@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "polybridge"
+version = "0.1.0"
+description = "Local MCP server that dispatches coding tasks to headless agents (Claude Code, Codex)"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["mcp>=2.0,<3"]
+
+[project.scripts]
+polybridge-server = "polybridge.server:main"
+polybridge-setup = "polybridge.setup_client:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-asyncio>=0.24"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/polybridge"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "integration: spawns a real agent CLI; spends real tokens. Opt in with PB_INTEGRATION=1",
+]
