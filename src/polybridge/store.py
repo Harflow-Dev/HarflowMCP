@@ -230,6 +230,17 @@ def _duration_seconds(record: TaskRecord, finished_at: str | None) -> float | No
     return round((end - start).total_seconds(), 3)
 
 
+def outcome_unobserved(record: TaskRecord) -> bool:
+    """Whether the recorded status might be a lie about a process that is still running.
+
+    A terminal status with no exit code was never observed to exit: it is what a bridge server
+    writes about a live run while its own event loop is being torn down, and what it writes when
+    its monitor crashes. The agent process survives both, so these records have to be rechecked
+    against the process rather than believed.
+    """
+    return record.status == "running" or record.exit_code is None
+
+
 def resolve_status(log_dir: Path, record: TaskRecord) -> tuple[str, str, Accumulator, list[str]]:
     """The single place a recovered task's status is decided.
 
@@ -237,8 +248,21 @@ def resolve_status(log_dir: Path, record: TaskRecord) -> tuple[str, str, Accumul
     reported as another.
     """
     state, tail = replay_log(log_dir, record.task_id, record.backend)
-    alive = record.status == "running" and process_alive(record.pid, record.markers)
+    unobserved = outcome_unobserved(record)
+    alive = unobserved and process_alive(record.pid, record.markers)
 
+    if alive and record.status in TERMINAL_RECORD_STATUSES:
+        return (
+            "running",
+            f"Recovered from disk: this task is recorded as '{record.status}', but its process is "
+            "still alive and working — that record was written by a bridge server being shut down "
+            "mid-run, and it was wrong. Cancellation works. Its output, however, is going nowhere: "
+            "the pipes died with that server, so the raw log stops at the teardown and no summary "
+            "will ever arrive for the rest of the run. Judge it by what it changed on disk, or "
+            "cancel it and dispatch again.",
+            state,
+            tail,
+        )
     if alive:
         return (
             "running",
@@ -248,10 +272,22 @@ def resolve_status(log_dir: Path, record: TaskRecord) -> tuple[str, str, Accumul
             state,
             tail,
         )
-    if record.status in TERMINAL_RECORD_STATUSES:
+    if record.status in TERMINAL_RECORD_STATUSES and not unobserved:
         return (
             record.status,
             "Recovered from disk: recorded by the bridge server that ran it.",
+            state,
+            tail,
+        )
+    # Only an unobserved `failed` is an inference the stream may overrule: it is what the monitor's
+    # backstop writes when it never saw the process exit at all. Every other status records
+    # something the bridge did — `cancelled` above all — so it stands even without an exit code.
+    if record.status in TERMINAL_RECORD_STATUSES and record.status != "failed":
+        return (
+            record.status,
+            "Recovered from disk: recorded by the bridge server that ran it, which never saw the "
+            "process exit. The status stands because it describes what the bridge did, not what it "
+            "guessed the run was doing.",
             state,
             tail,
         )
@@ -340,12 +376,17 @@ def brief(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
 
 
 def live_session_ids(log_dir: Path) -> set[str]:
-    """Sessions with a still-running task according to disk, whichever server started it."""
+    """Sessions with a still-running task according to disk, whichever server started it.
+
+    Uses the same "was this outcome actually observed?" test as `resolve_status`, so a run whose
+    server was torn down mid-flight still counts as live here. Trusting its recorded status instead
+    would let a second resume start against a session that is still being written to.
+    """
     return {
         record.session_id
         for record in read_all(log_dir)
         # A backend that mints its own id may have died before disclosing one; nothing to exclude.
         if record.session_id
-        and record.status == "running"
+        and outcome_unobserved(record)
         and process_alive(record.pid, record.markers)
     }

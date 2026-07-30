@@ -4,11 +4,14 @@ One `Task` owns one subprocess plus the asyncio tasks that drain its pipes and w
 exit. Nothing here blocks a caller for the duration of a run: `start` returns as soon as the
 process is spawned, and completion is observed through `Task.done`.
 
-Two invariants keep the state machine honest:
+Three invariants keep the state machine honest:
 
 * Only `_monitor` publishes a terminal status and sets `Task.done`, and only after the process has
   exited and its pipes have been fully read. Callers therefore never observe a task as finished
   while its process is still alive.
+* Conversely, `_monitor` publishes no status at all when it is itself cancelled: that means this
+  server is being torn down, while the run — its own session leader — carries on. The task stays
+  `running` for whichever process looks next.
 * Termination is owned by a `Task`-scoped asyncio task, not by the caller that asked for it, so
   SIGKILL escalation still happens if that caller goes away mid-cancellation.
 """
@@ -464,15 +467,17 @@ class TaskRegistry:
         # Attempted even though the leader looked alive a moment ago: the group may hold children
         # that outlive it and keep the run's pipes open.
         signalled = _signal_recorded_group(record, signal.SIGTERM)
-        if signalled:
-            deadline = asyncio.get_running_loop().time() + SIGKILL_GRACE_SECONDS
-            while asyncio.get_running_loop().time() < deadline:
-                await asyncio.sleep(0.25)
-                if not store.process_alive(record.pid, record.markers):
-                    break
-            else:
-                log.warning("recovered task %s ignored SIGTERM, sending SIGKILL", record.task_id)
-                _signal_recorded_group(record, signal.SIGKILL)
+        if signalled and not await _await_recorded_death(record):
+            log.warning("recovered task %s ignored SIGTERM, sending SIGKILL", record.task_id)
+            _signal_recorded_group(record, signal.SIGKILL)
+            # Waited for too: the response is resolved through `store.resolve_status`, which
+            # rechecks liveness, so returning while the group is still dying would answer this
+            # cancellation with "running" and contradict itself.
+            if not await _await_recorded_death(record):
+                log.warning(
+                    "recovered task %s survived SIGKILL; it will be reported as still running",
+                    record.task_id,
+                )
 
         if not signalled:
             log.warning(
@@ -553,6 +558,18 @@ class TaskRegistry:
         for task in [t for t in self.list() if t.finished][:overflow]:
             del self._tasks[task.task_id]
             log.debug("evicted finished task %s", task.task_id)
+
+
+async def _await_recorded_death(record: store.TaskRecord, timeout: float | None = None) -> bool:
+    """Poll a recovered task's process until it is gone. False if it outlasted `timeout`."""
+    # Read at call time rather than bound as a default, so the grace period stays patchable.
+    timeout = SIGKILL_GRACE_SECONDS if timeout is None else timeout
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.25)
+        if not store.process_alive(record.pid, record.markers):
+            return True
+    return not store.process_alive(record.pid, record.markers)
 
 
 def _signal_recorded_group(record: store.TaskRecord, sig: int) -> bool:
@@ -727,6 +744,7 @@ async def _monitor(task: Task, registry: TaskRegistry) -> None:
     The sole writer of terminal status and of `Task.done`.
     """
     assert task.proc is not None
+    abandoned = False
     try:
         exit_code = await task.proc.wait()
         await _finish_draining(task)
@@ -759,22 +777,42 @@ async def _monitor(task: Task, registry: TaskRegistry) -> None:
             )
         except Exception:  # pragma: no cover - logging must never change an outcome
             log.exception("task %s: could not log its completion", task.task_id)
+    except asyncio.CancelledError:
+        # Our event loop is going away, not the run: the agent is its own session leader and keeps
+        # going without us. Publishing a terminal status here would record an outcome that never
+        # happened — and because `store.write` refuses to move a task backwards, that lie would be
+        # permanent, hiding a live process from every later server. So the record is left saying
+        # `running` and the next process resolves it from the process itself.
+        #
+        # That resolution is correct whether or not the process is actually still alive, which is
+        # why this path does not need to determine which: a dead one is reconstructed from its
+        # stream log instead. Nothing in this package cancels a monitor, so getting here at all
+        # means the loop is being torn down.
+        abandoned = True
+        log.warning(
+            "task %s: monitor cancelled (process returncode=%s); leaving it recorded as running so "
+            "a later server process can observe the real outcome",
+            task.task_id,
+            task.proc.returncode,
+        )
+        raise
     except Exception:
         log.exception("task %s: monitor failed", task.task_id)
         task.finished_at = _now()
         task.status = "cancelled" if task.cancel_requested else "failed"
     finally:
-        # Reached even on CancelledError, which the handler above does not catch. `done` must never
-        # be observable alongside a non-terminal status, so backstop it here.
-        if task.status not in TERMINAL_STATUSES:
-            task.status = "cancelled" if task.cancel_requested else "failed"
-            task.finished_at = task.finished_at or _now()
-        task.done.set()
-        try:
-            registry.persist(task)
-            registry.prune()
-        except Exception:  # pragma: no cover - bookkeeping must never mask a finished run
-            log.exception("task %s: recording the finished run failed", task.task_id)
+        # Skipped when abandoned: `done` alongside a non-terminal status is only unobservable
+        # because the loop that could observe it is the one being torn down.
+        if not abandoned:
+            if task.status not in TERMINAL_STATUSES:
+                task.status = "cancelled" if task.cancel_requested else "failed"
+                task.finished_at = task.finished_at or _now()
+            task.done.set()
+            try:
+                registry.persist(task)
+                registry.prune()
+            except Exception:  # pragma: no cover - bookkeeping must never mask a finished run
+                log.exception("task %s: recording the finished run failed", task.task_id)
 
 
 def _classify(task: Task, exit_code: int) -> Status:

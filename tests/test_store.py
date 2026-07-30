@@ -259,3 +259,119 @@ def test_live_session_ids_spans_processes(tmp_path: Path, monkeypatch: pytest.Mo
     store.write(tmp_path, make_record(task_id="dead", session_id="s-dead", pid=2))
 
     assert store.live_session_ids(tmp_path) == {"s-live"}
+
+
+def test_a_terminal_record_with_no_exit_code_is_rechecked_against_the_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A shut-down server records live runs as failed; believing it strands them invisibly.
+
+    Observed in the wild on claude-code-bridge: a client restarted the server, both in-flight tasks
+    were recorded `failed` with no exit code, and the agent processes carried on working for another
+    ten minutes while every tool reported them dead.
+    """
+    monkeypatch.setattr(store, "process_alive", lambda pid, markers: True)
+    record = make_record(status="failed", exit_code=None, pid=4321)
+
+    status, note, _, _ = store.resolve_status(tmp_path, record)
+
+    assert status == "running"
+    assert "still alive" in note
+
+
+def test_a_terminal_record_with_an_exit_code_is_believed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An observed exit is the one thing that settles it, so no ps call should be needed."""
+
+    def unexpected(pid, markers):
+        raise AssertionError("liveness must not be rechecked for an observed exit")
+
+    monkeypatch.setattr(store, "process_alive", unexpected)
+
+    status, _, _, _ = store.resolve_status(tmp_path, make_record(status="failed", exit_code=1))
+
+    assert status == "failed"
+
+
+def test_an_unobserved_record_defers_to_the_result_the_run_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The run finished after its server wrote `failed`, and its own output proves it."""
+    monkeypatch.setattr(store, "process_alive", lambda pid, markers: False)
+    record = make_record(status="failed", exit_code=None)
+    write_log(tmp_path, record.task_id, RESULT_EVENT)
+
+    status, _, _, _ = store.resolve_status(tmp_path, record)
+
+    assert status == "completed"
+
+
+def test_an_unobserved_record_keeps_its_status_when_nothing_contradicts_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A recovered task cancelled by this bridge has no exit code, and must stay cancelled."""
+    monkeypatch.setattr(store, "process_alive", lambda pid, markers: False)
+
+    status, _, _, _ = store.resolve_status(tmp_path, make_record(status="cancelled"))
+
+    assert status == "cancelled"
+
+
+def test_a_result_event_does_not_overturn_a_recorded_cancellation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`cancelled` describes what the bridge did, so the stream must not relabel it `completed`.
+
+    `cancel_recovered` records no exit code, which makes these records "unobserved" — but only an
+    unobserved `failed` is a guess the stream is allowed to overrule.
+    """
+    monkeypatch.setattr(store, "process_alive", lambda pid, markers: False)
+    record = make_record(status="cancelled", exit_code=None)
+    write_log(tmp_path, record.task_id, RESULT_EVENT)
+
+    status, _, _, _ = store.resolve_status(tmp_path, record)
+
+    assert status == "cancelled"
+
+
+def test_a_cancellation_that_did_not_take_is_reported_as_still_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Claiming `cancelled` for a process that shrugged off the signal would be the same old lie."""
+    monkeypatch.setattr(store, "process_alive", lambda pid, markers: True)
+
+    status, _, _, _ = store.resolve_status(tmp_path, make_record(status="cancelled", pid=4321))
+
+    assert status == "running"
+
+
+def test_live_session_ids_catches_a_run_its_server_wrote_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Otherwise a resume starts a second process against a session still being written to."""
+    monkeypatch.setattr(store, "process_alive", lambda pid, markers: pid == 1)
+    store.write(
+        tmp_path, make_record(task_id="orphan", session_id="s-orphan", pid=1, status="failed")
+    )
+
+    assert store.live_session_ids(tmp_path) == {"s-orphan"}
+
+
+def test_live_session_ids_does_not_probe_settled_tasks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The task directory is never pruned, so every settled run must cost nothing to skip."""
+    probed: list[int | None] = []
+
+    def counting_alive(pid, markers):
+        probed.append(pid)
+        return False
+
+    monkeypatch.setattr(store, "process_alive", counting_alive)
+    store.write(tmp_path, make_record(task_id="settled", pid=7, status="completed", exit_code=0))
+    store.write(tmp_path, make_record(task_id="unsettled", pid=8, status="failed"))
+
+    store.live_session_ids(tmp_path)
+
+    assert probed == [8]
