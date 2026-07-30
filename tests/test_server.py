@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from mcp import Client, MCPError
 
-from polybridge import server
+from polybridge import server, store
 from polybridge.tasks import Task
 
 
@@ -176,3 +176,67 @@ async def test_a_started_task_reports_its_enforcement(fake_task: Task) -> None:
 
     assert status["backend"] == "claude"
     assert "enforcement" in status
+
+
+class _RecordingContext:
+    """Stands in for the MCP Context, capturing the progress reports a wait emits."""
+
+    def __init__(self) -> None:
+        self.reports: list[tuple[float, float | None, str | None]] = []
+
+    async def report_progress(self, progress, total=None, message=None) -> None:
+        self.reports.append((progress, total, message))
+
+
+async def test_waiting_on_a_recovered_task_does_not_believe_a_stale_terminal_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A `failed` record about a live process must not end the wait after one interval.
+
+    Breaking on the record's own status returned in a single tick while `next_step` claimed the
+    whole timeout had elapsed — a wait that looked like it had done its job and had not.
+    """
+    monkeypatch.setattr(server, "PROGRESS_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(store, "process_alive", lambda pid, markers: True)
+    record = store.TaskRecord(
+        task_id="orphan",
+        backend="claude",
+        session_id="session-1",
+        markers=["session-1"],
+        repo_path="/tmp",
+        started_at=datetime.now(timezone.utc).isoformat(),
+        pid=4321,
+        pgid=4321,
+        status="failed",  # what a torn-down server wrote about a run that kept going
+        exit_code=None,
+    )
+    store.write(server._reg().log_dir, record)
+
+    ctx = _RecordingContext()
+    await server._poll_recovered(record, 1, ctx)
+
+    assert len(ctx.reports) > 1, "the wait ended early instead of polling for its full timeout"
+
+
+async def test_waiting_on_a_recovered_task_stops_once_it_has_really_settled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(server, "PROGRESS_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(store, "process_alive", lambda pid, markers: False)
+    record = store.TaskRecord(
+        task_id="settled",
+        backend="claude",
+        session_id="session-1",
+        markers=["session-1"],
+        repo_path="/tmp",
+        started_at=datetime.now(timezone.utc).isoformat(),
+        pid=4321,
+        status="completed",
+        exit_code=0,
+    )
+    store.write(server._reg().log_dir, record)
+
+    ctx = _RecordingContext()
+    await asyncio.wait_for(server._poll_recovered(record, 30, ctx), timeout=2)
+
+    assert ctx.reports == []

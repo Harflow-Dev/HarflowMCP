@@ -182,6 +182,40 @@ async def test_a_cancelled_monitor_leaves_a_live_run_recorded_as_running(tmp_pat
     await proc.wait()
 
 
+async def test_a_teardown_mid_cancellation_still_records_the_cancellation(tmp_path: Path) -> None:
+    """Cancellation intent is the one thing recovery cannot reconstruct.
+
+    A signalled run dies without a result event, so leaving the record `running` would have the next
+    server infer `failed` and lose the fact that someone asked for this. Safe to record because a
+    `cancelled` record carries no exit code, so it is rechecked against the process.
+    """
+    registry = TaskRegistry(log_dir=tmp_path)
+    proc = await asyncio.create_subprocess_exec(
+        "sleep",
+        "30",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,
+    )
+    task = make_task(tmp_path, "t0")
+    task.proc = proc
+    task.pgid = proc.pid
+    task.cancel_requested = True
+    registry._tasks[task.task_id] = task
+    registry.persist(task)
+
+    monitor = asyncio.create_task(tasks_module._monitor(task, registry))
+    await asyncio.sleep(0.05)
+    monitor.cancel()
+    await asyncio.gather(monitor, return_exceptions=True)
+
+    assert task.status == "cancelled"
+    assert store.read(tmp_path, task.task_id).status == "cancelled"
+
+    tasks_module._signal_group(task, signal.SIGKILL)
+    await proc.wait()
+
+
 async def test_a_monitor_that_crashes_still_publishes_a_terminal_status(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

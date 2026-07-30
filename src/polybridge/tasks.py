@@ -9,9 +9,10 @@ Three invariants keep the state machine honest:
 * Only `_monitor` publishes a terminal status and sets `Task.done`, and only after the process has
   exited and its pipes have been fully read. Callers therefore never observe a task as finished
   while its process is still alive.
-* Conversely, `_monitor` publishes no status at all when it is itself cancelled: that means this
-  server is being torn down, while the run — its own session leader — carries on. The task stays
-  `running` for whichever process looks next.
+* Conversely, `_monitor` publishes no status when it is itself cancelled: that means this server is
+  being torn down, while the run — its own session leader — carries on. The task stays `running` for
+  whichever process looks next. The exception is a cancellation already in flight, whose intent
+  nothing on disk could reconstruct.
 * Termination is owned by a `Task`-scoped asyncio task, not by the caller that asked for it, so
   SIGKILL escalation still happens if that caller goes away mid-cancellation.
 """
@@ -788,12 +789,18 @@ async def _monitor(task: Task, registry: TaskRegistry) -> None:
         # why this path does not need to determine which: a dead one is reconstructed from its
         # stream log instead. Nothing in this package cancels a monitor, so getting here at all
         # means the loop is being torn down.
-        abandoned = True
+        #
+        # A cancellation already in flight is the exception. That intent cannot be reconstructed
+        # from anything on disk — a signalled run dies without a result event, so recovery would
+        # infer `failed` and lose the fact that the user asked for this. Recording it is safe now
+        # that a `cancelled` record carries no exit code and so is rechecked against the process:
+        # if the SIGKILL never landed, it still resolves to `running`.
+        abandoned = not task.cancel_requested
         log.warning(
-            "task %s: monitor cancelled (process returncode=%s); leaving it recorded as running so "
-            "a later server process can observe the real outcome",
+            "task %s: monitor cancelled (process returncode=%s); recording it as %s",
             task.task_id,
             task.proc.returncode,
+            "running, for a later server process to resolve" if abandoned else "cancelled as asked",
         )
         raise
     except Exception:
@@ -801,8 +808,9 @@ async def _monitor(task: Task, registry: TaskRegistry) -> None:
         task.finished_at = _now()
         task.status = "cancelled" if task.cancel_requested else "failed"
     finally:
-        # Skipped when abandoned: `done` alongside a non-terminal status is only unobservable
-        # because the loop that could observe it is the one being torn down.
+        # Skipped when abandoned, which is the one case where a task is left non-terminal: `done`
+        # alongside a non-terminal status is only unobservable because the loop that could observe
+        # it is the one being torn down.
         if not abandoned:
             if task.status not in TERMINAL_STATUSES:
                 task.status = "cancelled" if task.cancel_requested else "failed"

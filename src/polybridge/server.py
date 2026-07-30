@@ -250,6 +250,11 @@ async def _poll_recovered(
     There is no completion event to await here, so this checks the recorded process on the same
     cadence it reports progress, and re-reads the record in case that process's own server finishes
     it first.
+
+    Whether it has settled is decided by `store.resolve_status`, never by the record's own `status`
+    field: a record can claim `failed` about a process that is still running (see
+    `store.outcome_unobserved`), and believing it would end the wait after a single interval while
+    the caller is told the whole timeout elapsed.
     """
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout_seconds
@@ -258,15 +263,13 @@ async def _poll_recovered(
     for step in range(1, steps + 1):
         if loop.time() >= deadline:
             break
-        if not store.process_alive(record.pid, record.markers):
+        if store.resolve_status(_reg().log_dir, record)[0] in TERMINAL_STATUSES:
             break
         await asyncio.sleep(min(PROGRESS_INTERVAL_SECONDS, max(0.0, deadline - loop.time())))
 
         fresh = _reg().recover(record.task_id)
         if fresh is not None:
             record = fresh
-        if record.status in TERMINAL_STATUSES:
-            break
 
         if ctx is None:
             continue
