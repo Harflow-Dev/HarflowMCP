@@ -59,15 +59,19 @@ async def test_all_seven_tools_are_exposed() -> None:
     ]
 
 
-async def test_list_backends_describes_both() -> None:
+async def test_list_backends_describes_every_one() -> None:
     listed = (await call("list_backends")).structured_content["result"]
 
     by_name = {entry["backend"]: entry for entry in listed}
-    assert sorted(by_name) == ["claude", "codex"]
+    assert sorted(by_name) == ["claude", "codex", "opencode"]
     # The differences a caller has to plan around.
     assert by_name["claude"]["capabilities"]["supports_turn_cap"] is True
     assert by_name["codex"]["capabilities"]["supports_turn_cap"] is False
     assert by_name["codex"]["capabilities"]["os_sandbox"] is True
+    assert by_name["opencode"]["capabilities"]["supports_turn_cap"] is False
+    # Only codex has an OS boundary; opencode's restrictions are the agent's own.
+    assert by_name["opencode"]["capabilities"]["os_sandbox"] is False
+    assert by_name["opencode"]["capabilities"]["reports_cost_usd"] is True
     assert by_name["claude"]["capabilities"]["os_sandbox"] is False
 
 

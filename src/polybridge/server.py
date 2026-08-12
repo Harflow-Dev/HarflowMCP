@@ -45,14 +45,16 @@ PROGRESS_INTERVAL_SECONDS = 5.0
 mcp = MCPServer(
     "polybridge",
     instructions=(
-        "Dispatch coding tasks to headless coding agents on this machine — currently Claude Code "
-        "and Codex. start_task returns immediately with a task_id; poll it with get_task_status or "
-        "await it with wait_for_task, then continue the same session with resume_task.\n\n"
+        "Dispatch coding tasks to headless coding agents on this machine — currently Claude Code, "
+        "Codex and opencode. start_task returns immediately with a task_id; poll it with "
+        "get_task_status or await it with wait_for_task, then continue the same session with "
+        "resume_task.\n\n"
         "Call list_backends first if you are unsure which to use: it reports what is installed and "
         "what each one can actually do. Backends differ in ways that matter — only Claude supports "
-        "a turn cap and reports a dollar cost, and only Codex enforces restrictions with a real OS "
-        "sandbox. Every task reports an `enforcement` block describing what was actually enforced, "
-        "which is the honest answer rather than what `freedom` implies.\n\n"
+        "a turn cap, only Claude and opencode report a dollar cost, and only Codex enforces "
+        "restrictions with a real OS sandbox. Every task reports an `enforcement` block describing "
+        "what was actually enforced, which is the honest answer rather than what `freedom` "
+        "implies.\n\n"
         "A wait_for_task that comes back still 'running' has not failed — the run is untouched, so "
         "call again or poll. Tasks outlive this server process: ones started by an earlier "
         "polybridge server are still reported, marked 'recovered: true'."
@@ -155,7 +157,7 @@ async def start_task(
     Args:
         prompt: Instructions for the agent. Be specific about the desired end state.
         repo_path: Absolute path to a git repository; the agent's working directory.
-        backend: Which agent to use — "claude" or "codex". See list_backends.
+        backend: Which agent to use — "claude", "codex" or "opencode". See list_backends.
         freedom: "read_only", "write_in_repo" (default), or "unrestricted". How this is enforced
             depends on the backend; the returned `enforcement` says what actually applies.
         model: Model for this run, in the backend's own naming.

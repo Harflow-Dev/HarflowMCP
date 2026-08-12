@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "polybridge"
 version = "0.1.0"
-description = "Local MCP server that dispatches coding tasks to headless agents (Claude Code, Codex)"
+description = "Local MCP server that dispatches coding tasks to headless agents (Claude Code, Codex, opencode)"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = ["mcp>=2.0,<3"]

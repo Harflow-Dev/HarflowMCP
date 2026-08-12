@@ -1,8 +1,8 @@
 # polybridge
 
 A local MCP server that dispatches coding tasks to **whichever headless coding agent you want** —
-Claude Code or Codex — and returns immediately, so the caller is never blocked for the length of a
-run.
+Claude Code, Codex or opencode — and returns immediately, so the caller is never blocked for the
+length of a run.
 
 Same async contract for every backend: `start_task` hands back a `task_id`, then you poll it, await
 it with a non-destructive timeout, or continue the same session with follow-up instructions.
@@ -39,13 +39,13 @@ Then restart the Claude desktop app. Preview the config change first with
 
 ## Backends are not interchangeable, and the tool says so
 
-| | claude | codex |
-|---|---|---|
-| we can choose the session id | ✅ | ❌ (it mints and reports one) |
-| turn cap (`max_turns`) | ✅ | ❌ — asking for it is an **error**, not silently ignored |
-| dollar cost reported | ✅ | ❌ token counts only, `total_cost_usd` is null |
-| **real OS sandbox** | ❌ | ✅ `read-only` / `workspace-write` |
-| **per-command deny** | ✅ `git commit`/`git push` | ❌ none |
+| | claude | codex | opencode |
+|---|---|---|---|
+| we can choose the session id | ✅ | ❌ (it mints and reports one) | ❌ (`ses_…`, reported on the first event) |
+| turn cap (`max_turns`) | ✅ | ❌ — asking for it is an **error**, not silently ignored | ❌ — same |
+| dollar cost reported | ✅ | ❌ token counts only, `total_cost_usd` is null | ✅ per step, summed across the run |
+| **real OS sandbox** | ❌ | ✅ `read-only` / `workspace-write` | ❌ |
+| **per-command deny** | ✅ `git commit`/`git push` | ❌ none | ❌ none |
 
 One `freedom` parameter expresses intent — `read_only`, `write_in_repo` (default), `unrestricted` —
 and is mapped to each backend's real mechanism. Because those mechanisms differ in strength, every
@@ -75,6 +75,14 @@ Two consequences worth understanding:
 
 Claude also reports `os_enforced: false` and `writes_confined: false` throughout: it has no sandbox,
 and `repo_path` is only its working directory.
+
+opencode reports every enforcement boolean as `false` at every level, because its `freedom` mapping
+is only a choice of agent (`plan` for `read_only`, `build` otherwise) and none of it is an OS
+boundary. Two measured consequences live in its caveats: `plan` *declined* to write or run commands
+rather than being observed to be prevented from doing so — it never attempted a write, so no
+tool-layer refusal was exercised — and `build` wrote a file and ran a shell command **without
+`--auto`**, so `--auto` is not what separates writing from not writing, and how much `unrestricted`
+adds over `write_in_repo` depends on the user's own opencode configuration.
 
 ## Tasks outlive the server process
 

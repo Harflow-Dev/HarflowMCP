@@ -22,12 +22,14 @@ from .base import (
 )
 from .claude import ClaudeBackend
 from .codex import CodexBackend
+from .opencode import OpencodeBackend
 
 log = logging.getLogger(__name__)
 
 BACKENDS: dict[str, Backend] = {
     ClaudeBackend.name: ClaudeBackend(),
     CodexBackend.name: CodexBackend(),
+    OpencodeBackend.name: OpencodeBackend(),
 }
 
 DEFAULT_BACKEND = ClaudeBackend.name

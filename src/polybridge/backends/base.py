@@ -1,8 +1,8 @@
 """The contract every coding agent must satisfy, and nothing beyond it.
 
-Backends differ in ways that cannot be papered over: Codex has no turn cap and will not let us
-choose a session id, Claude has no OS sandbox, and only Claude reports a dollar cost. Rather than
-pretending otherwise, each backend declares its `Capabilities` and reports the `Enforcement` its
+Backends differ in ways that cannot be papered over: only Claude has a turn cap, only Claude lets us
+choose the session id, only Codex has an OS sandbox, and Codex alone reports no dollar cost. Rather
+than pretending otherwise, each backend declares its `Capabilities` and reports the `Enforcement` its
 flags actually deliver. Everything outside this package works on the normalised view and never
 branches on a backend's name.
 """

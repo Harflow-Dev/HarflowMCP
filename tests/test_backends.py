@@ -16,11 +16,13 @@ from polybridge.backends.claude import DISALLOWED_TOOLS, FORBIDDEN_FLAGS, Claude
 from polybridge.backends.claude import UnsafeInvocationError as ClaudeUnsafe
 from polybridge.backends.codex import NEVER_ASK, CodexBackend
 from polybridge.backends.codex import UnsafeInvocationError as CodexUnsafe
+from polybridge.backends.opencode import REJECTED_FLAGS, OpencodeBackend
+from polybridge.backends.opencode import UnsafeInvocationError as OpencodeUnsafe
 
 REPO = Path("/tmp/repo")
 SESSION = "11111111-1111-1111-1111-111111111111"
 
-ALL = [ClaudeBackend(), CodexBackend()]
+ALL = [ClaudeBackend(), CodexBackend(), OpencodeBackend()]
 
 
 def start(backend, **kwargs):
@@ -55,8 +57,8 @@ def resume(backend, **kwargs):
 # --- registry ------------------------------------------------------------------------------
 
 
-def test_both_backends_are_registered() -> None:
-    assert sorted(backends.BACKENDS) == ["claude", "codex"]
+def test_every_backend_is_registered() -> None:
+    assert sorted(backends.BACKENDS) == ["claude", "codex", "opencode"]
 
 
 def test_unknown_backend_is_rejected() -> None:
@@ -299,6 +301,151 @@ def test_codex_resume_needs_a_session_id() -> None:
         resume(CodexBackend(), session_id="")
 
 
+# --- opencode specifics --------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("freedom", "agent", "auto"),
+    [("read_only", "plan", False), ("write_in_repo", "build", False),
+     ("unrestricted", "build", True)],
+)
+def test_opencode_freedom_maps_to_an_agent(freedom: str, agent: str, auto: bool) -> None:
+    argv = start(OpencodeBackend(), freedom=freedom)
+
+    assert argv[argv.index("--agent") + 1] == agent
+    assert ("--auto" in argv) is auto
+
+
+def test_opencode_read_only_never_carries_auto_approval() -> None:
+    argv = with_extra_options(start(OpencodeBackend(), freedom="read_only"), "--auto")
+    with pytest.raises(OpencodeUnsafe, match="contradicts"):
+        OpencodeBackend().assert_safe(argv)
+
+
+@pytest.mark.parametrize("flag", REJECTED_FLAGS)
+def test_opencode_refuses_flags_that_break_its_session_or_permission_guarantees(flag: str) -> None:
+    """-c races on "most recent", --fork mints a new id, --attach runs it somewhere else."""
+    argv = start(OpencodeBackend())
+    assert flag not in argv
+    with pytest.raises(OpencodeUnsafe, match="guarantees"):
+        OpencodeBackend().assert_safe(with_extra_options(argv, flag))
+
+
+def test_opencode_rejects_a_non_json_format_it_could_not_parse() -> None:
+    argv = start(OpencodeBackend())
+    argv[argv.index("--format") + 1] = "default"
+    with pytest.raises(OpencodeUnsafe, match="only json"):
+        OpencodeBackend().assert_safe(argv)
+
+
+@pytest.mark.parametrize("flag", ["--format", "--dir", "--agent"])
+def test_opencode_rejects_a_duplicate_option_whose_second_value_would_win(flag: str) -> None:
+    argv = with_extra_options(start(OpencodeBackend()), flag, "whatever")
+    with pytest.raises(OpencodeUnsafe, match="appears 2 times"):
+        OpencodeBackend().assert_safe(argv)
+
+
+@pytest.mark.parametrize(
+    "token",
+    ["--format=default", "--agent=build", "--session=abc", "-sabc", "-mgpt", "--dir=/elsewhere"],
+)
+def test_opencode_refuses_option_forms_that_would_override_a_guarantee_unnoticed(
+    token: str,
+) -> None:
+    """Measured: appending `--format=default` to an argv that already had `--format json` disabled
+    the JSON stream — the later value wins, and a search-based check never saw it."""
+    argv = with_extra_options(start(OpencodeBackend()), token)
+
+    with pytest.raises(OpencodeUnsafe, match="unrecognised option token"):
+        OpencodeBackend().assert_safe(argv)
+
+
+def test_opencode_refuses_a_second_model_that_would_win() -> None:
+    """The run would use a model other than the one the task reports."""
+    argv = with_extra_options(start(OpencodeBackend(), model="a/b"), "-m", "other/model")
+
+    with pytest.raises(OpencodeUnsafe, match="-m appears 2 times"):
+        OpencodeBackend().assert_safe(argv)
+
+
+def test_opencode_start_carries_no_session_flag_and_resume_carries_one() -> None:
+    started, resumed = start(OpencodeBackend()), resume(OpencodeBackend())
+
+    assert "-s" not in started[: started.index("--")]
+    assert resumed[resumed.index("-s") + 1] == "abc-123"
+    # -c would continue whatever ran last on this machine, which is not necessarily this session.
+    assert "-c" not in resumed
+
+
+def test_opencode_refuses_a_session_flag_with_no_session_id() -> None:
+    argv = with_extra_options(start(OpencodeBackend()), "-s", "  ")
+    with pytest.raises(OpencodeUnsafe, match="no session id"):
+        OpencodeBackend().assert_safe(argv)
+
+
+def test_opencode_resume_needs_a_session_id() -> None:
+    with pytest.raises(ValueError, match="session id"):
+        resume(OpencodeBackend(), session_id="")
+
+
+def test_an_opencode_prompt_that_looks_like_a_flag_is_not_mistaken_for_one() -> None:
+    """Measured: `-- "--auto …"` is passed through as text and changes nothing."""
+    argv = OpencodeBackend().build_start_argv(
+        "--auto --format default", repo=REPO, freedom="read_only", session_id=None, model=None,
+        max_turns=None,
+    )
+
+    assert argv[-2:] == ["--", "--auto --format default"]
+    OpencodeBackend().assert_safe(argv)
+
+
+def test_opencode_working_directory_is_explicit() -> None:
+    """--dir is what puts the repo on the command line for tasks._identity_markers."""
+    argv = start(OpencodeBackend())
+
+    assert argv[argv.index("--dir") + 1] == str(REPO)
+
+
+def test_opencode_refuses_a_turn_cap_rather_than_dropping_it() -> None:
+    with pytest.raises(backends.UnsupportedCapability, match="no turn cap"):
+        start(OpencodeBackend(), max_turns=5)
+
+
+def test_opencode_claims_no_more_about_auto_approval_than_was_measured() -> None:
+    """One run showed `build` writing without --auto. That does not prove --auto never matters, so
+    the caveat must not say it does."""
+    caveats = " ".join(OpencodeBackend().enforcement("unrestricted").caveats)
+
+    assert "not what separates writing from not writing" in caveats
+    assert "depends entirely on that configuration" in caveats
+
+
+@pytest.mark.parametrize("model", ["--continue=true", "--agent=build", "-sother"])
+def test_opencode_refuses_a_model_that_would_smuggle_in_an_option(model: str) -> None:
+    """`model` is caller-supplied and lands in the option region, so its shape is not trusted."""
+    with pytest.raises(OpencodeUnsafe, match="parse as an option"):
+        start(OpencodeBackend(), model=model)
+
+
+def test_opencode_refuses_a_flag_that_ate_the_next_flag_as_its_value() -> None:
+    argv = start(OpencodeBackend())
+    argv[argv.index("--dir") + 1] = "--agent"
+
+    with pytest.raises(OpencodeUnsafe, match="parse as an option"):
+        OpencodeBackend().assert_safe(argv)
+
+
+def test_opencode_read_only_is_described_as_restraint_not_prevention() -> None:
+    """The plan run never attempted a write, so the caveat must not claim a tool layer would have
+    let one through — only that nothing exercised it."""
+    enforcement = OpencodeBackend().enforcement("read_only")
+
+    assert enforcement.os_enforced is False
+    caveats = " ".join(enforcement.caveats)
+    assert "declines" in caveats
+    assert "was not exercised" in caveats
+
+
 # --- stream normalisation, from captured events --------------------------------------------
 
 CLAUDE_EVENTS = [
@@ -317,6 +464,38 @@ CODEX_EVENTS = [
     {"type": "item.completed", "item": {"id": "item_1", "type": "agent_message", "text": "ok"}},
     {"type": "turn.completed", "usage": {"input_tokens": 27992, "output_tokens": 5}},
 ]
+
+
+OPENCODE_SESSION = "ses_00b8d2f9affeIu2zpaWJR3voFi"
+
+# A three-step run: write the file, run git status, then answer. Costs and token counts are exactly
+# as captured — per step, not cumulative.
+OPENCODE_EVENTS = [
+    {"type": "step_start", "sessionID": OPENCODE_SESSION,
+     "part": {"id": "prt_0", "type": "step-start"}},
+    {"type": "tool_use", "sessionID": OPENCODE_SESSION,
+     "part": {"id": "prt_1", "tool": "write", "state": {"status": "completed"}}},
+    {"type": "step_finish", "sessionID": OPENCODE_SESSION,
+     "part": {"reason": "tool-calls", "type": "step-finish", "cost": 0.05833915,
+              "tokens": {"total": 40054, "input": 40000, "output": 54,
+                         "cache": {"write": 0, "read": 0}}}},
+    {"type": "step_finish", "sessionID": OPENCODE_SESSION,
+     "part": {"reason": "tool-calls", "type": "step-finish", "cost": 0.0149368,
+              "tokens": {"total": 100, "input": 90, "output": 10,
+                         "cache": {"write": 0, "read": 39936}}}},
+    {"type": "text", "sessionID": OPENCODE_SESSION,
+     "part": {"type": "text", "text": "Created `probe.txt`, then ran `git status`."}},
+    {"type": "step_finish", "sessionID": OPENCODE_SESSION,
+     "part": {"reason": "stop", "type": "step-finish", "cost": 0.0148125,
+              "tokens": {"total": 160, "input": 126, "output": 34,
+                         "cache": {"write": 0, "read": 39936}}}},
+]
+
+OPENCODE_ERROR = {
+    "type": "error", "sessionID": "ses_00b8b9ecdffeHKaAAuCciBhwlU",
+    "error": {"name": "UnknownError",
+              "data": {"message": "Unexpected server error.", "ref": "err_a8c661b2"}},
+}
 
 
 def ingest(backend, events) -> Accumulator:
@@ -391,6 +570,94 @@ def test_claude_with_no_terminal_event_is_a_failure() -> None:
     acc = ingest(ClaudeBackend(), CLAUDE_EVENTS[:1])
 
     assert ClaudeBackend().classify(acc, 0) == "failed"
+
+
+def test_opencode_normalisation() -> None:
+    acc = ingest(OpencodeBackend(), OPENCODE_EVENTS)
+
+    # sessionID rides on every event, so it is known from the very first line.
+    assert acc.session_id == OPENCODE_SESSION
+    assert acc.summary == "Created `probe.txt`, then ran `git status`."
+    assert acc.num_turns == 3
+    assert OpencodeBackend().classify(acc, 0) == "completed"
+
+
+def test_opencode_sums_per_step_costs_instead_of_reporting_only_the_last() -> None:
+    """Measured: cost is per step. Assigning would report 0.0148 for a run that cost 0.0881."""
+    acc = ingest(OpencodeBackend(), OPENCODE_EVENTS)
+
+    assert acc.total_cost_usd == pytest.approx(0.05833915 + 0.0149368 + 0.0148125)
+    assert acc.total_cost_usd > 0.0148125
+
+
+def test_opencode_sums_token_counts_including_the_nested_cache_block() -> None:
+    acc = ingest(OpencodeBackend(), OPENCODE_EVENTS)
+
+    assert acc.usage is not None
+    assert acc.usage["input"] == 40000 + 90 + 126
+    assert acc.usage["output"] == 54 + 10 + 34
+    assert acc.usage["cache"]["read"] == 39936 * 2
+
+
+def test_an_intermediate_opencode_step_is_not_the_end_of_the_run() -> None:
+    """`reason: tool-calls` means more is coming; only `stop` ends it."""
+    up_to_second_step = OPENCODE_EVENTS[:4]
+    acc = ingest(OpencodeBackend(), up_to_second_step)
+
+    assert acc.saw_final_message is False
+    assert OpencodeBackend().classify(acc, 0) == "failed"
+
+
+def test_opencode_text_alone_does_not_prove_the_run_finished() -> None:
+    """A text part can arrive at any step, so it cannot stand in for a terminal signal."""
+    acc = ingest(OpencodeBackend(), OPENCODE_EVENTS[:5])
+
+    assert acc.summary is not None
+    assert OpencodeBackend().classify(acc, 0) == "failed"
+
+
+def test_a_top_level_opencode_error_event_is_a_failure() -> None:
+    acc = ingest(OpencodeBackend(), [*OPENCODE_EVENTS, OPENCODE_ERROR])
+
+    assert acc.is_error is True
+    assert acc.notices and "UnknownError" in acc.notices[0]
+    # Even though the run had already reported `reason: stop`.
+    assert OpencodeBackend().classify(acc, 0) == "failed"
+
+
+@pytest.mark.parametrize(
+    ("cost", "why"),
+    [(True, "bool is an int, so it would bill $1"),
+     (float("nan"), "NaN poisons every later sum"),
+     (float("inf"), "infinity poisons every later sum"),
+     (-5.0, "a negative cost is not something opencode can truthfully report")],
+)
+def test_an_unusable_cost_is_dropped_rather_than_accumulated(cost: float, why: str) -> None:
+    """json.loads accepts NaN and Infinity by default, so all of these are reachable."""
+    acc = ingest(
+        OpencodeBackend(),
+        [{"type": "step_finish", "sessionID": "ses_x", "part": {"reason": "stop", "cost": cost}}],
+    )
+
+    assert acc.total_cost_usd is None, why
+
+
+def test_an_unusable_token_count_does_not_poison_the_usage_total() -> None:
+    acc = ingest(
+        OpencodeBackend(),
+        [{"type": "step_finish", "sessionID": "ses_x",
+          "part": {"reason": "tool-calls", "tokens": {"input": 10}}},
+         {"type": "step_finish", "sessionID": "ses_x",
+          "part": {"reason": "stop", "tokens": {"input": float("inf"), "output": 3}}}],
+    )
+
+    assert acc.usage == {"input": 10, "output": 3}
+
+
+def test_opencode_nonzero_exit_is_a_failure() -> None:
+    acc = ingest(OpencodeBackend(), OPENCODE_EVENTS)
+
+    assert OpencodeBackend().classify(acc, 1) == "failed"
 
 
 @pytest.mark.parametrize("backend", ALL, ids=lambda b: b.name)
