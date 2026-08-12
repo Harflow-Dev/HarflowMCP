@@ -1,28 +1,24 @@
-"""Register the installed polybridge server with the Claude desktop app.
+"""Register the installed polybridge server with the Claude desktop app and each agent CLI found.
 
 The reason this exists rather than a README snippet: a GUI-launched process does not inherit the
 shell `PATH`, so a config that just says `"command": "polybridge-server"` fails twice over — the
 executable is not found, and even when it is, the server cannot find the agent CLIs it dispatches
-to. Both need absolute, resolved paths, and getting that wrong produces an error nobody
-can reasonably debug.
+to. Both need absolute, resolved paths, and getting that wrong produces an error nobody can
+reasonably debug.
 
-This edits a file it does not own, so it merges rather than replaces, backs up first, refuses to
-touch a config it cannot parse, and writes atomically.
+How each client is actually written to lives in `clients/`. This module works out *what* to register
+— the server's path and the PATH it needs — and reports what happened.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import shutil
 import sys
-import tempfile
-from datetime import datetime
 from pathlib import Path
-from typing import Any
 
-from . import backends
+from . import backends, clients
 
 SERVER_KEY = "polybridge"
 SERVER_COMMAND = "polybridge-server"
@@ -37,46 +33,16 @@ BASE_PATH_DIRS = (
     "/sbin",
 )
 
-MANUAL_INSTRUCTIONS = f"""
-Add this to your MCP client's config by hand, using absolute paths:
-
-  "mcpServers": {{
-    "{SERVER_KEY}": {{
-      "command": "<absolute path to {SERVER_COMMAND}>",
-      "env": {{ "PATH": "<dir holding claude>:/usr/local/bin:/usr/bin:/bin" }}
-    }}
-  }}
-"""
-
-
-class SetupError(RuntimeError):
-    """Something the user needs to fix before setup can proceed."""
-
-
-def desktop_config_path() -> Path:
-    if sys.platform == "darwin":
-        return (
-            Path.home()
-            / "Library"
-            / "Application Support"
-            / "Claude"
-            / "claude_desktop_config.json"
-        )
-    if sys.platform.startswith("linux"):
-        return Path.home() / ".config" / "Claude" / "claude_desktop_config.json"
-    raise SetupError(
-        f"no known Claude desktop config location for platform {sys.platform!r}."
-        + MANUAL_INSTRUCTIONS
-    )
+SetupError = clients.SetupError
 
 
 def resolve_server_command() -> str:
-    """Absolute path to the installed server, since the desktop app has no useful PATH."""
+    """Absolute path to the installed server, since a GUI client has no useful PATH."""
     found = shutil.which(SERVER_COMMAND)
     if found is None:
         raise SetupError(
             f"`{SERVER_COMMAND}` is not on PATH. Install it first:\n"
-            "  uv tool install .\n"
+            "  uv tool install . --force --no-cache\n"
             "then re-run this command."
         )
     # Absolute but NOT symlink-resolved — see build_path_env for why that matters.
@@ -85,7 +51,7 @@ def resolve_server_command() -> str:
 
 def _agent_paths() -> tuple[str | None, ...]:
     """Where each backend's CLI lives, so the spawned server can find every one of them."""
-    return tuple(shutil.which(b.binary) for b in backends.BACKENDS.values())
+    return tuple(shutil.which(backend.binary) for backend in backends.BACKENDS.values())
 
 
 def build_path_env(server_command: str, *dependency_paths: str | None) -> str:
@@ -107,94 +73,10 @@ def build_path_env(server_command: str, *dependency_paths: str | None) -> str:
     return os.pathsep.join(dict.fromkeys(candidates))
 
 
-def server_entry(server_command: str, *dependency_paths: str | None) -> dict[str, Any]:
-    return {
-        "command": server_command,
-        "env": {"PATH": build_path_env(server_command, *dependency_paths)},
-    }
-
-
-def read_raw(path: Path) -> str | None:
-    """Current file contents, or None if absent. Used both to parse and to detect concurrent edits."""
-    try:
-        return path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return None
-
-
-def load_config(path: Path) -> dict[str, Any]:
-    """Read an existing config, or return a fresh one. Never silently discards a malformed file."""
-    raw = read_raw(path)
-    if raw is None or not raw.strip():
-        return {}
-    try:
-        config = json.loads(raw)
-    except ValueError as exc:
-        raise SetupError(
-            f"{path} is not valid JSON ({exc}). Refusing to overwrite it — fix or move it first."
-        ) from None
-    if not isinstance(config, dict):
-        raise SetupError(f"{path} does not contain a JSON object. Refusing to overwrite it.")
-    return config
-
-
-def merge_entry(config: dict[str, Any], entry: dict[str, Any]) -> dict[str, Any]:
-    """Set our server key, leaving every other key in the config exactly as it was."""
-    servers = config.get("mcpServers")
-    if servers is not None and not isinstance(servers, dict):
-        raise SetupError("existing 'mcpServers' is not a JSON object. Refusing to overwrite it.")
-
-    merged = dict(config)
-    merged["mcpServers"] = {**(servers or {}), SERVER_KEY: entry}
-    return merged
-
-
-def back_up(path: Path) -> Path | None:
-    """Copy the config aside, never overwriting an existing backup.
-
-    Timestamps are only second-precise, so two runs in the same second would otherwise collide and
-    destroy the very thing the backup exists to protect.
-    """
-    if not path.exists():
-        return None
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    for suffix in ("", *(f".{n}" for n in range(1, 100))):
-        backup = path.with_name(f"{path.name}.bak-{stamp}{suffix}")
-        try:
-            with open(backup, "xb") as target:
-                target.write(path.read_bytes())
-        except FileExistsError:
-            continue
-        shutil.copystat(path, backup)
-        return backup
-    raise SetupError(f"could not find an unused backup name beside {path}")
-
-
-def write_config(path: Path, config: dict[str, Any]) -> None:
-    """Replace the config atomically, preserving its permissions.
-
-    A temp file in the same directory plus os.replace means a reader never sees a half-written
-    config. The mode is copied across because NamedTemporaryFile creates 0600, which would
-    otherwise silently tighten the file's permissions.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    body = json.dumps(config, indent=2) + "\n"
-    original_mode = path.stat().st_mode & 0o777 if path.exists() else None
-
-    handle = tempfile.NamedTemporaryFile(
-        "w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False
-    )
-    try:
-        with handle:
-            handle.write(body)
-            handle.flush()
-            os.fsync(handle.fileno())
-        if original_mode is not None:
-            os.chmod(handle.name, original_mode)
-        os.replace(handle.name, path)
-    except BaseException:
-        Path(handle.name).unlink(missing_ok=True)
-        raise
+def build_registration() -> clients.Registration:
+    server_command = resolve_server_command()
+    path_env = build_path_env(server_command, *_agent_paths(), shutil.which("git"))
+    return clients.Registration(key=SERVER_KEY, command=server_command, path_env=path_env)
 
 
 def is_ephemeral_install(server_command: str) -> bool:
@@ -207,79 +89,88 @@ def is_ephemeral_install(server_command: str) -> bool:
     return ".venv" in parts or "site-packages" in parts
 
 
-def setup(config_path: Path, *, dry_run: bool = False) -> dict[str, Any]:
-    """Install our entry into `config_path`. Returns the resulting config."""
-    # A symlinked config should have its target rewritten, not be replaced by a regular file.
-    if config_path.is_symlink():
-        config_path = Path(os.path.realpath(config_path))
+def _selected(args: argparse.Namespace) -> list[clients.Client]:
+    """The clients to register with, honouring a `--desktop-config` override."""
+    chosen = clients.select(args.client)
+    if args.desktop_config is None:
+        return chosen
+    return clients.override_config_path(chosen, args.desktop_config)
 
-    server_command = resolve_server_command()
-    entry = server_entry(server_command, *_agent_paths(), shutil.which("git"))
 
-    before = read_raw(config_path)
-    merged = merge_entry(load_config(config_path), entry)
-
-    if dry_run:
-        return merged
-
-    # The desktop app owns this file and writes to it too. Without this check a concurrent write
-    # between our read and our replace would be silently discarded.
-    if read_raw(config_path) != before:
-        raise SetupError(
-            f"{config_path} changed while it was being edited — nothing was written. "
-            "Quit the Claude desktop app and try again."
-        )
-
-    backup = back_up(config_path)
-    write_config(config_path, merged)
-    if backup is not None:
-        print(f"backed up previous config to {backup}")
-    return merged
+def _report(results: list[clients.Result]) -> None:
+    labels = {result.client: clients.label(result.client) for result in results}
+    width = max((len(label) for label in labels.values()), default=0)
+    for result in results:
+        indent = f"  {'':<{width}}  {'':<9}  "
+        print(f"  {labels[result.client]:<{width}}  {result.status:<9}  {result.detail}")
+        # Only the trouble cases get their commands printed; a preview already reads as one.
+        if result.status in ("failed", "unknown"):
+            for step in result.steps:
+                print(f"{indent}ran: {step}")
+        for line in result.diagnostics:
+            print(f"{indent}{line}")
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="polybridge-setup",
-        description="Register polybridge with the Claude desktop app.",
+        description="Register polybridge with the Claude desktop app and each agent CLI found.",
     )
     parser.add_argument(
-        "--config",
+        "--client",
+        action="append",
+        metavar="NAME",
+        help=(
+            "which client to register with; repeatable or comma-separated. "
+            f"One of {', '.join(clients.CLIENTS)}, or '{clients.ALL}'. "
+            "Defaults to the desktop app plus each agent CLI found."
+        ),
+    )
+    parser.add_argument(
+        "--desktop-config",
         type=Path,
         default=None,
-        help="config file to edit (defaults to the Claude desktop app's)",
+        help="config file for the Claude desktop app (defaults to its usual location)",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="print the resulting config without writing anything",
+        help="print what would be written or run, without changing anything",
     )
     args = parser.parse_args(argv)
 
     try:
-        config_path = args.config or desktop_config_path()
-        merged = setup(config_path, dry_run=args.dry_run)
-    except SetupError as exc:
+        selected = _selected(args)
+        registration = build_registration()
+    except (SetupError, clients.UnknownClient) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    entry = merged["mcpServers"][SERVER_KEY]
-    if args.dry_run:
-        print(f"would write {config_path}:")
-        print(json.dumps(merged, indent=2))
-        return 0
+    print(f"server:  {registration.command}")
+    print(f"PATH:    {registration.path_env}\n")
 
-    print(f"registered {SERVER_KEY} in {config_path}")
-    print(f"  command: {entry['command']}")
-    print(f"  PATH:    {entry['env']['PATH']}")
+    results = clients.register(
+        selected,
+        registration,
+        dry_run=args.dry_run,
+        named=clients.named_clients(args.client),
+    )
+    _report(results)
 
-    if is_ephemeral_install(entry["command"]):
+    if is_ephemeral_install(registration.command):
         print(
-            f"\nwarning: that command lives in a virtualenv, which will break if it is removed.\n"
-            f"Install it durably instead:\n  uv tool install .\n  {SERVER_COMMAND.replace('-server', '-setup')}",
+            "\nwarning: that command lives in a virtualenv, which will break if it is removed.\n"
+            "Install it durably instead:\n"
+            "  uv tool install . --force --no-cache\n"
+            f"  {SERVER_COMMAND.replace('-server', '-setup')}",
             file=sys.stderr,
         )
 
-    absent = [b.binary for b in backends.BACKENDS.values() if shutil.which(b.binary) is None]
+    absent = [
+        backend.binary
+        for backend in backends.BACKENDS.values()
+        if shutil.which(backend.binary) is None
+    ]
     if absent:
         print(
             f"\nwarning: these agent CLIs are not on PATH, so their backends will be unusable: "
@@ -287,8 +178,10 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
 
-    print("\nRestart the Claude desktop app to pick up the change.")
-    return 0
+    for note in clients.closing_notes(results):
+        print(f"\n{note}")
+
+    return clients.exit_code(results)
 
 
 if __name__ == "__main__":

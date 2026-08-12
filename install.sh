@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
-# Install polybridge and register it with the Claude desktop app.
+# Install polybridge and register it with the Claude desktop app plus each agent CLI found —
+# Claude Code, Codex, opencode.
 #
 # Deliberately short: you should be able to read an install script before running it.
-# Everything fiddly (merging your config, resolving absolute paths) is done by
-# `polybridge-setup`, which is Python and covered by tests.
+# Everything fiddly (merging your config, driving each client's own `mcp add`, resolving
+# absolute paths) is done by `polybridge-setup`, which is Python and covered by tests.
 #
-# Takes no arguments. To preview the config change instead, install and then run:
+# Takes no arguments. To preview the changes instead, install and then run:
 #   polybridge-setup --dry-run
+# To register with only some clients:
+#   polybridge-setup --client codex,opencode
 
 set -euo pipefail
 
@@ -20,7 +23,8 @@ die() { printf '\033[31merror:\033[0m %s\n' "$1" >&2; exit 1; }
 [ -f "$repo_root/pyproject.toml" ] || die "run this from a polybridge checkout"
 [ -n "${HOME:-}" ] || die "HOME is not set; cannot locate your config or user binaries"
 
-# `uv` is ours to install; `claude` is not — it needs your account, so we only check for it.
+# `uv` is ours to install; the agent CLIs are not — they need your account, so setup only looks
+# for them and reports which are missing.
 if ! command -v uv >/dev/null 2>&1; then
   say "uv not found, installing it from https://astral.sh/uv/install.sh"
   curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -29,7 +33,9 @@ if ! command -v uv >/dev/null 2>&1; then
 fi
 
 say "installing the server"
-uv tool install --force "$repo_root"
+# --no-cache is load-bearing: the version never changes, so uv otherwise reuses its cached wheel and
+# reinstalls stale code while printing "Installed 1 package".
+uv tool install --force --no-cache "$repo_root"
 
 # Asked rather than assumed: this honours UV_TOOL_BIN_DIR and friends.
 if tool_bin="$(uv tool dir --bin 2>/dev/null)" && [ -n "$tool_bin" ]; then
@@ -41,16 +47,16 @@ fi
 command -v polybridge-setup >/dev/null 2>&1 \
   || die "installed, but polybridge-setup is not on PATH. Add $(uv tool dir --bin 2>/dev/null || echo "$HOME/.local/bin") to your PATH."
 
-say "registering it with the Claude desktop app"
-polybridge-setup
+say "registering it with your MCP clients"
+# It reports per client and says what to restart, so nothing is repeated here. A non-zero exit means
+# at least one client was not *confirmed* — not that it definitely failed: a client whose CLI timed
+# out may already have written its config, which is why setup reports that case as `unknown`.
+setup_status=0
+polybridge-setup || setup_status=$?
 
-for agent in claude codex; do
-  command -v "$agent" >/dev/null 2>&1 || cat >&2 <<EOF
-
-Note: \`$agent\` is not installed, so its backend will be unusable.
-Install it, then re-run ./install.sh so its location gets recorded.
-
-EOF
-done
-
-say "done — restart the Claude desktop app to pick up the change"
+if [ "$setup_status" -eq 0 ]; then
+  say "done"
+else
+  printf '\033[31merror:\033[0m not every client was confirmed (see the table above)\n' >&2
+fi
+exit "$setup_status"

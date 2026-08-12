@@ -25,4 +25,5 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
     "integration: spawns a real agent CLI; spends real tokens. Opt in with PB_INTEGRATION=1",
+    "cli_integration: drives a real MCP client CLI against a sandboxed config. Costs nothing, but depends on those binaries. Opt in with PB_CLI_INTEGRATION=1",
 ]
