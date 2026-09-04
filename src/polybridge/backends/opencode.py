@@ -51,12 +51,15 @@ from pathlib import Path
 from typing import Any
 
 from .base import (
+    EFFORTS,
     Accumulator,
     Capabilities,
     Enforcement,
     Freedom,
+    ReasoningEffort,
     Status,
     UnsupportedCapability,
+    check_reasoning_effort,
 )
 
 BINARY = "opencode"
@@ -77,7 +80,7 @@ SESSION_FLAGS = ("-s", "--session")
 # region against these rather than searching it, because opencode also accepts `--flag=value` and
 # compact `-sID` forms that a search would miss while opencode still honours them — measured:
 # `--format=default` appended after `--format json` silently disabled the JSON stream.
-VALUE_FLAGS = ("--format", "--dir", "--agent", "-m", *SESSION_FLAGS)
+VALUE_FLAGS = ("--format", "--dir", "--agent", "-m", "--variant", *SESSION_FLAGS)
 BOOLEAN_FLAGS = ("--auto",)
 
 # Flags that would break a guarantee this backend makes. `-c`/`--continue` picks "the most recent
@@ -108,6 +111,18 @@ _NO_SANDBOX_CAVEAT = (
     "no OS sandbox: the agent can read and write outside repo_path, which is only its working "
     "directory"
 )
+_EFFORT_CAVEAT = (
+    "--variant support is per model, not universal: measured working on "
+    "opencode/muse-spark-1.3-contributor-free, where reasoning tokens on one prompt rose "
+    "monotonically with the variant over three paired runs each — 75/95/99 at the native 'minimal' "
+    "(outside this vocabulary), 172/201/230 at 'low', 239/254/308 at 'xhigh'. Non-overlapping, but "
+    "the low-to-xhigh margin is narrow, so treat the flag as directional rather than as a dial with "
+    "a guaranteed magnitude. A model that declares no `variants` in `opencode models --verbose` "
+    "(e.g. big-pickle) ignores --variant with no warning at all, and polybridge cannot know which "
+    "model has variants — so levels_change_behaviour=True means 'shown to change behaviour on one "
+    "capable model', not 'guaranteed on the model this run uses'"
+)
+
 _BUILD_CAVEAT = (
     "the `build` agent wrote a file and ran a shell command without --auto (measured), so --auto is "
     "not what separates writing from not writing; what else `build` permits depends on the user's "
@@ -145,6 +160,14 @@ class OpencodeBackend:
         reports_cost_usd=True,
         os_sandbox=False,
         per_command_deny=False,
+        reasoning_effort=ReasoningEffort(
+            accepts_parameter=True,
+            levels=EFFORTS,
+            native_flag="--variant",
+            accepted_in_real_run=True,
+            levels_change_behaviour=True,
+            caveats=(_EFFORT_CAVEAT,),
+        ),
     )
 
     def build_start_argv(
@@ -156,11 +179,12 @@ class OpencodeBackend:
         session_id: str | None,
         model: str | None,
         max_turns: int | None,
+        reasoning_effort: str | None,
     ) -> list[str]:
         if session_id is not None:
             raise ValueError("opencode mints its own session id; one cannot be supplied")
         self._reject_turn_cap(max_turns)
-        argv = [BINARY, "run", *self._options(repo, freedom, model)]
+        argv = [BINARY, "run", *self._options(repo, freedom, model, reasoning_effort)]
         # `--` then the prompt: last, and explicitly not parsed as an option however it looks.
         argv += ["--", self._check_prompt(prompt)]
         self.assert_safe(argv)
@@ -175,18 +199,23 @@ class OpencodeBackend:
         session_id: str,
         model: str | None,
         max_turns: int | None,
+        reasoning_effort: str | None,
     ) -> list[str]:
         if not session_id:
             raise ValueError("resuming opencode needs the session id its first run reported")
         self._reject_turn_cap(max_turns)
         # -s, never -c: "the most recent session" is whatever ran last on this machine, which is not
         # necessarily this task's conversation.
-        argv = [BINARY, "run", *self._options(repo, freedom, model), "-s", session_id]
+        options = self._options(repo, freedom, model, reasoning_effort)
+        argv = [BINARY, "run", *options, "-s", session_id]
         argv += ["--", self._check_prompt(prompt)]
         self.assert_safe(argv)
         return argv
 
-    def _options(self, repo: Path, freedom: Freedom, model: str | None) -> list[str]:
+    def _options(
+        self, repo: Path, freedom: Freedom, model: str | None, reasoning_effort: str | None
+    ) -> list[str]:
+        check_reasoning_effort(self, reasoning_effort)
         # --dir duplicates the spawn cwd on purpose: it is what puts the repository on the command
         # line, which is the only identity marker available for a backend that cannot carry its
         # session id in argv on a fresh run. See tasks._identity_markers.
@@ -195,6 +224,8 @@ class OpencodeBackend:
             options.append("--auto")
         if model:
             options += ["-m", model]
+        if reasoning_effort:
+            options += ["--variant", reasoning_effort]
         return options
 
     def _reject_turn_cap(self, max_turns: int | None) -> None:
@@ -242,6 +273,15 @@ class OpencodeBackend:
         # A second -m wins, so the run would use a model other than the one the task reports.
         if len(seen.get("-m", ())) > 1:
             raise UnsafeInvocationError(f"-m appears {len(seen['-m'])} times: {argv!r}")
+
+        # Optional, like -m: absent unless an effort was requested, but a second one would still
+        # win silently, and a non-canonical value is one opencode would ignore without a warning.
+        variants = seen.get("--variant", ())
+        if len(variants) > 1:
+            raise UnsafeInvocationError(f"--variant appears {len(variants)} times: {argv!r}")
+        if variants and variants[0] not in EFFORTS:
+            raise UnsafeInvocationError(f"unexpected --variant {variants[0]!r}: {argv!r}")
+
         if agent == AGENTS["read_only"] and "--auto" in seen:
             raise UnsafeInvocationError(
                 f"--auto contradicts the {agent!r} agent, which is how read_only is expressed: "

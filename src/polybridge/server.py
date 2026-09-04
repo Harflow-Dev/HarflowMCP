@@ -105,6 +105,13 @@ def _check_turn_cap(backend, max_turns: int | None) -> None:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
 
 
+def _check_reasoning_effort(backend, reasoning_effort: str | None) -> None:
+    try:
+        backends.check_reasoning_effort(backend, reasoning_effort)
+    except backends.UnsupportedCapability as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+
 def _resolve_repo_path(repo_path: str) -> Path:
     if not repo_path or not repo_path.strip():
         raise MCPError(INVALID_PARAMS, "repo_path must be a non-empty path")
@@ -151,6 +158,7 @@ async def start_task(
     freedom: str = DEFAULT_FREEDOM,
     model: str | None = None,
     max_turns: int | None = None,
+    reasoning_effort: str | None = None,
 ) -> dict[str, Any]:
     """Dispatch a coding task to a headless agent and return immediately.
 
@@ -163,6 +171,12 @@ async def start_task(
         model: Model for this run, in the backend's own naming.
         max_turns: Cap on agent turns. Only some backends support this; asking for it on one that
             does not is an error rather than being silently ignored.
+        reasoning_effort: "low", "medium", "high" or "xhigh", passed to the backend verbatim.
+            Rejected up front only when the chosen *backend* has no effort control at all, or is
+            asked for a level outside the ones it declares (see list_backends); polybridge cannot
+            tell whether the chosen *model* honours it — on opencode in particular, a model with no
+            declared variants silently ignores an unsupported level rather than erroring. See
+            list_backends' per-backend reasoning_effort caveats for what is and is not known there.
 
     Returns the new task_id and its starting state. The run continues in the background; poll
     get_task_status or call wait_for_task to follow it.
@@ -173,10 +187,17 @@ async def start_task(
     chosen = _backend(backend)
     _check_freedom(freedom)
     _check_turn_cap(chosen, max_turns)
+    _check_reasoning_effort(chosen, reasoning_effort)
     path = await _validate_repo_path(repo_path)
 
     task = await _reg().start(
-        prompt, path, backend=chosen, freedom=freedom, model=model, max_turns=max_turns
+        prompt,
+        path,
+        backend=chosen,
+        freedom=freedom,
+        model=model,
+        max_turns=max_turns,
+        reasoning_effort=reasoning_effort,
     )
     return task.brief() | {"enforcement": task.enforcement}
 
@@ -348,7 +369,9 @@ async def resume_task(
         max_turns: Cap on agent turns, where the backend supports one.
 
     Returns a new task_id sharing the original session, and returns immediately as with start_task.
-    Runs on the same backend, model and freedom as the original.
+    Runs on the same backend, model, reasoning_effort and freedom as the original — none of these
+    can be changed on resume, since a mid-conversation switch would not honestly describe what
+    produced the reply.
 
     Some backends mint their own session id and only disclose it mid-run; if a task died before
     doing so, its conversation cannot be continued and this says so rather than starting a

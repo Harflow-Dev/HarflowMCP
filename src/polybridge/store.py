@@ -57,6 +57,7 @@ class TaskRecord:
     pid: int | None = None
     pgid: int | None = None
     model: str | None = None
+    reasoning_effort: str | None = None
     max_turns: int | None = None
     parent_task_id: str | None = None
     prompt: str = ""
@@ -345,6 +346,7 @@ def snapshot(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
         "last_output_tail": tail,
         "raw_stream_log": str(log_path(log_dir, record.task_id)),
         "model": record.model,
+        "reasoning_effort": record.reasoning_effort,
         "max_turns": record.max_turns,
         "mcp_servers": state.mcp_servers,
         "available_tool_count": state.available_tool_count,

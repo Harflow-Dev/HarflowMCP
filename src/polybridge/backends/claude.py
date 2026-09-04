@@ -15,7 +15,16 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .base import Accumulator, Capabilities, Enforcement, Freedom, Status
+from .base import (
+    EFFORTS,
+    Accumulator,
+    Capabilities,
+    Enforcement,
+    Freedom,
+    ReasoningEffort,
+    Status,
+    check_reasoning_effort,
+)
 
 BINARY = "claude"
 
@@ -32,6 +41,17 @@ PERMISSION_MODES: dict[str, str] = {
     "write_in_repo": "acceptEdits",
     "unrestricted": "bypassPermissions",
 }
+
+_EFFORT_ACCEPTANCE_CAVEAT = (
+    "acceptance evidence is a real --effort xhigh run that produced no \"Unknown --effort value\" "
+    "warning on stderr and completed normally; no cross-level comparison was made, so this does not "
+    "show xhigh behaving differently from low"
+)
+_EFFORT_DEGRADE_CAVEAT = (
+    "an --effort value outside low/medium/high/xhigh/max is silently ignored by the CLI itself "
+    "(stderr warning, default effort used, measured) — polybridge's own validation is what stops "
+    "an unsupported value reaching it, not the CLI"
+)
 
 _NO_SANDBOX_CAVEAT = (
     "no OS sandbox: the agent can read and write outside repo_path, which is only its working "
@@ -73,6 +93,14 @@ class ClaudeBackend:
         reports_cost_usd=True,
         os_sandbox=False,
         per_command_deny=True,
+        reasoning_effort=ReasoningEffort(
+            accepts_parameter=True,
+            levels=EFFORTS,
+            native_flag="--effort",
+            accepted_in_real_run=True,
+            levels_change_behaviour=False,
+            caveats=(_EFFORT_ACCEPTANCE_CAVEAT, _EFFORT_DEGRADE_CAVEAT),
+        ),
     )
 
     def build_start_argv(
@@ -84,10 +112,11 @@ class ClaudeBackend:
         session_id: str | None,
         model: str | None,
         max_turns: int | None,
+        reasoning_effort: str | None,
     ) -> list[str]:
         if session_id is None:
             raise ValueError("claude accepts a chosen session id, so one must be supplied")
-        argv = self._common(prompt, freedom, model, max_turns)
+        argv = self._common(prompt, freedom, model, max_turns, reasoning_effort)
         argv += ["--session-id", session_id]
         self.assert_safe(argv)
         return argv
@@ -101,18 +130,27 @@ class ClaudeBackend:
         session_id: str,
         model: str | None,
         max_turns: int | None,
+        reasoning_effort: str | None,
     ) -> list[str]:
-        argv = self._common(prompt, freedom, model, max_turns)
+        argv = self._common(prompt, freedom, model, max_turns, reasoning_effort)
         # --resume and --session-id conflict, so never both.
         argv += ["--resume", session_id]
         self.assert_safe(argv)
         return argv
 
     def _common(
-        self, prompt: str, freedom: Freedom, model: str | None, max_turns: int | None
+        self,
+        prompt: str,
+        freedom: Freedom,
+        model: str | None,
+        max_turns: int | None,
+        reasoning_effort: str | None,
     ) -> list[str]:
         if not prompt or not prompt.strip():
             raise ValueError("prompt must be a non-empty string")
+        # Re-checked here, the one place both start and resume funnel through, so no caller of this
+        # method can reach the CLI with an effort it would silently degrade instead of honour.
+        check_reasoning_effort(self, reasoning_effort)
         argv = [
             BINARY,
             "-p",
@@ -130,6 +168,8 @@ class ClaudeBackend:
             argv += ["--max-turns", str(max_turns)]
         if model:
             argv += ["--model", model]
+        if reasoning_effort:
+            argv += ["--effort", reasoning_effort]
         return argv
 
     def assert_safe(self, argv: list[str]) -> None:
@@ -151,6 +191,16 @@ class ClaudeBackend:
         mode = flags[flags.index("--permission-mode") + 1]
         if mode not in set(PERMISSION_MODES.values()):
             raise UnsafeInvocationError(f"unexpected --permission-mode {mode!r}")
+
+        # Optional, unlike the flags above — but a second one, or a non-canonical value, would
+        # either win silently or reach a CLI that degrades it without telling anyone.
+        effort_count = flags.count("--effort")
+        if effort_count > 1:
+            raise UnsafeInvocationError(f"--effort appears {effort_count} times: {argv!r}")
+        if effort_count == 1:
+            effort = flags[flags.index("--effort") + 1]
+            if effort not in EFFORTS:
+                raise UnsafeInvocationError(f"unexpected --effort value {effort!r}: {argv!r}")
 
         for flag in FORBIDDEN_FLAGS:
             if flag in flags:

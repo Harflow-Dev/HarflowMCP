@@ -93,6 +93,58 @@ async def test_turn_cap_on_codex_fails_rather_than_being_ignored(git_repo: Path)
         )
 
 
+async def test_invalid_reasoning_effort_fails_before_a_task_exists(git_repo: Path) -> None:
+    """Not just a backend-specific quirk: an out-of-vocabulary value is rejected up front."""
+    with pytest.raises(MCPError, match="unknown reasoning_effort"):
+        await call("start_task", prompt="x", repo_path=str(git_repo), reasoning_effort="ultra")
+    assert (await call("list_tasks")).structured_content["result"] == []
+
+
+async def test_valid_reasoning_effort_reaches_the_argv_and_the_persisted_record(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Not just accepted — proven to reach both the built subprocess argv and what is written to
+    disk, not only an in-memory kwarg a weaker assertion could pass without either one being true."""
+    captured: dict = {}
+
+    async def fake_spawn(argv, **kwargs):
+        captured["argv"] = argv
+        captured.update(kwargs)
+        task = Task(
+            task_id="fake-task",
+            backend=kwargs["backend"].name,
+            session_id=kwargs.get("session_id"),
+            repo_path=kwargs["repo_path"],
+            prompt=kwargs["prompt"],
+            max_turns=kwargs.get("max_turns"),
+            log_path=kwargs["repo_path"] / "fake-task.jsonl",
+            started_at=datetime.now(timezone.utc),
+            model=kwargs.get("model"),
+            reasoning_effort=kwargs.get("reasoning_effort"),
+            freedom=kwargs.get("freedom", "write_in_repo"),
+        )
+        registry = server._reg()
+        registry._tasks[task.task_id] = task
+        registry.persist(task)
+        return task
+
+    monkeypatch.setattr(server._reg(), "_spawn", fake_spawn)
+
+    result = (
+        await call(
+            "start_task", prompt="x", repo_path=str(git_repo), backend="claude",
+            reasoning_effort="high",
+        )
+    ).structured_content
+
+    argv = captured["argv"]
+    assert argv[argv.index("--effort") + 1] == "high"
+
+    record = store.read(server._reg().log_dir, result["task_id"])
+    assert record is not None
+    assert record.reasoning_effort == "high"
+
+
 async def test_rejects_a_directory_that_is_not_a_git_repo(tmp_path: Path) -> None:
     plain = tmp_path / "not-a-repo"
     plain.mkdir()

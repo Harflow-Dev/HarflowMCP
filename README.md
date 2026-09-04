@@ -80,7 +80,7 @@ claude-desktop`.
 | Tool | Blocking? | What it does |
 |---|---|---|
 | `list_backends()` | No | What's installed, its version, and what each backend can actually do |
-| `start_task(prompt, repo_path, backend, freedom, model, max_turns)` | No | Dispatches, returns a `task_id` immediately |
+| `start_task(prompt, repo_path, backend, freedom, model, max_turns, reasoning_effort)` | No | Dispatches, returns a `task_id` immediately |
 | `get_task_status(task_id)` | No | Status, summary, turns, usage, denials, enforcement, stream tail |
 | `wait_for_task(task_id, timeout_seconds=55)` | Until done or timeout | On timeout returns `running` and **leaves the run alone** |
 | `resume_task(task_id, followup_prompt)` | No | Continues that session as a **new** task |
@@ -133,6 +133,58 @@ rather than being observed to be prevented from doing so — it never attempted 
 tool-layer refusal was exercised — and `build` wrote a file and ran a shell command **without
 `--auto`**, so `--auto` is not what separates writing from not writing, and how much `unrestricted`
 adds over `write_in_repo` depends on the user's own opencode configuration.
+
+## Reasoning effort is one vocabulary, passed through verbatim
+
+`start_task(..., reasoning_effort=...)` accepts `"low"`, `"medium"`, `"high"` or `"xhigh"` and hands
+it to whichever backend ran, on that backend's own flag — no translation, because each of those four
+level names is spelled the same way, and accepted, on all three (per each CLI's own `--help` text and
+model metadata). That is a claim about spelling only, not about the levels behaving identically or
+forming an equivalent ladder across backends — see the acceptance/behaviour caveats below.
+
+| backend | flag | value |
+|---|---|---|
+| claude | `--effort <v>` | as-is |
+| codex | `-c model_reasoning_effort="<v>"` | as-is |
+| opencode | `--variant <v>` | as-is |
+
+An effort outside those four levels is refused before a task is dispatched, on every backend — never
+silently dropped or degraded. That matters because each CLI mishandles an unsupported value
+differently if it ever reached one directly: claude silently degrades to its default effort with only
+a stderr warning; opencode silently ignores it with no warning at all; codex alone fails loudly, as a
+mid-run API `400`.
+
+`xhigh` is deliberately the ceiling, not necessarily each backend's true maximum. For claude and
+codex it genuinely is not: each has a native tier above `xhigh` (claude `max`; codex `max`/`ultra`)
+that stays unreachable through polybridge on purpose, so a caller cannot spend it by accident.
+opencode is different — on its variant-capable models, `xhigh` **is** the top declared variant, so
+there is no higher tier being deliberately withheld there; only the low end (`minimal`) is
+unreachable, for no reason beyond keeping one vocabulary all three share:
+
+| backend | unreachable through polybridge |
+|---|---|
+| claude | `max` |
+| codex | `none`, `minimal`, `max`, `ultra` |
+| opencode | `minimal` |
+
+Within **codex**, `xhigh` is also the one tier every model measured accepts (per
+`~/.codex/models_cache.json`) — `ultra`/`max` are absent from some codex models, and stopping short
+of them removes a model-dependent `400` as a possibility entirely there. That acceptance is not a
+universal claim across backends: opencode's own `--variant` support is per model, so a model can lack
+`xhigh` (or any other level) just as easily as codex's outliers lack `ultra`/`max` — see below.
+
+opencode's support is real but **per model**, and polybridge cannot know which model has variants:
+measured working on the free `opencode/muse-spark-1.3-contributor-free`, where reasoning tokens on
+one prompt rose with the variant over three paired runs each — 172–230 at `low` vs 239–308 at
+`xhigh`, and 75–99 at the native `minimal` below them. The paid `ling-3.0-flash-fin` accepts only
+`low`, `medium` and `high` (no `xhigh` at all), and a model that declares no `variants` in `opencode
+models --verbose` — `big-pickle`, for example — ignores `--variant` with no warning at all. So
+`levels_change_behaviour: true` in `list_backends`' `capabilities.reasoning_effort` for opencode means
+"shown to change behaviour on one capable model," not "guaranteed for whichever model this run uses"
+— the gap is spelled out in that block's own `caveats`, never left implied by the boolean alone. The
+weaker `accepted_in_real_run: true` claims only that a real run accepted the flag — the CLI neither
+refused it nor silently degraded it to a default — which is all claude's and codex's evidence
+amounts to; see their own caveats for what that leaves open.
 
 ## Tasks outlive the server process
 

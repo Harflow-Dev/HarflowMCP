@@ -59,6 +59,27 @@ def test_missing_record_reads_as_none(tmp_path: Path) -> None:
     assert store.read(tmp_path, "nope") is None
 
 
+def test_round_trips_a_reasoning_effort(tmp_path: Path) -> None:
+    record = make_record(reasoning_effort="xhigh")
+    store.write(tmp_path, record)
+
+    assert store.read(tmp_path, "task-1").reasoning_effort == "xhigh"
+
+
+def test_a_pre_change_record_with_no_effort_field_still_loads_as_none(tmp_path: Path) -> None:
+    """A record written before this parameter existed has no `reasoning_effort` key at all."""
+    store.write(tmp_path, make_record())
+    path = store.record_path(tmp_path, "task-1")
+    raw = json.loads(path.read_text())
+    del raw["reasoning_effort"]
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    loaded = store.read(tmp_path, "task-1")
+
+    assert loaded is not None
+    assert loaded.reasoning_effort is None
+
+
 def test_unknown_fields_are_ignored_so_newer_records_still_load(tmp_path: Path) -> None:
     """A record written by a future version must not break an older server."""
     store.write(tmp_path, make_record())

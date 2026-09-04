@@ -113,6 +113,7 @@ class Task:
     log_path: Path
     started_at: datetime
     model: str | None = None
+    reasoning_effort: str | None = None
     parent_task_id: str | None = None
     freedom: str = "write_in_repo"
     enforcement: dict[str, Any] = field(default_factory=dict)
@@ -181,6 +182,7 @@ class Task:
             "last_output_tail": list(self.tail)[-TAIL_LINES_RETURNED:],
             "raw_stream_log": str(self.log_path),
             "model": self.model,
+            "reasoning_effort": self.reasoning_effort,
             "max_turns": self.max_turns,
             "mcp_servers": self.acc.mcp_servers,
             "available_tool_count": self.acc.available_tool_count,
@@ -211,6 +213,7 @@ class TaskRegistry:
         freedom: str = "write_in_repo",
         max_turns: int | None = None,
         model: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> Task:
         """Dispatch a fresh session. Returns once the subprocess exists, not once it finishes."""
         # Only some backends let us name the session up front. Where we can, knowing it immediately
@@ -223,6 +226,7 @@ class TaskRegistry:
             session_id=session_id,
             model=model,
             max_turns=max_turns,
+            reasoning_effort=reasoning_effort,
         )
         return await self._spawn(
             argv,
@@ -233,6 +237,7 @@ class TaskRegistry:
             freedom=freedom,
             max_turns=max_turns,
             model=model,
+            reasoning_effort=reasoning_effort,
         )
 
     async def resume(
@@ -260,10 +265,11 @@ class TaskRegistry:
             repo=parent.repo_path,
             freedom=parent.freedom,  # type: ignore[arg-type]
             session_id=parent.session_id,
-            # Carried over so the continuation runs on the model the run started with, and so the
-            # model we report for it stays true.
+            # Carried over so the continuation runs on the model and effort the run started with,
+            # and so what we report for it stays true.
             model=parent.model,
             max_turns=max_turns,
+            reasoning_effort=parent.reasoning_effort,
         )
         return await self._spawn(
             argv,
@@ -274,6 +280,7 @@ class TaskRegistry:
             freedom=parent.freedom,
             max_turns=max_turns,
             model=parent.model,
+            reasoning_effort=parent.reasoning_effort,
             parent_task_id=parent.task_id,
         )
 
@@ -288,6 +295,7 @@ class TaskRegistry:
         freedom: str,
         max_turns: int | None,
         model: str | None,
+        reasoning_effort: str | None,
         parent_task_id: str | None = None,
     ) -> Task:
         # Re-checked at the point of execution, not only where the argv was built, so no future
@@ -320,6 +328,7 @@ class TaskRegistry:
             log_path=log_path,
             started_at=_now(),
             model=model,
+            reasoning_effort=reasoning_effort,
             parent_task_id=parent_task_id,
             freedom=freedom,
             enforcement=backend.enforcement(freedom).as_dict(),  # type: ignore[arg-type]
@@ -372,6 +381,7 @@ class TaskRegistry:
                 pid=task.proc.pid if task.proc is not None else None,
                 pgid=task.pgid,
                 model=task.model,
+                reasoning_effort=task.reasoning_effort,
                 max_turns=task.max_turns,
                 parent_task_id=task.parent_task_id,
                 prompt=task.prompt[: store.PROMPT_PREVIEW_CHARS],
@@ -530,6 +540,7 @@ class TaskRegistry:
             session_id=record.session_id,
             model=record.model,
             max_turns=max_turns,
+            reasoning_effort=record.reasoning_effort,
         )
         return await self._spawn(
             argv,
@@ -540,6 +551,7 @@ class TaskRegistry:
             freedom=record.freedom,
             max_turns=max_turns,
             model=record.model,
+            reasoning_effort=record.reasoning_effort,
             parent_task_id=record.task_id,
         )
 

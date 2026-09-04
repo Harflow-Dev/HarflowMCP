@@ -26,12 +26,15 @@ from pathlib import Path
 from typing import Any
 
 from .base import (
+    EFFORTS,
     Accumulator,
     Capabilities,
     Enforcement,
     Freedom,
+    ReasoningEffort,
     Status,
     UnsupportedCapability,
+    check_reasoning_effort,
 )
 
 BINARY = "codex"
@@ -44,6 +47,23 @@ SANDBOX_MODES: dict[str, str] = {
 
 # Without this a headless run can stop dead waiting for an approval nobody can give.
 NEVER_ASK = ("-c", 'approval_policy="never"')
+
+# The `-c` key this backend's effort rides on. EFFORTS is a closed four-value vocabulary with no
+# quote or `=` characters in it, so quoting the TOML value is a non-issue — no encoder needed.
+EFFORT_KEY = "model_reasoning_effort"
+
+_EFFORT_CAVEAT = (
+    "codex does not validate model_reasoning_effort itself — an unsupported value would reach the "
+    "API as a mid-run 400 rather than being rejected up front — but that gap is moot for the fixed "
+    "EFFORTS vocabulary, which every model accepts (measured: a run at 'ultra', outside this "
+    "vocabulary, still recorded reasoning_effort in its session rollout end to end)"
+)
+_EFFORT_NO_COMPARISON_CAVEAT = (
+    "acceptance evidence is the run's own session rollout recording the requested "
+    "model_reasoning_effort verbatim — stronger than nothing, but reasoning_output_tokens is "
+    "reported as 0 at both 'low' and 'xhigh' (measured), so a cross-level behavioural comparison is "
+    "not available from codex's stream at all"
+)
 
 # `workspace-write` is *not* repo-only: Codex reports its own writable set as
 # `[workdir, /tmp, $TMPDIR]`, so claiming confinement to the repository would overstate it.
@@ -66,6 +86,28 @@ _MODE_CAVEATS: dict[str, tuple[str, ...]] = {
     ),
 }
 
+# Options this backend itself ever writes — nothing more. `assert_safe` walks the option region
+# against exactly these instead of searching it, because searching is what let a non-canonical
+# spelling through while codex still honoured it. Measured evading a search-based check: the
+# attached forms `--config=…` and `-capproval_policy=…`, the attached `--sandbox=danger-full-access`
+# (`codex exec --json --sandbox=read-only …` runs fine, so this spelling is real), and `--add-dir
+# /etc`. Long aliases (`--cd`, `--sandbox`, `--config`, `--model`) are deliberately absent even though
+# codex accepts them: this backend never writes them, so admitting them here would reopen the same
+# hole under a different spelling.
+BOOLEAN_FLAGS = ("--json",)
+VALUE_FLAGS = ("-C", "-s", "-c", "-m")
+
+# The only two `-c key=value` literals this backend ever writes, matched byte-for-byte rather than
+# parsed. Measured: codex normalises whitespace around a `-c key=value` pair before applying it, and
+# falls back to the raw string when the value fails to parse as TOML — so a strip()-then-compare
+# check let an unbalanced quote (`model_reasoning_effort="low`, missing its close) and doubled
+# quoting (`=""low""`) through as if they were the clean value. Exact-literal membership closes that
+# by construction: anything not identical to one of these two shapes is refused outright, with no
+# parsing step for a malformed value to hide behind.
+PERMITTED_C_PAIRS: frozenset[str] = frozenset(
+    {NEVER_ASK[1]} | {f'{EFFORT_KEY}="{level}"' for level in EFFORTS}
+)
+
 
 class UnsafeInvocationError(RuntimeError):
     """An argv was assembled without this backend's required guarantees."""
@@ -81,6 +123,14 @@ class CodexBackend:
         reports_cost_usd=False,
         os_sandbox=True,
         per_command_deny=False,
+        reasoning_effort=ReasoningEffort(
+            accepts_parameter=True,
+            levels=EFFORTS,
+            native_flag=f"-c {EFFORT_KEY}",
+            accepted_in_real_run=True,
+            levels_change_behaviour=False,
+            caveats=(_EFFORT_CAVEAT, _EFFORT_NO_COMPARISON_CAVEAT),
+        ),
     )
 
     def build_start_argv(
@@ -92,11 +142,12 @@ class CodexBackend:
         session_id: str | None,
         model: str | None,
         max_turns: int | None,
+        reasoning_effort: str | None,
     ) -> list[str]:
         if session_id is not None:
             raise ValueError("codex mints its own session id; one cannot be supplied")
         self._reject_turn_cap(max_turns)
-        argv = [BINARY, "exec", *self._options(repo, freedom, model)]
+        argv = [BINARY, "exec", *self._options(repo, freedom, model, reasoning_effort)]
         # `--` then the prompt: last, and explicitly not parsed as an option however it looks.
         argv += ["--", self._check_prompt(prompt)]
         self.assert_safe(argv)
@@ -111,20 +162,26 @@ class CodexBackend:
         session_id: str,
         model: str | None,
         max_turns: int | None,
+        reasoning_effort: str | None,
     ) -> list[str]:
         if not session_id:
             raise ValueError("resuming codex needs the thread id its first run reported")
         self._reject_turn_cap(max_turns)
-        argv = [BINARY, "exec", "resume", *self._options(repo, freedom, model)]
+        argv = [BINARY, "exec", "resume", *self._options(repo, freedom, model, reasoning_effort)]
         # `codex exec resume [SESSION_ID] [PROMPT]` — both positional, after `--`.
         argv += ["--", session_id, self._check_prompt(prompt)]
         self.assert_safe(argv)
         return argv
 
-    def _options(self, repo: Path, freedom: Freedom, model: str | None) -> list[str]:
+    def _options(
+        self, repo: Path, freedom: Freedom, model: str | None, reasoning_effort: str | None
+    ) -> list[str]:
+        check_reasoning_effort(self, reasoning_effort)
         options = ["--json", "-C", str(repo), "-s", SANDBOX_MODES[freedom], *NEVER_ASK]
         if model:
             options += ["-m", model]
+        if reasoning_effort:
+            options += ["-c", f'{EFFORT_KEY}="{reasoning_effort}"']
         return options
 
     def _reject_turn_cap(self, max_turns: int | None) -> None:
@@ -151,35 +208,131 @@ class CodexBackend:
                 f"refusing to run codex without a `--` separator before the prompt, which stops "
                 f"prompt text being parsed as options: {argv!r}"
             )
-        options = argv[: argv.index("--")]
+        # The option region starts right after `exec`, except on a resume argv where `resume` is
+        # a literal subcommand token before it — `build_start_argv`'s first option is always
+        # `--json`, never the string "resume", so this is unambiguous rather than a hardcoded offset.
+        start_index = 3 if argv[2:3] == ["resume"] else 2
+        options = argv[start_index : argv.index("--")]
 
-        if "--json" not in options:
-            raise UnsafeInvocationError(f"refusing to run codex without --json: {argv!r}")
+        # Kept for the clearer message even though the allowlist below would refuse this token too
+        # (as unrecognised) — this is the one form worth naming explicitly.
+        if "--dangerously-bypass-approvals-and-sandbox" in options:
+            raise UnsafeInvocationError(
+                "--dangerously-bypass-approvals-and-sandbox discards the sandbox that is this "
+                "backend's main safety property"
+            )
 
-        # `-s` and `--sandbox` are the same option; a second occurrence of either would win.
-        sandbox_flags = [flag for flag in options if flag in ("-s", "--sandbox")]
-        if len(sandbox_flags) != 1:
+        seen = self._parse_options(options, argv)
+
+        # Positional arity, not just separator presence. `exec` takes one positional (the prompt),
+        # `exec resume` takes two (session id then prompt) — and a resume missing its prompt is the
+        # dangerous shape, because codex would read the intended prompt as the SESSION_ID and
+        # silently continue some other conversation. Counted, never matched: a legitimate prompt or
+        # session id may itself be `--`, `resume`, or look like an option.
+        positionals = argv[argv.index("--") + 1 :]
+        expected = 2 if start_index == 3 else 1
+        if len(positionals) != expected:
+            raise UnsafeInvocationError(
+                f"expected exactly {expected} positional argument(s) after `--`, found "
+                f"{len(positionals)}: {argv!r}"
+            )
+
+        # Exactly one, not merely present: a duplicate is not something this backend writes, and
+        # the allowlist's promise is that nothing else wrote here either.
+        if len(seen.get("--json", [])) != 1:
+            raise UnsafeInvocationError(f"refusing to run codex without exactly one --json: {argv!r}")
+
+        cds = seen.get("-C", [])
+        if len(cds) != 1:
+            raise UnsafeInvocationError(f"expected exactly one -C: {argv!r}")
+        if not cds[0].strip():
+            raise UnsafeInvocationError(f"-C names no directory: {argv!r}")
+
+        # `-s` and its long alias `--sandbox` were previously counted together as one option; now
+        # `--sandbox` is refused outright by the allowlist below, so only `-s` can appear here.
+        sandbox_values = seen.get("-s", [])
+        if len(sandbox_values) != 1:
             raise UnsafeInvocationError(f"expected exactly one sandbox flag: {argv!r}")
-        mode = options[options.index(sandbox_flags[0]) + 1]
+        mode = sandbox_values[0]
         if mode not in set(SANDBOX_MODES.values()):
             raise UnsafeInvocationError(f"unexpected sandbox mode {mode!r}")
 
-        # A missing never-ask policy is a hang, not a warning. Checked as a `-c` pair, and as the
-        # only approval_policy override, since a later one would take precedence.
-        pairs = [
-            options[i + 1] for i, flag in enumerate(options[:-1]) if flag == "-c" or flag == "--config"
-        ]
-        approvals = [value for value in pairs if value.startswith("approval_policy")]
+        models = seen.get("-m", [])
+        if len(models) > 1:
+            raise UnsafeInvocationError(f"-m appears {len(models)} times: {argv!r}")
+        # `_options` omits -m entirely when no model was chosen, so an empty value means something
+        # other than this backend assembled the argv.
+        if models and not models[0].strip():
+            raise UnsafeInvocationError(f"-m names no model: {argv!r}")
+
+        # Every `-c` value was already checked against PERMITTED_C_PAIRS while walking, so only
+        # multiplicity remains: exactly one approval override, at most one effort override.
+        pairs = seen.get("-c", [])
+        approvals = [pair for pair in pairs if pair == NEVER_ASK[1]]
         if approvals != [NEVER_ASK[1]]:
             raise UnsafeInvocationError(
                 f"codex must be given exactly one {NEVER_ASK[1]} override, which prevents it "
                 f"blocking on an approval prompt no one can answer; found {approvals!r}: {argv!r}"
             )
-        if "--dangerously-bypass-approvals-and-sandbox" in argv:
-            raise UnsafeInvocationError(
-                "--dangerously-bypass-approvals-and-sandbox discards the sandbox that is this "
-                "backend's main safety property"
-            )
+        efforts = [pair for pair in pairs if pair != NEVER_ASK[1]]
+        if len(efforts) > 1:
+            raise UnsafeInvocationError(f"expected at most one {EFFORT_KEY} override: {argv!r}")
+
+    @staticmethod
+    def _parse_options(options: list[str], argv: list[str]) -> dict[str, list[str]]:
+        """Walk the option region strictly, refusing any token this backend would not have written.
+
+        Mirrors OpencodeBackend._parse_options and exists for the same reason: searching for
+        `"-s" in options` or `value.startswith("approval_policy")` is not enough, because codex
+        also honours `--flag=value`, attached short forms (`-capproval_policy=…`), and long aliases
+        this backend never emits — a search sees the canonical form it wrote and passes while codex
+        applies the non-canonical one that rode along. So every token not in canonical
+        space-separated form is refused rather than skipped over, and a `-c` value is checked
+        byte-for-byte against PERMITTED_C_PAIRS rather than parsed, which is what closes the
+        unbalanced-quote and doubled-quote holes (see PERMITTED_C_PAIRS) by construction.
+        """
+        seen: dict[str, list[str]] = {}
+        index = 0
+        while index < len(options):
+            token = options[index]
+            if token in BOOLEAN_FLAGS:
+                seen.setdefault(token, []).append("")
+                index += 1
+            elif token == "-c":
+                if index + 1 >= len(options):
+                    raise UnsafeInvocationError(f"-c has no value: {argv!r}")
+                value = options[index + 1]
+                if "=" not in value:
+                    # Codex still applies *something* from a key with no `=`, so this is refused
+                    # outright rather than silently dropped from `seen`, which would let it slip
+                    # past every check below unexamined.
+                    raise UnsafeInvocationError(f"-c/--config pair has no '=': {value!r}: {argv!r}")
+                if value not in PERMITTED_C_PAIRS:
+                    raise UnsafeInvocationError(f"unexpected -c pair {value!r}: {argv!r}")
+                seen.setdefault(token, []).append(value)
+                index += 2
+            elif token in VALUE_FLAGS:
+                if index + 1 >= len(options):
+                    raise UnsafeInvocationError(f"{token} has no value: {argv!r}")
+                value = options[index + 1]
+                # A value starting with "-" is not a value: codex's parser would read it as the
+                # next option. `model` is caller-supplied and lands here via `-m`, so a model named
+                # e.g. `--sandbox=danger-full-access` would otherwise smuggle an option into the
+                # region this method exists to police.
+                if value.startswith("-"):
+                    raise UnsafeInvocationError(
+                        f"{token} was given {value!r}, which codex would parse as an option rather "
+                        f"than a value: {argv!r}"
+                    )
+                seen.setdefault(token, []).append(value)
+                index += 2
+            else:
+                raise UnsafeInvocationError(
+                    f"unrecognised option token {token!r}: this backend writes only canonical "
+                    f"space-separated options, and a non-canonical form could override one of them "
+                    f"unnoticed: {argv!r}"
+                )
+        return seen
 
     def enforcement(self, freedom: Freedom) -> Enforcement:
         mode = SANDBOX_MODES[freedom]

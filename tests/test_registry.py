@@ -117,6 +117,111 @@ async def test_resume_refuses_while_the_session_has_a_live_run(tmp_path: Path) -
         await registry.resume(parent, "carry on")
 
 
+async def test_resume_runs_at_the_parents_reasoning_effort(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Carried over for the same reason `model` is: the continuation must run — and be reported —
+    at the effort the session started with, not silently drop back to the CLI's own default.
+
+    Asserts on the *argv itself*, not just the kwargs the patched _spawn was called with: a
+    resume that built the argv without the effort flag but still reported the metadata kwarg would
+    have passed the weaker check this replaces.
+    """
+    registry = TaskRegistry(log_dir=tmp_path)
+    parent = make_task(tmp_path, "parent", session_id="s1", finished=True)
+    parent.reasoning_effort = "high"
+    registry._tasks[parent.task_id] = parent
+
+    captured: dict = {}
+
+    async def fake_spawn(argv, **kwargs):
+        captured["argv"] = argv
+        captured.update(kwargs)
+        child = make_task(tmp_path, "child", session_id="s1")
+        child.reasoning_effort = kwargs.get("reasoning_effort")
+        return child
+
+    monkeypatch.setattr(registry, "_spawn", fake_spawn)
+
+    child = await registry.resume(parent, "carry on")
+
+    assert captured["reasoning_effort"] == "high"
+    assert child.reasoning_effort == "high"
+    # claude's own effort flag, carrying the actual requested value — not just the metadata kwarg.
+    argv = captured["argv"]
+    assert argv[argv.index("--effort") + 1] == "high"
+
+
+async def test_resume_record_runs_at_the_recorded_reasoning_effort(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same carry-over, via the path recovering a task this process never spawned. Also asserts on
+    the argv, not just the kwargs — see test_resume_runs_at_the_parents_reasoning_effort."""
+    registry = TaskRegistry(log_dir=tmp_path)
+    record = store.TaskRecord(
+        task_id="old",
+        backend="claude",
+        session_id="s1",
+        markers=["s1"],
+        repo_path=str(tmp_path),
+        started_at=datetime.now(timezone.utc).isoformat(),
+        status="completed",
+        reasoning_effort="xhigh",
+    )
+
+    captured: dict = {}
+
+    async def fake_spawn(argv, **kwargs):
+        captured["argv"] = argv
+        captured.update(kwargs)
+        child = make_task(tmp_path, "child", session_id="s1")
+        child.reasoning_effort = kwargs.get("reasoning_effort")
+        return child
+
+    monkeypatch.setattr(registry, "_spawn", fake_spawn)
+
+    child = await registry.resume_record(record, "carry on")
+
+    assert captured["reasoning_effort"] == "xhigh"
+    assert child.reasoning_effort == "xhigh"
+    argv = captured["argv"]
+    assert argv[argv.index("--effort") + 1] == "xhigh"
+
+
+async def test_resume_record_with_no_stored_effort_can_still_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A record persisted before this field existed deserializes reasoning_effort to None (the
+    dataclass default) rather than failing to load — and that record must still be resumable, with
+    no effort flag reaching the child's argv at all."""
+    registry = TaskRegistry(log_dir=tmp_path)
+    # No reasoning_effort kwarg at all: stands in for a pre-change on-disk record.
+    record = store.TaskRecord(
+        task_id="old",
+        backend="claude",
+        session_id="s1",
+        markers=["s1"],
+        repo_path=str(tmp_path),
+        started_at=datetime.now(timezone.utc).isoformat(),
+        status="completed",
+    )
+    assert record.reasoning_effort is None
+
+    captured: dict = {}
+
+    async def fake_spawn(argv, **kwargs):
+        captured["argv"] = argv
+        captured.update(kwargs)
+        return make_task(tmp_path, "child", session_id="s1")
+
+    monkeypatch.setattr(registry, "_spawn", fake_spawn)
+
+    await registry.resume_record(record, "carry on")
+
+    assert captured["reasoning_effort"] is None
+    assert "--effort" not in captured["argv"]
+
+
 async def test_finish_draining_abandons_pipes_held_open_after_exit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
