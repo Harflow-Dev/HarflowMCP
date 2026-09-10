@@ -64,6 +64,14 @@ class TaskRecord:
     status: str = "running"
     exit_code: int | None = None
     finished_at: str | None = None
+    enforcement: dict[str, Any] | None = None
+    """What was actually enforced, captured at spawn (`Task.enforcement`) rather than rebuilt from
+    today's backend code — see `_enforcement`. None means the record predates this field existing,
+    not that nothing was enforced; defaults to None so a record written before it existed still
+    loads."""
+    bridge_notices: list[str] = field(default_factory=list)
+    """Notices the bridge itself generated about the dispatch, kept apart from the backend's own
+    `Accumulator.notices` — see `Task.bridge_notices` for why."""
 
 
 class InvalidTaskId(ValueError):
@@ -347,12 +355,35 @@ def _reconstruction_note(status: str, state: Accumulator) -> str:
 
 
 def _enforcement(record: TaskRecord) -> dict[str, Any]:
+    """What was actually enforced for this run — from what was captured at spawn, never re-derived.
+
+    Re-deriving via `get_backend(record.backend).enforcement(record.freedom)` would report what
+    *today's* backend code claims, not what this run's own version actually enforced: if a
+    backend's freedom mapping is ever changed, every historical record would silently acquire the
+    new claim. A record with nothing persisted predates that field, so it says plainly that
+    nothing was recorded rather than inventing a positive claim it cannot back up.
+    """
     try:
-        return get_backend(record.backend).enforcement(record.freedom).as_dict()  # type: ignore[arg-type]
+        if record.enforcement is not None:
+            return dict(record.enforcement)
+        return {
+            "freedom": record.freedom,
+            "recorded": False,
+            "note": (
+                "this run predates enforcement being persisted, so what actually applied to it "
+                "cannot be restated"
+            ),
+        }
     except Exception:
-        # An unrecognised backend or freedom in an older record must not break recovery.
-        log.debug("could not rebuild enforcement for task %s", record.task_id)
+        # Malformed data in an old or hand-edited record must not break recovery.
+        log.debug("could not resolve enforcement for task %s", record.task_id)
         return {}
+
+
+def _notices(record: TaskRecord, state: Accumulator) -> list[str]:
+    """Bridge notices merged with the backend's own, bridge first since they describe the dispatch
+    rather than the run — mirrors `Task._notices`. Neither source list is mutated."""
+    return [*record.bridge_notices, *state.notices]
 
 
 def snapshot(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
@@ -383,9 +414,9 @@ def snapshot(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
         "mcp_servers": state.mcp_servers,
         "available_tool_count": state.available_tool_count,
         "usage": state.usage,
-        "notices": list(state.notices),
-        # Reconstructed from the recorded backend and freedom, so a recovered task reports the same
-        # honest picture of what was enforced as a live one.
+        "notices": _notices(record, state),
+        # The enforcement actually captured at spawn, not re-derived from today's code — see
+        # `_enforcement`.
         "enforcement": _enforcement(record),
         "recovered": True,
         "note": note,
@@ -393,7 +424,13 @@ def snapshot(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
 
 
 def brief(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
-    """Listing shape for a recovered task, using the same status resolution as `snapshot`."""
+    """Listing shape for a recovered task, using the same status resolution as `snapshot`.
+
+    Carries the bridge's own notices but not the backend's, matching `Task.brief` so `list_tasks`
+    never mixes shapes between live and recovered entries. The backend's notices would need the
+    stream replayed, which a listing should not pay for — and they are stream detail, which is what
+    `snapshot` is for.
+    """
     status, _, _, _ = resolve_status(log_dir, record)
     return {
         "task_id": record.task_id,
@@ -405,6 +442,7 @@ def brief(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
         "started_at": record.started_at,
         "duration_seconds": _duration_seconds(record, record.finished_at),
         "parent_task_id": record.parent_task_id,
+        "notices": list(record.bridge_notices),
         "recovered": True,
     }
 

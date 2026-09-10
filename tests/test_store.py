@@ -80,6 +80,182 @@ def test_a_pre_change_record_with_no_effort_field_still_loads_as_none(tmp_path: 
     assert loaded.reasoning_effort is None
 
 
+def test_round_trips_enforcement_and_bridge_notices(tmp_path: Path) -> None:
+    enforcement = {
+        "freedom": "write_in_repo",
+        "mechanism": "permission mode",
+        "os_enforced": False,
+        "writes_confined": True,
+        "writable_roots": ["repo"],
+        "commit_push_blocked": False,
+        "direct_commit_commands_denied": True,
+        "caveats": [],
+    }
+    record = make_record(enforcement=enforcement, bridge_notices=["dispatched under write_in_repo"])
+    store.write(tmp_path, record)
+
+    loaded = store.read(tmp_path, "task-1")
+
+    assert loaded == record
+    assert loaded.enforcement == enforcement
+    assert loaded.bridge_notices == ["dispatched under write_in_repo"]
+
+
+def test_a_pre_change_record_with_no_enforcement_or_bridge_notices_keys_still_loads(
+    tmp_path: Path,
+) -> None:
+    """A record written before these fields existed has neither key at all."""
+    store.write(tmp_path, make_record())
+    path = store.record_path(tmp_path, "task-1")
+    raw = json.loads(path.read_text())
+    del raw["enforcement"]
+    del raw["bridge_notices"]
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    loaded = store.read(tmp_path, "task-1")
+
+    assert loaded is not None
+    assert loaded.enforcement is None
+    assert loaded.bridge_notices == []
+
+
+def test_recovered_enforcement_reports_the_persisted_value_not_a_fresh_derivation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A backend's current `enforcement()` must never overwrite what this run actually had."""
+    from polybridge.backends.claude import ClaudeBackend
+
+    def fake_enforcement(self, freedom):
+        raise AssertionError("must not re-derive enforcement for a recovered task")
+
+    monkeypatch.setattr(ClaudeBackend, "enforcement", fake_enforcement)
+
+    persisted = {
+        "freedom": "write_in_repo",
+        "mechanism": "rules as they were when this task ran",
+        "os_enforced": False,
+        "writes_confined": True,
+        "writable_roots": ["repo"],
+        "commit_push_blocked": False,
+        "direct_commit_commands_denied": False,
+        "caveats": [],
+    }
+    record = make_record(enforcement=persisted)
+
+    result = store.snapshot(tmp_path, record)
+
+    assert result["enforcement"] == persisted
+
+
+def test_legacy_record_with_no_persisted_enforcement_reports_not_recorded(tmp_path: Path) -> None:
+    record = make_record(enforcement=None)
+
+    result = store.snapshot(tmp_path, record)
+
+    assert result["enforcement"]["recorded"] is False
+    assert result["enforcement"]["freedom"] == record.freedom
+
+
+def test_recovered_notices_merge_bridge_first_without_mutating_either_source(
+    tmp_path: Path,
+) -> None:
+    record = make_record(
+        backend="codex",
+        pid=999_999_999,
+        bridge_notices=["dispatched under write_in_repo"],
+    )
+    write_log(
+        tmp_path,
+        record.task_id,
+        {"type": "item.completed", "item": {"type": "error", "message": "a codex notice"}},
+    )
+
+    snap = store.snapshot(tmp_path, record)
+
+    assert snap["notices"] == ["dispatched under write_in_repo", "a codex notice"]
+
+    snap["notices"].append("mutated")
+    assert record.bridge_notices == ["dispatched under write_in_repo"]
+
+
+def test_a_recovered_brief_carries_bridge_notices_but_not_the_backends(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`list_tasks` must not mix shapes between live and recovered entries.
+
+    The backend's notices would need the stream replayed, which a listing should not pay for, so
+    both sides carry the bridge's own only and leave the merge to `snapshot`.
+    """
+    monkeypatch.setattr(store, "process_alive", lambda pid, markers: False)
+    record = make_record(status="failed", exit_code=None, bridge_notices=["dispatch note"])
+    write_log(tmp_path, record.task_id, RESULT_EVENT)
+
+    brief = store.brief(tmp_path, record)
+    snap = store.snapshot(tmp_path, record)
+
+    assert brief["notices"] == ["dispatch note"]
+    assert snap["notices"][0] == "dispatch note"
+    brief["notices"].append("mutated")
+    assert record.bridge_notices == ["dispatch note"]
+
+
+def test_live_and_recovered_listings_hold_the_same_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A caller listing tasks sees one shape, whichever server started them."""
+    from polybridge.tasks import Task
+
+    monkeypatch.setattr(store, "process_alive", lambda pid, markers: False)
+    record = make_record(status="failed", exit_code=None)
+    write_log(tmp_path, record.task_id, RESULT_EVENT)
+    recovered = set(store.brief(tmp_path, record)) - {"recovered"}
+
+    live = set(
+        Task(
+            task_id="t",
+            backend="claude",
+            session_id=SESSION,
+            repo_path=tmp_path,
+            prompt="x",
+            max_turns=5,
+            log_path=tmp_path / "t.jsonl",
+            started_at=datetime.now(timezone.utc),
+        ).brief()
+    )
+
+    assert recovered == live
+
+
+def test_live_notices_merge_bridge_first_without_mutating_either_source(tmp_path: Path) -> None:
+    from polybridge.tasks import Task
+
+    task = Task(
+        task_id="t",
+        backend="claude",
+        session_id=SESSION,
+        repo_path=tmp_path,
+        prompt="x",
+        max_turns=5,
+        log_path=tmp_path / "t.jsonl",
+        started_at=datetime.now(timezone.utc),
+        bridge_notices=["dispatch note"],
+    )
+    task.acc.notices.append("backend note")
+
+    snapshot = task.snapshot()
+    brief = task.brief()
+
+    # snapshot carries both; brief carries only the bridge's own, because the backend's notices are
+    # parsed out of the stream and `brief` is documented as identity and state without stream detail.
+    assert snapshot["notices"] == ["dispatch note", "backend note"]
+    assert brief["notices"] == ["dispatch note"]
+
+    snapshot["notices"].append("mutated")
+    brief["notices"].append("mutated")
+    assert task.bridge_notices == ["dispatch note"]
+    assert task.acc.notices == ["backend note"]
+
+
 def test_unknown_fields_are_ignored_so_newer_records_still_load(tmp_path: Path) -> None:
     """A record written by a future version must not break an older server."""
     store.write(tmp_path, make_record())

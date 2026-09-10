@@ -133,6 +133,12 @@ class Task:
     pgid: int | None = None
 
     acc: Accumulator = field(default_factory=Accumulator)
+    bridge_notices: list[str] = field(default_factory=list)
+    """Notices the bridge itself generates about the dispatch, kept on a channel separate from
+    `acc.notices`: vibe's `ingest` resets `notices` to `[]` at the start of every new turn (see
+    backends/vibe.py), which would silently discard anything the bridge added there across a
+    resumed run. Nothing populates this yet — the channel exists so a future dispatch-level notice
+    has somewhere safe to live."""
     tail: deque[str] = field(default_factory=lambda: deque(maxlen=TAIL_LINES))
     stderr_tail: deque[str] = field(default_factory=lambda: deque(maxlen=STDERR_TAIL_LINES))
 
@@ -156,8 +162,19 @@ class Task:
         end = self.finished_at or _now()
         return round((end - self.started_at).total_seconds(), 3)
 
+    def _notices(self) -> list[str]:
+        """Bridge notices merged with the backend's own, bridge first since they describe the
+        dispatch rather than the run. Neither source list is mutated."""
+        return [*self.bridge_notices, *self.acc.notices]
+
     def brief(self) -> dict[str, Any]:
-        """The listing shape: identity and state, without stream detail."""
+        """The listing shape: identity and state, without stream detail.
+
+        `notices` here is the bridge's own only. The backend's `Accumulator.notices` are parsed out
+        of the run's stream, so they *are* stream detail and belong in `snapshot`; bridge notices
+        describe the dispatch instead, and a recovered task carries them on its record with no
+        replay cost — so live and recovered listings can hold the same shape.
+        """
         return {
             "task_id": self.task_id,
             "backend": self.backend,
@@ -168,11 +185,14 @@ class Task:
             "started_at": self.started_at.isoformat(),
             "duration_seconds": self.duration_seconds,
             "parent_task_id": self.parent_task_id,
+            "notices": list(self.bridge_notices),
         }
 
     def snapshot(self) -> dict[str, Any]:
         """Full current state of the run, safe to call at any point."""
         snap = self.brief() | {
+            # Overrides brief's bridge-only list with the full merge; see `brief`.
+            "notices": self._notices(),
             "summary": self.acc.summary,
             "is_error": self.acc.is_error,
             "total_cost_usd": self.acc.total_cost_usd,
@@ -188,7 +208,6 @@ class Task:
             "available_tool_count": self.acc.available_tool_count,
             "usage": self.acc.usage,
             "enforcement": self.enforcement,
-            "notices": list(self.acc.notices),
         }
         # Only meaningful when something went wrong, and usually empty otherwise.
         if self.status == "failed" and self.stderr_tail:
@@ -390,6 +409,8 @@ class TaskRegistry:
                 status=task.status,
                 exit_code=task.exit_code,
                 finished_at=task.finished_at.isoformat() if task.finished_at else None,
+                enforcement=dict(task.enforcement),
+                bridge_notices=list(task.bridge_notices),
             ),
         )
 
