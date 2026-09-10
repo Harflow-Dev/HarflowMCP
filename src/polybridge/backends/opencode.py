@@ -411,12 +411,14 @@ class OpencodeBackend:
                 if detail:
                     acc.notices.append(detail)
 
-    def classify(self, acc: Accumulator, exit_code: int) -> Status:
-        # There is no terminal success event, so the exit code is the authority and `reason: "stop"`
-        # is the corroboration — the same shape as codex, for the same reason.
+    def classify(self, acc: Accumulator, exit_code: int | None) -> Status:
+        # `reason: "stop"` is a real end-of-run signal, not merely "some text arrived", so unlike
+        # codex and vibe this backend does not need an observed exit code to establish success: a
+        # recovered run whose stream reached `stop` did finish. Only an *observed* non-zero exit
+        # overrules that, which is why None is not lumped in with it.
         if acc.is_error:
             return "failed"
-        if exit_code != 0:
+        if exit_code is not None and exit_code != 0:
             return "failed"
         return "completed" if acc.saw_final_message else "failed"
 

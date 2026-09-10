@@ -1067,6 +1067,7 @@ def test_vibe_refuses_a_model_at_start_and_resume() -> None:
         resume(VibeBackend(), model="mistral-medium")
 
 
+
 # --- stream normalisation, from captured events --------------------------------------------
 
 CLAUDE_EVENTS = [
@@ -1526,12 +1527,13 @@ def test_vibe_a_stop_event_envelope_with_prose_around_it_is_a_real_answer(text: 
     assert VibeBackend().classify(acc, 0) == "completed"
 
 
-def test_vibe_a_breach_after_a_normal_answer_cannot_be_recovered_as_completed() -> None:
-    """The regression test for the reason `ingest` withdraws evidence instead of just ignoring it.
+def test_vibe_a_breach_after_a_normal_answer_withdraws_the_earlier_answer() -> None:
+    """Why `ingest` withdraws the evidence rather than merely ignoring the marker.
 
-    An earlier step answers normally, then the turn cap is hit. At the real exit code (1) any
-    implementation reports `failed` — but `store.py`'s recovery path substitutes 0 for an exit it
-    never observed, so unless the earlier answer is cleared the breach is published as `completed`.
+    An earlier step answers normally, then the turn cap is hit. Merely ignoring the marker would
+    leave that earlier answer standing as the run's summary with `saw_final_message` still true — so
+    at any zero exit the breach reads as a clean completion. The assertion below uses 0 directly:
+    the withdrawal has to hold on its own, independently of what any caller passes.
     """
     events = [
         *_vibe_answer("Partway through, here is what I found."),
@@ -1544,7 +1546,7 @@ def test_vibe_a_breach_after_a_normal_answer_cannot_be_recovered_as_completed() 
     assert acc.summary is None
     assert acc.saw_final_message is False
     assert VibeBackend().classify(acc, 1) == "failed"
-    # The one that actually mattered: the recovery-substituted exit code.
+    # The one that actually matters: a zero exit must not turn the breach into a completion.
     assert VibeBackend().classify(acc, 0) == "failed"
 
 
@@ -1786,3 +1788,48 @@ def test_turn_cap_is_fine_where_supported() -> None:
 def test_unknown_freedom_is_rejected() -> None:
     with pytest.raises(backends.UnsupportedCapability, match="unknown freedom"):
         backends.check_freedom("whatever")
+
+
+# --- an unobserved exit code -----------------------------------------------------------------
+# `classify` takes `int | None`; None means nothing observed the process exit, which is what a
+# recovered run looks like. store.py used to substitute 0 here, so every backend appeared to have
+# exited cleanly and a recovered run with a closing message was published as `completed` on no
+# evidence. What None is worth differs per backend, deliberately.
+
+
+def test_claude_completes_without_an_observed_exit_because_its_result_event_is_terminal() -> None:
+    acc = ingest(ClaudeBackend(), CLAUDE_EVENTS)
+
+    assert ClaudeBackend().classify(acc, None) == "completed"
+    # An *observed* non-zero exit still overrules the event.
+    assert ClaudeBackend().classify(acc, 1) == "failed"
+
+
+def test_opencode_completes_without_an_observed_exit_because_stop_is_a_real_end_of_run() -> None:
+    acc = ingest(OpencodeBackend(), OPENCODE_EVENTS)
+
+    assert acc.saw_final_message is True
+    assert OpencodeBackend().classify(acc, None) == "completed"
+    assert OpencodeBackend().classify(acc, 1) == "failed"
+
+
+@pytest.mark.parametrize(
+    ("backend", "events"),
+    [(CodexBackend(), CODEX_EVENTS), (VibeBackend(), VIBE_FRESH_RUN)],
+    ids=["codex", "vibe"],
+)
+def test_a_backend_with_no_terminal_event_needs_an_observed_zero_exit(backend, events) -> None:
+    """The agent having spoken is not proof the run finished, so None cannot mean completed."""
+    acc = ingest(backend, events)
+
+    assert acc.saw_final_message is True, "the fixture must carry a closing message"
+    assert backend.classify(acc, 0) == "completed"
+    assert backend.classify(acc, None) == "failed"
+
+
+@pytest.mark.parametrize("backend", ALL, ids=lambda b: b.name)
+def test_every_backend_accepts_an_unobserved_exit_code_without_raising(backend) -> None:
+    """The signature is `int | None` for all four, whatever each one concludes from it."""
+    assert backend.classify(Accumulator(), None) in {
+        "completed", "failed", "timed_out", "cancelled", "running",
+    }

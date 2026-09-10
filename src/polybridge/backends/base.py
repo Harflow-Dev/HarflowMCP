@@ -231,7 +231,7 @@ class Backend(Protocol):
         """Fold one stream event into the normalised view."""
         ...
 
-    def classify(self, acc: Accumulator, exit_code: int) -> Status:
+    def classify(self, acc: Accumulator, exit_code: int | None) -> Status:
         """Decide the terminal status from this backend's own signals."""
         ...
 

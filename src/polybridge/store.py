@@ -293,14 +293,18 @@ def resolve_status(log_dir: Path, record: TaskRecord) -> tuple[str, str, Accumul
             tail,
         )
     if state.terminal is not None or state.saw_final_message:
-        status = get_backend(record.backend).classify(
-            state, record.exit_code if record.exit_code is not None else 0
-        )
+        # `record.exit_code` is passed through as-is, None included. Substituting 0 here used to
+        # make every backend look as though it had exited cleanly, so a recovered run carrying a
+        # closing message was published as `completed` on no evidence at all. What that None is
+        # worth is each backend's own business: claude's `result` event and opencode's
+        # `reason: "stop"` are real terminal evidence, while codex and vibe have no terminal event
+        # and so require an observed zero exit.
+        status = get_backend(record.backend).classify(state, record.exit_code)
         return (
             status,
             "Recovered from disk: the bridge server that started this task went away before "
-            "recording the outcome, so this was reconstructed from the run's own output. The run "
-            "reported this result itself, though its exit code was never observed.",
+            "recording the outcome, so this was reconstructed from the run's own output. "
+            + _reconstruction_note(status, state),
             state,
             tail,
         )
@@ -311,6 +315,34 @@ def resolve_status(log_dir: Path, record: TaskRecord) -> tuple[str, str, Accumul
         "inferred rather than observed. Nothing it had already written to the repo was undone.",
         state,
         tail,
+    )
+
+
+def _reconstruction_note(status: str, state: Accumulator) -> str:
+    """Why a recovered run reads the way it does, in terms of the evidence actually present.
+
+    Chosen from the accumulator and the resulting status, never from the backend's name — the point
+    of the seam is that nothing out here knows which backend produced the stream. Before `classify`
+    took `int | None` this could be one fixed sentence, because a fabricated zero exit made every
+    reconstruction look like a self-reported success; now a `failed` here often means "the output
+    was not enough on its own", which is a different thing to report than a run that failed.
+    """
+    if status == "completed":
+        return (
+            "Its own terminal output reported completion, which this backend treats as evidence in "
+            "its own right; the exit code itself was never observed."
+        )
+    if status == "timed_out":
+        return "Its own terminal output reported that the run exhausted its turn cap."
+    if state.is_error:
+        return "The run reported an error in its own output."
+    # Only reached with evidence present — the caller checks that first — so this is the
+    # `failed`-despite-a-closing-message case, which is a different thing to report than a run that
+    # failed on its own account.
+    return (
+        "A closing message was recovered, but this backend cannot call a run completed without an "
+        "observed zero exit code — the agent having spoken is not proof the run finished — so this "
+        "is an inference from missing evidence rather than an observed failure."
     )
 
 

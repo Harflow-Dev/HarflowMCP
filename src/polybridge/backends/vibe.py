@@ -52,17 +52,22 @@ introduced this module and CLAUDE.md's per-CLI section.
   discusses the token, as this module's own docstring does, must still be preserved), and records it
   as a notice.
 
-  Recognising it is not enough on its own, and this is the subtle part. An earlier step in the same
-  turn may already have recorded ordinary assistant text, so merely *declining* to add the marker
-  leaves `saw_final_message` still asserting a clean close. At the real exit code (1) `classify`
-  says `failed` either way — but `store.py`'s recovery path substitutes `0` for an exit it never
-  observed, and the breach would then be published as `completed`. So the evidence is **withdrawn**
-  (`summary` cleared, `saw_final_message` reset) and **latched** in `stream_state`, so nothing later
-  in the turn can re-establish it; the latch is turn-scoped like the rest of that state.
+  Recognising it is not enough on its own. An earlier step in the same turn may already have
+  recorded ordinary assistant text, so merely *declining* to add the marker leaves
+  `saw_final_message` still asserting a clean close, and the marker itself would be reported as the
+  agent's answer. So the evidence is **withdrawn** (`summary` cleared, `saw_final_message` reset)
+  and **latched** in `stream_state`, so nothing later in the turn can re-establish it; the latch is
+  turn-scoped like the rest of that state.
+
+  This was originally load-bearing for a second reason that no longer applies: `store.py` used to
+  substitute exit code `0` for a run it never saw exit, so a recovered breach would have been
+  published as `completed`. `classify` now takes `int | None` and this backend requires an
+  *observed* zero exit, so that path is closed at the source. The withdrawal stays because it is
+  independently correct — the marker is not an answer and must not be reported as the summary — not
+  because it is compensating for that bug.
 
   `is_error` is deliberately *not* set from this. A real breach already exits 1, so the flag adds
-  nothing there, while setting it would make a false positive at exit 0 unrecoverable — and
-  withdrawing the evidence covers the recovery case that `is_error` would otherwise have covered.
+  nothing there, while setting it would make a false positive at exit 0 unrecoverable.
 
   The accepted trade-off: an assistant message whose *entire* content is exactly a stop-event
   envelope is treated as a breach even at exit 0, so a legitimate answer consisting of nothing but
@@ -489,12 +494,14 @@ class VibeBackend:
             # message is the envelope. A legitimate answer that merely quotes or discusses the token
             # inside a longer message must be preserved, not discarded.
             #
-            # Ignoring it is not enough: an earlier step in this same turn may already have recorded
-            # ordinary assistant text, and leaving that in place means `saw_final_message` still
-            # says the run closed normally. At the real exit code (1) classify() would still say
-            # failed, but store.py's recovery path substitutes 0 for an exit it never observed, and
-            # the breach would then be published as `completed`. So the evidence of a clean close is
-            # withdrawn, and latched, rather than merely not added to.
+            # Neither of the two simpler options works, for different reasons. *Accepting* the
+            # marker as an answer reports the envelope itself as the run's summary. *Ignoring* it
+            # leaves whatever an earlier step in this turn already recorded standing as the summary,
+            # with `saw_final_message` still asserting a clean close. So the evidence is withdrawn,
+            # and latched, rather than either added to or merely skipped. (This once also covered a
+            # recovery hole where store.py fabricated a zero exit; `classify` now takes
+            # `int | None` and this backend requires an observed zero exit, so the withdrawal stands
+            # on its own merits.)
             acc.stream_state["stop_event_seen"] = True
             acc.summary = None
             acc.saw_final_message = False
@@ -508,12 +515,15 @@ class VibeBackend:
         acc.summary = text
         acc.saw_final_message = True
 
-    def classify(self, acc: Accumulator, exit_code: int) -> Status:
-        # No terminal event exists, so the exit code is the authority and the closing message is the
-        # corroboration — the same shape as codex and opencode.
+    def classify(self, acc: Accumulator, exit_code: int | None) -> Status:
+        # No terminal event exists, so the exit code is the authority and the closing message is
+        # only corroboration — the same shape as codex, and for the same reason an *observed* zero
+        # exit is mandatory: with `exit_code is None` (a recovered run nothing saw exit) a closing
+        # assistant message proves the agent spoke, not that the run finished. Spelled out rather
+        # than left to `!= 0` incidentally rejecting None.
         if acc.is_error:
             return "failed"
-        if exit_code != 0:
+        if exit_code is None or exit_code != 0:
             return "failed"
         return "completed" if acc.saw_final_message else "failed"
 

@@ -145,6 +145,21 @@ def test_recovers_max_turns_exhaustion_as_timed_out(tmp_path: Path) -> None:
     assert store.snapshot(tmp_path, record)["status"] == "timed_out"
 
 
+def test_a_recovered_turn_cap_exhaustion_is_not_described_as_missing_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`timed_out` is self-reported, so its note must not read like the failed-on-no-evidence case."""
+    monkeypatch.setattr(store, "process_alive", lambda pid, markers: False)
+    record = make_record(status="failed", exit_code=None)
+    write_log(tmp_path, record.task_id, RESULT_EVENT | {"subtype": "error_max_turns"})
+
+    status, note, _, _ = store.resolve_status(tmp_path, record)
+
+    assert status == "timed_out"
+    assert "turn cap" in note
+    assert "inference from missing evidence" not in note
+
+
 def test_a_gone_process_with_no_result_reads_as_interrupted(tmp_path: Path) -> None:
     record = make_record(pid=999_999_999)
     write_log(tmp_path, record.task_id, {"type": "system", "subtype": "init"})
@@ -354,6 +369,72 @@ def test_a_result_event_does_not_overturn_a_recorded_cancellation(
     status, _, _, _ = store.resolve_status(tmp_path, record)
 
     assert status == "cancelled"
+
+
+def test_a_backend_needing_an_observed_exit_is_not_credited_with_completion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A codex run recovered with a closing message but no observed exit is not `completed`.
+
+    store.py used to substitute exit code 0 here, so this record was published as `completed` on no
+    evidence that the process ever exited. codex has no terminal event, so its closing message
+    proves the agent spoke, not that the run finished.
+    """
+    monkeypatch.setattr(store, "process_alive", lambda pid, markers: False)
+    record = make_record(backend="codex", status="failed", exit_code=None)
+    write_log(
+        tmp_path,
+        record.task_id,
+        {"type": "thread.started", "thread_id": SESSION},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": "done"}},
+    )
+
+    status, note, _, _ = store.resolve_status(tmp_path, record)
+
+    assert status == "failed"
+    # And the note must say it is an inference from missing evidence, not a self-reported failure.
+    assert "observed zero exit code" in note
+    assert "reported this result itself" not in note
+
+
+def test_a_recovered_run_that_reported_its_own_error_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A self-reported error must not be described as failing for want of an exit code.
+
+    Without the `is_error` branch this reads "a closing message was recovered ... inference from
+    missing evidence", which is a different and false account of what happened.
+    """
+    monkeypatch.setattr(store, "process_alive", lambda pid, markers: False)
+    record = make_record(backend="codex", status="failed", exit_code=None)
+    write_log(
+        tmp_path,
+        record.task_id,
+        {"type": "thread.started", "thread_id": SESSION},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": "partial"}},
+        {"type": "error", "message": "the model returned a 500"},
+    )
+
+    status, note, state, _ = store.resolve_status(tmp_path, record)
+
+    assert state.is_error is True
+    assert status == "failed"
+    assert "reported an error" in note
+    assert "inference from missing evidence" not in note
+
+
+def test_a_backend_whose_terminal_event_is_real_is_still_credited(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half of the same rule: claude's `result` event stands without an observed exit."""
+    monkeypatch.setattr(store, "process_alive", lambda pid, markers: False)
+    record = make_record(status="failed", exit_code=None)
+    write_log(tmp_path, record.task_id, RESULT_EVENT)
+
+    status, note, _, _ = store.resolve_status(tmp_path, record)
+
+    assert status == "completed"
+    assert "never observed" in note
 
 
 def test_a_cancellation_that_did_not_take_is_reported_as_still_running(

@@ -255,11 +255,18 @@ class ClaudeBackend:
             denials = event.get("permission_denials")
             acc.denials = denials if isinstance(denials, list) else []
 
-    def classify(self, acc: Accumulator, exit_code: int) -> Status:
+    def classify(self, acc: Accumulator, exit_code: int | None) -> Status:
         if acc.terminal is None:
             return "failed"
         if acc.terminal.get("subtype") == "error_max_turns":
             return "timed_out"
-        if acc.is_error or exit_code != 0:
+        if acc.is_error:
+            return "failed"
+        # `exit_code is None` means nothing observed the process exit (a recovered run). Claude is
+        # the one backend that does not need an observed exit: its `result` event is a real terminal
+        # event, so a successful one is evidence in its own right. Only an *observed* non-zero exit
+        # overrules it — `exit_code != 0` alone would read None as failure and throw that evidence
+        # away.
+        if exit_code is not None and exit_code != 0:
             return "failed"
         return "completed"

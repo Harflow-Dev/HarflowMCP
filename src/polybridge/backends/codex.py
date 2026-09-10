@@ -393,11 +393,14 @@ class CodexBackend:
             if isinstance(message, str):
                 acc.notices.append(message)
 
-    def classify(self, acc: Accumulator, exit_code: int) -> Status:
+    def classify(self, acc: Accumulator, exit_code: int | None) -> Status:
         # No terminal success/failure event exists, so the exit code is the authority and the closing
-        # message is the corroboration.
+        # message is only corroboration. That makes an *observed* zero exit mandatory here: with
+        # `exit_code is None` (a recovered run nothing saw exit) an `agent_message` proves the agent
+        # spoke, not that the run finished, so completion cannot be established. Spelled out rather
+        # than left to `!= 0` incidentally rejecting None.
         if acc.is_error:
             return "failed"
-        if exit_code != 0:
+        if exit_code is None or exit_code != 0:
             return "failed"
         return "completed" if acc.saw_final_message else "failed"
