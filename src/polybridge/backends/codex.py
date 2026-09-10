@@ -34,6 +34,7 @@ from .base import (
     ReasoningEffort,
     Status,
     UnsupportedCapability,
+    check_freedom,
     check_reasoning_effort,
 )
 
@@ -151,7 +152,7 @@ class CodexBackend:
         argv = [BINARY, "exec", *self._options(repo, freedom, model, reasoning_effort)]
         # `--` then the prompt: last, and explicitly not parsed as an option however it looks.
         argv += ["--", self._check_prompt(prompt)]
-        self.assert_safe(argv)
+        self.assert_safe(argv, freedom)
         return argv
 
     def build_resume_argv(
@@ -171,7 +172,7 @@ class CodexBackend:
         argv = [BINARY, "exec", "resume", *self._options(repo, freedom, model, reasoning_effort)]
         # `codex exec resume [SESSION_ID] [PROMPT]` — both positional, after `--`.
         argv += ["--", session_id, self._check_prompt(prompt)]
-        self.assert_safe(argv)
+        self.assert_safe(argv, freedom)
         return argv
 
     def _options(
@@ -198,7 +199,10 @@ class CodexBackend:
             raise ValueError("prompt must be a non-empty string")
         return prompt
 
-    def assert_safe(self, argv: list[str]) -> None:
+    def assert_safe(self, argv: list[str], freedom: Freedom) -> None:
+        # Rejects an unknown freedom outright rather than letting SANDBOX_MODES[freedom] raise a
+        # bare KeyError below.
+        check_freedom(freedom)
         if argv[:2] != [BINARY, "exec"]:
             raise UnsafeInvocationError(f"unrecognised codex argv layout: {argv!r}")
 
@@ -255,8 +259,12 @@ class CodexBackend:
         if len(sandbox_values) != 1:
             raise UnsafeInvocationError(f"expected exactly one sandbox flag: {argv!r}")
         mode = sandbox_values[0]
-        if mode not in set(SANDBOX_MODES.values()):
-            raise UnsafeInvocationError(f"unexpected sandbox mode {mode!r}")
+        expected_mode = SANDBOX_MODES[freedom]
+        if mode != expected_mode:
+            raise UnsafeInvocationError(
+                f"sandbox mode was {mode!r}, expected {expected_mode!r} for freedom {freedom!r}: "
+                f"{argv!r}"
+            )
 
         models = seen.get("-m", [])
         if len(models) > 1:

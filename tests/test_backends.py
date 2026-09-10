@@ -135,8 +135,39 @@ def test_describe_covers_every_freedom(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.parametrize("backend", ALL, ids=lambda b: b.name)
 @pytest.mark.parametrize("freedom", FREEDOMS)
 def test_every_backend_builds_an_argv_it_considers_safe(backend, freedom: str) -> None:
-    backend.assert_safe(start(backend, freedom=freedom))
-    backend.assert_safe(resume(backend, freedom=freedom))
+    backend.assert_safe(start(backend, freedom=freedom), freedom)
+    backend.assert_safe(resume(backend, freedom=freedom), freedom)
+
+
+@pytest.mark.parametrize("backend", ALL, ids=lambda b: b.name)
+@pytest.mark.parametrize("built_freedom", FREEDOMS)
+@pytest.mark.parametrize("claimed_freedom", FREEDOMS)
+def test_assert_safe_refuses_an_argv_built_for_a_different_freedom(
+    backend, built_freedom: str, claimed_freedom: str
+) -> None:
+    """The whole point of widening assert_safe: it must check the argv against the freedom the
+    caller actually asked for, not merely that the argv is internally consistent for *some*
+    freedom. Without this, an argv built for read_only would pass a check told unrestricted, and
+    vice versa — this is deliberately the test that fails if that check is ever removed or weakened
+    back to a membership check (see the mutation-check step in the plan)."""
+    if built_freedom == claimed_freedom:
+        pytest.skip("same-freedom case is covered by test_every_backend_builds_an_argv_it_considers_safe")
+    for argv in (
+        start(backend, freedom=built_freedom),
+        resume(backend, freedom=built_freedom),
+    ):
+        with pytest.raises(RuntimeError):
+            backend.assert_safe(argv, claimed_freedom)
+
+
+@pytest.mark.parametrize("backend", ALL, ids=lambda b: b.name)
+def test_assert_safe_rejects_an_unknown_freedom_rather_than_a_key_error(backend) -> None:
+    """base.check_freedom must be consulted before any dict keyed by freedom (PERMISSION_MODES,
+    SANDBOX_MODES, AGENTS, ...) is indexed, or an unrecognised value would surface as a bare
+    KeyError instead of the same UnsupportedCapability every other unknown-value path raises."""
+    argv = start(backend)
+    with pytest.raises(backends.UnsupportedCapability, match="unknown freedom"):
+        backend.assert_safe(argv, "bogus-freedom")  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("backend", ALL, ids=lambda b: b.name)
@@ -418,14 +449,14 @@ def test_claude_refuses_flags_that_would_isolate_the_agent(flag: str) -> None:
     argv = start(ClaudeBackend())
     assert flag not in argv
     with pytest.raises(ClaudeUnsafe, match="cut the dispatched agent off"):
-        ClaudeBackend().assert_safe(argv + [flag])
+        ClaudeBackend().assert_safe(argv + [flag], "write_in_repo")
 
 
 def test_claude_rejects_a_weakened_deny_list() -> None:
     argv = start(ClaudeBackend())
     argv[argv.index("--disallowedTools") + 1] = "Bash(git push:*)"
     with pytest.raises(ClaudeUnsafe):
-        ClaudeBackend().assert_safe(argv)
+        ClaudeBackend().assert_safe(argv, "write_in_repo")
 
 
 def test_a_claude_prompt_that_looks_like_a_flag_is_not_mistaken_for_one() -> None:
@@ -433,7 +464,7 @@ def test_a_claude_prompt_that_looks_like_a_flag_is_not_mistaken_for_one() -> Non
         "--disallowedTools", repo=REPO, freedom="write_in_repo", session_id=SESSION, model=None,
         max_turns=None, reasoning_effort=None,
     )
-    ClaudeBackend().assert_safe(argv)
+    ClaudeBackend().assert_safe(argv, "write_in_repo")
 
 
 def test_claude_turn_cap_is_emitted() -> None:
@@ -444,13 +475,13 @@ def test_claude_turn_cap_is_emitted() -> None:
 def test_claude_rejects_a_duplicate_effort_flag_whose_second_value_would_win() -> None:
     argv = with_extra_options(start(ClaudeBackend(), reasoning_effort="low"), "--effort", "high")
     with pytest.raises(ClaudeUnsafe, match="--effort appears"):
-        ClaudeBackend().assert_safe(argv)
+        ClaudeBackend().assert_safe(argv, "write_in_repo")
 
 
 def test_claude_rejects_an_unexpected_effort_value_reaching_assert_safe_directly() -> None:
     argv = with_extra_options(start(ClaudeBackend()), "--effort", "bogus")
     with pytest.raises(ClaudeUnsafe, match="unexpected --effort"):
-        ClaudeBackend().assert_safe(argv)
+        ClaudeBackend().assert_safe(argv, "write_in_repo")
 
 
 # --- codex specifics -----------------------------------------------------------------------
@@ -474,7 +505,7 @@ def test_codex_pins_never_ask_or_it_could_hang() -> None:
     # `-c` right before `--` would be a missing-value argv the strict walker rejects for that
     # reason, which is a different failure than the missing-override one this test means to cover.
     with pytest.raises(CodexUnsafe, match="approval"):
-        CodexBackend().assert_safe([a for a in argv if a not in NEVER_ASK])
+        CodexBackend().assert_safe([a for a in argv if a not in NEVER_ASK], "write_in_repo")
 
 
 def test_codex_rejects_a_later_approval_override_that_would_win() -> None:
@@ -483,7 +514,7 @@ def test_codex_rejects_a_later_approval_override_that_would_win() -> None:
     override besides the exact one this backend writes is rejected outright."""
     argv = with_extra_options(start(CodexBackend()), "-c", 'approval_policy="on-request"')
     with pytest.raises(CodexUnsafe, match="unexpected -c pair"):
-        CodexBackend().assert_safe(argv)
+        CodexBackend().assert_safe(argv, "write_in_repo")
 
 
 def test_codex_rejects_a_duplicate_sandbox_under_its_long_alias() -> None:
@@ -492,7 +523,7 @@ def test_codex_rejects_a_duplicate_sandbox_under_its_long_alias() -> None:
     ever writes `-s` — rather than reaching a "two sandbox flags" count."""
     argv = with_extra_options(start(CodexBackend()), "--sandbox", "danger-full-access")
     with pytest.raises(CodexUnsafe, match="unrecognised option token"):
-        CodexBackend().assert_safe(argv)
+        CodexBackend().assert_safe(argv, "write_in_repo")
 
 
 def test_codex_separates_the_prompt_so_it_cannot_be_parsed_as_options() -> None:
@@ -503,7 +534,9 @@ def test_codex_separates_the_prompt_so_it_cannot_be_parsed_as_options() -> None:
     assert argv[-2:] == ["--", "--sandbox"]
     # And prompt text must not be able to satisfy a safety check.
     with pytest.raises(CodexUnsafe, match="exactly one sandbox"):
-        CodexBackend().assert_safe([a for a in argv if a not in ("-s", "read-only")])
+        CodexBackend().assert_safe(
+            [a for a in argv if a not in ("-s", "read-only")], "read_only"
+        )
 
 
 def test_codex_refuses_a_turn_cap_rather_than_dropping_it() -> None:
@@ -523,7 +556,7 @@ def test_a_top_level_codex_error_event_is_a_failure() -> None:
 def test_codex_refuses_to_discard_its_sandbox() -> None:
     argv = with_extra_options(start(CodexBackend()), "--dangerously-bypass-approvals-and-sandbox")
     with pytest.raises(CodexUnsafe, match="discards the sandbox"):
-        CodexBackend().assert_safe(argv)
+        CodexBackend().assert_safe(argv, "write_in_repo")
 
 
 def test_codex_prompt_mentioning_the_bypass_flag_is_not_treated_as_using_it() -> None:
@@ -534,7 +567,7 @@ def test_codex_prompt_mentioning_the_bypass_flag_is_not_treated_as_using_it() ->
         repo=REPO, freedom="write_in_repo", session_id=None, model=None, max_turns=None,
         reasoning_effort=None,
     )
-    CodexBackend().assert_safe(argv)
+    CodexBackend().assert_safe(argv, "write_in_repo")
 
 
 def test_codex_prompt_is_last_so_no_option_swallows_it() -> None:
@@ -584,7 +617,7 @@ def test_codex_refuses_shapes_it_would_never_have_written(argv: list[str], why: 
     intended prompt as SESSION_ID and silently continues a different conversation.
     """
     with pytest.raises(CodexUnsafe):
-        CodexBackend().assert_safe(argv)
+        CodexBackend().assert_safe(argv, "read_only")
 
 
 def test_codex_positional_arity_allows_values_that_look_like_options() -> None:
@@ -594,7 +627,8 @@ def test_codex_positional_arity_allows_values_that_look_like_options() -> None:
         backend.build_resume_argv(
             "--json", repo=REPO, freedom="read_only", session_id="resume",
             model=None, max_turns=None, reasoning_effort="xhigh",
-        )
+        ),
+        "read_only",
     )
 
 
@@ -613,7 +647,7 @@ def test_codex_emits_exactly_one_effort_pair_and_still_pins_approval_policy() ->
     argv = start(CodexBackend(), reasoning_effort="high")
     assert argv.count(f'{CODEX_EFFORT_KEY}="high"') == 1
     assert NEVER_ASK[1] in argv
-    CodexBackend().assert_safe(argv)
+    CodexBackend().assert_safe(argv, "write_in_repo")
 
 
 def test_codex_rejects_a_duplicate_effort_override_whose_second_value_would_win() -> None:
@@ -621,13 +655,13 @@ def test_codex_rejects_a_duplicate_effort_override_whose_second_value_would_win(
         start(CodexBackend(), reasoning_effort="low"), "-c", f'{CODEX_EFFORT_KEY}="high"'
     )
     with pytest.raises(CodexUnsafe, match="at most one"):
-        CodexBackend().assert_safe(argv)
+        CodexBackend().assert_safe(argv, "write_in_repo")
 
 
 def test_codex_rejects_an_unexpected_effort_value_reaching_assert_safe_directly() -> None:
     argv = with_extra_options(start(CodexBackend()), "-c", f'{CODEX_EFFORT_KEY}="bogus"')
     with pytest.raises(CodexUnsafe, match="unexpected"):
-        CodexBackend().assert_safe(argv)
+        CodexBackend().assert_safe(argv, "write_in_repo")
 
 
 def test_codex_a_look_alike_key_does_not_satisfy_the_approval_policy_requirement() -> None:
@@ -642,7 +676,7 @@ def test_codex_a_look_alike_key_does_not_satisfy_the_approval_policy_requirement
         "--", "do a thing",
     ]
     with pytest.raises(CodexUnsafe, match="unexpected -c pair"):
-        CodexBackend().assert_safe(argv)
+        CodexBackend().assert_safe(argv, "write_in_repo")
 
 
 def test_codex_an_unrelated_key_sharing_a_prefix_is_still_refused() -> None:
@@ -653,13 +687,13 @@ def test_codex_an_unrelated_key_sharing_a_prefix_is_still_refused() -> None:
     to keep here; strict allowlisting subsumes the narrower prefix-matching fix."""
     argv = with_extra_options(start(CodexBackend()), "-c", 'approval_policy_extra="never"')
     with pytest.raises(CodexUnsafe, match="unexpected -c pair"):
-        CodexBackend().assert_safe(argv)
+        CodexBackend().assert_safe(argv, "write_in_repo")
 
 
 def test_codex_rejects_a_model_value_that_looks_like_an_option() -> None:
     argv = with_extra_options(start(CodexBackend()), "-m", "--something")
     with pytest.raises(CodexUnsafe, match="parse as an option"):
-        CodexBackend().assert_safe(argv)
+        CodexBackend().assert_safe(argv, "write_in_repo")
 
 
 def test_codex_refuses_a_space_padded_approval_policy_override() -> None:
@@ -669,7 +703,7 @@ def test_codex_refuses_a_space_padded_approval_policy_override() -> None:
     the one literal this backend writes, so it never reaches the approval-count check at all."""
     argv = with_extra_options(start(CodexBackend()), "-c", 'approval_policy ="on-request"')
     with pytest.raises(CodexUnsafe, match="unexpected -c pair"):
-        CodexBackend().assert_safe(argv)
+        CodexBackend().assert_safe(argv, "write_in_repo")
 
 
 def test_codex_refuses_a_space_padded_duplicate_effort_override() -> None:
@@ -679,7 +713,7 @@ def test_codex_refuses_a_space_padded_duplicate_effort_override() -> None:
         start(CodexBackend(), reasoning_effort="low"), "-c", f'{CODEX_EFFORT_KEY} ="high"'
     )
     with pytest.raises(CodexUnsafe, match="unexpected -c pair"):
-        CodexBackend().assert_safe(argv)
+        CodexBackend().assert_safe(argv, "write_in_repo")
 
 
 def test_codex_refuses_a_config_pair_with_no_equals() -> None:
@@ -687,7 +721,7 @@ def test_codex_refuses_a_config_pair_with_no_equals() -> None:
     something from it — refused outright instead."""
     argv = with_extra_options(start(CodexBackend()), "-c", "model_reasoning_effort")
     with pytest.raises(CodexUnsafe, match="no '='"):
-        CodexBackend().assert_safe(argv)
+        CodexBackend().assert_safe(argv, "write_in_repo")
 
 
 # Six evasions measured directly against the real `codex` CLI — each honoured by codex while a
@@ -711,7 +745,7 @@ CODEX_EVASIONS: dict[str, tuple[str, ...]] = {
 def test_codex_refuses_every_measured_non_canonical_option_form(evasion: str) -> None:
     argv = with_extra_options(start(CodexBackend()), *CODEX_EVASIONS[evasion])
     with pytest.raises(CodexUnsafe):
-        CodexBackend().assert_safe(argv)
+        CodexBackend().assert_safe(argv, "write_in_repo")
 
 
 @pytest.mark.parametrize("build", [start, resume], ids=["start", "resume"])
@@ -719,7 +753,7 @@ def test_codex_legitimate_argv_with_model_and_effort_still_passes_the_strict_wal
     """The allowlist must not be so strict it refuses what this backend itself writes, on either
     the `exec` or `exec resume` option-region shape."""
     argv = build(CodexBackend(), model="gpt-5", reasoning_effort="medium")
-    CodexBackend().assert_safe(argv)
+    CodexBackend().assert_safe(argv, "write_in_repo")
 
 
 # --- opencode specifics --------------------------------------------------------------------
@@ -740,7 +774,7 @@ def test_opencode_freedom_maps_to_an_agent(freedom: str, agent: str, auto: bool)
 def test_opencode_read_only_never_carries_auto_approval() -> None:
     argv = with_extra_options(start(OpencodeBackend(), freedom="read_only"), "--auto")
     with pytest.raises(OpencodeUnsafe, match="contradicts"):
-        OpencodeBackend().assert_safe(argv)
+        OpencodeBackend().assert_safe(argv, "read_only")
 
 
 @pytest.mark.parametrize("flag", REJECTED_FLAGS)
@@ -749,21 +783,21 @@ def test_opencode_refuses_flags_that_break_its_session_or_permission_guarantees(
     argv = start(OpencodeBackend())
     assert flag not in argv
     with pytest.raises(OpencodeUnsafe, match="guarantees"):
-        OpencodeBackend().assert_safe(with_extra_options(argv, flag))
+        OpencodeBackend().assert_safe(with_extra_options(argv, flag), "write_in_repo")
 
 
 def test_opencode_rejects_a_non_json_format_it_could_not_parse() -> None:
     argv = start(OpencodeBackend())
     argv[argv.index("--format") + 1] = "default"
     with pytest.raises(OpencodeUnsafe, match="only json"):
-        OpencodeBackend().assert_safe(argv)
+        OpencodeBackend().assert_safe(argv, "write_in_repo")
 
 
 @pytest.mark.parametrize("flag", ["--format", "--dir", "--agent"])
 def test_opencode_rejects_a_duplicate_option_whose_second_value_would_win(flag: str) -> None:
     argv = with_extra_options(start(OpencodeBackend()), flag, "whatever")
     with pytest.raises(OpencodeUnsafe, match="appears 2 times"):
-        OpencodeBackend().assert_safe(argv)
+        OpencodeBackend().assert_safe(argv, "write_in_repo")
 
 
 @pytest.mark.parametrize(
@@ -781,7 +815,7 @@ def test_opencode_refuses_option_forms_that_would_override_a_guarantee_unnoticed
     argv = with_extra_options(start(OpencodeBackend()), token)
 
     with pytest.raises(OpencodeUnsafe, match="unrecognised option token"):
-        OpencodeBackend().assert_safe(argv)
+        OpencodeBackend().assert_safe(argv, "write_in_repo")
 
 
 def test_opencode_refuses_a_second_model_that_would_win() -> None:
@@ -789,28 +823,28 @@ def test_opencode_refuses_a_second_model_that_would_win() -> None:
     argv = with_extra_options(start(OpencodeBackend(), model="a/b"), "-m", "other/model")
 
     with pytest.raises(OpencodeUnsafe, match="-m appears 2 times"):
-        OpencodeBackend().assert_safe(argv)
+        OpencodeBackend().assert_safe(argv, "write_in_repo")
 
 
 def test_opencode_accepts_variant_in_canonical_form() -> None:
     argv = start(OpencodeBackend(), reasoning_effort="high")
 
     assert argv[argv.index("--variant") + 1] == "high"
-    OpencodeBackend().assert_safe(argv)
+    OpencodeBackend().assert_safe(argv, "write_in_repo")
 
 
 def test_opencode_rejects_a_duplicate_variant_whose_second_value_would_win() -> None:
     argv = with_extra_options(start(OpencodeBackend(), reasoning_effort="low"), "--variant", "high")
 
     with pytest.raises(OpencodeUnsafe, match="appears 2 times"):
-        OpencodeBackend().assert_safe(argv)
+        OpencodeBackend().assert_safe(argv, "write_in_repo")
 
 
 def test_opencode_rejects_an_unexpected_variant_value_reaching_assert_safe_directly() -> None:
     argv = with_extra_options(start(OpencodeBackend()), "--variant", "bogus")
 
     with pytest.raises(OpencodeUnsafe, match="unexpected --variant"):
-        OpencodeBackend().assert_safe(argv)
+        OpencodeBackend().assert_safe(argv, "write_in_repo")
 
 
 def test_opencode_start_carries_no_session_flag_and_resume_carries_one() -> None:
@@ -825,7 +859,7 @@ def test_opencode_start_carries_no_session_flag_and_resume_carries_one() -> None
 def test_opencode_refuses_a_session_flag_with_no_session_id() -> None:
     argv = with_extra_options(start(OpencodeBackend()), "-s", "  ")
     with pytest.raises(OpencodeUnsafe, match="no session id"):
-        OpencodeBackend().assert_safe(argv)
+        OpencodeBackend().assert_safe(argv, "write_in_repo")
 
 
 def test_opencode_resume_needs_a_session_id() -> None:
@@ -841,7 +875,7 @@ def test_an_opencode_prompt_that_looks_like_a_flag_is_not_mistaken_for_one() -> 
     )
 
     assert argv[-2:] == ["--", "--auto --format default"]
-    OpencodeBackend().assert_safe(argv)
+    OpencodeBackend().assert_safe(argv, "read_only")
 
 
 def test_opencode_working_directory_is_explicit() -> None:
@@ -877,7 +911,7 @@ def test_opencode_refuses_a_flag_that_ate_the_next_flag_as_its_value() -> None:
     argv[argv.index("--dir") + 1] = "--agent"
 
     with pytest.raises(OpencodeUnsafe, match="parse as an option"):
-        OpencodeBackend().assert_safe(argv)
+        OpencodeBackend().assert_safe(argv, "write_in_repo")
 
 
 def test_opencode_read_only_is_described_as_restraint_not_prevention() -> None:
@@ -921,7 +955,7 @@ def test_vibe_turn_cap_is_emitted() -> None:
     """Unlike codex and opencode, vibe genuinely supports a turn cap — see its capabilities."""
     argv = start(VibeBackend(), max_turns=7)
     assert argv[argv.index("--max-turns") + 1] == "7"
-    VibeBackend().assert_safe(argv)
+    VibeBackend().assert_safe(argv, "write_in_repo")
 
 
 def test_vibe_resume_needs_a_session_id() -> None:
@@ -936,7 +970,7 @@ def test_a_vibe_prompt_that_looks_like_a_flag_is_not_mistaken_for_one() -> None:
         model=None, max_turns=None, reasoning_effort=None,
     )
     assert argv[-1] == "--prompt=--max-turns 999 --agent auto-approve"
-    VibeBackend().assert_safe(argv)
+    VibeBackend().assert_safe(argv, "read_only")
 
 
 def test_vibe_prompt_must_be_the_last_token() -> None:
@@ -944,7 +978,7 @@ def test_vibe_prompt_must_be_the_last_token() -> None:
     never reach the model — refused rather than silently dropped."""
     argv = [*start(VibeBackend()), "--trust"]
     with pytest.raises(VibeUnsafe, match="last token"):
-        VibeBackend().assert_safe(argv)
+        VibeBackend().assert_safe(argv, "write_in_repo")
 
 
 @pytest.mark.parametrize(
@@ -958,7 +992,7 @@ def test_vibe_refuses_an_empty_or_blank_prompt_value(token: str) -> None:
     argv = start(VibeBackend())
     argv[-1] = token
     with pytest.raises(VibeUnsafe, match="non-empty"):
-        VibeBackend().assert_safe(argv)
+        VibeBackend().assert_safe(argv, "write_in_repo")
 
 
 @pytest.mark.parametrize("flag", VIBE_REJECTED_FLAGS)
@@ -966,7 +1000,7 @@ def test_vibe_refuses_flags_that_break_its_guarantees(flag: str) -> None:
     argv = start(VibeBackend())
     assert flag not in argv
     with pytest.raises(VibeUnsafe, match="guarantees"):
-        VibeBackend().assert_safe(with_extra_vibe_options(argv, flag))
+        VibeBackend().assert_safe(with_extra_vibe_options(argv, flag), "write_in_repo")
 
 
 @pytest.mark.parametrize(
@@ -976,7 +1010,7 @@ def test_vibe_refuses_flags_that_break_its_guarantees(flag: str) -> None:
 def test_vibe_refuses_option_forms_that_would_override_a_guarantee_unnoticed(token: str) -> None:
     argv = with_extra_vibe_options(start(VibeBackend()), token)
     with pytest.raises(VibeUnsafe, match="unrecognised option token"):
-        VibeBackend().assert_safe(argv)
+        VibeBackend().assert_safe(argv, "write_in_repo")
 
 
 @pytest.mark.parametrize(
@@ -989,26 +1023,26 @@ def test_vibe_rejects_a_duplicate_boolean_or_value_flag_whose_second_value_would
 ) -> None:
     argv = with_extra_vibe_options(start(VibeBackend()), flag, *extra)
     with pytest.raises(VibeUnsafe, match=why):
-        VibeBackend().assert_safe(argv)
+        VibeBackend().assert_safe(argv, "write_in_repo")
 
 
 def test_vibe_rejects_a_duplicate_max_turns_whose_second_value_would_win() -> None:
     argv = with_extra_vibe_options(start(VibeBackend(), max_turns=3), "--max-turns", "9")
     with pytest.raises(VibeUnsafe, match="--max-turns appears"):
-        VibeBackend().assert_safe(argv)
+        VibeBackend().assert_safe(argv, "write_in_repo")
 
 
 def test_vibe_rejects_a_duplicate_resume_whose_second_value_would_win() -> None:
     argv = with_extra_vibe_options(resume(VibeBackend()), "--resume", "other-session")
     with pytest.raises(VibeUnsafe, match="--resume appears"):
-        VibeBackend().assert_safe(argv)
+        VibeBackend().assert_safe(argv, "write_in_repo")
 
 
 def test_vibe_rejects_a_missing_trust() -> None:
     argv = start(VibeBackend())
     argv.remove("--trust")
     with pytest.raises(VibeUnsafe, match="--trust"):
-        VibeBackend().assert_safe(argv)
+        VibeBackend().assert_safe(argv, "write_in_repo")
 
 
 @pytest.mark.parametrize("value", ["0", "-1", "abc", "1.5", ""])
@@ -1016,7 +1050,7 @@ def test_vibe_rejects_a_non_canonical_max_turns_value(value: str) -> None:
     argv = start(VibeBackend(), max_turns=1)
     argv[argv.index("--max-turns") + 1] = value
     with pytest.raises(VibeUnsafe):
-        VibeBackend().assert_safe(argv)
+        VibeBackend().assert_safe(argv, "write_in_repo")
 
 
 def test_vibe_refuses_a_resume_flag_naming_no_session() -> None:
@@ -1026,7 +1060,7 @@ def test_vibe_refuses_a_resume_flag_naming_no_session() -> None:
     it can and does police is: at most one --resume, and never one naming no session at all."""
     argv = with_extra_vibe_options(start(VibeBackend()), "--resume", "  ")
     with pytest.raises(VibeUnsafe, match="names no session"):
-        VibeBackend().assert_safe(argv)
+        VibeBackend().assert_safe(argv, "write_in_repo")
 
 
 def test_vibe_start_carries_no_resume_and_resume_carries_one() -> None:
@@ -1039,7 +1073,7 @@ def test_vibe_refuses_a_workdir_value_that_looks_like_an_option() -> None:
     argv = start(VibeBackend())
     argv[argv.index("--workdir") + 1] = "--agent"
     with pytest.raises(VibeUnsafe, match="parse as an option"):
-        VibeBackend().assert_safe(argv)
+        VibeBackend().assert_safe(argv, "write_in_repo")
 
 
 def test_vibe_plan_caveat_states_that_bash_is_still_governed_by_the_users_config() -> None:

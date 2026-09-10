@@ -221,8 +221,19 @@ class Backend(Protocol):
         reasoning_effort: str | None,
     ) -> list[str]: ...
 
-    def assert_safe(self, argv: list[str]) -> None:
-        """Raise unless the argv still carries this backend's required guarantees."""
+    def assert_safe(self, argv: list[str], freedom: Freedom) -> None:
+        """Raise unless the argv still carries this backend's required guarantees.
+
+        `freedom` is the authorization the caller actually asked for — it is not, and cannot be,
+        derived from `argv` itself. An argv built for `read_only` can be just as internally
+        consistent as one built for `unrestricted`: checking that the mode/agent token is *one of*
+        the backend's known values only proves the argv is well-formed, not that it is well-formed
+        *for the freedom the caller requested*. Without this parameter, an argv assembled for one
+        freedom would pass `assert_safe` when a caller believed it had authorized a different one.
+        So every implementation must check the mode/agent token against the exact value this
+        freedom maps to (e.g. `PERMISSION_MODES[freedom]`), not merely against the set of values it
+        could take.
+        """
         ...
 
     def enforcement(self, freedom: Freedom) -> Enforcement: ...

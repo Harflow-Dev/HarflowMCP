@@ -299,8 +299,10 @@ class TaskRegistry:
         parent_task_id: str | None = None,
     ) -> Task:
         # Re-checked at the point of execution, not only where the argv was built, so no future
-        # caller of this method can launch an agent without its backend's guarantees.
-        backend.assert_safe(argv)
+        # caller of this method can launch an agent without its backend's guarantees — and, now that
+        # assert_safe takes freedom, that the argv actually matches the freedom this task was
+        # authorized under, not merely some freedom's shape.
+        backend.assert_safe(argv, freedom)  # type: ignore[arg-type]
 
         task_id = str(uuid.uuid4())
         self._log_dir.mkdir(parents=True, exist_ok=True)

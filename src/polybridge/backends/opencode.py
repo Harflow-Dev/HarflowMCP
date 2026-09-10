@@ -59,6 +59,7 @@ from .base import (
     ReasoningEffort,
     Status,
     UnsupportedCapability,
+    check_freedom,
     check_reasoning_effort,
 )
 
@@ -188,7 +189,7 @@ class OpencodeBackend:
         argv = [BINARY, "run", *self._options(repo, freedom, model, reasoning_effort)]
         # `--` then the prompt: last, and explicitly not parsed as an option however it looks.
         argv += ["--", self._check_prompt(prompt)]
-        self.assert_safe(argv)
+        self.assert_safe(argv, freedom)
         return argv
 
     def build_resume_argv(
@@ -210,7 +211,7 @@ class OpencodeBackend:
         options = self._options(repo, freedom, model, reasoning_effort)
         argv = [BINARY, "run", *options, "-s", session_id]
         argv += ["--", self._check_prompt(prompt)]
-        self.assert_safe(argv)
+        self.assert_safe(argv, freedom)
         return argv
 
     def _options(
@@ -242,7 +243,10 @@ class OpencodeBackend:
             raise ValueError("prompt must be a non-empty string")
         return prompt
 
-    def assert_safe(self, argv: list[str]) -> None:
+    def assert_safe(self, argv: list[str], freedom: Freedom) -> None:
+        # Rejects an unknown freedom outright rather than letting AGENTS[freedom] raise a bare
+        # KeyError below.
+        check_freedom(freedom)
         if argv[:2] != [BINARY, "run"]:
             raise UnsafeInvocationError(f"unrecognised opencode argv layout: {argv!r}")
 
@@ -265,8 +269,12 @@ class OpencodeBackend:
             raise UnsafeInvocationError(f"--dir names no directory: {argv!r}")
 
         agent = self._exactly_one(seen, "--agent", argv)
-        if agent not in set(AGENTS.values()):
-            raise UnsafeInvocationError(f"unexpected --agent {agent!r}: {argv!r}")
+        expected_agent = AGENTS[freedom]
+        if agent != expected_agent:
+            raise UnsafeInvocationError(
+                f"--agent was {agent!r}, expected {expected_agent!r} for freedom {freedom!r}: "
+                f"{argv!r}"
+            )
 
         if len(seen.get("--auto", ())) > 1:
             raise UnsafeInvocationError(f"--auto appears 2 times: {argv!r}")
@@ -283,10 +291,19 @@ class OpencodeBackend:
         if variants and variants[0] not in EFFORTS:
             raise UnsafeInvocationError(f"unexpected --variant {variants[0]!r}: {argv!r}")
 
-        if agent == AGENTS["read_only"] and "--auto" in seen:
+        # `--auto` must be present exactly when `freedom` calls for auto-approval — never more,
+        # never less. The old check only refused `--auto` alongside the read_only agent; that is
+        # now a special case of this rule, since read_only is never in AUTO_APPROVE.
+        has_auto = "--auto" in seen
+        should_auto = freedom in AUTO_APPROVE
+        if has_auto and not should_auto:
             raise UnsafeInvocationError(
-                f"--auto contradicts the {agent!r} agent, which is how read_only is expressed: "
-                f"{argv!r}"
+                f"--auto contradicts freedom {freedom!r} (agent {agent!r}), which does not call "
+                f"for auto-approval: {argv!r}"
+            )
+        if should_auto and not has_auto:
+            raise UnsafeInvocationError(
+                f"--auto is missing but freedom {freedom!r} requires auto-approval: {argv!r}"
             )
 
         # At most one session flag, counted across both spellings, and it must actually name a

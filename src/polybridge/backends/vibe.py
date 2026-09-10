@@ -115,6 +115,7 @@ from .base import (
     Freedom,
     ReasoningEffort,
     Status,
+    check_freedom,
     check_reasoning_effort,
     reject_model,
 )
@@ -252,7 +253,7 @@ class VibeBackend:
         # The single canonical token, last: no `--` separator works here (see module docstring), so
         # this is the only thing standing between prompt text and being parsed as an option.
         argv.append(f"--prompt={self._check_prompt(prompt)}")
-        self.assert_safe(argv)
+        self.assert_safe(argv, freedom)
         return argv
 
     def build_resume_argv(
@@ -271,7 +272,7 @@ class VibeBackend:
         argv = [BINARY, *self._options(repo, freedom, model, max_turns, reasoning_effort)]
         argv += ["--resume", session_id]
         argv.append(f"--prompt={self._check_prompt(prompt)}")
-        self.assert_safe(argv)
+        self.assert_safe(argv, freedom)
         return argv
 
     def _options(
@@ -302,7 +303,10 @@ class VibeBackend:
             raise ValueError("prompt must be a non-empty string")
         return prompt
 
-    def assert_safe(self, argv: list[str]) -> None:
+    def assert_safe(self, argv: list[str], freedom: Freedom) -> None:
+        # Rejects an unknown freedom outright rather than letting AGENTS[freedom] raise a bare
+        # KeyError below.
+        check_freedom(freedom)
         if not argv or argv[0] != BINARY:
             raise UnsafeInvocationError(f"unrecognised vibe argv layout: {argv!r}")
 
@@ -336,8 +340,12 @@ class VibeBackend:
             )
 
         agent = self._exactly_one(seen, "--agent", argv)
-        if agent not in set(AGENTS.values()):
-            raise UnsafeInvocationError(f"unexpected --agent {agent!r}: {argv!r}")
+        expected_agent = AGENTS[freedom]
+        if agent != expected_agent:
+            raise UnsafeInvocationError(
+                f"--agent was {agent!r}, expected {expected_agent!r} for freedom {freedom!r}: "
+                f"{argv!r}"
+            )
 
         if not self._exactly_one(seen, "--workdir", argv).strip():
             raise UnsafeInvocationError(f"--workdir names no directory: {argv!r}")

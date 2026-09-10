@@ -23,6 +23,7 @@ from .base import (
     Freedom,
     ReasoningEffort,
     Status,
+    check_freedom,
     check_reasoning_effort,
 )
 
@@ -119,7 +120,7 @@ class ClaudeBackend:
             raise ValueError("claude accepts a chosen session id, so one must be supplied")
         argv = self._common(prompt, freedom, model, max_turns, reasoning_effort)
         argv += ["--session-id", session_id]
-        self.assert_safe(argv)
+        self.assert_safe(argv, freedom)
         return argv
 
     def build_resume_argv(
@@ -136,7 +137,7 @@ class ClaudeBackend:
         argv = self._common(prompt, freedom, model, max_turns, reasoning_effort)
         # --resume and --session-id conflict, so never both.
         argv += ["--resume", session_id]
-        self.assert_safe(argv)
+        self.assert_safe(argv, freedom)
         return argv
 
     def _common(
@@ -173,7 +174,10 @@ class ClaudeBackend:
             argv += ["--effort", reasoning_effort]
         return argv
 
-    def assert_safe(self, argv: list[str]) -> None:
+    def assert_safe(self, argv: list[str], freedom: Freedom) -> None:
+        # Rejects an unknown freedom outright rather than letting PERMISSION_MODES[freedom] raise a
+        # bare KeyError below.
+        check_freedom(freedom)
         # The prompt is arbitrary caller text that may itself look like a flag, so only the option
         # region is inspected. Checked rather than assumed, so a reorder fails loudly.
         if len(argv) <= 3 or argv[0] != BINARY or argv[1] != "-p":
@@ -190,8 +194,12 @@ class ClaudeBackend:
             raise UnsafeInvocationError(f"--disallowedTools was {denied!r}, expected the deny list")
 
         mode = flags[flags.index("--permission-mode") + 1]
-        if mode not in set(PERMISSION_MODES.values()):
-            raise UnsafeInvocationError(f"unexpected --permission-mode {mode!r}")
+        expected_mode = PERMISSION_MODES[freedom]
+        if mode != expected_mode:
+            raise UnsafeInvocationError(
+                f"--permission-mode was {mode!r}, expected {expected_mode!r} for freedom "
+                f"{freedom!r}: {argv!r}"
+            )
 
         # Optional, unlike the flags above — but a second one, or a non-canonical value, would
         # either win silently or reach a CLI that degrades it without telling anyone.
