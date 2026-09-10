@@ -1,8 +1,8 @@
 # polybridge
 
 A local MCP server that dispatches coding tasks to **whichever headless coding agent you want** —
-Claude Code, Codex or opencode — and returns immediately, so the caller is never blocked for the
-length of a run.
+Claude Code, Codex, opencode or vibe — and returns immediately, so the caller is never blocked for
+the length of a run.
 
 Same async contract for every backend: `start_task` hands back a `task_id`, then you poll it, await
 it with a non-destructive timeout, or continue the same session with follow-up instructions.
@@ -31,16 +31,20 @@ everything it would do, without changing anything, with `polybridge-setup --dry-
 | Claude Code | `~/.claude.json`, user scope | `claude mcp add` |
 | Codex | `~/.codex/config.toml` | `codex mcp add` |
 | opencode | `~/.config/opencode/opencode.jsonc` | `opencode mcp add` |
+| vibe | `~/.vibe/config.toml` | `vibe mcp add` |
 
-The three CLIs write their own config because each stores the entry in its own shape — opencode's key
+The four CLIs write their own config because each stores the entry in its own shape — opencode's key
 is `environment`, not `env`, and its `command` is an array — and because their files are not ours to
-reformat: one is 78 KB of application state, another is hand-commented TOML, the third is JSONC.
+reformat: one is 78 KB of application state, another is hand-commented TOML, one is JSONC, and one is
+TOML again but not ours to reformat either — measured, `vibe mcp add` rewrites the whole file and
+destroys any hand-written comments in it, unlike codex's and opencode's own `add`, which preserved
+theirs.
 
 Only the desktop app needs a restart. The CLIs read their config when a session starts.
 
 The desktop app is the one entry written without checking for the client first: it can be installed
 anywhere, and its config directory does not exist until it has run once, so requiring either would
-skip a freshly installed app. The three CLIs are genuinely detected, by looking for their binary.
+skip a freshly installed app. The four CLIs are genuinely detected, by looking for their binary.
 
 ```bash
 polybridge-setup --client codex,opencode   # register with only these
@@ -69,7 +73,7 @@ nothing — and prints the command that restores it.
 
 ### Registering it with the agents it dispatches to
 
-Claude Code, Codex and opencode are both backends *and* clients here, so an agent dispatched by
+Claude Code, Codex, opencode and vibe are all backends *and* clients here, so an agent dispatched by
 polybridge can call polybridge and dispatch further agents. Nothing bounds that nesting; the only
 brake is the one-live-run-per-session guard, which stops a session resuming itself but not a new
 session being started. If you don't want it, leave those clients out: `polybridge-setup --client
@@ -89,13 +93,14 @@ claude-desktop`.
 
 ## Backends are not interchangeable, and the tool says so
 
-| | claude | codex | opencode |
-|---|---|---|---|
-| we can choose the session id | ✅ | ❌ (it mints and reports one) | ❌ (`ses_…`, reported on the first event) |
-| turn cap (`max_turns`) | ✅ | ❌ — asking for it is an **error**, not silently ignored | ❌ — same |
-| dollar cost reported | ✅ | ❌ token counts only, `total_cost_usd` is null | ✅ per step, summed across the run |
-| **real OS sandbox** | ❌ | ✅ `read-only` / `workspace-write` | ❌ |
-| **per-command deny** | ✅ `git commit`/`git push` | ❌ none | ❌ none |
+| | claude | codex | opencode | vibe |
+|---|---|---|---|---|
+| we can choose the session id | ✅ | ❌ (it mints and reports one) | ❌ (`ses_…`, reported on the first event) | ❌ (mints a UUID, present on the very first stream entry) |
+| we can choose the model | ✅ | ✅ | ✅ | ❌ — model selection is config-only there; `model` is refused before dispatch |
+| turn cap (`max_turns`) | ✅ | ❌ — asking for it is an **error**, not silently ignored | ❌ — same | ✅ — but a breach exits 1 and is reported as `failed`, not a clean stop like claude's |
+| dollar cost reported | ✅ | ❌ token counts only, `total_cost_usd` is null | ✅ per step, summed across the run | ❌ — the stream carries no cost **and no token counts at all** |
+| **real OS sandbox** | ❌ | ✅ `read-only` / `workspace-write` | ❌ | ❌ |
+| **per-command deny** | ✅ `git commit`/`git push` | ❌ none | ❌ none | ❌ none |
 
 One `freedom` parameter expresses intent — `read_only`, `write_in_repo` (default), `unrestricted` —
 and is mapped to each backend's real mechanism. Because those mechanisms differ in strength, every
@@ -134,25 +139,51 @@ tool-layer refusal was exercised — and `build` wrote a file and ran a shell co
 `--auto`**, so `--auto` is not what separates writing from not writing, and how much `unrestricted`
 adds over `write_in_repo` depends on the user's own opencode configuration.
 
+vibe reports every enforcement boolean as `false` at every level too — it has no OS sandbox
+(`os_sandbox=False`), so `os_enforced` and `writes_confined` are `false` throughout, and whether
+`git commit`/`git push` are even reachable depends on the user's own `[tools.bash]` allowlist, not on
+polybridge, so `per_command_deny`, `direct_commit_commands_denied` and `commit_push_blocked` are all
+`false`. `read_only` maps to `--agent plan`, which does set `write_file` and `edit` to
+`permission: "never"` — a real refusal, not model restraint — **but leaves `bash` untouched**, so a
+user whose own config allows `bash` unconditionally could still write through it; the caveat says so
+rather than implying `read_only` is airtight. `write_in_repo` maps to `--agent accept-edits`
+(auto-approves `write_file`/`edit` only) and `unrestricted` to `--agent auto-approve`
+(`bypass_tool_permissions: true`). In programmatic mode every approval callback vibe doesn't
+pre-approve is auto-denied, so anything outside the agent profile and the user's own config simply
+fails closed rather than prompting.
+
 ## Reasoning effort is one vocabulary, passed through verbatim
 
 `start_task(..., reasoning_effort=...)` accepts `"low"`, `"medium"`, `"high"` or `"xhigh"` and hands
 it to whichever backend ran, on that backend's own flag — no translation, because each of those four
-level names is spelled the same way, and accepted, on all three (per each CLI's own `--help` text and
-model metadata). That is a claim about spelling only, not about the levels behaving identically or
-forming an equivalent ladder across backends — see the acceptance/behaviour caveats below.
+level names is spelled the same way, and accepted, on the three backends that support reasoning
+effort at all — claude, codex, opencode (per each CLI's own `--help` text and model metadata). That
+is a claim about spelling only, not about the levels behaving identically or forming an equivalent
+ladder across backends — see the acceptance/behaviour caveats below.
+
+vibe is the exception, and it is why "no translation" cannot be said of all four: its native ladder is
+`off/low/medium/high/max`, with no `xhigh` at all, and vibe's own OpenAI-responses backend maps its
+`max` to `xhigh` internally. The vocabularies do line up — a faithful `low→low, medium→medium,
+high→high, xhigh→max` translation would be correct — but vibe would be the first backend needing a
+translation rather than a verbatim pass-through, and that is only one of the reasons reasoning effort
+is unsupported there outright (see the capability table above and CLAUDE.md's vibe section for the
+config-precedence reason it can't be done safely). A request for any level, on vibe, is refused before
+dispatch, the same treatment `model` gets there.
 
 | backend | flag | value |
 |---|---|---|
 | claude | `--effort <v>` | as-is |
 | codex | `-c model_reasoning_effort="<v>"` | as-is |
 | opencode | `--variant <v>` | as-is |
+| vibe | — (no flag exists; config-only) | unsupported outright — refused before dispatch |
 
-An effort outside those four levels is refused before a task is dispatched, on every backend — never
-silently dropped or degraded. That matters because each CLI mishandles an unsupported value
-differently if it ever reached one directly: claude silently degrades to its default effort with only
-a stderr warning; opencode silently ignores it with no warning at all; codex alone fails loudly, as a
-mid-run API `400`.
+An effort outside those four levels is refused before a task is dispatched, on every backend that
+supports the parameter — never silently dropped or degraded. That matters because each CLI mishandles
+an unsupported value differently if it ever reached one directly: claude silently degrades to its
+default effort with only a stderr warning; opencode silently ignores it with no warning at all; codex
+alone fails loudly, as a mid-run API `400`; vibe has no flag to mishandle in the first place — an
+unsupported value there would only ever reach `[[models]].thinking` in config, several layers removed
+from anything polybridge controls.
 
 `xhigh` is deliberately the ceiling, not necessarily each backend's true maximum. For claude and
 codex it genuinely is not: each has a native tier above `xhigh` (claude `max`; codex `max`/`ultra`)
@@ -166,6 +197,7 @@ unreachable, for no reason beyond keeping one vocabulary all three share:
 | claude | `max` |
 | codex | `none`, `minimal`, `max`, `ultra` |
 | opencode | `minimal` |
+| vibe | all four — `low`, `medium`, `high`, `xhigh` — reasoning effort is unsupported outright |
 
 Within **codex**, `xhigh` is also the one tier every model measured accepts (per
 `~/.codex/models_cache.json`) — `ultra`/`max` are absent from some codex models, and stopping short

@@ -93,6 +93,7 @@ class ClaudeBackend:
         reports_cost_usd=True,
         os_sandbox=False,
         per_command_deny=True,
+        supports_model_selection=True,
         reasoning_effort=ReasoningEffort(
             accepts_parameter=True,
             levels=EFFORTS,

@@ -123,6 +123,7 @@ class CodexBackend:
         reports_cost_usd=False,
         os_sandbox=True,
         per_command_deny=False,
+        supports_model_selection=True,
         reasoning_effort=ReasoningEffort(
             accepts_parameter=True,
             levels=EFFORTS,

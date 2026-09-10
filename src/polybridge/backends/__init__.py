@@ -21,11 +21,13 @@ from .base import (
     UnsupportedCapability,
     check_freedom,
     check_reasoning_effort,
+    reject_model,
     reject_turn_cap,
 )
 from .claude import ClaudeBackend
 from .codex import CodexBackend
 from .opencode import OpencodeBackend
+from .vibe import VibeBackend
 
 log = logging.getLogger(__name__)
 
@@ -33,6 +35,7 @@ BACKENDS: dict[str, Backend] = {
     ClaudeBackend.name: ClaudeBackend(),
     CodexBackend.name: CodexBackend(),
     OpencodeBackend.name: OpencodeBackend(),
+    VibeBackend.name: VibeBackend(),
 }
 
 DEFAULT_BACKEND = ClaudeBackend.name
@@ -109,6 +112,7 @@ __all__ = [
     "describe_all",
     "get",
     "is_installed",
+    "reject_model",
     "reject_turn_cap",
     "version",
 ]

@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
+import shutil
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -21,13 +24,37 @@ from polybridge.clients.claude_code import ClaudeCodeClient
 from polybridge.clients.codex import CodexClient
 from polybridge.clients.desktop import DesktopClient
 from polybridge.clients.opencode import OpencodeClient
+from polybridge.clients.vibe import (
+    VibeClient,
+    says_added,
+    says_already_configured,
+    says_not_configured,
+    says_removed,
+)
 
 REGISTRATION = Registration(key="polybridge", command="/opt/bin/polybridge-server", path_env="/a:/b")
 
 ALREADY_EXISTS = "MCP server polybridge already exists in user config"
 NOT_FOUND = 'No MCP server named "polybridge" in user scope'
 
+# vibe's measured wordings, whole — every one of these exits 0 (measured), so the message is the
+# only signal `VibeClient.apply` has to go on.
+VIBE_ADDED = "Added MCP server `polybridge`."
+VIBE_ALREADY_CONFIGURED = "MCP server `polybridge` is already configured."
+VIBE_REMOVED = "Removed MCP server `polybridge`."
+VIBE_NOT_CONFIGURED = "MCP server `polybridge` is not configured in the user config."
+# The *other* collision, measured: same name with different settings fails through argparse at
+# exit 2, with the extra word "name". Re-adding an identical entry is the exit-0 no-op above.
+VIBE_NAME_CONFLICT = (
+    "usage: vibe mcp [-h] {add,remove} ...\n"
+    "vibe mcp: error: MCP server name `polybridge` is already configured."
+)
+
 CLI_CLIENTS = [ClaudeCodeClient(), CodexClient(), OpencodeClient()]
+# Everything the shared timeout test also holds for — vibe's `apply` starts with its own `add` call,
+# same as every other client — but see `test_cli_argv_puts_the_command_after_a_separator` below,
+# which vibe is deliberately kept out of: it has no `--` separator at all.
+ALL_CLI_CLIENTS = [*CLI_CLIENTS, VibeClient()]
 
 
 def ok(output: str = "") -> tuple[int | None, str, bool]:
@@ -62,7 +89,13 @@ class FakeRunner:
 
 
 def test_every_client_is_registered() -> None:
-    assert sorted(clients.CLIENTS) == ["claude-code", "claude-desktop", "codex", "opencode"]
+    assert sorted(clients.CLIENTS) == [
+        "claude-code",
+        "claude-desktop",
+        "codex",
+        "opencode",
+        "vibe",
+    ]
     for key, client in clients.CLIENTS.items():
         assert client.key == key
 
@@ -122,9 +155,13 @@ def test_success_claims_only_that_the_command_exited_zero() -> None:
         assert overclaim not in result.detail.lower()
 
 
-@pytest.mark.parametrize("client", CLI_CLIENTS, ids=lambda c: c.key)
+@pytest.mark.parametrize("client", ALL_CLI_CLIENTS, ids=lambda c: c.key)
 def test_a_timeout_is_unknown_not_failed(client: CliClient) -> None:
-    """A CLI can write the config and then hang; calling that `failed` would be a guess."""
+    """A CLI can write the config and then hang; calling that `failed` would be a guess.
+
+    Every client's `apply`, vibe included, starts with `add` — a single scripted timeout covers all
+    of them because `apply` returns before ever reaching a second call.
+    """
     result = client.apply(REGISTRATION, FakeRunner(times_out()))
 
     assert result.status == "unknown"
@@ -276,6 +313,342 @@ def test_an_unrecognised_add_failure_is_not_treated_as_already_exists() -> None:
 
     assert result.status == "failed"
     assert len(runner.calls) == 1
+
+
+# --- vibe: no separator, and a fourth replacement policy (silent skip, so `apply` falls back to its
+# own remove-then-add, add-first like claude_code) ----------------------------------------------
+
+
+def test_vibe_argv_has_no_separator_and_puts_the_command_behind_a_flag() -> None:
+    """The one shape difference from every other CLI client: no `--`, `NAME` is positional, and the
+    server command rides on `--command` rather than trailing the argv."""
+    argv = VibeClient().add_argv(REGISTRATION)
+
+    assert argv == [
+        "vibe",
+        "mcp",
+        "add",
+        "polybridge",
+        "--transport",
+        "stdio",
+        "--command",
+        "/opt/bin/polybridge-server",
+        "--env",
+        "PATH=/a:/b",
+    ]
+    assert "--" not in argv
+
+
+def test_vibe_remove_argv() -> None:
+    assert VibeClient().remove_argv(REGISTRATION) == ["vibe", "mcp", "remove", "polybridge"]
+
+
+@pytest.mark.parametrize(
+    ("matcher", "message"),
+    [
+        (says_added, VIBE_ADDED),
+        (says_already_configured, VIBE_ALREADY_CONFIGURED),
+        (says_removed, VIBE_REMOVED),
+        (says_not_configured, VIBE_NOT_CONFIGURED),
+    ],
+    ids=["added", "already-configured", "removed", "not-configured"],
+)
+def test_vibe_signature_matches_are_case_insensitive(matcher, message: str) -> None:
+    assert matcher(RunResult(("vibe",), 0, message), "polybridge")
+    assert matcher(RunResult(("vibe",), 0, message.upper()), "polybridge")
+
+
+@pytest.mark.parametrize(
+    ("matcher", "message"),
+    [
+        (says_added, "Added MCP server `polybridge-staging`."),
+        (says_already_configured, "MCP server `polybridge-staging` is already configured."),
+        (says_removed, "Removed MCP server `polybridge-staging`."),
+        (
+            says_not_configured,
+            "MCP server `polybridge-staging` is not configured in the user config.",
+        ),
+        (says_added, "Added MCP server `not-polybridge`."),
+        (says_already_configured, "MCP server `not-polybridge` is already configured."),
+    ],
+    ids=[
+        "added-name-suffix",
+        "already-configured-name-suffix",
+        "removed-name-suffix",
+        "not-configured-name-suffix",
+        "added-name-prefix",
+        "already-configured-name-prefix",
+    ],
+)
+def test_vibe_signature_matches_do_not_confuse_a_longer_name(matcher, message: str) -> None:
+    """The backtick delimiting is the point: a name that merely contains ours must not match."""
+    assert not matcher(RunResult(("vibe",), 0, message), "polybridge")
+
+
+@pytest.mark.parametrize(
+    "matcher", [says_added, says_already_configured, says_removed, says_not_configured]
+)
+def test_vibe_signature_matches_require_a_zero_exit(matcher) -> None:
+    """Every measured wording came with exit 0; a non-zero exit means something else happened."""
+    message = "Added MCP server `polybridge`. Removed MCP server `polybridge`."
+    assert not matcher(RunResult(("vibe",), 1, message), "polybridge")
+
+
+@pytest.mark.parametrize(
+    ("matcher", "message"),
+    [
+        (says_added, "Not added MCP server `polybridge`."),
+        (says_added, "Added MCP server `polybridge` but configuration was not written"),
+        # A missing full stop is not the measured sentence either — matching must be whole-line,
+        # not "starts with" or "contains".
+        (says_added, "Added MCP server `polybridge`"),
+        (says_already_configured, "MCP server `polybridge` is already configured"),
+    ],
+    ids=[
+        "contradictory-not-added",
+        "added-with-trailing-caveat",
+        "added-missing-full-stop",
+        "already-configured-missing-full-stop",
+    ],
+)
+def test_vibe_signature_matches_require_the_whole_line_not_a_fragment(matcher, message: str) -> None:
+    """A substring check would also match a sentence that merely contains the expected wording —
+    including one whose surrounding words *contradict* it, like "Not added...\""""
+    assert not matcher(RunResult(("vibe",), 0, message), "polybridge")
+
+
+def test_vibe_adds_directly_when_the_add_succeeds_outright() -> None:
+    """Add-first: when nothing was previously configured, `add` alone reports success and `remove`
+    is never invoked at all."""
+    runner = FakeRunner(ok(VIBE_ADDED))
+
+    result = VibeClient().apply(REGISTRATION, runner)
+
+    assert result.status == "applied"
+    assert [call[2] for call in runner.calls] == ["add"]
+
+
+def test_vibe_falls_back_to_remove_then_add_when_add_reports_already_configured() -> None:
+    runner = FakeRunner(ok(VIBE_ALREADY_CONFIGURED), ok(VIBE_REMOVED), ok(VIBE_ADDED))
+
+    result = VibeClient().apply(REGISTRATION, runner)
+
+    assert result.status == "applied"
+    assert [call[2] for call in runner.calls] == ["add", "remove", "add"]
+
+
+def test_vibe_success_claims_only_that_add_reported_the_expected_confirmation() -> None:
+    result = VibeClient().apply(
+        REGISTRATION, FakeRunner(ok(VIBE_ALREADY_CONFIGURED), ok(VIBE_REMOVED), ok(VIBE_ADDED))
+    )
+
+    assert "add command succeeded" in result.detail
+    for overclaim in ("registered", "connected", "loaded", "running"):
+        assert overclaim not in result.detail.lower()
+
+
+def test_vibe_add_timeout_is_unknown_and_removes_nothing() -> None:
+    """A plain add-timeout (nothing yet known to have existed) must not touch `remove` at all."""
+    runner = FakeRunner(times_out())
+
+    result = VibeClient().apply(REGISTRATION, runner)
+
+    assert result.status == "unknown"
+    assert len(runner.calls) == 1
+
+
+def test_vibe_add_failure_is_failed_and_removes_nothing() -> None:
+    runner = FakeRunner(fails(2, "boom"))
+
+    result = VibeClient().apply(REGISTRATION, runner)
+
+    assert result.status == "failed"
+    assert "exit 2" in result.detail
+    assert "boom" in result.diagnostics
+    assert len(runner.calls) == 1
+
+
+def test_vibe_a_differing_settings_conflict_exits_two_and_still_replaces() -> None:
+    """The collision that matters for an update: it fails through argparse, not with exit 0.
+
+    A `not added.ok` check that returned `failed` here would make every update a hard failure while
+    leaving the stale entry in place — which a real cli_integration run caught.
+    """
+    runner = FakeRunner(fails(2, VIBE_NAME_CONFLICT), ok(VIBE_REMOVED), ok(VIBE_ADDED))
+
+    result = VibeClient().apply(REGISTRATION, runner)
+
+    assert result.status == "applied"
+    assert [call[2] for call in runner.calls] == ["add", "remove", "add"]
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "vibe mcp: error: MCP server name `not-polybridge` is already configured.",
+        "vibe mcp: error: MCP server name `polybridge-two` is already configured.",
+        "vibe mcp: error: unrecognized arguments: --nope",
+        "MCP server `polybridge` is already configured.",
+    ],
+    ids=["longer-name", "suffixed-name", "unrelated-error", "the-exit-zero-wording"],
+)
+def test_vibe_a_failure_that_is_not_our_name_conflict_is_just_a_failure(output: str) -> None:
+    """The two collision signatures must not be confusable, and neither may a different server's."""
+    runner = FakeRunner(fails(2, output))
+
+    result = VibeClient().apply(REGISTRATION, runner)
+
+    assert result.status == "failed"
+    assert len(runner.calls) == 1
+
+
+def test_vibe_an_unrecognised_add_message_is_unknown_and_does_not_fall_back_to_remove() -> None:
+    """Exit 0 with wording this client does not recognise must not be read as "already
+    configured" — pressing on to remove-then-add without that confirmation would be a guess."""
+    runner = FakeRunner(ok("something unexpected"))
+
+    result = VibeClient().apply(REGISTRATION, runner)
+
+    assert result.status == "unknown"
+    assert len(runner.calls) == 1
+
+
+def test_vibe_remove_timeout_after_add_reports_already_configured() -> None:
+    runner = FakeRunner(ok(VIBE_ALREADY_CONFIGURED), times_out())
+
+    result = VibeClient().apply(REGISTRATION, runner)
+
+    assert result.status == "unknown"
+    assert len(runner.calls) == 2
+    assert any("restore" in diag for diag in result.diagnostics)
+
+
+def test_vibe_remove_failure_after_add_reports_already_configured() -> None:
+    runner = FakeRunner(ok(VIBE_ALREADY_CONFIGURED), fails(2, "boom"))
+
+    result = VibeClient().apply(REGISTRATION, runner)
+
+    assert result.status == "failed"
+    assert "exit 2" in result.detail
+    assert "boom" in result.diagnostics
+    assert len(runner.calls) == 2
+    # Nothing measured says a failing `remove` cannot have written first, so the caller is told not
+    # to assume the entry survived, and given the way back. Deliberately weaker than the
+    # confirmed-removal branch's flat "NOT registered": here we genuinely do not know.
+    assert "no longer be registered" in result.detail
+    restore_diag = next(d for d in result.diagnostics if "restore it with" in d.lower())
+    assert restore_diag.endswith(shlex.join(VibeClient().add_argv(REGISTRATION)))
+
+
+def test_vibe_an_unrecognised_remove_message_is_unknown_not_a_guess() -> None:
+    """`remove` always exits 0 (measured); an unrecognised message means the wording moved, and
+    pressing on to `add` would be a guess dressed up as a fact.
+
+    It also means the entry may already be gone: if vibe changed its success wording *after*
+    actually removing it, saying only "the config may have changed" would leave the caller with no
+    registration and no way back.
+    """
+    runner = FakeRunner(ok(VIBE_ALREADY_CONFIGURED), ok("something unexpected"))
+
+    result = VibeClient().apply(REGISTRATION, runner)
+
+    assert result.status == "unknown"
+    assert len(runner.calls) == 2
+    assert "no longer be registered" in result.detail
+    restore_diag = next(d for d in result.diagnostics if "restore it with" in d.lower())
+    assert restore_diag.endswith(shlex.join(VibeClient().add_argv(REGISTRATION)))
+
+
+def test_vibe_readd_timeout_after_a_confirmed_removal_says_assume_nothing_registered() -> None:
+    """CLAUDE.md: a failed replacement must tell the caller to assume nothing is registered and
+    print the exact restoring command — a failed/timed-out `add` is not proof it wrote nothing."""
+    runner = FakeRunner(ok(VIBE_ALREADY_CONFIGURED), ok(VIBE_REMOVED), times_out())
+
+    result = VibeClient().apply(REGISTRATION, runner)
+
+    assert result.status == "unknown"
+    assert len(runner.calls) == 3
+    assert "NOT registered" in result.detail
+    restore_argv = shlex.join(VibeClient().add_argv(REGISTRATION))
+    assert any(d.endswith(restore_argv) for d in result.diagnostics)
+
+
+def test_vibe_readd_failure_after_a_confirmed_removal_carries_the_restore_command() -> None:
+    runner = FakeRunner(ok(VIBE_ALREADY_CONFIGURED), ok(VIBE_REMOVED), fails(1, "boom"))
+
+    result = VibeClient().apply(REGISTRATION, runner)
+
+    assert result.status == "failed"
+    assert "exit 1" in result.detail
+    assert "NOT registered" in result.detail
+    assert "boom" in result.diagnostics
+    restore_diag = next(d for d in result.diagnostics if "restore it with" in d.lower())
+    assert restore_diag.endswith(shlex.join(VibeClient().add_argv(REGISTRATION)))
+
+
+def test_vibe_add_reporting_already_configured_right_after_a_remove_is_unknown_not_applied() -> None:
+    """Should never happen (we just removed it), but `apply` must not assume success from exit 0
+    alone — this is the whole reason the default `CliClient` policy was overridden."""
+    runner = FakeRunner(ok(VIBE_ALREADY_CONFIGURED), ok(VIBE_REMOVED), ok(VIBE_ALREADY_CONFIGURED))
+
+    result = VibeClient().apply(REGISTRATION, runner)
+
+    assert result.status == "unknown"
+    assert len(runner.calls) == 3
+    assert any("nothing is registered" in d.lower() for d in result.diagnostics)
+
+
+# --- vibe, against the real binary and a sandboxed VIBE_HOME ------------------------------------
+
+
+@pytest.mark.cli_integration
+@pytest.mark.skipif(
+    not os.environ.get("PB_CLI_INTEGRATION"),
+    reason="drives the real vibe CLI; opt in with PB_CLI_INTEGRATION=1",
+)
+def test_vibe_registration_survives_unrelated_toml_and_replaces_on_a_second_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if shutil.which("vibe") is None:
+        pytest.skip("`vibe` is not installed")
+
+    # HOME is redirected, not just VIBE_HOME: `run_cli` runs from the user's home directory.
+    home = tmp_path / "home"
+    vibe_home = tmp_path / "vibe_home"
+    home.mkdir()
+    vibe_home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("VIBE_HOME", str(vibe_home))
+    config = vibe_home / "config.toml"
+    config.write_text(
+        "# hand-written comment, expected to be destroyed by `vibe mcp add` (measured)\n"
+        '[[mcp_servers]]\n'
+        'name = "unrelated"\n'
+        'transport = "stdio"\n'
+        'command = "/bin/true"\n'
+    )
+
+    first = VibeClient().apply(REGISTRATION, run_cli)
+
+    assert first.status == "applied", first
+    written = tomllib.loads(config.read_text())
+    servers = {entry["name"]: entry for entry in written["mcp_servers"]}
+    assert servers["unrelated"]["command"] == "/bin/true"
+    assert servers["polybridge"]["command"] == REGISTRATION.command
+    assert servers["polybridge"]["env"]["PATH"] == REGISTRATION.path_env
+
+    moved = Registration(
+        key="polybridge", command="/opt/bin/polybridge-server-v2", path_env="/moved"
+    )
+    second = VibeClient().apply(moved, run_cli)
+
+    assert second.status == "applied", second
+    written = tomllib.loads(config.read_text())
+    servers = {entry["name"]: entry for entry in written["mcp_servers"]}
+    assert servers["unrelated"]["command"] == "/bin/true", "unrelated TOML must survive"
+    assert servers["polybridge"]["command"] == "/opt/bin/polybridge-server-v2"
+    assert servers["polybridge"]["env"]["PATH"] == "/moved"
+    assert len([e for e in written["mcp_servers"] if e["name"] == "polybridge"]) == 1
 
 
 # --- availability and selection ---------------------------------------------------------------

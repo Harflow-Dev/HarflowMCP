@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Install polybridge and register it with the Claude desktop app plus each agent CLI found —
-# Claude Code, Codex, opencode.
+# Claude Code, Codex, opencode, vibe.
 #
 # Deliberately short: you should be able to read an install script before running it.
 # Everything fiddly (merging your config, driving each client's own `mcp add`, resolving
@@ -9,7 +9,7 @@
 # Takes no arguments. To preview the changes instead, install and then run:
 #   polybridge-setup --dry-run
 # To register with only some clients:
-#   polybridge-setup --client codex,opencode
+#   polybridge-setup --client codex,opencode,vibe
 
 set -euo pipefail
 

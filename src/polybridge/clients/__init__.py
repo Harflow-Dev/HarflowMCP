@@ -29,12 +29,19 @@ from .claude_code import ClaudeCodeClient
 from .codex import CodexClient
 from .desktop import DesktopClient, desktop_config_path
 from .opencode import OpencodeClient
+from .vibe import VibeClient
 
 ALL = "all"
 
 CLIENTS: dict[str, Client] = {
     client.key: client
-    for client in (DesktopClient(), ClaudeCodeClient(), CodexClient(), OpencodeClient())
+    for client in (
+        DesktopClient(),
+        ClaudeCodeClient(),
+        CodexClient(),
+        OpencodeClient(),
+        VibeClient(),
+    )
 }
 
 
@@ -108,7 +115,7 @@ def register(
     them writing at once is not something to find out about in an installer.
 
     One client's failure never stops the others — a broken desktop config should not cost you the
-    three registrations that would have worked. `named` holds the clients the user asked for by name,
+    four registrations that would have worked. `named` holds the clients the user asked for by name,
     for which "not installed" is an error rather than a skip.
     """
     results: list[Result] = []
@@ -248,6 +255,7 @@ __all__ = [
     "SetupError",
     "Status",
     "UnknownClient",
+    "VibeClient",
     "closing_notes",
     "desktop_config_path",
     "exit_code",

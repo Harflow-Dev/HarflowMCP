@@ -27,8 +27,9 @@ Status = Literal["running", "completed", "failed", "timed_out", "cancelled"]
 # `variants` at all and silently ignore the flag — see OpencodeBackend's reasoning_effort caveat.
 # Each backend's own ceiling is therefore left unreachable on purpose — claude `max`, codex
 # `max`/`ultra` — so a caller cannot spend it by accident. The tiers below `low` (codex and opencode
-# `minimal`, codex `none`) are unreachable too, for no reason beyond keeping one vocabulary all
-# three share.
+# `minimal`, codex `none`) are unreachable too, for no reason beyond keeping one vocabulary shared by
+# the three backends that accept an effort at all — vibe accepts none, so it is outside this
+# vocabulary rather than a fourth member of it.
 EFFORTS: tuple[str, ...] = ("low", "medium", "high", "xhigh")
 
 
@@ -93,6 +94,11 @@ class Capabilities(NamedTuple):
 
     per_command_deny: bool
     """Whether individual commands (e.g. `git commit`) can be denied."""
+
+    supports_model_selection: bool
+    """Whether this backend has a flag to choose the model at all. False means `model` is refused
+    outright rather than silently ignored — see `reject_model`. vibe is the first backend where this
+    is False: model choice is config-only there, with no CLI flag."""
 
     reasoning_effort: ReasoningEffort
 
@@ -174,6 +180,12 @@ class Accumulator:
     event_count: int = 0
     unparsable_lines: int = 0
 
+    stream_state: dict[str, Any] = field(default_factory=dict)
+    """Backend-private scratch space for an ingest algorithm that needs memory across events (e.g.
+    vibe's current-turn tracking). Lives here, per task, rather than on the backend instance:
+    `BACKENDS` holds one shared instance per backend, so state on `self` would corrupt concurrent
+    tasks. Never read by anything outside the backend that wrote it."""
+
 
 class UnsupportedCapability(ValueError):
     """A request a backend cannot honour, which must fail rather than be silently dropped."""
@@ -238,6 +250,16 @@ def reject_turn_cap(backend: Backend, max_turns: int | None) -> None:
         raise UnsupportedCapability(
             f"the {backend.name} CLI has no turn cap, so max_turns={max_turns} cannot be honoured; "
             "omit it, or use a backend whose capabilities report supports_turn_cap"
+        )
+
+
+def reject_model(backend: Backend, model: str | None) -> None:
+    """Fail loudly when a model was asked for and this backend has no flag to choose one."""
+    if model is not None and not backend.capabilities.supports_model_selection:
+        raise UnsupportedCapability(
+            f"the {backend.name} CLI has no model selection flag, so model={model!r} cannot be "
+            "honoured; omit it, or use a backend whose capabilities report "
+            "supports_model_selection"
         )
 
 

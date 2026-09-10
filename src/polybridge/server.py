@@ -46,15 +46,16 @@ mcp = MCPServer(
     "polybridge",
     instructions=(
         "Dispatch coding tasks to headless coding agents on this machine — currently Claude Code, "
-        "Codex and opencode. start_task returns immediately with a task_id; poll it with "
+        "Codex, opencode and vibe. start_task returns immediately with a task_id; poll it with "
         "get_task_status or await it with wait_for_task, then continue the same session with "
         "resume_task.\n\n"
         "Call list_backends first if you are unsure which to use: it reports what is installed and "
-        "what each one can actually do. Backends differ in ways that matter — only Claude supports "
-        "a turn cap, only Claude and opencode report a dollar cost, and only Codex enforces "
-        "restrictions with a real OS sandbox. Every task reports an `enforcement` block describing "
-        "what was actually enforced, which is the honest answer rather than what `freedom` "
-        "implies.\n\n"
+        "what each one can actually do. Backends differ in ways that matter — Claude and vibe "
+        "support a turn cap (though a breach on vibe reads as a plain failure, not a distinct "
+        "status), only Claude and opencode report a dollar cost, only Codex enforces restrictions "
+        "with a real OS sandbox, and only vibe has no model-selection flag at all. Every task "
+        "reports an `enforcement` block describing what was actually enforced, which is the honest "
+        "answer rather than what `freedom` implies.\n\n"
         "A wait_for_task that comes back still 'running' has not failed — the run is untouched, so "
         "call again or poll. Tasks outlive this server process: ones started by an earlier "
         "polybridge server are still reported, marked 'recovered: true'."
@@ -112,6 +113,13 @@ def _check_reasoning_effort(backend, reasoning_effort: str | None) -> None:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
 
 
+def _check_model(backend, model: str | None) -> None:
+    try:
+        backends.reject_model(backend, model)
+    except backends.UnsupportedCapability as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+
 def _resolve_repo_path(repo_path: str) -> Path:
     if not repo_path or not repo_path.strip():
         raise MCPError(INVALID_PARAMS, "repo_path must be a non-empty path")
@@ -165,18 +173,21 @@ async def start_task(
     Args:
         prompt: Instructions for the agent. Be specific about the desired end state.
         repo_path: Absolute path to a git repository; the agent's working directory.
-        backend: Which agent to use — "claude", "codex" or "opencode". See list_backends.
+        backend: Which agent to use — "claude", "codex", "opencode" or "vibe". See list_backends.
         freedom: "read_only", "write_in_repo" (default), or "unrestricted". How this is enforced
             depends on the backend; the returned `enforcement` says what actually applies.
-        model: Model for this run, in the backend's own naming.
+        model: Model for this run, in the backend's own naming. Rejected outright, rather than
+            silently ignored, on a backend with no model-selection flag at all — vibe is the first
+            such case; see list_backends' capabilities.supports_model_selection.
         max_turns: Cap on agent turns. Only some backends support this; asking for it on one that
             does not is an error rather than being silently ignored.
         reasoning_effort: "low", "medium", "high" or "xhigh", passed to the backend verbatim.
-            Rejected up front only when the chosen *backend* has no effort control at all, or is
-            asked for a level outside the ones it declares (see list_backends); polybridge cannot
-            tell whether the chosen *model* honours it — on opencode in particular, a model with no
-            declared variants silently ignores an unsupported level rather than erroring. See
-            list_backends' per-backend reasoning_effort caveats for what is and is not known there.
+            Rejected up front only when the chosen *backend* has no effort control at all (vibe is
+            config-only and has none), or is asked for a level outside the ones it declares (see
+            list_backends); polybridge cannot tell whether the chosen *model* honours it — on
+            opencode in particular, a model with no declared variants silently ignores an
+            unsupported level rather than erroring. See list_backends' per-backend reasoning_effort
+            caveats for what is and is not known there.
 
     Returns the new task_id and its starting state. The run continues in the background; poll
     get_task_status or call wait_for_task to follow it.
@@ -188,6 +199,7 @@ async def start_task(
     _check_freedom(freedom)
     _check_turn_cap(chosen, max_turns)
     _check_reasoning_effort(chosen, reasoning_effort)
+    _check_model(chosen, model)
     path = await _validate_repo_path(repo_path)
 
     task = await _reg().start(
@@ -211,7 +223,8 @@ async def get_task_status(task_id: str) -> dict[str, Any]:
 
     Carries the agent's closing summary, turn count, token usage and any permission denials once the
     run has finished, plus the tail of its event stream while it is still going. `total_cost_usd` is
-    null for backends that do not report cost — Codex reports tokens only.
+    null for backends that do not report cost — Codex reports tokens only, and vibe reports neither
+    cost nor tokens nor a turn count.
 
     `enforcement` states what the run's restrictions actually amounted to, and `mcp_servers` (where
     the backend reports them) shows what the agent loaded. Tasks started by an earlier polybridge
@@ -406,7 +419,7 @@ async def resume_task(
             task = await _reg().resume_record(record, followup_prompt, max_turns=max_turns)
     except (SessionBusyError, SessionUnknownError, RepoUnavailableError) as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
-    except backends.UnknownBackend as exc:
+    except (backends.UnknownBackend, backends.UnsupportedCapability) as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
     return task.brief() | {"enforcement": task.enforcement}
 

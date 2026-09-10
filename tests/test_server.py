@@ -63,7 +63,7 @@ async def test_list_backends_describes_every_one() -> None:
     listed = (await call("list_backends")).structured_content["result"]
 
     by_name = {entry["backend"]: entry for entry in listed}
-    assert sorted(by_name) == ["claude", "codex", "opencode"]
+    assert sorted(by_name) == ["claude", "codex", "opencode", "vibe"]
     # The differences a caller has to plan around.
     assert by_name["claude"]["capabilities"]["supports_turn_cap"] is True
     assert by_name["codex"]["capabilities"]["supports_turn_cap"] is False
@@ -73,6 +73,14 @@ async def test_list_backends_describes_every_one() -> None:
     assert by_name["opencode"]["capabilities"]["os_sandbox"] is False
     assert by_name["opencode"]["capabilities"]["reports_cost_usd"] is True
     assert by_name["claude"]["capabilities"]["os_sandbox"] is False
+    # vibe is the one backend with no model-selection flag at all, and no reasoning effort control.
+    assert by_name["vibe"]["capabilities"]["supports_model_selection"] is False
+    assert by_name["claude"]["capabilities"]["supports_model_selection"] is True
+    assert by_name["codex"]["capabilities"]["supports_model_selection"] is True
+    assert by_name["opencode"]["capabilities"]["supports_model_selection"] is True
+    assert by_name["vibe"]["capabilities"]["reasoning_effort"]["accepts_parameter"] is False
+    # But vibe genuinely does support a turn cap — unlike codex and opencode.
+    assert by_name["vibe"]["capabilities"]["supports_turn_cap"] is True
 
 
 async def test_unknown_backend_is_rejected(git_repo: Path) -> None:
@@ -91,6 +99,30 @@ async def test_turn_cap_on_codex_fails_rather_than_being_ignored(git_repo: Path)
         await call(
             "start_task", prompt="x", repo_path=str(git_repo), backend="codex", max_turns=5
         )
+
+
+async def test_model_on_vibe_fails_rather_than_being_ignored(git_repo: Path) -> None:
+    """vibe has no model-selection flag at all — a silent no-op is exactly what this repo forbids."""
+    with pytest.raises(MCPError, match="no model selection flag"):
+        await call(
+            "start_task", prompt="x", repo_path=str(git_repo), backend="vibe",
+            model="mistral-medium",
+        )
+    assert (await call("list_tasks")).structured_content["result"] == []
+
+
+async def test_model_on_vibe_resume_surfaces_as_invalid_params_not_an_internal_error(
+    fake_task: Task,
+) -> None:
+    """Exercises the resume_task except block: build_resume_argv raises UnsupportedCapability from
+    inside the argv builder, which must surface as INVALID_PARAMS, not an unhandled tool failure."""
+    fake_task.backend = "vibe"
+    fake_task.model = "mistral-medium"
+    fake_task.status = "completed"
+    fake_task.done.set()
+
+    with pytest.raises(MCPError, match="no model selection flag"):
+        await call("resume_task", task_id=fake_task.task_id, followup_prompt="carry on")
 
 
 async def test_invalid_reasoning_effort_fails_before_a_task_exists(git_repo: Path) -> None:

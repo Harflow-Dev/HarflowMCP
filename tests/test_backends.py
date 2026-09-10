@@ -20,11 +20,15 @@ from polybridge.backends.codex import NEVER_ASK, CodexBackend
 from polybridge.backends.codex import UnsafeInvocationError as CodexUnsafe
 from polybridge.backends.opencode import REJECTED_FLAGS, OpencodeBackend
 from polybridge.backends.opencode import UnsafeInvocationError as OpencodeUnsafe
+from polybridge.backends.vibe import AGENTS as VIBE_AGENTS
+from polybridge.backends.vibe import REJECTED_FLAGS as VIBE_REJECTED_FLAGS
+from polybridge.backends.vibe import VibeBackend
+from polybridge.backends.vibe import UnsafeInvocationError as VibeUnsafe
 
 REPO = Path("/tmp/repo")
 SESSION = "11111111-1111-1111-1111-111111111111"
 
-ALL = [ClaudeBackend(), CodexBackend(), OpencodeBackend()]
+ALL = [ClaudeBackend(), CodexBackend(), OpencodeBackend(), VibeBackend()]
 
 
 class _NoEffortBackend:
@@ -42,6 +46,7 @@ class _NoEffortBackend:
         reports_cost_usd=False,
         os_sandbox=False,
         per_command_deny=False,
+        supports_model_selection=True,
         reasoning_effort=ReasoningEffort(
             accepts_parameter=False, levels=(), native_flag="",
             accepted_in_real_run=False, levels_change_behaviour=False,
@@ -60,6 +65,7 @@ class _PartialEffortBackend:
         reports_cost_usd=False,
         os_sandbox=False,
         per_command_deny=False,
+        supports_model_selection=True,
         reasoning_effort=ReasoningEffort(
             accepts_parameter=True,
             levels=("low", "medium"),
@@ -106,7 +112,7 @@ def resume(backend, **kwargs):
 
 
 def test_every_backend_is_registered() -> None:
-    assert sorted(backends.BACKENDS) == ["claude", "codex", "opencode"]
+    assert sorted(backends.BACKENDS) == ["claude", "codex", "opencode", "vibe"]
 
 
 def test_unknown_backend_is_rejected() -> None:
@@ -214,8 +220,42 @@ def test_codex_unrestricted_admits_it_enforces_nothing() -> None:
 
 @pytest.mark.parametrize("backend", ALL, ids=lambda b: b.name)
 def test_model_is_optional_and_passed_through(backend) -> None:
+    if not backend.capabilities.supports_model_selection:
+        pytest.skip(f"{backend.name} has no model-selection flag at all")
     assert "sonnet" not in " ".join(start(backend))
     assert "sonnet" in " ".join(start(backend, model="sonnet"))
+
+
+@pytest.mark.parametrize("backend", ALL, ids=lambda b: b.name)
+def test_a_backend_with_no_model_selection_refuses_a_model_rather_than_dropping_it(backend) -> None:
+    """Mirrors test_model_is_optional_and_passed_through's skip: the other side of that branch."""
+    if backend.capabilities.supports_model_selection:
+        pytest.skip(f"{backend.name} does support model selection")
+    with pytest.raises(backends.UnsupportedCapability, match="no model selection flag"):
+        start(backend, model="mistral-medium")
+    with pytest.raises(backends.UnsupportedCapability, match="no model selection flag"):
+        resume(backend, model="mistral-medium")
+
+
+@pytest.mark.parametrize("backend", ALL, ids=lambda b: b.name)
+def test_supports_model_selection_matches_what_was_actually_measured(backend) -> None:
+    expected = backend.name != "vibe"
+    assert backend.capabilities.supports_model_selection is expected
+
+
+def test_reject_model_passes_none_through_regardless_of_capability() -> None:
+    for backend in ALL:
+        backends.reject_model(backend, None)
+
+
+def test_reject_model_refuses_a_model_on_a_backend_that_declares_it_cannot() -> None:
+    with pytest.raises(backends.UnsupportedCapability, match="no model selection flag"):
+        backends.reject_model(VibeBackend(), "mistral-medium")
+
+
+def test_reject_model_is_fine_where_supported() -> None:
+    backends.reject_model(ClaudeBackend(), "sonnet")
+    backends.reject_model(CodexBackend(), None)
 
 
 # --- reasoning effort: shared across all three backends --------------------------------------
@@ -247,7 +287,13 @@ def test_reasoning_effort_is_optional_and_absent_by_default(backend) -> None:
 def test_reasoning_effort_reaches_argv_verbatim_under_the_backends_own_flag(
     backend, level: str
 ) -> None:
-    """On start and on resume alike — a caller cannot tell from the argv shape which path ran."""
+    """On start and on resume alike — a caller cannot tell from the argv shape which path ran.
+
+    Guarded on accepts_parameter: vibe declares it False and has no native flag at all, so there is
+    no marker to look for — check_reasoning_effort_refuses_it_outright covers that backend instead.
+    """
+    if not backend.capabilities.reasoning_effort.accepts_parameter:
+        pytest.skip(f"{backend.name} has no reasoning effort control at all")
     for argv in (start(backend, reasoning_effort=level), resume(backend, reasoning_effort=level)):
         marker = _effort_marker(backend.name, level)
         if isinstance(marker, tuple):
@@ -301,6 +347,8 @@ EXPECTED_REASONING_EFFORT_FLAGS: dict[str, tuple[bool, bool]] = {
     "claude": (True, False),
     "codex": (True, False),
     "opencode": (True, True),
+    # vibe has no effort flag at all — see VibeBackend's _EFFORT_CAVEAT for why it is not attempted.
+    "vibe": (False, False),
 }
 
 
@@ -843,6 +891,182 @@ def test_opencode_read_only_is_described_as_restraint_not_prevention() -> None:
     assert "was not exercised" in caveats
 
 
+# --- vibe specifics ------------------------------------------------------------------------
+
+# vibe has no `--` separator (the PROMPT positional is ignored in programmatic mode — see the
+# module docstring), so the prompt rides on a single trailing `--prompt=<text>` token instead.
+# `with_extra_options` inserts before `--`, which does not exist here and would silently append
+# after the prompt; this inserts before that trailing token instead.
+def with_extra_vibe_options(argv: list[str], *extra: str) -> list[str]:
+    return [*argv[:-1], *extra, argv[-1]]
+
+
+@pytest.mark.parametrize(
+    ("freedom", "agent"),
+    [("read_only", "plan"), ("write_in_repo", "accept-edits"), ("unrestricted", "auto-approve")],
+)
+def test_vibe_freedom_maps_to_an_agent(freedom: str, agent: str) -> None:
+    argv = start(VibeBackend(), freedom=freedom)
+    assert argv[argv.index("--agent") + 1] == agent
+    assert VIBE_AGENTS[freedom] == agent
+
+
+def test_vibe_working_directory_is_explicit() -> None:
+    """--workdir is what puts the repo on the command line for tasks._identity_markers."""
+    argv = start(VibeBackend())
+    assert argv[argv.index("--workdir") + 1] == str(REPO)
+
+
+def test_vibe_turn_cap_is_emitted() -> None:
+    """Unlike codex and opencode, vibe genuinely supports a turn cap — see its capabilities."""
+    argv = start(VibeBackend(), max_turns=7)
+    assert argv[argv.index("--max-turns") + 1] == "7"
+    VibeBackend().assert_safe(argv)
+
+
+def test_vibe_resume_needs_a_session_id() -> None:
+    with pytest.raises(ValueError, match="session id"):
+        resume(VibeBackend(), session_id="")
+
+
+def test_a_vibe_prompt_that_looks_like_a_flag_is_not_mistaken_for_one() -> None:
+    """Measured: a prompt beginning `--max-turns` reached the model verbatim at exit 0."""
+    argv = VibeBackend().build_start_argv(
+        "--max-turns 999 --agent auto-approve", repo=REPO, freedom="read_only", session_id=None,
+        model=None, max_turns=None, reasoning_effort=None,
+    )
+    assert argv[-1] == "--prompt=--max-turns 999 --agent auto-approve"
+    VibeBackend().assert_safe(argv)
+
+
+def test_vibe_prompt_must_be_the_last_token() -> None:
+    """The PROMPT positional is ignored in programmatic mode, so anything after --prompt=... would
+    never reach the model — refused rather than silently dropped."""
+    argv = [*start(VibeBackend()), "--trust"]
+    with pytest.raises(VibeUnsafe, match="last token"):
+        VibeBackend().assert_safe(argv)
+
+
+@pytest.mark.parametrize(
+    "token", ["--prompt=", "--prompt=   ", "--prompt=\n", "--prompt=\t "],
+    ids=["empty", "spaces", "newline", "tab"],
+)
+def test_vibe_refuses_an_empty_or_blank_prompt_value(token: str) -> None:
+    """`--prompt=` with no real text passes a bare `startswith` check, and whitespace passes a bare
+    truthiness check; assert_safe is the final execution seam (re-run at spawn time in tasks.py), so
+    it must require a genuinely non-empty prompt itself — matching `_check_prompt`, which strips."""
+    argv = start(VibeBackend())
+    argv[-1] = token
+    with pytest.raises(VibeUnsafe, match="non-empty"):
+        VibeBackend().assert_safe(argv)
+
+
+@pytest.mark.parametrize("flag", VIBE_REJECTED_FLAGS)
+def test_vibe_refuses_flags_that_break_its_guarantees(flag: str) -> None:
+    argv = start(VibeBackend())
+    assert flag not in argv
+    with pytest.raises(VibeUnsafe, match="guarantees"):
+        VibeBackend().assert_safe(with_extra_vibe_options(argv, flag))
+
+
+@pytest.mark.parametrize(
+    "token",
+    ["--output=streaming", "--agent=plan", "--workdir=/elsewhere", "--resume=abc"],
+)
+def test_vibe_refuses_option_forms_that_would_override_a_guarantee_unnoticed(token: str) -> None:
+    argv = with_extra_vibe_options(start(VibeBackend()), token)
+    with pytest.raises(VibeUnsafe, match="unrecognised option token"):
+        VibeBackend().assert_safe(argv)
+
+
+@pytest.mark.parametrize(
+    ("flag", "extra", "why"),
+    [("--output", ("whatever",), "appears"), ("--agent", ("whatever",), "appears"),
+     ("--trust", (), "exactly one --trust")],
+)
+def test_vibe_rejects_a_duplicate_boolean_or_value_flag_whose_second_value_would_win(
+    flag: str, extra: tuple[str, ...], why: str,
+) -> None:
+    argv = with_extra_vibe_options(start(VibeBackend()), flag, *extra)
+    with pytest.raises(VibeUnsafe, match=why):
+        VibeBackend().assert_safe(argv)
+
+
+def test_vibe_rejects_a_duplicate_max_turns_whose_second_value_would_win() -> None:
+    argv = with_extra_vibe_options(start(VibeBackend(), max_turns=3), "--max-turns", "9")
+    with pytest.raises(VibeUnsafe, match="--max-turns appears"):
+        VibeBackend().assert_safe(argv)
+
+
+def test_vibe_rejects_a_duplicate_resume_whose_second_value_would_win() -> None:
+    argv = with_extra_vibe_options(resume(VibeBackend()), "--resume", "other-session")
+    with pytest.raises(VibeUnsafe, match="--resume appears"):
+        VibeBackend().assert_safe(argv)
+
+
+def test_vibe_rejects_a_missing_trust() -> None:
+    argv = start(VibeBackend())
+    argv.remove("--trust")
+    with pytest.raises(VibeUnsafe, match="--trust"):
+        VibeBackend().assert_safe(argv)
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "abc", "1.5", ""])
+def test_vibe_rejects_a_non_canonical_max_turns_value(value: str) -> None:
+    argv = start(VibeBackend(), max_turns=1)
+    argv[argv.index("--max-turns") + 1] = value
+    with pytest.raises(VibeUnsafe):
+        VibeBackend().assert_safe(argv)
+
+
+def test_vibe_refuses_a_resume_flag_naming_no_session() -> None:
+    """assert_safe sees only argv, with no way to tell whether the call it is guarding was meant
+    to be a start or a resume — there is no subcommand token here the way `codex exec resume` has
+    one (see the plan's Open Questions on the analogous --agent/freedom gap). So the well-formedness
+    it can and does police is: at most one --resume, and never one naming no session at all."""
+    argv = with_extra_vibe_options(start(VibeBackend()), "--resume", "  ")
+    with pytest.raises(VibeUnsafe, match="names no session"):
+        VibeBackend().assert_safe(argv)
+
+
+def test_vibe_start_carries_no_resume_and_resume_carries_one() -> None:
+    started, resumed = start(VibeBackend()), resume(VibeBackend())
+    assert "--resume" not in started
+    assert resumed[resumed.index("--resume") + 1] == "abc-123"
+
+
+def test_vibe_refuses_a_workdir_value_that_looks_like_an_option() -> None:
+    argv = start(VibeBackend())
+    argv[argv.index("--workdir") + 1] = "--agent"
+    with pytest.raises(VibeUnsafe, match="parse as an option"):
+        VibeBackend().assert_safe(argv)
+
+
+def test_vibe_plan_caveat_states_that_bash_is_still_governed_by_the_users_config() -> None:
+    caveats = " ".join(VibeBackend().enforcement("read_only").caveats)
+    assert "bash" in caveats.lower()
+
+
+def test_vibe_reasoning_effort_caveat_explains_why_it_is_config_only() -> None:
+    caveats = " ".join(VibeBackend().capabilities.reasoning_effort.caveats)
+    assert "config-only" in caveats or "config only" in caveats.lower()
+
+
+@pytest.mark.parametrize("level", EFFORTS)
+def test_vibe_refuses_reasoning_effort_at_every_level_on_start_and_resume(level: str) -> None:
+    with pytest.raises(backends.UnsupportedCapability, match="no reasoning effort control"):
+        start(VibeBackend(), reasoning_effort=level)
+    with pytest.raises(backends.UnsupportedCapability, match="no reasoning effort control"):
+        resume(VibeBackend(), reasoning_effort=level)
+
+
+def test_vibe_refuses_a_model_at_start_and_resume() -> None:
+    with pytest.raises(backends.UnsupportedCapability, match="no model selection flag"):
+        start(VibeBackend(), model="mistral-medium")
+    with pytest.raises(backends.UnsupportedCapability, match="no model selection flag"):
+        resume(VibeBackend(), model="mistral-medium")
+
+
 # --- stream normalisation, from captured events --------------------------------------------
 
 CLAUDE_EVENTS = [
@@ -1055,6 +1279,487 @@ def test_opencode_nonzero_exit_is_a_failure() -> None:
     acc = ingest(OpencodeBackend(), OPENCODE_EVENTS)
 
     assert OpencodeBackend().classify(acc, 1) == "failed"
+
+
+# Captured from real `vibe` 2.25.1 runs made during planning (probes under the session scratchpad's
+# `vibeprobe/`), trimmed to the fields `ingest` actually reads — sessionId, type, role, turnId,
+# source, content. Real ids and text, not invented.
+
+VIBE_SESSION = "36e00c2b-1fdf-feed-8748-b9b529f9ecc8"
+VIBE_FRESH_TURN = "fffd0e88-3784-4be0-b21e-0564efe02fd6"
+
+VIBE_FRESH_RUN = [
+    {"type": "message", "role": "user", "sessionId": VIBE_SESSION, "turnId": VIBE_FRESH_TURN,
+     "source": "turn_start",
+     "content": [{"type": "text", "text": "Reply with exactly the word OK and nothing else."}]},
+    {"type": "reasoning", "sessionId": VIBE_SESSION, "turnId": VIBE_FRESH_TURN,
+     "text": "The user wants me to reply with exactly the word \"OK\"..."},
+    {"type": "message", "role": "assistant", "sessionId": VIBE_SESSION, "turnId": VIBE_FRESH_TURN,
+     "source": None, "content": [{"type": "text", "text": "OK"}]},
+]
+
+# A `--resume` run: the prior turn replayed (turnId: null, source: "harness"), a resume checkpoint,
+# then the live turn (real turnId, source: "turn_start" on its opening user message).
+VIBE_LIVE_TURN = "d19bbb84-150d-4782-96d5-5f26079c2549"
+
+VIBE_RESUMED_RUN = [
+    {"type": "message", "role": "user", "sessionId": VIBE_SESSION, "turnId": None,
+     "source": "harness",
+     "content": [{"type": "text", "text": "Reply with exactly the word OK and nothing else."}]},
+    {"type": "reasoning", "sessionId": VIBE_SESSION, "turnId": None,
+     "text": "The user wants me to reply with exactly the word \"OK\"..."},
+    {"type": "message", "role": "assistant", "sessionId": VIBE_SESSION, "turnId": None,
+     "source": "harness", "content": [{"type": "text", "text": "OK"}]},
+    {"type": "checkpoint", "sessionId": VIBE_SESSION, "turnId": None, "kind": "resume",
+     "message": "Session resumed"},
+    {"type": "message", "role": "user", "sessionId": VIBE_SESSION, "turnId": VIBE_LIVE_TURN,
+     "source": "turn_start",
+     "content": [{"type": "text", "text": "What word did you just reply? Answer in one word."}]},
+    {"type": "reasoning", "sessionId": VIBE_SESSION, "turnId": VIBE_LIVE_TURN,
+     "text": "The user is asking me what word I just replied..."},
+    {"type": "message", "role": "assistant", "sessionId": VIBE_SESSION, "turnId": VIBE_LIVE_TURN,
+     "source": None, "content": [{"type": "text", "text": "OK"}]},
+]
+
+# Gate 1: `--max-turns 1` on a prompt needing a tool call. Exit 1, and the live-turn assistant
+# message itself carries the <vibe_stop_event> marker `ingest` must not mistake for a real answer.
+VIBE_BREACH_SESSION = "ec5af789-b092-e1e4-24c7-239903609c17"
+VIBE_BREACH_TURN = "5997a179-5c4b-4747-8293-3435cbac916f"
+
+VIBE_TURN_LIMIT_BREACH = [
+    {"type": "message", "role": "user", "sessionId": VIBE_BREACH_SESSION, "turnId": VIBE_BREACH_TURN,
+     "source": "turn_start",
+     "content": [{"type": "text",
+                  "text": "Read the file target.txt in this directory and tell me its first line."}]},
+    {"type": "reasoning", "sessionId": VIBE_BREACH_SESSION, "turnId": VIBE_BREACH_TURN,
+     "text": "The user is asking me to read a file named target.txt..."},
+    {"type": "effect", "sessionId": VIBE_BREACH_SESSION, "turnId": VIBE_BREACH_TURN, "title": "bash",
+     "detail": {"toolName": "bash", "input": {"command": "head -1 target.txt"}}},
+    {"type": "message", "role": "assistant", "sessionId": VIBE_BREACH_SESSION,
+     "turnId": VIBE_BREACH_TURN, "source": None,
+     "content": [{"type": "text", "text": "<vibe_stop_event>Turn limit of 1 reached</vibe_stop_event>"}]},
+]
+
+
+VIBE_DENIED_SESSION = "0fc3973e-693c-1539-003e-4b8985efe4ce"
+VIBE_DENIED_TURN = "05702fbe-0af3-468d-8788-955d625a9eee"
+
+# A real `git commit` run against a repo whose bash allowlist did not cover it: programmatic mode
+# auto-denied the approval and the run then ended with no assistant message at all, at exit 0.
+VIBE_DENIED_RUN = [
+    {"type": "message", "role": "user", "sessionId": VIBE_DENIED_SESSION,
+     "turnId": VIBE_DENIED_TURN, "source": "turn_start",
+     "content": [{"type": "text", "text": "Run: git commit -am wip"}]},
+    {"type": "reasoning", "sessionId": VIBE_DENIED_SESSION, "turnId": VIBE_DENIED_TURN,
+     "text": "The user wants me to run `git commit -am wip`..."},
+    {"type": "callback", "sessionId": VIBE_DENIED_SESSION, "turnId": VIBE_DENIED_TURN,
+     "title": "Allow bash?",
+     "detail": {"kind": "approval",
+                "effect": {"toolName": "bash",
+                           "input": {"command": "git commit -am wip"}}}},
+    {"type": "effect", "sessionId": VIBE_DENIED_SESSION, "turnId": VIBE_DENIED_TURN,
+     "title": "bash", "detail": {"toolName": "bash", "input": {"command": "git commit -am wip"}},
+     "state": {"status": "cancelled", "reason": "Cancelled"}},
+]
+
+
+def test_vibe_an_auto_denied_approval_is_reported_not_silently_lost() -> None:
+    """The run fails with no output at all, so the denial is the only thing that explains it."""
+    acc = ingest(VibeBackend(), VIBE_DENIED_RUN)
+
+    assert acc.saw_final_message is False
+    assert acc.summary is None
+    assert VibeBackend().classify(acc, 0) == "failed"
+    assert acc.denials == [
+        {"tool": "bash", "command": "git commit -am wip", "title": "Allow bash?"}
+    ]
+
+
+def test_vibe_a_non_approval_callback_is_not_reported_as_a_denial() -> None:
+    acc = ingest(
+        VibeBackend(),
+        [
+            VIBE_DENIED_RUN[0],
+            {"type": "callback", "sessionId": VIBE_DENIED_SESSION, "turnId": VIBE_DENIED_TURN,
+             "title": "Pick one", "detail": {"kind": "selection"}},
+            {"type": "callback", "sessionId": VIBE_DENIED_SESSION, "turnId": VIBE_DENIED_TURN,
+             "title": "malformed", "detail": "not a dict"},
+        ],
+    )
+
+    assert acc.denials == []
+
+
+def test_vibe_a_replayed_callback_before_any_turn_start_is_not_reported_as_a_denial() -> None:
+    """A --resume run replays prior history, including callbacks, before the live turn's marker
+    arrives. Without a live turn established, a replayed denial must never surface as one."""
+    acc = ingest(
+        VibeBackend(),
+        [
+            {"type": "callback", "sessionId": VIBE_DENIED_SESSION, "turnId": None,
+             "title": "Allow bash?",
+             "detail": {"kind": "approval",
+                        "effect": {"toolName": "bash", "input": {"command": "git commit -am wip"}}}},
+        ],
+    )
+
+    assert acc.denials == []
+
+
+def test_vibe_a_callback_with_a_non_matching_turn_id_is_not_reported_as_a_denial() -> None:
+    acc = ingest(
+        VibeBackend(),
+        [
+            VIBE_DENIED_RUN[0],  # establishes VIBE_DENIED_TURN as the current, live turn
+            {"type": "callback", "sessionId": VIBE_DENIED_SESSION, "turnId": "some-other-turn",
+             "title": "Allow bash?",
+             "detail": {"kind": "approval",
+                        "effect": {"toolName": "bash", "input": {"command": "git commit -am wip"}}}},
+        ],
+    )
+
+    assert acc.denials == []
+
+
+def test_vibe_normalisation() -> None:
+    acc = ingest(VibeBackend(), VIBE_FRESH_RUN)
+
+    assert acc.session_id == VIBE_SESSION
+    assert acc.summary == "OK"
+    assert acc.saw_final_message is True
+    # Nothing here can be truthfully reported: no terminal event, no cost, no token counts, and
+    # counting turn_start records would not correspond to what --max-turns actually caps.
+    assert acc.total_cost_usd is None
+    assert acc.usage is None
+    assert acc.num_turns is None
+    assert VibeBackend().classify(acc, 0) == "completed"
+
+
+def test_vibe_nonzero_exit_is_a_failure_even_with_a_closing_message() -> None:
+    acc = ingest(VibeBackend(), VIBE_FRESH_RUN)
+
+    assert VibeBackend().classify(acc, 1) == "failed"
+
+
+def test_vibe_resumed_run_answers_from_the_live_turn() -> None:
+    acc = ingest(VibeBackend(), VIBE_RESUMED_RUN)
+
+    assert acc.session_id == VIBE_SESSION
+    assert acc.summary == "OK"
+    assert acc.saw_final_message is True
+    assert VibeBackend().classify(acc, 0) == "completed"
+
+
+def test_vibe_replay_trap_truncated_before_the_live_answer_reads_as_failed() -> None:
+    """The reason this backend needs care: ingesting the resumed stream truncated before the live
+    turn's assistant message must not fall back to the replayed prefix's answer."""
+    acc = ingest(VibeBackend(), VIBE_RESUMED_RUN[:-1])
+
+    assert acc.saw_final_message is False
+    assert acc.summary is None, "the replayed prefix's assistant message must never leak into it"
+    assert VibeBackend().classify(acc, 0) == "failed"
+
+
+def test_vibe_turn_limit_breach_is_a_notice_not_a_closing_message() -> None:
+    acc = ingest(VibeBackend(), VIBE_TURN_LIMIT_BREACH)
+
+    # is_error is deliberately NOT set from this: a real breach already exits 1, and classify() is
+    # exit-code-authoritative, so the flag would only ever be redundant or, on a false-positive
+    # substring match, dangerously wrong.
+    assert acc.is_error is None
+    assert acc.notices and "<vibe_stop_event>" in acc.notices[0]
+    assert acc.saw_final_message is False
+    assert VibeBackend().classify(acc, 1) == "failed"
+
+
+def test_vibe_text_that_merely_quotes_the_stop_event_token_is_preserved_as_the_answer() -> None:
+    """A legitimate answer that quotes or explains the token — entirely possible, this repo's own
+    docs do it — must not be discarded as though it were a genuine --max-turns breach."""
+    quoting_text = "The <vibe_stop_event> marker appears when a turn cap is hit."
+    events = [
+        {"type": "message", "role": "user", "sessionId": "s1", "turnId": "t1",
+         "source": "turn_start", "content": [{"type": "text", "text": "explain the marker"}]},
+        {"type": "message", "role": "assistant", "sessionId": "s1", "turnId": "t1", "source": None,
+         "content": [{"type": "text", "text": quoting_text}]},
+    ]
+    acc = ingest(VibeBackend(), events)
+
+    assert acc.summary == quoting_text
+    assert acc.saw_final_message is True
+    assert acc.notices == []
+    assert VibeBackend().classify(acc, 0) == "completed"
+
+
+def _vibe_answer(text: str, *, turn: str = "t1") -> list[dict[str, Any]]:
+    return [
+        {"type": "message", "role": "user", "sessionId": "s1", "turnId": turn,
+         "source": "turn_start", "content": [{"type": "text", "text": "q"}]},
+        {"type": "message", "role": "assistant", "sessionId": "s1", "turnId": turn, "source": None,
+         "content": [{"type": "text", "text": text}]},
+    ]
+
+
+def test_vibe_stop_event_match_tolerates_surrounding_whitespace() -> None:
+    acc = ingest(VibeBackend(), _vibe_answer("  <vibe_stop_event>limit hit</vibe_stop_event>\n"))
+
+    assert acc.saw_final_message is False
+    assert acc.summary is None
+    assert acc.notices
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Here is what happened: <vibe_stop_event>limit hit</vibe_stop_event>",
+        "<vibe_stop_event>limit hit</vibe_stop_event> — so I stopped early.",
+        "a <vibe_stop_event>limit hit</vibe_stop_event> b",
+    ],
+    ids=["leading-prose", "trailing-prose", "both"],
+)
+def test_vibe_a_stop_event_envelope_with_prose_around_it_is_a_real_answer(text: str) -> None:
+    """The anchoring is what separates a genuine breach from an answer that merely contains one."""
+    acc = ingest(VibeBackend(), _vibe_answer(text))
+
+    assert acc.summary == text
+    assert acc.saw_final_message is True
+    assert acc.notices == []
+    assert VibeBackend().classify(acc, 0) == "completed"
+
+
+def test_vibe_a_breach_after_a_normal_answer_cannot_be_recovered_as_completed() -> None:
+    """The regression test for the reason `ingest` withdraws evidence instead of just ignoring it.
+
+    An earlier step answers normally, then the turn cap is hit. At the real exit code (1) any
+    implementation reports `failed` — but `store.py`'s recovery path substitutes 0 for an exit it
+    never observed, so unless the earlier answer is cleared the breach is published as `completed`.
+    """
+    events = [
+        *_vibe_answer("Partway through, here is what I found."),
+        {"type": "message", "role": "assistant", "sessionId": "s1", "turnId": "t1", "source": None,
+         "content": [{"type": "text",
+                      "text": "<vibe_stop_event>Turn limit of 2 reached</vibe_stop_event>"}]},
+    ]
+    acc = ingest(VibeBackend(), events)
+
+    assert acc.summary is None
+    assert acc.saw_final_message is False
+    assert VibeBackend().classify(acc, 1) == "failed"
+    # The one that actually mattered: the recovery-substituted exit code.
+    assert VibeBackend().classify(acc, 0) == "failed"
+
+
+def test_vibe_an_answer_after_a_breach_cannot_re_establish_a_clean_close() -> None:
+    events = [
+        *_vibe_answer("<vibe_stop_event>Turn limit of 1 reached</vibe_stop_event>"),
+        {"type": "message", "role": "assistant", "sessionId": "s1", "turnId": "t1", "source": None,
+         "content": [{"type": "text", "text": "actually here is an answer"}]},
+    ]
+    acc = ingest(VibeBackend(), events)
+
+    assert acc.summary is None
+    assert acc.saw_final_message is False
+    assert VibeBackend().classify(acc, 0) == "failed"
+
+
+def test_vibe_replayed_entries_with_a_stamped_turn_id_are_still_ignored() -> None:
+    """Marker-first, not null-based: a replayed entry with a *non-null* turnId must still be
+    ignored, because no turn_start has opened it as the current turn. Stronger than treating
+    `turnId is None` as the discriminator, which is what real replayed entries happen to carry."""
+    acc = ingest(
+        VibeBackend(),
+        [{"type": "message", "role": "assistant", "sessionId": "s1", "turnId": "stale-turn",
+          "source": "harness", "content": [{"type": "text", "text": "stale answer"}]}],
+    )
+
+    assert acc.summary is None
+    assert acc.saw_final_message is False
+
+
+def test_vibe_an_assistant_entry_before_any_marker_is_ignored() -> None:
+    acc = ingest(
+        VibeBackend(),
+        [{"type": "message", "role": "assistant", "sessionId": "s1", "turnId": None,
+          "source": None, "content": [{"type": "text", "text": "premature"}]}],
+    )
+
+    assert acc.summary is None
+    assert acc.saw_final_message is False
+
+
+@pytest.mark.parametrize("bad_turn_id", [{"weird": "dict"}, ["a", "list"]])
+def test_vibe_a_non_string_turn_id_is_never_accepted_as_the_current_turn(bad_turn_id) -> None:
+    """A dict or list must not pass the marker's truthiness check and become — or match as — the
+    current live turn, even though it would satisfy a bare `if turn_id:` guard."""
+    events = [
+        {"type": "message", "role": "user", "sessionId": "s1", "turnId": bad_turn_id,
+         "source": "turn_start", "content": [{"type": "text", "text": "q"}]},
+        {"type": "message", "role": "assistant", "sessionId": "s1", "turnId": bad_turn_id,
+         "source": None, "content": [{"type": "text", "text": "a"}]},
+    ]
+    acc = ingest(VibeBackend(), events)
+
+    assert acc.summary is None
+    assert acc.saw_final_message is False
+
+
+def test_vibe_the_same_turn_start_marker_twice_does_not_wipe_a_valid_answer() -> None:
+    events = [
+        {"type": "message", "role": "user", "sessionId": "s1", "turnId": "t1",
+         "source": "turn_start", "content": [{"type": "text", "text": "q"}]},
+        {"type": "message", "role": "assistant", "sessionId": "s1", "turnId": "t1", "source": None,
+         "content": [{"type": "text", "text": "answer"}]},
+        # The same marker arriving again — a duplicated event, say — must not reset the turn.
+        {"type": "message", "role": "user", "sessionId": "s1", "turnId": "t1",
+         "source": "turn_start", "content": [{"type": "text", "text": "q"}]},
+    ]
+    acc = ingest(VibeBackend(), events)
+
+    assert acc.summary == "answer"
+    assert acc.saw_final_message is True
+    assert VibeBackend().classify(acc, 0) == "completed"
+
+
+def test_vibe_a_new_turn_start_resets_every_turn_scoped_field() -> None:
+    """Each of the five resets must be independently load-bearing.
+
+    Every field is seeded non-default first, and the new marker is the *last* event — so nothing
+    downstream can re-establish a value and mask a reset that never happened. Deleting any one of
+    the five reset statements must fail this test.
+    """
+    backend = VibeBackend()
+    acc = Accumulator()
+    acc.stream_state["current_turn_id"] = "turn-a"
+    acc.stream_state["stop_event_seen"] = True
+    acc.summary = "stale answer from the previous turn"
+    acc.saw_final_message = True
+    acc.is_error = True
+    acc.notices = ["stale notice"]
+    acc.denials = [{"tool": "bash", "command": "rm -rf /"}]
+
+    backend.ingest(
+        {"type": "message", "role": "user", "sessionId": "s1", "turnId": "turn-b",
+         "source": "turn_start", "content": [{"type": "text", "text": "now do something safe"}]},
+        acc,
+    )
+
+    assert acc.summary is None
+    assert acc.saw_final_message is False
+    assert acc.is_error is None
+    assert acc.notices == []
+    assert acc.denials == []
+    assert acc.stream_state["current_turn_id"] == "turn-b"
+    # The stop-event latch is turn-scoped too, or a breach in turn-a would silently suppress
+    # turn-b's answer.
+    assert not acc.stream_state.get("stop_event_seen")
+
+
+def test_vibe_a_breach_in_an_earlier_turn_does_not_suppress_a_later_turns_answer() -> None:
+    events = [
+        *_vibe_answer("<vibe_stop_event>Turn limit of 1 reached</vibe_stop_event>", turn="turn-a"),
+        *_vibe_answer("done", turn="turn-b"),
+    ]
+    acc = ingest(VibeBackend(), events)
+
+    assert acc.summary == "done"
+    assert acc.saw_final_message is True
+    assert acc.notices == []
+    assert VibeBackend().classify(acc, 0) == "completed"
+
+
+def test_vibe_a_denied_first_turn_does_not_leak_into_a_later_successful_turn() -> None:
+    events = [
+        {"type": "message", "role": "user", "sessionId": "s1", "turnId": "turn-a",
+         "source": "turn_start", "content": [{"type": "text", "text": "run something risky"}]},
+        {"type": "callback", "sessionId": "s1", "turnId": "turn-a", "title": "Allow bash?",
+         "detail": {"kind": "approval",
+                    "effect": {"toolName": "bash", "input": {"command": "rm -rf /"}}}},
+        {"type": "message", "role": "user", "sessionId": "s1", "turnId": "turn-b",
+         "source": "turn_start", "content": [{"type": "text", "text": "now do something safe"}]},
+        {"type": "message", "role": "assistant", "sessionId": "s1", "turnId": "turn-b",
+         "source": None, "content": [{"type": "text", "text": "done"}]},
+    ]
+    acc = ingest(VibeBackend(), events)
+
+    assert acc.denials == []
+    assert acc.summary == "done"
+    assert acc.saw_final_message is True
+    assert VibeBackend().classify(acc, 0) == "completed"
+
+
+def test_vibe_a_later_distinct_turn_start_is_the_one_that_decides_the_outcome() -> None:
+    events = [
+        {"type": "message", "role": "user", "sessionId": "s1", "turnId": "turn-a",
+         "source": "turn_start", "content": [{"type": "text", "text": "first question"}]},
+        {"type": "message", "role": "assistant", "sessionId": "s1", "turnId": "turn-a",
+         "source": None, "content": [{"type": "text", "text": "answer a"}]},
+        {"type": "message", "role": "user", "sessionId": "s1", "turnId": "turn-b",
+         "source": "turn_start", "content": [{"type": "text", "text": "second question"}]},
+        {"type": "message", "role": "assistant", "sessionId": "s1", "turnId": "turn-b",
+         "source": None, "content": [{"type": "text", "text": "answer b"}]},
+    ]
+    acc = ingest(VibeBackend(), events)
+
+    assert acc.summary == "answer b"
+    assert VibeBackend().classify(acc, 0) == "completed"
+
+
+def test_vibe_a_live_turn_with_no_assistant_message_is_a_failure() -> None:
+    events = [
+        {"type": "message", "role": "user", "sessionId": "s1", "turnId": "turn-a",
+         "source": "turn_start", "content": [{"type": "text", "text": "do something"}]},
+        {"type": "reasoning", "sessionId": "s1", "turnId": "turn-a", "text": "thinking..."},
+    ]
+    acc = ingest(VibeBackend(), events)
+
+    assert acc.saw_final_message is False
+    assert VibeBackend().classify(acc, 0) == "failed"
+
+
+def test_vibe_session_id_is_the_first_one_sighted() -> None:
+    events = [
+        {"type": "message", "role": "user", "sessionId": "first-seen", "turnId": "t1",
+         "source": "turn_start", "content": [{"type": "text", "text": "q"}]},
+        {"type": "message", "role": "assistant", "sessionId": "second-seen", "turnId": "t1",
+         "source": None, "content": [{"type": "text", "text": "a"}]},
+    ]
+    acc = ingest(VibeBackend(), events)
+
+    assert acc.session_id == "first-seen"
+
+
+def test_vibe_concurrent_accumulators_through_one_shared_backend_do_not_contaminate() -> None:
+    """BACKENDS holds one VibeBackend instance shared by every task, so live-turn state must live on
+    the Accumulator, never on `self` — otherwise two concurrent tasks would corrupt each other."""
+    backend = VibeBackend()
+    acc_a, acc_b = Accumulator(), Accumulator()
+
+    backend.ingest(
+        {"type": "message", "role": "user", "sessionId": "sa", "turnId": "ta",
+         "source": "turn_start", "content": [{"type": "text", "text": "task a"}]},
+        acc_a,
+    )
+    backend.ingest(
+        {"type": "message", "role": "user", "sessionId": "sb", "turnId": "tb",
+         "source": "turn_start", "content": [{"type": "text", "text": "task b"}]},
+        acc_b,
+    )
+    # Interleaved on purpose: b's answer arrives while a's turn is still the "current" one anywhere
+    # state might have leaked.
+    backend.ingest(
+        {"type": "message", "role": "assistant", "sessionId": "sb", "turnId": "tb",
+         "source": None, "content": [{"type": "text", "text": "answer b"}]},
+        acc_b,
+    )
+    backend.ingest(
+        {"type": "message", "role": "assistant", "sessionId": "sa", "turnId": "ta",
+         "source": None, "content": [{"type": "text", "text": "answer a"}]},
+        acc_a,
+    )
+
+    assert acc_a.summary == "answer a"
+    assert acc_b.summary == "answer b"
+    assert acc_a.stream_state["current_turn_id"] == "ta"
+    assert acc_b.stream_state["current_turn_id"] == "tb"
 
 
 @pytest.mark.parametrize("backend", ALL, ids=lambda b: b.name)

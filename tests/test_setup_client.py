@@ -13,7 +13,7 @@ import pytest
 from polybridge import setup_client
 from polybridge.clients import Result, SetupError
 
-EVERYTHING = {"polybridge-server", "claude", "codex", "opencode", "git"}
+EVERYTHING = {"polybridge-server", "claude", "codex", "opencode", "vibe", "git"}
 
 
 @pytest.fixture
@@ -96,7 +96,7 @@ def test_a_dry_run_changes_nothing_and_previews_every_client(
     assert code == 0
     assert not (tmp_path / "claude_desktop_config.json").exists()
     assert "would write" in out
-    for binary in ("claude", "codex", "opencode"):
+    for binary in ("claude", "codex", "opencode", "vibe"):
         assert f"{binary} mcp add polybridge" in out
 
 
@@ -110,7 +110,7 @@ def test_clients_that_are_not_installed_are_skipped_not_failed(
     out = capsys.readouterr().out
     assert code == 0
     assert json.loads((tmp_path / "claude_desktop_config.json").read_text())["mcpServers"]
-    assert out.count("skipped") == 3
+    assert out.count("skipped") == 4
 
 
 def test_asking_for_a_client_that_is_not_installed_is_an_error(
