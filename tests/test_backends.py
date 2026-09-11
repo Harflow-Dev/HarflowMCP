@@ -12,11 +12,11 @@ import pytest
 
 from polybridge import backends
 from polybridge.backends import EFFORTS, FREEDOMS, Accumulator, Capabilities, ReasoningEffort
-from polybridge.backends.claude import DISALLOWED_TOOLS, FORBIDDEN_FLAGS, ClaudeBackend
+from polybridge.backends.claude import ALLOWED_TOOLS, DISALLOWED_TOOLS, FORBIDDEN_FLAGS, ClaudeBackend
 from polybridge.backends.claude import UnsafeInvocationError as ClaudeUnsafe
 from polybridge.backends.codex import BINARY as CODEX_BINARY
 from polybridge.backends.codex import EFFORT_KEY as CODEX_EFFORT_KEY
-from polybridge.backends.codex import NEVER_ASK, CodexBackend
+from polybridge.backends.codex import NETWORK_ENABLE_PAIR, NEVER_ASK, CodexBackend
 from polybridge.backends.codex import UnsafeInvocationError as CodexUnsafe
 from polybridge.backends.opencode import REJECTED_FLAGS, OpencodeBackend
 from polybridge.backends.opencode import UnsafeInvocationError as OpencodeUnsafe
@@ -139,6 +139,18 @@ def test_every_backend_builds_an_argv_it_considers_safe(backend, freedom: str) -
     backend.assert_safe(resume(backend, freedom=freedom), freedom)
 
 
+# Two (backend, freedom-pair) combinations are *deliberately* indistinguishable from argv alone —
+# not a hole in assert_safe, but a documented property of how those backends map freedoms to
+# mechanisms. See test_known_freedom_collapses_produce_byte_identical_argv, which pins the collapse
+# itself, and each backend's own `_MODE_CAVEATS["publish"]` / `AGENTS["publish"]` comment.
+KNOWN_COLLAPSED_FREEDOM_PAIRS: frozenset[tuple[str, frozenset[str]]] = frozenset(
+    {
+        ("opencode", frozenset({"write_in_repo", "publish"})),
+        ("vibe", frozenset({"publish", "unrestricted"})),
+    }
+)
+
+
 @pytest.mark.parametrize("backend", ALL, ids=lambda b: b.name)
 @pytest.mark.parametrize("built_freedom", FREEDOMS)
 @pytest.mark.parametrize("claimed_freedom", FREEDOMS)
@@ -149,15 +161,44 @@ def test_assert_safe_refuses_an_argv_built_for_a_different_freedom(
     caller actually asked for, not merely that the argv is internally consistent for *some*
     freedom. Without this, an argv built for read_only would pass a check told unrestricted, and
     vice versa — this is deliberately the test that fails if that check is ever removed or weakened
-    back to a membership check (see the mutation-check step in the plan)."""
+    back to a membership check (see the mutation-check step in the plan).
+
+    Excludes exactly the pairs in KNOWN_COLLAPSED_FREEDOM_PAIRS: assert_safe genuinely cannot refuse
+    a mismatch there, because there is no argv difference to detect — a documented property, pinned
+    by test_known_freedom_collapses_produce_byte_identical_argv, not a silent gap in this test.
+    """
     if built_freedom == claimed_freedom:
         pytest.skip("same-freedom case is covered by test_every_backend_builds_an_argv_it_considers_safe")
+    if (backend.name, frozenset({built_freedom, claimed_freedom})) in KNOWN_COLLAPSED_FREEDOM_PAIRS:
+        pytest.skip(
+            f"{backend.name} deliberately collapses {built_freedom!r} and {claimed_freedom!r}"
+        )
     for argv in (
         start(backend, freedom=built_freedom),
         resume(backend, freedom=built_freedom),
     ):
         with pytest.raises(RuntimeError):
             backend.assert_safe(argv, claimed_freedom)
+
+
+@pytest.mark.parametrize(
+    ("backend", "freedom_a", "freedom_b"),
+    [
+        (OpencodeBackend(), "write_in_repo", "publish"),
+        (VibeBackend(), "publish", "unrestricted"),
+    ],
+    ids=["opencode-write_in_repo-publish", "vibe-publish-unrestricted"],
+)
+def test_known_freedom_collapses_produce_byte_identical_argv(backend, freedom_a, freedom_b) -> None:
+    """Pins the collapse deliberately rather than leaving it an accident of the current mapping —
+    see KNOWN_COLLAPSED_FREEDOM_PAIRS, which excludes exactly these two pairs from the cross-freedom
+    refusal test above."""
+    assert start(backend, freedom=freedom_a) == start(backend, freedom=freedom_b)
+    assert resume(backend, freedom=freedom_a) == resume(backend, freedom=freedom_b)
+    caveats = " ".join(backend.enforcement(freedom_a).caveats) + " ".join(
+        backend.enforcement(freedom_b).caveats
+    )
+    assert "cannot tell these two freedoms apart" in caveats
 
 
 @pytest.mark.parametrize("backend", ALL, ids=lambda b: b.name)
@@ -226,6 +267,41 @@ def test_confined_writes_say_where_they_may_still_land(backend, freedom: str) ->
         assert enforcement.writable_roots, "confinement must state what remains writable"
     if freedom == "read_only" and enforcement.writes_confined:
         assert enforcement.writable_roots == (), "read-only permits no writes at all"
+
+
+@pytest.mark.parametrize("backend", ALL, ids=lambda b: b.name)
+@pytest.mark.parametrize("freedom", FREEDOMS)
+def test_publish_attempts_allowed_by_polybridge_matches_the_ladder(backend, freedom: str) -> None:
+    """False at read_only/write_in_repo, True at publish/unrestricted — for all four backends,
+    even though what that True actually amounts to varies wildly (see the mechanism table in
+    CLAUDE.md / README.md). Never named `publishing_permitted`: see the field's own docstring for
+    why that name would overclaim."""
+    expected = freedom in ("publish", "unrestricted")
+    enforcement = backend.enforcement(freedom)
+    assert enforcement.publish_attempts_allowed_by_polybridge is expected
+
+
+# Exact measured table. claude/opencode/vibe impose no sandbox at all, so network reachability is
+# never something polybridge controls there — "not_controlled" at every freedom. codex alone has an
+# OS sandbox with a measured, freedom-dependent effect on network reachability.
+EXPECTED_NETWORK_ACCESS: dict[str, dict[str, str]] = {
+    "claude": dict.fromkeys(FREEDOMS, "not_controlled"),
+    "codex": {
+        "read_only": "blocked",
+        "write_in_repo": "blocked",
+        "publish": "enabled",
+        "unrestricted": "unrestricted",
+    },
+    "opencode": dict.fromkeys(FREEDOMS, "not_controlled"),
+    "vibe": dict.fromkeys(FREEDOMS, "not_controlled"),
+}
+
+
+@pytest.mark.parametrize("backend", ALL, ids=lambda b: b.name)
+@pytest.mark.parametrize("freedom", FREEDOMS)
+def test_network_access_matches_the_measured_table(backend, freedom: str) -> None:
+    expected = EXPECTED_NETWORK_ACCESS[backend.name][freedom]
+    assert backend.enforcement(freedom).network_access == expected
 
 
 def test_claude_denies_direct_commit_commands_without_claiming_to_block_them() -> None:
@@ -484,17 +560,107 @@ def test_claude_rejects_an_unexpected_effort_value_reaching_assert_safe_directly
         ClaudeBackend().assert_safe(argv, "write_in_repo")
 
 
+@pytest.mark.parametrize("freedom", ["read_only", "write_in_repo"])
+def test_claude_deny_patterns_present_at_read_only_and_write_in_repo(freedom: str) -> None:
+    argv = start(ClaudeBackend(), freedom=freedom)
+    assert argv[argv.index("--disallowedTools") + 1] == DISALLOWED_TOOLS
+    assert "--allowedTools" not in argv
+
+
+@pytest.mark.parametrize("freedom", ["publish", "unrestricted"])
+def test_claude_deny_patterns_absent_at_publish_and_unrestricted(freedom: str) -> None:
+    argv = start(ClaudeBackend(), freedom=freedom)
+    assert "--disallowedTools" not in argv
+
+
+def test_claude_publish_carries_the_allowlist_and_no_deny_patterns() -> None:
+    argv = start(ClaudeBackend(), freedom="publish")
+    assert argv[argv.index("--allowedTools") + 1] == ALLOWED_TOOLS["publish"]
+    assert "Bash(git commit:*)" in ALLOWED_TOOLS["publish"]
+    assert "Bash(git push:*)" in ALLOWED_TOOLS["publish"]
+    assert "Bash(gh pr create:*)" in ALLOWED_TOOLS["publish"]
+    ClaudeBackend().assert_safe(argv, "publish")
+
+
+@pytest.mark.parametrize("freedom", ["read_only", "write_in_repo", "unrestricted"])
+def test_claude_allowlist_absent_outside_publish(freedom: str) -> None:
+    assert "--allowedTools" not in start(ClaudeBackend(), freedom=freedom)
+
+
+def test_claude_unrestricted_has_neither_denies_nor_allowlist() -> None:
+    argv = start(ClaudeBackend(), freedom="unrestricted")
+    assert "--disallowedTools" not in argv
+    assert "--allowedTools" not in argv
+    ClaudeBackend().assert_safe(argv, "unrestricted")
+
+
+def test_claude_assert_safe_rejects_an_allowlist_present_outside_publish() -> None:
+    argv = with_extra_options(start(ClaudeBackend(), freedom="write_in_repo"), "--allowedTools",
+                               ALLOWED_TOOLS["publish"])
+    with pytest.raises(ClaudeUnsafe, match="allowedTools"):
+        ClaudeBackend().assert_safe(argv, "write_in_repo")
+
+
+def test_claude_assert_safe_rejects_publish_missing_its_allowlist() -> None:
+    argv = start(ClaudeBackend(), freedom="publish")
+    index = argv.index("--allowedTools")
+    del argv[index : index + 2]
+    with pytest.raises(ClaudeUnsafe, match="allowedTools"):
+        ClaudeBackend().assert_safe(argv, "publish")
+
+
+def test_claude_assert_safe_rejects_deny_patterns_present_at_publish() -> None:
+    argv = start(ClaudeBackend(), freedom="publish") + ["--disallowedTools", DISALLOWED_TOOLS]
+    with pytest.raises(ClaudeUnsafe, match="disallowedTools"):
+        ClaudeBackend().assert_safe(argv, "publish")
+
+
+def test_claude_assert_safe_rejects_missing_deny_patterns_at_write_in_repo() -> None:
+    argv = start(ClaudeBackend(), freedom="write_in_repo")
+    index = argv.index("--disallowedTools")
+    del argv[index : index + 2]
+    with pytest.raises(ClaudeUnsafe, match="disallowedTools"):
+        ClaudeBackend().assert_safe(argv, "write_in_repo")
+
+
 # --- codex specifics -----------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
     ("freedom", "mode"),
     [("read_only", "read-only"), ("write_in_repo", "workspace-write"),
-     ("unrestricted", "danger-full-access")],
+     ("publish", "workspace-write"), ("unrestricted", "danger-full-access")],
 )
 def test_codex_freedom_maps_to_a_sandbox_mode(freedom: str, mode: str) -> None:
     argv = start(CodexBackend(), freedom=freedom)
     assert argv[argv.index("-s") + 1] == mode
+
+
+def test_codex_publish_carries_the_network_pair_on_top_of_workspace_write() -> None:
+    argv = start(CodexBackend(), freedom="publish")
+    assert argv[argv.index("-s") + 1] == "workspace-write"
+    assert NETWORK_ENABLE_PAIR in argv
+    CodexBackend().assert_safe(argv, "publish")
+
+
+@pytest.mark.parametrize("freedom", ["read_only", "write_in_repo", "unrestricted"])
+def test_codex_network_pair_absent_outside_publish(freedom: str) -> None:
+    assert NETWORK_ENABLE_PAIR not in start(CodexBackend(), freedom=freedom)
+
+
+def test_codex_assert_safe_refuses_the_network_pair_outside_publish() -> None:
+    argv = with_extra_options(start(CodexBackend(), freedom="write_in_repo"), "-c", NETWORK_ENABLE_PAIR)
+    with pytest.raises(CodexUnsafe, match="network"):
+        CodexBackend().assert_safe(argv, "write_in_repo")
+
+
+def test_codex_assert_safe_refuses_publish_missing_the_network_pair() -> None:
+    argv = start(CodexBackend(), freedom="publish")
+    index = argv.index(NETWORK_ENABLE_PAIR)
+    del argv[index - 1 : index + 1]  # the "-c" token and the pair value
+    assert NETWORK_ENABLE_PAIR not in argv
+    with pytest.raises(CodexUnsafe, match="network"):
+        CodexBackend().assert_safe(argv, "publish")
 
 
 def test_codex_pins_never_ask_or_it_could_hang() -> None:
@@ -762,7 +928,7 @@ def test_codex_legitimate_argv_with_model_and_effort_still_passes_the_strict_wal
 @pytest.mark.parametrize(
     ("freedom", "agent", "auto"),
     [("read_only", "plan", False), ("write_in_repo", "build", False),
-     ("unrestricted", "build", True)],
+     ("publish", "build", False), ("unrestricted", "build", True)],
 )
 def test_opencode_freedom_maps_to_an_agent(freedom: str, agent: str, auto: bool) -> None:
     argv = start(OpencodeBackend(), freedom=freedom)
@@ -937,7 +1103,8 @@ def with_extra_vibe_options(argv: list[str], *extra: str) -> list[str]:
 
 @pytest.mark.parametrize(
     ("freedom", "agent"),
-    [("read_only", "plan"), ("write_in_repo", "accept-edits"), ("unrestricted", "auto-approve")],
+    [("read_only", "plan"), ("write_in_repo", "accept-edits"), ("publish", "auto-approve"),
+     ("unrestricted", "auto-approve")],
 )
 def test_vibe_freedom_maps_to_an_agent(freedom: str, agent: str) -> None:
     argv = start(VibeBackend(), freedom=freedom)

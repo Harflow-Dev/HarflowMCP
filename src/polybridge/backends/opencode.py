@@ -68,6 +68,10 @@ BINARY = "opencode"
 AGENTS: dict[str, str] = {
     "read_only": "plan",
     "write_in_repo": "build",
+    # Identical to write_in_repo on purpose: nothing here was ever enforced by polybridge (see
+    # _BUILD_CAVEAT), so there is no separate mechanism to give `publish` — assert_safe cannot tell
+    # these two freedoms apart from argv alone, and that collapse is deliberate, not a hole.
+    "publish": "build",
     "unrestricted": "build",
 }
 
@@ -136,6 +140,14 @@ _MODE_CAVEATS: dict[str, tuple[str, ...]] = {
         _BUILD_CAVEAT,
         "writes are not confined to the repository — repo_path is the working directory, nothing "
         "more",
+    ),
+    "publish": (
+        _BUILD_CAVEAT,
+        "writes are not confined to the repository — repo_path is the working directory, nothing "
+        "more",
+        "identical mechanism to write_in_repo: --agent build, no --auto — publish adds nothing "
+        "real here, since nothing was ever enforced by this mapping. assert_safe cannot tell "
+        "these two freedoms apart from argv alone, and that collapse is deliberate",
     ),
     "unrestricted": (
         _BUILD_CAVEAT,
@@ -379,6 +391,11 @@ class OpencodeBackend:
             # No per-command deny list exists, so neither commit claim can be made.
             commit_push_blocked=False,
             direct_commit_commands_denied=False,
+            # publish and unrestricted are where polybridge configures no barrier of its own
+            # against a commit/push/PR attempt — though on opencode nothing ever did, at any
+            # freedom, so this is no stronger a claim than write_in_repo already implied.
+            publish_attempts_allowed_by_polybridge=freedom in ("publish", "unrestricted"),
+            network_access="not_controlled",
             caveats=(_NO_SANDBOX_CAVEAT, *_MODE_CAVEATS[freedom]),
         )
 

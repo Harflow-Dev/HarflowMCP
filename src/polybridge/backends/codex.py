@@ -18,6 +18,16 @@ CLI facts established by capturing a real run, not assumption:
   event carrying success or failure, and **no dollar cost** — only token counts.
 * An `item.type == "error"` was observed in a *successful* run (a benign skills warning), so error
   items are notices, never proof of failure.
+
+**`publish` (measured network table).** `-s workspace-write` alone leaves network blocked — the same
+as its default. Network genuinely opens only with the config pair
+`-c sandbox_workspace_write.network_access=true` added on top: paired runs measured curl against a
+real host returning exit 6 (could not resolve host) at `read-only` and at `workspace-write` without
+the pair, and HTTP 200 at `workspace-write` with the pair, and at `danger-full-access`. So `publish`
+maps to `workspace-write` plus that pair. This is honestly **general** network access, not
+git/gh-specific — anything the sandbox lets run can now reach the network, not only a git push or
+`gh pr create`. `WRITABLE_ROOTS` at `publish` is identical to `write_in_repo` — the switch changes
+network reachability only, not the writable set.
 """
 
 from __future__ import annotations
@@ -43,11 +53,19 @@ BINARY = "codex"
 SANDBOX_MODES: dict[str, str] = {
     "read_only": "read-only",
     "write_in_repo": "workspace-write",
+    "publish": "workspace-write",
     "unrestricted": "danger-full-access",
 }
 
 # Without this a headless run can stop dead waiting for an approval nobody can give.
 NEVER_ASK = ("-c", 'approval_policy="never"')
+
+# The `-c` key/value that turns network access on inside `workspace-write`, per the binary's own
+# strings (see module docstring) — passed only at `publish`. Codex does not validate `-c` keys at
+# all, so getting the literal exactly right is what stands between "network still blocked" and
+# "wrong key, silently ignored".
+NETWORK_KEY = "sandbox_workspace_write.network_access"
+NETWORK_ENABLE_PAIR = f"{NETWORK_KEY}=true"
 
 # The `-c` key this backend's effort rides on. EFFORTS is a closed four-value vocabulary with no
 # quote or `=` characters in it, so quoting the TOML value is a non-issue — no encoder needed.
@@ -67,12 +85,22 @@ _EFFORT_NO_COMPARISON_CAVEAT = (
 )
 
 # `workspace-write` is *not* repo-only: Codex reports its own writable set as
-# `[workdir, /tmp, $TMPDIR]`, so claiming confinement to the repository would overstate it.
+# `[workdir, /tmp, $TMPDIR]`, so claiming confinement to the repository would overstate it. `publish`
+# shares write_in_repo's writable set exactly — the network pair changes reachability, not writes.
 WRITABLE_ROOTS: dict[str, tuple[str, ...]] = {
     "read_only": (),
     "write_in_repo": ("the working directory", "/tmp", "$TMPDIR"),
+    "publish": ("the working directory", "/tmp", "$TMPDIR"),
     "unrestricted": ("anywhere the user can write",),
 }
+
+_NETWORK_CAVEAT = (
+    "this level additionally enables GENERAL network access "
+    f"({NETWORK_ENABLE_PAIR}), not git/gh-specific: anything running inside the sandbox can reach "
+    "the network, not only a git push or gh pr create. Measured per sandbox: read-only and plain "
+    "workspace-write both block it (curl exit 6, could not resolve host); workspace-write plus this "
+    "pair enables it (HTTP 200), same as danger-full-access"
+)
 
 _MODE_CAVEATS: dict[str, tuple[str, ...]] = {
     "read_only": ("the sandbox rejects writes outright",),
@@ -80,6 +108,12 @@ _MODE_CAVEATS: dict[str, tuple[str, ...]] = {
         "writes are confined by the OS, but to the workspace *plus* temporary directories — not to "
         "the repository alone",
         "no per-command deny list, so the agent can freely commit inside the sandbox",
+    ),
+    "publish": (
+        "writes are confined by the OS, but to the workspace *plus* temporary directories — not to "
+        "the repository alone",
+        "no per-command deny list, so the agent can freely commit inside the sandbox",
+        _NETWORK_CAVEAT,
     ),
     "unrestricted": (
         "danger-full-access disables the sandbox: nothing is restricted, which is the one mode where "
@@ -98,15 +132,17 @@ _MODE_CAVEATS: dict[str, tuple[str, ...]] = {
 BOOLEAN_FLAGS = ("--json",)
 VALUE_FLAGS = ("-C", "-s", "-c", "-m")
 
-# The only two `-c key=value` literals this backend ever writes, matched byte-for-byte rather than
+# The only `-c key=value` literals this backend ever writes, matched byte-for-byte rather than
 # parsed. Measured: codex normalises whitespace around a `-c key=value` pair before applying it, and
 # falls back to the raw string when the value fails to parse as TOML — so a strip()-then-compare
 # check let an unbalanced quote (`model_reasoning_effort="low`, missing its close) and doubled
 # quoting (`=""low""`) through as if they were the clean value. Exact-literal membership closes that
-# by construction: anything not identical to one of these two shapes is refused outright, with no
-# parsing step for a malformed value to hide behind.
+# by construction: anything not identical to one of these shapes is refused outright, with no
+# parsing step for a malformed value to hide behind. Built by construction, not hardcoded loosely,
+# so NETWORK_ENABLE_PAIR (the `publish` network switch) stays the single source of truth for its own
+# literal.
 PERMITTED_C_PAIRS: frozenset[str] = frozenset(
-    {NEVER_ASK[1]} | {f'{EFFORT_KEY}="{level}"' for level in EFFORTS}
+    {NEVER_ASK[1], NETWORK_ENABLE_PAIR} | {f'{EFFORT_KEY}="{level}"' for level in EFFORTS}
 )
 
 
@@ -180,6 +216,8 @@ class CodexBackend:
     ) -> list[str]:
         check_reasoning_effort(self, reasoning_effort)
         options = ["--json", "-C", str(repo), "-s", SANDBOX_MODES[freedom], *NEVER_ASK]
+        if freedom == "publish":
+            options += ["-c", NETWORK_ENABLE_PAIR]
         if model:
             options += ["-m", model]
         if reasoning_effort:
@@ -275,7 +313,8 @@ class CodexBackend:
             raise UnsafeInvocationError(f"-m names no model: {argv!r}")
 
         # Every `-c` value was already checked against PERMITTED_C_PAIRS while walking, so only
-        # multiplicity remains: exactly one approval override, at most one effort override.
+        # multiplicity remains: exactly one approval override, the network pair iff freedom is
+        # `publish` and nowhere else, at most one effort override.
         pairs = seen.get("-c", [])
         approvals = [pair for pair in pairs if pair == NEVER_ASK[1]]
         if approvals != [NEVER_ASK[1]]:
@@ -283,7 +322,21 @@ class CodexBackend:
                 f"codex must be given exactly one {NEVER_ASK[1]} override, which prevents it "
                 f"blocking on an approval prompt no one can answer; found {approvals!r}: {argv!r}"
             )
-        efforts = [pair for pair in pairs if pair != NEVER_ASK[1]]
+
+        network_pairs = [pair for pair in pairs if pair == NETWORK_ENABLE_PAIR]
+        if freedom == "publish":
+            if network_pairs != [NETWORK_ENABLE_PAIR]:
+                raise UnsafeInvocationError(
+                    f"codex must carry exactly one {NETWORK_ENABLE_PAIR} override at freedom "
+                    f"'publish': found {network_pairs!r}: {argv!r}"
+                )
+        elif network_pairs:
+            raise UnsafeInvocationError(
+                f"{NETWORK_ENABLE_PAIR} present at freedom {freedom!r}, which must not enable "
+                f"network access: {argv!r}"
+            )
+
+        efforts = [pair for pair in pairs if pair != NEVER_ASK[1] and pair != NETWORK_ENABLE_PAIR]
         if len(efforts) > 1:
             raise UnsafeInvocationError(f"expected at most one {EFFORT_KEY} override: {argv!r}")
 
@@ -346,9 +399,19 @@ class CodexBackend:
     def enforcement(self, freedom: Freedom) -> Enforcement:
         mode = SANDBOX_MODES[freedom]
         unrestricted = freedom == "unrestricted"
+        mechanism = f"codex sandbox: {mode}"
+        if freedom == "publish":
+            mechanism += f" + {NETWORK_ENABLE_PAIR}"
+        # Measured per sandbox — see the module docstring and _NETWORK_CAVEAT for the evidence.
+        network_access = {
+            "read_only": "blocked",
+            "write_in_repo": "blocked",
+            "publish": "enabled",
+            "unrestricted": "unrestricted",
+        }[freedom]
         return Enforcement(
             freedom=freedom,
-            mechanism=f"codex sandbox: {mode}",
+            mechanism=mechanism,
             # Imposed by the OS, not by the agent's own judgement — except when switched off.
             os_enforced=not unrestricted,
             writes_confined=not unrestricted,
@@ -356,6 +419,11 @@ class CodexBackend:
             # Codex has no per-command deny list at all, so neither claim can be made.
             commit_push_blocked=False,
             direct_commit_commands_denied=False,
+            # publish and unrestricted are where polybridge configures no barrier of its own
+            # against a commit/push/PR attempt — see the field's own docstring for what this does
+            # and does not promise.
+            publish_attempts_allowed_by_polybridge=freedom in ("publish", "unrestricted"),
+            network_access=network_access,
             caveats=_MODE_CAVEATS[freedom],
         )
 

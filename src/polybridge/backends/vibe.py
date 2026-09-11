@@ -125,6 +125,11 @@ BINARY = "vibe"
 AGENTS: dict[str, str] = {
     "read_only": "plan",
     "write_in_repo": "accept-edits",
+    # Not accept-edits: measured, a `git commit` under accept-edits produced an approval `callback`
+    # and was auto-denied (the user's [tools.bash] allowlist did not cover it), and no commit
+    # landed. auto-approve is the only agent profile that can publish here, which makes `publish`
+    # identical to `unrestricted` on vibe — see the module docstring and _MODE_CAVEATS["publish"].
+    "publish": "auto-approve",
     "unrestricted": "auto-approve",
 }
 
@@ -178,9 +183,17 @@ _AUTO_APPROVE_CAVEAT = (
     "approval callback that programmatic mode would otherwise auto-deny is skipped instead"
 )
 
+_PUBLISH_COLLAPSE_CAVEAT = (
+    "identical mechanism to unrestricted: --agent auto-approve is the only agent profile that can "
+    "publish here (measured: accept-edits left a git commit auto-denied, no commit landed), so "
+    "publish is not narrower than unrestricted on vibe — assert_safe cannot tell these two "
+    "freedoms apart from argv alone, and that collapse is deliberate"
+)
+
 _MODE_CAVEATS: dict[str, tuple[str, ...]] = {
     "read_only": (_PLAN_CAVEAT,),
     "write_in_repo": (_ACCEPT_EDITS_CAVEAT,),
+    "publish": (_AUTO_APPROVE_CAVEAT, _PUBLISH_COLLAPSE_CAVEAT),
     "unrestricted": (_AUTO_APPROVE_CAVEAT,),
 }
 
@@ -432,6 +445,11 @@ class VibeBackend:
             writable_roots=(),
             commit_push_blocked=False,
             direct_commit_commands_denied=False,
+            # publish and unrestricted are the two freedoms where the agent profile in use
+            # (auto-approve, identical for both here) leaves no barrier of polybridge's own
+            # against a commit/push/PR attempt.
+            publish_attempts_allowed_by_polybridge=freedom in ("publish", "unrestricted"),
+            network_access="not_controlled",
             caveats=(_NO_SANDBOX_CAVEAT, *_MODE_CAVEATS[freedom]),
         )
 

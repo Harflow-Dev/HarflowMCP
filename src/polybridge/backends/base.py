@@ -13,9 +13,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, NamedTuple, Protocol, runtime_checkable
 
-Freedom = Literal["read_only", "write_in_repo", "unrestricted"]
+Freedom = Literal["read_only", "write_in_repo", "publish", "unrestricted"]
 
-FREEDOMS: tuple[Freedom, ...] = ("read_only", "write_in_repo", "unrestricted")
+FREEDOMS: tuple[Freedom, ...] = ("read_only", "write_in_repo", "publish", "unrestricted")
 DEFAULT_FREEDOM: Freedom = "write_in_repo"
 
 Status = Literal["running", "completed", "failed", "timed_out", "cancelled"]
@@ -139,6 +139,19 @@ class Enforcement:
     direct_commit_commands_denied: bool = False
     """Whether the obvious `git commit` / `git push` invocations are refused, which is weaker."""
 
+    publish_attempts_allowed_by_polybridge: bool = False
+    """True only at freedoms where polybridge itself configured no publish-specific barrier of its
+    own and authorized an *attempt* to commit, push or open a PR. This asserts nothing about
+    whether publication will actually succeed — credentials, remote permissions, branch
+    protection, hooks, an unauthenticated `gh`, and the agent's own behaviour are all outside
+    polybridge's control. Deliberately not named `publishing_permitted`: that name would be read
+    as a promise this field cannot make."""
+
+    network_access: str = "not_controlled"
+    """One of "blocked" | "enabled" | "unrestricted" | "not_controlled". "not_controlled" means
+    polybridge imposes nothing of its own here and the surrounding environment decides — which is
+    NOT the same as "blocked"."""
+
     caveats: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
@@ -150,6 +163,8 @@ class Enforcement:
             "writable_roots": list(self.writable_roots),
             "commit_push_blocked": self.commit_push_blocked,
             "direct_commit_commands_denied": self.direct_commit_commands_denied,
+            "publish_attempts_allowed_by_polybridge": self.publish_attempts_allowed_by_polybridge,
+            "network_access": self.network_access,
             "caveats": list(self.caveats),
         }
 

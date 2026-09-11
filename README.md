@@ -102,9 +102,9 @@ claude-desktop`.
 | **real OS sandbox** | ❌ | ✅ `read-only` / `workspace-write` | ❌ | ❌ |
 | **per-command deny** | ✅ `git commit`/`git push` | ❌ none | ❌ none | ❌ none |
 
-One `freedom` parameter expresses intent — `read_only`, `write_in_repo` (default), `unrestricted` —
-and is mapped to each backend's real mechanism. Because those mechanisms differ in strength, every
-task reports what was **actually** enforced rather than what the parameter implies:
+One `freedom` parameter expresses intent — `read_only`, `write_in_repo` (default), `publish`,
+`unrestricted` — and is mapped to each backend's real mechanism. Because those mechanisms differ in
+strength, every task reports what was **actually** enforced rather than what the parameter implies:
 
 ```json
 "enforcement": {
@@ -115,6 +115,8 @@ task reports what was **actually** enforced rather than what the parameter impli
   "writable_roots": ["the working directory", "/tmp", "$TMPDIR"],
   "commit_push_blocked": false,
   "direct_commit_commands_denied": false,
+  "publish_attempts_allowed_by_polybridge": false,
+  "network_access": "blocked",
   "caveats": ["writes are confined by the OS, but to the workspace *plus* temporary directories …"]
 }
 ```
@@ -131,13 +133,46 @@ Two consequences worth understanding:
 Claude also reports `os_enforced: false` and `writes_confined: false` throughout: it has no sandbox,
 and `repo_path` is only its working directory.
 
+## `publish`: authorizing an attempt, not promising it succeeds
+
+`publish` sits between `write_in_repo` and `unrestricted`. Two fields on `enforcement` exist just for
+it: `publish_attempts_allowed_by_polybridge` is `true` only at freedoms (`publish`, `unrestricted`)
+where polybridge itself configured no barrier of its own against a commit/push/PR attempt — it is
+**not** called `publishing_permitted`, because that name would read as a promise polybridge cannot
+make. Credentials, remote permissions, branch protection, repo hooks, and an unauthenticated `gh` can
+all still stop the attempt, and it says nothing about whether the agent even tries. `network_access` is
+one of `"blocked"`, `"enabled"`, `"unrestricted"` or `"not_controlled"` — the last means polybridge
+imposes nothing of its own and the surrounding environment decides, which is **not** the same as
+`"blocked"`.
+
+The freedom ladder is a *requested ordering*, not a guarantee that every backend implements four
+distinct strengths — two backends collapse an adjacent pair on purpose:
+
+| backend | `publish` mechanism | vs. its neighbours |
+|---|---|---|
+| claude | `--permission-mode acceptEdits`, deny patterns dropped, `--allowedTools "Bash(git commit:*),Bash(git push:*),Bash(gh pr create:*)"` added | genuine middle tier — everything not allow-listed still needs approval, so is still refused headlessly (measured: dropping only the deny patterns was NOT enough on its own) |
+| codex | `-s workspace-write` **plus** `-c sandbox_workspace_write.network_access=true` | genuine middle tier, OS-enforced — but the switch opens **general** network access, not git-specific |
+| opencode | `--agent build`, same as `write_in_repo` | **collapses into `write_in_repo`**: nothing here was ever enforced, so `publish` adds nothing real |
+| vibe | `--agent auto-approve`, same as `unrestricted` | **collapses into `unrestricted`**: `accept-edits` left a measured `git commit` auto-denied, so `auto-approve` is the only profile that can publish, and it removes every other restriction too |
+
+Those two collapses are intentional and covered by tests pinning the byte-identical argv, not a gap —
+`assert_safe` genuinely cannot distinguish `write_in_repo` from `publish` on opencode, or `publish`
+from `unrestricted` on vibe, because there is no argv difference to check.
+
+Claude's `unrestricted` also changed behaviour to make this level make sense: the deny patterns used
+to apply even at `unrestricted`, refusing ordinary `git commit`/`git push` there too. They are now
+dropped at `unrestricted` (bypassPermissions with no denies) — a **compatibility break** for anyone
+who relied on the old behaviour. That `bypassPermissions` actually lets a commit through follows from
+it auto-approving everything, but this specific case was not itself measured — expected, not verified.
+
 opencode reports every enforcement boolean as `false` at every level, because its `freedom` mapping
-is only a choice of agent (`plan` for `read_only`, `build` otherwise) and none of it is an OS
-boundary. Two measured consequences live in its caveats: `plan` *declined* to write or run commands
-rather than being observed to be prevented from doing so — it never attempted a write, so no
-tool-layer refusal was exercised — and `build` wrote a file and ran a shell command **without
-`--auto`**, so `--auto` is not what separates writing from not writing, and how much `unrestricted`
-adds over `write_in_repo` depends on the user's own opencode configuration.
+is only a choice of agent (`plan` for `read_only`, `build` otherwise, `build` again for `publish`) and
+none of it is an OS boundary. Two measured consequences live in its caveats: `plan` *declined* to
+write or run commands rather than being observed to be prevented from doing so — it never attempted a
+write, so no tool-layer refusal was exercised — and `build` wrote a file and ran a shell command
+**without `--auto`**, so `--auto` is not what separates writing from not writing, and how much
+`unrestricted` adds over `write_in_repo` (or `publish`) depends on the user's own opencode
+configuration.
 
 vibe reports every enforcement boolean as `false` at every level too — it has no OS sandbox
 (`os_sandbox=False`), so `os_enforced` and `writes_confined` are `false` throughout, and whether
@@ -147,8 +182,9 @@ polybridge, so `per_command_deny`, `direct_commit_commands_denied` and `commit_p
 `permission: "never"` — a real refusal, not model restraint — **but leaves `bash` untouched**, so a
 user whose own config allows `bash` unconditionally could still write through it; the caveat says so
 rather than implying `read_only` is airtight. `write_in_repo` maps to `--agent accept-edits`
-(auto-approves `write_file`/`edit` only) and `unrestricted` to `--agent auto-approve`
-(`bypass_tool_permissions: true`). In programmatic mode every approval callback vibe doesn't
+(auto-approves `write_file`/`edit` only) and `publish`/`unrestricted` both map to `--agent
+auto-approve` (`bypass_tool_permissions: true`) — see the collapse table above for why `publish`
+cannot be narrower than `unrestricted` here. In programmatic mode every approval callback vibe doesn't
 pre-approve is auto-denied, so anything outside the agent profile and the user's own config simply
 fails closed rather than prompting.
 

@@ -56,6 +56,13 @@ mcp = MCPServer(
         "with a real OS sandbox, and only vibe has no model-selection flag at all. Every task "
         "reports an `enforcement` block describing what was actually enforced, which is the honest "
         "answer rather than what `freedom` implies.\n\n"
+        "A `publish` freedom level sits between `write_in_repo` and `unrestricted`: it means "
+        "polybridge configured no barrier of its own against the agent committing, pushing or "
+        "opening a PR, and authorized the attempt. It is NOT a promise that publishing succeeds — "
+        "credentials, remote permissions, branch protection, repo hooks, or an unauthenticated `gh` "
+        "can all still stop it, and the agent may not even try. Check "
+        "`enforcement.publish_attempts_allowed_by_polybridge` and `enforcement.network_access` on "
+        "the returned task rather than assuming from the freedom name alone.\n\n"
         "A wait_for_task that comes back still 'running' has not failed — the run is untouched, so "
         "call again or poll. Tasks outlive this server process: ones started by an earlier "
         "polybridge server are still reported, marked 'recovered: true'."
@@ -174,8 +181,13 @@ async def start_task(
         prompt: Instructions for the agent. Be specific about the desired end state.
         repo_path: Absolute path to a git repository; the agent's working directory.
         backend: Which agent to use — "claude", "codex", "opencode" or "vibe". See list_backends.
-        freedom: "read_only", "write_in_repo" (default), or "unrestricted". How this is enforced
-            depends on the backend; the returned `enforcement` says what actually applies.
+        freedom: "read_only", "write_in_repo" (default), "publish", or "unrestricted". "publish"
+            sits between "write_in_repo" and "unrestricted": polybridge configures no barrier of
+            its own against a commit/push/PR attempt there, but that is not a promise the attempt
+            succeeds — credentials, remote permissions, branch protection, hooks and an
+            unauthenticated `gh` are all outside polybridge's control. How each level is enforced
+            depends on the backend; the returned `enforcement` says what actually applies, via
+            `publish_attempts_allowed_by_polybridge` and `network_access` among other fields.
         model: Model for this run, in the backend's own naming. Rejected outright, rather than
             silently ignored, on a backend with no model-selection flag at all — vibe is the first
             such case; see list_backends' capabilities.supports_model_selection.
