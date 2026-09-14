@@ -23,6 +23,7 @@ import asyncio
 import logging
 import os
 import signal
+import time
 import subprocess
 import uuid
 from collections import deque
@@ -69,8 +70,10 @@ MAX_TASKS = 200
 PUBLISH_FREEDOMS: frozenset[str] = frozenset({"publish", "unrestricted"})
 
 # Short and strict on purpose: these are local, read-only ref lookups (never a fetch or ls-remote),
-# so a slow or hanging git must not be allowed to delay a dispatch.
-GIT_PROBE_TIMEOUT_SECONDS = 3.0
+# so a slow or hanging git must not be allowed to delay a dispatch. The budget is for the *whole*
+# check, not per call — several probes each allowed the full timeout would stack up into a delay
+# before the agent even starts.
+GIT_PROBE_BUDGET_SECONDS = 3.0
 
 _UNDETERMINED_PUBLISH_NOTICE = (
     "this task was dispatched at freedom {freedom!r}, which authorizes it to commit, push, and "
@@ -91,7 +94,7 @@ _ON_DEFAULT_BRANCH_PUBLISH_NOTICE = (
 )
 
 
-def _git_read(repo_path: Path, *args: str) -> str | None:
+def _git_read(repo_path: Path, deadline: float, *args: str) -> str | None:
     """Run one read-only git ref lookup. `None` for a non-zero exit — including git's own graceful
     "not applicable" cases, like `--quiet` on a detached HEAD — never an exception for those.
 
@@ -100,11 +103,14 @@ def _git_read(repo_path: Path, *args: str) -> str | None:
     rather than being silently absorbed a layer early. Never a fetch or `ls-remote` — only locally
     recorded refs.
     """
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise subprocess.TimeoutExpired(cmd="git", timeout=GIT_PROBE_BUDGET_SECONDS)
     result = subprocess.run(
         ["git", "-C", str(repo_path), *args],
         capture_output=True,
         text=True,
-        timeout=GIT_PROBE_TIMEOUT_SECONDS,
+        timeout=remaining,
         check=False,
     )
     if result.returncode != 0:
@@ -112,14 +118,14 @@ def _git_read(repo_path: Path, *args: str) -> str | None:
     return result.stdout.strip()
 
 
-def _default_branch_remote(repo_path: Path) -> str | None:
+def _default_branch_remote(repo_path: Path, deadline: float) -> str | None:
     """Which remote's locally recorded HEAD names the default branch — never guessed.
 
     `origin` is preferred when present. With no `origin` but exactly one remote, that one is
     unambiguous. Several remotes with none named `origin` is left unavailable rather than picking
     arbitrarily.
     """
-    remotes_raw = _git_read(repo_path, "remote")
+    remotes_raw = _git_read(repo_path, deadline, "remote")
     if not remotes_raw:
         return None
     remotes = [line.strip() for line in remotes_raw.splitlines() if line.strip()]
@@ -139,10 +145,13 @@ def _detect_publish_branch_notice(freedom: str, repo_path: Path) -> str | None:
     `main`, and a repo's real default can be something else entirely; the default is only ever what
     a remote's own recorded `HEAD` says.
     """
-    current_branch = _git_read(repo_path, "symbolic-ref", "--quiet", "--short", "HEAD")
-    remote = _default_branch_remote(repo_path)
+    deadline = time.monotonic() + GIT_PROBE_BUDGET_SECONDS
+    current_branch = _git_read(repo_path, deadline, "symbolic-ref", "--quiet", "--short", "HEAD")
+    remote = _default_branch_remote(repo_path, deadline)
     default_ref = (
-        _git_read(repo_path, "symbolic-ref", "--quiet", "--short", f"refs/remotes/{remote}/HEAD")
+        _git_read(
+            repo_path, deadline, "symbolic-ref", "--quiet", "--short", f"refs/remotes/{remote}/HEAD"
+        )
         if remote is not None
         else None
     )
@@ -151,6 +160,17 @@ def _detect_publish_branch_notice(freedom: str, repo_path: Path) -> str | None:
         if remote is not None and default_ref is not None and default_ref.startswith(f"{remote}/")
         else None
     )
+
+    if default_branch is not None and (
+        _git_read(
+            repo_path, deadline, "rev-parse", "--verify", "--quiet", f"refs/remotes/{default_ref}"
+        )
+        is None
+    ):
+        # A recorded remote HEAD can outlive the branch it names — the ref file is local and is not
+        # cleaned up when the branch is deleted upstream. Warning that the checkout is "on the
+        # default branch" on the strength of a dangling pointer would be a claim about nothing.
+        default_branch = None
 
     if not current_branch or not default_branch:
         return _UNDETERMINED_PUBLISH_NOTICE.format(freedom=freedom)
@@ -447,6 +467,14 @@ class TaskRegistry:
         self._log_dir.mkdir(parents=True, exist_ok=True)
         log_path = self._log_dir / f"{task_id}.jsonl"
 
+        # Before the spawn, deliberately. Off the event loop because these are blocking
+        # `subprocess.run` calls (the treatment `server.py` gives its own git probe), but the
+        # placement matters more than the threading: between `create_subprocess_exec` and the
+        # registration below there must be no await at all. One there could be cancelled — a client
+        # disconnecting mid-call — leaving a live agent no tool can reach, and it would hold the
+        # process's pipes unread meanwhile, which blocks the agent (drainers are load-bearing).
+        publish_notice = await asyncio.to_thread(_publish_branch_notice, freedom, repo_path)
+
         proc = await asyncio.create_subprocess_exec(
             *argv,
             cwd=str(repo_path),
@@ -458,11 +486,6 @@ class TaskRegistry:
             # of orphaning them.
             start_new_session=True,
         )
-
-        # Off the event loop: these are blocking `subprocess.run` calls with their own timeout, and
-        # `_spawn` is async — running them inline would stall every other task's monitor and drainer
-        # for the duration. Same treatment `server.py` gives its own git probe.
-        publish_notice = await asyncio.to_thread(_publish_branch_notice, freedom, repo_path)
 
         task = Task(
             task_id=task_id,

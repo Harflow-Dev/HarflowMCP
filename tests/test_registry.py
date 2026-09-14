@@ -600,6 +600,26 @@ def test_a_detached_head_reports_that_it_could_not_tell(tmp_path: Path) -> None:
     assert "could not be determined" in notice
 
 
+def test_a_remote_head_pointing_at_a_deleted_branch_is_not_trusted(tmp_path: Path) -> None:
+    """A recorded `origin/HEAD` outlives the branch it names — the local ref file is not cleaned up.
+
+    Warning "you are on the repository's default branch" on the strength of a dangling pointer would
+    be a claim about a branch that no longer exists.
+    """
+    repo = _repo_with_remote(tmp_path, branch="main")
+    # Point origin/HEAD at a branch that was never created, and stand on a branch of that name.
+    (repo / ".git" / "refs" / "remotes" / "origin" / "HEAD").write_text(
+        "ref: refs/remotes/origin/gone\n"
+    )
+    subprocess.run(["git", "-C", str(repo), "checkout", "-q", "-b", "gone"], check=True)
+
+    notice = tasks_module._publish_branch_notice("publish", repo)
+
+    assert notice is not None
+    assert "could not be determined" in notice
+    assert "'gone'" not in notice
+
+
 @pytest.mark.parametrize(
     "boom",
     [FileNotFoundError("git"), subprocess.TimeoutExpired("git", 3.0), RuntimeError("unexpected")],

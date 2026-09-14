@@ -16,7 +16,12 @@ from polybridge.backends.claude import ALLOWED_TOOLS, DISALLOWED_TOOLS, FORBIDDE
 from polybridge.backends.claude import UnsafeInvocationError as ClaudeUnsafe
 from polybridge.backends.codex import BINARY as CODEX_BINARY
 from polybridge.backends.codex import EFFORT_KEY as CODEX_EFFORT_KEY
-from polybridge.backends.codex import NETWORK_ENABLE_PAIR, NEVER_ASK, CodexBackend
+from polybridge.backends.codex import (
+    NETWORK_DISABLE_PAIR,
+    NETWORK_ENABLE_PAIR,
+    NEVER_ASK,
+    CodexBackend,
+)
 from polybridge.backends.codex import UnsafeInvocationError as CodexUnsafe
 from polybridge.backends.opencode import REJECTED_FLAGS, OpencodeBackend
 from polybridge.backends.opencode import UnsafeInvocationError as OpencodeUnsafe
@@ -525,7 +530,7 @@ def test_claude_refuses_flags_that_would_isolate_the_agent(flag: str) -> None:
     argv = start(ClaudeBackend())
     assert flag not in argv
     with pytest.raises(ClaudeUnsafe, match="cut the dispatched agent off"):
-        ClaudeBackend().assert_safe(argv + [flag], "write_in_repo")
+        ClaudeBackend().assert_safe(with_extra_options(argv, flag), "write_in_repo")
 
 
 def test_claude_rejects_a_weakened_deny_list() -> None:
@@ -541,6 +546,60 @@ def test_a_claude_prompt_that_looks_like_a_flag_is_not_mistaken_for_one() -> Non
         max_turns=None, reasoning_effort=None,
     )
     ClaudeBackend().assert_safe(argv, "write_in_repo")
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "--dangerously-skip-permissions",
+        "--permission-mode=bypassPermissions",
+        "--disallowed-tools=Bash(git commit:*)",
+        "--effort",
+        "--",
+    ],
+)
+def test_a_claude_prompt_equal_to_a_real_flag_name_still_passes_once_separated(
+    prompt: str,
+) -> None:
+    """Measured against the real claude CLI: `-p`/`--print` is a boolean flag and `prompt` is a
+    separate declared positional, so without a `--` separator a prompt token that exactly matches a
+    real claude option name is parsed by claude as that option, not as text (see the module
+    docstring). Once the builder places `--` before the prompt, claude reads it as literal text
+    regardless of content — this is the case that must keep working."""
+    start_argv = ClaudeBackend().build_start_argv(
+        prompt, repo=REPO, freedom="write_in_repo", session_id=SESSION, model=None,
+        max_turns=None, reasoning_effort=None,
+    )
+    assert start_argv[-2:] == ["--", prompt]
+    ClaudeBackend().assert_safe(start_argv, "write_in_repo")
+
+    resume_argv = ClaudeBackend().build_resume_argv(
+        prompt, repo=REPO, freedom="write_in_repo", session_id="abc-123", model=None,
+        max_turns=None, reasoning_effort=None,
+    )
+    assert resume_argv[-2:] == ["--", prompt]
+    ClaudeBackend().assert_safe(resume_argv, "write_in_repo")
+
+
+def test_claude_refuses_an_argv_without_a_separator_before_the_prompt() -> None:
+    """The pre-`--` shape this backend used to build: prompt as a fixed positional right after
+    `-p`. Measured to be unsafe (see module docstring), so assert_safe must refuse it outright even
+    though every flag in it is otherwise well-formed."""
+    argv = [
+        "claude", "-p", "--dangerously-skip-permissions", "--output-format", "stream-json",
+        "--verbose", "--permission-mode", "acceptEdits", "--disallowedTools", DISALLOWED_TOOLS,
+        "--session-id", SESSION,
+    ]
+    with pytest.raises(ClaudeUnsafe, match="separator"):
+        ClaudeBackend().assert_safe(argv, "write_in_repo")
+
+
+def test_claude_refuses_extra_tokens_after_the_prompt_separator() -> None:
+    """`with_extra_options` inserts before `--`; appending directly after simulates a stray
+    positional riding along with the prompt, which claude only ever declares one of."""
+    argv = start(ClaudeBackend()) + ["extra positional"]
+    with pytest.raises(ClaudeUnsafe, match="expected exactly one positional"):
+        ClaudeBackend().assert_safe(argv, "write_in_repo")
 
 
 def test_claude_turn_cap_is_emitted() -> None:
@@ -610,7 +669,9 @@ def test_claude_assert_safe_rejects_publish_missing_its_allowlist() -> None:
 
 
 def test_claude_assert_safe_rejects_deny_patterns_present_at_publish() -> None:
-    argv = start(ClaudeBackend(), freedom="publish") + ["--disallowedTools", DISALLOWED_TOOLS]
+    argv = with_extra_options(
+        start(ClaudeBackend(), freedom="publish"), "--disallowedTools", DISALLOWED_TOOLS
+    )
     with pytest.raises(ClaudeUnsafe, match="disallowedTools"):
         ClaudeBackend().assert_safe(argv, "publish")
 
@@ -621,6 +682,163 @@ def test_claude_assert_safe_rejects_missing_deny_patterns_at_write_in_repo() -> 
     del argv[index : index + 2]
     with pytest.raises(ClaudeUnsafe, match="disallowedTools"):
         ClaudeBackend().assert_safe(argv, "write_in_repo")
+
+
+# Three evasions measured directly against the real `claude` CLI — each honoured by claude while
+# the pre-strict-walk `assert_safe` (search/count-based) let it through. Every one is a single
+# extra option appended to an otherwise-legitimate start argv.
+CLAUDE_EVASIONS: dict[str, tuple[str, ...]] = {
+    # Defeats the check that --permission-mode matches the requested freedom.
+    "attached --permission-mode=": ("--permission-mode=bypassPermissions",),
+    # A full permission bypass, and was not even in FORBIDDEN_FLAGS.
+    "--dangerously-skip-permissions": ("--dangerously-skip-permissions",),
+    # claude's own alias for --disallowedTools, attached form: lets a deny list coexist with the
+    # allow list at `publish`, and deny beats allow.
+    "attached --disallowed-tools= alias": (f"--disallowed-tools={DISALLOWED_TOOLS}",),
+}
+
+
+@pytest.mark.parametrize("evasion", CLAUDE_EVASIONS, ids=list(CLAUDE_EVASIONS))
+def test_claude_refuses_every_measured_non_canonical_option_form(evasion: str) -> None:
+    argv = with_extra_options(start(ClaudeBackend()), *CLAUDE_EVASIONS[evasion])
+    with pytest.raises(ClaudeUnsafe):
+        ClaudeBackend().assert_safe(argv, "write_in_repo")
+
+
+CLAUDE_ATTACHED_FLAG_FORMS = [
+    f"{flag}=x"
+    for flag in (
+        "--output-format", "--permission-mode", "--disallowedTools", "--allowedTools",
+        "--max-turns", "--model", "--effort", "--session-id", "--resume",
+    )
+]
+
+
+@pytest.mark.parametrize("token", CLAUDE_ATTACHED_FLAG_FORMS)
+def test_claude_refuses_the_attached_form_of_every_flag_it_writes(token: str) -> None:
+    """`--flag=value` is honoured by claude but never written by this backend, so it must be
+    refused like any other non-canonical spelling — not just the three flags actually exploited."""
+    argv = with_extra_options(start(ClaudeBackend()), token)
+    with pytest.raises(ClaudeUnsafe, match="unrecognised option token"):
+        ClaudeBackend().assert_safe(argv, "write_in_repo")
+
+
+@pytest.mark.parametrize("alias", ["--allowed-tools", "--disallowed-tools"])
+def test_claude_refuses_documented_tool_flag_aliases(alias: str) -> None:
+    """claude's own --help documents these as aliases of --allowedTools/--disallowedTools; this
+    backend never writes them, so they must be refused like any other unrecognised token."""
+    argv = with_extra_options(start(ClaudeBackend()), alias, "Bash(git commit:*)")
+    with pytest.raises(ClaudeUnsafe, match="unrecognised option token"):
+        ClaudeBackend().assert_safe(argv, "write_in_repo")
+
+
+def test_claude_refuses_an_unrecognised_token() -> None:
+    argv = with_extra_options(start(ClaudeBackend()), "--frobnicate")
+    with pytest.raises(ClaudeUnsafe, match="unrecognised option token"):
+        ClaudeBackend().assert_safe(argv, "write_in_repo")
+
+
+@pytest.mark.parametrize("freedom", ["read_only", "write_in_repo"])
+def test_claude_deny_and_allow_can_never_coexist_whatever_the_spelling(freedom: str) -> None:
+    """Structural, not incidental: forcing an --allowedTools onto a deny freedom must be refused
+    even though today's DENY_FREEDOMS/ALLOWED_TOOLS mapping never asks for both at once."""
+    argv = with_extra_options(
+        start(ClaudeBackend(), freedom=freedom), "--allowedTools", ALLOWED_TOOLS["publish"]
+    )
+    with pytest.raises(ClaudeUnsafe, match="both present"):
+        ClaudeBackend().assert_safe(argv, freedom)
+
+
+def test_claude_deny_and_allow_can_never_coexist_at_publish() -> None:
+    argv = with_extra_options(
+        start(ClaudeBackend(), freedom="publish"), "--disallowedTools", DISALLOWED_TOOLS
+    )
+    with pytest.raises(ClaudeUnsafe, match="both present"):
+        ClaudeBackend().assert_safe(argv, "publish")
+
+
+@pytest.mark.parametrize("model", ["--effort=high", "-sother", "--unknown-flag"])
+def test_claude_refuses_a_model_that_would_smuggle_in_an_option(model: str) -> None:
+    """`model` is caller-supplied and lands in the option region, so its shape is not trusted."""
+    with pytest.raises(ClaudeUnsafe, match="parse as an option"):
+        ClaudeBackend().build_start_argv(
+            "do a thing", repo=REPO, freedom="write_in_repo", session_id=SESSION, model=model,
+            max_turns=None, reasoning_effort=None,
+        )
+
+
+def test_claude_refuses_a_session_id_that_would_smuggle_in_an_option() -> None:
+    with pytest.raises(ClaudeUnsafe, match="parse as an option"):
+        ClaudeBackend().build_start_argv(
+            "do a thing", repo=REPO, freedom="write_in_repo", session_id="--verbose", model=None,
+            max_turns=None, reasoning_effort=None,
+        )
+
+
+def test_claude_refuses_a_model_of_bare_separator() -> None:
+    """A caller-supplied `model` equal to `--` cannot become a false end-of-options marker.
+
+    `argv.index("--")` finds this fake one first, before the real separator the builder appends —
+    so the option region gets truncated right after `--model` (no value pairs with it), and the
+    "positional" region balloons to include the real `--`, the prompt, and everything the truncation
+    dropped. Confirmed (Codex round-2 review): this fails loudly on positional arity rather than
+    silently treating anything as an option — never a bypass, just a different, still-safe message
+    than a mid-region smuggle attempt.
+    """
+    with pytest.raises(ClaudeUnsafe, match="expected exactly one positional"):
+        ClaudeBackend().build_start_argv(
+            "do a thing", repo=REPO, freedom="write_in_repo", session_id=SESSION, model="--",
+            max_turns=None, reasoning_effort=None,
+        )
+
+
+def test_claude_refuses_a_session_id_of_bare_separator() -> None:
+    """Same reasoning as test_claude_refuses_a_model_of_bare_separator, one flag later."""
+    with pytest.raises(ClaudeUnsafe, match="expected exactly one positional"):
+        ClaudeBackend().build_start_argv(
+            "do a thing", repo=REPO, freedom="write_in_repo", session_id="--", model=None,
+            max_turns=None, reasoning_effort=None,
+        )
+
+
+def test_claude_refuses_a_session_flag_with_no_session_id() -> None:
+    argv = start(ClaudeBackend())
+    argv[argv.index("--session-id") + 1] = "  "
+    with pytest.raises(ClaudeUnsafe, match="no session id"):
+        ClaudeBackend().assert_safe(argv, "write_in_repo")
+
+
+def test_claude_rejects_output_format_other_than_stream_json() -> None:
+    argv = start(ClaudeBackend())
+    argv[argv.index("--output-format") + 1] = "text"
+    with pytest.raises(ClaudeUnsafe, match="stream-json"):
+        ClaudeBackend().assert_safe(argv, "write_in_repo")
+
+
+def test_claude_rejects_a_duplicate_output_format_whose_second_value_would_win() -> None:
+    argv = with_extra_options(start(ClaudeBackend()), "--output-format", "text")
+    with pytest.raises(ClaudeUnsafe, match="--output-format appears"):
+        ClaudeBackend().assert_safe(argv, "write_in_repo")
+
+
+def test_claude_rejects_a_duplicate_max_turns_whose_second_value_would_win() -> None:
+    argv = with_extra_options(start(ClaudeBackend(), max_turns=3), "--max-turns", "99")
+    with pytest.raises(ClaudeUnsafe, match="--max-turns appears"):
+        ClaudeBackend().assert_safe(argv, "write_in_repo")
+
+
+def test_claude_rejects_a_duplicate_model_whose_second_value_would_win() -> None:
+    argv = with_extra_options(start(ClaudeBackend(), model="opus"), "--model", "sonnet")
+    with pytest.raises(ClaudeUnsafe, match="--model appears"):
+        ClaudeBackend().assert_safe(argv, "write_in_repo")
+
+
+@pytest.mark.parametrize("build", [start, resume], ids=["start", "resume"])
+def test_claude_legitimate_argv_with_model_and_effort_still_passes_the_strict_walk(build) -> None:
+    """The allowlist must not be so strict it refuses what this backend itself writes, on either
+    the start or resume argv shape."""
+    argv = build(ClaudeBackend(), model="sonnet", reasoning_effort="medium")
+    ClaudeBackend().assert_safe(argv, "write_in_repo")
 
 
 # --- codex specifics -----------------------------------------------------------------------
@@ -663,6 +881,41 @@ def test_codex_assert_safe_refuses_publish_missing_the_network_pair() -> None:
         CodexBackend().assert_safe(argv, "publish")
 
 
+def test_codex_asserts_network_blocked_rather_than_hoping_the_user_config_agrees() -> None:
+    """`network_access: blocked` has to be true of the run, not of whoever's machine it is on.
+
+    Measured: with `[sandbox_workspace_write] network_access = true` in the user's own codex config,
+    `-s workspace-write` with no `-c` pair reached the network (HTTP 200). The explicit `=false`
+    overrides that (measured: back to curl exit 6), so the claim holds by construction.
+    """
+    argv = start(CodexBackend(), freedom="write_in_repo")
+
+    assert NETWORK_DISABLE_PAIR in argv
+    assert CodexBackend().enforcement("write_in_repo").network_access == "blocked"
+
+    index = argv.index(NETWORK_DISABLE_PAIR)
+    del argv[index - 1 : index + 1]
+    with pytest.raises(CodexUnsafe, match="network"):
+        CodexBackend().assert_safe(argv, "write_in_repo")
+
+
+def test_codex_read_only_takes_no_network_override_because_the_key_does_not_apply() -> None:
+    """Measured: `read-only` stayed blocked even with the user config setting the key true, so the
+    key is genuinely scoped to `workspace-write` and asserting it here would be noise."""
+    argv = start(CodexBackend(), freedom="read_only")
+
+    assert not [a for a in argv if "network_access" in a]
+    assert CodexBackend().enforcement("read_only").network_access == "blocked"
+
+
+def test_codex_refuses_both_network_overrides_at_once() -> None:
+    """Which one wins would then depend on argument order rather than the requested freedom."""
+    argv = with_extra_options(start(CodexBackend(), freedom="publish"), "-c", NETWORK_DISABLE_PAIR)
+
+    with pytest.raises(CodexUnsafe, match="both network overrides"):
+        CodexBackend().assert_safe(argv, "publish")
+
+
 def test_codex_pins_never_ask_or_it_could_hang() -> None:
     """A headless run that stops for approval waits forever, so this is not optional."""
     argv = start(CodexBackend())
@@ -670,8 +923,12 @@ def test_codex_pins_never_ask_or_it_could_hang() -> None:
     # Drop the whole `-c approval_policy="never"` pair, not just its value: leaving a dangling
     # `-c` right before `--` would be a missing-value argv the strict walker rejects for that
     # reason, which is a different failure than the missing-override one this test means to cover.
+    # Delete it positionally rather than filtering every `-c` out, which would also orphan the
+    # network override's own `-c` and fail on that instead.
+    index = argv.index(NEVER_ASK[1])
+    del argv[index - 1 : index + 1]
     with pytest.raises(CodexUnsafe, match="approval"):
-        CodexBackend().assert_safe([a for a in argv if a not in NEVER_ASK], "write_in_repo")
+        CodexBackend().assert_safe(argv, "write_in_repo")
 
 
 def test_codex_rejects_a_later_approval_override_that_would_win() -> None:

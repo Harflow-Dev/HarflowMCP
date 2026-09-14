@@ -66,6 +66,12 @@ NEVER_ASK = ("-c", 'approval_policy="never"')
 # "wrong key, silently ignored".
 NETWORK_KEY = "sandbox_workspace_write.network_access"
 NETWORK_ENABLE_PAIR = f"{NETWORK_KEY}=true"
+# Passed explicitly wherever we claim network is blocked, rather than relying on codex's default.
+# Measured: with `[sandbox_workspace_write] network_access = true` in the user's own config,
+# `-s workspace-write` with no `-c` pair reached the network (HTTP 200) — so "blocked" was a claim
+# about this machine's config, not about the sandbox. The explicit `=false` overrides that ambient
+# setting (measured: back to curl exit 6), which makes the claim true by construction.
+NETWORK_DISABLE_PAIR = f"{NETWORK_KEY}=false"
 
 # The `-c` key this backend's effort rides on. EFFORTS is a closed four-value vocabulary with no
 # quote or `=` characters in it, so quoting the TOML value is a non-issue — no encoder needed.
@@ -142,7 +148,8 @@ VALUE_FLAGS = ("-C", "-s", "-c", "-m")
 # so NETWORK_ENABLE_PAIR (the `publish` network switch) stays the single source of truth for its own
 # literal.
 PERMITTED_C_PAIRS: frozenset[str] = frozenset(
-    {NEVER_ASK[1], NETWORK_ENABLE_PAIR} | {f'{EFFORT_KEY}="{level}"' for level in EFFORTS}
+    {NEVER_ASK[1], NETWORK_ENABLE_PAIR, NETWORK_DISABLE_PAIR}
+    | {f'{EFFORT_KEY}="{level}"' for level in EFFORTS}
 )
 
 
@@ -218,6 +225,10 @@ class CodexBackend:
         options = ["--json", "-C", str(repo), "-s", SANDBOX_MODES[freedom], *NEVER_ASK]
         if freedom == "publish":
             options += ["-c", NETWORK_ENABLE_PAIR]
+        elif SANDBOX_MODES[freedom] == "workspace-write":
+            # Only meaningful for workspace-write: the key is scoped to that sandbox, and `read-only`
+            # was measured immune to it even when the user's config sets it true.
+            options += ["-c", NETWORK_DISABLE_PAIR]
         if model:
             options += ["-m", model]
         if reasoning_effort:
@@ -323,20 +334,39 @@ class CodexBackend:
                 f"blocking on an approval prompt no one can answer; found {approvals!r}: {argv!r}"
             )
 
-        network_pairs = [pair for pair in pairs if pair == NETWORK_ENABLE_PAIR]
+        # The network switch is asserted in BOTH directions: `=true` exactly at `publish`, and
+        # `=false` wherever the sandbox is `workspace-write` and we claim network is blocked. The
+        # second half is not belt-and-braces — without it the claim depends on the user's own
+        # `[sandbox_workspace_write]` config, and was measured false against a config setting it
+        # true.
+        enables = [pair for pair in pairs if pair == NETWORK_ENABLE_PAIR]
+        disables = [pair for pair in pairs if pair == NETWORK_DISABLE_PAIR]
+        if enables and disables:
+            raise UnsafeInvocationError(
+                f"codex was given both network overrides at once, so which one applies depends on "
+                f"argument order rather than on the requested freedom: {argv!r}"
+            )
         if freedom == "publish":
-            if network_pairs != [NETWORK_ENABLE_PAIR]:
+            if enables != [NETWORK_ENABLE_PAIR]:
                 raise UnsafeInvocationError(
                     f"codex must carry exactly one {NETWORK_ENABLE_PAIR} override at freedom "
-                    f"'publish': found {network_pairs!r}: {argv!r}"
+                    f"'publish': found {enables!r}: {argv!r}"
                 )
-        elif network_pairs:
+        elif SANDBOX_MODES[freedom] == "workspace-write":
+            if disables != [NETWORK_DISABLE_PAIR]:
+                raise UnsafeInvocationError(
+                    f"codex must carry exactly one {NETWORK_DISABLE_PAIR} override at freedom "
+                    f"{freedom!r}, or 'network_access: blocked' would be a claim about the user's "
+                    f"own config rather than this run: found {disables!r}: {argv!r}"
+                )
+        elif enables or disables:
             raise UnsafeInvocationError(
-                f"{NETWORK_ENABLE_PAIR} present at freedom {freedom!r}, which must not enable "
-                f"network access: {argv!r}"
+                f"codex carries a network override at freedom {freedom!r}, where the sandbox "
+                f"({SANDBOX_MODES[freedom]}) does not take one: {argv!r}"
             )
 
-        efforts = [pair for pair in pairs if pair != NEVER_ASK[1] and pair != NETWORK_ENABLE_PAIR]
+        overrides_with_own_checks = {NEVER_ASK[1], NETWORK_ENABLE_PAIR, NETWORK_DISABLE_PAIR}
+        efforts = [pair for pair in pairs if pair not in overrides_with_own_checks]
         if len(efforts) > 1:
             raise UnsafeInvocationError(f"expected at most one {EFFORT_KEY} override: {argv!r}")
 

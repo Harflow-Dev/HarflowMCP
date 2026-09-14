@@ -162,8 +162,9 @@ from `unrestricted` on vibe, because there is no argv difference to check.
 Claude's `unrestricted` also changed behaviour to make this level make sense: the deny patterns used
 to apply even at `unrestricted`, refusing ordinary `git commit`/`git push` there too. They are now
 dropped at `unrestricted` (bypassPermissions with no denies) — a **compatibility break** for anyone
-who relied on the old behaviour. That `bypassPermissions` actually lets a commit through follows from
-it auto-approving everything, but this specific case was not itself measured — expected, not verified.
+who relied on the old behaviour. That it actually lets a commit through was measured the same way as
+the rest: `bypassPermissions` with no `--disallowedTools`, against a scratch repo with a bare remote,
+committed and pushed with `permission_denials` empty.
 
 opencode reports every enforcement boolean as `false` at every level, because its `freedom` mapping
 is only a choice of agent (`plan` for `read_only`, `build` otherwise, `build` again for `publish`) and

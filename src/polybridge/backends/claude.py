@@ -8,6 +8,16 @@ CLI facts established by measurement, not assumption:
 * `--max-turns` works but is undocumented in `--help`.
 * Deny rules *do* take precedence over `bypassPermissions`, and the matcher decomposes `&&` chains —
   but not `git -C … commit` or `bash -c 'git commit'`. There is no OS sandbox at all.
+* `-p`/`--print` is a *boolean* flag, not one that takes the prompt as its argument — `--help`'s own
+  usage line is `claude [options] [command] [prompt]`, with `prompt` a separate declared positional.
+  So a prompt token that happens to exactly equal a real claude option name (e.g.
+  `--dangerously-skip-permissions`) is parsed by claude as that option, not as text, if nothing marks
+  where options end. Confirmed live (killed within seconds, `--permission-mode plan`): with no `--`,
+  that shape reached claude's own option parser and the run aborted for lack of a prompt; with `--`
+  inserted before the prompt, claude correctly read the following token as literal prompt text and
+  started a normal turn. `assert_safe` and the argv builders both rely on `--` for this now, the same
+  way opencode and codex already did — a prior version of this backend assumed the prompt was simply
+  positional at a fixed index, which this measurement showed was not a safe assumption to make.
 
 **`publish` (measured, and it refuted an earlier plan for this level).** Dropping the deny patterns
 alone is not enough: with `acceptEdits` and no denies, `git commit` was still refused with "This
@@ -70,6 +80,27 @@ ALLOWED_TOOLS: dict[str, str] = {
 # CLAUDE.md. That inheritance is the point — a dispatched agent should be as capable as one the user
 # runs themselves — so these are refused rather than merely unused.
 FORBIDDEN_FLAGS = ("--strict-mcp-config", "--setting-sources", "--safe-mode", "--bare")
+
+# Options this backend itself ever writes — nothing more. `assert_safe` walks the option region
+# against exactly these instead of searching/counting it, because a search is what let non-canonical
+# spellings through while claude still honoured them. Measured evading the old search/count check:
+# the attached `--permission-mode=bypassPermissions`, `--dangerously-skip-permissions` (caught
+# separately, below, for a clearer message — see the dedicated check in assert_safe), and the
+# attached alias form `--disallowed-tools=...`. Long aliases (`--allowed-tools`,
+# `--disallowed-tools`) are deliberately absent even though claude accepts them: this backend never
+# writes them, so admitting them here would reopen the same hole under a different spelling.
+BOOLEAN_FLAGS = ("--verbose",)
+VALUE_FLAGS = (
+    "--output-format",
+    "--permission-mode",
+    "--disallowedTools",
+    "--allowedTools",
+    "--max-turns",
+    "--model",
+    "--effort",
+    "--session-id",
+    "--resume",
+)
 
 PERMISSION_MODES: dict[str, str] = {
     "read_only": "plan",
@@ -178,8 +209,11 @@ class ClaudeBackend:
     ) -> list[str]:
         if session_id is None:
             raise ValueError("claude accepts a chosen session id, so one must be supplied")
-        argv = self._common(prompt, freedom, model, max_turns, reasoning_effort)
+        argv = self._common(freedom, model, max_turns, reasoning_effort)
         argv += ["--session-id", session_id]
+        # `--` then the prompt: last, and explicitly not parsed as an option however it looks —
+        # see the note in assert_safe about why this is load-bearing for claude specifically.
+        argv += ["--", self._check_prompt(prompt)]
         self.assert_safe(argv, freedom)
         return argv
 
@@ -194,29 +228,26 @@ class ClaudeBackend:
         max_turns: int | None,
         reasoning_effort: str | None,
     ) -> list[str]:
-        argv = self._common(prompt, freedom, model, max_turns, reasoning_effort)
+        argv = self._common(freedom, model, max_turns, reasoning_effort)
         # --resume and --session-id conflict, so never both.
         argv += ["--resume", session_id]
+        argv += ["--", self._check_prompt(prompt)]
         self.assert_safe(argv, freedom)
         return argv
 
     def _common(
         self,
-        prompt: str,
         freedom: Freedom,
         model: str | None,
         max_turns: int | None,
         reasoning_effort: str | None,
     ) -> list[str]:
-        if not prompt or not prompt.strip():
-            raise ValueError("prompt must be a non-empty string")
         # Re-checked here, the one place both start and resume funnel through, so no caller of this
         # method can reach the CLI with an effort it would silently degrade instead of honour.
         check_reasoning_effort(self, reasoning_effort)
         argv = [
             BINARY,
             "-p",
-            prompt,
             "--output-format",
             "stream-json",
             # Required, not stylistic: the CLI refuses to start without it.
@@ -238,56 +269,119 @@ class ClaudeBackend:
             argv += ["--effort", reasoning_effort]
         return argv
 
+    @staticmethod
+    def _check_prompt(prompt: str) -> str:
+        if not prompt or not prompt.strip():
+            raise ValueError("prompt must be a non-empty string")
+        return prompt
+
     def assert_safe(self, argv: list[str], freedom: Freedom) -> None:
         # Rejects an unknown freedom outright rather than letting PERMISSION_MODES[freedom] raise a
         # bare KeyError below.
         check_freedom(freedom)
-        # The prompt is arbitrary caller text that may itself look like a flag, so only the option
-        # region is inspected. Checked rather than assumed, so a reorder fails loudly.
-        if len(argv) <= 3 or argv[0] != BINARY or argv[1] != "-p":
+        if argv[:2] != [BINARY, "-p"]:
             raise UnsafeInvocationError(f"unrecognised claude argv layout: {argv!r}")
-        flags = argv[3:]
 
-        for flag in ("--verbose", "--permission-mode"):
-            count = flags.count(flag)
-            if count != 1:
-                raise UnsafeInvocationError(f"{flag} appears {count} times: {argv!r}")
+        # Only the option region is inspected. Everything after `--` is the prompt — caller text
+        # that happens to contain a flag name must never be able to satisfy a safety check, nor be
+        # read by claude itself as anything but text. An earlier version of this method assumed the
+        # prompt was a fixed positional right after `-p` (index 2), reasoning that `-p <value>`
+        # takes its argument the way most flags do. That assumption was wrong: measured against
+        # `claude --help`, `-p`/`--print` is a *boolean* flag and `prompt` is a separate declared
+        # positional (`Usage: claude [options] [command] [prompt]`) — so a prompt token that
+        # happened to exactly equal a real claude option name (e.g.
+        # `--dangerously-skip-permissions`) was parsed by claude as that option, not as prompt text,
+        # with no separator to stop it. Confirmed live, with `--permission-mode plan` and killed
+        # within seconds: without `--`, that exact shape reached claude's own parser; with `--`
+        # inserted before the prompt, claude correctly treated the token after it as literal prompt
+        # text and started a normal turn. So, as with opencode/codex, `--` now pins the boundary
+        # explicitly rather than relying on argv position.
+        if "--" not in argv:
+            raise UnsafeInvocationError(
+                f"refusing to run claude without a `--` separator before the prompt, which stops "
+                f"prompt text being parsed as options: {argv!r}"
+            )
+        options = argv[2 : argv.index("--")]
 
-        deny_count = flags.count("--disallowedTools")
-        if freedom in DENY_FREEDOMS:
-            if deny_count != 1:
+        # Positional arity, not just separator presence: claude declares exactly one positional
+        # (the prompt), so anything other than exactly one token after `--` is not a shape this
+        # backend ever writes.
+        positionals = argv[argv.index("--") + 1 :]
+        if len(positionals) != 1:
+            raise UnsafeInvocationError(
+                f"expected exactly one positional argument (the prompt) after `--`, found "
+                f"{len(positionals)}: {argv!r}"
+            )
+
+        # Kept for the clearer message even though the allowlist below would refuse this token too
+        # (as unrecognised) — this is the one form worth naming explicitly: a full permission
+        # bypass, not merely a flag this backend happens not to write.
+        if "--dangerously-skip-permissions" in options:
+            raise UnsafeInvocationError(
+                f"--dangerously-skip-permissions discards the permission layer this backend's "
+                f"freedom mapping depends on entirely: {argv!r}"
+            )
+
+        # Likewise kept ahead of the allowlist for their own clearer message.
+        for flag in FORBIDDEN_FLAGS:
+            if flag in options:
                 raise UnsafeInvocationError(
-                    f"--disallowedTools appears {deny_count} times: {argv!r}"
+                    f"{flag} would cut the dispatched agent off from the user's MCP servers and "
+                    f"settings, which it is meant to inherit: {argv!r}"
                 )
-            denied = flags[flags.index("--disallowedTools") + 1]
+
+        seen = self._parse_options(options, argv)
+
+        self._exactly_one(seen, "--verbose", argv)
+
+        fmt = self._exactly_one(seen, "--output-format", argv)
+        if fmt != "stream-json":
+            raise UnsafeInvocationError(
+                f"--output-format was {fmt!r}, but only stream-json can be parsed into events: "
+                f"{argv!r}"
+            )
+
+        deny_values = seen.get("--disallowedTools", [])
+        allow_values = seen.get("--allowedTools", [])
+
+        # Structurally impossible for both to survive the walk, whatever spelling arrived and
+        # whatever freedom is in play: deny beats allow, so both present would silently neuter an
+        # allow-list freedom rather than error loudly. Checked before either per-freedom branch
+        # below, so this is the invariant itself — not merely a consequence of DENY_FREEDOMS and
+        # ALLOWED_TOOLS happening not to share a freedom today.
+        if deny_values and allow_values:
+            raise UnsafeInvocationError(
+                f"--disallowedTools and --allowedTools both present: deny beats allow, which "
+                f"would silently neuter this freedom's allow-list: {argv!r}"
+            )
+
+        if freedom in DENY_FREEDOMS:
+            denied = self._exactly_one(seen, "--disallowedTools", argv)
             if denied != DISALLOWED_TOOLS:
                 raise UnsafeInvocationError(
-                    f"--disallowedTools was {denied!r}, expected the deny list"
+                    f"--disallowedTools was {denied!r}, expected the deny list: {argv!r}"
                 )
-        elif deny_count != 0:
+        elif deny_values:
             raise UnsafeInvocationError(
                 f"--disallowedTools present at freedom {freedom!r}, which must not deny git "
                 f"commit/push: {argv!r}"
             )
 
-        allow_count = flags.count("--allowedTools")
         expected_allowed = ALLOWED_TOOLS.get(freedom)
         if expected_allowed is not None:
-            if allow_count != 1:
-                raise UnsafeInvocationError(f"--allowedTools appears {allow_count} times: {argv!r}")
-            allowed = flags[flags.index("--allowedTools") + 1]
+            allowed = self._exactly_one(seen, "--allowedTools", argv)
             if allowed != expected_allowed:
                 raise UnsafeInvocationError(
                     f"--allowedTools was {allowed!r}, expected {expected_allowed!r} for freedom "
                     f"{freedom!r}: {argv!r}"
                 )
-        elif allow_count != 0:
+        elif allow_values:
             raise UnsafeInvocationError(
                 f"--allowedTools present at freedom {freedom!r}, which this backend does not use "
                 f"there: {argv!r}"
             )
 
-        mode = flags[flags.index("--permission-mode") + 1]
+        mode = self._exactly_one(seen, "--permission-mode", argv)
         expected_mode = PERMISSION_MODES[freedom]
         if mode != expected_mode:
             raise UnsafeInvocationError(
@@ -297,20 +391,84 @@ class ClaudeBackend:
 
         # Optional, unlike the flags above — but a second one, or a non-canonical value, would
         # either win silently or reach a CLI that degrades it without telling anyone.
-        effort_count = flags.count("--effort")
-        if effort_count > 1:
-            raise UnsafeInvocationError(f"--effort appears {effort_count} times: {argv!r}")
-        if effort_count == 1:
-            effort = flags[flags.index("--effort") + 1]
-            if effort not in EFFORTS:
-                raise UnsafeInvocationError(f"unexpected --effort value {effort!r}: {argv!r}")
+        effort_values = seen.get("--effort", [])
+        if len(effort_values) > 1:
+            raise UnsafeInvocationError(f"--effort appears {len(effort_values)} times: {argv!r}")
+        if effort_values and effort_values[0] not in EFFORTS:
+            raise UnsafeInvocationError(f"unexpected --effort value {effort_values[0]!r}: {argv!r}")
 
-        for flag in FORBIDDEN_FLAGS:
-            if flag in flags:
+        # Optional too, and caller-supplied — a second value would win silently.
+        model_values = seen.get("--model", [])
+        if len(model_values) > 1:
+            raise UnsafeInvocationError(f"--model appears {len(model_values)} times: {argv!r}")
+
+        # A second --max-turns would win silently, same reasoning as --effort/--model above.
+        turns_values = seen.get("--max-turns", [])
+        if len(turns_values) > 1:
+            raise UnsafeInvocationError(f"--max-turns appears {len(turns_values)} times: {argv!r}")
+
+        # Exactly one session flag, counted across both spellings: never both --session-id and
+        # --resume, never neither, and it must actually name a session — a resume that silently
+        # continued the wrong conversation is worse than one that fails outright.
+        session_values = seen.get("--session-id", []) + seen.get("--resume", [])
+        if len(session_values) != 1:
+            raise UnsafeInvocationError(
+                f"expected exactly one of --session-id/--resume, found {len(session_values)}: "
+                f"{argv!r}"
+            )
+        if not session_values[0].strip():
+            raise UnsafeInvocationError(f"session flag with no session id: {argv!r}")
+
+    @staticmethod
+    def _parse_options(options: list[str], argv: list[str]) -> dict[str, list[str]]:
+        """Walk the option region strictly, refusing any token this backend would not have written.
+
+        Mirrors OpencodeBackend._parse_options and exists for the same reason: searching
+        `"--permission-mode" in flags` or counting `flags.count(...)` is not enough, because claude
+        also honours `--flag=value` and documented long aliases (`--allowed-tools`,
+        `--disallowed-tools`) this backend never emits — a search sees the canonical form it wrote
+        and passes while claude applies the non-canonical one that rode along. Measured evading the
+        old search/count check: the attached `--permission-mode=bypassPermissions`,
+        `--dangerously-skip-permissions` (caught separately, above, for a clearer message), and the
+        attached alias form `--disallowed-tools=...`. So every token not in canonical
+        space-separated form is refused rather than skipped over.
+        """
+        seen: dict[str, list[str]] = {}
+        index = 0
+        while index < len(options):
+            token = options[index]
+            if token in BOOLEAN_FLAGS:
+                seen.setdefault(token, []).append("")
+                index += 1
+            elif token in VALUE_FLAGS:
+                if index + 1 >= len(options):
+                    raise UnsafeInvocationError(f"{token} has no value: {argv!r}")
+                value = options[index + 1]
+                # A value that looks like an option is not a value: claude's parser would read it
+                # as the next flag. `model` and the session id are caller-supplied and land here,
+                # so a model named `--dangerously-skip-permissions` would otherwise smuggle an
+                # option into the region this method exists to police.
+                if value.startswith("-"):
+                    raise UnsafeInvocationError(
+                        f"{token} was given {value!r}, which claude would parse as an option "
+                        f"rather than a value: {argv!r}"
+                    )
+                seen.setdefault(token, []).append(value)
+                index += 2
+            else:
                 raise UnsafeInvocationError(
-                    f"{flag} would cut the dispatched agent off from the user's MCP servers and "
-                    f"settings, which it is meant to inherit: {argv!r}"
+                    f"unrecognised option token {token!r}: this backend writes only canonical "
+                    f"space-separated options, and `--flag=value` or an alias spelling would apply "
+                    f"unnoticed: {argv!r}"
                 )
+        return seen
+
+    @staticmethod
+    def _exactly_one(seen: dict[str, list[str]], flag: str, argv: list[str]) -> str:
+        values = seen.get(flag, [])
+        if len(values) != 1:
+            raise UnsafeInvocationError(f"{flag} appears {len(values)} times: {argv!r}")
+        return values[0]
 
     def enforcement(self, freedom: Freedom) -> Enforcement:
         mode = PERMISSION_MODES[freedom]
