@@ -109,7 +109,7 @@ strength, every task reports what was **actually** enforced rather than what the
 ```json
 "enforcement": {
   "freedom": "write_in_repo",
-  "mechanism": "codex sandbox: workspace-write",
+  "mechanism": "codex sandbox: workspace-write + -c sandbox_workspace_write.network_access=false",
   "os_enforced": true,
   "writes_confined": true,
   "writable_roots": ["the working directory", "/tmp", "$TMPDIR"],
@@ -144,6 +144,12 @@ all still stop the attempt, and it says nothing about whether the agent even tri
 one of `"blocked"`, `"enabled"`, `"unrestricted"` or `"not_controlled"` — the last means polybridge
 imposes nothing of its own and the surrounding environment decides, which is **not** the same as
 `"blocked"`.
+
+Where codex reports `"blocked"` it passes `-c sandbox_workspace_write.network_access=false`
+explicitly rather than relying on the sandbox default, and the `mechanism` string names it. That is
+not belt-and-braces: a plain `workspace-write` run defers the setting to the user's own
+`config.toml`, and was measured reaching the network (HTTP 200) on a config that enables it. The
+explicit override makes the claim true of the run instead of the machine.
 
 The freedom ladder is a *requested ordering*, not a guarantee that every backend implements four
 distinct strengths — two backends collapse an adjacent pair on purpose:

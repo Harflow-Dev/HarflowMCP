@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import signal
 import subprocess
+from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
+from polybridge.backends.base import Enforcement
 from polybridge import store
 from polybridge import tasks as tasks_module
 from polybridge.tasks import (
@@ -520,7 +522,10 @@ def test_publish_on_the_default_branch_discloses_it(tmp_path: Path) -> None:
     assert "'main'" in notice
     # Disclosure, not a guard: start_task returns after the process has already spawned.
     assert "cancel this task" in notice.lower()
-    assert "at spawn" in notice
+    # The branch is sampled just before the launch, not during the run — the notice must not
+    # overstate how current it is.
+    assert "sampled once" in notice
+    assert "will not be re-checked" in notice
 
 
 def test_publish_on_a_feature_branch_says_nothing(tmp_path: Path) -> None:
@@ -598,6 +603,63 @@ def test_a_detached_head_reports_that_it_could_not_tell(tmp_path: Path) -> None:
 
     assert notice is not None
     assert "could not be determined" in notice
+
+
+class _TrivialBackend:
+    """A backend that spawns a real but instant process, so `_spawn` can be exercised end to end.
+
+    The doubles in tests/test_backends.py exist for the same reason: no real backend has the shape
+    a given test needs. This one only has to get through `_spawn`.
+    """
+
+    name = "trivial"
+    binary = "/bin/echo"
+    capabilities = SimpleNamespace(chooses_session_id=False)
+
+    def build_start_argv(self, prompt, **kwargs):
+        return [self.binary, "{}"]
+
+    def build_resume_argv(self, prompt, **kwargs):
+        return [self.binary, "{}"]
+
+    def assert_safe(self, argv, freedom):
+        return None
+
+    def enforcement(self, freedom):
+        return Enforcement(freedom=freedom, mechanism="none", os_enforced=False,
+                           writes_confined=False, caveats=("test double",))
+
+    def ingest(self, event, acc):
+        return None
+
+    def classify(self, acc, exit_code):
+        return "completed"
+
+
+async def test_a_dispatch_below_publish_pays_no_thread_hop_for_the_branch_check(
+    git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The freedom gate is on the call site, not only inside the helper.
+
+    Checking it only inside the helper still costs an executor round trip on every dispatch, and
+    the helper's own deadline does not start until a worker picks the work up — so a saturated
+    executor would delay a task that has no use for the check at all.
+    """
+    hops: list[object] = []
+    real = asyncio.to_thread
+
+    async def counting_to_thread(func, /, *args, **kwargs):
+        hops.append(func)
+        return await real(func, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", counting_to_thread)
+
+    registry = TaskRegistry(log_dir=tmp_path / "streams")
+    task = await registry.start("x", git_repo, backend=_TrivialBackend(), freedom="write_in_repo")
+    await task.done.wait()
+
+    assert tasks_module._publish_branch_notice not in hops
+    assert task.bridge_notices == []
 
 
 def test_a_remote_head_pointing_at_a_deleted_branch_is_not_trusted(tmp_path: Path) -> None:

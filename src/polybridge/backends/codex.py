@@ -19,8 +19,11 @@ CLI facts established by capturing a real run, not assumption:
 * An `item.type == "error"` was observed in a *successful* run (a benign skills warning), so error
   items are notices, never proof of failure.
 
-**`publish` (measured network table).** `-s workspace-write` alone leaves network blocked — the same
-as its default. Network genuinely opens only with the config pair
+**`publish` (measured network table).** `-s workspace-write` alone leaves network to *the user's own
+config* — measured: with `[sandbox_workspace_write] network_access = true` set there, a plain
+`workspace-write` run reached the network (HTTP 200). So polybridge passes
+`-c sandbox_workspace_write.network_access=false` wherever it reports `blocked`, making that claim
+true of the run rather than of the machine. Network opens only with the config pair
 `-c sandbox_workspace_write.network_access=true` added on top: paired runs measured curl against a
 real host returning exit 6 (could not resolve host) at `read-only` and at `workspace-write` without
 the pair, and HTTP 200 at `workspace-write` with the pair, and at `danger-full-access`. So `publish`
@@ -430,8 +433,13 @@ class CodexBackend:
         mode = SANDBOX_MODES[freedom]
         unrestricted = freedom == "unrestricted"
         mechanism = f"codex sandbox: {mode}"
+        # Name the override that actually carries the network claim. Without it the mechanism reads
+        # as though the sandbox alone decided, which is what `blocked` used to rest on and what was
+        # measured false: plain `workspace-write` defers to the user's own config.
         if freedom == "publish":
-            mechanism += f" + {NETWORK_ENABLE_PAIR}"
+            mechanism += f" + -c {NETWORK_ENABLE_PAIR}"
+        elif mode == "workspace-write":
+            mechanism += f" + -c {NETWORK_DISABLE_PAIR}"
         # Measured per sandbox — see the module docstring and _NETWORK_CAVEAT for the evidence.
         network_access = {
             "read_only": "blocked",

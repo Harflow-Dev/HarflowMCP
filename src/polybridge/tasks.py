@@ -81,16 +81,18 @@ _UNDETERMINED_PUBLISH_NOTICE = (
     "HEAD recorded locally, a detached HEAD, several remotes with none named 'origin', git being "
     "unavailable, or the check timing out). For a publish-authorized run, that is itself worth "
     "knowing: cancel this task now if you need to confirm the target branch before it proceeds. "
-    "This was checked once, at spawn — the agent may switch branches during the run and this "
-    "notice will not see that."
+    "This was sampled once, immediately before the agent was launched — not during the run — so "
+    "the branch may already have changed by the time the agent started, and will not be "
+    "re-checked if it changes later."
 )
 
 _ON_DEFAULT_BRANCH_PUBLISH_NOTICE = (
     "this task was dispatched at freedom {freedom!r} while checked out on the repository's default "
     "branch ({branch!r}), and is authorized to commit, push, and open a PR directly against it — "
     "nothing here blocked that. Cancel this task now if publishing to {branch!r} was not intended. "
-    "This was checked once, at spawn — the agent may switch branches during the run and this "
-    "notice will not see that."
+    "This was sampled once, immediately before the agent was launched — not during the run — so "
+    "the branch may already have changed by the time the agent started, and will not be "
+    "re-checked if it changes later."
 )
 
 
@@ -183,7 +185,10 @@ def _publish_branch_notice(freedom: str, repo_path: Path) -> str | None:
     """A bridge notice disclosing default-branch exposure for a publish-authorized dispatch.
 
     This is disclosure, not a guard: `start_task` returns after the process has already spawned, so
-    nothing here delays or blocks the run. Detection is entirely best-effort — per CLAUDE.md,
+    nothing here can stop a run once it is going. It does run *before* the launch, though — bounded
+    by `GIT_PROBE_BUDGET_SECONDS` and skipped entirely below `publish` — so on a publish dispatch it
+    delays the launch slightly rather than not at all. That is the price of keeping the window
+    between spawning and registering the process free of awaits. Detection is entirely best-effort — per CLAUDE.md,
     bookkeeping must never change an outcome — so every failure mode (a missing `git`, a timed-out
     probe, a detached HEAD, no recorded remote HEAD, an unexpected bug in the detection itself) is
     caught here and turned into the "could not determine" notice rather than an exception. Nothing
@@ -467,13 +472,26 @@ class TaskRegistry:
         self._log_dir.mkdir(parents=True, exist_ok=True)
         log_path = self._log_dir / f"{task_id}.jsonl"
 
-        # Before the spawn, deliberately. Off the event loop because these are blocking
-        # `subprocess.run` calls (the treatment `server.py` gives its own git probe), but the
-        # placement matters more than the threading: between `create_subprocess_exec` and the
-        # registration below there must be no await at all. One there could be cancelled — a client
+        # Before the spawn, deliberately. Between `create_subprocess_exec` and the registration
+        # below there must be no await at all: one there could be cancelled — a client
         # disconnecting mid-call — leaving a live agent no tool can reach, and it would hold the
         # process's pipes unread meanwhile, which blocks the agent (drainers are load-bearing).
-        publish_notice = await asyncio.to_thread(_publish_branch_notice, freedom, repo_path)
+        #
+        # The freedom is checked *here*, not only inside the helper, so a run below `publish` does
+        # not pay a thread hop it has no use for — and cannot queue behind a saturated executor.
+        # The deadline inside the helper only starts once a worker picks the work up, so the wait
+        # for a worker is bounded out here instead, on the event loop, where it is observable.
+        publish_notice: str | None = None
+        if freedom in PUBLISH_FREEDOMS:
+            try:
+                publish_notice = await asyncio.wait_for(
+                    asyncio.to_thread(_publish_branch_notice, freedom, repo_path),
+                    timeout=GIT_PROBE_BUDGET_SECONDS * 2,
+                )
+            except (TimeoutError, asyncio.TimeoutError):
+                # Same rule as every other failure in this check: the dispatch proceeds and the
+                # caller is told the branch could not be determined.
+                publish_notice = _UNDETERMINED_PUBLISH_NOTICE.format(freedom=freedom)
 
         proc = await asyncio.create_subprocess_exec(
             *argv,
