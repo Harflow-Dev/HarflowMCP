@@ -23,6 +23,7 @@ import asyncio
 import logging
 import os
 import signal
+import subprocess
 import uuid
 from collections import deque
 from dataclasses import dataclass, field, replace
@@ -61,6 +62,125 @@ SIGKILL_GRACE_SECONDS = 5.0
 DRAIN_GRACE_SECONDS = 10.0
 
 MAX_TASKS = 200
+
+# Freedoms that authorize a dispatched agent to commit, push, or open a PR — see backends'
+# `publish_attempts_allowed_by_polybridge`. This module does not import from `backends` for this,
+# to keep the check trivial and local; it is re-derived nowhere else.
+PUBLISH_FREEDOMS: frozenset[str] = frozenset({"publish", "unrestricted"})
+
+# Short and strict on purpose: these are local, read-only ref lookups (never a fetch or ls-remote),
+# so a slow or hanging git must not be allowed to delay a dispatch.
+GIT_PROBE_TIMEOUT_SECONDS = 3.0
+
+_UNDETERMINED_PUBLISH_NOTICE = (
+    "this task was dispatched at freedom {freedom!r}, which authorizes it to commit, push, and "
+    "open a PR — but which branch it would land on could not be determined at spawn (no remote "
+    "HEAD recorded locally, a detached HEAD, several remotes with none named 'origin', git being "
+    "unavailable, or the check timing out). For a publish-authorized run, that is itself worth "
+    "knowing: cancel this task now if you need to confirm the target branch before it proceeds. "
+    "This was checked once, at spawn — the agent may switch branches during the run and this "
+    "notice will not see that."
+)
+
+_ON_DEFAULT_BRANCH_PUBLISH_NOTICE = (
+    "this task was dispatched at freedom {freedom!r} while checked out on the repository's default "
+    "branch ({branch!r}), and is authorized to commit, push, and open a PR directly against it — "
+    "nothing here blocked that. Cancel this task now if publishing to {branch!r} was not intended. "
+    "This was checked once, at spawn — the agent may switch branches during the run and this "
+    "notice will not see that."
+)
+
+
+def _git_read(repo_path: Path, *args: str) -> str | None:
+    """Run one read-only git ref lookup. `None` for a non-zero exit — including git's own graceful
+    "not applicable" cases, like `--quiet` on a detached HEAD — never an exception for those.
+
+    A missing `git` binary or a timed-out call raise instead of returning `None`: those are exactly
+    the failures `_publish_branch_notice`'s single guard exists to catch, so they must reach it
+    rather than being silently absorbed a layer early. Never a fetch or `ls-remote` — only locally
+    recorded refs.
+    """
+    result = subprocess.run(
+        ["git", "-C", str(repo_path), *args],
+        capture_output=True,
+        text=True,
+        timeout=GIT_PROBE_TIMEOUT_SECONDS,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def _default_branch_remote(repo_path: Path) -> str | None:
+    """Which remote's locally recorded HEAD names the default branch — never guessed.
+
+    `origin` is preferred when present. With no `origin` but exactly one remote, that one is
+    unambiguous. Several remotes with none named `origin` is left unavailable rather than picking
+    arbitrarily.
+    """
+    remotes_raw = _git_read(repo_path, "remote")
+    if not remotes_raw:
+        return None
+    remotes = [line.strip() for line in remotes_raw.splitlines() if line.strip()]
+    if not remotes:
+        return None
+    if "origin" in remotes:
+        return "origin"
+    if len(remotes) == 1:
+        return remotes[0]
+    return None
+
+
+def _detect_publish_branch_notice(freedom: str, repo_path: Path) -> str | None:
+    """The three outcomes: on the default branch, not on it (nothing to report), or undeterminable.
+
+    Never falls back to "the branch is named main or master" — a feature branch can be named
+    `main`, and a repo's real default can be something else entirely; the default is only ever what
+    a remote's own recorded `HEAD` says.
+    """
+    current_branch = _git_read(repo_path, "symbolic-ref", "--quiet", "--short", "HEAD")
+    remote = _default_branch_remote(repo_path)
+    default_ref = (
+        _git_read(repo_path, "symbolic-ref", "--quiet", "--short", f"refs/remotes/{remote}/HEAD")
+        if remote is not None
+        else None
+    )
+    default_branch = (
+        default_ref[len(remote) + 1 :]
+        if remote is not None and default_ref is not None and default_ref.startswith(f"{remote}/")
+        else None
+    )
+
+    if not current_branch or not default_branch:
+        return _UNDETERMINED_PUBLISH_NOTICE.format(freedom=freedom)
+    if current_branch == default_branch:
+        return _ON_DEFAULT_BRANCH_PUBLISH_NOTICE.format(freedom=freedom, branch=default_branch)
+    return None
+
+
+def _publish_branch_notice(freedom: str, repo_path: Path) -> str | None:
+    """A bridge notice disclosing default-branch exposure for a publish-authorized dispatch.
+
+    This is disclosure, not a guard: `start_task` returns after the process has already spawned, so
+    nothing here delays or blocks the run. Detection is entirely best-effort — per CLAUDE.md,
+    bookkeeping must never change an outcome — so every failure mode (a missing `git`, a timed-out
+    probe, a detached HEAD, no recorded remote HEAD, an unexpected bug in the detection itself) is
+    caught here and turned into the "could not determine" notice rather than an exception. Nothing
+    below `publish`/`unrestricted` runs a single git command.
+    """
+    if freedom not in PUBLISH_FREEDOMS:
+        return None
+    try:
+        return _detect_publish_branch_notice(freedom, repo_path)
+    except Exception:
+        log.warning(
+            "could not determine publish-branch exposure for %s; reporting that rather than the "
+            "branch itself",
+            repo_path,
+            exc_info=True,
+        )
+        return _UNDETERMINED_PUBLISH_NOTICE.format(freedom=freedom)
 
 
 class SessionBusyError(RuntimeError):
@@ -137,8 +257,8 @@ class Task:
     """Notices the bridge itself generates about the dispatch, kept on a channel separate from
     `acc.notices`: vibe's `ingest` resets `notices` to `[]` at the start of every new turn (see
     backends/vibe.py), which would silently discard anything the bridge added there across a
-    resumed run. Nothing populates this yet — the channel exists so a future dispatch-level notice
-    has somewhere safe to live."""
+    resumed run. Currently populated by `_publish_branch_notice` in `_spawn`, when a task is
+    dispatched at a freedom that authorizes publishing."""
     tail: deque[str] = field(default_factory=lambda: deque(maxlen=TAIL_LINES))
     stderr_tail: deque[str] = field(default_factory=lambda: deque(maxlen=STDERR_TAIL_LINES))
 
@@ -339,6 +459,11 @@ class TaskRegistry:
             start_new_session=True,
         )
 
+        # Off the event loop: these are blocking `subprocess.run` calls with their own timeout, and
+        # `_spawn` is async — running them inline would stall every other task's monitor and drainer
+        # for the duration. Same treatment `server.py` gives its own git probe.
+        publish_notice = await asyncio.to_thread(_publish_branch_notice, freedom, repo_path)
+
         task = Task(
             task_id=task_id,
             backend=backend.name,
@@ -356,6 +481,7 @@ class TaskRegistry:
             markers=_identity_markers(backend, session_id, repo_path),
             proc=proc,
             pgid=proc.pid,
+            bridge_notices=[publish_notice] if publish_notice else [],
         )
 
         # Written before anything can go wrong, so even a task whose server dies immediately is

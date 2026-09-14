@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import signal
+import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -476,3 +477,150 @@ async def test_cancelling_a_finished_task_is_a_no_op(tmp_path: Path) -> None:
 
     assert task.status == "completed"
     assert not task.cancel_requested
+
+
+# --- the default-branch notice on a publish-authorized dispatch --------------------------------
+# Real git repos rather than mocks: the whole point of this check is what git actually records, and
+# the failure it guards against (guessing from a branch *name*) is invisible to a mock.
+
+
+def _repo_with_remote(tmp_path: Path, *, branch: str, remotes: tuple[str, ...] = ("origin",)) -> Path:
+    """A repo on `branch`, with each named remote pointing at a bare clone and origin/HEAD recorded."""
+    bare = tmp_path / "bare.git"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(bare)], check=True)
+
+    repo = tmp_path / "work"
+    repo.mkdir()
+    run = lambda *a: subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True)
+    subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+    run("config", "user.email", "t@t.t")
+    run("config", "user.name", "T")
+    (repo / "f.txt").write_text("seed\n")
+    run("add", "-A")
+    run("commit", "-qm", "init")
+    for remote in remotes:
+        run("remote", "add", remote, str(bare))
+        run("push", "-q", remote, "main")
+        # Record the remote's HEAD locally; the detection never performs a network lookup.
+        (repo / ".git" / "refs" / "remotes" / remote).mkdir(parents=True, exist_ok=True)
+        (repo / ".git" / "refs" / "remotes" / remote / "HEAD").write_text(
+            f"ref: refs/remotes/{remote}/main\n"
+        )
+    if branch != "main":
+        run("checkout", "-q", "-b", branch)
+    return repo
+
+
+def test_publish_on_the_default_branch_discloses_it(tmp_path: Path) -> None:
+    repo = _repo_with_remote(tmp_path, branch="main")
+
+    notice = tasks_module._publish_branch_notice("publish", repo)
+
+    assert notice is not None
+    assert "'main'" in notice
+    # Disclosure, not a guard: start_task returns after the process has already spawned.
+    assert "cancel this task" in notice.lower()
+    assert "at spawn" in notice
+
+
+def test_publish_on_a_feature_branch_says_nothing(tmp_path: Path) -> None:
+    repo = _repo_with_remote(tmp_path, branch="feature/x")
+
+    assert tasks_module._publish_branch_notice("publish", repo) is None
+
+
+def test_a_feature_branch_named_main_is_not_mistaken_for_the_default(tmp_path: Path) -> None:
+    """The reason the branch *name* is never used as evidence: a repo's default can be anything."""
+    bare = tmp_path / "bare.git"
+    subprocess.run(["git", "init", "-q", "--bare", "-b", "trunk", str(bare)], check=True)
+    repo = tmp_path / "work"
+    repo.mkdir()
+    run = lambda *a: subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True)
+    subprocess.run(["git", "init", "-q", "-b", "trunk", str(repo)], check=True)
+    run("config", "user.email", "t@t.t")
+    run("config", "user.name", "T")
+    (repo / "f.txt").write_text("seed\n")
+    run("add", "-A")
+    run("commit", "-qm", "init")
+    run("remote", "add", "origin", str(bare))
+    run("push", "-q", "origin", "trunk")
+    (repo / ".git" / "refs" / "remotes" / "origin").mkdir(parents=True, exist_ok=True)
+    (repo / ".git" / "refs" / "remotes" / "origin" / "HEAD").write_text(
+        "ref: refs/remotes/origin/trunk\n"
+    )
+    run("checkout", "-q", "-b", "main")
+
+    # On a branch called `main`, but the repo's real default is `trunk` — so nothing to disclose.
+    assert tasks_module._publish_branch_notice("publish", repo) is None
+
+
+@pytest.mark.parametrize("freedom", ["read_only", "write_in_repo"])
+def test_below_publish_nothing_is_checked_at_all(
+    tmp_path: Path, freedom: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _repo_with_remote(tmp_path, branch="main")
+
+    def explode(*args, **kwargs):
+        raise AssertionError("no git command may run below publish")
+
+    monkeypatch.setattr(tasks_module.subprocess, "run", explode)
+
+    assert tasks_module._publish_branch_notice(freedom, repo) is None
+
+
+def test_a_repo_with_no_remote_reports_that_it_could_not_tell(git_repo: Path) -> None:
+    """Silence would be wrong here: for a publish-authorized run, not knowing is itself material."""
+    subprocess.run(["git", "-C", str(git_repo), "commit", "-qm", "x", "--allow-empty"], check=True)
+
+    notice = tasks_module._publish_branch_notice("publish", git_repo)
+
+    assert notice is not None
+    assert "could not be determined" in notice
+
+
+def test_several_remotes_with_no_origin_are_not_picked_between(tmp_path: Path) -> None:
+    repo = _repo_with_remote(tmp_path, branch="main", remotes=("upstream", "fork"))
+
+    notice = tasks_module._publish_branch_notice("publish", repo)
+
+    assert notice is not None
+    assert "could not be determined" in notice
+
+
+def test_a_detached_head_reports_that_it_could_not_tell(tmp_path: Path) -> None:
+    repo = _repo_with_remote(tmp_path, branch="main")
+    head = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    subprocess.run(["git", "-C", str(repo), "checkout", "-q", head], check=True)
+
+    notice = tasks_module._publish_branch_notice("publish", repo)
+
+    assert notice is not None
+    assert "could not be determined" in notice
+
+
+@pytest.mark.parametrize(
+    "boom",
+    [FileNotFoundError("git"), subprocess.TimeoutExpired("git", 3.0), RuntimeError("unexpected")],
+    ids=["git-missing", "timeout", "unexpected"],
+)
+def test_a_broken_git_never_stops_a_dispatch(
+    tmp_path: Path, boom: Exception, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CLAUDE.md invariant: bookkeeping must never change an outcome.
+
+    A stale attribute in a *log line* once turned a successful run into `failed`, so every failure
+    mode here has to be absorbed into the notice rather than escape into the dispatch.
+    """
+    repo = _repo_with_remote(tmp_path, branch="main")
+
+    def explode(*args, **kwargs):
+        raise boom
+
+    monkeypatch.setattr(tasks_module.subprocess, "run", explode)
+
+    notice = tasks_module._publish_branch_notice("publish", repo)
+
+    assert notice is not None
+    assert "could not be determined" in notice
