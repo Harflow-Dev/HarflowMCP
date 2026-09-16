@@ -18,6 +18,13 @@ CLI facts established by capturing a real run, not assumption:
   event carrying success or failure, and **no dollar cost** — only token counts.
 * An `item.type == "error"` was observed in a *successful* run (a benign skills warning), so error
   items are notices, never proof of failure.
+* **`codex exec resume` rejects `-C`/`-s`: they are global `codex exec` options, absent from `codex
+  exec resume --help`.** Measured on codex-cli 0.154.0, 2026-09-16, with a bogus thread id so a
+  parse success shows up as `no rollout found for thread id …` rather than an option error:
+  `codex exec --json -C <dir> -s read-only -c approval_policy="never" resume -- <id> <prompt>`
+  parses; `codex exec resume --json -C <dir> …` does not (`error: unexpected argument '-C' found`).
+  So `build_resume_argv` places the whole option region *before* `resume`, and `resume` itself
+  becomes the last token ahead of the `--` separator — the shape `assert_safe` now checks for.
 
 **`publish` (measured network table).** `-s workspace-write` alone leaves network to *the user's own
 config* — measured: with `[sandbox_workspace_write] network_access = true` set there, a plain
@@ -215,7 +222,10 @@ class CodexBackend:
         if not session_id:
             raise ValueError("resuming codex needs the thread id its first run reported")
         self._reject_turn_cap(max_turns)
-        argv = [BINARY, "exec", "resume", *self._options(repo, freedom, model, reasoning_effort)]
+        # `-C`/`-s` are global `codex exec` options, absent from `codex exec resume --help` (see
+        # module docstring) — so the option region goes ahead of `resume`, not after it, and
+        # `resume` becomes the last token before `--`.
+        argv = [BINARY, "exec", *self._options(repo, freedom, model, reasoning_effort), "resume"]
         # `codex exec resume [SESSION_ID] [PROMPT]` — both positional, after `--`.
         argv += ["--", session_id, self._check_prompt(prompt)]
         self.assert_safe(argv, freedom)
@@ -265,11 +275,14 @@ class CodexBackend:
                 f"refusing to run codex without a `--` separator before the prompt, which stops "
                 f"prompt text being parsed as options: {argv!r}"
             )
-        # The option region starts right after `exec`, except on a resume argv where `resume` is
-        # a literal subcommand token before it — `build_start_argv`'s first option is always
-        # `--json`, never the string "resume", so this is unambiguous rather than a hardcoded offset.
-        start_index = 3 if argv[2:3] == ["resume"] else 2
-        options = argv[start_index : argv.index("--")]
+        # The option region is `argv[2:sep]` on BOTH shapes now: `-C`/`-s` are global `codex exec`
+        # options that `codex exec resume` itself rejects (measured — see module docstring), so a
+        # resume argv carries them ahead of `resume`, which becomes the region's own last token
+        # rather than living at a fixed offset like the pre-fix `argv[2] == "resume"` layout did.
+        # `_parse_options` recognises that trailing `resume` token itself, since only it knows which
+        # positions are option-start (a candidate subcommand) versus a value already claimed by the
+        # previous flag (e.g. `-m resume`, where "resume" is this backend's own model value).
+        options = argv[2 : argv.index("--")]
 
         # Kept for the clearer message even though the allowlist below would refuse this token too
         # (as unrecognised) — this is the one form worth naming explicitly.
@@ -279,15 +292,16 @@ class CodexBackend:
                 "backend's main safety property"
             )
 
-        seen = self._parse_options(options, argv)
+        seen, is_resume = self._parse_options(options, argv)
 
         # Positional arity, not just separator presence. `exec` takes one positional (the prompt),
         # `exec resume` takes two (session id then prompt) — and a resume missing its prompt is the
         # dangerous shape, because codex would read the intended prompt as the SESSION_ID and
         # silently continue some other conversation. Counted, never matched: a legitimate prompt or
-        # session id may itself be `--`, `resume`, or look like an option.
+        # session id may itself be `--`, `resume`, or look like an option. Driven by `is_resume`,
+        # which the walker above decided, rather than a fixed offset into `argv`.
         positionals = argv[argv.index("--") + 1 :]
-        expected = 2 if start_index == 3 else 1
+        expected = 2 if is_resume else 1
         if len(positionals) != expected:
             raise UnsafeInvocationError(
                 f"expected exactly {expected} positional argument(s) after `--`, found "
@@ -374,7 +388,7 @@ class CodexBackend:
             raise UnsafeInvocationError(f"expected at most one {EFFORT_KEY} override: {argv!r}")
 
     @staticmethod
-    def _parse_options(options: list[str], argv: list[str]) -> dict[str, list[str]]:
+    def _parse_options(options: list[str], argv: list[str]) -> tuple[dict[str, list[str]], bool]:
         """Walk the option region strictly, refusing any token this backend would not have written.
 
         Mirrors OpencodeBackend._parse_options and exists for the same reason: searching for
@@ -385,12 +399,32 @@ class CodexBackend:
         space-separated form is refused rather than skipped over, and a `-c` value is checked
         byte-for-byte against PERMITTED_C_PAIRS rather than parsed, which is what closes the
         unbalanced-quote and doubled-quote holes (see PERMITTED_C_PAIRS) by construction.
+
+        Also decides `is_resume`: whether the region ends in a literal `resume` subcommand token.
+        Only this walker can tell, because a candidate `resume` is examined solely when the loop is
+        at an option-start position — never in a value position, which a plain string search cannot
+        distinguish. That is what keeps `-m resume` (a caller-supplied model literally named
+        "resume", consumed as `-m`'s value two lines below) from ever being mistaken for the
+        subcommand, and even `-m resume resume` unambiguous: the first "resume" is consumed as the
+        value, and only the second, trailing one is examined as a candidate subcommand token. A
+        `resume` found anywhere but the region's last position is refused outright, since codex
+        itself would then see it as a bare positional/unknown token, not the subcommand — which
+        also refuses a duplicate, because only the first occurrence could ever be non-final.
         """
         seen: dict[str, list[str]] = {}
+        is_resume = False
         index = 0
         while index < len(options):
             token = options[index]
-            if token in BOOLEAN_FLAGS:
+            if token == "resume":
+                if index != len(options) - 1:
+                    raise UnsafeInvocationError(
+                        f"'resume' must be the last token before the '--' separator on a resume "
+                        f"argv; found it earlier, at index {index} of the option region: {argv!r}"
+                    )
+                is_resume = True
+                index += 1
+            elif token in BOOLEAN_FLAGS:
                 seen.setdefault(token, []).append("")
                 index += 1
             elif token == "-c":
@@ -427,7 +461,7 @@ class CodexBackend:
                     f"space-separated options, and a non-canonical form could override one of them "
                     f"unnoticed: {argv!r}"
                 )
-        return seen
+        return seen, is_resume
 
     def enforcement(self, freedom: Freedom) -> Enforcement:
         mode = SANDBOX_MODES[freedom]

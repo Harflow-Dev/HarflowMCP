@@ -999,6 +999,71 @@ def test_codex_prompt_is_last_so_no_option_swallows_it() -> None:
     assert resume(CodexBackend())[-3:] == ["--", "abc-123", "more"]
 
 
+def test_codex_resume_argv_puts_the_option_region_before_resume() -> None:
+    """The bug this backend shipped with: `-C`/`-s` are global `codex exec` options, absent from
+    `codex exec resume --help` (measured on codex-cli 0.154.0) — so they must sit ahead of `resume`,
+    which becomes the region's own last token, immediately before `--`."""
+    argv = resume(CodexBackend())
+    sep = argv.index("--")
+    assert argv[2] != "resume", "options must lead, not `resume`"
+    assert argv[sep - 1] == "resume", "`resume` must be the last token before `--`"
+    assert argv[sep + 1 :] == ["abc-123", "more"]
+
+
+def test_codex_start_and_resume_share_a_byte_identical_option_region() -> None:
+    """The precise claim, not just "the same options appear somewhere": start's `argv[2:sep]` is
+    resume's `argv[2:sep-1]` (i.e. the resume region minus its own trailing `resume` token) —
+    `_options` is untouched by the fix, so both argvs must carry it identically."""
+    start_argv = start(CodexBackend(), model="gpt-5", reasoning_effort="medium")
+    resume_argv = resume(CodexBackend(), model="gpt-5", reasoning_effort="medium")
+    start_sep = start_argv.index("--")
+    resume_sep = resume_argv.index("--")
+
+    assert resume_argv[resume_sep - 1] == "resume"
+    assert start_argv[2:start_sep] == resume_argv[2 : resume_sep - 1]
+
+
+def test_codex_refuses_the_old_pre_fix_resume_shape() -> None:
+    """This is the actual reported bug: `resume` right after `exec`, options after it — codex
+    itself rejects it (`error: unexpected argument '-C' found`), so it must never be built or
+    waved through again."""
+    argv = [
+        CODEX_BINARY, "exec", "resume", "--json", "-C", str(REPO), "-s", "read-only",
+        "-c", NEVER_ASK[1], "--", "abc-123", "more",
+    ]
+    with pytest.raises(CodexUnsafe, match="last token"):
+        CodexBackend().assert_safe(argv, "write_in_repo")
+
+
+def test_codex_refuses_a_duplicated_resume_token() -> None:
+    """Two real `resume` tokens (not one consumed as a flag's value): the first can never be the
+    region's last token, so it is refused there — same check as the non-terminal case, since a
+    duplicate always makes an earlier occurrence non-final."""
+    argv = resume(CodexBackend())
+    sep = argv.index("--")
+    assert argv[sep - 1] == "resume"
+    argv = [*argv[: sep - 1], "resume", *argv[sep - 1 :]]
+    with pytest.raises(CodexUnsafe, match="last token"):
+        CodexBackend().assert_safe(argv, "write_in_repo")
+
+
+def test_codex_model_named_resume_is_not_read_as_the_subcommand_on_start() -> None:
+    """`-m resume`'s value is consumed in value position, never examined as a candidate subcommand
+    token — so this stays a 1-positional start argv, not a 2-positional resume one."""
+    argv = start(CodexBackend(), model="resume")
+    assert argv[argv.index("-m") + 1] == "resume"
+    CodexBackend().assert_safe(argv, "write_in_repo")
+
+
+def test_codex_model_named_resume_still_passes_on_an_actual_resume() -> None:
+    """`-m resume resume`: the first "resume" is `-m`'s value, and only the second, trailing one is
+    the real subcommand token — unambiguous by construction, per `_parse_options`' docstring."""
+    argv = resume(CodexBackend(), model="resume")
+    sep = argv.index("--")
+    assert argv[sep - 2 : sep] == ["resume", "resume"]
+    CodexBackend().assert_safe(argv, "write_in_repo")
+
+
 @pytest.mark.parametrize(
     "argv, why",
     [
@@ -1008,8 +1073,8 @@ def test_codex_prompt_is_last_so_no_option_swallows_it() -> None:
         ),
         (
             [
-                "codex", "exec", "resume", "--json", "-C", str(REPO), "-s", "read-only",
-                "-c", NEVER_ASK[1], "--", "only-one",
+                "codex", "exec", "--json", "-C", str(REPO), "-s", "read-only",
+                "-c", NEVER_ASK[1], "resume", "--", "only-one",
             ],
             "a resume missing its prompt, where codex would read the prompt as the session id",
         ),
@@ -1053,6 +1118,21 @@ def test_codex_positional_arity_allows_values_that_look_like_options() -> None:
         ),
         "read_only",
     )
+
+
+def test_codex_positionals_may_be_the_separator_or_the_subcommand_itself() -> None:
+    """`_parse_options`' docstring promises positionals are *counted*, never matched — so the two
+    strings that carry structural meaning in the option region, `--` and `resume`, must still be
+    deliverable as a session id and a prompt. Everything after the first `--` is positional, so
+    neither can reach the walker.
+    """
+    backend = CodexBackend()
+    argv = backend.build_resume_argv(
+        "resume", repo=REPO, freedom="read_only", session_id="--",
+        model=None, max_turns=None, reasoning_effort=None,
+    )
+    assert argv[-3:] == ["--", "--", "resume"]
+    backend.assert_safe(argv, "read_only")
 
 
 def test_codex_working_directory_is_explicit() -> None:
@@ -1147,7 +1227,7 @@ def test_codex_refuses_a_config_pair_with_no_equals() -> None:
         CodexBackend().assert_safe(argv, "write_in_repo")
 
 
-# Six evasions measured directly against the real `codex` CLI — each honoured by codex while a
+# Eight evasions measured directly against the real `codex` CLI — each honoured by codex while a
 # search-based `assert_safe` (the pre-strict-walk version) let it through. Every one is a single
 # extra option appended to an otherwise-legitimate start argv.
 CODEX_EVASIONS: dict[str, tuple[str, ...]] = {
@@ -1161,6 +1241,13 @@ CODEX_EVASIONS: dict[str, tuple[str, ...]] = {
     # so this would reach codex as the literal (invalid) string rather than being rejected there.
     "unbalanced quote": ("-c", 'model_reasoning_effort="low'),
     "doubled quoting": ("-c", 'model_reasoning_effort=""low""'),
+    # Both attached model spellings were measured honoured on codex-cli 0.154.0: each sent the
+    # value to the API as the model (`The 'resume' model is not supported …`), so neither is a
+    # token codex ignores. Neither is a token this backend's walker recognises either — whatever
+    # value rides on it, including the one ("resume") that a check searching for the subcommand
+    # rather than walking to it could mistake for one.
+    "attached --model=resume": ("--model=resume",),
+    "attached -mresume": ("-mresume",),
 }
 
 
@@ -1171,10 +1258,33 @@ def test_codex_refuses_every_measured_non_canonical_option_form(evasion: str) ->
         CodexBackend().assert_safe(argv, "write_in_repo")
 
 
+def with_extra_options_before_codex_resume(argv: list[str], *extra: str) -> list[str]:
+    """Like `with_extra_options`, but inserts before the trailing `resume` token rather than
+    before `--`.
+
+    On a resume argv those are no longer the same position: `resume` itself now sits immediately
+    before `--`. The shared helper would insert an evasion *after* the subcommand, which is a
+    start-shaped injection into a resume argv — codex would probably still refuse it, but not for
+    the reason this test claims to cover, and a bug that only manifested when the evasion landed
+    ahead of `resume` would pass silently.
+    """
+    cut = argv.index("--") - 1
+    assert argv[cut] == "resume", f"expected a trailing resume token right before '--': {argv!r}"
+    return [*argv[:cut], *extra, *argv[cut:]]
+
+
+@pytest.mark.parametrize("evasion", CODEX_EVASIONS, ids=list(CODEX_EVASIONS))
+def test_codex_refuses_every_measured_non_canonical_option_form_on_resume(evasion: str) -> None:
+    argv = with_extra_options_before_codex_resume(resume(CodexBackend()), *CODEX_EVASIONS[evasion])
+    with pytest.raises(CodexUnsafe):
+        CodexBackend().assert_safe(argv, "write_in_repo")
+
+
 @pytest.mark.parametrize("build", [start, resume], ids=["start", "resume"])
 def test_codex_legitimate_argv_with_model_and_effort_still_passes_the_strict_walk(build) -> None:
-    """The allowlist must not be so strict it refuses what this backend itself writes, on either
-    the `exec` or `exec resume` option-region shape."""
+    """The allowlist must not be so strict it refuses what this backend itself writes. `start` and
+    `resume` no longer differ in where the option region *begins* — both start right after `exec` —
+    only in whether a trailing `resume` token follows it before `--`."""
     argv = build(CodexBackend(), model="gpt-5", reasoning_effort="medium")
     CodexBackend().assert_safe(argv, "write_in_repo")
 

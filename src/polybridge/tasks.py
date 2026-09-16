@@ -226,10 +226,12 @@ def _identity_markers(
     """Strings that must all appear in the process's command line for it to still be this task.
 
     A live pid alone proves nothing — pids get reused. Claude carries its session id on the command
-    line, so that is a precise marker. Codex mints its own id and never receives it as an argument,
-    so the best available markers are its binary and its `-C <repo>`; a reused pid landing on another
-    codex run in the same repository is the residual risk, and a far smaller one than reporting a
-    running task as dead.
+    line, so that is a precise marker. Codex mints its own id and never receives it as an argument on
+    a *fresh* run, so the best available markers there are its binary and its `-C <repo>`; a reused
+    pid landing on another codex run in the same repository is the residual risk, and a far smaller
+    one than reporting a running task as dead. A codex *resume* does carry the id, as a positional
+    (see `backends/codex.py`) — `session_id` is not None there, so the branch below already prefers
+    it over `repo_path`, without this function needing to know which case it is.
     """
     markers: list[str] = [backend.binary]
     if session_id:
