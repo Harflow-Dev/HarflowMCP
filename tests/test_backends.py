@@ -2945,3 +2945,174 @@ def test_every_backend_accepts_an_unobserved_exit_code_without_raising(backend) 
     assert backend.classify(Accumulator(), None) in {
         "completed", "failed", "timed_out", "cancelled", "running",
     }
+
+
+# The shape measured on 2026-09-22 that the denial handling did not cover: the agent narrated its
+# next step, *then* had the tool auto-denied, and never spoke again. The run changed nothing, yet
+# reported `completed` with that narration as its summary.
+VIBE_DENIED_AFTER_SPEAKING = [
+    VIBE_DENIED_RUN[0],
+    {"type": "message", "role": "assistant", "sessionId": VIBE_DENIED_SESSION,
+     "turnId": VIBE_DENIED_TURN, "source": None,
+     "content": [{"type": "text", "text": "Full picture assembled. Now I'll capture a baseline."}]},
+    VIBE_DENIED_RUN[2],
+    VIBE_DENIED_RUN[3],
+]
+
+
+def test_vibe_a_denial_after_a_progress_line_is_not_a_finished_run() -> None:
+    """The narration was a mid-work progress line, not an answer — the denial ended the run.
+
+    Reporting `completed` here hands the caller a result where there was none, and the summary reads
+    like one. Measured on a real dispatch that changed zero files: the last assistant message came
+    at entry 30 and the denial at entry 33, with nothing spoken after it.
+    """
+    acc = ingest(VibeBackend(), VIBE_DENIED_AFTER_SPEAKING)
+
+    assert acc.saw_final_message is False
+    assert acc.summary is None
+    assert VibeBackend().classify(acc, 0) == "failed"
+    assert acc.denials == [
+        {"tool": "bash", "command": "git commit -am wip", "title": "Allow bash?"}
+    ]
+
+
+def test_vibe_a_denial_the_agent_recovered_from_still_completes() -> None:
+    """The other direction, and the reason the withdrawal must NOT latch the way the turn-cap one
+    does: being refused one command is not being stopped. An agent that is denied something
+    incidental and then answers has genuinely finished, and marking it `failed` would be the
+    opposite overclaim."""
+    acc = ingest(
+        VibeBackend(),
+        [
+            *VIBE_DENIED_AFTER_SPEAKING,
+            {"type": "message", "role": "assistant", "sessionId": VIBE_DENIED_SESSION,
+             "turnId": VIBE_DENIED_TURN, "source": None,
+             "content": [{"type": "text", "text": "Worked around it; here is the answer."}]},
+        ],
+    )
+
+    assert acc.saw_final_message is True
+    assert acc.summary == "Worked around it; here is the answer."
+    assert VibeBackend().classify(acc, 0) == "completed"
+    # Recovery does not erase the refusal — the caller still needs to know it happened.
+    assert len(acc.denials) == 1
+
+
+def test_vibe_a_replayed_denial_does_not_withdraw_the_live_turns_answer() -> None:
+    """A --resume run replays prior history, denials included. Those must not reach live-turn state
+    at all — and now that a denial *withdraws* the close, a leak would be worse than a spurious
+    entry on `denials`: it would turn a genuinely finished resumed run into `failed`."""
+    acc = ingest(
+        VibeBackend(),
+        [
+            VIBE_DENIED_RUN[0],
+            {"type": "message", "role": "assistant", "sessionId": VIBE_DENIED_SESSION,
+             "turnId": VIBE_DENIED_TURN, "source": None,
+             "content": [{"type": "text", "text": "the real answer"}]},
+            # Replayed from history: turnId null, and a foreign one.
+            {"type": "callback", "sessionId": VIBE_DENIED_SESSION, "turnId": None,
+             "title": "Allow bash?", "detail": {"kind": "approval",
+                                                "effect": {"toolName": "bash"}}},
+            {"type": "callback", "sessionId": VIBE_DENIED_SESSION, "turnId": "some-other-turn",
+             "title": "Allow bash?", "detail": {"kind": "approval",
+                                                "effect": {"toolName": "bash"}}},
+        ],
+    )
+
+    assert acc.summary == "the real answer"
+    assert acc.saw_final_message is True
+    assert acc.denials == []
+    assert VibeBackend().classify(acc, 0) == "completed"
+
+
+@pytest.mark.parametrize(
+    "callback_detail",
+    [
+        {"kind": "selection"},
+        "not a dict",
+        {"kind": "approval-ish"},
+        {},
+    ],
+    ids=["selection", "malformed", "unknown-kind", "empty"],
+)
+def test_vibe_a_non_approval_callback_does_not_withdraw_an_answer(callback_detail) -> None:
+    """A callback that is not a refusal says nothing about whether the run finished.
+
+    This is the regression the first version of the withdrawal caused: it cleared the close for
+    *every* live-turn callback, while `_record_denial` filtered to approvals — so a `selection`
+    arriving after a genuine answer produced `failed` with an empty `denials` list, which is worse
+    than the `completed` it was meant to fix. Both decisions now read one predicate.
+    """
+    acc = ingest(
+        VibeBackend(),
+        [
+            VIBE_DENIED_RUN[0],
+            {"type": "message", "role": "assistant", "sessionId": VIBE_DENIED_SESSION,
+             "turnId": VIBE_DENIED_TURN, "source": None,
+             "content": [{"type": "text", "text": "the real answer"}]},
+            {"type": "callback", "sessionId": VIBE_DENIED_SESSION, "turnId": VIBE_DENIED_TURN,
+             "title": "Pick one", "detail": callback_detail},
+        ],
+    )
+
+    assert acc.summary == "the real answer"
+    assert acc.saw_final_message is True
+    assert acc.denials == []
+    assert VibeBackend().classify(acc, 0) == "completed"
+
+
+@pytest.mark.parametrize("order", ["denial-then-stop", "stop-then-denial"])
+def test_vibe_a_denial_and_a_turn_cap_breach_in_either_order_end_failed(order: str) -> None:
+    """Makes the interaction explicit rather than leaving it to be inferred.
+
+    The stop-event latch and the denial withdrawal both clear the close, but only the latch
+    suppresses everything after it. Whichever arrives first, a turn that breached its cap and was
+    refused a command has not finished.
+    """
+    denial = VIBE_DENIED_RUN[2]
+    stop = {
+        "type": "message", "role": "assistant", "sessionId": VIBE_DENIED_SESSION,
+        "turnId": VIBE_DENIED_TURN, "source": None,
+        "content": [{"type": "text", "text": "<vibe_stop_event>Turn limit of 1 reached</vibe_stop_event>"}],
+    }
+    middle = [denial, stop] if order == "denial-then-stop" else [stop, denial]
+    # A late ordinary message, so the test actually exercises the latch rather than just observing
+    # that two events which each independently clear the close did so. Without it this would pass
+    # even if a denial arriving after a stop-event wiped `stop_event_seen`, letting a later message
+    # re-establish a clean close the turn cap had already ruled out.
+    late_answer = {
+        "type": "message", "role": "assistant", "sessionId": VIBE_DENIED_SESSION,
+        "turnId": VIBE_DENIED_TURN, "source": None,
+        "content": [{"type": "text", "text": "carrying on regardless"}],
+    }
+
+    acc = ingest(VibeBackend(), [VIBE_DENIED_RUN[0], *middle, late_answer])
+
+    assert acc.saw_final_message is False
+    assert acc.summary is None
+    assert acc.stream_state.get("stop_event_seen") is True
+    assert VibeBackend().classify(acc, 0) == "failed"
+    assert len(acc.denials) == 1
+
+
+def test_vibe_an_approval_with_no_usable_metadata_is_still_reported() -> None:
+    """`ingest` withdraws the close on the strength of `kind: "approval"` alone, so the denial has
+    to land even when every descriptive field is missing — otherwise the run reports `failed` with
+    an empty `permission_denials`, the payload contradicting the signal the status came from. The
+    fallback states only what was observed; it does not invent a tool or command."""
+    acc = ingest(
+        VibeBackend(),
+        [
+            VIBE_DENIED_RUN[0],
+            {"type": "message", "role": "assistant", "sessionId": VIBE_DENIED_SESSION,
+             "turnId": VIBE_DENIED_TURN, "source": None,
+             "content": [{"type": "text", "text": "about to do the thing"}]},
+            {"type": "callback", "sessionId": VIBE_DENIED_SESSION, "turnId": VIBE_DENIED_TURN,
+             "detail": {"kind": "approval"}},
+        ],
+    )
+
+    assert acc.saw_final_message is False
+    assert VibeBackend().classify(acc, 0) == "failed"
+    assert acc.denials == [{"kind": "approval"}]

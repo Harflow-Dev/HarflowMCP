@@ -519,7 +519,31 @@ class VibeBackend:
             # of these and the run then ended with no assistant message at exit 0 — `failed` with no
             # summary. Without recording it the caller is told the run failed but never why, which is
             # exactly the inference CLAUDE.md says belongs in the payload instead.
+            if not _is_approval_callback(event):
+                # Not a refusal at all — a selection request, or some future callback kind. It
+                # neither belongs on `denials` nor says anything about whether the run finished,
+                # so it must not withdraw the close below. Sharing one predicate with
+                # `_record_denial` is what keeps those two decisions from drifting apart: an
+                # earlier version withdrew unconditionally here while `_record_denial` filtered,
+                # so a `selection` callback after an answer produced `failed` with nothing on
+                # `denials` to explain it — worse than the bug being fixed.
+                return
             _record_denial(event, acc)
+            # Withdraw any close this turn had already recorded, the same way the stop-event branch
+            # below does — because a message that arrived *before* a refusal was narration of work
+            # the agent then never got to do, not an answer. Measured on a dispatch that changed
+            # zero files: it narrated its next step, had bash denied, never spoke again, and was
+            # reported `completed` with the narration as its summary.
+            #
+            # Deliberately NOT latched, which is the one way this differs from the stop-event
+            # branch. A turn-cap breach is terminal, so nothing after it can re-establish a clean
+            # close. A refusal is not: an agent denied one incidental command may work around it and
+            # genuinely finish, and a later assistant message in this turn re-sets both fields. So
+            # the evidence is withdrawn only until the agent speaks again, and `classify` reports
+            # `failed` exactly when it never does. The denial itself stays on `acc.denials` either
+            # way — recovery does not erase that it was refused.
+            acc.summary = None
+            acc.saw_final_message = False
             return
 
         if entry_type != "message":
@@ -599,16 +623,23 @@ class VibeBackend:
         return "completed" if acc.saw_final_message else "failed"
 
 
-def _record_denial(event: dict[str, Any], acc: Accumulator) -> None:
-    """Normalise one auto-denied approval callback onto `acc.denials`.
+def _is_approval_callback(event: dict[str, Any]) -> bool:
+    """Whether this callback is an auto-denied approval — a refusal that already happened.
 
-    Only `kind: "approval"` callbacks are refusals; any other kind is a different sort of request and
-    is left alone rather than reported as something the agent was stopped from doing.
+    The single source of truth for that question: `ingest` uses it to decide whether to withdraw
+    the turn's close, and `_record_denial` to decide whether to report one. Any other kind is a
+    different sort of request and means nothing about whether the run finished.
     """
     detail = event.get("detail")
-    detail = detail if isinstance(detail, dict) else {}
-    if detail.get("kind") != "approval":
+    return isinstance(detail, dict) and detail.get("kind") == "approval"
+
+
+def _record_denial(event: dict[str, Any], acc: Accumulator) -> None:
+    """Normalise one auto-denied approval callback onto `acc.denials`."""
+    if not _is_approval_callback(event):
         return
+    detail = event.get("detail")
+    detail = detail if isinstance(detail, dict) else {}
 
     effect = detail.get("effect")
     effect = effect if isinstance(effect, dict) else {}
@@ -622,8 +653,12 @@ def _record_denial(event: dict[str, Any], acc: Accumulator) -> None:
         for key, value in (("tool", tool), ("command", command), ("title", title))
         if isinstance(value, str) and value
     }
-    if denial:
-        acc.denials.append(denial)
+    # A recognised approval always lands, even with every descriptive field malformed or missing.
+    # `ingest` has already withdrawn the turn's close on the strength of the same `kind`, so
+    # dropping the entry here would report `failed` alongside an empty `permission_denials` —
+    # the payload contradicting the signal the status was derived from. The fallback repeats only
+    # what was actually observed rather than inventing a tool, command or title for it.
+    acc.denials.append(denial or {"kind": "approval"})
 
 
 def _entry_text(event: dict[str, Any]) -> str | None:
