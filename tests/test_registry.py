@@ -11,7 +11,10 @@ from pathlib import Path
 
 import pytest
 
+from polybridge import backends
+from polybridge.backends.base import FREEDOMS
 from polybridge.backends.base import Enforcement
+from polybridge.backends.codex import CodexBackend
 from polybridge import store
 from polybridge import tasks as tasks_module
 from polybridge.tasks import (
@@ -513,10 +516,16 @@ def _repo_with_remote(tmp_path: Path, *, branch: str, remotes: tuple[str, ...] =
     return repo
 
 
+def _codex_enforcement(freedom: str, network: bool | None = None) -> Enforcement:
+    """The real Enforcement a codex dispatch would carry, so these tests exercise the gate the
+    way `_spawn` does rather than a hand-built block that could drift from it."""
+    return CodexBackend().enforcement(freedom, network=network)
+
+
 def test_publish_on_the_default_branch_discloses_it(tmp_path: Path) -> None:
     repo = _repo_with_remote(tmp_path, branch="main")
 
-    notice = tasks_module._publish_branch_notice("publish", repo)
+    notice = tasks_module._publish_branch_notice("publish", repo, _codex_enforcement("publish"))
 
     assert notice is not None
     assert "'main'" in notice
@@ -531,7 +540,7 @@ def test_publish_on_the_default_branch_discloses_it(tmp_path: Path) -> None:
 def test_publish_on_a_feature_branch_says_nothing(tmp_path: Path) -> None:
     repo = _repo_with_remote(tmp_path, branch="feature/x")
 
-    assert tasks_module._publish_branch_notice("publish", repo) is None
+    assert tasks_module._publish_branch_notice("publish", repo, _codex_enforcement("publish")) is None
 
 
 def test_a_feature_branch_named_main_is_not_mistaken_for_the_default(tmp_path: Path) -> None:
@@ -556,28 +565,86 @@ def test_a_feature_branch_named_main_is_not_mistaken_for_the_default(tmp_path: P
     run("checkout", "-q", "-b", "main")
 
     # On a branch called `main`, but the repo's real default is `trunk` — so nothing to disclose.
-    assert tasks_module._publish_branch_notice("publish", repo) is None
+    assert tasks_module._publish_branch_notice("publish", repo, _codex_enforcement("publish")) is None
 
 
 @pytest.mark.parametrize("freedom", ["read_only", "write_in_repo"])
-def test_below_publish_nothing_is_checked_at_all(
+def test_below_publish_with_no_network_nothing_is_checked_at_all(
     tmp_path: Path, freedom: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Narrowed from "below publish" to "below publish *and* network blocked".
+
+    Being below `publish` is no longer sufficient on its own: `network=True` at `write_in_repo`
+    produces the same argv as `publish`, so the gate is the Enforcement block, not the ladder.
+    """
     repo = _repo_with_remote(tmp_path, branch="main")
 
     def explode(*args, **kwargs):
-        raise AssertionError("no git command may run below publish")
+        raise AssertionError("no git command may run for an unexposed run")
 
     monkeypatch.setattr(tasks_module.subprocess, "run", explode)
 
-    assert tasks_module._publish_branch_notice(freedom, repo) is None
+    assert tasks_module._publish_branch_notice(freedom, repo, _codex_enforcement(freedom)) is None
+
+
+def test_write_in_repo_with_network_is_disclosed_though_it_never_authorized_publishing(
+    tmp_path: Path,
+) -> None:
+    """The cell the old `freedom in PUBLISH_FREEDOMS` gate missed entirely.
+
+    Mechanically identical to `publish`, so just as able to reach a remote — and codex has no
+    per-command deny list to stop a push. Silence here was the bug.
+    """
+    repo = _repo_with_remote(tmp_path, branch="main")
+
+    notice = tasks_module._publish_branch_notice(
+        "write_in_repo", repo, _codex_enforcement("write_in_repo", network=True)
+    )
+
+    assert notice is not None
+    assert "'main'" in notice
+    assert "cancel this task" in notice.lower()
+    # The positive claims, not merely "some notice appeared": this cell must say publishing was
+    # NOT authorized while a remote is nonetheless reachable. Asserting only the branch name would
+    # pass even if this cell wrongly reused the publish-authorized wording.
+    assert "does not authorize" in notice
+    assert "permits remote publication" in notice
+    assert "'enabled'" in notice
+    assert "is authorized to commit, push, and open a PR" not in notice
+
+
+def test_publish_with_network_blocked_is_still_disclosed_but_worded_differently(
+    tmp_path: Path,
+) -> None:
+    """The other crossed cell: publishing is authorized, but network-backed push is not possible.
+
+    The notice must not claim "nothing here blocked that", and must not claim publishing is
+    stopped outright either — a push to a local-path remote inside a writable root was measured
+    to still succeed with `network_access=false`.
+    """
+    repo = _repo_with_remote(tmp_path, branch="main")
+
+    notice = tasks_module._publish_branch_notice(
+        "publish", repo, _codex_enforcement("publish", network=False)
+    )
+
+    assert notice is not None
+    assert "'main'" in notice
+    # Excluding one phrase is too weak on its own — it would accept the *unauthorized* wording,
+    # which is false here. Assert all three truths this cell has to carry.
+    assert "is authorized to commit, push, and open a PR" in notice
+    # Whole clauses, not the nouns: "permits a network-backed push but blocks a local path" would
+    # satisfy a bare `"network-backed push" in notice` while saying the exact opposite.
+    assert "blocks a network-backed push" in notice
+    assert "still succeeds" in notice
+    assert "does not authorize" not in notice
 
 
 def test_a_repo_with_no_remote_reports_that_it_could_not_tell(git_repo: Path) -> None:
     """Silence would be wrong here: for a publish-authorized run, not knowing is itself material."""
     subprocess.run(["git", "-C", str(git_repo), "commit", "-qm", "x", "--allow-empty"], check=True)
 
-    notice = tasks_module._publish_branch_notice("publish", git_repo)
+    notice = tasks_module._publish_branch_notice("publish", git_repo, _codex_enforcement("publish"))
 
     assert notice is not None
     assert "could not be determined" in notice
@@ -586,7 +653,7 @@ def test_a_repo_with_no_remote_reports_that_it_could_not_tell(git_repo: Path) ->
 def test_several_remotes_with_no_origin_are_not_picked_between(tmp_path: Path) -> None:
     repo = _repo_with_remote(tmp_path, branch="main", remotes=("upstream", "fork"))
 
-    notice = tasks_module._publish_branch_notice("publish", repo)
+    notice = tasks_module._publish_branch_notice("publish", repo, _codex_enforcement("publish"))
 
     assert notice is not None
     assert "could not be determined" in notice
@@ -599,7 +666,7 @@ def test_a_detached_head_reports_that_it_could_not_tell(tmp_path: Path) -> None:
     ).stdout.strip()
     subprocess.run(["git", "-C", str(repo), "checkout", "-q", head], check=True)
 
-    notice = tasks_module._publish_branch_notice("publish", repo)
+    notice = tasks_module._publish_branch_notice("publish", repo, _codex_enforcement("publish"))
 
     assert notice is not None
     assert "could not be determined" in notice
@@ -622,10 +689,10 @@ class _TrivialBackend:
     def build_resume_argv(self, prompt, **kwargs):
         return [self.binary, "{}"]
 
-    def assert_safe(self, argv, freedom):
+    def assert_safe(self, argv, freedom, network=None):
         return None
 
-    def enforcement(self, freedom):
+    def enforcement(self, freedom, network=None):
         return Enforcement(freedom=freedom, mechanism="none", os_enforced=False,
                            writes_confined=False, caveats=("test double",))
 
@@ -634,6 +701,58 @@ class _TrivialBackend:
 
     def classify(self, acc, exit_code):
         return "completed"
+
+
+class _NetworkAwareBackend(_TrivialBackend):
+    """A double whose Enforcement actually varies with the network request, standing in for codex.
+
+    `_NoBarrierBackend` cannot catch a `_spawn` that computes enforcement from the wrong pair,
+    because its answer is `not_controlled` either way — a mutation of
+    `backend.enforcement(freedom, network)` to `(freedom, None)` was measured to leave the whole
+    suite green. This double makes that disagreement observable, which is the point of `_spawn`
+    computing it once for the notice, the Task and the record.
+    """
+
+    name = "netaware"
+    capabilities = SimpleNamespace(
+        chooses_session_id=False,
+        network_control=SimpleNamespace(
+            can_enable=("write_in_repo",), can_block=("write_in_repo",)
+        ),
+    )
+
+    def enforcement(self, freedom, network=None):
+        return Enforcement(
+            freedom=freedom,
+            mechanism="double",
+            os_enforced=True,
+            writes_confined=True,
+            network_access="enabled" if network else "blocked",
+            caveats=("test double",),
+        )
+
+
+class _NoBarrierBackend(_TrivialBackend):
+    """Stands in for claude/opencode/vibe: accepts `network=True` because it imposes no barrier,
+    and reports `not_controlled` — the exact combination the uncontrolled-network notice exists
+    for. A real backend would do here too, but only a double reaches `_spawn` with an instant
+    process."""
+
+    name = "nobarrier"
+    capabilities = SimpleNamespace(
+        chooses_session_id=False,
+        network_control=SimpleNamespace(can_enable=tuple(FREEDOMS), can_block=()),
+    )
+
+    def enforcement(self, freedom, network=None):
+        return Enforcement(
+            freedom=freedom,
+            mechanism="none",
+            os_enforced=False,
+            writes_confined=False,
+            network_access="not_controlled",
+            caveats=("test double",),
+        )
 
 
 async def test_a_dispatch_below_publish_pays_no_thread_hop_for_the_branch_check(
@@ -675,7 +794,7 @@ def test_a_remote_head_pointing_at_a_deleted_branch_is_not_trusted(tmp_path: Pat
     )
     subprocess.run(["git", "-C", str(repo), "checkout", "-q", "-b", "gone"], check=True)
 
-    notice = tasks_module._publish_branch_notice("publish", repo)
+    notice = tasks_module._publish_branch_notice("publish", repo, _codex_enforcement("publish"))
 
     assert notice is not None
     assert "could not be determined" in notice
@@ -702,7 +821,264 @@ def test_a_broken_git_never_stops_a_dispatch(
 
     monkeypatch.setattr(tasks_module.subprocess, "run", explode)
 
-    notice = tasks_module._publish_branch_notice("publish", repo)
+    notice = tasks_module._publish_branch_notice("publish", repo, _codex_enforcement("publish"))
 
     assert notice is not None
     assert "could not be determined" in notice
+
+
+async def test_resume_inherits_the_parents_network_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`None` means "no explicit request", which on a resume has to mean the parent's, not the
+    freedom's default — otherwise a continuation of a network-enabled run would silently lose it.
+
+    Asserts on the argv, not just the metadata kwarg: a resume that reported `network` while
+    building an argv without the `-c` pair would pass a weaker check.
+    """
+    registry = TaskRegistry(log_dir=tmp_path)
+    parent = make_task(tmp_path, "parent", session_id="s1", finished=True)
+    parent.backend = "codex"
+    parent.freedom = "write_in_repo"
+    parent.network = True
+    registry._tasks[parent.task_id] = parent
+
+    captured: dict = {}
+
+    async def fake_spawn(argv, **kwargs):
+        captured["argv"] = argv
+        captured.update(kwargs)
+        return make_task(tmp_path, "child", session_id="s1")
+
+    monkeypatch.setattr(registry, "_spawn", fake_spawn)
+
+    await registry.resume(parent, "carry on")
+
+    assert captured["network"] is True
+    assert "sandbox_workspace_write.network_access=true" in captured["argv"]
+
+
+async def test_an_explicit_network_on_resume_overrides_the_parents(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Network is a per-run sandbox setting, so changing it on a continuation cannot misrepresent
+    the reply the parent already gave — unlike model or freedom, which are inherited outright."""
+    registry = TaskRegistry(log_dir=tmp_path)
+    parent = make_task(tmp_path, "parent", session_id="s1", finished=True)
+    parent.backend = "codex"
+    parent.freedom = "write_in_repo"
+    parent.network = True
+    registry._tasks[parent.task_id] = parent
+
+    captured: dict = {}
+
+    async def fake_spawn(argv, **kwargs):
+        captured["argv"] = argv
+        captured.update(kwargs)
+        return make_task(tmp_path, "child", session_id="s1")
+
+    monkeypatch.setattr(registry, "_spawn", fake_spawn)
+
+    await registry.resume(parent, "carry on", network=False)
+
+    assert captured["network"] is False
+    assert "sandbox_workspace_write.network_access=false" in captured["argv"]
+
+
+async def test_resume_record_inherits_the_recorded_network_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same carry-over through the path recovering a task this process never spawned."""
+    registry = TaskRegistry(log_dir=tmp_path)
+    record = store.TaskRecord(
+        task_id="old",
+        backend="codex",
+        session_id="s1",
+        markers=["s1"],
+        repo_path=str(tmp_path),
+        started_at=datetime.now(timezone.utc).isoformat(),
+        status="completed",
+        freedom="write_in_repo",
+        network=True,
+    )
+
+    captured: dict = {}
+
+    async def fake_spawn(argv, **kwargs):
+        captured["argv"] = argv
+        captured.update(kwargs)
+        return make_task(tmp_path, "child", session_id="s1")
+
+    monkeypatch.setattr(registry, "_spawn", fake_spawn)
+
+    await registry.resume_record(record, "carry on")
+
+    assert captured["network"] is True
+    assert "sandbox_workspace_write.network_access=true" in captured["argv"]
+
+
+async def test_a_pre_change_record_resumes_at_the_freedoms_historical_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A record written before this parameter existed deserializes `network` to None, and must
+    resume exactly as it always did — network blocked at write_in_repo."""
+    registry = TaskRegistry(log_dir=tmp_path)
+    record = store.TaskRecord(
+        task_id="old",
+        backend="codex",
+        session_id="s1",
+        markers=["s1"],
+        repo_path=str(tmp_path),
+        started_at=datetime.now(timezone.utc).isoformat(),
+        status="completed",
+        freedom="write_in_repo",
+    )
+
+    captured: dict = {}
+
+    async def fake_spawn(argv, **kwargs):
+        captured["argv"] = argv
+        captured.update(kwargs)
+        return make_task(tmp_path, "child", session_id="s1")
+
+    monkeypatch.setattr(registry, "_spawn", fake_spawn)
+
+    await registry.resume_record(record, "carry on")
+
+    assert captured["network"] is None
+    assert "sandbox_workspace_write.network_access=false" in captured["argv"]
+
+
+async def test_resume_refuses_a_network_request_the_parents_freedom_cannot_honour(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An override has to fail as loudly on resume as it would on start_task — silently dropping
+    it is the failure mode the parameter exists to avoid."""
+    registry = TaskRegistry(log_dir=tmp_path)
+    parent = make_task(tmp_path, "parent", session_id="s1", finished=True)
+    parent.backend = "codex"
+    parent.freedom = "read_only"
+    registry._tasks[parent.task_id] = parent
+
+    async def fake_spawn(argv, **kwargs):
+        raise AssertionError("must not reach spawn")
+
+    monkeypatch.setattr(registry, "_spawn", fake_spawn)
+
+    with pytest.raises(backends.UnsupportedCapability, match="cannot enable network"):
+        await registry.resume(parent, "carry on", network=True)
+
+
+async def test_resume_record_honours_an_explicit_network_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The recovered path needs the override half too, not just inheritance — a resume of a task
+    this process never spawned is exactly where a silently-ignored override would go unnoticed."""
+    registry = TaskRegistry(log_dir=tmp_path)
+    record = store.TaskRecord(
+        task_id="old",
+        backend="codex",
+        session_id="s1",
+        markers=["s1"],
+        repo_path=str(tmp_path),
+        started_at=datetime.now(timezone.utc).isoformat(),
+        status="completed",
+        freedom="write_in_repo",
+        network=True,
+    )
+
+    captured: dict = {}
+
+    async def fake_spawn(argv, **kwargs):
+        captured["argv"] = argv
+        captured.update(kwargs)
+        return make_task(tmp_path, "child", session_id="s1")
+
+    monkeypatch.setattr(registry, "_spawn", fake_spawn)
+
+    await registry.resume_record(record, "carry on", network=False)
+
+    assert captured["network"] is False
+    assert "sandbox_workspace_write.network_access=false" in captured["argv"]
+
+
+async def test_resume_record_refuses_an_override_the_recorded_freedom_cannot_honour(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same loud refusal as the live-parent path — reached through the recovered record."""
+    registry = TaskRegistry(log_dir=tmp_path)
+    record = store.TaskRecord(
+        task_id="old",
+        backend="codex",
+        session_id="s1",
+        markers=["s1"],
+        repo_path=str(tmp_path),
+        started_at=datetime.now(timezone.utc).isoformat(),
+        status="completed",
+        freedom="read_only",
+    )
+
+    async def fake_spawn(argv, **kwargs):
+        raise AssertionError("must not reach spawn")
+
+    monkeypatch.setattr(registry, "_spawn", fake_spawn)
+
+    with pytest.raises(backends.UnsupportedCapability, match="cannot enable network"):
+        await registry.resume_record(record, "carry on", network=True)
+
+
+async def test_a_network_request_with_no_barrier_is_disclosed_and_persisted(
+    git_repo: Path, tmp_path: Path
+) -> None:
+    """Driven through the real `_spawn`, not by assigning the notice by hand.
+
+    The first version of this test invented the notice string itself and then asserted that
+    persistence kept it — which would have passed with the production notice generation deleted
+    outright, and duplicated a round trip test_store.py already owns. Here the notice has to be
+    produced by the dispatch to exist at all.
+    """
+    registry = TaskRegistry(log_dir=tmp_path)
+
+    task = await registry.start(
+        "x", git_repo, backend=_NoBarrierBackend(), freedom="write_in_repo", network=True
+    )
+    await task.done.wait()
+
+    assert any("no network barrier" in n for n in task.bridge_notices), task.bridge_notices
+    record = store.read(tmp_path, task.task_id)
+    assert record is not None
+    assert record.network is True
+    assert any("no network barrier" in n for n in record.bridge_notices)
+
+
+async def test_no_such_notice_when_nothing_was_asked(git_repo: Path, tmp_path: Path) -> None:
+    """The other direction: omitting `network` must not manufacture a disclosure about it."""
+    registry = TaskRegistry(log_dir=tmp_path)
+
+    task = await registry.start("x", git_repo, backend=_NoBarrierBackend(), freedom="write_in_repo")
+    await task.done.wait()
+
+    assert not any("network barrier" in n for n in task.bridge_notices), task.bridge_notices
+
+
+async def test_the_enforcement_reported_and_persisted_reflects_the_network_request(
+    git_repo: Path, tmp_path: Path
+) -> None:
+    """`_spawn` computes Enforcement once, from the same (freedom, network) pair it built the argv
+    from, so the block a caller reads describes the run it actually got.
+
+    Guards a mutation the rest of the suite missed: computing it as `enforcement(freedom, None)`
+    would report `network_access: "blocked"` for a run whose argv enables the network — the
+    payload contradicting the process, which is precisely the overclaim this repo forbids.
+    """
+    registry = TaskRegistry(log_dir=tmp_path)
+
+    task = await registry.start(
+        "x", git_repo, backend=_NetworkAwareBackend(), freedom="write_in_repo", network=True
+    )
+    await task.done.wait()
+
+    assert task.enforcement["network_access"] == "enabled"
+    record = store.read(tmp_path, task.task_id)
+    assert record is not None
+    assert record.enforcement["network_access"] == "enabled"

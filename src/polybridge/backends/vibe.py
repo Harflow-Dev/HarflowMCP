@@ -109,13 +109,16 @@ from pathlib import Path
 from typing import Any
 
 from .base import (
+    FREEDOMS,
     Accumulator,
     Capabilities,
     Enforcement,
     Freedom,
+    NetworkControl,
     ReasoningEffort,
     Status,
     check_freedom,
+    check_network,
     check_reasoning_effort,
     reject_model,
 )
@@ -166,6 +169,19 @@ REJECTED_FLAGS = (
 _NO_SANDBOX_CAVEAT = (
     "no OS sandbox: os_sandbox=False at every freedom, and nothing here confines writes to "
     "repo_path, which is only the working directory"
+)
+
+# No OS sandbox and no network-controlling mechanism at all: network=True ("impose no barrier of
+# our own") is accepted at every freedom because having nothing to impose genuinely delivers it,
+# while network=False ("impose one") is refused outright — a silently-ignored block would look
+# exactly like an enforced one. enforcement.network_access stays "not_controlled" either way:
+# the surrounding environment, not polybridge, decides reachability here.
+_NETWORK_CONTROL_CAVEAT = (
+    "network=True is accepted as 'impose no barrier of our own', which this backend genuinely "
+    "delivers by having none to impose — not a claim of reachability: "
+    "enforcement.network_access stays not_controlled, and the surrounding environment decides. "
+    "network=False is refused outright: there is no barrier this backend could raise, and a "
+    "silently-ignored block would be indistinguishable from an enforced one"
 )
 _PLAN_CAVEAT = (
     "read_only is --agent plan: write_file and edit get permission \"never\" (allowlisted only "
@@ -247,6 +263,11 @@ class VibeBackend:
             levels_change_behaviour=False,
             caveats=(_EFFORT_CAVEAT,),
         ),
+        network_control=NetworkControl(
+            can_enable=FREEDOMS,
+            can_block=(),
+            caveats=(_NETWORK_CONTROL_CAVEAT,),
+        ),
     )
 
     def build_start_argv(
@@ -259,14 +280,18 @@ class VibeBackend:
         model: str | None,
         max_turns: int | None,
         reasoning_effort: str | None,
+        network: bool | None = None,
     ) -> list[str]:
         if session_id is not None:
             raise ValueError("vibe mints its own session id; one cannot be supplied")
-        argv = [BINARY, *self._options(repo, freedom, model, max_turns, reasoning_effort)]
+        argv = [
+            BINARY,
+            *self._options(repo, freedom, model, max_turns, reasoning_effort, network),
+        ]
         # The single canonical token, last: no `--` separator works here (see module docstring), so
         # this is the only thing standing between prompt text and being parsed as an option.
         argv.append(f"--prompt={self._check_prompt(prompt)}")
-        self.assert_safe(argv, freedom)
+        self.assert_safe(argv, freedom, network)
         return argv
 
     def build_resume_argv(
@@ -279,13 +304,17 @@ class VibeBackend:
         model: str | None,
         max_turns: int | None,
         reasoning_effort: str | None,
+        network: bool | None = None,
     ) -> list[str]:
         if not session_id:
             raise ValueError("resuming vibe needs the session id its first run reported")
-        argv = [BINARY, *self._options(repo, freedom, model, max_turns, reasoning_effort)]
+        argv = [
+            BINARY,
+            *self._options(repo, freedom, model, max_turns, reasoning_effort, network),
+        ]
         argv += ["--resume", session_id]
         argv.append(f"--prompt={self._check_prompt(prompt)}")
-        self.assert_safe(argv, freedom)
+        self.assert_safe(argv, freedom, network)
         return argv
 
     def _options(
@@ -295,11 +324,17 @@ class VibeBackend:
         model: str | None,
         max_turns: int | None,
         reasoning_effort: str | None,
+        network: bool | None = None,
     ) -> list[str]:
         reject_model(self, model)
         # accepts_parameter=False turns any non-None value into UnsupportedCapability; no vibe-side
         # plumbing is needed beyond that shared check.
         check_reasoning_effort(self, reasoning_effort)
+        # Validated here so no caller can reach the CLI with a network request this backend
+        # would silently ignore (False). True needs no argv change at all — there is nothing to
+        # impose — which is exactly why the enforcement block, not the argv, is where its
+        # acceptance is disclosed.
+        check_network(self, freedom, network)
         # --workdir also puts the repo path on the command line, which is what
         # tasks._identity_markers needs for a backend that mints its own session id — the same
         # reason opencode passes --dir.
@@ -316,10 +351,14 @@ class VibeBackend:
             raise ValueError("prompt must be a non-empty string")
         return prompt
 
-    def assert_safe(self, argv: list[str], freedom: Freedom) -> None:
+    def assert_safe(self, argv: list[str], freedom: Freedom, network: bool | None = None) -> None:
         # Rejects an unknown freedom outright rather than letting AGENTS[freedom] raise a bare
-        # KeyError below.
+        # KeyError below. The network request is validated here too — this is the final
+        # execution seam, so an unhonourable request must fail loudly even if every earlier check
+        # was bypassed. network leaves no trace in this backend's argv (there is nothing to
+        # impose), so there is nothing further to check for it beyond the request itself.
         check_freedom(freedom)
+        check_network(self, freedom, network)
         if not argv or argv[0] != BINARY:
             raise UnsafeInvocationError(f"unrecognised vibe argv layout: {argv!r}")
 
@@ -436,7 +475,12 @@ class VibeBackend:
             raise UnsafeInvocationError(f"{flag} appears {len(values)} times: {argv!r}")
         return values[0]
 
-    def enforcement(self, freedom: Freedom) -> Enforcement:
+    def enforcement(self, freedom: Freedom, network: bool | None = None) -> Enforcement:
+        # Validated here too, not only in the argv builders: `enforcement` is part of the widened
+        # Backend contract, and reporting `not_controlled` for a request this backend documents as
+        # an error would make the contract internally inconsistent for any caller that asks it
+        # directly rather than going through the tool surface.
+        check_network(self, freedom, network)
         return Enforcement(
             freedom=freedom,
             mechanism=f"vibe --agent {AGENTS[freedom]}",
@@ -445,9 +489,10 @@ class VibeBackend:
             writable_roots=(),
             commit_push_blocked=False,
             direct_commit_commands_denied=False,
-            # publish and unrestricted are the two freedoms where the agent profile in use
-            # (auto-approve, identical for both here) leaves no barrier of polybridge's own
-            # against a commit/push/PR attempt.
+            # publish and unrestricted are the two freedoms that authorize a publish attempt —
+            # see the field's own docstring; the agent profile in use (auto-approve, identical
+            # for both here) is what leaves no barrier of polybridge's own against one. A
+            # network request changes nothing here: this backend has no barrier either way.
             publish_attempts_allowed_by_polybridge=freedom in ("publish", "unrestricted"),
             network_access="not_controlled",
             caveats=(_NO_SANDBOX_CAVEAT, *_MODE_CAVEATS[freedom]),

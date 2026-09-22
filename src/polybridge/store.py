@@ -59,6 +59,12 @@ class TaskRecord:
     model: str | None = None
     reasoning_effort: str | None = None
     max_turns: int | None = None
+    network: bool | None = None
+    """The network request this run was dispatched with: True/False explicit, None the freedom's
+    historical default. The *outcome* lives in `enforcement.network_access` — this records what
+    was asked, so a resume can inherit it exactly. Defaults to None so a record written before
+    this field existed still loads and resumes at the historical default; `read` already filters
+    unknown keys and defaults missing ones, so no migration is needed."""
     parent_task_id: str | None = None
     prompt: str = ""
     status: str = "running"

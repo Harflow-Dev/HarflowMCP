@@ -38,6 +38,26 @@ maps to `workspace-write` plus that pair. This is honestly **general** network a
 git/gh-specific — anything the sandbox lets run can now reach the network, not only a git push or
 `gh pr create`. `WRITABLE_ROOTS` at `publish` is identical to `write_in_repo` — the switch changes
 network reachability only, not the writable set.
+
+**The `network` parameter (measured 2026-09-22, codex-cli 0.154.0, with the free `codex sandbox`
+harness — a real sandbox run with no model call, so the whole matrix cost seconds).** The
+measurements above reproduce exactly under that harness, which is what licenses it as a proxy
+for `codex exec` on this axis. `sandbox_workspace_write.network_access` is the only working
+switch: `read-only` is immune to it in both directions (set true, curl still could not resolve
+the host), `workspace-write` takes either direction, `danger-full-access` has no sandbox left
+to configure. The domain-allowlist machinery (`experimental_network.domains`, legacy
+`allowed_domains`/`denied_domains`) is inert via `-c` — a curl to a "denied" host returned 200 —
+so no domain-scoped tier is buildable today; re-measure before believing otherwise on a later
+codex. Hence the resolution table: `network=None` keeps each freedom's historical setting
+(read_only and unrestricted emit no pair at all), True emits the `=true` pair, False the
+`=false` pair, and the two unhonourable cells — enable at read_only, block at unrestricted —
+refuse loudly. Two identities follow and are pinned by tests: `write_in_repo`+True is
+byte-identical to `publish`'s default, and `publish`+False to `write_in_repo`'s default. The
+first means a remote is reachable although publishing was not authorized — recorded intent,
+not an enforced barrier, since codex has no per-command deny list at any level — and it enables
+arbitrary outbound traffic, exfiltration included. The second blocks **network-backed** push
+only: measured, `git push <local bare repo> HEAD:refs/heads/main` still landed with
+`network_access=false`, so no wording about that cell may claim publishing is stopped outright.
 """
 
 from __future__ import annotations
@@ -51,10 +71,12 @@ from .base import (
     Capabilities,
     Enforcement,
     Freedom,
+    NetworkControl,
     ReasoningEffort,
     Status,
     UnsupportedCapability,
     check_freedom,
+    check_network,
     check_reasoning_effort,
 )
 
@@ -82,6 +104,18 @@ NETWORK_ENABLE_PAIR = f"{NETWORK_KEY}=true"
 # about this machine's config, not about the sandbox. The explicit `=false` overrides that ambient
 # setting (measured: back to curl exit 6), which makes the claim true by construction.
 NETWORK_DISABLE_PAIR = f"{NETWORK_KEY}=false"
+
+# The historical network setting per freedom, pre-dating the `network` parameter: `network=None`
+# resolves to exactly this, which is what makes every pre-existing caller byte-identical. Derived
+# from the measured matrix in the module docstring: read-only blocks regardless (the key is
+# inert there), workspace-write blocks by the explicit `=false`, publish enables by the `=true`,
+# danger-full-access has no sandbox left to configure.
+DEFAULT_NETWORK: dict[str, bool] = {
+    "read_only": False,
+    "write_in_repo": False,
+    "publish": True,
+    "unrestricted": True,
+}
 
 # The `-c` key this backend's effort rides on. EFFORTS is a closed four-value vocabulary with no
 # quote or `=` characters in it, so quoting the TOML value is a non-issue — no encoder needed.
@@ -118,6 +152,20 @@ _NETWORK_CAVEAT = (
     "pair enables it (HTTP 200), same as danger-full-access"
 )
 
+# Only at write_in_repo + network=True: the argv is byte-identical to publish's default, so the
+# run is mechanically a publish even though publishing was never authorized. Stated as a caveat
+# because the enforcement booleans stay honest — publish_attempts_allowed_by_polybridge is an
+# authorization claim, and nothing was authorized here.
+_NETWORK_TRUE_AT_WRITE_IN_REPO_CAVEAT = (
+    "network=True at this freedom enables arbitrary outbound traffic — exfiltration included — "
+    "not merely docs lookup or a git push: the argv is byte-identical to publish's default, so a "
+    "remote is reachable although publishing was not authorized. The difference from publish is "
+    "recorded intent, not an enforced barrier — codex has no per-command deny list at any level"
+)
+
+# _NETWORK_CAVEAT follows the *resolved* network setting (see enforcement), not the freedom
+# name, so it lives outside this table: publish's default still carries it, write_in_repo with
+# network=True acquires it, and both freedoms shed it whenever network is actually blocked.
 _MODE_CAVEATS: dict[str, tuple[str, ...]] = {
     "read_only": ("the sandbox rejects writes outright",),
     "write_in_repo": (
@@ -129,7 +177,6 @@ _MODE_CAVEATS: dict[str, tuple[str, ...]] = {
         "writes are confined by the OS, but to the workspace *plus* temporary directories — not to "
         "the repository alone",
         "no per-command deny list, so the agent can freely commit inside the sandbox",
-        _NETWORK_CAVEAT,
     ),
     "unrestricted": (
         "danger-full-access disables the sandbox: nothing is restricted, which is the one mode where "
@@ -186,6 +233,25 @@ class CodexBackend:
             levels_change_behaviour=False,
             caveats=(_EFFORT_CAVEAT, _EFFORT_NO_COMPARISON_CAVEAT),
         ),
+        # Measured with the free `codex sandbox` harness (codex-cli 0.154.0 — see the module
+        # docstring), every cell of the matrix rather than just the diagonal: read-only +
+        # network_access=true stayed blocked (the key is inert under that sandbox) and
+        # danger-full-access has no sandbox to block with, so those two directions are refused
+        # rather than silently accepted as no-ops. read-only CAN be asked for network=False —
+        # the sandbox already blocks there, so the request is satisfiable with no pair emitted.
+        network_control=NetworkControl(
+            can_enable=("write_in_repo", "publish", "unrestricted"),
+            can_block=("read_only", "write_in_repo", "publish"),
+            caveats=(
+                "support is non-rectangular on purpose: read-only cannot enable (the "
+                "sandbox_workspace_write.network_access key is inert under the read-only "
+                "sandbox, measured — set true, curl still could not resolve the host) and "
+                "unrestricted cannot block (danger-full-access disables the sandbox entirely, "
+                "so no barrier remains to raise). Either direction is a claim about "
+                "polybridge's own -c override only, never about reachability — the "
+                "surrounding network can still defeat it"
+            ),
+        ),
     )
 
     def build_start_argv(
@@ -198,14 +264,15 @@ class CodexBackend:
         model: str | None,
         max_turns: int | None,
         reasoning_effort: str | None,
+        network: bool | None = None,
     ) -> list[str]:
         if session_id is not None:
             raise ValueError("codex mints its own session id; one cannot be supplied")
         self._reject_turn_cap(max_turns)
-        argv = [BINARY, "exec", *self._options(repo, freedom, model, reasoning_effort)]
+        argv = [BINARY, "exec", *self._options(repo, freedom, model, reasoning_effort, network)]
         # `--` then the prompt: last, and explicitly not parsed as an option however it looks.
         argv += ["--", self._check_prompt(prompt)]
-        self.assert_safe(argv, freedom)
+        self.assert_safe(argv, freedom, network)
         return argv
 
     def build_resume_argv(
@@ -218,6 +285,7 @@ class CodexBackend:
         model: str | None,
         max_turns: int | None,
         reasoning_effort: str | None,
+        network: bool | None = None,
     ) -> list[str]:
         if not session_id:
             raise ValueError("resuming codex needs the thread id its first run reported")
@@ -225,28 +293,53 @@ class CodexBackend:
         # `-C`/`-s` are global `codex exec` options, absent from `codex exec resume --help` (see
         # module docstring) — so the option region goes ahead of `resume`, not after it, and
         # `resume` becomes the last token before `--`.
-        argv = [BINARY, "exec", *self._options(repo, freedom, model, reasoning_effort), "resume"]
+        argv = [
+            BINARY, "exec", *self._options(repo, freedom, model, reasoning_effort, network),
+            "resume",
+        ]
         # `codex exec resume [SESSION_ID] [PROMPT]` — both positional, after `--`.
         argv += ["--", session_id, self._check_prompt(prompt)]
-        self.assert_safe(argv, freedom)
+        self.assert_safe(argv, freedom, network)
         return argv
 
     def _options(
-        self, repo: Path, freedom: Freedom, model: str | None, reasoning_effort: str | None
+        self,
+        repo: Path,
+        freedom: Freedom,
+        model: str | None,
+        reasoning_effort: str | None,
+        network: bool | None = None,
     ) -> list[str]:
         check_reasoning_effort(self, reasoning_effort)
+        resolved = self._resolve_network(freedom, network)
         options = ["--json", "-C", str(repo), "-s", SANDBOX_MODES[freedom], *NEVER_ASK]
-        if freedom == "publish":
-            options += ["-c", NETWORK_ENABLE_PAIR]
-        elif SANDBOX_MODES[freedom] == "workspace-write":
-            # Only meaningful for workspace-write: the key is scoped to that sandbox, and `read-only`
-            # was measured immune to it even when the user's config sets it true.
-            options += ["-c", NETWORK_DISABLE_PAIR]
+        if SANDBOX_MODES[freedom] == "workspace-write":
+            # Only meaningful for workspace-write: the key is scoped to that sandbox, and
+            # `read-only` was measured immune to it even when the user's config sets it true.
+            # The direction follows the *resolved* request — at network=None that is the
+            # freedom's own historical setting, which is what keeps the default byte-identical
+            # to before the parameter existed.
+            options += ["-c", NETWORK_ENABLE_PAIR if resolved else NETWORK_DISABLE_PAIR]
         if model:
             options += ["-m", model]
         if reasoning_effort:
             options += ["-c", f'{EFFORT_KEY}="{reasoning_effort}"']
         return options
+
+    def _resolve_network(self, freedom: Freedom, network: bool | None) -> bool:
+        """The concrete network setting this run will carry, refusing what the sandbox cannot
+        honour.
+
+        `None` resolves to the freedom's historical default (DEFAULT_NETWORK) — the
+        backward-compatibility guarantee. An explicit boolean goes through the shared capability
+        check, so an unhonourable request fails loudly (read-only cannot enable: the key is
+        inert there, measured; unrestricted cannot block: no sandbox remains) instead of being
+        silently accepted as a no-op.
+        """
+        if network is None:
+            return DEFAULT_NETWORK[freedom]
+        check_network(self, freedom, network)
+        return network
 
     def _reject_turn_cap(self, max_turns: int | None) -> None:
         if max_turns is not None:
@@ -261,10 +354,13 @@ class CodexBackend:
             raise ValueError("prompt must be a non-empty string")
         return prompt
 
-    def assert_safe(self, argv: list[str], freedom: Freedom) -> None:
+    def assert_safe(self, argv: list[str], freedom: Freedom, network: bool | None = None) -> None:
         # Rejects an unknown freedom outright rather than letting SANDBOX_MODES[freedom] raise a
-        # bare KeyError below.
+        # bare KeyError below. The network request is resolved here too — assert_safe is the
+        # final execution seam, re-run at spawn time, so an unhonourable (freedom, network) pair
+        # must be refused here just as it is in the builders, never waved through.
         check_freedom(freedom)
+        resolved = self._resolve_network(freedom, network)
         if argv[:2] != [BINARY, "exec"]:
             raise UnsafeInvocationError(f"unrecognised codex argv layout: {argv!r}")
 
@@ -341,8 +437,8 @@ class CodexBackend:
             raise UnsafeInvocationError(f"-m names no model: {argv!r}")
 
         # Every `-c` value was already checked against PERMITTED_C_PAIRS while walking, so only
-        # multiplicity remains: exactly one approval override, the network pair iff freedom is
-        # `publish` and nowhere else, at most one effort override.
+        # multiplicity remains: exactly one approval override, the network pair exactly where
+        # the resolved network setting calls for one, at most one effort override.
         pairs = seen.get("-c", [])
         approvals = [pair for pair in pairs if pair == NEVER_ASK[1]]
         if approvals != [NEVER_ASK[1]]:
@@ -351,11 +447,18 @@ class CodexBackend:
                 f"blocking on an approval prompt no one can answer; found {approvals!r}: {argv!r}"
             )
 
-        # The network switch is asserted in BOTH directions: `=true` exactly at `publish`, and
-        # `=false` wherever the sandbox is `workspace-write` and we claim network is blocked. The
-        # second half is not belt-and-braces — without it the claim depends on the user's own
-        # `[sandbox_workspace_write]` config, and was measured false against a config setting it
-        # true.
+        # The network switch is asserted in BOTH directions against the *resolved* request, not
+        # against the freedom name: `=true` exactly where the resolved setting enables it,
+        # `=false` exactly where it blocks, and no pair at all where the sandbox takes one
+        # nowhere (read-only: the key is inert there, measured; danger-full-access: no sandbox
+        # remains). The explicit `=false` half is not belt-and-braces — without it the
+        # 'blocked' claim depends on the user's own `[sandbox_workspace_write]` config, and was
+        # measured false against a config setting it true.
+        expected_network_pair = (
+            (NETWORK_ENABLE_PAIR if resolved else NETWORK_DISABLE_PAIR)
+            if SANDBOX_MODES[freedom] == "workspace-write"
+            else None
+        )
         enables = [pair for pair in pairs if pair == NETWORK_ENABLE_PAIR]
         disables = [pair for pair in pairs if pair == NETWORK_DISABLE_PAIR]
         if enables and disables:
@@ -363,23 +466,23 @@ class CodexBackend:
                 f"codex was given both network overrides at once, so which one applies depends on "
                 f"argument order rather than on the requested freedom: {argv!r}"
             )
-        if freedom == "publish":
+        if expected_network_pair is None:
+            if enables or disables:
+                raise UnsafeInvocationError(
+                    f"codex carries a network override at freedom {freedom!r}, where the sandbox "
+                    f"({SANDBOX_MODES[freedom]}) does not take one: {argv!r}"
+                )
+        elif expected_network_pair == NETWORK_ENABLE_PAIR:
             if enables != [NETWORK_ENABLE_PAIR]:
                 raise UnsafeInvocationError(
-                    f"codex must carry exactly one {NETWORK_ENABLE_PAIR} override at freedom "
-                    f"'publish': found {enables!r}: {argv!r}"
+                    f"codex must carry exactly one {NETWORK_ENABLE_PAIR} override for this run's "
+                    f"resolved network setting: found {enables!r}: {argv!r}"
                 )
-        elif SANDBOX_MODES[freedom] == "workspace-write":
-            if disables != [NETWORK_DISABLE_PAIR]:
-                raise UnsafeInvocationError(
-                    f"codex must carry exactly one {NETWORK_DISABLE_PAIR} override at freedom "
-                    f"{freedom!r}, or 'network_access: blocked' would be a claim about the user's "
-                    f"own config rather than this run: found {disables!r}: {argv!r}"
-                )
-        elif enables or disables:
+        elif disables != [NETWORK_DISABLE_PAIR]:
             raise UnsafeInvocationError(
-                f"codex carries a network override at freedom {freedom!r}, where the sandbox "
-                f"({SANDBOX_MODES[freedom]}) does not take one: {argv!r}"
+                f"codex must carry exactly one {NETWORK_DISABLE_PAIR} override for this run's "
+                f"resolved network setting, or 'network_access: blocked' would be a claim about "
+                f"the user's own config rather than this run: found {disables!r}: {argv!r}"
             )
 
         overrides_with_own_checks = {NEVER_ASK[1], NETWORK_ENABLE_PAIR, NETWORK_DISABLE_PAIR}
@@ -463,24 +566,32 @@ class CodexBackend:
                 )
         return seen, is_resume
 
-    def enforcement(self, freedom: Freedom) -> Enforcement:
+    def enforcement(self, freedom: Freedom, network: bool | None = None) -> Enforcement:
         mode = SANDBOX_MODES[freedom]
         unrestricted = freedom == "unrestricted"
+        resolved = self._resolve_network(freedom, network)
         mechanism = f"codex sandbox: {mode}"
         # Name the override that actually carries the network claim. Without it the mechanism reads
         # as though the sandbox alone decided, which is what `blocked` used to rest on and what was
         # measured false: plain `workspace-write` defers to the user's own config.
-        if freedom == "publish":
-            mechanism += f" + -c {NETWORK_ENABLE_PAIR}"
-        elif mode == "workspace-write":
-            mechanism += f" + -c {NETWORK_DISABLE_PAIR}"
+        if mode == "workspace-write":
+            mechanism += f" + -c {NETWORK_ENABLE_PAIR if resolved else NETWORK_DISABLE_PAIR}"
         # Measured per sandbox — see the module docstring and _NETWORK_CAVEAT for the evidence.
-        network_access = {
-            "read_only": "blocked",
-            "write_in_repo": "blocked",
-            "publish": "enabled",
-            "unrestricted": "unrestricted",
-        }[freedom]
+        # The *resolved* setting decides, not the freedom name: publish with network=False is
+        # genuinely blocked, and write_in_repo with network=True is genuinely enabled.
+        network_access = (
+            "unrestricted" if unrestricted else ("enabled" if resolved else "blocked")
+        )
+        caveats = list(_MODE_CAVEATS[freedom])
+        if mode == "workspace-write" and resolved:
+            # _NETWORK_CAVEAT follows the resolved setting rather than the freedom name: it
+            # described publish's default before the parameter existed (and still does), it now
+            # also covers write_in_repo with network=True, and it is absent wherever network is
+            # actually blocked — a caveat attached to a True-sounding claim it contradicted
+            # would be exactly the overclaim this dataclass forbids.
+            caveats.append(_NETWORK_CAVEAT)
+            if freedom == "write_in_repo":
+                caveats.append(_NETWORK_TRUE_AT_WRITE_IN_REPO_CAVEAT)
         return Enforcement(
             freedom=freedom,
             mechanism=mechanism,
@@ -491,12 +602,13 @@ class CodexBackend:
             # Codex has no per-command deny list at all, so neither claim can be made.
             commit_push_blocked=False,
             direct_commit_commands_denied=False,
-            # publish and unrestricted are where polybridge configures no barrier of its own
-            # against a commit/push/PR attempt — see the field's own docstring for what this does
-            # and does not promise.
+            # publish and unrestricted are the freedoms that authorize a publish attempt — see
+            # the field's own docstring for what that does and does not promise. write_in_repo
+            # with network=True keeps this False: a remote push is mechanically possible there,
+            # but it was not authorized, and the field claims authorization only.
             publish_attempts_allowed_by_polybridge=freedom in ("publish", "unrestricted"),
             network_access=network_access,
-            caveats=_MODE_CAVEATS[freedom],
+            caveats=tuple(caveats),
         )
 
     def ingest(self, event: dict[str, Any], acc: Accumulator) -> None:

@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from . import store
-from .backends import Accumulator, Backend
+from .backends import Accumulator, Backend, Enforcement
 from .backends import get as get_backend
 from .stream import parse_line
 
@@ -64,11 +64,6 @@ DRAIN_GRACE_SECONDS = 10.0
 
 MAX_TASKS = 200
 
-# Freedoms that authorize a dispatched agent to commit, push, or open a PR — see backends'
-# `publish_attempts_allowed_by_polybridge`. This module does not import from `backends` for this,
-# to keep the check trivial and local; it is re-derived nowhere else.
-PUBLISH_FREEDOMS: frozenset[str] = frozenset({"publish", "unrestricted"})
-
 # Short and strict on purpose: these are local, read-only ref lookups (never a fetch or ls-remote),
 # so a slow or hanging git must not be allowed to delay a dispatch. The budget is for the *whole*
 # check, not per call — several probes each allowed the full timeout would stack up into a delay
@@ -93,6 +88,70 @@ _ON_DEFAULT_BRANCH_PUBLISH_NOTICE = (
     "This was sampled once, immediately before the agent was launched — not during the run — so "
     "the branch may already have changed by the time the agent started, and will not be "
     "re-checked if it changes later."
+)
+
+# The disclosure state comes from the Enforcement block, never from the freedom or backend name:
+# authorization is `publish_attempts_allowed_by_polybridge`, network reachability is
+# `network_access`. Two more states needed their own wordings once `network` became requestable —
+# authorized with polybridge's own network barrier raised (publish + network=False on codex: a
+# network-backed push is blocked, but a push to a local path was measured to still succeed, so
+# the barrier must never be worded as stopping publishing outright), and not authorized while
+# the mechanism nevertheless reaches a remote (codex write_in_repo + network=True:
+# byte-identical to publish's default, so the old freedom-name gate silently skipped it).
+_ON_DEFAULT_BRANCH_NETWORK_BLOCKED_NOTICE = (
+    "this task was dispatched at freedom {freedom!r} while checked out on the repository's default "
+    "branch ({branch!r}), and is authorized to commit, push, and open a PR directly against it — "
+    "polybridge's own network barrier blocks a network-backed push and any network-backed PR "
+    "creation here, but a push to a local path (measured: a bare repo under a writable root) "
+    "still succeeds, so the barrier stops network-backed operations only. Cancel this task now if "
+    "publishing to {branch!r} was not intended. This was sampled once, immediately before the "
+    "agent was launched — not during the run — so the branch may already have changed by the time "
+    "the agent started, and will not be re-checked if it changes later."
+)
+_UNDETERMINED_NETWORK_BLOCKED_NOTICE = (
+    "this task was dispatched at freedom {freedom!r}, which authorizes it to commit, push, and "
+    "open a PR — but which branch it would land on could not be determined at spawn (no remote "
+    "HEAD recorded locally, a detached HEAD, several remotes with none named 'origin', git being "
+    "unavailable, or the check timing out). Polybridge's own network barrier blocks a "
+    "network-backed push and any network-backed PR creation here, but a push to a local path "
+    "(measured: a bare repo under a writable root) still succeeds, so the barrier stops "
+    "network-backed operations only. For a publish-authorized run, that is itself worth "
+    "knowing: cancel this task now if you need to confirm the target branch before it proceeds. "
+    "This was sampled once, immediately before the agent was launched — not during the run — so "
+    "the branch may already have changed by the time the agent started, and will not be "
+    "re-checked if it changes later."
+)
+_ON_DEFAULT_BRANCH_UNAUTHORIZED_REACHABLE_NOTICE = (
+    "this task was dispatched at freedom {freedom!r}, which does not authorize committing, "
+    "pushing, or opening a PR — but the mechanism it runs under nevertheless permits remote "
+    "publication (enforcement.network_access is {network_access!r}), so a push can genuinely "
+    "reach a remote and nothing here blocked that. It is checked out on the repository's default "
+    "branch ({branch!r}). Cancel this task now if that was not intended. This was sampled once, "
+    "immediately before the agent was launched — not during the run — so the branch may already "
+    "have changed by the time the agent started, and will not be re-checked if it changes later."
+)
+_UNDETERMINED_UNAUTHORIZED_REACHABLE_NOTICE = (
+    "this task was dispatched at freedom {freedom!r}, which does not authorize committing, "
+    "pushing, or opening a PR — but the mechanism it runs under nevertheless permits remote "
+    "publication (enforcement.network_access is {network_access!r}), so a push can genuinely "
+    "reach a remote, and which branch it would land on could not be determined at spawn (no "
+    "remote HEAD recorded locally, a detached HEAD, several remotes with none named 'origin', "
+    "git being unavailable, or the check timing out). That is itself worth knowing: cancel this "
+    "task now if you need to confirm the target branch before it proceeds. This was sampled "
+    "once, immediately before the agent was launched — not during the run — so the branch may "
+    "already have changed by the time the agent started, and will not be re-checked if it "
+    "changes later."
+)
+
+# Where network=True was accepted by a backend that has no barrier of its own to impose
+# (enforcement.network_access stays "not_controlled"), acceptance must not silently read as "the
+# network now works". Worded about what polybridge imposes, never about reachability — the
+# environment decides there, and a claim either way would overclaim.
+_UNCONTROLLED_NETWORK_NOTICE = (
+    "network=True was accepted, but polybridge imposes no network barrier of its own on this "
+    "backend — there is no mechanism it could raise or lower, so whether this run can reach the "
+    "network is decided entirely by the surrounding environment. This is not a claim of "
+    "reachability either way."
 )
 
 
@@ -140,12 +199,51 @@ def _default_branch_remote(repo_path: Path, deadline: float) -> str | None:
     return None
 
 
-def _detect_publish_branch_notice(freedom: str, repo_path: Path) -> str | None:
+def _branch_disclosure_warranted(enforcement: Enforcement) -> bool:
+    """Whether this run's restrictions make default-branch exposure worth disclosing at all.
+
+    Keys off the Enforcement block rather than the freedom name, so the gate covers the crossed
+    cells the old `freedom in PUBLISH_FREEDOMS` check missed in both directions: a
+    network-enabled run at a freedom that never authorized publishing (codex write_in_repo with
+    network=True — mechanically identical to publish, so just as exposed), and a
+    publish-authorized run whose network-backed push is blocked (still disclosed, with its own
+    wording). `not_controlled` deliberately does not count as reaching a remote: there polybridge
+    cannot say either way, and a notice asserting exposure it cannot establish would overclaim.
+    """
+    return enforcement.publish_attempts_allowed_by_polybridge or enforcement.network_access in (
+        "enabled",
+        "unrestricted",
+    )
+
+
+def _branch_notice_templates(enforcement: Enforcement) -> tuple[str, str]:
+    """The (on-default-branch, could-not-determine) wordings for this run's disclosure state."""
+    if enforcement.network_access == "blocked":
+        return _ON_DEFAULT_BRANCH_NETWORK_BLOCKED_NOTICE, _UNDETERMINED_NETWORK_BLOCKED_NOTICE
+    if not enforcement.publish_attempts_allowed_by_polybridge:
+        return (
+            _ON_DEFAULT_BRANCH_UNAUTHORIZED_REACHABLE_NOTICE,
+            _UNDETERMINED_UNAUTHORIZED_REACHABLE_NOTICE,
+        )
+    return _ON_DEFAULT_BRANCH_PUBLISH_NOTICE, _UNDETERMINED_PUBLISH_NOTICE
+
+
+def _format_branch_notice(
+    template: str, freedom: str, enforcement: Enforcement, branch: str | None = None
+) -> str:
+    # str.format ignores keywords a template does not use, so all three states share one call.
+    return template.format(freedom=freedom, branch=branch, network_access=enforcement.network_access)
+
+
+def _detect_publish_branch_notice(
+    freedom: str, repo_path: Path, enforcement: Enforcement
+) -> str | None:
     """The three outcomes: on the default branch, not on it (nothing to report), or undeterminable.
 
     Never falls back to "the branch is named main or master" — a feature branch can be named
     `main`, and a repo's real default can be something else entirely; the default is only ever what
-    a remote's own recorded `HEAD` says.
+    a remote's own recorded `HEAD` says. Which runs get a disclosure at all, and which wording,
+    is decided by the Enforcement block (see `_branch_notice_templates`), not by the freedom name.
     """
     deadline = time.monotonic() + GIT_PROBE_BUDGET_SECONDS
     current_branch = _git_read(repo_path, deadline, "symbolic-ref", "--quiet", "--short", "HEAD")
@@ -174,30 +272,36 @@ def _detect_publish_branch_notice(freedom: str, repo_path: Path) -> str | None:
         # default branch" on the strength of a dangling pointer would be a claim about nothing.
         default_branch = None
 
+    on_branch, undetermined = _branch_notice_templates(enforcement)
     if not current_branch or not default_branch:
-        return _UNDETERMINED_PUBLISH_NOTICE.format(freedom=freedom)
+        return _format_branch_notice(undetermined, freedom, enforcement)
     if current_branch == default_branch:
-        return _ON_DEFAULT_BRANCH_PUBLISH_NOTICE.format(freedom=freedom, branch=default_branch)
+        return _format_branch_notice(on_branch, freedom, enforcement, default_branch)
     return None
 
 
-def _publish_branch_notice(freedom: str, repo_path: Path) -> str | None:
-    """A bridge notice disclosing default-branch exposure for a publish-authorized dispatch.
+def _publish_branch_notice(
+    freedom: str, repo_path: Path, enforcement: Enforcement
+) -> str | None:
+    """A bridge notice disclosing default-branch exposure for a run that can publish — or reach
+    a remote.
 
     This is disclosure, not a guard: `start_task` returns after the process has already spawned, so
     nothing here can stop a run once it is going. It does run *before* the launch, though — bounded
-    by `GIT_PROBE_BUDGET_SECONDS` and skipped entirely below `publish` — so on a publish dispatch it
-    delays the launch slightly rather than not at all. That is the price of keeping the window
-    between spawning and registering the process free of awaits. Detection is entirely best-effort — per CLAUDE.md,
+    by `GIT_PROBE_BUDGET_SECONDS` and skipped entirely where the run is neither publish-authorized
+    nor network-reachable — so on a run it applies to it delays the launch slightly rather than not
+    at all. That is the price of keeping the window between spawning and registering the process
+    free of awaits. Detection is entirely best-effort — per CLAUDE.md,
     bookkeeping must never change an outcome — so every failure mode (a missing `git`, a timed-out
     probe, a detached HEAD, no recorded remote HEAD, an unexpected bug in the detection itself) is
-    caught here and turned into the "could not determine" notice rather than an exception. Nothing
-    below `publish`/`unrestricted` runs a single git command.
+    caught here and turned into the "could not determine" notice rather than an exception. Which
+    runs it applies to is decided by `_branch_disclosure_warranted`, from the Enforcement block —
+    never from the freedom or backend name, which would miss the crossed cells.
     """
-    if freedom not in PUBLISH_FREEDOMS:
+    if not _branch_disclosure_warranted(enforcement):
         return None
     try:
-        return _detect_publish_branch_notice(freedom, repo_path)
+        return _detect_publish_branch_notice(freedom, repo_path, enforcement)
     except Exception:
         log.warning(
             "could not determine publish-branch exposure for %s; reporting that rather than the "
@@ -205,7 +309,7 @@ def _publish_branch_notice(freedom: str, repo_path: Path) -> str | None:
             repo_path,
             exc_info=True,
         )
-        return _UNDETERMINED_PUBLISH_NOTICE.format(freedom=freedom)
+        return _format_branch_notice(_branch_notice_templates(enforcement)[1], freedom, enforcement)
 
 
 class SessionBusyError(RuntimeError):
@@ -263,6 +367,10 @@ class Task:
     reasoning_effort: str | None = None
     parent_task_id: str | None = None
     freedom: str = "write_in_repo"
+    network: bool | None = None
+    """The network request this task was dispatched under: True/False explicit, None the
+    freedom's historical default. Kept raw rather than resolved so a resume inherits exactly
+    what was asked; the resolved outcome is `enforcement.network_access`."""
     enforcement: dict[str, Any] = field(default_factory=dict)
     # Strings guaranteed to appear in the process's command line, so a later server process can tell
     # this task's pid apart from a reused one. What identifies a run differs per backend: Claude
@@ -284,8 +392,10 @@ class Task:
     """Notices the bridge itself generates about the dispatch, kept on a channel separate from
     `acc.notices`: vibe's `ingest` resets `notices` to `[]` at the start of every new turn (see
     backends/vibe.py), which would silently discard anything the bridge added there across a
-    resumed run. Currently populated by `_publish_branch_notice` in `_spawn`, when a task is
-    dispatched at a freedom that authorizes publishing."""
+    resumed run. Currently populated in `_spawn` by the branch disclosure (gated on the
+    Enforcement block — a publish-authorized run, or one whose mechanism nevertheless reaches
+    a remote) and by the line saying polybridge imposed nothing, where network=True was
+    accepted on a backend with no barrier of its own."""
     tail: deque[str] = field(default_factory=lambda: deque(maxlen=TAIL_LINES))
     stderr_tail: deque[str] = field(default_factory=lambda: deque(maxlen=STDERR_TAIL_LINES))
 
@@ -380,6 +490,7 @@ class TaskRegistry:
         max_turns: int | None = None,
         model: str | None = None,
         reasoning_effort: str | None = None,
+        network: bool | None = None,
     ) -> Task:
         """Dispatch a fresh session. Returns once the subprocess exists, not once it finishes."""
         # Only some backends let us name the session up front. Where we can, knowing it immediately
@@ -393,6 +504,7 @@ class TaskRegistry:
             model=model,
             max_turns=max_turns,
             reasoning_effort=reasoning_effort,
+            network=network,
         )
         return await self._spawn(
             argv,
@@ -404,6 +516,7 @@ class TaskRegistry:
             max_turns=max_turns,
             model=model,
             reasoning_effort=reasoning_effort,
+            network=network,
         )
 
     async def resume(
@@ -412,6 +525,7 @@ class TaskRegistry:
         followup_prompt: str,
         *,
         max_turns: int | None = None,
+        network: bool | None = None,
     ) -> Task:
         """Continue `parent`'s session as a new task sharing its session id."""
         if parent.session_id is None:
@@ -426,6 +540,12 @@ class TaskRegistry:
             )
 
         backend = get_backend(parent.backend)
+        # None inherits the parent's recorded request; an explicit boolean overrides it for this
+        # subprocess only. Network is a per-run sandbox setting — changing it cannot
+        # misrepresent the earlier reply — and max_turns is already per-run overridable on
+        # resume, so this matches the existing shape rather than inventing one. An override the
+        # parent's freedom cannot honour raises inside the builder below, exactly as on start.
+        effective_network = network if network is not None else parent.network
         argv = backend.build_resume_argv(
             followup_prompt,
             repo=parent.repo_path,
@@ -436,6 +556,7 @@ class TaskRegistry:
             model=parent.model,
             max_turns=max_turns,
             reasoning_effort=parent.reasoning_effort,
+            network=effective_network,
         )
         return await self._spawn(
             argv,
@@ -447,6 +568,7 @@ class TaskRegistry:
             max_turns=max_turns,
             model=parent.model,
             reasoning_effort=parent.reasoning_effort,
+            network=effective_network,
             parent_task_id=parent.task_id,
         )
 
@@ -462,38 +584,64 @@ class TaskRegistry:
         max_turns: int | None,
         model: str | None,
         reasoning_effort: str | None,
+        network: bool | None = None,
         parent_task_id: str | None = None,
     ) -> Task:
         # Re-checked at the point of execution, not only where the argv was built, so no future
-        # caller of this method can launch an agent without its backend's guarantees — and, now that
-        # assert_safe takes freedom, that the argv actually matches the freedom this task was
-        # authorized under, not merely some freedom's shape.
-        backend.assert_safe(argv, freedom)  # type: ignore[arg-type]
+        # caller of this method can launch an agent without its backend's guarantees — and, now
+        # that assert_safe takes the (freedom, network) pair, that the argv matches the
+        # *resolved mechanism* that pair maps to. Where two authorizations resolve to the same
+        # argv (codex write_in_repo+network=True is byte-identical to publish's default),
+        # assert_safe genuinely cannot tell which produced it — a loss of provenance, not a
+        # sandbox escape: the collapsed argv already had identical powers.
+        backend.assert_safe(argv, freedom, network)  # type: ignore[arg-type]
 
         task_id = str(uuid.uuid4())
         self._log_dir.mkdir(parents=True, exist_ok=True)
         log_path = self._log_dir / f"{task_id}.jsonl"
+
+        # Computed before the notice block, not at Task construction below: the branch
+        # disclosure keys on what this run's restrictions actually amount to, so it needs the
+        # block — and `backend.enforcement` is a pure synchronous call, so hoisting it
+        # introduces no await into the window between spawn and registration that the comment
+        # below guards. One computation serves the notice, the Task, and the record, so all
+        # three describe the same (freedom, network) pair.
+        enforcement = backend.enforcement(freedom, network)  # type: ignore[arg-type]
 
         # Before the spawn, deliberately. Between `create_subprocess_exec` and the registration
         # below there must be no await at all: one there could be cancelled — a client
         # disconnecting mid-call — leaving a live agent no tool can reach, and it would hold the
         # process's pipes unread meanwhile, which blocks the agent (drainers are load-bearing).
         #
-        # The freedom is checked *here*, not only inside the helper, so a run below `publish` does
-        # not pay a thread hop it has no use for — and cannot queue behind a saturated executor.
-        # The deadline inside the helper only starts once a worker picks the work up, so the wait
-        # for a worker is bounded out here instead, on the event loop, where it is observable.
+        # The disclosure gate is checked *here*, not only inside the helper, so a run that is
+        # neither publish-authorized nor network-reachable does not pay a thread hop it has no
+        # use for — and cannot queue behind a saturated executor. The deadline inside the helper
+        # only starts once a worker picks the work up, so the wait for a worker is bounded out
+        # here instead, on the event loop, where it is observable.
         publish_notice: str | None = None
-        if freedom in PUBLISH_FREEDOMS:
+        if _branch_disclosure_warranted(enforcement):
             try:
                 publish_notice = await asyncio.wait_for(
-                    asyncio.to_thread(_publish_branch_notice, freedom, repo_path),
+                    asyncio.to_thread(
+                        _publish_branch_notice, freedom, repo_path, enforcement
+                    ),
                     timeout=GIT_PROBE_BUDGET_SECONDS * 2,
                 )
             except (TimeoutError, asyncio.TimeoutError):
                 # Same rule as every other failure in this check: the dispatch proceeds and the
                 # caller is told the branch could not be determined.
-                publish_notice = _UNDETERMINED_PUBLISH_NOTICE.format(freedom=freedom)
+                publish_notice = _format_branch_notice(
+                    _branch_notice_templates(enforcement)[1], freedom, enforcement
+                )
+
+        # Where network=True was accepted by a backend with no barrier of its own to impose
+        # (enforcement.network_access stays "not_controlled"), acceptance must not silently
+        # read as "the network now works": the bridge says so itself, worded about what
+        # polybridge imposes rather than about reachability. Sync, so the no-await window below
+        # is untouched.
+        bridge_notices: list[str] = [publish_notice] if publish_notice else []
+        if network is True and enforcement.network_access == "not_controlled":
+            bridge_notices.append(_UNCONTROLLED_NETWORK_NOTICE)
 
         proc = await asyncio.create_subprocess_exec(
             *argv,
@@ -520,11 +668,12 @@ class TaskRegistry:
             reasoning_effort=reasoning_effort,
             parent_task_id=parent_task_id,
             freedom=freedom,
-            enforcement=backend.enforcement(freedom).as_dict(),  # type: ignore[arg-type]
+            network=network,
+            enforcement=enforcement.as_dict(),
             markers=_identity_markers(backend, session_id, repo_path),
             proc=proc,
             pgid=proc.pid,
-            bridge_notices=[publish_notice] if publish_notice else [],
+            bridge_notices=bridge_notices,
         )
 
         # Written before anything can go wrong, so even a task whose server dies immediately is
@@ -573,6 +722,7 @@ class TaskRegistry:
                 model=task.model,
                 reasoning_effort=task.reasoning_effort,
                 max_turns=task.max_turns,
+                network=task.network,
                 parent_task_id=task.parent_task_id,
                 prompt=task.prompt[: store.PROMPT_PREVIEW_CHARS],
                 status=task.status,
@@ -703,6 +853,7 @@ class TaskRegistry:
         followup_prompt: str,
         *,
         max_turns: int | None = None,
+        network: bool | None = None,
     ) -> Task:
         """Continue the session of a task recovered from disk."""
         if not record.session_id:
@@ -725,6 +876,10 @@ class TaskRegistry:
             )
 
         backend = get_backend(record.backend)
+        # Same semantics as the live-parent path: None inherits the recorded request — which is
+        # also None for a record written before the field existed, resuming at the freedom's
+        # historical default — and an explicit boolean overrides it for this subprocess only.
+        effective_network = network if network is not None else record.network
         argv = backend.build_resume_argv(
             followup_prompt,
             repo=repo_path,
@@ -733,6 +888,7 @@ class TaskRegistry:
             model=record.model,
             max_turns=max_turns,
             reasoning_effort=record.reasoning_effort,
+            network=effective_network,
         )
         return await self._spawn(
             argv,
@@ -744,6 +900,7 @@ class TaskRegistry:
             max_turns=max_turns,
             model=record.model,
             reasoning_effort=record.reasoning_effort,
+            network=effective_network,
             parent_task_id=record.task_id,
         )
 

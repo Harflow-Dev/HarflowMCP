@@ -52,14 +52,17 @@ from typing import Any
 
 from .base import (
     EFFORTS,
+    FREEDOMS,
     Accumulator,
     Capabilities,
     Enforcement,
     Freedom,
+    NetworkControl,
     ReasoningEffort,
     Status,
     UnsupportedCapability,
     check_freedom,
+    check_network,
     check_reasoning_effort,
 )
 
@@ -115,6 +118,19 @@ _PLAN_CAVEAT = (
 _NO_SANDBOX_CAVEAT = (
     "no OS sandbox: the agent can read and write outside repo_path, which is only its working "
     "directory"
+)
+
+# No OS sandbox and no network-controlling mechanism at all: network=True ("impose no barrier of
+# our own") is accepted at every freedom because having nothing to impose genuinely delivers it,
+# while network=False ("impose one") is refused outright — a silently-ignored block would look
+# exactly like an enforced one. enforcement.network_access stays "not_controlled" either way:
+# the surrounding environment, not polybridge, decides reachability here.
+_NETWORK_CONTROL_CAVEAT = (
+    "network=True is accepted as 'impose no barrier of our own', which this backend genuinely "
+    "delivers by having none to impose — not a claim of reachability: "
+    "enforcement.network_access stays not_controlled, and the surrounding environment decides. "
+    "network=False is refused outright: there is no barrier this backend could raise, and a "
+    "silently-ignored block would be indistinguishable from an enforced one"
 )
 _EFFORT_CAVEAT = (
     "--variant support is per model, not universal: measured working on "
@@ -182,6 +198,11 @@ class OpencodeBackend:
             levels_change_behaviour=True,
             caveats=(_EFFORT_CAVEAT,),
         ),
+        network_control=NetworkControl(
+            can_enable=FREEDOMS,
+            can_block=(),
+            caveats=(_NETWORK_CONTROL_CAVEAT,),
+        ),
     )
 
     def build_start_argv(
@@ -194,14 +215,15 @@ class OpencodeBackend:
         model: str | None,
         max_turns: int | None,
         reasoning_effort: str | None,
+        network: bool | None = None,
     ) -> list[str]:
         if session_id is not None:
             raise ValueError("opencode mints its own session id; one cannot be supplied")
         self._reject_turn_cap(max_turns)
-        argv = [BINARY, "run", *self._options(repo, freedom, model, reasoning_effort)]
+        argv = [BINARY, "run", *self._options(repo, freedom, model, reasoning_effort, network)]
         # `--` then the prompt: last, and explicitly not parsed as an option however it looks.
         argv += ["--", self._check_prompt(prompt)]
-        self.assert_safe(argv, freedom)
+        self.assert_safe(argv, freedom, network)
         return argv
 
     def build_resume_argv(
@@ -214,22 +236,33 @@ class OpencodeBackend:
         model: str | None,
         max_turns: int | None,
         reasoning_effort: str | None,
+        network: bool | None = None,
     ) -> list[str]:
         if not session_id:
             raise ValueError("resuming opencode needs the session id its first run reported")
         self._reject_turn_cap(max_turns)
         # -s, never -c: "the most recent session" is whatever ran last on this machine, which is not
         # necessarily this task's conversation.
-        options = self._options(repo, freedom, model, reasoning_effort)
+        options = self._options(repo, freedom, model, reasoning_effort, network)
         argv = [BINARY, "run", *options, "-s", session_id]
         argv += ["--", self._check_prompt(prompt)]
-        self.assert_safe(argv, freedom)
+        self.assert_safe(argv, freedom, network)
         return argv
 
     def _options(
-        self, repo: Path, freedom: Freedom, model: str | None, reasoning_effort: str | None
+        self,
+        repo: Path,
+        freedom: Freedom,
+        model: str | None,
+        reasoning_effort: str | None,
+        network: bool | None = None,
     ) -> list[str]:
         check_reasoning_effort(self, reasoning_effort)
+        # Validated here so no caller can reach the CLI with a network request this backend
+        # would silently ignore (False). True needs no argv change at all — there is nothing to
+        # impose — which is exactly why the enforcement block, not the argv, is where its
+        # acceptance is disclosed.
+        check_network(self, freedom, network)
         # --dir duplicates the spawn cwd on purpose: it is what puts the repository on the command
         # line, which is the only identity marker available for a backend that cannot carry its
         # session id in argv on a fresh run. See tasks._identity_markers.
@@ -255,10 +288,14 @@ class OpencodeBackend:
             raise ValueError("prompt must be a non-empty string")
         return prompt
 
-    def assert_safe(self, argv: list[str], freedom: Freedom) -> None:
+    def assert_safe(self, argv: list[str], freedom: Freedom, network: bool | None = None) -> None:
         # Rejects an unknown freedom outright rather than letting AGENTS[freedom] raise a bare
-        # KeyError below.
+        # KeyError below. The network request is validated here too — this is the final
+        # execution seam, so an unhonourable request must fail loudly even if every earlier check
+        # was bypassed. network leaves no trace in this backend's argv (there is nothing to
+        # impose), so there is nothing further to check for it beyond the request itself.
         check_freedom(freedom)
+        check_network(self, freedom, network)
         if argv[:2] != [BINARY, "run"]:
             raise UnsafeInvocationError(f"unrecognised opencode argv layout: {argv!r}")
 
@@ -378,7 +415,12 @@ class OpencodeBackend:
             raise UnsafeInvocationError(f"{flag} appears {len(values)} times: {argv!r}")
         return values[0]
 
-    def enforcement(self, freedom: Freedom) -> Enforcement:
+    def enforcement(self, freedom: Freedom, network: bool | None = None) -> Enforcement:
+        # Validated here too, not only in the argv builders: `enforcement` is part of the widened
+        # Backend contract, and reporting `not_controlled` for a request this backend documents as
+        # an error would make the contract internally inconsistent for any caller that asks it
+        # directly rather than going through the tool surface.
+        check_network(self, freedom, network)
         agent = AGENTS[freedom]
         auto = " --auto" if freedom in AUTO_APPROVE else ""
         return Enforcement(
@@ -391,9 +433,9 @@ class OpencodeBackend:
             # No per-command deny list exists, so neither commit claim can be made.
             commit_push_blocked=False,
             direct_commit_commands_denied=False,
-            # publish and unrestricted are where polybridge configures no barrier of its own
-            # against a commit/push/PR attempt — though on opencode nothing ever did, at any
-            # freedom, so this is no stronger a claim than write_in_repo already implied.
+            # publish and unrestricted are the freedoms that authorize a publish attempt — see
+            # the field's own docstring. A network request changes nothing here: this backend
+            # has no barrier of its own either way, at any freedom.
             publish_attempts_allowed_by_polybridge=freedom in ("publish", "unrestricted"),
             network_access="not_controlled",
             caveats=(_NO_SANDBOX_CAVEAT, *_MODE_CAVEATS[freedom]),

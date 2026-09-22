@@ -84,10 +84,10 @@ claude-desktop`.
 | Tool | Blocking? | What it does |
 |---|---|---|
 | `list_backends()` | No | What's installed, its version, and what each backend can actually do |
-| `start_task(prompt, repo_path, backend, freedom, model, max_turns, reasoning_effort)` | No | Dispatches, returns a `task_id` immediately |
+| `start_task(prompt, repo_path, backend, freedom, model, max_turns, reasoning_effort, network)` | No | Dispatches, returns a `task_id` immediately |
 | `get_task_status(task_id)` | No | Status, summary, turns, usage, denials, enforcement, stream tail |
 | `wait_for_task(task_id, timeout_seconds=55)` | Until done or timeout | On timeout returns `running` and **leaves the run alone** |
-| `resume_task(task_id, followup_prompt)` | No | Continues that session as a **new** task |
+| `resume_task(task_id, followup_prompt, max_turns, network)` | No | Continues that session as a **new** task; `network` omitted inherits the parent's, an explicit boolean overrides it |
 | `list_tasks(status, backend)` | No | All tasks, oldest first, optionally filtered |
 | `cancel_task(task_id)` | Until dead | SIGTERM the process group, SIGKILL after 5s |
 
@@ -137,13 +137,15 @@ and `repo_path` is only its working directory.
 
 `publish` sits between `write_in_repo` and `unrestricted`. Two fields on `enforcement` exist just for
 it: `publish_attempts_allowed_by_polybridge` is `true` only at freedoms (`publish`, `unrestricted`)
-where polybridge itself configured no barrier of its own against a commit/push/PR attempt — it is
-**not** called `publishing_permitted`, because that name would read as a promise polybridge cannot
-make. Credentials, remote permissions, branch protection, repo hooks, and an unauthenticated `gh` can
-all still stop the attempt, and it says nothing about whether the agent even tries. `network_access` is
-one of `"blocked"`, `"enabled"`, `"unrestricted"` or `"not_controlled"` — the last means polybridge
-imposes nothing of its own and the surrounding environment decides, which is **not** the same as
-`"blocked"`.
+where polybridge **authorized an attempt** to commit, push or open a PR — an authorization claim
+only, which says nothing about whether the *mechanism* prevents the attempt elsewhere (codex at
+`write_in_repo` with `network=True` can mechanically reach a remote with this field false) nor
+whether the attempt succeeds — it is **not** called `publishing_permitted`, because that name would
+read as a promise polybridge cannot make. Credentials, remote permissions, branch protection, repo
+hooks, and an unauthenticated `gh` can all still stop the attempt, and it says nothing about
+whether the agent even tries. `network_access` is one of `"blocked"`, `"enabled"`, `"unrestricted"`
+or `"not_controlled"` — the last means polybridge imposes nothing of its own and the surrounding
+environment decides, which is **not** the same as `"blocked"`.
 
 Where codex reports `"blocked"` it passes `-c sandbox_workspace_write.network_access=false`
 explicitly rather than relying on the sandbox default, and the `mechanism` string names it. That is
@@ -194,6 +196,49 @@ auto-approve` (`bypass_tool_permissions: true`) — see the collapse table above
 cannot be narrower than `unrestricted` here. In programmatic mode every approval callback vibe doesn't
 pre-approve is auto-denied, so anything outside the agent profile and the user's own config simply
 fails closed rather than prompting.
+
+## `network`: asking for the network without climbing to `publish`
+
+`start_task(..., network=...)` and `resume_task(..., network=...)` take an optional boolean that
+asks for network access independently of the freedom. `None` (the default) keeps each freedom's
+historical behaviour exactly — byte-identical argv on every backend. `True` asks polybridge to
+impose no network barrier of its own; `False` asks it to impose one. The parameter governs
+**polybridge's own network barrier, never reachability** — a corporate firewall or proxy defeats
+it too, and on claude/opencode/vibe the surrounding environment always decides.
+
+Only codex has a barrier polybridge can actually raise or lower
+(`-c sandbox_workspace_write.network_access=…`), and its support is non-rectangular — measured
+with the free `codex sandbox` harness (codex-cli 0.154.0), which runs a command under the real
+sandbox with no model call:
+
+| codex freedom | default | `network=True` | `network=False` |
+|---|---|---|---|
+| `read_only` | blocked | **error** — the key is inert under the read-only sandbox (measured) | accepted — already blocked by the sandbox itself, no pair emitted |
+| `write_in_repo` | blocked | `-c …network_access=true` | `-c …network_access=false` |
+| `publish` | enabled | `-c …network_access=true` | `-c …network_access=false` |
+| `unrestricted` | open | accepted — no sandbox left to configure | **error** — no barrier remains to raise |
+
+The domain-allowlist machinery codex carries (`experimental_network.domains`, legacy
+`allowed_domains`/`denied_domains`) is inert via `-c` — measured, a curl to a "denied" host
+returned 200 — so no domain-scoped tier is buildable today.
+
+Two identities follow on codex and are pinned by tests: `write_in_repo`+`network=True` produces
+an argv byte-identical to `publish`'s default, and `publish`+`network=False` produces one
+identical to `write_in_repo`'s default. The first means a push can genuinely reach a remote at
+`write_in_repo` although publishing was not authorized — the difference is recorded intent, not
+an enforced barrier — and it enables arbitrary outbound traffic, exfiltration included, which is
+why `assert_safe` cannot refuse the crossed claim and the dispatch-time branch notice discloses
+it instead. The second means `publish`+`network=False` blocks **network-backed** push only:
+measured, `git push <local bare repo> HEAD:refs/heads/main` still landed with
+`network_access=false`.
+
+On claude, opencode and vibe, `network=True` is accepted — "impose no barrier" is genuinely
+delivered by having nothing to impose — and `network=False` is an error rather than being
+silently dropped; `enforcement.network_access` stays `"not_controlled"` there and a bridge
+notice says polybridge imposed nothing.
+
+On `resume_task`, `network=None` inherits the parent run's setting and an explicit boolean
+overrides it for the new run only.
 
 ## Reasoning effort is one vocabulary, passed through verbatim
 

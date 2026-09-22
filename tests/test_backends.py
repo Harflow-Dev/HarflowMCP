@@ -11,7 +11,14 @@ from pathlib import Path
 import pytest
 
 from polybridge import backends
-from polybridge.backends import EFFORTS, FREEDOMS, Accumulator, Capabilities, ReasoningEffort
+from polybridge.backends import (
+    EFFORTS,
+    FREEDOMS,
+    Accumulator,
+    Capabilities,
+    NetworkControl,
+    ReasoningEffort,
+)
 from polybridge.backends.claude import ALLOWED_TOOLS, DISALLOWED_TOOLS, FORBIDDEN_FLAGS, ClaudeBackend
 from polybridge.backends.claude import UnsafeInvocationError as ClaudeUnsafe
 from polybridge.backends.codex import BINARY as CODEX_BINARY
@@ -20,6 +27,7 @@ from polybridge.backends.codex import (
     NETWORK_DISABLE_PAIR,
     NETWORK_ENABLE_PAIR,
     NEVER_ASK,
+    WRITABLE_ROOTS,
     CodexBackend,
 )
 from polybridge.backends.codex import UnsafeInvocationError as CodexUnsafe
@@ -34,6 +42,10 @@ REPO = Path("/tmp/repo")
 SESSION = "11111111-1111-1111-1111-111111111111"
 
 ALL = [ClaudeBackend(), CodexBackend(), OpencodeBackend(), VibeBackend()]
+
+# network=None keeps each freedom's historical default; the doubles and helpers below carry it
+# explicitly so the default is pinned by tests rather than only implied.
+NETWORKS = [None, True, False]
 
 
 class _NoEffortBackend:
@@ -56,6 +68,7 @@ class _NoEffortBackend:
             accepts_parameter=False, levels=(), native_flag="",
             accepted_in_real_run=False, levels_change_behaviour=False,
         ),
+        network_control=NetworkControl(can_enable=(), can_block=()),
     )
 
 
@@ -79,6 +92,7 @@ class _PartialEffortBackend:
             levels_change_behaviour=True,
             caveats=("fake",),
         ),
+        network_control=NetworkControl(can_enable=(), can_block=()),
     )
 
 
@@ -91,6 +105,7 @@ def start(backend, **kwargs):
         "model": None,
         "max_turns": None,
         "reasoning_effort": None,
+        "network": None,
     } | kwargs
     return backend.build_start_argv("do a thing", **args)
 
@@ -109,6 +124,7 @@ def resume(backend, **kwargs):
         "model": None,
         "max_turns": None,
         "reasoning_effort": None,
+        "network": None,
     } | kwargs
     return backend.build_resume_argv("more", **args)
 
@@ -144,46 +160,69 @@ def test_every_backend_builds_an_argv_it_considers_safe(backend, freedom: str) -
     backend.assert_safe(resume(backend, freedom=freedom), freedom)
 
 
-# Two (backend, freedom-pair) combinations are *deliberately* indistinguishable from argv alone —
-# not a hole in assert_safe, but a documented property of how those backends map freedoms to
-# mechanisms. See test_known_freedom_collapses_produce_byte_identical_argv, which pins the collapse
-# itself, and each backend's own `_MODE_CAVEATS["publish"]` / `AGENTS["publish"]` comment.
-KNOWN_COLLAPSED_FREEDOM_PAIRS: frozenset[tuple[str, frozenset[str]]] = frozenset(
-    {
-        ("opencode", frozenset({"write_in_repo", "publish"})),
-        ("vibe", frozenset({"publish", "unrestricted"})),
-    }
-)
+def _argvs_or_none(backend, freedom: str, network):
+    """Both argv shapes for one (freedom, network) authorization, or None when the backend refuses
+    that cell outright — the refusal itself is what the raising tests cover."""
+    try:
+        return (
+            start(backend, freedom=freedom, network=network),
+            resume(backend, freedom=freedom, network=network),
+        )
+    except backends.UnsupportedCapability:
+        return None
 
 
 @pytest.mark.parametrize("backend", ALL, ids=lambda b: b.name)
+@pytest.mark.parametrize("built_network", NETWORKS, ids=["default", "true", "false"])
+@pytest.mark.parametrize("claimed_network", NETWORKS, ids=["default", "true", "false"])
 @pytest.mark.parametrize("built_freedom", FREEDOMS)
 @pytest.mark.parametrize("claimed_freedom", FREEDOMS)
-def test_assert_safe_refuses_an_argv_built_for_a_different_freedom(
-    backend, built_freedom: str, claimed_freedom: str
-) -> None:
-    """The whole point of widening assert_safe: it must check the argv against the freedom the
-    caller actually asked for, not merely that the argv is internally consistent for *some*
-    freedom. Without this, an argv built for read_only would pass a check told unrestricted, and
-    vice versa — this is deliberately the test that fails if that check is ever removed or weakened
-    back to a membership check (see the mutation-check step in the plan).
+def test_assert_safe_refuses_an_argv_built_for_a_different_authorization(
+    backend, built_freedom: str, claimed_freedom: str, built_network, claimed_network
+):
+    """The whole point of widening assert_safe: it must check the argv against the authorization
+    the caller actually asked for, not merely that the argv is internally consistent for *some*
+    authorization. Without this, an argv built for read_only would pass a check told
+    unrestricted, and vice versa.
 
-    Excludes exactly the pairs in KNOWN_COLLAPSED_FREEDOM_PAIRS: assert_safe genuinely cannot refuse
-    a mismatch there, because there is no argv difference to detect — a documented property, pinned
-    by test_known_freedom_collapses_produce_byte_identical_argv, not a silent gap in this test.
+    Re-keyed, deliberately, from (backend, freedom-pair) to the full tuple (backend,
+    built_freedom, built_network, claimed_freedom, claimed_network): network joined freedom as
+    part of what assert_safe vouches for, so an argv built for write_in_repo with the network
+    blocked must not pass a check told (write_in_repo, network=True) either — and, in the other
+    direction, the codex crossings are cells whose *freedoms* differ while their argvs are
+    identical.
+
+    Excluded are exactly the equal-argv combinations, computed rather than enumerated: where the
+    claimed authorization would build the same bytes, assert_safe genuinely cannot refuse —
+    there is no difference to detect. That subsumes the old freedom-pair exclusion (opencode
+    write_in_repo/publish and vibe publish/unrestricted, now at every network value those
+    backends accept) and adds the two codex network collapses (write_in_repo+True vs publish's
+    default, publish+False vs write_in_repo's default). It does NOT exclude the codex
+    write_in_repo/publish freedom pair as a whole: their defaults stay distinguishable
+    (network_access=false vs =true), and a blanket exclusion there would silently delete that
+    coverage — the trap this re-keying exists to avoid.
     """
-    if built_freedom == claimed_freedom:
-        pytest.skip("same-freedom case is covered by test_every_backend_builds_an_argv_it_considers_safe")
-    if (backend.name, frozenset({built_freedom, claimed_freedom})) in KNOWN_COLLAPSED_FREEDOM_PAIRS:
-        pytest.skip(
-            f"{backend.name} deliberately collapses {built_freedom!r} and {claimed_freedom!r}"
-        )
-    for argv in (
-        start(backend, freedom=built_freedom),
-        resume(backend, freedom=built_freedom),
-    ):
-        with pytest.raises(RuntimeError):
-            backend.assert_safe(argv, claimed_freedom)
+    if (built_freedom, built_network) == (claimed_freedom, claimed_network):
+        pytest.skip("same authorization")
+    built = _argvs_or_none(backend, built_freedom, built_network)
+    if built is None:
+        pytest.skip("this authorization is refused at build time; the raising tests cover it")
+    claimed = _argvs_or_none(backend, claimed_freedom, claimed_network)
+    for built_argv, shape in zip(built, ("start", "resume")):
+        if claimed is not None and claimed[0 if shape == "start" else 1] == built_argv:
+            # Byte-identical argv: a documented collapse, pinned by the identity tests —
+            # assert_safe cannot refuse what it cannot distinguish.
+            continue
+        if claimed is None:
+            # The claimed authorization is itself refused by the capability check, so no argv
+            # exists to compare against — but assert_safe is the final execution seam and must
+            # not wave it through either: whatever exception carries the refusal, a raise here
+            # is the loud failure this repo requires rather than a silent drop.
+            with pytest.raises((RuntimeError, backends.UnsupportedCapability)):
+                backend.assert_safe(built_argv, claimed_freedom, claimed_network)
+        else:
+            with pytest.raises(RuntimeError):
+                backend.assert_safe(built_argv, claimed_freedom, claimed_network)
 
 
 @pytest.mark.parametrize(
@@ -196,8 +235,8 @@ def test_assert_safe_refuses_an_argv_built_for_a_different_freedom(
 )
 def test_known_freedom_collapses_produce_byte_identical_argv(backend, freedom_a, freedom_b) -> None:
     """Pins the collapse deliberately rather than leaving it an accident of the current mapping —
-    see KNOWN_COLLAPSED_FREEDOM_PAIRS, which excludes exactly these two pairs from the cross-freedom
-    refusal test above."""
+    these are the equal-argv combinations the cross-authorization refusal test above excludes,
+    computed there rather than enumerated, so this pin is what keeps each exclusion honest."""
     assert start(backend, freedom=freedom_a) == start(backend, freedom=freedom_b)
     assert resume(backend, freedom=freedom_a) == resume(backend, freedom=freedom_b)
     caveats = " ".join(backend.enforcement(freedom_a).caveats) + " ".join(
@@ -501,6 +540,511 @@ def test_capabilities_as_dict_serializes_reasoning_effort_to_json_safe_lists(bac
     assert isinstance(data["levels"], list)
     assert isinstance(data["caveats"], list)
     json.dumps(data)  # must not raise: no bare tuple/NamedTuple left inside
+
+
+# --- network: the fourth capability-gated knob ----------------------------------------------
+# `network` rides alongside freedom exactly the way model/max_turns/reasoning_effort do: optional,
+# refused loudly where a backend cannot honour it, and None = the historical default on every
+# backend at every freedom. The tests here pin the full matrix, the two codex collapses, and the
+# backward-compatibility guarantee as explicit argv literals.
+
+EXPECTED_NETWORK_CONTROL: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    # Measured with the free `codex sandbox` harness (codex-cli 0.154.0): read-only is immune to
+    # the sandbox_workspace_write key in both directions, workspace-write takes either, and
+    # danger-full-access has no sandbox to block with. Blocking at read-only is satisfiable
+    # because the sandbox itself already blocks there — no pair needed.
+    "codex": (("write_in_repo", "publish", "unrestricted"), ("read_only", "write_in_repo", "publish")),
+    # No sandbox and no network-controlling mechanism: True ("impose no barrier") is deliverable
+    # by having nothing to impose at every freedom; False ("impose one") is not, anywhere.
+    "claude": (FREEDOMS, ()),
+    "opencode": (FREEDOMS, ()),
+    "vibe": (FREEDOMS, ()),
+}
+
+
+@pytest.mark.parametrize("backend", ALL, ids=lambda b: b.name)
+def test_network_control_tuples_match_what_was_measured(backend) -> None:
+    can_enable, can_block = EXPECTED_NETWORK_CONTROL[backend.name]
+    control = backend.capabilities.network_control
+
+    assert control.can_enable == can_enable
+    assert control.can_block == can_block
+    assert control.caveats, "support this non-uniform needs its measured reasons attached"
+
+
+@pytest.mark.parametrize("backend", ALL, ids=lambda b: b.name)
+def test_capabilities_as_dict_serializes_network_control_to_json_safe_lists(backend) -> None:
+    """The trap `reasoning_effort` already hit: `_asdict()` does not recurse into a nested
+    NamedTuple, so a missed expansion would serialize as a bare list and lose its field names."""
+    data = backend.capabilities.as_dict()["network_control"]
+    assert isinstance(data, dict)
+    assert isinstance(data["can_enable"], list)
+    assert isinstance(data["can_block"], list)
+    assert isinstance(data["caveats"], list)
+    json.dumps(data)  # must not raise
+
+
+@pytest.mark.parametrize("backend", ALL, ids=lambda b: b.name)
+def test_check_network_passes_none_through_regardless_of_capability(backend) -> None:
+    for freedom in FREEDOMS:
+        backends.check_network(backend, freedom, None)
+
+
+def test_check_network_refuses_an_unknown_freedom_with_the_shared_message() -> None:
+    with pytest.raises(backends.UnsupportedCapability, match="unknown freedom"):
+        backends.check_network(ClaudeBackend(), "bogus", True)
+
+
+@pytest.mark.parametrize("backend", ALL, ids=lambda b: b.name)
+@pytest.mark.parametrize("freedom", FREEDOMS)
+def test_network_true_is_accepted_exactly_where_the_declared_tuple_says(backend, freedom: str) -> None:
+    if freedom not in backend.capabilities.network_control.can_enable:
+        pytest.skip(f"{backend.name} cannot enable at {freedom!r}; the raising tests cover it")
+    backend.assert_safe(start(backend, freedom=freedom, network=True), freedom, True)
+    backend.assert_safe(resume(backend, freedom=freedom, network=True), freedom, True)
+
+
+@pytest.mark.parametrize("backend", ALL, ids=lambda b: b.name)
+@pytest.mark.parametrize("freedom", FREEDOMS)
+def test_network_false_is_accepted_exactly_where_the_declared_tuple_says(
+    backend, freedom: str
+) -> None:
+    if freedom not in backend.capabilities.network_control.can_block:
+        pytest.skip(f"{backend.name} cannot block at {freedom!r}; the raising tests cover it")
+    backend.assert_safe(start(backend, freedom=freedom, network=False), freedom, False)
+    backend.assert_safe(resume(backend, freedom=freedom, network=False), freedom, False)
+
+
+@pytest.mark.parametrize("build", [start, resume], ids=["start", "resume"])
+def test_codex_cannot_enable_network_at_read_only(build) -> None:
+    """Measured (plan cell B): the key is inert under the read-only sandbox even set true, so
+    accepting the request would look honoured while changing nothing."""
+    with pytest.raises(backends.UnsupportedCapability, match="cannot enable network"):
+        build(CodexBackend(), freedom="read_only", network=True)
+
+
+@pytest.mark.parametrize("build", [start, resume], ids=["start", "resume"])
+def test_codex_cannot_block_network_at_unrestricted(build) -> None:
+    """danger-full-access disables the sandbox entirely, so there is no barrier left to raise."""
+    with pytest.raises(backends.UnsupportedCapability, match="cannot block network"):
+        build(CodexBackend(), freedom="unrestricted", network=False)
+
+
+@pytest.mark.parametrize(
+    "backend", [ClaudeBackend(), OpencodeBackend(), VibeBackend()], ids=lambda b: b.name
+)
+@pytest.mark.parametrize("freedom", FREEDOMS)
+@pytest.mark.parametrize("build", [start, resume], ids=["start", "resume"])
+def test_a_backend_with_no_network_barrier_refuses_network_false(backend, freedom: str, build) -> None:
+    """False means "impose a barrier of your own", which a backend with no network-controlling
+    mechanism genuinely cannot — accepting it would be the silent drop this repo exists to
+    prevent, and an ignored block would be indistinguishable from an enforced one."""
+    with pytest.raises(backends.UnsupportedCapability, match="no network barrier"):
+        build(backend, freedom=freedom, network=False)
+
+
+@pytest.mark.parametrize(
+    "backend", [ClaudeBackend(), OpencodeBackend(), VibeBackend()], ids=lambda b: b.name
+)
+@pytest.mark.parametrize("freedom", FREEDOMS)
+def test_enforcement_refuses_network_false_on_a_backend_with_no_barrier(
+    backend, freedom: str
+) -> None:
+    """`enforcement` validates too, not only the argv builders.
+
+    Without this the contract is internally inconsistent: these backends declare `can_block=()`
+    and their builders raise, yet `enforcement(freedom, False)` would hand back a block reporting
+    `network_access="not_controlled"` — an answer to a request they have already said they cannot
+    honour. The tool surface refuses earlier, so this is invisible there; it is a direct caller of
+    the widened Backend protocol who would be misled.
+    """
+    with pytest.raises(backends.UnsupportedCapability, match="no network barrier"):
+        backend.enforcement(freedom, False)
+
+
+@pytest.mark.parametrize(
+    ("freedom", "network", "message"),
+    [
+        ("read_only", True, "cannot enable network"),
+        ("unrestricted", False, "cannot block network"),
+    ],
+    ids=["read_only-enable", "unrestricted-block"],
+)
+def test_codex_enforcement_refuses_its_two_unhonourable_cells(
+    freedom: str, network: bool, message: str
+) -> None:
+    """codex's own two refused cells, through `enforcement` rather than the builders — the same
+    consistency the three unsandboxed backends needed."""
+    with pytest.raises(backends.UnsupportedCapability, match=message):
+        CodexBackend().enforcement(freedom, network)
+
+
+# The backward-compatibility guarantee, as explicit expected argvs transcribed from the
+# pre-change builders (each backend module's docstring and CLAUDE.md's measured facts) rather
+# than re-derived by calling today's code — a builder that regressed any token fails here
+# against the literal, not against itself. Every backend, every freedom, both shapes.
+LEGACY_ARGV: dict[str, dict[str, dict[str, list[str]]]] = {
+    "claude": {
+        "read_only": {
+            "start": [
+                "claude", "-p", "--output-format", "stream-json", "--verbose",
+                "--permission-mode", "plan",
+                "--disallowedTools", "Bash(git commit:*),Bash(git push:*)",
+                "--session-id", SESSION,
+                "--", "do a thing",
+            ],
+            "resume": [
+                "claude", "-p", "--output-format", "stream-json", "--verbose",
+                "--permission-mode", "plan",
+                "--disallowedTools", "Bash(git commit:*),Bash(git push:*)",
+                "--resume", "abc-123",
+                "--", "more",
+            ],
+        },
+        "write_in_repo": {
+            "start": [
+                "claude", "-p", "--output-format", "stream-json", "--verbose",
+                "--permission-mode", "acceptEdits",
+                "--disallowedTools", "Bash(git commit:*),Bash(git push:*)",
+                "--session-id", SESSION,
+                "--", "do a thing",
+            ],
+            "resume": [
+                "claude", "-p", "--output-format", "stream-json", "--verbose",
+                "--permission-mode", "acceptEdits",
+                "--disallowedTools", "Bash(git commit:*),Bash(git push:*)",
+                "--resume", "abc-123",
+                "--", "more",
+            ],
+        },
+        "publish": {
+            "start": [
+                "claude", "-p", "--output-format", "stream-json", "--verbose",
+                "--permission-mode", "acceptEdits",
+                "--allowedTools", "Bash(git commit:*),Bash(git push:*),Bash(gh pr create:*)",
+                "--session-id", SESSION,
+                "--", "do a thing",
+            ],
+            "resume": [
+                "claude", "-p", "--output-format", "stream-json", "--verbose",
+                "--permission-mode", "acceptEdits",
+                "--allowedTools", "Bash(git commit:*),Bash(git push:*),Bash(gh pr create:*)",
+                "--resume", "abc-123",
+                "--", "more",
+            ],
+        },
+        "unrestricted": {
+            "start": [
+                "claude", "-p", "--output-format", "stream-json", "--verbose",
+                "--permission-mode", "bypassPermissions",
+                "--session-id", SESSION,
+                "--", "do a thing",
+            ],
+            "resume": [
+                "claude", "-p", "--output-format", "stream-json", "--verbose",
+                "--permission-mode", "bypassPermissions",
+                "--resume", "abc-123",
+                "--", "more",
+            ],
+        },
+    },
+    "codex": {
+        "read_only": {
+            "start": [
+                "codex", "exec", "--json", "-C", "/tmp/repo", "-s", "read-only",
+                "-c", 'approval_policy="never"',
+                "--", "do a thing",
+            ],
+            "resume": [
+                "codex", "exec", "--json", "-C", "/tmp/repo", "-s", "read-only",
+                "-c", 'approval_policy="never"', "resume",
+                "--", "abc-123", "more",
+            ],
+        },
+        "write_in_repo": {
+            "start": [
+                "codex", "exec", "--json", "-C", "/tmp/repo", "-s", "workspace-write",
+                "-c", 'approval_policy="never"',
+                "-c", "sandbox_workspace_write.network_access=false",
+                "--", "do a thing",
+            ],
+            "resume": [
+                "codex", "exec", "--json", "-C", "/tmp/repo", "-s", "workspace-write",
+                "-c", 'approval_policy="never"',
+                "-c", "sandbox_workspace_write.network_access=false", "resume",
+                "--", "abc-123", "more",
+            ],
+        },
+        "publish": {
+            "start": [
+                "codex", "exec", "--json", "-C", "/tmp/repo", "-s", "workspace-write",
+                "-c", 'approval_policy="never"',
+                "-c", "sandbox_workspace_write.network_access=true",
+                "--", "do a thing",
+            ],
+            "resume": [
+                "codex", "exec", "--json", "-C", "/tmp/repo", "-s", "workspace-write",
+                "-c", 'approval_policy="never"',
+                "-c", "sandbox_workspace_write.network_access=true", "resume",
+                "--", "abc-123", "more",
+            ],
+        },
+        "unrestricted": {
+            "start": [
+                "codex", "exec", "--json", "-C", "/tmp/repo", "-s", "danger-full-access",
+                "-c", 'approval_policy="never"',
+                "--", "do a thing",
+            ],
+            "resume": [
+                "codex", "exec", "--json", "-C", "/tmp/repo", "-s", "danger-full-access",
+                "-c", 'approval_policy="never"', "resume",
+                "--", "abc-123", "more",
+            ],
+        },
+    },
+    "opencode": {
+        "read_only": {
+            "start": [
+                "opencode", "run", "--format", "json", "--dir", "/tmp/repo",
+                "--agent", "plan",
+                "--", "do a thing",
+            ],
+            "resume": [
+                "opencode", "run", "--format", "json", "--dir", "/tmp/repo",
+                "--agent", "plan", "-s", "abc-123",
+                "--", "more",
+            ],
+        },
+        "write_in_repo": {
+            "start": [
+                "opencode", "run", "--format", "json", "--dir", "/tmp/repo",
+                "--agent", "build",
+                "--", "do a thing",
+            ],
+            "resume": [
+                "opencode", "run", "--format", "json", "--dir", "/tmp/repo",
+                "--agent", "build", "-s", "abc-123",
+                "--", "more",
+            ],
+        },
+        "publish": {
+            "start": [
+                "opencode", "run", "--format", "json", "--dir", "/tmp/repo",
+                "--agent", "build",
+                "--", "do a thing",
+            ],
+            "resume": [
+                "opencode", "run", "--format", "json", "--dir", "/tmp/repo",
+                "--agent", "build", "-s", "abc-123",
+                "--", "more",
+            ],
+        },
+        "unrestricted": {
+            "start": [
+                "opencode", "run", "--format", "json", "--dir", "/tmp/repo",
+                "--agent", "build", "--auto",
+                "--", "do a thing",
+            ],
+            "resume": [
+                "opencode", "run", "--format", "json", "--dir", "/tmp/repo",
+                "--agent", "build", "--auto", "-s", "abc-123",
+                "--", "more",
+            ],
+        },
+    },
+    "vibe": {
+        "read_only": {
+            "start": [
+                "vibe", "--output", "streaming", "--trust", "--agent", "plan",
+                "--workdir", "/tmp/repo",
+                "--prompt=do a thing",
+            ],
+            "resume": [
+                "vibe", "--output", "streaming", "--trust", "--agent", "plan",
+                "--workdir", "/tmp/repo", "--resume", "abc-123",
+                "--prompt=more",
+            ],
+        },
+        "write_in_repo": {
+            "start": [
+                "vibe", "--output", "streaming", "--trust", "--agent", "accept-edits",
+                "--workdir", "/tmp/repo",
+                "--prompt=do a thing",
+            ],
+            "resume": [
+                "vibe", "--output", "streaming", "--trust", "--agent", "accept-edits",
+                "--workdir", "/tmp/repo", "--resume", "abc-123",
+                "--prompt=more",
+            ],
+        },
+        "publish": {
+            "start": [
+                "vibe", "--output", "streaming", "--trust", "--agent", "auto-approve",
+                "--workdir", "/tmp/repo",
+                "--prompt=do a thing",
+            ],
+            "resume": [
+                "vibe", "--output", "streaming", "--trust", "--agent", "auto-approve",
+                "--workdir", "/tmp/repo", "--resume", "abc-123",
+                "--prompt=more",
+            ],
+        },
+        "unrestricted": {
+            "start": [
+                "vibe", "--output", "streaming", "--trust", "--agent", "auto-approve",
+                "--workdir", "/tmp/repo",
+                "--prompt=do a thing",
+            ],
+            "resume": [
+                "vibe", "--output", "streaming", "--trust", "--agent", "auto-approve",
+                "--workdir", "/tmp/repo", "--resume", "abc-123",
+                "--prompt=more",
+            ],
+        },
+    },
+}
+
+
+@pytest.mark.parametrize("backend", ALL, ids=lambda b: b.name)
+@pytest.mark.parametrize("freedom", FREEDOMS)
+def test_network_none_builds_the_pre_parameter_argv_byte_for_byte(backend, freedom: str) -> None:
+    """The backward-compatibility guarantee: omitting `network` (or passing None) must produce
+    exactly the argv the pre-change builders wrote, on every backend at every freedom. Compared
+    against literals transcribed from that code, so a regression in any token fails here rather
+    than being re-derived through the same builder it regressed."""
+    expected = LEGACY_ARGV[backend.name][freedom]
+    assert start(backend, freedom=freedom, network=None) == expected["start"]
+    assert resume(backend, freedom=freedom, network=None) == expected["resume"]
+    # And the pre-change call shape itself — the builders invoked without the kwarg at all —
+    # must still produce the same bytes.
+    session_id = SESSION if backend.capabilities.chooses_session_id else None
+    assert backend.build_start_argv(
+        "do a thing", repo=REPO, freedom=freedom, session_id=session_id, model=None,
+        max_turns=None, reasoning_effort=None,
+    ) == expected["start"]
+    assert backend.build_resume_argv(
+        "more", repo=REPO, freedom=freedom, session_id="abc-123", model=None, max_turns=None,
+        reasoning_effort=None,
+    ) == expected["resume"]
+
+
+def test_codex_network_crossings_collapse_onto_their_neighbours_argv() -> None:
+    """Pins the two collapses the plan calls the honesty problem: write_in_repo+network=True is
+    byte-identical to publish's default (so a remote is reachable although publishing was not
+    authorized), and publish+network=False is byte-identical to write_in_repo's default (so a
+    network-backed push is blocked while a local-path push still works). assert_safe genuinely
+    cannot refuse the crossed claim in either direction — there is no argv difference to
+    detect — which is why these are pinned here rather than left silent."""
+    for build in (start, resume):
+        assert (
+            build(CodexBackend(), freedom="write_in_repo", network=True)
+            == build(CodexBackend(), freedom="publish")
+        )
+        assert (
+            build(CodexBackend(), freedom="publish", network=False)
+            == build(CodexBackend(), freedom="write_in_repo")
+        )
+    caveats = " ".join(CodexBackend().enforcement("write_in_repo", True).caveats)
+    assert "not authorized" in caveats
+    assert "exfiltration" in caveats
+
+
+@pytest.mark.parametrize(("built_network", "claimed_network"), [(True, False), (False, True)])
+def test_codex_assert_safe_refuses_an_argv_whose_pair_contradicts_the_resolved_network(
+    built_network, claimed_network
+) -> None:
+    """Both directions at one freedom: the argv's network pair must match the *resolved* request,
+    so a hand-edited (or mis-built) argv carrying the opposite pair is refused, not waved
+    through on the strength of its sandbox mode alone."""
+    argv = start(CodexBackend(), freedom="write_in_repo", network=built_network)
+    with pytest.raises(CodexUnsafe, match="network"):
+        CodexBackend().assert_safe(argv, "write_in_repo", claimed_network)
+
+
+# The full enforcement block for every valid (freedom, network) cell on codex — the whole
+# report, not merely "caveats exist". The two refusing cells (read_only+True,
+# unrestricted+False) appear above, in the raising tests. None resolves to the freedom's
+# historical setting, which is itself the pre-change table EXPECTED_NETWORK_ACCESS pins.
+CODEX_CELL_ENFORCEMENT: list[tuple[str, bool | None, str, str]] = [
+    # (freedom, network, mechanism, network_access)
+    ("read_only", None, "codex sandbox: read-only", "blocked"),
+    ("read_only", False, "codex sandbox: read-only", "blocked"),
+    ("write_in_repo", None, f"codex sandbox: workspace-write + -c {NETWORK_DISABLE_PAIR}", "blocked"),
+    ("write_in_repo", False, f"codex sandbox: workspace-write + -c {NETWORK_DISABLE_PAIR}", "blocked"),
+    ("write_in_repo", True, f"codex sandbox: workspace-write + -c {NETWORK_ENABLE_PAIR}", "enabled"),
+    ("publish", None, f"codex sandbox: workspace-write + -c {NETWORK_ENABLE_PAIR}", "enabled"),
+    ("publish", True, f"codex sandbox: workspace-write + -c {NETWORK_ENABLE_PAIR}", "enabled"),
+    ("publish", False, f"codex sandbox: workspace-write + -c {NETWORK_DISABLE_PAIR}", "blocked"),
+    ("unrestricted", None, "codex sandbox: danger-full-access", "unrestricted"),
+    ("unrestricted", True, "codex sandbox: danger-full-access", "unrestricted"),
+]
+
+
+@pytest.mark.parametrize(
+    ("freedom", "network", "mechanism", "network_access"),
+    CODEX_CELL_ENFORCEMENT,
+    ids=[
+        f"{freedom}-{str(network).lower()}"
+        for freedom, network, _, _ in CODEX_CELL_ENFORCEMENT
+    ],
+)
+def test_codex_enforcement_reports_the_resolved_network_for_every_valid_cell(
+    freedom: str, network, mechanism: str, network_access: str
+) -> None:
+    enforcement = CodexBackend().enforcement(freedom, network)
+
+    assert enforcement.freedom == freedom
+    assert enforcement.mechanism == mechanism
+    assert enforcement.network_access == network_access
+    assert enforcement.os_enforced is (freedom != "unrestricted")
+    assert enforcement.writes_confined is (freedom != "unrestricted")
+    assert enforcement.writable_roots == WRITABLE_ROOTS[freedom]
+    assert enforcement.commit_push_blocked is False
+    assert enforcement.direct_commit_commands_denied is False
+    # Authorization is freedom-derived and stays that way: write_in_repo+True has a reachable
+    # remote without ever having been authorized to publish, and publish+False stays authorized
+    # even though its network-backed push is blocked.
+    assert enforcement.publish_attempts_allowed_by_polybridge is (
+        freedom in ("publish", "unrestricted")
+    )
+
+    # The mechanism's named pair is cross-checked against the argv the same cell builds, so
+    # the report and the invocation can never drift apart.
+    argv = start(CodexBackend(), freedom=freedom, network=network)
+    if network_access in ("enabled", "blocked") and freedom != "read_only":
+        expected_pair = NETWORK_ENABLE_PAIR if network_access == "enabled" else NETWORK_DISABLE_PAIR
+        assert expected_pair in argv
+    else:
+        assert NETWORK_ENABLE_PAIR not in argv
+        assert NETWORK_DISABLE_PAIR not in argv
+
+    caveats = " ".join(enforcement.caveats)
+    if network_access == "enabled":
+        # The general-network caveat follows the resolved setting, not the freedom name.
+        assert "GENERAL network access" in caveats
+    else:
+        assert "GENERAL network access" not in caveats
+    if freedom == "write_in_repo" and network is True:
+        assert "exfiltration" in caveats
+        assert "not authorized" in caveats
+
+
+@pytest.mark.parametrize(
+    "backend", [ClaudeBackend(), OpencodeBackend(), VibeBackend()], ids=lambda b: b.name
+)
+@pytest.mark.parametrize("freedom", FREEDOMS)
+@pytest.mark.parametrize("network", [None, True], ids=["default", "true"])
+def test_a_backend_without_a_network_mechanism_reports_not_controlled_whatever_was_asked(
+    backend, freedom: str, network
+) -> None:
+    """True is accepted (imposing no barrier is deliverable by having none) but must not turn the
+    enforcement block into a claim of reachability: the whole block is unchanged from the
+    default and network_access stays not_controlled, rather than pretending a barrier was
+    configured or that the network now works."""
+    assert backend.enforcement(freedom, network) == backend.enforcement(freedom)
+    assert backend.enforcement(freedom, network).network_access == "not_controlled"
+    # And the argv carries no network trace either way — there is nothing to impose on.
+    assert start(backend, freedom=freedom, network=network) == start(backend, freedom=freedom)
 
 
 # --- claude specifics ----------------------------------------------------------------------

@@ -50,13 +50,16 @@ from typing import Any
 
 from .base import (
     EFFORTS,
+    FREEDOMS,
     Accumulator,
     Capabilities,
     Enforcement,
     Freedom,
+    NetworkControl,
     ReasoningEffort,
     Status,
     check_freedom,
+    check_network,
     check_reasoning_effort,
 )
 
@@ -118,6 +121,19 @@ _EFFORT_DEGRADE_CAVEAT = (
     "an --effort value outside low/medium/high/xhigh/max is silently ignored by the CLI itself "
     "(stderr warning, default effort used, measured) — polybridge's own validation is what stops "
     "an unsupported value reaching it, not the CLI"
+)
+
+# No OS sandbox and no network-controlling mechanism at all: network=True ("impose no barrier of
+# our own") is accepted at every freedom because having nothing to impose genuinely delivers it,
+# while network=False ("impose one") is refused outright — a silently-ignored block would look
+# exactly like an enforced one. enforcement.network_access stays "not_controlled" either way:
+# the surrounding environment, not polybridge, decides reachability here.
+_NETWORK_CONTROL_CAVEAT = (
+    "network=True is accepted as 'impose no barrier of our own', which this backend genuinely "
+    "delivers by having none to impose — not a claim of reachability: "
+    "enforcement.network_access stays not_controlled, and the surrounding environment decides. "
+    "network=False is refused outright: there is no barrier this backend could raise, and a "
+    "silently-ignored block would be indistinguishable from an enforced one"
 )
 
 _NO_SANDBOX_CAVEAT = (
@@ -194,6 +210,11 @@ class ClaudeBackend:
             levels_change_behaviour=False,
             caveats=(_EFFORT_ACCEPTANCE_CAVEAT, _EFFORT_DEGRADE_CAVEAT),
         ),
+        network_control=NetworkControl(
+            can_enable=FREEDOMS,
+            can_block=(),
+            caveats=(_NETWORK_CONTROL_CAVEAT,),
+        ),
     )
 
     def build_start_argv(
@@ -206,15 +227,16 @@ class ClaudeBackend:
         model: str | None,
         max_turns: int | None,
         reasoning_effort: str | None,
+        network: bool | None = None,
     ) -> list[str]:
         if session_id is None:
             raise ValueError("claude accepts a chosen session id, so one must be supplied")
-        argv = self._common(freedom, model, max_turns, reasoning_effort)
+        argv = self._common(freedom, model, max_turns, reasoning_effort, network)
         argv += ["--session-id", session_id]
         # `--` then the prompt: last, and explicitly not parsed as an option however it looks —
         # see the note in assert_safe about why this is load-bearing for claude specifically.
         argv += ["--", self._check_prompt(prompt)]
-        self.assert_safe(argv, freedom)
+        self.assert_safe(argv, freedom, network)
         return argv
 
     def build_resume_argv(
@@ -227,12 +249,13 @@ class ClaudeBackend:
         model: str | None,
         max_turns: int | None,
         reasoning_effort: str | None,
+        network: bool | None = None,
     ) -> list[str]:
-        argv = self._common(freedom, model, max_turns, reasoning_effort)
+        argv = self._common(freedom, model, max_turns, reasoning_effort, network)
         # --resume and --session-id conflict, so never both.
         argv += ["--resume", session_id]
         argv += ["--", self._check_prompt(prompt)]
-        self.assert_safe(argv, freedom)
+        self.assert_safe(argv, freedom, network)
         return argv
 
     def _common(
@@ -241,10 +264,16 @@ class ClaudeBackend:
         model: str | None,
         max_turns: int | None,
         reasoning_effort: str | None,
+        network: bool | None = None,
     ) -> list[str]:
         # Re-checked here, the one place both start and resume funnel through, so no caller of this
         # method can reach the CLI with an effort it would silently degrade instead of honour.
         check_reasoning_effort(self, reasoning_effort)
+        # Validated here for the same reason: no caller can reach the CLI with a network request
+        # this backend would silently ignore (False). True needs no argv change at all — there is
+        # nothing to impose — which is exactly why the enforcement block, not the argv, is where
+        # its acceptance is disclosed.
+        check_network(self, freedom, network)
         argv = [
             BINARY,
             "-p",
@@ -275,10 +304,14 @@ class ClaudeBackend:
             raise ValueError("prompt must be a non-empty string")
         return prompt
 
-    def assert_safe(self, argv: list[str], freedom: Freedom) -> None:
+    def assert_safe(self, argv: list[str], freedom: Freedom, network: bool | None = None) -> None:
         # Rejects an unknown freedom outright rather than letting PERMISSION_MODES[freedom] raise a
-        # bare KeyError below.
+        # bare KeyError below. The network request is validated here too — this is the final
+        # execution seam, so an unhonourable request must fail loudly even if every earlier check
+        # was bypassed. network leaves no trace in this backend's argv (there is nothing to
+        # impose), so there is nothing further to check for it beyond the request itself.
         check_freedom(freedom)
+        check_network(self, freedom, network)
         if argv[:2] != [BINARY, "-p"]:
             raise UnsafeInvocationError(f"unrecognised claude argv layout: {argv!r}")
 
@@ -470,7 +503,12 @@ class ClaudeBackend:
             raise UnsafeInvocationError(f"{flag} appears {len(values)} times: {argv!r}")
         return values[0]
 
-    def enforcement(self, freedom: Freedom) -> Enforcement:
+    def enforcement(self, freedom: Freedom, network: bool | None = None) -> Enforcement:
+        # Validated here too, not only in the argv builders: `enforcement` is part of the widened
+        # Backend contract, and reporting `not_controlled` for a request this backend documents as
+        # an error would make the contract internally inconsistent for any caller that asks it
+        # directly rather than going through the tool surface.
+        check_network(self, freedom, network)
         mode = PERMISSION_MODES[freedom]
         denies = freedom in DENY_FREEDOMS
         allowed = ALLOWED_TOOLS.get(freedom)
@@ -498,11 +536,12 @@ class ClaudeBackend:
             # boolean that says "blocked" would be a promise this cannot keep.
             commit_push_blocked=False,
             direct_commit_commands_denied=denies,
-            # publish and unrestricted are the two freedoms where polybridge configures no barrier
-            # of its own against a commit/push/PR attempt — see the field's own docstring for what
-            # this does and does not promise.
+            # publish and unrestricted are the two freedoms that authorize a publish attempt —
+            # see the field's own docstring for what that does and does not promise. A network
+            # request changes nothing here: this backend has no barrier of its own either way.
             publish_attempts_allowed_by_polybridge=freedom in ("publish", "unrestricted"),
-            # No sandbox at all, so nothing here ever controls network reachability.
+            # No sandbox at all, so nothing here ever controls network reachability — whatever
+            # the caller asked for, the environment decides.
             network_access="not_controlled",
             caveats=caveats,
         )

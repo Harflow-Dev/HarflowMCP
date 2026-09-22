@@ -81,6 +81,36 @@ class ReasoningEffort(NamedTuple):
         }
 
 
+class NetworkControl(NamedTuple):
+    """Whether polybridge can raise or lower its own network barrier, per freedom.
+
+    Two freedom tuples rather than a pair of global booleans because support is non-rectangular
+    on codex: `read_only` cannot enable (measured — the `sandbox_workspace_write.network_access`
+    key is inert under the read-only sandbox even when set true), `workspace-write` takes either
+    direction, and `unrestricted` cannot block (danger-full-access disables the sandbox, so no
+    barrier remains to raise). A backend with no network-controlling mechanism at all declares
+    every freedom in `can_enable` — `network=True` means "impose no barrier of your own", which
+    having none to impose genuinely delivers — and nothing in `can_block`, because
+    `network=False` means "impose one", which it genuinely cannot. Every claim here is about
+    polybridge's own barrier only, never about reachability.
+    """
+
+    can_enable: tuple[Freedom, ...]
+    """Freedoms where network=True is accepted: polybridge can lift, or need not raise, its own barrier."""
+
+    can_block: tuple[Freedom, ...]
+    """Freedoms where network=False is accepted: polybridge can impose its own barrier."""
+
+    caveats: tuple[str, ...] = ()
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "can_enable": list(self.can_enable),
+            "can_block": list(self.can_block),
+            "caveats": list(self.caveats),
+        }
+
+
 class Capabilities(NamedTuple):
     """What a backend can and cannot do, so callers are told rather than surprised."""
 
@@ -102,11 +132,14 @@ class Capabilities(NamedTuple):
 
     reasoning_effort: ReasoningEffort
 
+    network_control: NetworkControl
+
     def as_dict(self) -> dict[str, Any]:
-        # `_asdict()` does not recurse into a nested NamedTuple — it would serialize as a bare JSON
-        # list and lose its field names — so the nested block is expanded explicitly.
+        # `_asdict()` does not recurse into a nested NamedTuple — it would serialize as a bare
+        # JSON list and lose its field names — so each nested block is expanded explicitly.
         data: dict[str, Any] = dict(self._asdict())
         data["reasoning_effort"] = self.reasoning_effort.as_dict()
+        data["network_control"] = self.network_control.as_dict()
         return data
 
 
@@ -140,12 +173,17 @@ class Enforcement:
     """Whether the obvious `git commit` / `git push` invocations are refused, which is weaker."""
 
     publish_attempts_allowed_by_polybridge: bool = False
-    """True only at freedoms where polybridge itself configured no publish-specific barrier of its
-    own and authorized an *attempt* to commit, push or open a PR. This asserts nothing about
-    whether publication will actually succeed — credentials, remote permissions, branch
-    protection, hooks, an unauthenticated `gh`, and the agent's own behaviour are all outside
-    polybridge's control. Deliberately not named `publishing_permitted`: that name would be read
-    as a promise this field cannot make."""
+    """True only at freedoms where polybridge authorized an *attempt* to commit, push or open a
+    PR. An authorization claim and nothing more: it does not say the mechanism prevents the
+    attempt elsewhere — codex at `write_in_repo` with `network=True` can mechanically reach a
+    remote while this field is false, the difference being recorded intent, not an enforced
+    barrier — nor that publication will actually succeed — credentials, remote permissions,
+    branch protection, hooks, an unauthenticated `gh`, and the agent's own behaviour are all
+    outside polybridge's control. Deliberately not named `publishing_permitted`: that name would
+    be read as a promise this field cannot make. (An earlier docstring also claimed polybridge
+    "configured no publish-specific barrier of its own" here; that conjunction became untrue in
+    both directions once network was requestable — true where this is false — so it was removed
+    rather than caveated, per the rule that a caveat cannot repair an untrue claim.)"""
 
     network_access: str = "not_controlled"
     """One of "blocked" | "enabled" | "unrestricted" | "not_controlled". "not_controlled" means
@@ -222,6 +260,7 @@ class Backend(Protocol):
         model: str | None,
         max_turns: int | None,
         reasoning_effort: str | None,
+        network: bool | None = None,
     ) -> list[str]: ...
 
     def build_resume_argv(
@@ -234,24 +273,34 @@ class Backend(Protocol):
         model: str | None,
         max_turns: int | None,
         reasoning_effort: str | None,
+        network: bool | None = None,
     ) -> list[str]: ...
 
-    def assert_safe(self, argv: list[str], freedom: Freedom) -> None:
+    def assert_safe(self, argv: list[str], freedom: Freedom, network: bool | None = None) -> None:
         """Raise unless the argv still carries this backend's required guarantees.
 
-        `freedom` is the authorization the caller actually asked for — it is not, and cannot be,
-        derived from `argv` itself. An argv built for `read_only` can be just as internally
-        consistent as one built for `unrestricted`: checking that the mode/agent token is *one of*
-        the backend's known values only proves the argv is well-formed, not that it is well-formed
-        *for the freedom the caller requested*. Without this parameter, an argv assembled for one
-        freedom would pass `assert_safe` when a caller believed it had authorized a different one.
-        So every implementation must check the mode/agent token against the exact value this
-        freedom maps to (e.g. `PERMISSION_MODES[freedom]`), not merely against the set of values it
-        could take.
+        `freedom` and `network` together are the authorization the caller actually asked for —
+        neither is, nor can be, derived from `argv` itself. An argv built for `read_only` can be
+        just as internally consistent as one built for `unrestricted`: checking that the
+        mode/agent token is *one of* the backend's known values only proves the argv is
+        well-formed, not that it is well-formed for what the caller requested. So every
+        implementation must check the mode/agent token against the exact value this freedom maps
+        to (e.g. `PERMISSION_MODES[freedom]`), not merely against the set of values it could
+        take — and, where the backend carries its network setting in argv, that the network
+        token matches the mechanism this (freedom, network) pair *resolves to*.
+
+        That is deliberately weaker than this docstring once claimed: it can no longer promise
+        the argv is well-formed for the authorization tuple itself, because two authorizations
+        can resolve to the same argv — codex `write_in_repo` with `network=True` is
+        byte-identical to `publish`'s default, and codex `publish` with `network=False` to
+        `write_in_repo`'s default. Where that happens, assert_safe genuinely cannot refuse the
+        crossed claim; there is no argv difference to detect. That is a loss of provenance, not
+        a sandbox escape — the collapsed argv already had identical powers — and the collapses
+        are pinned by tests rather than left as silent gaps.
         """
         ...
 
-    def enforcement(self, freedom: Freedom) -> Enforcement: ...
+    def enforcement(self, freedom: Freedom, network: bool | None = None) -> Enforcement: ...
 
     def ingest(self, event: dict[str, Any], acc: Accumulator) -> None:
         """Fold one stream event into the normalised view."""
@@ -308,4 +357,37 @@ def check_reasoning_effort(backend: Backend, reasoning_effort: str | None) -> No
         raise UnsupportedCapability(
             f"the {backend.name} CLI does not accept reasoning_effort={reasoning_effort!r}; "
             f"it accepts {list(effort_caps.levels)}"
+        )
+
+
+def check_network(backend: Backend, freedom: Freedom, network: bool | None) -> None:
+    """Fail loudly when a network request cannot be honoured at this freedom.
+
+    Driven purely by the declared `NetworkControl` tuples, so it holds no backend-specific
+    branch — codex's non-rectangular support lives in its declaration, not here. `None` always
+    passes: it is the historical default, and keeping every pre-existing caller byte-for-byte
+    unchanged is the point of the parameter. The request governs polybridge's own network
+    barrier only, never reachability, which is why a backend with no barrier at all refuses
+    `False` rather than pretending to impose one.
+    """
+    check_freedom(freedom)
+    if network is None:
+        return
+    control = backend.capabilities.network_control
+    if network and freedom not in control.can_enable:
+        raise UnsupportedCapability(
+            f"the {backend.name} backend cannot enable network at freedom {freedom!r}; "
+            f"network=True is accepted only at {list(control.can_enable)} — see its "
+            f"network_control caveats for why"
+        )
+    if network is False and freedom not in control.can_block:
+        if not control.can_block:
+            raise UnsupportedCapability(
+                f"the {backend.name} backend has no network barrier of its own to raise, so "
+                f"network=False cannot be honoured; omit it, or use a backend whose "
+                f"capabilities report network_control.can_block"
+            )
+        raise UnsupportedCapability(
+            f"the {backend.name} backend cannot block network at freedom {freedom!r}; "
+            f"network=False is accepted only at {list(control.can_block)}"
         )

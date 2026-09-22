@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from mcp import MCPError
+from pydantic import StrictBool
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
 from mcp.types import INVALID_PARAMS
@@ -56,13 +57,18 @@ mcp = MCPServer(
         "with a real OS sandbox, and only vibe has no model-selection flag at all. Every task "
         "reports an `enforcement` block describing what was actually enforced, which is the honest "
         "answer rather than what `freedom` implies.\n\n"
-        "A `publish` freedom level sits between `write_in_repo` and `unrestricted`: it means "
-        "polybridge configured no barrier of its own against the agent committing, pushing or "
-        "opening a PR, and authorized the attempt. It is NOT a promise that publishing succeeds — "
-        "credentials, remote permissions, branch protection, repo hooks, or an unauthenticated `gh` "
-        "can all still stop it, and the agent may not even try. Check "
+        "A `publish` freedom level sits between `write_in_repo` and `unrestricted`: it authorizes "
+        "the agent to attempt to commit, push or open a PR. It is NOT a promise that publishing "
+        "succeeds — credentials, remote permissions, branch protection, repo hooks, or an "
+        "unauthenticated `gh` can all still stop it, and the agent may not even try — and it is "
+        "authorization only: with network=True a lower freedom can mechanically reach a remote "
+        "without having been authorized to publish. Check "
         "`enforcement.publish_attempts_allowed_by_polybridge` and `enforcement.network_access` on "
-        "the returned task rather than assuming from the freedom name alone.\n\n"
+        "the returned task rather than assuming from the freedom name alone. An optional `network` "
+        "parameter on start_task and resume_task asks for network independently of the freedom: "
+        "True asks polybridge to impose no network barrier of its own, False asks it to impose "
+        "one, and None keeps each freedom's historical behaviour. It governs polybridge's own "
+        "network barrier only, never reachability.\n\n"
         "A wait_for_task that comes back still 'running' has not failed — the run is untouched, so "
         "call again or poll. Tasks outlive this server process: ones started by an earlier "
         "polybridge server are still reported, marked 'recovered: true'."
@@ -127,6 +133,27 @@ def _check_model(backend, model: str | None) -> None:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
 
 
+def _check_network(backend, freedom: str, network: bool | None) -> None:
+    # Strict on purpose: anything other than a real boolean or None is refused rather than
+    # truthy-coerced — "yes"/1/0 must not silently become a network decision, and a coerced
+    # request would be indistinguishable from a considered one on the returned task.
+    #
+    # This check alone is NOT what delivers that on the tool surface, and believing otherwise is
+    # the trap: pydantic's lax mode coerces "yes"/"true"/"on"/1/0 to real booleans while binding
+    # the call, so by the time this runs the string is already gone (measured). `StrictBool` on
+    # the two tool signatures is what actually refuses them; this remains as the backstop for a
+    # direct Python caller, which bypasses that binding entirely.
+    if network is not None and not isinstance(network, bool):
+        raise MCPError(
+            INVALID_PARAMS,
+            f"network must be a boolean (true/false) or omitted, got {network!r}",
+        )
+    try:
+        backends.check_network(backend, freedom, network)
+    except backends.UnsupportedCapability as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+
 def _resolve_repo_path(repo_path: str) -> Path:
     if not repo_path or not repo_path.strip():
         raise MCPError(INVALID_PARAMS, "repo_path must be a non-empty path")
@@ -174,6 +201,7 @@ async def start_task(
     model: str | None = None,
     max_turns: int | None = None,
     reasoning_effort: str | None = None,
+    network: StrictBool | None = None,
 ) -> dict[str, Any]:
     """Dispatch a coding task to a headless agent and return immediately.
 
@@ -182,11 +210,11 @@ async def start_task(
         repo_path: Absolute path to a git repository; the agent's working directory.
         backend: Which agent to use — "claude", "codex", "opencode" or "vibe". See list_backends.
         freedom: "read_only", "write_in_repo" (default), "publish", or "unrestricted". "publish"
-            sits between "write_in_repo" and "unrestricted": polybridge configures no barrier of
-            its own against a commit/push/PR attempt there, but that is not a promise the attempt
-            succeeds — credentials, remote permissions, branch protection, hooks and an
-            unauthenticated `gh` are all outside polybridge's control. How each level is enforced
-            depends on the backend; the returned `enforcement` says what actually applies, via
+            sits between "write_in_repo" and "unrestricted": it authorizes an attempt to
+            commit/push/open a PR, but that is not a promise the attempt succeeds — credentials,
+            remote permissions, branch protection, hooks and an unauthenticated `gh` are all
+            outside polybridge's control. How each level is enforced depends on the backend; the
+            returned `enforcement` says what actually applies, via
             `publish_attempts_allowed_by_polybridge` and `network_access` among other fields.
         model: Model for this run, in the backend's own naming. Rejected outright, rather than
             silently ignored, on a backend with no model-selection flag at all — vibe is the first
@@ -200,6 +228,17 @@ async def start_task(
             opencode in particular, a model with no declared variants silently ignores an
             unsupported level rather than erroring. See list_backends' per-backend reasoning_effort
             caveats for what is and is not known there.
+        network: Optional boolean asking for network access independently of `freedom`: True
+            asks polybridge to impose no network barrier of its own, False asks it to impose one,
+            and None (the default) keeps each freedom's historical behaviour exactly. The
+            parameter governs polybridge's own network barrier only — never reachability: a
+            corporate firewall or proxy defeats it too. Only codex has a barrier polybridge can
+            actually raise or lower, and its support is non-rectangular (see
+            capabilities.network_control): enabling is refused at read_only and blocking at
+            unrestricted. On claude, opencode and vibe, True is accepted — there is nothing to
+            impose — and False is an error rather than silently dropped;
+            enforcement.network_access stays "not_controlled" there. What actually applied is
+            stated on the returned task's enforcement.network_access.
 
     Returns the new task_id and its starting state. The run continues in the background; poll
     get_task_status or call wait_for_task to follow it.
@@ -212,6 +251,7 @@ async def start_task(
     _check_turn_cap(chosen, max_turns)
     _check_reasoning_effort(chosen, reasoning_effort)
     _check_model(chosen, model)
+    _check_network(chosen, freedom, network)
     path = await _validate_repo_path(repo_path)
 
     task = await _reg().start(
@@ -222,6 +262,7 @@ async def start_task(
         model=model,
         max_turns=max_turns,
         reasoning_effort=reasoning_effort,
+        network=network,
     )
     return task.brief() | {"enforcement": task.enforcement}
 
@@ -385,6 +426,7 @@ async def resume_task(
     task_id: str,
     followup_prompt: str,
     max_turns: int | None = None,
+    network: StrictBool | None = None,
 ) -> dict[str, Any]:
     """Continue a finished task's session with follow-up instructions.
 
@@ -392,11 +434,17 @@ async def resume_task(
         task_id: A task that has finished; its session is the one resumed.
         followup_prompt: What the agent should do next, with the prior context intact.
         max_turns: Cap on agent turns, where the backend supports one.
+        network: Optional boolean overriding the parent run's network setting for this run only:
+            None (the default) inherits what the parent was dispatched with — which is also the
+            historical default for a record written before the field existed — True asks for no
+            network barrier of polybridge's own, False asks for one, honoured or refused exactly
+            as on start_task for the parent's freedom.
 
     Returns a new task_id sharing the original session, and returns immediately as with start_task.
     Runs on the same backend, model, reasoning_effort and freedom as the original — none of these
     can be changed on resume, since a mid-conversation switch would not honestly describe what
-    produced the reply.
+    produced the reply. `network` is the one per-run override, because it is a per-run sandbox
+    setting rather than a description of the session.
 
     Some backends mint their own session id and only disclose it mid-run; if a task died before
     doing so, its conversation cannot be continued and this says so rather than starting a
@@ -404,6 +452,12 @@ async def resume_task(
     """
     if not followup_prompt or not followup_prompt.strip():
         raise MCPError(INVALID_PARAMS, "followup_prompt must be a non-empty string")
+    # Same strict boolean rule as start_task, checked before anything is resumed.
+    if network is not None and not isinstance(network, bool):
+        raise MCPError(
+            INVALID_PARAMS,
+            f"network must be a boolean (true/false) or omitted, got {network!r}",
+        )
 
     parent = _reg().get(task_id)
     try:
@@ -416,7 +470,10 @@ async def resume_task(
                     "before resuming",
                 )
             _check_turn_cap(backends.get(parent.backend), max_turns)
-            task = await _reg().resume(parent, followup_prompt, max_turns=max_turns)
+            _check_network(backends.get(parent.backend), parent.freedom, network)
+            task = await _reg().resume(
+                parent, followup_prompt, max_turns=max_turns, network=network
+            )
         else:
             record = _reg().recover(task_id)
             if record is None:
@@ -428,7 +485,10 @@ async def resume_task(
                     "process); wait for it or cancel it before resuming",
                 )
             _check_turn_cap(backends.get(record.backend), max_turns)
-            task = await _reg().resume_record(record, followup_prompt, max_turns=max_turns)
+            _check_network(backends.get(record.backend), record.freedom, network)
+            task = await _reg().resume_record(
+                record, followup_prompt, max_turns=max_turns, network=network
+            )
     except (SessionBusyError, SessionUnknownError, RepoUnavailableError) as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
     except (backends.UnknownBackend, backends.UnsupportedCapability) as exc:

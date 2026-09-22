@@ -653,3 +653,41 @@ def test_live_session_ids_does_not_probe_settled_tasks(
     store.live_session_ids(tmp_path)
 
     assert probed == [8]
+
+
+def test_round_trips_a_network_request(tmp_path: Path) -> None:
+    record = make_record(network=True)
+    store.write(tmp_path, record)
+
+    assert store.read(tmp_path, "task-1").network is True
+
+
+def test_a_network_request_of_false_survives_the_round_trip(tmp_path: Path) -> None:
+    """False and None mean different things here — one asked for a barrier, one asked nothing —
+    so a falsy-collapsing round trip would turn an explicit request into the default."""
+    record = make_record(network=False)
+    store.write(tmp_path, record)
+
+    loaded = store.read(tmp_path, "task-1")
+
+    assert loaded.network is False
+    assert loaded.network is not None
+
+
+def test_a_pre_change_record_with_no_network_field_still_loads_as_none(tmp_path: Path) -> None:
+    """A record written before this parameter existed has no `network` key at all.
+
+    Unlike `enforcement`, `None` is unambiguous for this field: "no explicit request" is exactly
+    what every pre-change record meant, so such a record resumes at its freedom's historical
+    default rather than needing a migration.
+    """
+    store.write(tmp_path, make_record())
+    path = store.record_path(tmp_path, "task-1")
+    raw = json.loads(path.read_text())
+    del raw["network"]
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    loaded = store.read(tmp_path, "task-1")
+
+    assert loaded is not None
+    assert loaded.network is None
