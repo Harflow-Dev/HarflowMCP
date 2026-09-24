@@ -1603,3 +1603,169 @@ def test_opencode_remove_of_a_config_it_cannot_parse_is_a_failure(opencode_dir: 
     )
 
     assert result.status == "failed"
+
+
+# --- vibe: inspect via tomllib, remove behind a backup ---------------------------------------------
+
+VIBE_TOML = (
+    "# hand-written\n"
+    "[[mcp_servers]]\n"
+    'name = "unrelated"\n'
+    'transport = "stdio"\n'
+    'command = "/bin/true"\n'
+    "\n"
+    "[[mcp_servers]]\n"
+    'name = "polybridge"\n'
+    'transport = "stdio"\n'
+    'command = "/x/polybridge-server"\n'
+    "\n"
+    "[mcp_servers.env]\n"
+    'PATH = "/a:/b"\n'
+)
+
+
+@pytest.fixture
+def vibe_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.setenv("VIBE_HOME", str(tmp_path / "vibe"))
+    (tmp_path / "vibe").mkdir()
+    return tmp_path / "vibe" / "config.toml"
+
+
+def test_vibe_inspect_honours_vibe_home(vibe_config: Path) -> None:
+    vibe_config.write_text(VIBE_TOML)
+
+    inspection = VibeClient().inspect("polybridge", FakeRunner())
+
+    assert inspection.installed is True
+    assert inspection.command == "/x/polybridge-server"
+    assert inspection.path_env == "/a:/b"
+
+
+def test_vibe_inspect_defaults_to_dot_vibe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("VIBE_HOME", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".vibe").mkdir()
+    (tmp_path / ".vibe" / "config.toml").write_text(VIBE_TOML)
+
+    assert VibeClient().inspect("polybridge", FakeRunner()).installed is True
+
+
+def test_vibe_inspect_with_only_other_servers_is_not_installed(vibe_config: Path) -> None:
+    vibe_config.write_text(VIBE_TOML.replace('"polybridge"', '"polybridge-old"'))
+
+    assert VibeClient().inspect("polybridge", FakeRunner()).installed is False
+
+
+def test_vibe_inspect_with_no_config_is_not_installed(vibe_config: Path) -> None:
+    assert VibeClient().inspect("polybridge", FakeRunner()).installed is False
+
+
+@pytest.mark.parametrize(
+    "raw", ["[[mcp_servers]\n", "mcp_servers = 3\n", b"\xff"], ids=["syntax", "type", "bytes"]
+)
+def test_vibe_inspect_of_a_malformed_config_is_an_error(vibe_config: Path, raw) -> None:
+    if isinstance(raw, bytes):
+        vibe_config.write_bytes(raw)
+    else:
+        vibe_config.write_text(raw)
+
+    inspection = VibeClient().inspect("polybridge", FakeRunner())
+
+    assert inspection.installed is None
+    assert inspection.error
+
+
+def test_vibe_remove_backs_up_first_then_removes(vibe_config: Path) -> None:
+    vibe_config.write_text(VIBE_TOML)
+    seen: list[str] = []
+
+    def runner(argv):
+        # The backup must already exist, holding the comments, when vibe is asked to remove.
+        backups = [p for p in vibe_config.parent.iterdir() if ".bak-" in p.name]
+        seen.extend(p.read_text() for p in backups)
+        return RunResult(tuple(argv), 0, VIBE_REMOVED)
+
+    result = VibeClient().remove("polybridge", runner)
+
+    assert result.status == "removed"
+    assert seen == [VIBE_TOML]
+    assert any("backed up" in line and ".bak-" in line for line in result.diagnostics)
+
+
+def test_vibe_remove_of_an_absent_entry_is_not_installed(vibe_config: Path) -> None:
+    result = VibeClient().remove("polybridge", FakeRunner(ok(VIBE_NOT_CONFIGURED)))
+
+    assert result.status == "not_installed"
+
+
+def test_vibe_remove_with_no_config_makes_no_backup(vibe_config: Path) -> None:
+    result = VibeClient().remove("polybridge", FakeRunner(ok(VIBE_NOT_CONFIGURED)))
+
+    assert result.diagnostics == ()
+    assert list(vibe_config.parent.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("response", "status"),
+    [
+        (times_out(), "unknown"),
+        (fails(1, "boom"), "failed"),
+        (ok("something unexpected"), "unknown"),
+        (ok("Removed MCP server `polybridge-old`."), "unknown"),
+    ],
+    ids=["timeout", "failure", "unrecognised", "longer-name"],
+)
+def test_vibe_remove_never_claims_more_than_it_saw(vibe_config: Path, response, status) -> None:
+    vibe_config.write_text(VIBE_TOML)
+
+    result = VibeClient().remove("polybridge", FakeRunner(response))
+
+    assert result.status == status
+    assert any("backed up" in line for line in result.diagnostics), "the backup is still named"
+
+
+def test_vibe_remove_does_not_run_vibe_when_the_backup_fails(
+    vibe_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vibe_config.write_text(VIBE_TOML)
+
+    def refuse(path):
+        raise SetupError("no room for a backup")
+
+    monkeypatch.setattr("polybridge.clients.vibe.back_up", refuse)
+
+    (result,) = clients.unregister(
+        [VibeClient(binary=sys.executable)], "polybridge", run=FakeRunner()
+    )
+
+    assert result.status == "failed"
+    assert "no room" in result.detail
+
+
+# --- the Protocol, on every client and every test double ----------------------------------------
+
+
+PROTOCOL_MEMBERS = ("availability", "preview", "apply", "inspect", "remove")
+
+
+@pytest.mark.parametrize(
+    "client",
+    [*clients.CLIENTS.values(), Exploding(RuntimeError()), Absent()],
+    ids=lambda c: f"{type(c).__name__}",
+)
+def test_every_client_and_test_double_implements_the_whole_protocol(client) -> None:
+    for attribute in ("key", "label", "post_apply_note"):
+        assert isinstance(getattr(client, attribute), str)
+    for member in PROTOCOL_MEMBERS:
+        assert callable(getattr(client, member, None)), member
+
+
+@pytest.mark.parametrize(
+    "client",
+    [c for c in clients.CLIENTS.values() if isinstance(c, CliClient)],
+    ids=lambda c: c.key,
+)
+def test_every_registered_cli_client_overrides_the_raising_defaults(client: CliClient) -> None:
+    """CliClient's inspect/remove only raise; a registered client left on them would always error."""
+    for member in ("inspect", "remove"):
+        assert getattr(type(client), member) is not getattr(CliClient, member), member

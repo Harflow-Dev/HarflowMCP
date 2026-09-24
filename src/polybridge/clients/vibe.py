@@ -53,14 +53,41 @@ do not let that expectation leak into how this client's success is described.
 `NAME` is a positional argument here, not `--name`, and there is no `--` separator: the server
 command goes behind `--command`. So `CliClient.add_argv`'s trailing `"--", registration.command`
 shape does not apply and is overridden outright.
+
+`inspect` reads `config.toml` itself with `tomllib` — vibe has no machine-readable listing — from
+`$VIBE_HOME` when set, else `~/.vibe` (`VIBE_HOME` is honoured, measured). `remove` is
+`vibe mcp remove`, which **also strips every comment** in `config.toml` (measured, vibe 2.25.5: a
+trailing `# c2` was gone after removing our entry), so the file is backed up with a timestamp first
+and the result names the backup. Removing an absent name left the file byte-identical (measured), but
+the backup is taken regardless, before vibe is asked: a guess about which case applies is not worth
+the comments it would cost if wrong.
 """
 
 from __future__ import annotations
 
+import os
 import shlex
+import tomllib
 from dataclasses import dataclass
+from pathlib import Path
 
-from .base import CLI_TIMEOUT_SECONDS, CliClient, Registration, Result, RunResult, Runner
+from .base import (
+    CLI_TIMEOUT_SECONDS,
+    CliClient,
+    Inspection,
+    Registration,
+    Result,
+    RunResult,
+    Runner,
+    entry_inspection,
+)
+from .desktop import back_up
+
+
+def config_path() -> Path:
+    override = os.environ.get("VIBE_HOME")
+    base = Path(os.path.expanduser(override)) if override else Path.home() / ".vibe"
+    return base / "config.toml"
 
 
 def _exact_line(result: RunResult, expected_lower: str) -> bool:
@@ -140,6 +167,79 @@ class VibeClient(CliClient):
 
     def env_flag(self, registration: Registration) -> list[str]:
         return ["--env", f"PATH={registration.path_env}"]
+
+    def inspect(self, key: str, run: Runner) -> Inspection:
+        """Read-only; `run` is unused."""
+        path = config_path()
+        try:
+            raw = path.read_bytes()
+        except FileNotFoundError:
+            return Inspection(self.key, False, notes=(f"no config at {path}",))
+        try:
+            config = tomllib.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+            return Inspection(self.key, None, error=f"{path} could not be parsed ({exc})")
+        servers = config.get("mcp_servers", [])
+        if not isinstance(servers, list):
+            return Inspection(self.key, None, error=f"'mcp_servers' in {path} is not an array")
+
+        matching = [e for e in servers if isinstance(e, dict) and e.get("name") == key]
+        if not matching:
+            return Inspection(self.key, False, notes=(f"read {path}",))
+        inspections = [entry_inspection(self.key, entry, str(path)) for entry in matching]
+        if len({(i.command, i.path_env) for i in inspections}) > 1:
+            return Inspection(
+                self.key,
+                True,
+                notes=(f"read {path}", f"{len(matching)} differing entries named `{key}`"),
+            )
+        return inspections[0]
+
+    def remove(self, key: str, run: Runner) -> Result:
+        """Back up, then `vibe mcp remove`. A failed backup raises before vibe is ever run."""
+        path = config_path()
+        backup = back_up(path)
+        kept = (f"backed up {path} to {backup} first (vibe mcp remove strips comments)",)
+        diagnostics = kept if backup else ()
+
+        removed = run(self.remove_argv(key))
+        steps = (shlex.join(removed.argv),)
+        if removed.timed_out:
+            return Result(
+                self.key,
+                "unknown",
+                f"timed out after {CLI_TIMEOUT_SECONDS:.0f}s; the entry may or may not still be there",
+                steps=steps,
+                diagnostics=diagnostics,
+            )
+        if not removed.ok:
+            return Result(
+                self.key,
+                "failed",
+                f"remove command failed (exit {removed.returncode})",
+                steps=steps,
+                diagnostics=(*((removed.tail,) if removed.tail else ()), *diagnostics),
+            )
+        if says_removed(removed, key):
+            return Result(
+                self.key,
+                "removed",
+                f"remove command succeeded ({self.config_hint})",
+                steps=steps,
+                diagnostics=diagnostics,
+            )
+        if says_not_configured(removed, key):
+            return Result(
+                self.key, "not_installed", "nothing registered", steps=steps, diagnostics=diagnostics
+            )
+        return Result(
+            self.key,
+            "unknown",
+            "remove exited 0 but did not report a recognised outcome; the entry may or may not "
+            "still be there",
+            steps=steps,
+            diagnostics=(*((removed.tail,) if removed.tail else ()), *diagnostics),
+        )
 
     def apply(self, registration: Registration, run: Runner) -> Result:
         key = registration.key
