@@ -22,6 +22,29 @@ log = logging.getLogger(__name__)
 EVENTS_SUFFIX = ".events.jsonl"
 EVENT_LOG_VERSION = 1
 
+# The closed set of `kind` values in a v1 events log — the Monitor app (Stage C) switches on these,
+# so adding one is a contract change: update this set, README.md's list, and the app together.
+# Found by reading every emit site: the bridge's own writes in `tasks.py` (`task_started`,
+# `task_finished`, `user_message`, `notice`, `undelivered`) and the helpers every backend's
+# `normalize` builds events with (`backends/normalize.py`). Pinned by `tests/test_events.py`.
+EVENT_KINDS = frozenset(
+    {
+        "task_started",
+        "assistant_text",
+        "tool_call",
+        "tool_result",
+        "user_message",
+        "usage",
+        "notice",
+        "task_finished",
+        "undelivered",
+    }
+)
+
+
+class UnknownEventKind(ValueError):
+    """A write named a `kind` outside `EVENT_KINDS` — a programming error, not an I/O failure."""
+
 
 def events_path(log_dir: Path, task_id: str) -> Path:
     return log_dir / f"{store.validate_task_id(task_id)}{EVENTS_SUFFIX}"
@@ -58,11 +81,17 @@ class EventLog:
         raw_offset: int | None = None,
         source_ts: str | None = None,
     ) -> bool:
-        """Append one envelope. False if the log is disabled or the write failed.
+        """Append one envelope. False if the log is disabled or the write failed. Raises
+        `UnknownEventKind` for a `kind` outside `EVENT_KINDS` — the only thing it ever raises.
 
         Envelope keys win over any same-named key in `fields`, so a caller can pass a backend's own
         normalized dict straight through without stripping fields that happen to collide.
         """
+        if kind not in EVENT_KINDS:
+            # Raised rather than written, so an unlisted kind never reaches a reader of the frozen
+            # v1 schema. Every call site already guards its write, so this cannot change a run's
+            # outcome; it fails the test that exercises it (see `tests/conftest.py`).
+            raise UnknownEventKind(f"{kind!r} is not a v1 event kind; see events.EVENT_KINDS")
         if self._handle is None:
             return False
         envelope: dict[str, Any] = {

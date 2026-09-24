@@ -88,3 +88,28 @@ def identities(monkeypatch: pytest.MonkeyPatch) -> IdentityStub:
     stub = IdentityStub()
     monkeypatch.setattr(identity, "identity_check", stub)
     return stub
+
+
+@pytest.fixture(autouse=True)
+def only_v1_event_kinds(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch):
+    """Every event kind any test causes to be written must be in `events.EVENT_KINDS`.
+
+    `EventLog.write` already raises for an unknown kind, but every call site guards its write (a
+    broken event log must never change an outcome), so that raise alone would be swallowed. This
+    records each attempted kind and fails the test that produced an unlisted one.
+    """
+    from polybridge import events
+
+    attempted: set[str] = set()
+    real_write = events.EventLog.write
+
+    def recording_write(self, kind, fields, **kwargs):
+        attempted.add(kind)
+        return real_write(self, kind, fields, **kwargs)
+
+    monkeypatch.setattr(events.EventLog, "write", recording_write)
+    yield
+    if request.node.get_closest_marker("allow_unknown_event_kinds"):
+        return
+    unknown = attempted - events.EVENT_KINDS
+    assert not unknown, f"event kinds outside events.EVENT_KINDS were written: {sorted(unknown)}"

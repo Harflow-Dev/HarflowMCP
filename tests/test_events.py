@@ -428,3 +428,86 @@ def test_an_unserializable_event_is_dropped_without_disabling_the_log(tmp_path: 
 
     lines = [json.loads(line) for line in (tmp_path / "t.events.jsonl").read_text().splitlines()]
     assert [(line["seq"], line["text"]) for line in lines] == [(0, "next")]
+
+
+# --- the closed v1 kind set (Stage C switches on it) ----------------------------------------
+
+import re as _re  # noqa: E402
+
+from polybridge import events as events_module  # noqa: E402
+from polybridge.backends import normalize as nz  # noqa: E402
+
+_SRC = Path(__file__).resolve().parent.parent / "src" / "polybridge"
+_README = Path(__file__).resolve().parent.parent / "README.md"
+
+
+@pytest.mark.allow_unknown_event_kinds
+def test_writing_an_unknown_kind_raises_and_writes_nothing(tmp_path: Path) -> None:
+    path = tmp_path / "t.events.jsonl"
+    log = EventLog(path, "t")
+
+    with pytest.raises(events_module.UnknownEventKind):
+        log.write("assistant_thought", {"text": "x"})
+    assert log.write("notice", {"text": "still usable"}) is True
+    log.close()
+
+    lines = [json.loads(line) for line in path.read_text().splitlines()]
+    assert [(e["seq"], e["kind"]) for e in lines] == [(0, "notice")]
+
+
+def test_every_normalize_helper_builds_a_listed_kind() -> None:
+    acc = backends.Accumulator()
+    built = [
+        nz.tool_call(call_id="c1", tool="Bash", category="shell", input={"command": "ls"}),
+        nz.tool_result(call_id="c1", ok=True, output="ok"),
+        nz.assistant_text("hi"),
+        nz.user_message("hi", "initial"),
+        nz.notice("n"),
+        nz.usage(acc),
+    ]
+    assert {event["kind"] for event in built} <= events_module.EVENT_KINDS
+
+
+def _emitted_literal_kinds() -> set[str]:
+    """Every kind named literally at an emit site in the package: the bridge's `_write_event(task,
+    "<kind>", …)` and `events.write("<kind>", …)`, and the `"kind": "<kind>"` dicts in
+    `backends/normalize.py`, which is where every backend's normalized events are built."""
+    kinds: set[str] = set()
+    for path in _SRC.rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        kinds.update(_re.findall(r'_write_event\(\s*\w+,\s*"(\w+)"', text))
+        kinds.update(_re.findall(r'events\.write\(\s*"(\w+)"', text))
+    kinds.update(_re.findall(r'"kind":\s*"(\w+)"', (_SRC / "backends" / "normalize.py").read_text()))
+    return kinds
+
+
+def test_every_kind_emitted_in_the_code_is_listed_and_every_listed_kind_is_emitted() -> None:
+    emitted = _emitted_literal_kinds()
+    assert emitted == events_module.EVENT_KINDS, (
+        f"emitted but unlisted: {sorted(emitted - events_module.EVENT_KINDS)}; "
+        f"listed but never emitted: {sorted(events_module.EVENT_KINDS - emitted)}"
+    )
+
+
+# `"kind"` dicts in backend modules that are not events: vibe records an auto-denied approval as
+# `{"kind": "approval"}` on `acc.denials` (permission_denials), never in the events log.
+_NON_EVENT_KIND_LITERALS = frozenset({"approval"})
+
+
+def test_no_backend_names_an_unlisted_kind_outside_the_normalize_helpers() -> None:
+    """Backends build events through `backends/normalize.py`, which the scan above reads; any other
+    `"kind": "<x>"` literal in a backend module must be a listed kind or a known non-event dict."""
+    for path in (_SRC / "backends").glob("*.py"):
+        if path.name == "normalize.py":
+            continue
+        found = set(_re.findall(r'"kind":\s*"(\w+)"', path.read_text()))
+        stray = found - events_module.EVENT_KINDS - _NON_EVENT_KIND_LITERALS
+        assert not stray, f"{path.name}: {sorted(stray)}"
+
+
+def test_the_readme_lists_exactly_event_kinds() -> None:
+    text = " ".join(_README.read_text(encoding="utf-8").split())
+    match = _re.search(r"`kind` — one of (.*?)\. ", text)
+    assert match is not None, "README's events.jsonl kind list not found"
+    documented = set(_re.findall(r"`(\w+)`", match.group(1)))
+    assert documented == events_module.EVENT_KINDS
