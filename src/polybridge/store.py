@@ -559,7 +559,7 @@ def snapshot(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
         "events_log": str(events.events_path(log_dir, record.task_id)),
         "recovered": True,
         "note": note,
-    }
+    } | control.taken_over_fields(log_dir, record.task_id)
 
 
 def brief(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
@@ -592,11 +592,37 @@ def brief(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
         "owner": record.owner,
         "owned_by_live_server": owned if status == "running" else None,
         "recovered": True,
+    } | control.taken_over_fields(log_dir, record.task_id)
+
+
+def _record_holds_session(record: TaskRecord) -> bool:
+    """A record whose run may still be writing to its session: never observed to finish, and its
+    process not confirmed `dead` (`undecidable` counts as live — never guess a session is free)."""
+    return bool(
+        record.session_id
+        and outcome_unobserved(record)
+        and record.pid is not None
+        and identity.identity_check(
+            identity.task_identity(record.pid, record.start_time, record.markers)
+        )
+        != "dead"
+    )
+
+
+def live_session_task_ids(log_dir: Path, session_id: str) -> set[str]:
+    """Ids of the records whose run may still hold `session_id` — see `_record_holds_session`.
+    Records only: takeover reservations are `control.takeover_reservations`."""
+    return {
+        record.task_id
+        for record in read_all(log_dir)
+        if record.session_id == session_id and _record_holds_session(record)
     }
 
 
 def live_session_ids(log_dir: Path) -> set[str]:
-    """Sessions with a still-running task according to disk, whichever server started it.
+    """Sessions with a still-running task according to disk, whichever server started it, plus
+    sessions a takeover currently holds (`control.takeover_reservations`: from a takeover's `.req`
+    until its window lapses or its attached terminal is confirmed gone).
 
     Uses the same "was this outcome actually observed?" test as `resolve_status`, so a run whose
     server was torn down mid-flight still counts as live here. Trusting its recorded status instead
@@ -608,15 +634,11 @@ def live_session_ids(log_dir: Path) -> set[str]:
     ruled out (`undecidable`, e.g. `ps` unavailable) still counts as busy, on the same "never guess
     a session is free" rule; only a confirmed-`dead` pid clears it.
     """
-    return {
-        record.session_id
-        for record in read_all(log_dir)
-        # A backend that mints its own id may have died before disclosing one; nothing to exclude.
-        if record.session_id
-        and outcome_unobserved(record)
-        and record.pid is not None
-        and identity.identity_check(
-            identity.task_identity(record.pid, record.start_time, record.markers)
-        )
-        != "dead"
-    }
+    # A backend that mints its own id may have died before disclosing one; nothing to exclude.
+    live = {record.session_id for record in read_all(log_dir) if _record_holds_session(record)}
+    live.update(
+        session_id
+        for session_id in control.takeover_reservations(log_dir).values()
+        if session_id
+    )
+    return live

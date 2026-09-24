@@ -43,7 +43,7 @@ import re
 import subprocess
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -165,6 +165,31 @@ def ancestors(pid: int, table: Mapping[int, int]) -> list[int]:
         seen.add(parent)
         current = parent
     return chain
+
+
+def lineage_closure(
+    rows: Iterable[tuple[str, str | None, str | None]], task_id: str
+) -> set[str]:
+    """`task_id`, every task reachable from it by following `spawned_by` downwards, and every task
+    whose `root_task_id` names it. `rows` are `(task_id, spawned_by, root_task_id)` for every known
+    task — live or not, so a settled intermediate does not break the chain to a live descendant."""
+    rows = list(rows)
+    children: dict[str, set[str]] = {}
+    for tid, spawned_by, _root in rows:
+        if spawned_by:
+            children.setdefault(spawned_by, set()).add(tid)
+
+    targets = {task_id}
+    frontier = [task_id]
+    while frontier:
+        current = frontier.pop()
+        for child in children.get(current, ()):
+            if child not in targets:
+                targets.add(child)
+                frontier.append(child)
+
+    targets.update(tid for tid, _spawned_by, root in rows if root == task_id)
+    return targets
 
 
 def _candidate_identity(record: store.TaskRecord) -> dict[str, Any]:

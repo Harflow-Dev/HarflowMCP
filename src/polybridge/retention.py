@@ -232,18 +232,17 @@ def _sweep_temp_files(
 def _has_active_attempt(log_dir: Path, task_id: str, now: datetime | None = None) -> bool:
     """Whether the latest cancel or takeover attempt for `task_id` has not yet finished.
 
-    Cancel-family activity is delegated to `control.cancel_attempt_active`, which understands the
-    `.req`/`.sig`/`.failed` phase vocabulary and lease-based abandoned-controller recovery (A2).
-    Takeover keeps the original conservative rule — active unless the latest attempt has a
-    `.failed` marker — since A4 owns its own phase semantics. For either family, an attempt number
-    that fails to parse as an int still forces this task active regardless, the same conservative
-    fallback both families have always had.
+    Each family's own rule decides: `control.cancel_attempt_active` (a pending attempt whose
+    controller is not provably abandoned, A2) and `control.takeover_attempt_active` (the attempt
+    still holds its session, A4 — deleting its phase files then would drop the reservation while
+    the user's terminal is open). For either family, an attempt number that fails to parse as an int
+    still forces this task active regardless, the same conservative fallback both have always had.
     """
     if control.cancel_attempt_active(log_dir, task_id, now):
         return True
+    if control.takeover_attempt_active(log_dir, task_id, now):
+        return True
 
-    latest_n: dict[str, int] = {}
-    forced_active: set[str] = set()
     try:
         entries = list(log_dir.iterdir())
     except OSError:
@@ -252,22 +251,10 @@ def _has_active_attempt(log_dir: Path, task_id: str, now: datetime | None = None
         match = _ATTEMPT_RE.match(path.name)
         if match is None or match.group("id") != task_id:
             continue
-        family = match.group("family")
         try:
-            n = int(match.group("n"))
+            int(match.group("n"))
         except ValueError:
-            forced_active.add(family)  # unparsable n: treat this family as active regardless
-            continue
-        if family == control.CANCEL:
-            continue  # cancel-family activity was already decided above
-        if n > latest_n.get(family, -1):
-            latest_n[family] = n
-
-    if forced_active:
-        return True
-    for family, n in latest_n.items():
-        if not (log_dir / f"{task_id}.{family}.{n}.failed").exists():
-            return True
+            return True  # unparsable n: treat this task as active regardless
     return False
 
 

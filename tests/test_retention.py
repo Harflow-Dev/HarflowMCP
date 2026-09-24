@@ -360,19 +360,67 @@ def test_sweep_deletes_a_task_whose_cancel_controller_died_with_an_expired_lease
     assert store.read(log_dir, record.task_id) is None
 
 
-def test_takeover_family_semantics_are_unchanged_by_the_cancel_rewrite(tmp_path: Path) -> None:
-    """Cancel now routes through `control.cancel_attempt_active`; takeover still uses the original
-    "active unless the latest attempt has `.failed`" rule this task does not own."""
+def _takeover_phase(log_dir: Path, task_id: str, n: int, phase: str, payload: dict) -> None:
+    (log_dir / f"{task_id}.takeover.{n}.{phase}").write_text(json.dumps(payload))
+
+
+@pytest.mark.parametrize(
+    ("phases", "attach_verdict", "kept"),
+    [
+        # `.req` just written, controller alive: the session is reserved.
+        ({"req": 5}, None, True),
+        # `.ready` inside the attach window, nothing attached yet: still reserved.
+        ({"req": 30, "ready": 20}, None, True),
+        # `.ready` long ago, never attached: the window lapsed, nothing is held.
+        ({"req": 400, "ready": 390}, None, False),
+        # Attached terminal still alive (or undecidable): held.
+        ({"req": 400, "ready": 390, "attach": 380}, "alive", True),
+        ({"req": 400, "ready": 390, "attach": 380}, "undecidable", True),
+        # Attached terminal confirmed gone: released.
+        ({"req": 400, "ready": 390, "attach": 380}, "dead", False),
+        # Failed: never held.
+        ({"req": 5, "failed": 4}, None, False),
+    ],
+)
+def test_a_takeover_attempt_keeps_its_task_exactly_while_it_holds_the_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phases: dict, attach_verdict, kept: bool
+) -> None:
+    """A4 owns the takeover rule: deleting a held attempt's phase files would drop the reservation
+    while the user's terminal is open, and keeping a released one would pin the task forever."""
+    log_dir = tmp_path / "tasks"
+    log_dir.mkdir()
+    now = datetime.now(timezone.utc)
+    record = make_record()
+    store.write(log_dir, record)
+    controller = {"pid": 111, "start_time": "x", "markers": []}
+    for phase, age in phases.items():
+        payload = {"at": _iso(now - timedelta(seconds=age))}
+        if phase == "req":
+            payload |= {"session_id": "s", "by": controller, "lease_seconds": 60}
+        if phase == "attach":
+            payload |= {"pid": 222, "start_time": "y", "markers": ["claude", "s"]}
+        _takeover_phase(log_dir, record.task_id, 1, phase, payload)
+    verdicts = {111: "alive", 222: attach_verdict}
+    monkeypatch.setattr(
+        retention.control.identity, "identity_check", lambda ident: verdicts.get(ident.get("pid"))
+    )
+
+    stats = retention.sweep(log_dir, 30, now)
+
+    assert (store.read(log_dir, record.task_id) is not None) is kept
+    assert stats["kept_active_attempt"] == (1 if kept else 0)
+
+
+def test_an_unparsable_takeover_attempt_number_still_forces_the_task_active(tmp_path: Path) -> None:
     log_dir = tmp_path / "tasks"
     log_dir.mkdir()
     record = make_record()
     store.write(log_dir, record)
-    (log_dir / f"{record.task_id}.takeover.1.requested").write_text("")
+    (log_dir / f"{record.task_id}.takeover.x.req").write_text("{}")
 
     stats = retention.sweep(log_dir, 30, datetime.now(timezone.utc))
 
     assert stats["kept_active_attempt"] == 1
-    assert stats["deleted_tasks"] == 0
     assert store.read(log_dir, record.task_id) is not None
 
 

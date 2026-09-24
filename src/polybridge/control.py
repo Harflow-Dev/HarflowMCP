@@ -43,7 +43,7 @@ import tempfile
 import time
 import uuid
 from collections.abc import Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -555,3 +555,276 @@ def close_record_if_open(
         except OSError:
             pass
         os.close(fd)
+
+
+# --- takeover (A4.1) -----------------------------------------------------------------------------
+#
+# A takeover attempt is `<task_id>.takeover.<n>.<phase>`, phase one of `req | ready | failed |
+# attach`. `.req {at, session_id, by, lease_seconds}` reserves the session from the moment it lands;
+# `.ready {at}` means the headless run is confirmed gone and the interactive command was handed out;
+# `.failed {at, reason}` ends the attempt without the session; `.attach {at, pid, start_time,
+# markers}` names the interactive process holding it. Unlike a cancel, `.ready` is the attempt's
+# success phase, so a `.req` with a `.ready` is finished for lease purposes even though its
+# controller (a short-lived `polybridge-ctl`) is dead — which is why takeover has its own recovery
+# rather than `recover_abandoned`, which would fail every ready attempt once its controller exits.
+
+TAKEOVER = "takeover"
+TAKEOVER_ATTACH_WINDOW_SECONDS = 120.0
+TAKEN_OVER_NOTE = "taken over by the user in the Monitor"
+
+
+class TakeoverRefused(RuntimeError):
+    """A takeover step was refused; `code` is a stable identifier for the reason."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+@dataclass(frozen=True)
+class TakeoverAttempt:
+    """What is on disk for one takeover attempt. `req`, `ready` and `attach` are each None (no
+    such file), `UNPARSABLE`, or the parsed payload; `failed` is existence alone."""
+
+    n: int
+    req: Any
+    ready: Any
+    failed: bool
+    attach: Any
+
+
+def takeover_attempt(log_dir: Path, task_id: str, n: int | None = None) -> TakeoverAttempt | None:
+    """Attempt `n` (default: the latest), or None when there is none."""
+    if n is None:
+        n = latest_attempt(log_dir, task_id, TAKEOVER)
+        if n is None:
+            return None
+    return TakeoverAttempt(
+        n=n,
+        req=read_phase(log_dir, task_id, TAKEOVER, n, "req"),
+        ready=read_phase(log_dir, task_id, TAKEOVER, n, "ready"),
+        failed=phase_path(log_dir, task_id, TAKEOVER, n, "failed").exists(),
+        attach=read_phase(log_dir, task_id, TAKEOVER, n, "attach"),
+    )
+
+
+def _phase_at(payload: Any) -> datetime | None:
+    if not isinstance(payload, dict) or not isinstance(payload.get("at"), str):
+        return None
+    try:
+        at = datetime.fromisoformat(payload["at"])
+    except ValueError:
+        return None
+    return at if at.tzinfo is not None else at.replace(tzinfo=timezone.utc)
+
+
+def takeover_window_open(attempt: TakeoverAttempt, now: datetime) -> bool:
+    """Whether fewer than `TAKEOVER_ATTACH_WINDOW_SECONDS` have passed since the later of `.req`
+    and `.ready` — or that cannot be ruled out, because a time could not be read."""
+    req_at = _phase_at(attempt.req)
+    if req_at is None:
+        return True
+    anchor = req_at
+    if attempt.ready is not None:
+        ready_at = _phase_at(attempt.ready)
+        if ready_at is None:
+            return True
+        anchor = max(anchor, ready_at)
+    try:
+        return now < anchor + timedelta(seconds=TAKEOVER_ATTACH_WINDOW_SECONDS)
+    except OverflowError:
+        return True
+
+
+def takeover_busy(attempt: TakeoverAttempt | None, now: datetime | None = None) -> bool:
+    """Whether this attempt holds its session, so no other run may start on it.
+
+    Not busy once `.failed` exists. With `.attach`: busy until the attached process is confirmed
+    `dead` (`undecidable` stays busy). With `.ready` and no attach: busy while the attach window is
+    open. Pending (no `.ready`): busy while the window is open *or* the controller is not yet
+    provably abandoned — the second clause is stricter than the window alone, so a slow cascade
+    cannot let a resume in before `.ready`.
+    """
+    if attempt is None or attempt.failed:
+        return False
+    resolved_now = now or datetime.now(timezone.utc)
+    if attempt.attach is not None:
+        if not isinstance(attempt.attach, dict):
+            return True
+        return identity.identity_check(attempt.attach) != "dead"
+    if attempt.ready is None:
+        return takeover_window_open(attempt, resolved_now) or not controller_abandoned(
+            attempt.req, resolved_now
+        )
+    return takeover_window_open(attempt, resolved_now)
+
+
+def takeover_attempt_active(log_dir: Path, task_id: str, now: datetime | None = None) -> bool:
+    """For retention: whether the latest takeover attempt still holds its session."""
+    return takeover_busy(takeover_attempt(log_dir, task_id), now)
+
+
+def taken_over(log_dir: Path, task_id: str) -> bool:
+    """The latest attempt has `.ready` and no `.failed`. One `stat` when there was never an
+    attempt: attempts are numbered from 1, so no `.takeover.1.req` means none ever started."""
+    if not phase_path(log_dir, task_id, TAKEOVER, 1, "req").exists():
+        return False
+    attempt = takeover_attempt(log_dir, task_id)
+    return attempt is not None and attempt.ready is not None and not attempt.failed
+
+
+def taken_over_fields(log_dir: Path, task_id: str) -> dict[str, Any]:
+    """The listing keys for a taken-over task, or `{}` — only present when true, so no existing
+    shape changes. Never raises: bookkeeping must not break a listing."""
+    try:
+        if taken_over(log_dir, task_id):
+            return {"taken_over": True, "taken_over_note": TAKEN_OVER_NOTE}
+    except Exception:
+        log.debug("could not read the takeover state of %s", task_id, exc_info=True)
+    return {}
+
+
+def takeover_reservations(log_dir: Path, now: datetime | None = None) -> dict[str, str | None]:
+    """`task_id -> session_id` for every task whose latest takeover attempt holds its session.
+
+    The session id comes from the attempt's own `.req`, falling back to the task's record (an
+    unparsable `.req` still reserves whatever session the task ran on). One directory scan.
+    """
+    resolved_now = now or datetime.now(timezone.utc)
+    latest: dict[str, int] = {}
+    try:
+        entries = list(log_dir.iterdir())
+    except OSError:
+        return {}
+    for path in entries:
+        match = _PHASE_FILE_RE.match(path.name)
+        if match is None or match.group("family") != TAKEOVER:
+            continue
+        if not _ATTEMPT_N_RE.match(match.group("n")) or not store.TASK_ID_PATTERN.fullmatch(
+            match.group("id")
+        ):
+            continue
+        n = int(match.group("n"))
+        if n > latest.get(match.group("id"), 0):
+            latest[match.group("id")] = n
+
+    reserved: dict[str, str | None] = {}
+    for task_id, n in latest.items():
+        attempt = takeover_attempt(log_dir, task_id, n)
+        if not takeover_busy(attempt, resolved_now):
+            continue
+        session_id = attempt.req.get("session_id") if isinstance(attempt.req, dict) else None
+        if not isinstance(session_id, str) or not session_id:
+            record = store.read(log_dir, task_id)
+            session_id = record.session_id if record is not None else None
+        reserved[task_id] = session_id
+    return reserved
+
+
+def begin_takeover(
+    log_dir: Path,
+    task_id: str,
+    *,
+    controller: dict,
+    session_id: str | None,
+    now: datetime | None = None,
+) -> int:
+    """Open takeover attempt n and write its `.req`; returns n.
+
+    A new attempt only when the latest one ended in `.failed`. Two dead attempts are closed first,
+    each with a `.failed` that states why: a pending one whose controller is abandoned
+    (`controller died`), and a ready one never attached whose window has expired (`attach window
+    expired` — an attach would be refused now anyway). Anything else is refused without writing:
+    the attempt is in progress, awaiting its attach, or already holds (or held) the session.
+    Raises `PhaseWriteError` if the `.req` cannot be written.
+    """
+    resolved_now = now or datetime.now(timezone.utc)
+    latest = latest_attempt(log_dir, task_id, TAKEOVER)
+    n = 1
+    if latest is not None:
+        attempt = takeover_attempt(log_dir, task_id, latest)
+        if not attempt.failed:
+            if attempt.attach is not None:
+                raise TakeoverRefused(
+                    "already_taken_over",
+                    f"task {task_id} was already taken over (attempt {latest}); resume its session "
+                    "with resume_task, or take over the new task that creates",
+                )
+            if attempt.ready is None:
+                if not controller_abandoned(attempt.req, resolved_now):
+                    raise TakeoverRefused(
+                        "takeover_in_progress",
+                        f"a takeover of task {task_id} is already in progress (attempt {latest})",
+                    )
+                mark_takeover_failed(log_dir, task_id, latest, "controller died", now=resolved_now)
+            else:
+                if takeover_window_open(attempt, resolved_now):
+                    raise TakeoverRefused(
+                        "takeover_pending_attach",
+                        f"task {task_id} was just taken over (attempt {latest}) and is waiting for "
+                        "its terminal to attach",
+                    )
+                mark_takeover_failed(
+                    log_dir, task_id, latest, "attach window expired", now=resolved_now
+                )
+        n = latest + 1
+
+    payload = {
+        "at": resolved_now.isoformat(),
+        "session_id": session_id,
+        "by": controller,
+        "lease_seconds": LEASE_SECONDS,
+    }
+    if not write_phase(log_dir, task_id, TAKEOVER, n, "req", payload):
+        raise TakeoverRefused(
+            "takeover_in_progress", f"another takeover of task {task_id} started at the same time"
+        )
+    return n
+
+
+def mark_takeover_failed(
+    log_dir: Path, task_id: str, n: int, reason: str, *, now: datetime | None = None
+) -> bool:
+    resolved_now = now or datetime.now(timezone.utc)
+    return write_phase(
+        log_dir, task_id, TAKEOVER, n, "failed", {"at": resolved_now.isoformat(), "reason": reason}
+    )
+
+
+def mark_takeover_ready(log_dir: Path, task_id: str, n: int, *, now: datetime | None = None) -> bool:
+    resolved_now = now or datetime.now(timezone.utc)
+    return write_phase(log_dir, task_id, TAKEOVER, n, "ready", {"at": resolved_now.isoformat()})
+
+
+@contextmanager
+def _flock_sync(path: Path, timeout: float, what: str):
+    """A blocking-with-timeout `flock` for synchronous callers (a CLI, or a worker thread)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise LockTimeout(f"timed out acquiring {what}") from None
+                time.sleep(_LOCK_POLL_SECONDS)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        os.close(fd)
+
+
+def session_lock_sync(log_dir: Path, session_id: str, timeout: float = 30.0):
+    """`session_lock` for a synchronous caller — the same lock file."""
+    return _flock_sync(session_lock_path(log_dir, session_id), timeout, f"session lock for {session_id}")
+
+
+def record_lock_sync(log_dir: Path, task_id: str, timeout: float = RECORD_LOCK_TIMEOUT_SECONDS):
+    """`<id>.lock` for a synchronous caller — the same lock `close_record_if_open` takes."""
+    return _flock_sync(record_lock_path(log_dir, task_id), timeout, f"record lock for {task_id}")

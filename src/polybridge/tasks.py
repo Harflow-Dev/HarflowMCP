@@ -643,7 +643,7 @@ class Task:
             # Meaningful only while the task is still running — a settled task has no live server
             # to speak of, so this is null rather than a claim about the process that finished it.
             "owned_by_live_server": (True if not self.finished else None),
-        }
+        } | control.taken_over_fields(self.log_path.parent, self.task_id)
 
     def snapshot(self) -> dict[str, Any]:
         """Full current state of the run, safe to call at any point."""
@@ -851,8 +851,8 @@ class TaskRegistry:
             ):
                 if self.session_has_live_run(parent.session_id):
                     raise SessionBusyError(
-                        f"session {parent.session_id} already has a running task; "
-                        "two concurrent runs would corrupt its shared conversation state"
+                        f"session {parent.session_id} already has a running task, or is held by a takeover in "
+                        "the Monitor; two concurrent runs would corrupt its shared conversation state"
                     )
                 invocation = backend.build_resume_argv(
                     followup_prompt,
@@ -1733,23 +1733,7 @@ class TaskRegistry:
         records = store.read_all(self._log_dir)
         lineage_rows = [(r.task_id, r.spawned_by, r.root_task_id) for r in records]
         lineage_rows.extend(local_lineage)
-
-        children: dict[str, set[str]] = {}
-        for tid, spawned_by, _root in lineage_rows:
-            if spawned_by:
-                children.setdefault(spawned_by, set()).add(tid)
-
-        targets = {task_id}
-        frontier = [task_id]
-        while frontier:
-            current = frontier.pop()
-            for child in children.get(current, ()):
-                if child not in targets:
-                    targets.add(child)
-                    frontier.append(child)
-
-        targets.update(tid for tid, _spawned_by, root in lineage_rows if root == task_id)
-        return targets
+        return lineage.lineage_closure(lineage_rows, task_id)
 
     def _triage_target(self, task_id: str) -> tuple[str, Any]:
         """Decide what a non-local cascade target needs. Blocking (`ps`, disk), so run in a thread.
@@ -2362,8 +2346,8 @@ class TaskRegistry:
             ):
                 if self.session_has_live_run(record.session_id):
                     raise SessionBusyError(
-                        f"session {record.session_id} already has a running task; "
-                        "two concurrent runs would corrupt its shared conversation state"
+                        f"session {record.session_id} already has a running task, or is held by a takeover in "
+                        "the Monitor; two concurrent runs would corrupt its shared conversation state"
                     )
                 invocation = backend.build_resume_argv(
                     followup_prompt,
