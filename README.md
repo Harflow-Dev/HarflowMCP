@@ -505,7 +505,11 @@ starts retention.
   refusal after the reservation is recorded, so a retry starts a fresh attempt.
 - **`takeover-attach`** records the terminal's process within 120 s of the takeover. From the
   takeover until that window lapses unattached, or until the attached process is confirmed gone,
-  `resume_task` on the session is refused with the usual "session busy" error. Snapshots and
+  `resume_task` on the session is refused with the usual "session busy" error. A takeover that has
+  not yet reached `.ready` stays busy past the 120 s window for as long as its `polybridge-ctl`
+  controller is alive — a deliberate divergence from the plan's window alone, so a slow cascade
+  cancel cannot let a resume start on the session before the interactive command is handed out.
+  Snapshots and
   listings of a taken-over task carry `taken_over: true` and `taken_over_note`.
 
 | Backend | Interactive command handed out by `takeover` |
