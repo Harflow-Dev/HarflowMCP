@@ -340,7 +340,7 @@ def test_vibe_argv_has_no_separator_and_puts_the_command_behind_a_flag() -> None
 
 
 def test_vibe_remove_argv() -> None:
-    assert VibeClient().remove_argv(REGISTRATION) == ["vibe", "mcp", "remove", "polybridge"]
+    assert VibeClient().remove_argv("polybridge") == ["vibe", "mcp", "remove", "polybridge"]
 
 
 @pytest.mark.parametrize(
@@ -731,6 +731,12 @@ class Exploding:
     def apply(self, registration, run):
         raise self.exc
 
+    def inspect(self, key, run):
+        raise self.exc
+
+    def remove(self, key, run):
+        raise self.exc
+
 
 @pytest.mark.parametrize(
     "exc",
@@ -760,6 +766,93 @@ def test_an_exception_with_no_message_still_reports_something(
 
     assert result.status == "failed"
     assert "RuntimeError" in result.detail
+
+
+class Absent(Exploding):
+    """A well-behaved client with nothing registered."""
+
+    key = "opencode"
+    label = "opencode"
+
+    def __init__(self) -> None:
+        super().__init__(RuntimeError("unused"))
+
+    def inspect(self, key, run):
+        return clients.Inspection(self.key, False)
+
+    def remove(self, key, run):
+        return Result(self.key, "not_installed", "nothing to remove")
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"), RuntimeError("kaboom")],
+    ids=["non-utf8-config", "bug"],
+)
+def test_an_inspect_that_raises_is_that_clients_error_and_the_others_still_run(
+    exc: Exception,
+) -> None:
+    results = clients.inspect_all([Exploding(exc), Absent()], "polybridge", run=FakeRunner())
+
+    assert results[0].installed is None
+    assert results[0].error
+    assert results[1].installed is False
+    assert results[1].error is None
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"), RuntimeError("kaboom")],
+    ids=["non-utf8-config", "bug"],
+)
+def test_a_remove_that_raises_is_a_failure_and_the_others_still_run(exc: Exception) -> None:
+    results = clients.unregister([Exploding(exc), Absent()], "polybridge", run=FakeRunner())
+
+    assert [result.status for result in results] == ["failed", "not_installed"]
+    assert results[0].detail
+
+
+def test_an_unavailable_client_is_not_inspected_and_reads_as_not_checked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`installed=None`, never False: the file was not read, so absence was not observed."""
+    monkeypatch.setattr("polybridge.clients.base.shutil.which", lambda _: None)
+
+    (inspection,) = clients.inspect_all([CodexClient()], "polybridge", run=FakeRunner())
+
+    assert inspection.available is False
+    assert inspection.installed is None
+    assert inspection.error is None
+    assert any("not on PATH" in note for note in inspection.notes)
+
+
+def test_an_availability_check_that_crashes_is_an_inspect_error_not_an_absence() -> None:
+    class Broken(Exploding):
+        def availability(self):
+            raise self.exc
+
+    (inspection,) = clients.inspect_all(
+        [Broken(RuntimeError("cannot stat"))], "polybridge", run=FakeRunner()
+    )
+
+    assert inspection.available is False
+    assert inspection.installed is None
+    assert inspection.error == "cannot stat"
+
+
+def test_an_absent_client_is_skipped_on_uninstall_unless_it_was_named(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("polybridge.clients.base.shutil.which", lambda _: None)
+    codex = CodexClient()
+
+    skipped = clients.unregister([codex], "polybridge", run=FakeRunner())
+    failed = clients.unregister(
+        [codex], "polybridge", run=FakeRunner(), named=frozenset({"codex"})
+    )
+
+    assert [result.status for result in skipped] == ["skipped"]
+    assert [result.status for result in failed] == ["failed"]
 
 
 def test_parse_selection_accepts_repeats_commas_and_all() -> None:

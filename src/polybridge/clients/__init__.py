@@ -9,6 +9,7 @@ needs a restart.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from .base import (
     Availability,
     Client,
     CliClient,
+    Inspection,
     Registration,
     Result,
     RunResult,
@@ -141,6 +143,64 @@ def register(
     return results
 
 
+def inspect_all(
+    clients: Sequence[Client], key: str, *, run: Runner = run_cli
+) -> list[Inspection]:
+    """Read each client's registration, changing nothing.
+
+    Only clients whose availability check passed are inspected, uniformly: an unavailable one comes
+    back `installed=None` ("not checked") rather than having its file read anyway, because some of
+    these can only be asked through their binary and a mixed answer would read as a comparison it is
+    not. An availability check that *broke* is an error, never an absence.
+    """
+    inspections: list[Inspection] = []
+    for client in clients:
+        availability = _availability(client)
+        if not availability.available:
+            inspections.append(
+                Inspection(
+                    client.key,
+                    None,
+                    error=availability.reason if availability.errored else None,
+                    notes=() if availability.errored else (availability.reason or "unavailable",),
+                    available=False,
+                )
+            )
+            continue
+        inspections.append(_inspect(client, key, run))
+    return inspections
+
+
+def unregister(
+    clients: Sequence[Client],
+    key: str,
+    *,
+    run: Runner = run_cli,
+    named: frozenset[str] = frozenset(),
+) -> list[Result]:
+    """Remove our server from each client in turn — `register`'s mirror, with the same guarantees.
+
+    Sequential, and one client's failure never stops the others. A client named explicitly whose
+    binary is absent is `failed`, as it is for install: the user asked for a removal that could not
+    even be attempted.
+    """
+    results: list[Result] = []
+    for client in clients:
+        availability = _availability(client)
+        if not availability.available:
+            asked_for = client.key in named
+            results.append(
+                Result(
+                    client.key,
+                    "failed" if asked_for or availability.errored else "skipped",
+                    availability.reason or "unavailable",
+                )
+            )
+            continue
+        results.append(_remove(client, key, run))
+    return results
+
+
 def override_config_path(chosen: Sequence[Client], config_path: Path) -> list[Client]:
     """Point whichever selected client edits a config file at `config_path` instead.
 
@@ -231,6 +291,22 @@ def _apply(client: Client, registration: Registration, run: Runner) -> Result:
         return Result(client.key, "failed", _first_line(exc))
 
 
+def _inspect(client: Client, key: str, run: Runner) -> Inspection:
+    """Same reasoning as `_apply`: one client's crash is that client's error, not the run's."""
+    try:
+        inspection = client.inspect(key, run)
+    except Exception as exc:  # noqa: BLE001 — see _apply
+        return Inspection(client.key, None, error=_first_line(exc))
+    return dataclasses.replace(inspection, available=True)
+
+
+def _remove(client: Client, key: str, run: Runner) -> Result:
+    try:
+        return client.remove(key, run)
+    except Exception as exc:  # noqa: BLE001 — see _apply
+        return Result(client.key, "failed", _first_line(exc))
+
+
 def _first_line(exc: BaseException) -> str:
     """Exception text is for a human reading one row of a table; `repr` when there is no message."""
     text = str(exc).strip()
@@ -247,6 +323,7 @@ __all__ = [
     "CliClient",
     "CodexClient",
     "DesktopClient",
+    "Inspection",
     "OpencodeClient",
     "Registration",
     "Result",
@@ -260,6 +337,7 @@ __all__ = [
     "desktop_config_path",
     "exit_code",
     "get",
+    "inspect_all",
     "named_clients",
     "label",
     "override_config_path",
@@ -267,4 +345,5 @@ __all__ = [
     "register",
     "run_cli",
     "select",
+    "unregister",
 ]

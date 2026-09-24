@@ -5,8 +5,10 @@ one of the agent CLIs that doubles as an MCP host. They divide into two kinds th
 this interface — the desktop app owns a JSON file we edit ourselves, while the CLIs own their config
 formats and are driven through their own `mcp add` subcommands.
 
-Statuses are deliberately five, not two. `unknown` exists because a CLI that times out may already
-have written the config, and saying `failed` there would be a guess presented as a fact.
+Statuses are deliberately seven, not two. `unknown` exists because a CLI that times out may already
+have written the config, and saying `failed` there would be a guess presented as a fact. `removed` and
+`not_installed` are the two outcomes of an uninstall that did not go wrong, and they are kept apart
+because only one of them changed anything.
 """
 
 from __future__ import annotations
@@ -31,7 +33,9 @@ class SetupError(RuntimeError):
     """Something the user needs to fix before setup can proceed."""
 
 
-Status = Literal["applied", "previewed", "skipped", "failed", "unknown"]
+Status = Literal[
+    "applied", "previewed", "skipped", "failed", "unknown", "removed", "not_installed"
+]
 
 
 @dataclass(frozen=True)
@@ -120,12 +124,36 @@ class Result:
     diagnostics: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class Inspection:
+    """What one client's config says about our server, read without changing anything.
+
+    `installed is None` means "could not tell" — the check was not run, or it errored (`error` says
+    which). It is never folded into False: "not registered" and "could not look" are different answers,
+    and the Mac app acts on the first.
+
+    `command` and `path_env` are what the stored entry would launch, so a caller can compare them with
+    what install would write now. `available` is filled in by the orchestration, not by the client.
+    """
+
+    client: str
+    installed: bool | None
+    command: str | None = None
+    path_env: str | None = None
+    error: str | None = None
+    notes: tuple[str, ...] = ()
+    available: bool = True
+
+
 class Client(Protocol):
     """Everything the orchestration needs. Nothing outside `clients/` branches on `key`.
 
     `post_apply_note` is here so that "restart the desktop app, but not the CLIs" is knowledge each
     client holds about itself, rather than a name check in the reporting code. It is phrased to
-    follow the client's own label.
+    follow the client's own label, and it applies to a removal as much as to an add.
+
+    `inspect` and `remove` take the server's key rather than a `Registration`: neither needs the
+    server binary, and an uninstall has to work after that binary is gone.
     """
 
     key: str
@@ -137,6 +165,10 @@ class Client(Protocol):
     def preview(self, registration: Registration) -> Result: ...
 
     def apply(self, registration: Registration, run: Runner) -> Result: ...
+
+    def inspect(self, key: str, run: Runner) -> Inspection: ...
+
+    def remove(self, key: str, run: Runner) -> Result: ...
 
 
 @dataclass(frozen=True)
@@ -173,6 +205,14 @@ class CliClient:
     def env_flag(self, registration: Registration) -> list[str]:
         """How this CLI spells "set an environment variable for the server it launches"."""
         raise NotImplementedError
+
+    def inspect(self, key: str, run: Runner) -> Inspection:
+        """How to read this CLI's registration differs per CLI; there is no safe shared default."""
+        raise NotImplementedError(f"{self.label} does not implement inspect")
+
+    def remove(self, key: str, run: Runner) -> Result:
+        """Neither is there one for removal: each CLI reports absence differently, or not at all."""
+        raise NotImplementedError(f"{self.label} does not implement remove")
 
     def availability(self) -> Availability:
         found = shutil.which(self.binary)

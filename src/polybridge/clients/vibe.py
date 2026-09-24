@@ -135,8 +135,8 @@ class VibeClient(CliClient):
             *self.env_flag(registration),
         ]
 
-    def remove_argv(self, registration: Registration) -> list[str]:
-        return [self.binary, "mcp", "remove", registration.key]
+    def remove_argv(self, key: str) -> list[str]:
+        return [self.binary, "mcp", "remove", key]
 
     def env_flag(self, registration: Registration) -> list[str]:
         return ["--env", f"PATH={registration.path_env}"]
@@ -192,7 +192,7 @@ class VibeClient(CliClient):
         """
         key = registration.key
         restore = shlex.join(self.add_argv(registration))
-        removed = run(self.remove_argv(registration))
+        removed = run(self.remove_argv(registration.key))
         steps = (shlex.join(first_add.argv), shlex.join(removed.argv))
 
         if removed.timed_out:

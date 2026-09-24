@@ -56,8 +56,8 @@ class ClaudeCodeClient(CliClient):
     def env_flag(self, registration: Registration) -> list[str]:
         return ["-e", f"PATH={registration.path_env}"]
 
-    def remove_argv(self, registration: Registration) -> list[str]:
-        return [self.binary, "mcp", "remove", registration.key, "-s", "user"]
+    def remove_argv(self, key: str) -> list[str]:
+        return [self.binary, "mcp", "remove", key, "-s", "user"]
 
     def apply(self, registration: Registration, run: Runner) -> Result:
         added = run(self.add_argv(registration))
@@ -67,7 +67,7 @@ class ClaudeCodeClient(CliClient):
 
     def replace(self, registration: Registration, run: Runner, *, first_add: RunResult) -> Result:
         restore = shlex.join(self.add_argv(registration))
-        removed = run(self.remove_argv(registration))
+        removed = run(self.remove_argv(registration.key))
         steps = (shlex.join(first_add.argv), shlex.join(removed.argv))
 
         if removed.timed_out:
