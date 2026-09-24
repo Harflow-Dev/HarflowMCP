@@ -835,3 +835,77 @@ async def test_real_detection_that_positively_finds_no_caller_lets_a_person_thro
     result = await _take_over(log_dir)
 
     assert result["session_id"] == SESSION
+
+
+# --- every descendant must be confirmed stopped ---------------------------------------------
+
+
+async def test_a_descendant_that_cannot_be_signalled_blocks_the_takeover(
+    log_dir: Path, repo: Path, verdicts: Verdicts, orphan_sleeper
+) -> None:
+    """Verifier finding: only the target's own `owner_still_settling` was checked. A live descendant
+    on another session whose leader is undecidable (its start time matches but its markers are not
+    on the command line) is never signalled — and must block the takeover, with `.failed` written,
+    no `.ready`, and the descendant named."""
+    target_pid, target_pgid = orphan_sleeper()
+    target_ident = _captured(target_pid, ["sleep"])
+    child_pid, child_pgid = orphan_sleeper()
+    child_ident = _captured(child_pid, ["sleep"])
+    store.write(
+        log_dir,
+        finished_record(
+            repo, status="running", exit_code=None, finished_at=None, pid=target_pid,
+            pgid=target_pgid, start_time=target_ident["start_time"], markers=["sleep"],
+        ),
+    )
+    store.write(
+        log_dir,
+        finished_record(
+            repo, task_id="child", spawned_by="task-1", root_task_id="task-1",
+            session_id="another-session", status="running", exit_code=None, finished_at=None,
+            pid=child_pid, pgid=child_pgid, start_time=child_ident["start_time"],
+            markers=["no-such-marker"],
+        ),
+    )
+
+    with pytest.raises(control.TakeoverRefused) as refused:
+        await takeover.take_over(
+            log_dir, "task-1", registry_factory=lambda: TaskRegistry(log_dir=log_dir, owner=CONTROLLER)
+        )
+
+    assert refused.value.code == "descendants_not_stopped"
+    assert "child (not signalled: markers_missing)" in str(refused.value)
+    assert failed_reason(log_dir, 1) == str(refused.value)
+    assert not (log_dir / "task-1.takeover.1.ready").exists()
+    assert not control.taken_over(log_dir, "task-1")
+    assert _real_identity_check(child_ident) == "alive"  # never signalled
+    assert _real_identity_check(target_ident) == "dead"  # the target itself was stopped
+
+
+@pytest.mark.parametrize(
+    ("cascade", "expected"),
+    [
+        ({"sigkill_survivors": ["kid"]}, "kid (survived SIGKILL)"),
+        ({"not_signalled": [{"task_id": "kid", "reason": "ps_failed"}]}, "kid (not signalled: ps_failed)"),
+        ({"owner_still_settling": ["kid"]}, "kid (its owning server has not settled it)"),
+    ],
+)
+async def test_every_kind_of_unstopped_descendant_blocks_the_takeover(
+    log_dir: Path, repo: Path, verdicts: Verdicts, monkeypatch: pytest.MonkeyPatch, cascade, expected
+) -> None:
+    store.write(log_dir, finished_record(repo, status="running", exit_code=None, start_time="x"))
+    monkeypatch.setattr(identity, "check_detail", lambda ident: ("alive", "start_time_match"))
+    verdicts.by_pid[999_991] = "dead"
+    result = {"sigkill_survivors": [], "not_signalled": [], "owner_still_settling": []} | cascade
+
+    class _Registry:
+        async def cancel_cascade(self, task_id):
+            return result
+
+    with pytest.raises(control.TakeoverRefused) as refused:
+        await takeover.take_over(log_dir, "task-1", registry_factory=_Registry)
+
+    assert refused.value.code == "descendants_not_stopped"
+    assert expected in str(refused.value)
+    assert (log_dir / "task-1.takeover.1.failed").exists()
+    assert not (log_dir / "task-1.takeover.1.ready").exists()

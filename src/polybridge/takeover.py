@@ -245,15 +245,41 @@ async def _stop_run(record: store.TaskRecord, registry_factory: Callable[[], Any
         if unrecorded:
             log.warning("takeover of %s: unrecorded cancel phases: %s", record.task_id, unrecorded)
 
+    target = record.task_id
     survivors = set(cascade.get("sigkill_survivors", []))
-    survivors.update(entry["task_id"] for entry in cascade.get("not_signalled", []))
-    if survivors:
-        raise _Refusal(
-            "not_stopped",
-            f"the headless run could not be confirmed stopped; still running or not signalled: "
-            f"{', '.join(sorted(survivors))}",
+    not_signalled = {
+        entry["task_id"]: entry.get("reason") or "" for entry in cascade.get("not_signalled", [])
+    }
+    settling = set(cascade.get("owner_still_settling", []))
+
+    if target in survivors or target in not_signalled:
+        detail = (
+            "survived SIGKILL"
+            if target in survivors
+            else f"not signalled: {not_signalled[target]}"
         )
-    if record.task_id in cascade.get("owner_still_settling", []):
+        raise _Refusal(
+            "not_stopped", f"the headless run could not be confirmed stopped ({detail})"
+        )
+
+    # Any descendant the cascade could not confirm stopped blocks the takeover, whatever session
+    # it is on: the cascade is the task's tree, and handing the tree's root to a person while part
+    # of it may still be running under the task's authority is not a clean stop.
+    blocked: list[str] = []
+    for tid in sorted((survivors | set(not_signalled) | settling) - {target}):
+        if tid in survivors:
+            blocked.append(f"{tid} (survived SIGKILL)")
+        elif tid in not_signalled:
+            blocked.append(f"{tid} (not signalled: {not_signalled[tid]})")
+        else:
+            blocked.append(f"{tid} (its owning server has not settled it)")
+    if blocked:
+        raise _Refusal(
+            "descendants_not_stopped",
+            "descendants of this task could not be confirmed stopped: " + "; ".join(blocked),
+        )
+
+    if target in settling:
         if await asyncio.to_thread(identity.identity_check, record.owner) == "undecidable":
             raise _Refusal(
                 "not_stopped",
