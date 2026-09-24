@@ -53,12 +53,17 @@ class RunResult:
 
     `returncode is None` means the process never reported one: either it timed out (`timed_out`) or
     it could not be launched at all, which are different situations for the caller.
+
+    `output` is stdout and stderr together, which is what a human diagnosing a failure wants.
+    `stdout` alone is kept for callers that parse it — a warning on stderr must not corrupt a JSON
+    listing. `None` means it was not captured separately, and `output` is all there is.
     """
 
     argv: tuple[str, ...]
     returncode: int | None
     output: str
     timed_out: bool = False
+    stdout: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -95,7 +100,12 @@ def run_cli(argv: Sequence[str]) -> RunResult:
         return RunResult(tuple(argv), None, "", timed_out=True)
     except OSError as exc:
         return RunResult(tuple(argv), None, f"could not run {argv[0]}: {exc}")
-    return RunResult(tuple(argv), completed.returncode, completed.stdout + completed.stderr)
+    return RunResult(
+        tuple(argv),
+        completed.returncode,
+        completed.stdout + completed.stderr,
+        stdout=completed.stdout,
+    )
 
 
 @dataclass(frozen=True)

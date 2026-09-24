@@ -1366,3 +1366,116 @@ def test_claude_code_remove_failure_carries_the_output() -> None:
 
     assert result.status == "failed"
     assert "EACCES" in result.diagnostics[0]
+
+
+# --- Codex: inspect and remove --------------------------------------------------------------------
+
+CODEX_LISTED = json.dumps(
+    [
+        {"name": "argent", "transport": {"type": "stdio", "command": "argent", "args": []}},
+        {
+            "name": "polybridge",
+            "enabled": True,
+            "transport": {
+                "type": "stdio",
+                "command": "/x/polybridge-server",
+                "args": [],
+                "env": {"PATH": "/a:/b"},
+                "env_vars": [],
+                "cwd": None,
+            },
+        },
+    ]
+)
+CODEX_REMOVED = "Removed global MCP server 'polybridge'."
+CODEX_NOT_FOUND = "No MCP server named 'polybridge' found."
+
+
+def test_codex_inspect_runs_list_json_and_reads_the_transport() -> None:
+    runner = FakeRunner(ok(CODEX_LISTED))
+
+    inspection = CodexClient().inspect("polybridge", runner)
+
+    assert runner.calls == [["codex", "mcp", "list", "--json"]]
+    assert inspection.installed is True
+    assert inspection.command == "/x/polybridge-server"
+    assert inspection.path_env == "/a:/b"
+
+
+def test_codex_inspect_of_an_empty_list_is_not_installed() -> None:
+    assert CodexClient().inspect("polybridge", FakeRunner(ok("[]"))).installed is False
+
+
+def test_codex_inspect_parses_stdout_only_so_a_stderr_warning_cannot_corrupt_it() -> None:
+    def runner(argv):
+        return RunResult(tuple(argv), 0, "[]\nWARNING: something", stdout="[]\n")
+
+    assert CodexClient().inspect("polybridge", runner).installed is False
+
+
+def test_codex_inspect_does_not_match_a_longer_name() -> None:
+    listed = json.dumps([{"name": "polybridge-old", "transport": {"command": "/x"}}])
+
+    assert CodexClient().inspect("polybridge", FakeRunner(ok(listed))).installed is False
+
+
+@pytest.mark.parametrize(
+    "response",
+    [fails(1, "boom"), times_out(), ok("not json"), ok('{"name": "polybridge"}')],
+    ids=["exit-1", "timeout", "not-json", "not-an-array"],
+)
+def test_codex_inspect_that_cannot_tell_is_an_error_not_an_absence(response) -> None:
+    inspection = CodexClient().inspect("polybridge", FakeRunner(response))
+
+    assert inspection.installed is None
+    assert inspection.error
+
+
+def test_codex_inspect_of_a_non_stdio_transport_claims_no_command() -> None:
+    listed = json.dumps([{"name": "polybridge", "transport": {"type": "streamable_http"}}])
+
+    inspection = CodexClient().inspect("polybridge", FakeRunner(ok(listed)))
+
+    assert inspection.installed is True
+    assert inspection.command is None
+
+
+def test_codex_remove_reports_removed_on_the_measured_message() -> None:
+    runner = FakeRunner(ok(CODEX_REMOVED))
+
+    result = CodexClient().remove("polybridge", runner)
+
+    assert runner.calls == [["codex", "mcp", "remove", "polybridge"]]
+    assert result.status == "removed"
+
+
+def test_codex_remove_of_an_absent_entry_is_not_installed_despite_exit_zero() -> None:
+    assert CodexClient().remove("polybridge", FakeRunner(ok(CODEX_NOT_FOUND))).status == (
+        "not_installed"
+    )
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "something unexpected",
+        "Removed global MCP server 'polybridge-old'.",
+        "No MCP server named 'polybridge-old' found.",
+        "Not removed global MCP server 'polybridge'.",
+    ],
+)
+def test_codex_remove_with_an_unrecognised_message_is_unknown(output: str) -> None:
+    """remove exits 0 whether or not anything was there, so wording is all there is."""
+    assert CodexClient().remove("polybridge", FakeRunner(ok(output))).status == "unknown"
+
+
+def test_codex_remove_timeout_is_unknown_and_failure_is_failed() -> None:
+    assert CodexClient().remove("polybridge", FakeRunner(times_out())).status == "unknown"
+    assert CodexClient().remove("polybridge", FakeRunner(fails(1, "boom"))).status == "failed"
+
+
+def test_run_cli_keeps_stdout_apart_for_parsers() -> None:
+    result = run_cli(python("import sys; print('out'); print('err', file=sys.stderr)"))
+
+    assert result.stdout == "out\n"
+    assert "err" in result.output
