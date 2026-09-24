@@ -302,3 +302,55 @@ async def test_resume_accepts_live_input(git_repo: Path) -> None:
 
     assert result.get("session_id") == session_id
     assert "PELICAN" in result["result"].upper()
+
+
+# --- through polybridge ---------------------------------------------------------------------------
+
+
+async def test_polybridge_two_message_run_end_to_end(git_repo: Path, tmp_path: Path) -> None:
+    """The whole live-input path on the real CLI: start, a mid-run `send_message` folded into the
+    running turn, the pump closing stdin once idle, `completed`, and a later send refused."""
+    import json as _json
+
+    from polybridge import backends, inbox
+    from polybridge.events import events_path
+    from polybridge.tasks import TaskRegistry
+
+    registry = TaskRegistry(log_dir=tmp_path / "streams")
+    task = await registry.start(
+        "Run the bash command `sleep 8` in the foreground (not in the background), then answer: "
+        "what is 2+2? Reply briefly.",
+        git_repo,
+        backend=backends.get("claude"),
+        freedom="unrestricted",
+        model=MODEL,
+    )
+    try:
+        assert task.live_input
+        # Mid-turn: once the foreground sleep has started (its own task_started event).
+        deadline = time.monotonic() + RUN_TIMEOUT_SECONDS
+        while not any('"subtype":"task_started"' in line for line in task.tail):
+            assert time.monotonic() < deadline, list(task.tail)[-5:]
+            await asyncio.sleep(0.1)
+        queued = await registry.send_message(task, "Also: what is 3+3?")
+        assert queued["status"] == "queued"
+        await asyncio.wait_for(task.done.wait(), RUN_TIMEOUT_SECONDS)
+    except BaseException:
+        await registry.cancel(task)
+        raise
+
+    assert task.status == "completed", (task.status, list(task.stderr_tail)[-5:])
+    assert task.exit_code == 0
+    assert task.acc.result_count == 1
+    assert "4" in task.acc.summary and "6" in task.acc.summary, task.acc.summary
+    assert task.input_closed and task.inbox_closed
+
+    events = [
+        _json.loads(line)
+        for line in events_path(registry.log_dir, task.task_id).read_text().splitlines()
+    ]
+    injected = [e for e in events if e["kind"] == "user_message" and e["source"] == "injected"]
+    assert [e["message_id"] for e in injected] == [queued["message_id"]]
+
+    with pytest.raises(inbox.SendRefused, match="finished; continue with resume_task"):
+        await registry.send_message(task, "too late")

@@ -32,7 +32,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, NamedTuple
 
-from . import control, identity, lineage, retention, store
+from . import control, identity, inbox, lineage, retention, store
 from .backends import (
     Accumulator,
     Backend,
@@ -556,6 +556,19 @@ class Task:
     input_closed: bool = False
     """Whether polybridge has closed (or lost) this live-input run's stdin. Always False for a
     DEVNULL run, which never had one to close."""
+    inbox_closed: bool = False
+    """The input pump has run its close protocol: nothing more is accepted, and every message
+    queued before it was either written or reported undelivered."""
+    inbox_queue: deque[dict[str, Any]] = field(default_factory=deque)
+    """Messages `send_message` accepted on this (owning) server, waiting for the pump."""
+    inbox_offset: int = 0
+    """How far into `<id>.inbox.jsonl` (other processes' appends) the pump has read."""
+    pump: asyncio.Task[Any] | None = None
+    """The input pump — retained here, and deliberately not in `watchers`: `_finish_draining`
+    must neither wait on nor cancel it. `_monitor` settles it itself (`_finish_pump`)."""
+    pump_wake: asyncio.Event = field(default_factory=asyncio.Event)
+    last_output_at: float = field(default_factory=time.monotonic)
+    """`time.monotonic()` of the last stdout line — the idle bound's clock."""
 
     done: asyncio.Event = field(default_factory=asyncio.Event)
     cancel_requested: bool = False
@@ -1061,6 +1074,7 @@ class TaskRegistry:
         # queued ahead of anything else, then flushed below.
         if invocation.live_input:
             self._write_initial_input(task, invocation.initial_input or b"")
+            task.pump = asyncio.create_task(self._pump(task), name=f"pb-pump-{task_id}")
             await self._flush_stdin(task)
 
         # Best-effort start-time capture, so a later server can tell this pid apart from a reused
@@ -1105,10 +1119,260 @@ class TaskRegistry:
             log.warning("task %s: stdin was already gone before the prompt could be written", task.task_id)
 
     async def _flush_stdin(self, task: Task) -> None:
-        """Await the prompt's delivery to the pipe, then — until the input pump exists — close it:
-        a turn keeps running after EOF (measured), so the run settles exactly as a one-shot does."""
+        """Await the prompt's delivery to the pipe. The input pump, not this, decides when stdin
+        closes."""
         await _drain_stdin(task)
+
+    # --- live input: send, pump, close protocol ------------------------------------------------
+
+    async def send_message(self, task: Task, text: str) -> dict[str, Any]:
+        """Queue `text` for a live-input task this server owns. Returns "queued", never
+        "delivered": the pump writes it, and the event log records whether it did.
+
+        Takes the same inbox lock as the close protocol, so a message is either accepted before
+        the close (and then forwarded or reported undelivered) or refused after it.
+        """
+        if not task.live_input:
+            raise inbox.SendRefused(
+                f"task {task.task_id} was not started with live input, so it cannot take a message "
+                "while it runs; continue it with resume_task once it has finished",
+                code="not_live_input",
+            )
+        try:
+            fd = await inbox.lock_async(self._log_dir, task.task_id)
+        except control.LockTimeout:
+            raise inbox.SendRefused(
+                f"task {task.task_id}'s inbox is locked by another process; try again shortly",
+                code="lock_timeout",
+            ) from None
+        try:
+            if task.inbox_closed or inbox.is_closed(self._log_dir, task.task_id):
+                raise inbox.SendRefused(
+                    f"task {task.task_id} has {inbox.CLOSED_MESSAGE}", code="closed"
+                )
+            if task.finished:
+                raise inbox.SendRefused(
+                    f"task {task.task_id} has settled ({task.status}); continue with resume_task",
+                    code="settled",
+                )
+            message = inbox.make_message(text, self._owner)
+            task.inbox_queue.append(message)
+        finally:
+            inbox.unlock(fd)
+        task.pump_wake.set()
+        return inbox.queued_response(task.task_id, message)
+
+    async def send_to_record(self, task_id: str, text: str) -> dict[str, Any]:
+        """Queue `text` for a live-input task another server owns, via its on-disk inbox."""
+        return await asyncio.to_thread(
+            inbox.send_to_record, self._log_dir, task_id, text, by=self._owner
+        )
+
+    def _take_pending(self, task: Task) -> list[dict[str, Any]]:
+        """Everything queued, from this server and from other processes, in queue order. Call with
+        the inbox lock held."""
+        pending = list(task.inbox_queue)
+        task.inbox_queue.clear()
+        try:
+            appended, task.inbox_offset = inbox.read_new(
+                self._log_dir, task.task_id, task.inbox_offset
+            )
+        except OSError:
+            log.warning("task %s: could not read its inbox", task.task_id, exc_info=True)
+            appended = []
+        pending.extend(appended)
+        pending.sort(key=lambda message: str(message.get("queued_at") or ""))
+        return pending
+
+    def _write_messages(self, task: Task, messages: list[dict[str, Any]]) -> int:
+        """Write each message to stdin, synchronously. A message that cannot be written — and every
+        one after it — is reported undelivered rather than dropped silently."""
+        backend = get_backend(task.backend)
+        written = 0
+        for index, message in enumerate(messages):
+            try:
+                data = backend.encode_live_message(message["text"])
+            except Exception:
+                log.warning("task %s: could not encode a message", task.task_id, exc_info=True)
+                self._report_undelivered(task, [message], "it could not be encoded for this run")
+                continue
+            if not _write_stdin(task, data):
+                self._report_undelivered(
+                    task, messages[index:], "the run's stdin was already closed"
+                )
+                break
+            written += 1
+            _write_event(
+                task,
+                "user_message",
+                {"text": message["text"], "source": "injected", "message_id": message.get("id")},
+            )
+        return written
+
+    def _report_undelivered(
+        self, task: Task, messages: list[dict[str, Any]], reason: str
+    ) -> None:
+        for message in messages:
+            _write_event(
+                task,
+                "undelivered",
+                {"message_id": message.get("id"), "text": message.get("text"), "reason": reason},
+            )
+            task.bridge_notices.append(
+                f"a message queued with send_message (id {message.get('id')}) was not delivered: "
+                f"{reason}"
+            )
+
+    async def _forward_pending(self, task: Task) -> bool:
+        """Write whatever is queued. True if anything was taken off the queue."""
+        if not task.inbox_queue and not inbox.has_unread(
+            self._log_dir, task.task_id, task.inbox_offset
+        ):
+            return False
+        try:
+            fd = await inbox.lock_async(self._log_dir, task.task_id)
+        except control.LockTimeout:
+            log.warning("task %s: inbox lock busy; will retry", task.task_id)
+            return False
+        try:
+            pending = self._take_pending(task)
+            written = self._write_messages(task, pending)
+        finally:
+            inbox.unlock(fd)
+        if written:
+            # A turn is owed now (or the message folds into the one running): not idle until its
+            # result says so.
+            task.acc.awaiting_input = False
+            await _drain_stdin(task)
+        return bool(pending)
+
+    async def _close_input(self, task: Task, *, drop_reason: str | None = None) -> None:
+        """The close protocol: 1) lock the inbox; 2) forward — or, with `drop_reason`, report
+        undelivered — every message still queued; 3) create the closed marker; 4) unlock;
+        5) close stdin. The same sequence on every path (idle, error, idle bound, exit), so no send
+        can slip in between the last forward and EOF.
+
+        While the run is alive a busy lock is waited out, however long: closing without it could
+        accept a message after the last forward. Once the run has exited that is moot, so a lock
+        that stays busy is given up on and whatever is known about is reported undelivered.
+        """
+        fd: int | None = None
+        while fd is None:
+            try:
+                fd = await inbox.lock_async(self._log_dir, task.task_id)
+            except control.LockTimeout:
+                if task.proc is None or task.proc.returncode is not None:
+                    log.warning(
+                        "task %s: inbox lock still busy after exit; closing without it",
+                        task.task_id,
+                    )
+                    break
+                log.warning("task %s: inbox lock busy; still waiting to close input", task.task_id)
+        try:
+            pending = self._take_pending(task)
+            if drop_reason is None:
+                self._write_messages(task, pending)
+            else:
+                self._report_undelivered(task, pending, drop_reason)
+            try:
+                inbox.mark_closed(self._log_dir, task.task_id)
+            except OSError:
+                log.error(
+                    "task %s: could not write its inbox closed marker", task.task_id, exc_info=True
+                )
+            task.inbox_closed = True
+        finally:
+            if fd is not None:
+                inbox.unlock(fd)
         _close_stdin(task)
+
+    async def _pump(self, task: Task) -> None:
+        """Feed a live-input run's stdin until it is idle, then close it so the run settles.
+
+        Woken by the stdout drainer after every event and by `send_message`, and otherwise every
+        `PUMP_POLL_SECONDS` (which is also how often other processes' appends are noticed). Every
+        exit from the loop goes through `_close_input`.
+        """
+        bound = live_idle_seconds()
+        try:
+            while not task.inbox_closed:
+                task.pump_wake.clear()
+                acc = task.acc
+                if task.proc is None or task.proc.returncode is not None:
+                    await self._close_input(
+                        task, drop_reason="the run exited before it could be delivered"
+                    )
+                    return
+                if acc.error_result_seen:
+                    await self._close_input(
+                        task,
+                        drop_reason=(
+                            "the run reported an error, so polybridge stopped forwarding messages "
+                            "and closed its input"
+                        ),
+                    )
+                    return
+                if task.input_closed:
+                    await self._close_input(task, drop_reason="the run's stdin had closed")
+                    return
+                if await self._forward_pending(task):
+                    continue
+                if acc.awaiting_input:
+                    await self._close_input(task)
+                    return
+                if background_idle_bound_reached(
+                    acc, time.monotonic() - task.last_output_at, bound
+                ):
+                    acc.background_abandoned = True
+                    task.bridge_notices.append(_BACKGROUND_ABANDONED_NOTICE.format(bound=bound))
+                    _write_event(
+                        task,
+                        "notice",
+                        {"text": _BACKGROUND_ABANDONED_NOTICE.format(bound=bound)},
+                    )
+                    await self._close_input(task)
+                    return
+                try:
+                    await asyncio.wait_for(task.pump_wake.wait(), timeout=PUMP_POLL_SECONDS)
+                except (asyncio.TimeoutError, TimeoutError):
+                    pass
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("task %s: input pump failed", task.task_id)
+            # Bookkeeping must never change an outcome — but an open stdin would keep the run
+            # from ever settling, so the input is closed regardless.
+            _close_stdin(task)
+
+    async def _finish_pump(self, task: Task) -> None:
+        """Let the pump run its exit-path close, so undelivered messages are reported before
+        `task_finished`; bounded, then cancelled. Called by `_monitor` after the process exits."""
+        pump = task.pump
+        if pump is not None and not pump.done():
+            task.pump_wake.set()
+            try:
+                await asyncio.wait_for(asyncio.shield(pump), timeout=PUMP_STOP_GRACE_SECONDS)
+            except (asyncio.TimeoutError, TimeoutError):
+                log.warning("task %s: input pump did not stop; cancelling it", task.task_id)
+                pump.cancel()
+                await asyncio.gather(pump, return_exceptions=True)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.debug("task %s: input pump ended with an error", task.task_id, exc_info=True)
+        if task.live_input and not task.inbox_closed:
+            # The pump never got to its close (it failed, or was cancelled above): report what is
+            # known to be queued here, and close input so no later send is accepted.
+            self._report_undelivered(
+                task, list(task.inbox_queue), "the run exited before it could be delivered"
+            )
+            task.inbox_queue.clear()
+            try:
+                inbox.mark_closed(self._log_dir, task.task_id)
+            except OSError:
+                log.error("task %s: could not write its inbox closed marker", task.task_id)
+            task.inbox_closed = True
+            _close_stdin(task)
 
     @property
     def log_dir(self) -> Path:
@@ -2010,6 +2274,17 @@ class TaskRegistry:
 # stdin promptly, so this only bounds a wedged reader; the message stays queued in the transport.
 STDIN_DRAIN_SECONDS = 10.0
 
+# How often the input pump re-checks a live-input run without being woken (another process's
+# inbox append is only noticed this way), and how long `_monitor` lets it finish after exit.
+PUMP_POLL_SECONDS = 1.0
+PUMP_STOP_GRACE_SECONDS = 5.0
+
+_BACKGROUND_ABANDONED_NOTICE = (
+    "background task abandoned at the idle bound: the run waited on background tasks alone, with "
+    "no output, for {bound:.0f}s (PB_LIVE_IDLE_SECONDS), so polybridge closed its input anyway — "
+    "which kills them, and nobody sees their result. Reported as failed."
+)
+
 # What a write to a live-input run's stdin raises once the reader is gone.
 _PIPE_ERRORS = (BrokenPipeError, ConnectionResetError)
 
@@ -2169,6 +2444,7 @@ async def _drain_stdout(task: Task, registry: TaskRegistry) -> None:
                     handle.close()
                     handle = None
 
+            task.last_output_at = time.monotonic()
             line = text.rstrip("\n")
             if not line.strip():
                 continue
@@ -2181,6 +2457,8 @@ async def _drain_stdout(task: Task, registry: TaskRegistry) -> None:
             backend = get_backend(task.backend)
             backend.ingest(event, task.acc)
             _record_events(task, backend, event, raw_offset)
+            if task.pump is not None:
+                task.pump_wake.set()
 
             # Recorded the moment it is disclosed, not at the end of the run. A backend that mints
             # its own session id only reveals it mid-stream, so waiting until exit would mean a
@@ -2319,6 +2597,7 @@ async def _monitor(task: Task, registry: TaskRegistry) -> None:
     try:
         exit_code = await task.proc.wait()
         await _finish_draining(task)
+        await registry._finish_pump(task)
 
         task.exit_code = exit_code
         task.finished_at = _now()

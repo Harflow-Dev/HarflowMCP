@@ -1,7 +1,8 @@
-"""polybridge-ctl: a read-only CLI over the task records `polybridge-server` writes to disk.
+"""polybridge-ctl: a CLI over the task records `polybridge-server` writes to disk.
 
 Deliberately separate from the MCP server: this never starts retention, never constructs a
-`TaskRegistry`, and never signals a process. It reads exactly what `store` and
+`TaskRegistry`, and never signals a process. Its one write is `send`, which appends a message to a
+live-input task's inbox under that inbox's lock (see `inbox.py`) for the owning server to deliver. It reads exactly what `store` and
 `tasks.default_log_dir` already expose, which is also why `list`'s status resolution is cheap for a
 settled task — see `store.resolve_status`'s `detail=False` shortcut.
 """
@@ -15,7 +16,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from . import store
+from . import identity, inbox, store
 from .tasks import default_log_dir
 
 _DURATION_RE = re.compile(r"^(\d+)([smhdw])$")
@@ -46,7 +47,7 @@ class _ArgumentParser(argparse.ArgumentParser):
         raise SystemExit(2)
 
 
-def _build_parser() -> tuple[_ArgumentParser, _ArgumentParser, _ArgumentParser]:
+def _build_parser() -> tuple[_ArgumentParser, ...]:
     parser = _ArgumentParser(prog="polybridge-ctl")
     sub = parser.add_subparsers(dest="command", required=True, parser_class=_ArgumentParser)
 
@@ -60,7 +61,14 @@ def _build_parser() -> tuple[_ArgumentParser, _ArgumentParser, _ArgumentParser]:
     status_p.add_argument("task_id")
     status_p.add_argument("--json", action="store_true")
 
-    return parser, list_p, status_p
+    send_p = sub.add_parser(
+        "send", help="queue a message for a running live-input task (reports queued, not delivered)"
+    )
+    send_p.add_argument("task_id")
+    send_p.add_argument("text")
+    send_p.add_argument("--json", action="store_true")
+
+    return parser, list_p, status_p, send_p
 
 
 def _print_table(entries: list[dict[str, Any]]) -> None:
@@ -150,20 +158,51 @@ def _cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_send(args: argparse.Namespace) -> int:
+    def fail(code: str, message: str) -> int:
+        print(f"polybridge-ctl: error: {message}", file=sys.stderr)
+        if args.json:
+            print(json.dumps({"v": 1, "error": {"code": code, "message": message}}))
+        return 1
+
+    try:
+        task_id = store.validate_task_id(args.task_id)
+    except store.InvalidTaskId:
+        return fail("invalid_task_id", f"not a valid task id: {args.task_id!r}")
+    if not args.text.strip():
+        return fail("empty_text", "text must be a non-empty string")
+
+    try:
+        by = identity.own_identity()
+    except Exception:
+        by = None
+    try:
+        result = inbox.send_to_record(default_log_dir(), task_id, args.text, by=by)
+    except inbox.SendRefused as exc:
+        return fail(exc.code, str(exc))
+
+    if args.json:
+        print(json.dumps({"v": 1, "result": result}))
+    else:
+        print(f"queued {result['message_id']} for {task_id} (not yet delivered)")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Entry point for the `polybridge-ctl` console script, which calls `sys.exit(main())`."""
     argv = sys.argv[1:] if argv is None else list(argv)
     json_requested = "--json" in argv
 
-    parser, list_p, status_p = _build_parser()
-    parser.json_requested = json_requested
-    list_p.json_requested = json_requested
-    status_p.json_requested = json_requested
+    parser, list_p, status_p, send_p = _build_parser()
+    for each in (parser, list_p, status_p, send_p):
+        each.json_requested = json_requested
 
     args = parser.parse_args(argv)
 
     if args.command == "list":
         return _cmd_list(args, list_p)
+    if args.command == "send":
+        return _cmd_send(args)
     return _cmd_status(args)
 
 

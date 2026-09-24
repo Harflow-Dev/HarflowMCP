@@ -20,8 +20,13 @@ from polybridge.tasks import TaskRegistry
 OWNER = {"pid": 1, "start_time": "t", "markers": []}
 
 
+RESULT_LINE = '{"type":"result","subtype":"success","is_error":false,"result":"ok"}'
+
+
 class _CatDouble:
-    """Spawns `cat > <file>` on a stdin pipe, so what reaches the run's stdin can be read back."""
+    """Spawns a shell on a stdin pipe that copies the first line it reads to a file, answers with a
+    claude `result`, then waits for EOF — the smallest process that behaves like a live agent.
+    Ingest and classify are claude's own, so the input pump sees the result and closes stdin."""
 
     name = "live-cat-double"
     binary = "/bin/sh"
@@ -32,7 +37,7 @@ class _CatDouble:
 
     def build_start_argv(self, prompt, **kwargs):
         return Invocation(
-            [self.binary, "-c", f"cat > {self.sink}"],
+            [self.binary, "-c", f"head -n 1 > {self.sink}; echo '{RESULT_LINE}'; cat > /dev/null"],
             stdin_mode=STDIN_PIPE,
             initial_input=self.encode_live_message(prompt),
         )
@@ -46,13 +51,13 @@ class _CatDouble:
         return Enforcement(freedom=freedom, mechanism="none", os_enforced=False, writes_confined=False)
 
     def ingest(self, event, acc):
-        return None
+        backends.ClaudeBackend().ingest(event, acc)
 
     def normalize(self, event, acc):
         return []
 
     def classify(self, acc, exit_code):
-        return "completed" if exit_code == 0 else "failed"
+        return backends.ClaudeBackend().classify(acc, exit_code)
 
     def encode_live_message(self, text):
         return backends.ClaudeBackend().encode_live_message(text)
@@ -101,7 +106,7 @@ async def test_a_devnull_invocation_never_gets_a_pipe(
         name = "devnull-cat-double"
 
         def build_start_argv(self, prompt, **kwargs):
-            return Invocation([self.binary, "-c", f"cat > {self.sink}"])
+            return Invocation([self.binary, "-c", f"cat > {self.sink}; echo '{RESULT_LINE}'"])
 
     backend = _Devnull(sink)
     monkeypatch.setitem(backends.BACKENDS, backend.name, backend)
@@ -427,3 +432,569 @@ def test_a_non_success_subtype_is_an_error_even_without_is_error() -> None:
     acc = _feed(_result("ok"))
     assert not acc.error_result_seen
     assert claude.classify(acc, 0) == "completed"
+
+
+# --- A3.4: the input pump, the close protocol, and send ------------------------------------------
+
+import asyncio  # noqa: E402
+import os  # noqa: E402
+import sys  # noqa: E402
+from collections import deque  # noqa: E402
+from datetime import datetime, timezone  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
+
+from polybridge import control, identity, inbox  # noqa: E402
+from polybridge import tasks as tasks_module  # noqa: E402
+from polybridge.tasks import Task  # noqa: E402
+
+FAKE_AGENT = Path(__file__).with_name("fake_claude_agent.py")
+SETTLE_SECONDS = 20.0
+
+
+class _FakeClaude:
+    """claude's own ingest/normalize/classify/encoding, driving `tests/fake_claude_agent.py`."""
+
+    name = "fake-claude"
+    binary = sys.executable
+    capabilities = backends.ClaudeBackend.capabilities
+
+    def __init__(self) -> None:
+        self._claude = backends.ClaudeBackend()
+
+    def build_start_argv(self, prompt, **kwargs):
+        return Invocation(
+            [self.binary, str(FAKE_AGENT), kwargs.get("session_id") or "s"],
+            stdin_mode=STDIN_PIPE,
+            initial_input=self.encode_live_message(prompt),
+        )
+
+    build_resume_argv = build_start_argv
+
+    def assert_safe(self, invocation, freedom, network=None):
+        assert isinstance(invocation, Invocation) and invocation.live_input
+
+    def enforcement(self, freedom, network=None):
+        return self._claude.enforcement(freedom, network)
+
+    def ingest(self, event, acc):
+        self._claude.ingest(event, acc)
+
+    def normalize(self, event, acc):
+        return self._claude.normalize(event, acc)
+
+    def classify(self, acc, exit_code):
+        return self._claude.classify(acc, exit_code)
+
+    def encode_live_message(self, text):
+        return self._claude.encode_live_message(text)
+
+
+@pytest.fixture
+def fake(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A registry whose owner is this real process (so a non-owner send finds it alive), with the
+    fake agent registered and its stdin log under tmp_path."""
+    backend = _FakeClaude()
+    monkeypatch.setitem(backends.BACKENDS, backend.name, backend)
+    stdin_log = tmp_path / "agent-stdin.jsonl"
+    monkeypatch.setenv("FAKE_CLAUDE_LOG", str(stdin_log))
+    registry = TaskRegistry(log_dir=tmp_path / "streams", owner=identity.own_identity())
+    return SimpleNamespace(backend=backend, registry=registry, stdin_log=stdin_log, repo=tmp_path)
+
+
+async def _settle(task) -> None:
+    await asyncio.wait_for(task.done.wait(), SETTLE_SECONDS)
+
+
+async def _until(predicate, timeout: float = SETTLE_SECONDS) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not predicate():
+        if asyncio.get_running_loop().time() > deadline:
+            pytest.fail("condition never held")
+        await asyncio.sleep(0.02)
+
+
+def _received(stdin_log: Path) -> list[str]:
+    if not stdin_log.exists():
+        return []
+    return [
+        json.loads(line)["message"]["content"][0]["text"]
+        for line in stdin_log.read_text().splitlines()
+    ]
+
+
+def _kinds(registry, task) -> list[str]:
+    return [event["kind"] for event in _events(registry.log_dir, task.task_id)]
+
+
+async def test_a_mid_turn_message_is_folded_into_the_running_turn(fake) -> None:
+    task = await fake.registry.start("slow 1.5 first", fake.repo, backend=fake.backend)
+    await _until(lambda: task.acc.turn_open)
+
+    queued = await fake.registry.send_message(task, "and this too")
+    assert queued["status"] == "queued" and queued["task_id"] == task.task_id
+
+    await _settle(task)
+    assert task.status == "completed"
+    assert task.acc.result_count == 1
+    assert task.acc.summary == "first | folded: and this too"
+    assert _received(fake.stdin_log) == ["slow 1.5 first", "and this too"]
+    assert task.input_closed and task.inbox_closed
+    assert inbox.is_closed(fake.registry.log_dir, task.task_id)
+
+    events = _events(fake.registry.log_dir, task.task_id)
+    users = [e for e in events if e["kind"] == "user_message"]
+    assert [(e["source"], e["text"]) for e in users] == [
+        ("initial", "slow 1.5 first"),
+        ("injected", "and this too"),
+    ]
+    assert users[1]["message_id"] == queued["message_id"]
+    assert events[-1]["kind"] == "task_finished"
+
+
+async def test_a_send_after_the_close_is_refused_with_resume_advice(fake) -> None:
+    task = await fake.registry.start("reply hi", fake.repo, backend=fake.backend)
+    await _settle(task)
+    assert task.status == "completed"
+
+    with pytest.raises(inbox.SendRefused, match="finished; continue with resume_task") as caught:
+        await fake.registry.send_message(task, "too late")
+    assert caught.value.code == "closed"
+    # And from another process, via the on-disk inbox.
+    with pytest.raises(inbox.SendRefused, match="finished; continue with resume_task"):
+        await fake.registry.send_to_record(task.task_id, "too late")
+
+
+async def test_a_message_sent_from_another_process_is_delivered(fake) -> None:
+    task = await fake.registry.start("slow 2 first", fake.repo, backend=fake.backend)
+    await _until(lambda: task.acc.turn_open)
+
+    queued = await asyncio.to_thread(
+        inbox.send_to_record, fake.registry.log_dir, task.task_id, "from afar", by=None
+    )
+    assert queued["status"] == "queued"
+
+    await _settle(task)
+    assert task.status == "completed"
+    assert "from afar" in task.acc.summary
+    user_ids = [
+        e.get("message_id")
+        for e in _events(fake.registry.log_dir, task.task_id)
+        if e["kind"] == "user_message"
+    ]
+    assert queued["message_id"] in user_ids
+
+
+async def test_an_open_background_task_holds_input_open_until_it_finishes(fake) -> None:
+    task = await fake.registry.start("bg b1 1", fake.repo, backend=fake.backend)
+    await _until(lambda: task.acc.result_count == 1)
+    assert task.acc.background_open == {"b1"}
+    assert not task.input_closed
+
+    # While idle-but-waiting, a message starts a turn of its own.
+    await fake.registry.send_message(task, "reply meanwhile")
+    await _settle(task)
+
+    assert task.status == "completed"
+    assert task.acc.background_open == set()
+    assert task.acc.result_count == 3  # STARTED, meanwhile, and the background follow-up turn
+    assert task.acc.summary == "bg b1 done"
+    assert _received(fake.stdin_log) == ["bg b1 1", "reply meanwhile"]
+
+
+async def test_the_idle_bound_closes_a_background_wait_and_fails_the_run(
+    fake, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PB_LIVE_IDLE_SECONDS", "0.5")
+    task = await fake.registry.start("silentbg forever", fake.repo, backend=fake.backend)
+    await _settle(task)
+
+    assert task.acc.background_abandoned
+    assert task.status == "failed"
+    assert task.exit_code == 0
+    assert any("abandoned at the idle bound" in notice for notice in task.bridge_notices)
+    record = store.read(fake.registry.log_dir, task.task_id)
+    assert any("abandoned at the idle bound" in n for n in record.bridge_notices)
+    assert "notice" in _kinds(fake.registry, task)
+
+
+async def test_an_error_result_closes_input_and_the_run_fails(fake) -> None:
+    task = await fake.registry.start("error", fake.repo, backend=fake.backend)
+    await _settle(task)
+    assert task.status == "failed"
+    assert task.acc.error_result_seen
+    assert task.inbox_closed
+    with pytest.raises(inbox.SendRefused, match="finished; continue with resume_task"):
+        await fake.registry.send_message(task, "anything")
+
+
+async def test_a_run_that_exits_without_a_result_fails_and_closes_its_input(fake) -> None:
+    task = await fake.registry.start("bg b1 30", fake.repo, backend=fake.backend)
+    await _until(lambda: task.acc.result_count == 1)
+    await fake.registry.send_message(task, "die 3")
+    await _settle(task)
+
+    assert task.exit_code == 3
+    assert task.status == "failed"
+    assert task.inbox_closed
+    with pytest.raises(inbox.SendRefused, match="finished; continue with resume_task"):
+        await fake.registry.send_message(task, "after exit")
+
+
+async def test_messages_queued_when_the_run_exits_are_reported_undelivered(tmp_path: Path) -> None:
+    registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
+    stdin = _Stdin()
+    task = _stub_task(tmp_path, stdin)
+    task.proc.returncode = 3
+    task.inbox_queue.append(inbox.make_message("never sent", None))
+
+    await asyncio.wait_for(registry._pump(task), 5)
+
+    assert stdin.written == [] and task.inbox_closed
+    undelivered = [e for e in _events(tmp_path, task.task_id) if e["kind"] == "undelivered"]
+    assert [e["text"] for e in undelivered] == ["never sent"]
+    assert "exited" in undelivered[0]["reason"]
+    assert any("was not delivered" in notice for notice in task.bridge_notices)
+
+
+async def test_the_monitor_lets_the_pump_report_before_task_finished(fake) -> None:
+    """A message accepted while the run is exiting is reported before `task_finished`."""
+    task = await fake.registry.start("bg b1 30", fake.repo, backend=fake.backend)
+    await _until(lambda: task.acc.result_count == 1)
+    original = fake.registry._forward_pending
+
+    async def hold_back(t):  # the pump stops forwarding, so the queued message stays queued
+        return False
+
+    fake.registry._forward_pending = hold_back
+    await fake.registry.send_message(task, "stuck in the queue")
+    os.killpg(task.pgid, 9)
+    await _settle(task)
+    fake.registry._forward_pending = original
+
+    kinds = _kinds(fake.registry, task)
+    assert "undelivered" in kinds
+    assert kinds.index("undelivered") < kinds.index("task_finished")
+
+
+async def test_cancelling_a_live_task_closes_its_input(fake) -> None:
+    task = await fake.registry.start("slow 30 x", fake.repo, backend=fake.backend)
+    await _until(lambda: task.acc.turn_open)
+    await fake.registry.cancel(task)
+    await _settle(task)
+    assert task.status == "cancelled"
+    assert task.inbox_closed
+    with pytest.raises(inbox.SendRefused):
+        await fake.registry.send_message(task, "after cancel")
+
+
+async def test_a_classic_task_refuses_a_message(fake, monkeypatch: pytest.MonkeyPatch) -> None:
+    class _Classic(_CatDouble):
+        name = "classic-double"
+
+        def build_start_argv(self, prompt, **kwargs):
+            return Invocation([self.binary, "-c", f"echo '{RESULT_LINE}'"])
+
+    backend = _Classic(fake.repo / "unused")
+    monkeypatch.setitem(backends.BACKENDS, backend.name, backend)
+    task = await fake.registry.start("x", fake.repo, backend=backend)
+    with pytest.raises(inbox.SendRefused, match="not started with live input") as caught:
+        await fake.registry.send_message(task, "hi")
+    assert caught.value.code == "not_live_input"
+    await _settle(task)
+    with pytest.raises(inbox.SendRefused) as caught:
+        await fake.registry.send_to_record(task.task_id, "hi")
+    assert caught.value.code == "not_live_input"
+
+
+# Unit level: a Task with a stub process, so every branch of the close protocol is deterministic.
+
+
+class _Stdin:
+    def __init__(self, *, fail_write: Exception | None = None, fail_drain: Exception | None = None):
+        self.written: list[bytes] = []
+        self.closed = False
+        self._fail_write = fail_write
+        self._fail_drain = fail_drain
+
+    def is_closing(self) -> bool:
+        return self.closed
+
+    def write(self, data: bytes) -> None:
+        if self._fail_write is not None:
+            raise self._fail_write
+        self.written.append(data)
+
+    async def drain(self) -> None:
+        if self._fail_drain is not None:
+            raise self._fail_drain
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _stub_task(log_dir: Path, stdin: _Stdin, task_id: str = "live1") -> Task:
+    from polybridge.events import EventLog
+
+    log_dir.mkdir(parents=True, exist_ok=True)
+    task = Task(
+        task_id=task_id,
+        backend="claude",
+        session_id="s",
+        repo_path=log_dir,
+        prompt="p",
+        max_turns=None,
+        log_path=log_dir / f"{task_id}.jsonl",
+        started_at=datetime.now(timezone.utc),
+        live_input=True,
+    )
+    task.proc = SimpleNamespace(stdin=stdin, returncode=None, pid=None)
+    task.events = EventLog(events_path(log_dir, task_id), task_id)
+    return task
+
+
+def _texts(data: list[bytes]) -> list[str]:
+    return [json.loads(chunk)["message"]["content"][0]["text"] for chunk in data]
+
+
+async def test_an_error_result_drops_every_queued_message_as_undelivered(tmp_path: Path) -> None:
+    registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
+    stdin = _Stdin()
+    task = _stub_task(tmp_path, stdin)
+    task.inbox_queue.extend([inbox.make_message("one", None), inbox.make_message("two", None)])
+    fd = inbox.lock_sync(tmp_path, task.task_id)
+    inbox.append_locked(tmp_path, task.task_id, inbox.make_message("three", None))
+    inbox.unlock(fd)
+    task.acc.error_result_seen = True
+
+    await asyncio.wait_for(registry._pump(task), 5)
+
+    assert stdin.written == [] and stdin.closed
+    assert task.inbox_closed and inbox.is_closed(tmp_path, task.task_id)
+    undelivered = [e for e in _events(tmp_path, task.task_id) if e["kind"] == "undelivered"]
+    assert sorted(e["text"] for e in undelivered) == ["one", "three", "two"]
+    assert all("reported an error" in e["reason"] for e in undelivered)
+    assert sum("was not delivered" in n for n in task.bridge_notices) == 3
+
+
+async def test_idle_with_nothing_queued_closes_input(tmp_path: Path) -> None:
+    registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
+    stdin = _Stdin()
+    task = _stub_task(tmp_path, stdin)
+    task.acc.result_count, task.acc.awaiting_input = 1, True
+
+    await asyncio.wait_for(registry._pump(task), 5)
+
+    assert stdin.closed and task.inbox_closed and stdin.written == []
+
+
+async def test_a_send_racing_the_close_is_either_delivered_or_refused(tmp_path: Path) -> None:
+    """The close protocol holds the inbox lock from its last read to the marker: a sender that got
+    the lock first is forwarded; one that comes after is refused. Simulated by holding the lock (as
+    a sender would) while the pump tries to close, appending, then releasing."""
+    registry = TaskRegistry(log_dir=tmp_path, owner=identity.own_identity())
+    store.write(
+        tmp_path,
+        store.TaskRecord(
+            task_id="live1",
+            backend="claude",
+            session_id="s",
+            repo_path=str(tmp_path),
+            started_at=datetime.now(timezone.utc).isoformat(),
+            owner=identity.own_identity(),
+            live_input=True,
+        ),
+    )
+    stdin = _Stdin()
+    task = _stub_task(tmp_path, stdin)
+    task.acc.result_count, task.acc.awaiting_input = 1, True
+
+    fd = inbox.lock_sync(tmp_path, task.task_id)
+    pump = asyncio.create_task(registry._pump(task))
+    await asyncio.sleep(0.3)
+    assert not pump.done() and not stdin.closed  # waiting for the lock, stdin still open
+    inbox.append_locked(tmp_path, task.task_id, inbox.make_message("just in time", None))
+    inbox.unlock(fd)
+    await asyncio.wait_for(pump, 5)
+
+    assert _texts(stdin.written) == ["just in time"]
+    assert stdin.closed and inbox.is_closed(tmp_path, task.task_id)
+    with pytest.raises(inbox.SendRefused, match="finished; continue with resume_task"):
+        inbox.send_to_record(tmp_path, task.task_id, "too late", by=None)
+    with pytest.raises(inbox.SendRefused, match="finished; continue with resume_task"):
+        await registry.send_message(task, "too late")
+
+
+async def test_concurrent_senders_never_lose_an_acknowledged_message(tmp_path: Path) -> None:
+    """Many senders race a closing pump: every "queued" message ends up written or reported."""
+    owner = identity.own_identity()
+    registry = TaskRegistry(log_dir=tmp_path, owner=owner)
+    store.write(
+        tmp_path,
+        store.TaskRecord(
+            task_id="live1",
+            backend="claude",
+            session_id="s",
+            repo_path=str(tmp_path),
+            started_at=datetime.now(timezone.utc).isoformat(),
+            owner=owner,
+            live_input=True,
+        ),
+    )
+    stdin = _Stdin()
+    task = _stub_task(tmp_path, stdin)
+    task.acc.result_count = 1
+
+    accepted: list[str] = []
+
+    def sender(n: int) -> None:
+        for i in range(20):
+            try:
+                accepted.append(
+                    inbox.send_to_record(tmp_path, "live1", f"m{n}-{i}", by=None)["message_id"]
+                )
+            except inbox.SendRefused as exc:
+                assert exc.code == "closed"
+
+    senders = [asyncio.to_thread(sender, n) for n in range(4)]
+    pump = asyncio.create_task(registry._pump(task))
+
+    async def close_soon() -> None:
+        # Each forward clears awaiting_input (a turn is owed); with no agent to answer, keep
+        # re-asserting it the way each turn's result would, until the pump closes.
+        await asyncio.sleep(0.05)
+        while not pump.done():
+            task.acc.awaiting_input = True
+            task.pump_wake.set()
+            await asyncio.sleep(0.01)
+
+    await asyncio.gather(*senders, close_soon())
+    await asyncio.wait_for(pump, 10)
+
+    written = {
+        e["message_id"] for e in _events(tmp_path, "live1") if e["kind"] == "user_message"
+    }
+    reported = {
+        e["message_id"] for e in _events(tmp_path, "live1") if e["kind"] == "undelivered"
+    }
+    assert accepted, "no send was accepted before the close — the race was not exercised"
+    assert set(accepted) <= written | reported
+    assert len(_texts(stdin.written)) == len(written)
+
+
+@pytest.mark.parametrize("error", [BrokenPipeError(), ConnectionResetError()])
+async def test_a_broken_pipe_on_write_reports_the_rest_undelivered(tmp_path: Path, error) -> None:
+    registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
+    stdin = _Stdin(fail_write=error)
+    task = _stub_task(tmp_path, stdin)
+    task.inbox_queue.extend([inbox.make_message("a", None), inbox.make_message("b", None)])
+
+    await asyncio.wait_for(registry._pump(task), 5)
+
+    assert task.input_closed and task.inbox_closed
+    undelivered = [e["text"] for e in _events(tmp_path, task.task_id) if e["kind"] == "undelivered"]
+    assert undelivered == ["a", "b"]
+
+
+@pytest.mark.parametrize("error", [BrokenPipeError(), ConnectionResetError()])
+async def test_a_broken_pipe_on_drain_stops_the_pump(tmp_path: Path, error) -> None:
+    registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
+    stdin = _Stdin(fail_drain=error)
+    task = _stub_task(tmp_path, stdin)
+    task.inbox_queue.append(inbox.make_message("a", None))
+
+    await asyncio.wait_for(registry._pump(task), 5)
+
+    assert task.input_closed and task.inbox_closed and stdin.closed
+    kinds = [e["kind"] for e in _events(tmp_path, task.task_id)]
+    assert kinds.count("user_message") == 1  # written; the pipe broke only afterwards
+
+
+async def test_a_closing_transport_counts_as_closed(tmp_path: Path) -> None:
+    stdin = _Stdin()
+    stdin.closed = True
+    task = _stub_task(tmp_path, stdin)
+    assert tasks_module._write_stdin(task, b"x") is False
+    assert task.input_closed
+
+
+# send refusals on the non-owner path, in order.
+
+
+def _record(tmp_path: Path, **overrides) -> None:
+    fields = dict(
+        task_id="t1",
+        backend="claude",
+        session_id="s",
+        repo_path=str(tmp_path),
+        started_at=datetime.now(timezone.utc).isoformat(),
+        owner=identity.own_identity(),
+        live_input=True,
+    )
+    fields.update(overrides)
+    store.write(tmp_path, store.TaskRecord(**fields))
+
+
+@pytest.mark.parametrize(
+    ("overrides", "closed", "code"),
+    [
+        ({"live_input": False}, True, "not_live_input"),
+        ({}, True, "closed"),
+        ({"status": "completed", "exit_code": 0}, False, "settled"),
+        ({"owner": {"pid": 999_999_9, "start_time": "Mon Jan  1 00:00:00 2001", "markers": []}},
+         False, "owner_not_alive"),
+        ({"owner": None}, False, "owner_not_alive"),
+        ({"owner": {"pid": 1, "start_time": None, "markers": []}}, False, "owner_not_alive"),
+    ],
+    ids=["not-live", "closed", "settled", "owner-dead", "owner-unknown", "owner-legacy"],
+)
+def test_a_non_owner_send_is_refused_in_order(tmp_path: Path, overrides, closed, code) -> None:
+    _record(tmp_path, **overrides)
+    if closed:
+        inbox.mark_closed(tmp_path, "t1")
+    with pytest.raises(inbox.SendRefused) as caught:
+        inbox.send_to_record(tmp_path, "t1", "hi", by=None)
+    assert caught.value.code == code
+    assert not inbox.inbox_path(tmp_path, "t1").read_bytes()
+
+
+def test_a_non_owner_send_to_an_unknown_task(tmp_path: Path) -> None:
+    with pytest.raises(inbox.SendRefused) as caught:
+        inbox.send_to_record(tmp_path, "nope", "hi", by=None)
+    assert caught.value.code == "unknown_task"
+
+
+def test_a_non_owner_send_appends_one_durable_line(tmp_path: Path) -> None:
+    _record(tmp_path)
+    result = inbox.send_to_record(tmp_path, "t1", "line one\nline two", by={"pid": 7})
+    assert result["status"] == "queued"
+    messages, offset = inbox.read_new(tmp_path, "t1", 0)
+    assert [m["text"] for m in messages] == ["line one\nline two"]
+    assert messages[0]["id"] == result["message_id"] and messages[0]["by"] == {"pid": 7}
+    assert offset == inbox.inbox_path(tmp_path, "t1").stat().st_size
+    assert inbox.read_new(tmp_path, "t1", offset) == ([], offset)
+
+
+def test_read_new_leaves_a_torn_line_unread(tmp_path: Path) -> None:
+    path = inbox.inbox_path(tmp_path, "t1")
+    good = json.dumps(inbox.make_message("ok", None)) + "\n"
+    path.write_text(good + "not json\n" + '{"id": "x", "text": "partial')
+    messages, offset = inbox.read_new(tmp_path, "t1", 0)
+    assert [m["text"] for m in messages] == ["ok"]
+    assert offset == len((good + "not json\n").encode())
+
+
+def test_mark_closed_is_idempotent(tmp_path: Path) -> None:
+    inbox.mark_closed(tmp_path, "t1")
+    inbox.mark_closed(tmp_path, "t1")
+    assert inbox.is_closed(tmp_path, "t1")
+
+
+def test_a_held_inbox_lock_times_out_the_sender(tmp_path: Path) -> None:
+    _record(tmp_path)
+    fd = inbox.lock_sync(tmp_path, "t1")
+    try:
+        with pytest.raises(inbox.SendRefused) as caught:
+            inbox.send_to_record(tmp_path, "t1", "hi", by=None, timeout=0.2)
+        assert caught.value.code == "lock_timeout"
+    finally:
+        inbox.unlock(fd)

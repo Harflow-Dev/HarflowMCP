@@ -157,6 +157,22 @@ def test_sweep_deletes_an_old_settled_task_but_never_its_lock_file(tmp_path: Pat
     assert (log_dir / f"{record.task_id}.lock").exists()
 
 
+def test_sweep_keeps_the_inbox_lock_file_but_deletes_the_closed_marker(tmp_path: Path) -> None:
+    """`<id>.inbox.jsonl` is the live-input inbox's flock target, and lock files are never deleted."""
+    log_dir = tmp_path / "tasks"
+    log_dir.mkdir()
+    record = make_record()
+    store.write(log_dir, record)
+    (log_dir / f"{record.task_id}.inbox.jsonl").write_text("")
+    (log_dir / f"{record.task_id}.inbox.closed").write_text("{}")
+
+    stats = retention.sweep(log_dir, 30, datetime.now(timezone.utc))
+
+    assert stats["deleted_tasks"] == 1
+    assert (log_dir / f"{record.task_id}.inbox.jsonl").exists()
+    assert not (log_dir / f"{record.task_id}.inbox.closed").exists()
+
+
 def test_sweep_keeps_a_young_task(tmp_path: Path) -> None:
     log_dir = tmp_path / "tasks"
     log_dir.mkdir()

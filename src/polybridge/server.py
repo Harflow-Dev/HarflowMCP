@@ -18,7 +18,7 @@ from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
 from mcp.types import INTERNAL_ERROR, INVALID_PARAMS
 
-from . import backends, control, identity, store
+from . import backends, control, identity, inbox, store
 from .backends import DEFAULT_BACKEND, DEFAULT_FREEDOM, FREEDOMS
 from .tasks import (
     TERMINAL_STATUSES,
@@ -71,7 +71,12 @@ mcp = MCPServer(
         "network barrier only, never reachability.\n\n"
         "A wait_for_task that comes back still 'running' has not failed — the run is untouched, so "
         "call again or poll. Tasks outlive this server process: ones started by an earlier "
-        "polybridge server are still reported, marked 'recovered: true'."
+        "polybridge server are still reported, marked 'recovered: true'.\n\n"
+        "A claude task started without max_turns has live input (`live_input: true`): "
+        "send_message adds a message while it runs — folded into the running turn, or starting a "
+        "new one if the agent is idle. It returns 'queued', never 'delivered'. Once the agent is "
+        "idle with nothing queued the task closes its own input and settles as usual; a send after "
+        "that is refused with 'finished; continue with resume_task'."
     ),
 )
 
@@ -603,6 +608,42 @@ async def cancel_task(task_id: str) -> dict[str, Any]:
         response = store.snapshot(_reg().log_dir, record) if record is not None else {}
     response["cascade"] = cascade
     return response
+
+
+@mcp.tool()
+async def send_message(task_id: str, text: str) -> dict[str, Any]:
+    """Add a message to a running live-input task, as if the user had typed it mid-run.
+
+    Args:
+        task_id: A running task whose `live_input` is true (claude, started without `max_turns`).
+        text: The message.
+
+    Returns `status: "queued"` — never "delivered". The task's input pump writes the message to the
+    agent: while a turn is running it is folded into that turn; if the agent is idle it starts a new
+    one. The task's event log then records a `user_message` event (`source: "injected"`) when it is
+    written, or an `undelivered` event plus a notice if it never is (the run errored or exited first).
+
+    A live task closes its own input once it is idle with nothing queued, so it still settles
+    unattended. A send after that is refused with "finished; continue with resume_task" — which is
+    exactly what to do. Also refused: a task that was not started with live input, one that has
+    settled, and one whose owning polybridge server is not confirmed alive.
+    """
+    try:
+        store.validate_task_id(task_id)
+    except store.InvalidTaskId as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+    if not isinstance(text, str) or not text.strip():
+        raise MCPError(INVALID_PARAMS, "text must be a non-empty string")
+
+    try:
+        task = _reg().get(task_id)
+        if task is not None:
+            return await _reg().send_message(task, text)
+        if _reg().recover(task_id) is None:
+            raise MCPError(INVALID_PARAMS, f"unknown task_id: {task_id}")
+        return await _reg().send_to_record(task_id, text)
+    except inbox.SendRefused as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
 
 
 def main() -> None:

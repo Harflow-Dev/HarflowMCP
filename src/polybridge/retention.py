@@ -308,20 +308,21 @@ def _delete_task(log_dir: Path, record: store.TaskRecord, stats: dict[str, int],
 
 
 def _delete_task_files(log_dir: Path, task_id: str) -> None:
-    """Delete every `{task_id}.*` file except the lock, the record (`.meta.json`) last — a crash
+    """Delete every `{task_id}.*` file except the lock files — `.lock`, and `.inbox.jsonl`, which is
+    the inbox's `flock` target (see `inbox.py`) — with the record (`.meta.json`) last: a crash
     mid-sweep then leaves a record the next sweep retries, rather than orphaned stream files with
     nothing on disk to say they ever belonged to a task."""
     try:
         entries = list(log_dir.iterdir())
     except OSError:
         return
-    lock_name = f"{task_id}.lock"
+    lock_names = {f"{task_id}.lock", f"{task_id}.inbox.jsonl"}
     record_name = f"{task_id}{store.RECORD_SUFFIX}"
     prefix = f"{task_id}."
     record_path: Path | None = None
     for path in entries:
         name = path.name
-        if name == lock_name or not name.startswith(prefix):
+        if name in lock_names or not name.startswith(prefix):
             continue
         if name == record_name:
             record_path = path

@@ -44,7 +44,7 @@ def fake_task(tmp_path: Path) -> Task:
     return task
 
 
-async def test_all_seven_tools_are_exposed() -> None:
+async def test_all_eight_tools_are_exposed() -> None:
     async with Client(server.mcp) as client:
         names = sorted(tool.name for tool in (await client.list_tools()).tools)
 
@@ -54,6 +54,7 @@ async def test_all_seven_tools_are_exposed() -> None:
         "list_backends",
         "list_tasks",
         "resume_task",
+        "send_message",
         "start_task",
         "wait_for_task",
     ]
@@ -536,3 +537,57 @@ async def test_resume_forwards_network_through_both_server_branches(
 
     assert captured["network"] is True
     assert "sandbox_workspace_write.network_access=true" in captured["argv"]
+
+
+# --- send_message (live input) ------------------------------------------------------------------
+
+
+async def test_send_message_queues_for_a_live_task_the_server_owns(fake_task: Task) -> None:
+    fake_task.live_input = True
+    result = (await call("send_message", task_id="task-1", text="also this")).structured_content
+    assert result["status"] == "queued"
+    assert [m["text"] for m in fake_task.inbox_queue] == ["also this"]
+    assert fake_task.pump_wake.is_set()
+
+
+async def test_send_message_refuses_a_task_without_live_input(fake_task: Task) -> None:
+    with pytest.raises(MCPError, match="not started with live input"):
+        await call("send_message", task_id="task-1", text="hi")
+
+
+async def test_send_message_after_close_says_to_resume(fake_task: Task) -> None:
+    fake_task.live_input = True
+    fake_task.inbox_closed = True
+    with pytest.raises(MCPError, match="finished; continue with resume_task"):
+        await call("send_message", task_id="task-1", text="hi")
+
+
+async def test_send_message_validates_its_arguments() -> None:
+    with pytest.raises(MCPError, match="not a valid task id"):
+        await call("send_message", task_id="../etc", text="hi")
+    with pytest.raises(MCPError, match="unknown task_id"):
+        await call("send_message", task_id="nope", text="hi")
+    with pytest.raises(MCPError, match="non-empty"):
+        await call("send_message", task_id="nope", text="  ")
+
+
+async def test_send_message_reaches_a_recorded_task_via_its_inbox() -> None:
+    from polybridge import identity, inbox
+
+    log_dir = server._reg().log_dir
+    store.write(
+        log_dir,
+        store.TaskRecord(
+            task_id="other",
+            backend="claude",
+            session_id="s",
+            repo_path="/tmp",
+            started_at=datetime.now(timezone.utc).isoformat(),
+            owner=identity.own_identity(),
+            live_input=True,
+        ),
+    )
+    result = (await call("send_message", task_id="other", text="hello")).structured_content
+    assert result["status"] == "queued"
+    messages, _ = inbox.read_new(log_dir, "other", 0)
+    assert [m["text"] for m in messages] == ["hello"]

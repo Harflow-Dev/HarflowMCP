@@ -90,6 +90,7 @@ claude-desktop`.
 | `resume_task(task_id, followup_prompt, max_turns, network)` | No | Continues that session as a **new** task; `network` omitted inherits the parent's, an explicit boolean overrides it |
 | `list_tasks(status, backend)` | No | All tasks, oldest first, optionally filtered |
 | `cancel_task(task_id)` | Until dead | SIGTERM the process group, SIGKILL after 5s; cascades to live descendants and reports them under `cascade` |
+| `send_message(task_id, text)` | No | Adds a message to a running **live-input** task (claude, no `max_turns`); returns `queued`, never `delivered` |
 
 ## Backends are not interchangeable, and the tool says so
 
@@ -101,6 +102,7 @@ claude-desktop`.
 | dollar cost reported | ✅ | ❌ token counts only, `total_cost_usd` is null | ✅ per step, summed across the run | ❌ — the stream carries no cost **and no token counts at all** |
 | **real OS sandbox** | ❌ | ✅ `read-only` / `workspace-write` | ❌ | ❌ |
 | **per-command deny** | ✅ `git commit`/`git push` | ❌ none | ❌ none | ❌ none |
+| live input (`send_message`) | ✅ unless `max_turns` is set | ❌ | ❌ | ❌ |
 
 One `freedom` parameter expresses intent — `read_only`, `write_in_repo` (default), `publish`,
 `unrestricted` — and is mapped to each backend's real mechanism. Because those mechanisms differ in
@@ -386,24 +388,59 @@ every backend rather than each one's own stream format. Every line carries an en
 has one), `raw_offset` (byte offset into the raw stream log the event was derived from, null for
 `task_started`/`task_finished` and for any event recorded while the raw log itself could not be
 written), `task_id`, and `kind` — one of `task_started`, `task_finished`, `assistant_text`,
-`tool_call`, `tool_result`, `user_message`, `usage`, or `notice`.
+`tool_call`, `tool_result`, `user_message`, `usage`, `notice`, or `undelivered`. On a live-input
+task every message sent to the agent is a `user_message` — the prompt with `source: "initial"`, each
+`send_message` with `source: "injected"` and its `message_id` — and one that never reached it is an
+`undelivered` event with the same `message_id` and a `reason`.
 
 This file is written only by the server process that owns the task — never by a recovered task's
 new server, and never by `polybridge-ctl`. So a task recovered after its original server died has
 an events log that simply stops where that server's did, exactly like its raw stream log; there is
 no owner left to keep appending to it.
 
-## `polybridge-ctl`: a read-only CLI over the same records
+## Live input: talking to a claude task while it runs
+
+A claude task started without `max_turns` runs with `--input-format stream-json` and an open stdin
+(`live_input: true` on the task — read that field, not the backend name). `send_message` — or
+`polybridge-ctl send` from another process — queues a message for it:
+
+- while a turn is running, the message is **folded into that turn** (one result answering both);
+- if the agent is idle, it starts a new turn;
+- once the agent is idle with nothing queued and no background task open, polybridge closes its
+  stdin, so the task still exits and settles on its own and `wait_for_task` is never held open.
+
+A send is refused once input has closed, with **"finished; continue with resume_task"** — which is
+the thing to do. It is also refused for a task without live input, a settled one, and one whose
+owning server is not confirmed alive. It only ever returns `queued`: the event log's
+`user_message` / `undelivered` events say what actually happened. If a result reports an error the
+task stops forwarding at once, and every message still queued is reported `undelivered` with a
+notice rather than silently dropped.
+
+`max_turns` with live input has never been measured, so a capped task keeps the one-shot shape and
+cannot take messages. A task that started a background job keeps its input open until the job
+finishes (claude runs a turn for it by itself); one that waits on background jobs alone, with no
+output, for `PB_LIVE_IDLE_SECONDS` (default 600) has its input closed anyway — which kills the jobs
+— and is reported `failed`, never a clean completion.
+
+The owning server delivers the messages. If it restarts mid-run the turn in flight still finishes
+(the agent is its own session leader), but messages queued and not yet written are lost with it,
+and a background job still open is killed when the agent's stdin reaches EOF.
+
+## `polybridge-ctl`: a CLI over the same records
 
 ```bash
 polybridge-ctl list [--since 7d] [--json]
 polybridge-ctl status <task_id> [--json]
+polybridge-ctl send <task_id> <text> [--json]
 ```
 
 Reads exactly what the MCP tools read — `store` and `tasks.default_log_dir()` — but never starts
-retention, never constructs a `TaskRegistry`, and never signals a process. `--json` output is
+retention, never constructs a `TaskRegistry`, and never signals a process. Its one write is `send`,
+which appends to a live-input task's inbox under the inbox lock for the owning server to deliver,
+with the same refusals as `send_message`. `--json` output is
 always exactly one document on stdout, versioned the same way the event log is:
-`{"v": 1, "tasks": [...]}` for `list`, `{"v": 1, "task": {...}}` for `status`, and
+`{"v": 1, "tasks": [...]}` for `list`, `{"v": 1, "task": {...}}` for `status`,
+`{"v": 1, "result": {...}}` for `send`, and
 `{"v": 1, "error": {"code": ..., "message": ...}}` on failure. `--since` accepts a duration like
 `7d`, `12h`, or `30m`. Diagnostics go to stderr, never stdout, so a script parsing `--json` output
 never has to filter noise out of it.
@@ -415,7 +452,8 @@ A running server sweeps settled task records at most once every 24 hours, contro
 it is terminal, older than the window, has no still-running descendant (from `resume_task` or a nested dispatch), and no
 cancel/takeover attempt still in flight (a cancel attempt is finished once it has a `.sig` or
 `.failed`, or its canceller died and its lease expired) — and only `polybridge-server` ever runs it;
-`polybridge-ctl` is read-only and never triggers a sweep.
+`polybridge-ctl` never triggers a sweep. Lock files — `<task_id>.lock` and the live-input inbox
+`<task_id>.inbox.jsonl` — are never deleted.
 
 **A deleted task's id stops working for `resume_task` — with one exception.** `resume_task` checks
 its own in-memory registry before falling back to the on-disk record, so a server that still holds
