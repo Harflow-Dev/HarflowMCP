@@ -115,12 +115,15 @@ from .base import (
     Capabilities,
     Enforcement,
     Freedom,
+    Invocation,
     NetworkControl,
     ReasoningEffort,
     Status,
+    UnsupportedCapability,
     check_freedom,
     check_network,
     check_reasoning_effort,
+    classic_invocation_problem,
     reject_model,
 )
 
@@ -269,6 +272,7 @@ class VibeBackend:
             can_block=(),
             caveats=(_NETWORK_CONTROL_CAVEAT,),
         ),
+        supports_live_input=False,
     )
 
     def build_start_argv(
@@ -282,7 +286,7 @@ class VibeBackend:
         max_turns: int | None,
         reasoning_effort: str | None,
         network: bool | None = None,
-    ) -> list[str]:
+    ) -> Invocation:
         if session_id is not None:
             raise ValueError("vibe mints its own session id; one cannot be supplied")
         argv = [
@@ -292,8 +296,9 @@ class VibeBackend:
         # The single canonical token, last: no `--` separator works here (see module docstring), so
         # this is the only thing standing between prompt text and being parsed as an option.
         argv.append(f"--prompt={self._check_prompt(prompt)}")
-        self.assert_safe(argv, freedom, network)
-        return argv
+        invocation = Invocation(argv)
+        self.assert_safe(invocation, freedom, network)
+        return invocation
 
     def build_resume_argv(
         self,
@@ -306,7 +311,7 @@ class VibeBackend:
         max_turns: int | None,
         reasoning_effort: str | None,
         network: bool | None = None,
-    ) -> list[str]:
+    ) -> Invocation:
         if not session_id:
             raise ValueError("resuming vibe needs the session id its first run reported")
         argv = [
@@ -315,8 +320,9 @@ class VibeBackend:
         ]
         argv += ["--resume", session_id]
         argv.append(f"--prompt={self._check_prompt(prompt)}")
-        self.assert_safe(argv, freedom, network)
-        return argv
+        invocation = Invocation(argv)
+        self.assert_safe(invocation, freedom, network)
+        return invocation
 
     def _options(
         self,
@@ -352,7 +358,14 @@ class VibeBackend:
             raise ValueError("prompt must be a non-empty string")
         return prompt
 
-    def assert_safe(self, argv: list[str], freedom: Freedom, network: bool | None = None) -> None:
+    def assert_safe(
+        self, invocation: Invocation, freedom: Freedom, network: bool | None = None
+    ) -> None:
+        # No live input here: only a devnull-stdin Invocation is a shape this backend ever builds.
+        problem = classic_invocation_problem(invocation)
+        if problem is not None:
+            raise UnsafeInvocationError(problem)
+        argv = invocation.argv
         # Rejects an unknown freedom outright rather than letting AGENTS[freedom] raise a bare
         # KeyError below. The network request is validated here too — this is the final
         # execution seam, so an unhonourable request must fail loudly even if every earlier check
@@ -678,6 +691,12 @@ class VibeBackend:
         description = _callback_description(event)
         text = f"auto-denied: {description}" if description else "auto-denied"
         return [nz.notice(text, source_ts=source_ts)]
+
+    def encode_live_message(self, text: str) -> bytes:
+        raise UnsupportedCapability(
+            f"the {self.name} backend has no live input, so a message cannot be added to a running "
+            "task; continue its session with resume_task instead"
+        )
 
     def classify(self, acc: Accumulator, exit_code: int | None) -> Status:
         # No terminal event exists, so the exit code is the authority and the closing message is

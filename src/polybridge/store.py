@@ -112,6 +112,10 @@ class TaskRecord:
     lineage_detected: str | None = None
     """Which `lineage.detect_caller` method found this task's caller (`"pb_task_id"` | `"session"`
     | `"ancestry"`), or None if no caller was detected."""
+    live_input: bool = False
+    """Whether the run was spawned with a stdin pipe that takes further messages (`send_message`,
+    `polybridge-ctl send`). From the run's own `Invocation`, never inferred from the backend. False
+    for a record written before this field existed — those runs all had stdin DEVNULL."""
 
 
 class InvalidTaskId(ValueError):
@@ -520,6 +524,7 @@ def snapshot(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
         "max_depth": record.max_depth,
         "group": record.group,
         "lineage_detected": record.lineage_detected,
+        "live_input": record.live_input,
         "summary": state.summary,
         "is_error": state.is_error,
         "total_cost_usd": state.total_cost_usd,
@@ -573,6 +578,7 @@ def brief(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
         "max_depth": record.max_depth,
         "group": record.group,
         "lineage_detected": record.lineage_detected,
+        "live_input": record.live_input,
         "notices": list(record.bridge_notices),
         "owner": record.owner,
         "owned_by_live_server": owned if status == "running" else None,

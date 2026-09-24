@@ -139,8 +139,9 @@ async def test_valid_reasoning_effort_reaches_the_argv_and_the_persisted_record(
     disk, not only an in-memory kwarg a weaker assertion could pass without either one being true."""
     captured: dict = {}
 
-    async def fake_spawn(argv, **kwargs):
-        captured["argv"] = argv
+    async def fake_spawn(invocation, **kwargs):
+        captured["argv"] = invocation.argv
+        captured["invocation"] = invocation
         captured.update(kwargs)
         task = Task(
             task_id="fake-task",
@@ -424,8 +425,9 @@ async def test_a_valid_network_request_reaches_the_argv_enforcement_and_the_reco
     """
     captured: dict = {}
 
-    async def fake_spawn(argv, **kwargs):
-        captured["argv"] = argv
+    async def fake_spawn(invocation, **kwargs):
+        captured["argv"] = invocation.argv
+        captured["invocation"] = invocation
         captured.update(kwargs)
         task = Task(
             task_id="fake-task",
@@ -477,8 +479,9 @@ async def test_resume_forwards_network_through_both_server_branches(
     """
     captured: dict = {}
 
-    async def fake_spawn(argv, **kwargs):
-        captured["argv"] = argv
+    async def fake_spawn(invocation, **kwargs):
+        captured["argv"] = invocation.argv
+        captured["invocation"] = invocation
         captured.update(kwargs)
         task = Task(
             task_id="resumed",

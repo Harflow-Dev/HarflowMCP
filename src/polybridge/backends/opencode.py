@@ -58,6 +58,7 @@ from .base import (
     Capabilities,
     Enforcement,
     Freedom,
+    Invocation,
     NetworkControl,
     ReasoningEffort,
     Status,
@@ -65,6 +66,7 @@ from .base import (
     check_freedom,
     check_network,
     check_reasoning_effort,
+    classic_invocation_problem,
 )
 
 BINARY = "opencode"
@@ -204,6 +206,7 @@ class OpencodeBackend:
             can_block=(),
             caveats=(_NETWORK_CONTROL_CAVEAT,),
         ),
+        supports_live_input=False,
     )
 
     def build_start_argv(
@@ -217,15 +220,16 @@ class OpencodeBackend:
         max_turns: int | None,
         reasoning_effort: str | None,
         network: bool | None = None,
-    ) -> list[str]:
+    ) -> Invocation:
         if session_id is not None:
             raise ValueError("opencode mints its own session id; one cannot be supplied")
         self._reject_turn_cap(max_turns)
         argv = [BINARY, "run", *self._options(repo, freedom, model, reasoning_effort, network)]
         # `--` then the prompt: last, and explicitly not parsed as an option however it looks.
         argv += ["--", self._check_prompt(prompt)]
-        self.assert_safe(argv, freedom, network)
-        return argv
+        invocation = Invocation(argv)
+        self.assert_safe(invocation, freedom, network)
+        return invocation
 
     def build_resume_argv(
         self,
@@ -238,7 +242,7 @@ class OpencodeBackend:
         max_turns: int | None,
         reasoning_effort: str | None,
         network: bool | None = None,
-    ) -> list[str]:
+    ) -> Invocation:
         if not session_id:
             raise ValueError("resuming opencode needs the session id its first run reported")
         self._reject_turn_cap(max_turns)
@@ -247,8 +251,9 @@ class OpencodeBackend:
         options = self._options(repo, freedom, model, reasoning_effort, network)
         argv = [BINARY, "run", *options, "-s", session_id]
         argv += ["--", self._check_prompt(prompt)]
-        self.assert_safe(argv, freedom, network)
-        return argv
+        invocation = Invocation(argv)
+        self.assert_safe(invocation, freedom, network)
+        return invocation
 
     def _options(
         self,
@@ -289,7 +294,14 @@ class OpencodeBackend:
             raise ValueError("prompt must be a non-empty string")
         return prompt
 
-    def assert_safe(self, argv: list[str], freedom: Freedom, network: bool | None = None) -> None:
+    def assert_safe(
+        self, invocation: Invocation, freedom: Freedom, network: bool | None = None
+    ) -> None:
+        # No live input here: only a devnull-stdin Invocation is a shape this backend ever builds.
+        problem = classic_invocation_problem(invocation)
+        if problem is not None:
+            raise UnsafeInvocationError(problem)
+        argv = invocation.argv
         # Rejects an unknown freedom outright rather than letting AGENTS[freedom] raise a bare
         # KeyError below. The network request is validated here too — this is the final
         # execution seam, so an unhonourable request must fail loudly even if every earlier check
@@ -539,6 +551,12 @@ class OpencodeBackend:
                 )
             )
         return events
+
+    def encode_live_message(self, text: str) -> bytes:
+        raise UnsupportedCapability(
+            f"the {self.name} backend has no live input, so a message cannot be added to a running "
+            "task; continue its session with resume_task instead"
+        )
 
     def classify(self, acc: Accumulator, exit_code: int | None) -> Status:
         # `reason: "stop"` is a real end-of-run signal, not merely "some text arrived", so unlike

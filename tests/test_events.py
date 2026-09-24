@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from polybridge import backends, tasks as tasks_module
+from polybridge.backends import Invocation
 from polybridge.backends.base import Enforcement
 from polybridge.events import EventLog, events_path
 from polybridge.tasks import Task, TaskRegistry
@@ -32,13 +33,17 @@ class _RecordingBackend:
         self._classify_result = classify_result
 
     def build_start_argv(self, prompt, **kwargs):
-        return [self.binary, "-c", self.script]
+        return Invocation([self.binary, "-c", self.script])
 
     def build_resume_argv(self, prompt, **kwargs):
-        return [self.binary, "-c", self.script]
+        return Invocation([self.binary, "-c", self.script])
 
-    def assert_safe(self, argv, freedom, network=None):
+    def assert_safe(self, invocation, freedom, network=None):
+        assert isinstance(invocation, Invocation)
         return None
+
+    def encode_live_message(self, text):
+        raise backends.UnsupportedCapability("no live input")
 
     def enforcement(self, freedom, network=None):
         return Enforcement(

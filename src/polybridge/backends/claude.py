@@ -18,6 +18,11 @@ CLI facts established by measurement, not assumption:
   started a normal turn. `assert_safe` and the argv builders both rely on `--` for this now, the same
   way opencode and codex already did — a prior version of this backend assumed the prompt was simply
   positional at a fixed index, which this measurement showed was not a safe assumption to make.
+* **Live input** (claude 2.1.281, `tests/test_live_input_real.py`): with `--input-format stream-json`
+  a positional prompt is silently ignored, so a live run carries its prompt as the first stdin line
+  and has no `--` and no positional at all. Mid-turn messages fold into the running turn; after a
+  `result` the process idles until more input or EOF. Every run is live except one with `max_turns`
+  (an unmeasured combination), which keeps the classic `-- <prompt>` shape on stdin DEVNULL.
 
 **`publish` (measured, and it refuted an earlier plan for this level).** Dropping the deny patterns
 alone is not enough: with `acceptEdits` and no denies, `git commit` was still refused with "This
@@ -45,6 +50,7 @@ the commit landed in both the working repo and the remote.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -55,7 +61,10 @@ from .base import (
     Accumulator,
     Capabilities,
     Enforcement,
+    STDIN_DEVNULL,
+    STDIN_PIPE,
     Freedom,
+    Invocation,
     NetworkControl,
     ReasoningEffort,
     Status,
@@ -96,6 +105,7 @@ FORBIDDEN_FLAGS = ("--strict-mcp-config", "--setting-sources", "--safe-mode", "-
 BOOLEAN_FLAGS = ("--verbose",)
 VALUE_FLAGS = (
     "--output-format",
+    "--input-format",
     "--permission-mode",
     "--disallowedTools",
     "--allowedTools",
@@ -105,6 +115,11 @@ VALUE_FLAGS = (
     "--session-id",
     "--resume",
 )
+
+# The one `--input-format` value this backend writes, and only on a live-input run. Measured (claude
+# 2.1.281): with it, a positional prompt is silently ignored (exit 0, no model call), so a live run
+# carries its prompt as the first stdin line and has no `--` and no positional at all.
+LIVE_INPUT_FORMAT = "stream-json"
 
 PERMISSION_MODES: dict[str, str] = {
     "read_only": "plan",
@@ -284,6 +299,7 @@ class ClaudeBackend:
             can_block=(),
             caveats=(_NETWORK_CONTROL_CAVEAT,),
         ),
+        supports_live_input=True,
     )
 
     def build_start_argv(
@@ -297,16 +313,20 @@ class ClaudeBackend:
         max_turns: int | None,
         reasoning_effort: str | None,
         network: bool | None = None,
-    ) -> list[str]:
+    ) -> Invocation:
         if session_id is None:
             raise ValueError("claude accepts a chosen session id, so one must be supplied")
-        argv = self._common(freedom, model, max_turns, reasoning_effort, network)
-        argv += ["--session-id", session_id]
-        # `--` then the prompt: last, and explicitly not parsed as an option however it looks —
-        # see the note in assert_safe about why this is load-bearing for claude specifically.
-        argv += ["--", self._check_prompt(prompt)]
-        self.assert_safe(argv, freedom, network)
-        return argv
+        invocation = self._invocation(
+            prompt,
+            ["--session-id", session_id],
+            freedom=freedom,
+            model=model,
+            max_turns=max_turns,
+            reasoning_effort=reasoning_effort,
+            network=network,
+        )
+        self.assert_safe(invocation, freedom, network)
+        return invocation
 
     def build_resume_argv(
         self,
@@ -319,13 +339,58 @@ class ClaudeBackend:
         max_turns: int | None,
         reasoning_effort: str | None,
         network: bool | None = None,
-    ) -> list[str]:
-        argv = self._common(freedom, model, max_turns, reasoning_effort, network)
+    ) -> Invocation:
         # --resume and --session-id conflict, so never both.
-        argv += ["--resume", session_id]
-        argv += ["--", self._check_prompt(prompt)]
-        self.assert_safe(argv, freedom, network)
-        return argv
+        invocation = self._invocation(
+            prompt,
+            ["--resume", session_id],
+            freedom=freedom,
+            model=model,
+            max_turns=max_turns,
+            reasoning_effort=reasoning_effort,
+            network=network,
+        )
+        self.assert_safe(invocation, freedom, network)
+        return invocation
+
+    def _invocation(
+        self,
+        prompt: str,
+        session_flags: list[str],
+        *,
+        freedom: Freedom,
+        model: str | None,
+        max_turns: int | None,
+        reasoning_effort: str | None,
+        network: bool | None,
+    ) -> Invocation:
+        """Live input unless a turn cap was asked for.
+
+        `--max-turns` together with `--input-format stream-json` has never been measured, so a
+        capped run keeps the classic one-shot shape (`--` then the prompt as the sole positional,
+        stdin DEVNULL) and cannot take `send_message`. Everything else is live: the prompt becomes
+        the first stdin line and the pipe stays open until the pump closes it.
+        """
+        argv = self._common(freedom, model, max_turns, reasoning_effort, network)
+        prompt = self._check_prompt(prompt)
+        if max_turns is not None:
+            # `--` then the prompt: last, and explicitly not parsed as an option however it looks —
+            # see the note in assert_safe about why this is load-bearing for claude specifically.
+            return Invocation([*argv, *session_flags, "--", prompt])
+        return Invocation(
+            [*argv, "--input-format", LIVE_INPUT_FORMAT, *session_flags],
+            stdin_mode=STDIN_PIPE,
+            initial_input=self.encode_live_message(prompt),
+        )
+
+    def encode_live_message(self, text: str) -> bytes:
+        """One stream-json user line (measured shape). `json.dumps` escapes any newline in `text`,
+        so a message can never split into two lines on the wire."""
+        line = {
+            "type": "user",
+            "message": {"role": "user", "content": [{"type": "text", "text": text}]},
+        }
+        return (json.dumps(line, ensure_ascii=False) + "\n").encode("utf-8")
 
     def _common(
         self,
@@ -373,7 +438,9 @@ class ClaudeBackend:
             raise ValueError("prompt must be a non-empty string")
         return prompt
 
-    def assert_safe(self, argv: list[str], freedom: Freedom, network: bool | None = None) -> None:
+    def assert_safe(
+        self, invocation: Invocation, freedom: Freedom, network: bool | None = None
+    ) -> None:
         # Rejects an unknown freedom outright rather than letting PERMISSION_MODES[freedom] raise a
         # bare KeyError below. The network request is validated here too — this is the final
         # execution seam, so an unhonourable request must fail loudly even if every earlier check
@@ -381,39 +448,58 @@ class ClaudeBackend:
         # impose), so there is nothing further to check for it beyond the request itself.
         check_freedom(freedom)
         check_network(self, freedom, network)
+        if not isinstance(invocation, Invocation):
+            raise UnsafeInvocationError(
+                f"expected an Invocation, got {type(invocation).__name__}: {invocation!r}"
+            )
+        argv = invocation.argv
         if argv[:2] != [BINARY, "-p"]:
             raise UnsafeInvocationError(f"unrecognised claude argv layout: {argv!r}")
 
-        # Only the option region is inspected. Everything after `--` is the prompt — caller text
-        # that happens to contain a flag name must never be able to satisfy a safety check, nor be
-        # read by claude itself as anything but text. An earlier version of this method assumed the
-        # prompt was a fixed positional right after `-p` (index 2), reasoning that `-p <value>`
-        # takes its argument the way most flags do. That assumption was wrong: measured against
-        # `claude --help`, `-p`/`--print` is a *boolean* flag and `prompt` is a separate declared
-        # positional (`Usage: claude [options] [command] [prompt]`) — so a prompt token that
-        # happened to exactly equal a real claude option name (e.g.
-        # `--dangerously-skip-permissions`) was parsed by claude as that option, not as prompt text,
-        # with no separator to stop it. Confirmed live, with `--permission-mode plan` and killed
-        # within seconds: without `--`, that exact shape reached claude's own parser; with `--`
-        # inserted before the prompt, claude correctly treated the token after it as literal prompt
-        # text and started a normal turn. So, as with opencode/codex, `--` now pins the boundary
+        # Exactly two shapes, told apart by the separator and each validated completely — never a
+        # mixture. Classic: `--` then exactly one positional (the prompt), stdin DEVNULL. Live: no
+        # `--` and no positional at all, `--input-format stream-json`, a stdin pipe, and the prompt
+        # as the one stream-json line in `initial_input`.
+        #
+        # Classic, the reason for `--`: only the option region is inspected, and everything after
+        # `--` is the prompt — caller text that happens to contain a flag name must never be able to
+        # satisfy a safety check, nor be read by claude itself as anything but text. An earlier
+        # version of this method assumed the prompt was a fixed positional right after `-p`
+        # (index 2), reasoning that `-p <value>` takes its argument the way most flags do. That
+        # assumption was wrong: measured against `claude --help`, `-p`/`--print` is a *boolean* flag
+        # and `prompt` is a separate declared positional (`Usage: claude [options] [command]
+        # [prompt]`) — so a prompt token that happened to exactly equal a real claude option name
+        # (e.g. `--dangerously-skip-permissions`) was parsed by claude as that option, not as prompt
+        # text, with no separator to stop it. Confirmed live, with `--permission-mode plan` and
+        # killed within seconds: without `--`, that exact shape reached claude's own parser; with
+        # `--` inserted before the prompt, claude correctly treated the token after it as literal
+        # prompt text and started a normal turn. So, as with opencode/codex, `--` pins the boundary
         # explicitly rather than relying on argv position.
-        if "--" not in argv:
-            raise UnsafeInvocationError(
-                f"refusing to run claude without a `--` separator before the prompt, which stops "
-                f"prompt text being parsed as options: {argv!r}"
-            )
-        options = argv[2 : argv.index("--")]
-
-        # Positional arity, not just separator presence: claude declares exactly one positional
-        # (the prompt), so anything other than exactly one token after `--` is not a shape this
-        # backend ever writes.
-        positionals = argv[argv.index("--") + 1 :]
-        if len(positionals) != 1:
-            raise UnsafeInvocationError(
-                f"expected exactly one positional argument (the prompt) after `--`, found "
-                f"{len(positionals)}: {argv!r}"
-            )
+        #
+        # Live: the prompt never touches argv, so there is no boundary to pin — and a positional
+        # would be silently ignored by claude under `--input-format stream-json` (measured), so one
+        # is refused rather than tolerated. The strict option walk below does that: in the live
+        # shape every token must be a known option or its value.
+        live = "--" not in argv
+        if live:
+            options = argv[2:]
+            self._check_live_wiring(invocation)
+        else:
+            options = argv[2 : argv.index("--")]
+            # Positional arity, not just separator presence: claude declares exactly one
+            # positional (the prompt), so anything other than exactly one token after `--` is not a
+            # shape this backend ever writes.
+            positionals = argv[argv.index("--") + 1 :]
+            if len(positionals) != 1:
+                raise UnsafeInvocationError(
+                    f"expected exactly one positional argument (the prompt) after `--`, found "
+                    f"{len(positionals)}: {argv!r}"
+                )
+            if invocation.stdin_mode != STDIN_DEVNULL or invocation.initial_input is not None:
+                raise UnsafeInvocationError(
+                    f"a one-shot claude argv (prompt after `--`) must run with stdin DEVNULL and no "
+                    f"initial input, got stdin_mode={invocation.stdin_mode!r}: {argv!r}"
+                )
 
         # Kept for the clearer message even though the allowlist below would refuse this token too
         # (as unrecognised) — this is the one form worth naming explicitly: a full permission
@@ -435,6 +521,27 @@ class ClaudeBackend:
         seen = self._parse_options(options, argv)
 
         self._exactly_one(seen, "--verbose", argv)
+
+        input_values = seen.get("--input-format", [])
+        if live:
+            input_format = self._exactly_one(seen, "--input-format", argv)
+            if input_format != LIVE_INPUT_FORMAT:
+                raise UnsafeInvocationError(
+                    f"--input-format was {input_format!r}, expected {LIVE_INPUT_FORMAT!r} on a "
+                    f"live-input run: {argv!r}"
+                )
+            # Never written together: --max-turns with live input is unmeasured, so a capped run
+            # is built classic (see `_invocation`).
+            if seen.get("--max-turns"):
+                raise UnsafeInvocationError(
+                    f"--max-turns on a live-input run, a combination this backend never builds: "
+                    f"{argv!r}"
+                )
+        elif input_values:
+            raise UnsafeInvocationError(
+                f"--input-format on a one-shot argv, where claude would ignore the positional "
+                f"prompt: {argv!r}"
+            )
 
         fmt = self._exactly_one(seen, "--output-format", argv)
         if fmt != "stream-json":
@@ -520,6 +627,48 @@ class ClaudeBackend:
             )
         if not session_values[0].strip():
             raise UnsafeInvocationError(f"session flag with no session id: {argv!r}")
+
+    @staticmethod
+    def _check_live_wiring(invocation: Invocation) -> None:
+        """A live argv must be wired to a pipe, with exactly one well-formed user message queued."""
+        argv = invocation.argv
+        if invocation.stdin_mode != STDIN_PIPE:
+            raise UnsafeInvocationError(
+                f"a live-input claude argv needs a stdin pipe, got stdin_mode="
+                f"{invocation.stdin_mode!r}: {argv!r}"
+            )
+        data = invocation.initial_input
+        if not isinstance(data, bytes) or not data.endswith(b"\n") or data.count(b"\n") != 1:
+            raise UnsafeInvocationError(
+                f"a live-input run needs its prompt as exactly one newline-terminated stdin line, "
+                f"got {data!r}: {argv!r}"
+            )
+        try:
+            message = json.loads(data.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            raise UnsafeInvocationError(
+                f"initial_input is not one JSON line: {data!r}"
+            ) from None
+        body = message.get("message") if isinstance(message, dict) else None
+        content = body.get("content") if isinstance(body, dict) else None
+        block = content[0] if isinstance(content, list) and len(content) == 1 else None
+        well_formed = (
+            isinstance(message, dict)
+            and set(message) == {"type", "message"}
+            and message["type"] == "user"
+            and isinstance(body, dict)
+            and set(body) == {"role", "content"}
+            and body["role"] == "user"
+            and isinstance(block, dict)
+            and set(block) == {"type", "text"}
+            and block["type"] == "text"
+            and isinstance(block["text"], str)
+            and block["text"].strip() != ""
+        )
+        if not well_formed:
+            raise UnsafeInvocationError(
+                f"initial_input is not a single non-empty stream-json user message: {data!r}"
+            )
 
     @staticmethod
     def _parse_options(options: list[str], argv: list[str]) -> dict[str, list[str]]:

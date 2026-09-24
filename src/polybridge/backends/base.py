@@ -22,6 +22,44 @@ DEFAULT_FREEDOM: Freedom = "write_in_repo"
 
 Status = Literal["running", "completed", "failed", "timed_out", "cancelled"]
 
+StdinMode = Literal["devnull", "pipe"]
+STDIN_DEVNULL: StdinMode = "devnull"
+STDIN_PIPE: StdinMode = "pipe"
+
+
+@dataclass(frozen=True)
+class Invocation:
+    """Everything `_spawn` needs to launch one run: the argv, how its stdin is wired, and the first
+    bytes to write to it.
+
+    Returned by the argv builders instead of a bare argv, so the stdin mode comes from the run that
+    was actually built — never from the backend's name or its static capability. A live-input run
+    (`stdin_mode="pipe"`) carries its prompt as `initial_input`, because a CLI reading its input as a
+    stream ignores a positional prompt (measured on claude). Every other run is `"devnull"` with no
+    initial input: codex and vibe block forever reading an open stdin, so DEVNULL is mandatory there.
+    """
+
+    argv: list[str]
+    stdin_mode: StdinMode = STDIN_DEVNULL
+    initial_input: bytes | None = None
+
+    @property
+    def live_input(self) -> bool:
+        return self.stdin_mode == STDIN_PIPE
+
+
+def classic_invocation_problem(invocation: Any) -> str | None:
+    """Why `invocation` is not a plain devnull-stdin run, or None if it is — for backends with no
+    live input. A bare argv list is refused too: a caller that skipped the Invocation could not have
+    said how the process's stdin is wired."""
+    if not isinstance(invocation, Invocation):
+        return f"expected an Invocation, got {type(invocation).__name__}: {invocation!r}"
+    if invocation.stdin_mode != STDIN_DEVNULL:
+        return f"stdin_mode is {invocation.stdin_mode!r}, but this backend has no live input"
+    if invocation.initial_input is not None:
+        return "initial_input is set, but this backend has no live input to write it to"
+    return None
+
 # Stopping at xhigh is deliberate, not an oversight — but "every model measured accepts" is only
 # true of codex (per ~/.codex/models_cache.json), where no canonical level can produce a
 # model-dependent failure. It is not true of opencode: --variant support is per model there, e.g.
@@ -135,6 +173,12 @@ class Capabilities(NamedTuple):
     reasoning_effort: ReasoningEffort
 
     network_control: NetworkControl
+
+    supports_live_input: bool
+    """Whether a run can take further messages on stdin while it works (`send_message`). A capability
+    of the backend, not a promise about every run: claude falls back to the classic one-shot shape
+    when `max_turns` is set (that combination is unmeasured), so what a *task* got is its own
+    `live_input` field, never this one."""
 
     def as_dict(self) -> dict[str, Any]:
         # `_asdict()` does not recurse into a nested NamedTuple — it would serialize as a bare
@@ -283,7 +327,7 @@ class Backend(Protocol):
         max_turns: int | None,
         reasoning_effort: str | None,
         network: bool | None = None,
-    ) -> list[str]: ...
+    ) -> Invocation: ...
 
     def build_resume_argv(
         self,
@@ -296,10 +340,16 @@ class Backend(Protocol):
         max_turns: int | None,
         reasoning_effort: str | None,
         network: bool | None = None,
-    ) -> list[str]: ...
+    ) -> Invocation: ...
 
-    def assert_safe(self, argv: list[str], freedom: Freedom, network: bool | None = None) -> None:
-        """Raise unless the argv still carries this backend's required guarantees.
+    def assert_safe(
+        self, invocation: Invocation, freedom: Freedom, network: bool | None = None
+    ) -> None:
+        """Raise unless the invocation still carries this backend's required guarantees.
+
+        The whole `Invocation`, not just its argv: a live-input argv paired with a devnull stdin (or
+        a one-shot argv paired with a pipe) is a mismatch between what the CLI is told and how it is
+        wired, and must be refused here like any other unsafe shape. A bare list is refused too.
 
         `freedom` and `network` together are the authorization the caller actually asked for —
         neither is, nor can be, derived from `argv` itself. An argv built for `read_only` can be
@@ -343,6 +393,12 @@ class Backend(Protocol):
 
     def classify(self, acc: Accumulator, exit_code: int | None) -> Status:
         """Decide the terminal status from this backend's own signals."""
+        ...
+
+    def encode_live_message(self, text: str) -> bytes:
+        """One message for a live-input run's stdin, in this CLI's own input format, newline
+        included. Raises `UnsupportedCapability` on a backend without live input — the pump in
+        `tasks.py` calls this so it never needs to know any backend's wire format."""
         ...
 
 

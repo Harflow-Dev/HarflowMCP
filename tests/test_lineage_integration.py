@@ -26,6 +26,7 @@ from mcp import Client, MCPError
 from polybridge import backends, control, lineage, server, store
 from polybridge import tasks as tasks_module
 from polybridge.backends import BACKENDS, NestedDispatchRefused
+from polybridge.backends import Invocation
 from polybridge.backends.base import Enforcement
 from polybridge.backends.codex import CodexBackend
 from polybridge.lineage import Caller
@@ -61,13 +62,17 @@ class _FakeBackend:
         self._enforcement_kwargs = enforcement_kwargs or {}
 
     def build_start_argv(self, prompt, **kwargs):
-        return list(self._argv)
+        return Invocation(list(self._argv))
 
     def build_resume_argv(self, prompt, **kwargs):
-        return list(self._argv)
+        return Invocation(list(self._argv))
 
-    def assert_safe(self, argv, freedom, network=None):
+    def assert_safe(self, invocation, freedom, network=None):
+        assert isinstance(invocation, Invocation)
         return None
+
+    def encode_live_message(self, text):
+        raise backends.UnsupportedCapability("no live input")
 
     def enforcement(self, freedom, network=None):
         return Enforcement(

@@ -13,6 +13,7 @@ import pytest
 
 from polybridge import backends
 from polybridge.backends.base import FREEDOMS
+from polybridge.backends import Invocation
 from polybridge.backends.base import Enforcement
 from polybridge.backends.codex import CodexBackend
 from polybridge import identity, store
@@ -140,8 +141,9 @@ async def test_resume_runs_at_the_parents_reasoning_effort(
 
     captured: dict = {}
 
-    async def fake_spawn(argv, **kwargs):
-        captured["argv"] = argv
+    async def fake_spawn(invocation, **kwargs):
+        captured["argv"] = invocation.argv
+        captured["invocation"] = invocation
         captured.update(kwargs)
         child = make_task(tmp_path, "child", session_id="s1")
         child.reasoning_effort = kwargs.get("reasoning_effort")
@@ -177,8 +179,9 @@ async def test_resume_record_runs_at_the_recorded_reasoning_effort(
 
     captured: dict = {}
 
-    async def fake_spawn(argv, **kwargs):
-        captured["argv"] = argv
+    async def fake_spawn(invocation, **kwargs):
+        captured["argv"] = invocation.argv
+        captured["invocation"] = invocation
         captured.update(kwargs)
         child = make_task(tmp_path, "child", session_id="s1")
         child.reasoning_effort = kwargs.get("reasoning_effort")
@@ -215,8 +218,9 @@ async def test_resume_record_with_no_stored_effort_can_still_resume(
 
     captured: dict = {}
 
-    async def fake_spawn(argv, **kwargs):
-        captured["argv"] = argv
+    async def fake_spawn(invocation, **kwargs):
+        captured["argv"] = invocation.argv
+        captured["invocation"] = invocation
         captured.update(kwargs)
         return make_task(tmp_path, "child", session_id="s1")
 
@@ -735,13 +739,17 @@ class _TrivialBackend:
     capabilities = SimpleNamespace(chooses_session_id=False)
 
     def build_start_argv(self, prompt, **kwargs):
-        return [self.binary, "{}"]
+        return Invocation([self.binary, "{}"])
 
     def build_resume_argv(self, prompt, **kwargs):
-        return [self.binary, "{}"]
+        return Invocation([self.binary, "{}"])
 
-    def assert_safe(self, argv, freedom, network=None):
+    def assert_safe(self, invocation, freedom, network=None):
+        assert isinstance(invocation, Invocation)
         return None
+
+    def encode_live_message(self, text):
+        raise backends.UnsupportedCapability("no live input")
 
     def enforcement(self, freedom, network=None):
         return Enforcement(freedom=freedom, mechanism="none", os_enforced=False,
@@ -899,8 +907,9 @@ async def test_resume_inherits_the_parents_network_request(
 
     captured: dict = {}
 
-    async def fake_spawn(argv, **kwargs):
-        captured["argv"] = argv
+    async def fake_spawn(invocation, **kwargs):
+        captured["argv"] = invocation.argv
+        captured["invocation"] = invocation
         captured.update(kwargs)
         return make_task(tmp_path, "child", session_id="s1")
 
@@ -926,8 +935,9 @@ async def test_an_explicit_network_on_resume_overrides_the_parents(
 
     captured: dict = {}
 
-    async def fake_spawn(argv, **kwargs):
-        captured["argv"] = argv
+    async def fake_spawn(invocation, **kwargs):
+        captured["argv"] = invocation.argv
+        captured["invocation"] = invocation
         captured.update(kwargs)
         return make_task(tmp_path, "child", session_id="s1")
 
@@ -958,8 +968,9 @@ async def test_resume_record_inherits_the_recorded_network_request(
 
     captured: dict = {}
 
-    async def fake_spawn(argv, **kwargs):
-        captured["argv"] = argv
+    async def fake_spawn(invocation, **kwargs):
+        captured["argv"] = invocation.argv
+        captured["invocation"] = invocation
         captured.update(kwargs)
         return make_task(tmp_path, "child", session_id="s1")
 
@@ -990,8 +1001,9 @@ async def test_a_pre_change_record_resumes_at_the_freedoms_historical_default(
 
     captured: dict = {}
 
-    async def fake_spawn(argv, **kwargs):
-        captured["argv"] = argv
+    async def fake_spawn(invocation, **kwargs):
+        captured["argv"] = invocation.argv
+        captured["invocation"] = invocation
         captured.update(kwargs)
         return make_task(tmp_path, "child", session_id="s1")
 
@@ -1043,8 +1055,9 @@ async def test_resume_record_honours_an_explicit_network_override(
 
     captured: dict = {}
 
-    async def fake_spawn(argv, **kwargs):
-        captured["argv"] = argv
+    async def fake_spawn(invocation, **kwargs):
+        captured["argv"] = invocation.argv
+        captured["invocation"] = invocation
         captured.update(kwargs)
         return make_task(tmp_path, "child", session_id="s1")
 

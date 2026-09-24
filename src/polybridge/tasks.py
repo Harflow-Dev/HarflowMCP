@@ -33,7 +33,14 @@ from pathlib import Path
 from typing import Any, Literal, NamedTuple
 
 from . import control, identity, lineage, retention, store
-from .backends import Accumulator, Backend, Enforcement, check_nested_depth, check_nested_enforcement
+from .backends import (
+    Accumulator,
+    Backend,
+    Enforcement,
+    Invocation,
+    check_nested_depth,
+    check_nested_enforcement,
+)
 from .backends import get as get_backend
 from .events import EVENTS_SUFFIX, EventLog, events_path
 from .stream import parse_line
@@ -470,6 +477,10 @@ class Task:
     lineage_detected: str | None = None
     """Which `lineage.detect_caller` method found this task's caller (`"pb_task_id"` | `"session"`
     | `"ancestry"`), or None if no caller was detected — i.e. this is a root task."""
+    live_input: bool = False
+    """Whether this run was spawned with a stdin pipe that takes further messages — taken from the
+    run's own `Invocation`, never inferred from the backend. `send_message`, `polybridge-ctl send`
+    and the snapshot all read this field."""
 
     status: Status = "running"
     exit_code: int | None = None
@@ -508,6 +519,10 @@ class Task:
     accepted on a backend with no barrier of its own."""
     tail: deque[str] = field(default_factory=lambda: deque(maxlen=TAIL_LINES))
     stderr_tail: deque[str] = field(default_factory=lambda: deque(maxlen=STDERR_TAIL_LINES))
+
+    input_closed: bool = False
+    """Whether polybridge has closed (or lost) this live-input run's stdin. Always False for a
+    DEVNULL run, which never had one to close."""
 
     done: asyncio.Event = field(default_factory=asyncio.Event)
     cancel_requested: bool = False
@@ -558,6 +573,7 @@ class Task:
             "max_depth": self.max_depth,
             "group": self.group,
             "lineage_detected": self.lineage_detected,
+            "live_input": self.live_input,
             "notices": list(self.bridge_notices),
             "owner": self.owner,
             # Meaningful only while the task is still running — a settled task has no live server
@@ -690,7 +706,7 @@ class TaskRegistry:
         # Only some backends let us name the session up front. Where we can, knowing it immediately
         # means a resume works even if the run dies before saying anything.
         session_id = str(uuid.uuid4()) if backend.capabilities.chooses_session_id else None
-        argv = backend.build_start_argv(
+        invocation = backend.build_start_argv(
             prompt,
             repo=repo_path,
             freedom=freedom,  # type: ignore[arg-type]
@@ -713,7 +729,7 @@ class TaskRegistry:
         resolved_group = group if group is not None else (caller.record.group if caller else None)
 
         return await self._spawn(
-            argv,
+            invocation,
             backend=backend,
             prompt=prompt,
             repo_path=repo_path,
@@ -774,7 +790,7 @@ class TaskRegistry:
                         f"session {parent.session_id} already has a running task; "
                         "two concurrent runs would corrupt its shared conversation state"
                     )
-                argv = backend.build_resume_argv(
+                invocation = backend.build_resume_argv(
                     followup_prompt,
                     repo=parent.repo_path,
                     freedom=parent.freedom,  # type: ignore[arg-type]
@@ -787,7 +803,7 @@ class TaskRegistry:
                     network=effective_network,
                 )
                 return await self._spawn(
-                    argv,
+                    invocation,
                     backend=backend,
                     prompt=followup_prompt,
                     repo_path=parent.repo_path,
@@ -813,7 +829,7 @@ class TaskRegistry:
 
     async def _spawn(
         self,
-        argv: list[str],
+        invocation: Invocation,
         *,
         backend: Backend,
         prompt: str,
@@ -839,7 +855,12 @@ class TaskRegistry:
         # argv (codex write_in_repo+network=True is byte-identical to publish's default),
         # assert_safe genuinely cannot tell which produced it — a loss of provenance, not a
         # sandbox escape: the collapsed argv already had identical powers.
-        backend.assert_safe(argv, freedom, network)  # type: ignore[arg-type]
+        #
+        # The whole Invocation is checked, not just its argv, and the stdin wiring below comes from
+        # it — never from the backend's name or its static capability — so a live-input argv can
+        # only ever run with the pipe it was built for, and every other run keeps stdin DEVNULL
+        # (codex and vibe block forever reading an open stdin).
+        backend.assert_safe(invocation, freedom, network)  # type: ignore[arg-type]
 
         task_id = str(uuid.uuid4())
         # A root task (no detected caller) is the root of its own dispatch chain.
@@ -916,9 +937,9 @@ class TaskRegistry:
         }
 
         proc = await asyncio.create_subprocess_exec(
-            *argv,
+            *invocation.argv,
             cwd=str(repo_path),
-            stdin=asyncio.subprocess.DEVNULL,
+            stdin=asyncio.subprocess.PIPE if invocation.live_input else asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             limit=STREAM_LINE_LIMIT,
@@ -956,6 +977,7 @@ class TaskRegistry:
             max_depth=max_depth,
             group=group,
             lineage_detected=lineage_detected,
+            live_input=invocation.live_input,
         )
 
         # Written before anything can go wrong, so even a task whose server dies immediately is
@@ -995,10 +1017,18 @@ class TaskRegistry:
                     "max_depth": task.max_depth,
                     "group": task.group,
                     "lineage_detected": task.lineage_detected,
+                    "live_input": task.live_input,
                 },
             )
         except Exception:
             log.exception("task %s: could not write task_started event", task_id)
+
+        # Outside the no-await window, and still before any await: the prompt is the first stdin
+        # line of a live-input run (a positional would be ignored), written synchronously so it is
+        # queued ahead of anything else, then flushed below.
+        if invocation.live_input:
+            self._write_initial_input(task, invocation.initial_input or b"")
+            await self._flush_stdin(task)
 
         # Best-effort start-time capture, so a later server can tell this pid apart from a reused
         # one (see `identity.identity_check`). `except Exception`, not `BaseException`: a
@@ -1032,6 +1062,20 @@ class TaskRegistry:
             f" resumed-from={parent_task_id}" if parent_task_id else "",
         )
         return task
+
+    def _write_initial_input(self, task: Task, data: bytes) -> None:
+        """Queue a live-input run's prompt on its stdin — synchronous, so nothing can be written
+        ahead of it — and log it as the run's first `user_message`."""
+        if _write_stdin(task, data):
+            _write_event(task, "user_message", {"text": task.prompt, "source": "initial"})
+        else:
+            log.warning("task %s: stdin was already gone before the prompt could be written", task.task_id)
+
+    async def _flush_stdin(self, task: Task) -> None:
+        """Await the prompt's delivery to the pipe, then — until the input pump exists — close it:
+        a turn keeps running after EOF (measured), so the run settles exactly as a one-shot does."""
+        await _drain_stdin(task)
+        _close_stdin(task)
 
     @property
     def log_dir(self) -> Path:
@@ -1071,6 +1115,7 @@ class TaskRegistry:
                 max_depth=task.max_depth,
                 group=task.group,
                 lineage_detected=task.lineage_detected,
+                live_input=task.live_input,
             ),
         )
 
@@ -1844,7 +1889,7 @@ class TaskRegistry:
                         f"session {record.session_id} already has a running task; "
                         "two concurrent runs would corrupt its shared conversation state"
                     )
-                argv = backend.build_resume_argv(
+                invocation = backend.build_resume_argv(
                     followup_prompt,
                     repo=repo_path,
                     freedom=record.freedom,  # type: ignore[arg-type]
@@ -1855,7 +1900,7 @@ class TaskRegistry:
                     network=effective_network,
                 )
                 return await self._spawn(
-                    argv,
+                    invocation,
                     backend=backend,
                     prompt=followup_prompt,
                     repo_path=repo_path,
@@ -1926,6 +1971,69 @@ class TaskRegistry:
 
         task.add_done_callback(_log_failure)
 
+
+
+# How long one flush of a live-input run's stdin may wait for the pipe to drain. The agent reads its
+# stdin promptly, so this only bounds a wedged reader; the message stays queued in the transport.
+STDIN_DRAIN_SECONDS = 10.0
+
+# What a write to a live-input run's stdin raises once the reader is gone.
+_PIPE_ERRORS = (BrokenPipeError, ConnectionResetError)
+
+
+def _write_stdin(task: Task, data: bytes) -> bool:
+    """Queue `data` on the run's stdin, synchronously. False if the pipe is closed or going away —
+    asyncio's pipe transport silently drops a write once it is closing, so that is checked first."""
+    stdin = task.proc.stdin if task.proc is not None else None
+    if stdin is None or task.input_closed:
+        return False
+    try:
+        if stdin.is_closing():
+            task.input_closed = True
+            return False
+        stdin.write(data)
+    except (*_PIPE_ERRORS, RuntimeError):
+        task.input_closed = True
+        return False
+    return True
+
+
+async def _drain_stdin(task: Task) -> bool:
+    """Wait for queued stdin bytes to reach the pipe. False (and stdin marked closed) if the reader
+    went away; a timeout is not a failure — the bytes stay queued."""
+    stdin = task.proc.stdin if task.proc is not None else None
+    if stdin is None or task.input_closed:
+        return False
+    try:
+        await asyncio.wait_for(stdin.drain(), timeout=STDIN_DRAIN_SECONDS)
+    except (asyncio.TimeoutError, TimeoutError):
+        log.warning("task %s: stdin did not drain within %.0fs", task.task_id, STDIN_DRAIN_SECONDS)
+    except (*_PIPE_ERRORS, RuntimeError):
+        task.input_closed = True
+        return False
+    return True
+
+
+def _close_stdin(task: Task) -> None:
+    """Close a live-input run's stdin (EOF). Idempotent, and never raises."""
+    task.input_closed = True
+    stdin = task.proc.stdin if task.proc is not None else None
+    if stdin is None:
+        return
+    try:
+        stdin.close()
+    except (*_PIPE_ERRORS, RuntimeError, OSError):
+        pass
+
+
+def _write_event(task: Task, kind: str, fields: dict[str, Any]) -> None:
+    """One bridge-written event, guarded: a broken event log never changes an outcome."""
+    if task.events is None:
+        return
+    try:
+        task.events.write(kind, fields)
+    except Exception:
+        log.debug("task %s: could not write a %s event", task.task_id, kind, exc_info=True)
 
 
 def _signal_recorded_group(record: store.TaskRecord, sig: int) -> bool:

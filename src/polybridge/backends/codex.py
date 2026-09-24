@@ -72,6 +72,7 @@ from .base import (
     Capabilities,
     Enforcement,
     Freedom,
+    Invocation,
     NetworkControl,
     ReasoningEffort,
     Status,
@@ -79,6 +80,7 @@ from .base import (
     check_freedom,
     check_network,
     check_reasoning_effort,
+    classic_invocation_problem,
 )
 
 BINARY = "codex"
@@ -288,6 +290,7 @@ class CodexBackend:
                 "surrounding network can still defeat it"
             ),
         ),
+        supports_live_input=False,
     )
 
     def build_start_argv(
@@ -301,15 +304,16 @@ class CodexBackend:
         max_turns: int | None,
         reasoning_effort: str | None,
         network: bool | None = None,
-    ) -> list[str]:
+    ) -> Invocation:
         if session_id is not None:
             raise ValueError("codex mints its own session id; one cannot be supplied")
         self._reject_turn_cap(max_turns)
         argv = [BINARY, "exec", *self._options(repo, freedom, model, reasoning_effort, network)]
         # `--` then the prompt: last, and explicitly not parsed as an option however it looks.
         argv += ["--", self._check_prompt(prompt)]
-        self.assert_safe(argv, freedom, network)
-        return argv
+        invocation = Invocation(argv)
+        self.assert_safe(invocation, freedom, network)
+        return invocation
 
     def build_resume_argv(
         self,
@@ -322,7 +326,7 @@ class CodexBackend:
         max_turns: int | None,
         reasoning_effort: str | None,
         network: bool | None = None,
-    ) -> list[str]:
+    ) -> Invocation:
         if not session_id:
             raise ValueError("resuming codex needs the thread id its first run reported")
         self._reject_turn_cap(max_turns)
@@ -335,8 +339,9 @@ class CodexBackend:
         ]
         # `codex exec resume [SESSION_ID] [PROMPT]` — both positional, after `--`.
         argv += ["--", session_id, self._check_prompt(prompt)]
-        self.assert_safe(argv, freedom, network)
-        return argv
+        invocation = Invocation(argv)
+        self.assert_safe(invocation, freedom, network)
+        return invocation
 
     def _options(
         self,
@@ -390,7 +395,14 @@ class CodexBackend:
             raise ValueError("prompt must be a non-empty string")
         return prompt
 
-    def assert_safe(self, argv: list[str], freedom: Freedom, network: bool | None = None) -> None:
+    def assert_safe(
+        self, invocation: Invocation, freedom: Freedom, network: bool | None = None
+    ) -> None:
+        # No live input here: only a devnull-stdin Invocation is a shape this backend ever builds.
+        problem = classic_invocation_problem(invocation)
+        if problem is not None:
+            raise UnsafeInvocationError(problem)
+        argv = invocation.argv
         # Rejects an unknown freedom outright rather than letting SANDBOX_MODES[freedom] raise a
         # bare KeyError below. The network request is resolved here too — assert_safe is the
         # final execution seam, re-run at spawn time, so an unhonourable (freedom, network) pair
@@ -817,6 +829,12 @@ class CodexBackend:
     def _was_started(acc: Accumulator, call_id: Any) -> bool:
         started = acc.stream_state.get("normalize_started_calls")
         return isinstance(started, set) and call_id in started
+
+    def encode_live_message(self, text: str) -> bytes:
+        raise UnsupportedCapability(
+            f"the {self.name} backend has no live input, so a message cannot be added to a running "
+            "task; continue its session with resume_task instead"
+        )
 
     def classify(self, acc: Accumulator, exit_code: int | None) -> Status:
         # No terminal success/failure event exists, so the exit code is the authority and the closing
