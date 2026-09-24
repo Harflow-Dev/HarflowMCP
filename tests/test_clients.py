@@ -1137,3 +1137,125 @@ def test_desktop_preview_writes_nothing(tmp_path: Path) -> None:
     assert result.status == "previewed"
     assert not path.exists()
     assert any("polybridge" in line for line in result.diagnostics)
+
+
+# --- the desktop app: inspect and remove -----------------------------------------------------------
+
+
+def test_desktop_inspect_reports_nothing_registered_when_there_is_no_config(tmp_path: Path) -> None:
+    client, path = desktop(tmp_path)
+
+    inspection = client.inspect("polybridge", FakeRunner())
+
+    assert inspection.installed is False
+    assert inspection.error is None
+    assert not path.exists()
+
+
+def test_desktop_inspect_reads_the_stored_command_and_path(tmp_path: Path) -> None:
+    client, _ = desktop(tmp_path)
+    client.apply(REGISTRATION, FakeRunner())
+
+    inspection = client.inspect("polybridge", FakeRunner())
+
+    assert inspection.installed is True
+    assert inspection.command == REGISTRATION.command
+    assert inspection.path_env == REGISTRATION.path_env
+
+
+def test_desktop_inspect_ignores_other_servers(tmp_path: Path) -> None:
+    client, path = desktop(tmp_path)
+    path.write_text(json.dumps({"mcpServers": {"not-polybridge": {"command": "x"}}}))
+
+    assert client.inspect("polybridge", FakeRunner()).installed is False
+
+
+def test_desktop_inspect_of_a_malformed_config_is_an_error_not_an_absence(tmp_path: Path) -> None:
+    client, path = desktop(tmp_path)
+    path.write_text("{not json")
+
+    (inspection,) = clients.inspect_all([client], "polybridge", run=FakeRunner())
+
+    assert inspection.installed is None
+    assert "not valid JSON" in inspection.error
+
+
+def test_desktop_inspect_folds_args_into_the_command(tmp_path: Path) -> None:
+    """An entry that passes extra args launches something else, so it must not compare equal."""
+    client, path = desktop(tmp_path)
+    path.write_text(
+        json.dumps({"mcpServers": {"polybridge": {"command": "/x/server", "args": ["--debug"]}}})
+    )
+
+    assert client.inspect("polybridge", FakeRunner()).command == "/x/server --debug"
+
+
+def test_desktop_remove_deletes_only_our_key_and_backs_up_first(tmp_path: Path) -> None:
+    client, path = desktop(tmp_path)
+    path.write_text(json.dumps({"theme": "dark", "mcpServers": {"argent": {"command": "argent"}}}))
+    client.apply(REGISTRATION, FakeRunner())
+    before = path.read_text()
+
+    result = client.remove("polybridge", FakeRunner())
+
+    assert result.status == "removed"
+    written = json.loads(path.read_text())
+    assert written == {"theme": "dark", "mcpServers": {"argent": {"command": "argent"}}}
+    backups = [p for p in tmp_path.iterdir() if ".bak-" in p.name and p.read_text() == before]
+    assert backups, "the config as it was just before the removal must be backed up"
+    assert any(str(backups[0]) in line for line in result.diagnostics)
+
+
+def test_desktop_remove_with_nothing_registered_writes_nothing(tmp_path: Path) -> None:
+    client, path = desktop(tmp_path)
+    path.write_text(json.dumps({"mcpServers": {"argent": {}}}))
+    mtime = path.stat().st_mtime_ns
+
+    result = client.remove("polybridge", FakeRunner())
+
+    assert result.status == "not_installed"
+    assert path.stat().st_mtime_ns == mtime
+    assert [p.name for p in tmp_path.iterdir()] == [path.name], "no backup for a no-op"
+
+
+def test_desktop_remove_with_no_config_at_all_is_not_installed(tmp_path: Path) -> None:
+    client, path = desktop(tmp_path)
+
+    assert client.remove("polybridge", FakeRunner()).status == "not_installed"
+    assert not path.exists()
+
+
+def test_desktop_remove_refuses_a_config_it_cannot_parse(tmp_path: Path) -> None:
+    client, path = desktop(tmp_path)
+    path.write_text("{not json")
+
+    (result,) = clients.unregister([client], "polybridge", run=FakeRunner())
+
+    assert result.status == "failed"
+    assert path.read_text() == "{not json"
+
+
+def test_desktop_remove_refuses_a_non_object_mcp_servers(tmp_path: Path) -> None:
+    client, path = desktop(tmp_path)
+    path.write_text(json.dumps({"mcpServers": ["polybridge"]}))
+
+    (result,) = clients.unregister([client], "polybridge", run=FakeRunner())
+
+    assert result.status == "failed"
+    assert json.loads(path.read_text()) == {"mcpServers": ["polybridge"]}
+
+
+def test_desktop_remove_refuses_when_the_file_changed_underneath_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, path = desktop(tmp_path)
+    client.apply(REGISTRATION, FakeRunner())
+    original = path.read_text()
+    reads = iter([original, original, '{"mcpServers": {"someone-else": {}}}'])
+    monkeypatch.setattr("polybridge.clients.desktop.read_raw", lambda _: next(reads))
+
+    result = client.remove("polybridge", FakeRunner())
+
+    assert result.status == "failed"
+    assert "changed while it was being edited" in result.detail
+    assert path.read_text() == original

@@ -21,7 +21,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .base import Availability, Registration, Result, Runner, SetupError
+from .base import (
+    Availability,
+    Inspection,
+    Registration,
+    Result,
+    Runner,
+    SetupError,
+    entry_inspection,
+)
 
 MANUAL_INSTRUCTIONS = """
 Add this to your MCP client's config by hand, using absolute paths:
@@ -80,18 +88,22 @@ def load_config(path: Path) -> dict[str, Any]:
     return config
 
 
+def servers_of(config: dict[str, Any]) -> dict[str, Any]:
+    """The `mcpServers` object, or an empty one. Never guesses at a value of the wrong type."""
+    servers = config.get("mcpServers")
+    if servers is not None and not isinstance(servers, dict):
+        raise SetupError("existing 'mcpServers' is not a JSON object. Refusing to touch it.")
+    return servers or {}
+
+
 def merge_entry(config: dict[str, Any], key: str, entry: dict[str, Any]) -> dict[str, Any]:
     """Set our server key, leaving every other key's *value* as it was.
 
     Formatting is not preserved: the file is reserialized, so comments-by-convention and key order
     outside our own entry survive only as far as `json.dumps` reproduces them.
     """
-    servers = config.get("mcpServers")
-    if servers is not None and not isinstance(servers, dict):
-        raise SetupError("existing 'mcpServers' is not a JSON object. Refusing to overwrite it.")
-
     merged = dict(config)
-    merged["mcpServers"] = {**(servers or {}), key: entry}
+    merged["mcpServers"] = {**servers_of(config), key: entry}
     return merged
 
 
@@ -206,5 +218,43 @@ class DesktopClient:
             self.key,
             "applied",
             f"wrote {path}",
+            diagnostics=(f"backed up previous config to {backup}",) if backup else (),
+        )
+
+    def inspect(self, key: str, run: Runner) -> Inspection:
+        """`run` is unused. A config that does not exist yet simply has nothing registered."""
+        path = self.resolve_path()
+        servers = servers_of(load_config(path))
+        if key not in servers:
+            return Inspection(self.key, False, notes=(f"read {path}",))
+        return entry_inspection(self.key, servers[key], str(path))
+
+    def remove(self, key: str, run: Runner) -> Result:
+        """`apply`'s discipline in reverse: back up, delete only our key, replace atomically.
+
+        Nothing is written, and no backup made, when there is nothing to remove.
+        """
+        path = self.resolve_path()
+        before = read_raw(path)
+        config = load_config(path)
+        servers = servers_of(config)
+        if key not in servers:
+            return Result(self.key, "not_installed", f"no {key} entry in {path}")
+
+        updated = {**config, "mcpServers": {k: v for k, v in servers.items() if k != key}}
+        if read_raw(path) != before:
+            return Result(
+                self.key,
+                "failed",
+                f"{path} changed while it was being edited — nothing was written",
+                diagnostics=("Quit the Claude desktop app and try again.",),
+            )
+
+        backup = back_up(path)
+        write_config(path, updated)
+        return Result(
+            self.key,
+            "removed",
+            f"removed {key} from {path}",
             diagnostics=(f"backed up previous config to {backup}",) if backup else (),
         )

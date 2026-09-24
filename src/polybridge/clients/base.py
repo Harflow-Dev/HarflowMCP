@@ -145,6 +145,32 @@ class Inspection:
     available: bool = True
 
 
+def entry_inspection(client: str, entry: object, where: str) -> Inspection:
+    """Read a `{"command": …, "args": […], "env": {"PATH": …}}` entry — the shape the desktop app,
+    Claude Code and vibe all store, and the one Codex's `mcp list --json` reports under `transport`.
+
+    A non-empty `args` is folded into `command` rather than dropped: the entry launches more than the
+    bare command, so reporting the command alone would let it compare equal to one that does not.
+    """
+    if not isinstance(entry, dict):
+        return Inspection(
+            client, True, error=f"the entry in {where} is not an object", notes=(f"read {where}",)
+        )
+    command = entry.get("command")
+    args = entry.get("args")
+    env = entry.get("env")
+    path_env = env.get("PATH") if isinstance(env, dict) else None
+    if isinstance(command, str) and args:
+        command = shlex.join([command, *(str(arg) for arg in args)]) if isinstance(args, list) else None
+    return Inspection(
+        client,
+        True,
+        command=command if isinstance(command, str) else None,
+        path_env=path_env if isinstance(path_env, str) else None,
+        notes=(f"read {where}",),
+    )
+
+
 class Client(Protocol):
     """Everything the orchestration needs. Nothing outside `clients/` branches on `key`.
 
