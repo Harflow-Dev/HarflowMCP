@@ -360,7 +360,10 @@ any signal, then `.sig` (with whether the leader was alive when signalled) or `.
 server, seeing its process exit with a `.req` in flight, waits for the outcome instead of guessing:
 only a `.sig` that found the leader alive turns that exit into `cancelled`, even if the agent caught
 SIGTERM and exited 0. A `.failed`, or a canceller that died with its lease expired, leaves the normal
-classification in place. Resumes of one session are serialised by a lock under
+classification in place. A second canceller that joins an attempt already under way first records an intent
+file (`<id>.cancel.<n>.join-<token>`), then resolves it with the shared `.sig` or its own `nosig-<token>`;
+a `.failed` only settles the attempt once no such intent is outstanding, so a delivery whose `.sig` is
+still being written can never be outrun by it. Resumes of one session are serialised by a lock under
 `~/.polybridge/sessions/`, so two servers cannot both resume it.
 
 ## The normalized event log

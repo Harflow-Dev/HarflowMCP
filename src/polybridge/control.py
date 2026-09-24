@@ -41,6 +41,7 @@ import os
 import re
 import tempfile
 import time
+import uuid
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -200,6 +201,87 @@ def attempt_outcome(log_dir: Path, task_id: str, family: str, n: int) -> str:
     return "pending"
 
 
+JOIN_PREFIX = "join-"
+NOSIG_PREFIX = "nosig-"
+_JOIN_TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
+
+
+def join_tokens(log_dir: Path, task_id: str, family: str, n: int) -> list[str]:
+    """Tokens of every joiner intent (`<id>.<family>.<n>.join-<token>`) recorded for attempt `n`."""
+    store.validate_task_id(task_id)
+    try:
+        entries = list(log_dir.iterdir())
+    except OSError:
+        return []
+    tokens: list[str] = []
+    for path in entries:
+        match = _PHASE_FILE_RE.match(path.name)
+        if match is None or match.group("id") != task_id or match.group("family") != family:
+            continue
+        if match.group("n") != str(n) or not match.group("phase").startswith(JOIN_PREFIX):
+            continue
+        token = match.group("phase")[len(JOIN_PREFIX) :]
+        if _JOIN_TOKEN_RE.match(token):
+            tokens.append(token)
+    return tokens
+
+
+def joins_outstanding(
+    log_dir: Path, task_id: str, family: str, n: int, now: datetime | None = None
+) -> bool:
+    """Whether a joining controller of attempt `n` may still have a delivery to record.
+
+    A joiner writes its intent before signalling, then resolves it with the shared `.sig` (it
+    delivered) or its own `nosig-<token>` (it did not). An intent whose joiner is dead with an
+    expired lease is resolved too — it can no longer record anything. An unparsable intent is
+    undecidable, so it stays outstanding, like an unparsable `.req`.
+    """
+    if phase_path(log_dir, task_id, family, n, "sig").exists():
+        return False
+    resolved_now = now or datetime.now(timezone.utc)
+    for token in join_tokens(log_dir, task_id, family, n):
+        if phase_path(log_dir, task_id, family, n, f"{NOSIG_PREFIX}{token}").exists():
+            continue
+        intent = read_phase(log_dir, task_id, family, n, f"{JOIN_PREFIX}{token}")
+        if controller_abandoned(intent, resolved_now):
+            continue
+        return True
+    return False
+
+
+def attempt_state(
+    log_dir: Path, task_id: str, family: str, n: int, now: datetime | None = None
+) -> str:
+    """`attempt_outcome`, except that a `.failed` only settles the attempt once no joiner delivery
+    is outstanding: a joiner that signalled may still be writing its `.sig`, and a `.failed` read
+    first would publish the ordinary classified result for a run that was in fact cancelled."""
+    outcome = attempt_outcome(log_dir, task_id, family, n)
+    if outcome == "failed" and joins_outstanding(log_dir, task_id, family, n, now):
+        return "pending"
+    return outcome
+
+
+def begin_join(
+    log_dir: Path, task_id: str, family: str, n: int, controller: dict, now: datetime | None = None
+) -> str:
+    """Record a joining controller's intent to deliver under attempt `n`, before it signals.
+
+    Returns the token its outcome is recorded under (`mark_join_undelivered`, or the shared `.sig`).
+    Carries a lease like `.req`, so a joiner that dies mid-delivery is recoverable. Raises
+    `PhaseWriteError` — and the caller must then not signal at all.
+    """
+    resolved_now = now or datetime.now(timezone.utc)
+    payload = {"at": resolved_now.isoformat(), "by": controller, "lease_seconds": LEASE_SECONDS}
+    while True:
+        token = uuid.uuid4().hex
+        if write_phase(log_dir, task_id, family, n, f"{JOIN_PREFIX}{token}", payload):
+            return token
+
+
+def nosig_phase(token: str) -> str:
+    return f"{NOSIG_PREFIX}{token}"
+
+
 def controller_abandoned(req_payload: Any, now: datetime) -> bool:
     """Whether the controller that opened a `.req` can be declared gone.
 
@@ -265,11 +347,11 @@ def begin_attempt(
     resolved_now = now or datetime.now(timezone.utc)
     latest = latest_attempt(log_dir, task_id, family)
     if latest is not None:
-        outcome = attempt_outcome(log_dir, task_id, family, latest)
-        if outcome == "pending":
+        if attempt_outcome(log_dir, task_id, family, latest) == "pending":
             recover_abandoned(log_dir, task_id, family, latest, resolved_now)
-            outcome = attempt_outcome(log_dir, task_id, family, latest)
-        if outcome != "failed":
+        # A `.failed` with a joiner delivery still outstanding is not settled: starting n+1 then
+        # would hide that joiner's `.sig` from everything that reads only the latest attempt.
+        if attempt_state(log_dir, task_id, family, latest, resolved_now) != "failed":
             return Attempt(n=latest, owned=False)
         n = latest + 1
     else:
@@ -288,21 +370,22 @@ def cancel_verdict(log_dir: Path, task_id: str, now: datetime | None = None) -> 
     `"not_authorized"` — the latest attempt signalled a leader that was already gone, gave up
     outright, or its controller was found abandoned (which this call also recovers, publishing
     `.failed`, so a caller checking this does not need to call `recover_abandoned` itself).
-    `"pending"` — an attempt is underway with a controller that is still live or undecidable.
+    `"pending"` — an attempt is underway with a controller that is still live or undecidable, or
+    it has a `.failed` but a joining controller's delivery is still outstanding (`attempt_state`).
     """
     resolved_now = now or datetime.now(timezone.utc)
     latest = latest_attempt(log_dir, task_id, CANCEL)
     if latest is None:
         return "none"
-    outcome = attempt_outcome(log_dir, task_id, CANCEL, latest)
-    if outcome == "sig":
+    if attempt_outcome(log_dir, task_id, CANCEL, latest) == "pending":
+        recover_abandoned(log_dir, task_id, CANCEL, latest, resolved_now)
+    state = attempt_state(log_dir, task_id, CANCEL, latest, resolved_now)
+    if state == "sig":
         payload = read_phase(log_dir, task_id, CANCEL, latest, "sig")
         if isinstance(payload, dict) and payload.get("leader_alive") is True:
             return "authorized"
         return "not_authorized"
-    if outcome == "failed":
-        return "not_authorized"
-    if recover_abandoned(log_dir, task_id, CANCEL, latest, resolved_now):
+    if state == "failed":
         return "not_authorized"
     return "pending"
 
@@ -335,8 +418,10 @@ def cancel_attempt_active(log_dir: Path, task_id: str, now: datetime | None = No
     latest = latest_attempt(log_dir, task_id, CANCEL)
     if latest is None:
         return False
-    if attempt_outcome(log_dir, task_id, CANCEL, latest) != "pending":
+    if attempt_state(log_dir, task_id, CANCEL, latest, resolved_now) != "pending":
         return False
+    if attempt_outcome(log_dir, task_id, CANCEL, latest) == "failed":
+        return True  # a joiner's delivery is still outstanding
     req = read_phase(log_dir, task_id, CANCEL, latest, "req")
     return not controller_abandoned(req, resolved_now)
 
@@ -405,13 +490,28 @@ def write_record_if_open(
     *,
     timeout: float = RECORD_LOCK_TIMEOUT_SECONDS,
 ) -> store.TaskRecord | None:
+    """`close_record_if_open`, returning the written record or None if nothing was written."""
+    outcome, record = close_record_if_open(log_dir, task_id, update, timeout=timeout)
+    return record if outcome == "written" else None
+
+
+def close_record_if_open(
+    log_dir: Path,
+    task_id: str,
+    update: Callable[[store.TaskRecord], store.TaskRecord],
+    *,
+    timeout: float = RECORD_LOCK_TIMEOUT_SECONDS,
+) -> tuple[str, store.TaskRecord | None]:
     """Apply `update` to `task_id`'s record, but only if it is still open for a non-owner to act on.
 
     Synchronous and meant to run via `asyncio.to_thread` — nothing here awaits, so blocking with a
     plain `time.sleep` retry between `flock` attempts is fine; the calling coroutine is the one that
-    yields, by virtue of being in a worker thread. Returns None (no write) when the record is
-    missing, already terminal, or its owner is anything other than confirmed dead — `alive` and
-    `undecidable` both refuse, since only a *dead* owner's record is safe for someone else to close.
+    yields, by virtue of being in a worker thread. Only a *dead* owner's record is safe for someone
+    else to close: `alive` and `undecidable` both refuse.
+
+    Returns `(outcome, record)`: `"written"` with the new record; `"terminal"` with the existing
+    one (something already settled it); `"missing"`; `"owner_not_dead"`; or `"write_failed"` when
+    the write did not land on disk. Raises `LockTimeout` if the lock cannot be taken.
     """
     fd = os.open(record_lock_path(log_dir, task_id), os.O_CREAT | os.O_RDWR, 0o644)
     deadline = time.monotonic() + timeout
@@ -427,14 +527,15 @@ def write_record_if_open(
 
         record = store.read(log_dir, task_id)
         if record is None:
-            return None
+            return "missing", None
         if record.status in store.TERMINAL_RECORD_STATUSES:
-            return None
+            return "terminal", record
         if identity.identity_check(record.owner) != "dead":
-            return None
+            return "owner_not_dead", None
         updated = update(record)
-        store.write(log_dir, updated)
-        return updated
+        if not store.write_landed(log_dir, updated):
+            return "write_failed", None
+        return "written", updated
     finally:
         try:
             fcntl.flock(fd, fcntl.LOCK_UN)

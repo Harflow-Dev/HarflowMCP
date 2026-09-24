@@ -143,11 +143,20 @@ def write(log_dir: Path, record: TaskRecord) -> None:
     Refuses to move a task backwards: with several server processes writing, a stale "running"
     record must not overwrite an already-recorded outcome.
     """
+    write_landed(log_dir, record)
+
+
+def write_landed(log_dir: Path, record: TaskRecord) -> bool:
+    """`write`, reporting whether the record actually landed on disk.
+
+    Same never-raise contract; False for an invalid id, a refused backwards move, or an I/O
+    failure. For a caller that must tell the user when a status it published did not stick.
+    """
     try:
         target = record_path(log_dir, record.task_id)
     except InvalidTaskId:
         log.warning("refusing to persist a record for an invalid task id")
-        return
+        return False
 
     existing = read(log_dir, record.task_id)
     if (
@@ -161,7 +170,7 @@ def write(log_dir: Path, record: TaskRecord) -> None:
             record.task_id,
             record.status,
         )
-        return
+        return False
 
     try:
         log_dir.mkdir(parents=True, exist_ok=True)
@@ -179,6 +188,8 @@ def write(log_dir: Path, record: TaskRecord) -> None:
             raise
     except OSError:
         log.warning("could not persist record for task %s", record.task_id, exc_info=True)
+        return False
+    return True
 
 
 def read(log_dir: Path, task_id: str) -> TaskRecord | None:

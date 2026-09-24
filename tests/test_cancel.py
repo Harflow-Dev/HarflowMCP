@@ -958,10 +958,14 @@ async def test_a_failed_sig_write_is_retried_and_never_replaced_by_failed(
     monkeypatch.setattr(identity, "check_detail", lambda ident: ("alive", "start_time_match"))
     monkeypatch.setattr(tasks_module, "_signal_recorded_group", lambda record, sig: True)
 
-    def never(*args, **kwargs):
-        raise control.PhaseWriteError("disk full")
+    real_write = control.write_phase
 
-    monkeypatch.setattr(control, "mark_signalled", never)
+    def never_sig(log_dir, task_id, family, n, phase, payload):
+        if phase == "sig":
+            raise control.PhaseWriteError("disk full")
+        return real_write(log_dir, task_id, family, n, phase, payload)
+
+    monkeypatch.setattr(control, "write_phase", never_sig)
 
     registry._deliver_recorded_cancel(record)
 
@@ -1031,16 +1035,16 @@ async def test_a_delivered_cancel_whose_sig_keeps_failing_is_recorded_once_the_d
     )
     monkeypatch.setattr(tasks_module, "_signal_recorded_group", lambda record, sig: True)
 
-    real_mark = control.mark_signalled
+    real_write = control.write_phase
     failures = {"left": 8}  # well past the in-line attempts
 
-    def flaky_mark(*args, **kwargs):
-        if failures["left"] > 0:
+    def flaky_sig(log_dir, task_id, family, n, phase, payload):
+        if phase == "sig" and failures["left"] > 0:
             failures["left"] -= 1
             raise control.PhaseWriteError("transient")
-        return real_mark(*args, **kwargs)
+        return real_write(log_dir, task_id, family, n, phase, payload)
 
-    monkeypatch.setattr(control, "mark_signalled", flaky_mark)
+    monkeypatch.setattr(control, "write_phase", flaky_sig)
 
     await registry.cancel_recovered(record)
     assert control.attempt_outcome(tmp_path, "child", control.CANCEL, 1) == "pending"
@@ -1074,7 +1078,7 @@ async def test_a_record_lock_timeout_after_signalling_is_reported_not_raised(
     def locked(*args, **kwargs):
         raise control.LockTimeout("timed out acquiring record lock for child")
 
-    monkeypatch.setattr(control, "write_record_if_open", locked)
+    monkeypatch.setattr(control, "close_record_if_open", locked)
 
     result = await asyncio.wait_for(registry.cancel_cascade("root"), timeout=5)
 
@@ -1082,3 +1086,159 @@ async def test_a_record_lock_timeout_after_signalling_is_reported_not_raised(
     assert [entry["task_id"] for entry in result["not_recorded"]] == ["child"]
     assert "could not be recorded" in result["not_recorded"][0]["reason"]
     assert store.read(tmp_path, "child").status == "running"
+
+
+# --- second independent-verification regressions --------------------------------------------------
+
+CONTROLLER_A = {"pid": 7, "start_time": "a", "markers": []}
+
+
+def _flaky_sig_writes(monkeypatch: pytest.MonkeyPatch, failures: int) -> dict[str, int]:
+    real_write = control.write_phase
+    left = {"n": failures}
+
+    def write(log_dir, task_id, family, n, phase, payload):
+        if phase == "sig" and left["n"] > 0:
+            left["n"] -= 1
+            raise control.PhaseWriteError("transient")
+        return real_write(log_dir, task_id, family, n, phase, payload)
+
+    monkeypatch.setattr(control, "write_phase", write)
+    return left
+
+
+async def test_a_joiners_delayed_sig_cannot_be_outrun_by_the_owners_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A owns attempt 1; joiner B delivers SIGTERM but its `.sig` write is deferred to the retry
+    job; A then finds the group gone and writes `.failed`. The owner's monitor must keep waiting
+    and read `cancelled` once B's `.sig` lands — not publish the classified result on `.failed`."""
+    monkeypatch.setattr(tasks_module, "_SIG_WRITE_RETRY_SECONDS", 0)
+    monkeypatch.setattr(tasks_module, "SIG_RETRY_INITIAL_SECONDS", 0.2)
+    monkeypatch.setattr(tasks_module, "CANCEL_VERDICT_POLL_SECONDS", 0.01)
+    registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)  # controller B
+    registry._loop = asyncio.get_running_loop()
+    record = _child_record(tmp_path)
+    store.write(tmp_path, record)
+    assert control.begin_attempt(tmp_path, "child", control.CANCEL, CONTROLLER_A).owned
+    monkeypatch.setattr(identity, "check_detail", lambda ident: ("alive", "start_time_match"))
+    monkeypatch.setattr(tasks_module, "_signal_recorded_group", lambda record, sig: True)
+    _flaky_sig_writes(monkeypatch, failures=tasks_module._SIG_WRITE_ATTEMPTS)
+
+    assert await asyncio.to_thread(registry._deliver_recorded_cancel, record) == ("signalled", None)
+    assert control.attempt_outcome(tmp_path, "child", control.CANCEL, 1) == "pending"
+    control.mark_failed(tmp_path, "child", control.CANCEL, 1, reason="process group already gone")
+
+    assert control.cancel_verdict(tmp_path, "child") == "pending"
+    monitor_task = make_task(tmp_path, "child")
+    verdict = await asyncio.wait_for(
+        tasks_module._await_cancel_verdict(monitor_task, registry), timeout=5
+    )
+    assert verdict == "authorized"
+    assert control.phase_path(tmp_path, "child", control.CANCEL, 1, "failed").exists()
+
+
+async def test_a_joiner_that_could_not_deliver_resolves_its_intent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
+    record = _child_record(tmp_path)
+    store.write(tmp_path, record)
+    control.begin_attempt(tmp_path, "child", control.CANCEL, CONTROLLER_A)
+    monkeypatch.setattr(identity, "check_detail", lambda ident: ("alive", "start_time_match"))
+    monkeypatch.setattr(tasks_module, "_signal_recorded_group", lambda record, sig: False)
+
+    registry._deliver_recorded_cancel(record)
+    control.mark_failed(tmp_path, "child", control.CANCEL, 1, reason="process group already gone")
+
+    (token,) = control.join_tokens(tmp_path, "child", control.CANCEL, 1)
+    assert control.phase_path(tmp_path, "child", control.CANCEL, 1, f"nosig-{token}").exists()
+    assert control.cancel_verdict(tmp_path, "child") == "not_authorized"
+
+
+async def test_a_joiner_that_finds_its_attempt_already_failed_withdraws_and_starts_afresh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `.failed` written between joining and recording the intent may already have been read, so
+    the joiner must not deliver under that attempt."""
+    registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
+    record = _child_record(tmp_path)
+    store.write(tmp_path, record)
+    control.begin_attempt(tmp_path, "child", control.CANCEL, CONTROLLER_A)
+    monkeypatch.setattr(identity, "check_detail", lambda ident: ("alive", "start_time_match"))
+    monkeypatch.setattr(tasks_module, "_signal_recorded_group", lambda record, sig: True)
+    real_join = control.begin_join
+
+    def join_then_owner_fails(log_dir, task_id, family, n, controller, now=None):
+        token = real_join(log_dir, task_id, family, n, controller, now)
+        if n == 1:
+            control.mark_failed(log_dir, task_id, family, 1, reason="process group already gone")
+        return token
+
+    monkeypatch.setattr(control, "begin_join", join_then_owner_fails)
+
+    assert registry._deliver_recorded_cancel(record) == ("signalled", None)
+
+    (token,) = control.join_tokens(tmp_path, "child", control.CANCEL, 1)
+    assert control.phase_path(tmp_path, "child", control.CANCEL, 1, f"nosig-{token}").exists()
+    assert not control.phase_path(tmp_path, "child", control.CANCEL, 1, "sig").exists()
+    assert control.attempt_outcome(tmp_path, "child", control.CANCEL, 2) == "sig"
+
+
+@pytest.mark.parametrize(
+    ("outcome", "reported", "reason_fragment"),
+    [
+        ("missing", True, "no longer exists"),
+        ("owner_not_dead", True, "no longer confirmed dead"),
+        ("write_failed", True, "writing its cancelled status to disk failed"),
+        ("terminal", False, None),
+    ],
+)
+async def test_every_cancelled_write_that_did_not_land_is_reported(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: str,
+    reported: bool,
+    reason_fragment: str | None,
+) -> None:
+    """Only "written" and the benign "terminal" (already settled by someone) go unreported."""
+    monkeypatch.setattr(tasks_module, "SIGKILL_GRACE_SECONDS", 0.02)
+    monkeypatch.setattr(tasks_module, "CANCEL_VERDICT_POLL_SECONDS", 0.01)
+    registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
+    spawn_noop_local_task(registry, tmp_path)
+    store.write(tmp_path, _child_record(tmp_path))
+    monkeypatch.setattr(identity, "check_detail", lambda ident: ("alive", "start_time_match"))
+    monkeypatch.setattr(identity, "identity_check", lambda ident: "dead")
+    monkeypatch.setattr(tasks_module, "_signal_recorded_group", lambda record, sig: True)
+    monkeypatch.setattr(control, "close_record_if_open", lambda *a, **k: (outcome, None))
+
+    result = await asyncio.wait_for(registry.cancel_cascade("root"), timeout=5)
+
+    if reported:
+        assert [entry["task_id"] for entry in result["not_recorded"]] == ["child"]
+        assert reason_fragment in result["not_recorded"][0]["reason"]
+    else:
+        assert result["not_recorded"] == []
+
+
+async def test_phase_retries_are_deduplicated_per_attempt_and_released_when_done(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(tasks_module, "SIG_RETRY_INITIAL_SECONDS", 0.05)
+    registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
+    registry._loop = asyncio.get_running_loop()
+
+    registry._request_phase_retry("child", 1, "sig", {"leader_alive": True})
+    registry._request_phase_retry("child", 1, "sig", {"leader_alive": True})
+    registry._request_phase_retry("child", 2, "sig", {"leader_alive": True})
+
+    assert len(registry._control_jobs) == 2
+    first = registry._phase_retries[("child", 1, "sig")]
+    await asyncio.wait_for(asyncio.gather(*registry._control_jobs), timeout=5)
+    await asyncio.sleep(0)
+    assert registry._phase_retries == {}
+    assert control.attempt_outcome(tmp_path, "child", control.CANCEL, 1) == "sig"
+
+    registry._request_phase_retry("child", 1, "failed-probe", {})
+    assert registry._phase_retries[("child", 1, "failed-probe")] is not first
+    await asyncio.wait_for(asyncio.gather(*registry._control_jobs), timeout=5)

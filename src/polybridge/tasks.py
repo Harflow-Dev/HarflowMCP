@@ -77,6 +77,21 @@ _SIG_WRITE_RETRY_SECONDS = 0.1
 SIG_RETRY_INITIAL_SECONDS = 0.5
 SIG_RETRY_MAX_SECONDS = 30.0
 
+# Why a signalled case-3 target's `cancelled` did not land, by `control.close_record_if_open`
+# outcome. "written" and "terminal" are absent: the first landed, the second was already settled.
+_NOT_RECORDED_REASONS = {
+    "missing": "signalled, but its record no longer exists, so no cancellation was recorded",
+    "owner_not_dead": (
+        "signalled, but its owning server is no longer confirmed dead, so only that server may "
+        "record the outcome"
+    ),
+    "write_failed": "signalled, but writing its cancelled status to disk failed",
+}
+
+# How many times a joiner restarts after finding its attempt settled under it (see
+# `_deliver_recorded_cancel`) before reporting the target as not signalled.
+_JOIN_ATTEMPTS = 3
+
 # How long `resume`/`resume_record` wait to acquire a session's lock before giving up. Held across
 # the check-and-spawn it protects (see `control.session_lock`'s docstring and the plan's Notes on
 # why that is fine), so this bounds how long a second resume on a busy session waits before it is
@@ -598,11 +613,13 @@ class TaskRegistry:
         self._owner = owner if owner is not None else identity.own_identity()
         self._maintenance: asyncio.Task[Any] | None = None
         # Strong references to shielded cancel jobs (see `_shielded`) and `.sig` retries (see
-        # `_retry_sig`), which outlive their caller.
+        # `_retry_phase`), which outlive their caller.
         self._control_jobs: set[asyncio.Task[Any]] = set()
         # The loop cancels run on, captured when one starts, so a `.sig` retry requested from a
         # worker thread can be scheduled back onto it.
         self._loop: asyncio.AbstractEventLoop | None = None
+        # The live phase-write retry per (task_id, attempt n, phase) — see `_start_phase_retry`.
+        self._phase_retries: dict[tuple[str, int, str], asyncio.Task[Any]] = {}
 
     async def _detect_caller(self) -> lineage.Caller | None:
         """Best-effort: which task (if any) dispatched the process calling us.
@@ -1266,18 +1283,45 @@ class TaskRegistry:
             if verdict == "dead":
                 return "gone", None
             return "not_signalled", reason
-        try:
-            attempt = control.begin_attempt(self._log_dir, task_id, control.CANCEL, self._owner)
-        except control.PhaseWriteError as exc:
-            return "not_signalled", f"phase write failed: {exc}"
+        join_token: str | None = None
+        for _ in range(_JOIN_ATTEMPTS):
+            try:
+                attempt = control.begin_attempt(
+                    self._log_dir, task_id, control.CANCEL, self._owner
+                )
+                if attempt.owned:
+                    break
+                # A joiner records its intent before signalling: while it is outstanding, the
+                # owner's `.failed` does not settle the attempt (`control.attempt_state`), so a
+                # delivery whose `.sig` is still being written cannot be outrun by it.
+                join_token = control.begin_join(
+                    self._log_dir, task_id, control.CANCEL, attempt.n, self._owner
+                )
+            except control.PhaseWriteError as exc:
+                return "not_signalled", f"phase write failed: {exc}"
+            if control.attempt_outcome(self._log_dir, task_id, control.CANCEL, attempt.n) != "failed":
+                break
+            # The attempt already had a `.failed` that may have been read before this intent
+            # existed, so delivering under it could go unnoticed. Withdraw and start afresh.
+            self._record_phase(
+                task_id, attempt.n, control.nosig_phase(join_token), {"reason": "attempt settled"}
+            )
+            join_token = None
+        else:
+            return "not_signalled", "the cancel attempt kept settling concurrently; retry"
 
         delivered = _signal_recorded_group(record, signal.SIGTERM)
         if delivered:
-            # Written by a joining controller too, not only the attempt's owner: if the owner is
-            # still between its `.req` and its own delivery, it may find the group already gone and
-            # write `.failed` — and a delivery that really happened must not be lost to that.
-            # `.sig` outranks `.failed` in `control.attempt_outcome`.
+            # Written by a joining controller too, not only the attempt's owner — that is also what
+            # resolves a joiner's intent. `.sig` outranks `.failed` in `control.attempt_outcome`.
             self._record_delivery(task_id, attempt.n, leader_alive=verdict == "alive")
+        elif join_token is not None:
+            self._record_phase(
+                task_id,
+                attempt.n,
+                control.nosig_phase(join_token),
+                {"reason": "process group already gone"},
+            )
         elif attempt.owned:
             try:
                 control.mark_failed(
@@ -1307,80 +1351,127 @@ class TaskRegistry:
         leader_alive: bool,
         inline_attempts: int = _SIG_WRITE_ATTEMPTS,
     ) -> None:
-        """Write `.sig` for a delivered SIGTERM; if that keeps failing, hand it to `_retry_sig`.
+        """Write `.sig` for a delivered SIGTERM, retried until it lands (see `_record_phase`).
 
         Never falls back to `.failed`: that means delivery failed, and publishing it for a signal
-        that landed would turn a cancelled run into whatever `classify` makes of its exit. Nor may
-        the attempt simply be left pending: its `.req` names this server as controller, and lease
-        recovery only closes an attempt whose controller is dead — so while this server lives, an
-        abandoned pending attempt would keep the owner's monitor waiting and retention keeping the
-        record, forever. The retry job is what makes the pending state last exactly as long as
-        this controller's work does; if the server itself dies, lease recovery takes over.
+        that landed would turn a cancelled run into whatever `classify` makes of its exit.
+        """
+        self._record_phase(
+            task_id, n, "sig", {"leader_alive": leader_alive}, inline_attempts=inline_attempts
+        )
+
+    def _record_phase(
+        self,
+        task_id: str,
+        n: int,
+        phase: str,
+        payload: dict[str, Any],
+        *,
+        inline_attempts: int = _SIG_WRITE_ATTEMPTS,
+    ) -> None:
+        """Write a cancel attempt's outcome phase; if that keeps failing, hand it to `_retry_phase`.
+
+        The attempt may not simply be left unresolved: its `.req` (or a joiner's intent) names this
+        server as controller, and lease recovery only closes what a dead controller left behind —
+        so while this server lives, an unwritten outcome would keep the owner's monitor waiting and
+        retention keeping the record, forever. The retry job makes the unresolved state last
+        exactly as long as this controller's work does; if the server dies, lease recovery takes
+        over.
         """
         for attempt_index in range(inline_attempts):
             try:
-                control.mark_signalled(
-                    self._log_dir, task_id, control.CANCEL, n, leader_alive=leader_alive
+                control.write_phase(
+                    self._log_dir,
+                    task_id,
+                    control.CANCEL,
+                    n,
+                    phase,
+                    {"at": _now().isoformat(), **payload},
                 )
                 return
             except control.PhaseWriteError:
                 if attempt_index + 1 < inline_attempts:
                     time.sleep(_SIG_WRITE_RETRY_SECONDS)
         log.warning(
-            "cancel of %s: could not record its delivered SIGTERM yet; retrying in the background",
+            "cancel of %s: could not write attempt %d's %s yet; retrying in the background",
             task_id,
+            n,
+            phase,
         )
-        self._request_sig_retry(task_id, n, leader_alive)
+        self._request_phase_retry(task_id, n, phase, payload)
 
-    def _request_sig_retry(self, task_id: str, n: int, leader_alive: bool) -> None:
-        """Schedule `_retry_sig` on the registry's loop, from the loop or from a worker thread."""
+    def _request_phase_retry(
+        self, task_id: str, n: int, phase: str, payload: dict[str, Any]
+    ) -> None:
+        """Schedule `_retry_phase` on the registry's loop, from the loop or from a worker thread."""
         loop = self._loop
         if loop is None:  # pragma: no cover - every cancel path captures the loop first
-            log.error("cancel of %s: no event loop to retry its .sig on", task_id)
+            log.error("cancel of %s: no event loop to retry its %s on", task_id, phase)
             return
         try:
             on_loop = asyncio.get_running_loop() is loop
         except RuntimeError:
             on_loop = False
         if on_loop:
-            self._start_sig_retry(task_id, n, leader_alive)
+            self._start_phase_retry(task_id, n, phase, payload)
         else:
-            loop.call_soon_threadsafe(self._start_sig_retry, task_id, n, leader_alive)
+            loop.call_soon_threadsafe(self._start_phase_retry, task_id, n, phase, payload)
 
-    def _start_sig_retry(self, task_id: str, n: int, leader_alive: bool) -> None:
+    def _start_phase_retry(
+        self, task_id: str, n: int, phase: str, payload: dict[str, Any]
+    ) -> None:
+        """At most one live retry per (task, attempt, phase): a repeat request reuses the running
+        job, and the key is released when that job ends."""
+        key = (task_id, n, phase)
+        running = self._phase_retries.get(key)
+        if running is not None and not running.done():
+            return
         job = asyncio.create_task(
-            self._retry_sig(task_id, n, leader_alive), name=f"pb-sig-retry-{task_id}-{n}"
+            self._retry_phase(task_id, n, phase, payload), name=f"pb-phase-retry-{task_id}-{n}-{phase}"
         )
+        self._phase_retries[key] = job
         self._control_jobs.add(job)
-        job.add_done_callback(self._control_jobs.discard)
 
-    async def _retry_sig(self, task_id: str, n: int, leader_alive: bool) -> None:
-        """Keep trying to write attempt `n`'s `.sig`, with capped backoff, until it exists.
+        def _release(done: asyncio.Task[Any]) -> None:
+            self._control_jobs.discard(done)
+            if self._phase_retries.get(key) is done:
+                del self._phase_retries[key]
+
+        job.add_done_callback(_release)
+
+    async def _retry_phase(
+        self, task_id: str, n: int, phase: str, payload: dict[str, Any]
+    ) -> None:
+        """Keep trying to write attempt `n`'s `phase`, with capped backoff, until it exists.
 
         No give-up: stopping while this server lives would strand the attempt (see
-        `_record_delivery`). A `.sig` written meanwhile by a joining controller ends it; a
-        `.failed` does not, because `.sig` outranks it and this delivery really happened.
+        `_record_phase`). It ends early once `.sig` exists, whoever wrote it — that resolves a
+        joiner's intent as well — but not on a `.failed`, which `.sig` outranks.
         """
         delay = SIG_RETRY_INITIAL_SECONDS
         while True:
             await asyncio.sleep(delay)
             try:
-                if control.attempt_outcome(self._log_dir, task_id, control.CANCEL, n) == "sig":
+                if any(
+                    control.phase_path(self._log_dir, task_id, control.CANCEL, n, done).exists()
+                    for done in {phase, "sig"}
+                ):
                     return
                 await asyncio.to_thread(
-                    control.mark_signalled,
+                    control.write_phase,
                     self._log_dir,
                     task_id,
                     control.CANCEL,
                     n,
-                    leader_alive=leader_alive,
+                    phase,
+                    {"at": _now().isoformat(), **payload},
                 )
-                log.info("cancel of %s: recorded its delivered SIGTERM after retrying", task_id)
+                log.info("cancel of %s: wrote attempt %d's %s after retrying", task_id, n, phase)
                 return
             except control.PhaseWriteError:
                 delay = min(delay * 2, SIG_RETRY_MAX_SECONDS)
             except Exception:
-                log.warning("cancel of %s: .sig retry failed unexpectedly", task_id, exc_info=True)
+                log.warning("cancel of %s: %s retry failed unexpectedly", task_id, phase, exc_info=True)
                 delay = min(delay * 2, SIG_RETRY_MAX_SECONDS)
 
     @staticmethod
@@ -1505,9 +1596,10 @@ class TaskRegistry:
         survivor_ids = {record.task_id for record, _leader in survivors}
         for record, _leader in signalled:
             survivor = record.task_id in survivor_ids
+            reason: str | None = None
             try:
-                await asyncio.to_thread(
-                    control.write_record_if_open,
+                written, _ = await asyncio.to_thread(
+                    control.close_record_if_open,
                     self._log_dir,
                     record.task_id,
                     lambda r: replace(
@@ -1521,6 +1613,11 @@ class TaskRegistry:
                 # published.
                 log.warning("cascade: could not record %s as cancelled", record.task_id, exc_info=True)
                 reason = f"signalled, but the cancellation could not be recorded: {exc}"
+            else:
+                # "terminal" is benign — whoever settled it (its owner, or another canceller) got
+                # there first, and the status that stands is theirs — so it is not reported.
+                reason = _NOT_RECORDED_REASONS.get(written)
+            if reason is not None:
                 outcomes[record.task_id] = (
                     ("sigkill_survivor", reason) if survivor else ("not_recorded", reason)
                 )

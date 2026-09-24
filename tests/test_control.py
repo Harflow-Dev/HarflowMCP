@@ -592,3 +592,63 @@ def test_write_phase_wraps_a_temp_file_creation_failure(
 
     with pytest.raises(control.PhaseWriteError):
         control.write_phase(tmp_path, "t1", control.CANCEL, 1, "sig", {})
+
+
+def test_close_record_if_open_reports_a_write_that_did_not_land(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store.write(tmp_path, make_record(owner={"pid": 1, "start_time": "x", "markers": []}))
+    monkeypatch.setattr(control.identity, "identity_check", lambda ident: "dead")
+    monkeypatch.setattr(store, "write_landed", lambda log_dir, record: False)
+
+    outcome, record = control.close_record_if_open(
+        tmp_path, "task-1", lambda r: replace(r, status="cancelled")
+    )
+
+    assert (outcome, record) == ("write_failed", None)
+    assert store.read(tmp_path, "task-1").status == "running"
+
+
+def test_close_record_if_open_distinguishes_missing_terminal_and_live_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    close = lambda: control.close_record_if_open(  # noqa: E731
+        tmp_path, "task-1", lambda r: replace(r, status="cancelled")
+    )
+    assert close() == ("missing", None)
+
+    store.write(tmp_path, make_record(owner={"pid": 1, "start_time": "x", "markers": []}))
+    monkeypatch.setattr(control.identity, "identity_check", lambda ident: "alive")
+    assert close() == ("owner_not_dead", None)
+
+    store.write(tmp_path, make_record(status="completed", exit_code=0))
+    assert close()[0] == "terminal"
+
+
+def test_store_write_landed_is_false_on_an_io_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def no_space(*args, **kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(store.tempfile, "NamedTemporaryFile", no_space)
+
+    assert store.write_landed(tmp_path, make_record()) is False
+    store.write(tmp_path, make_record())  # the plain write still never raises
+
+
+def test_a_failed_attempt_with_an_outstanding_joiner_is_not_settled(tmp_path: Path) -> None:
+    controller = {"pid": 1, "start_time": "x", "markers": []}
+    control.begin_attempt(tmp_path, "t1", control.CANCEL, controller)
+    token = control.begin_join(tmp_path, "t1", control.CANCEL, 1, controller)
+    control.mark_failed(tmp_path, "t1", control.CANCEL, 1, reason="gone")
+
+    assert control.attempt_state(tmp_path, "t1", control.CANCEL, 1) == "pending"
+    assert control.cancel_verdict(tmp_path, "t1") == "pending"
+    assert control.cancel_attempt_active(tmp_path, "t1") is True
+    # a pending joiner also stops a new attempt starting, which would hide its `.sig`
+    assert control.begin_attempt(tmp_path, "t1", control.CANCEL, controller) == control.Attempt(1, False)
+
+    control.write_phase(tmp_path, "t1", control.CANCEL, 1, control.nosig_phase(token), {})
+    assert control.attempt_state(tmp_path, "t1", control.CANCEL, 1) == "failed"
+    assert control.cancel_verdict(tmp_path, "t1") == "not_authorized"
