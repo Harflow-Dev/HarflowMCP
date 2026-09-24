@@ -48,8 +48,8 @@ CLOSED_MESSAGE = "finished; continue with resume_task"
 
 class SendRefused(RuntimeError):
     """A message that was not queued, and why. `code` is stable for callers and `polybridge-ctl`:
-    `closed`, `not_live_input`, `settled`, `owner_not_alive`, `unknown_task`, `lock_timeout`,
-    `write_failed`."""
+    `closed`, `not_live_input`, `settled`, `exited`, `owner_not_alive`, `unknown_task`,
+    `lock_timeout`, `write_failed`."""
 
     def __init__(self, message: str, *, code: str) -> None:
         super().__init__(message)
@@ -85,8 +85,28 @@ def queued_response(task_id: str, message: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _is_seal(entry: Any) -> bool:
+    return isinstance(entry, dict) and entry.get("closed") is True and "id" not in entry
+
+
 def is_closed(log_dir: Path, task_id: str) -> bool:
-    return closed_path(log_dir, task_id).exists()
+    """Input is closed: the marker exists, or — where the marker could not be created — the inbox
+    itself carries a seal line (see `seal`)."""
+    if closed_path(log_dir, task_id).exists():
+        return True
+    try:
+        data = inbox_path(log_dir, task_id).read_bytes()
+    except OSError:
+        return False
+    if b'"closed"' not in data:
+        return False
+    for line in data.splitlines():
+        try:
+            if _is_seal(json.loads(line.decode("utf-8"))):
+                return True
+        except (UnicodeDecodeError, ValueError):
+            continue
+    return False
 
 
 def mark_closed(log_dir: Path, task_id: str) -> None:
@@ -102,6 +122,18 @@ def mark_closed(log_dir: Path, task_id: str) -> None:
     finally:
         os.close(fd)
     control._fsync_dir(log_dir)
+
+
+def seal(log_dir: Path, task_id: str) -> None:
+    """Close input durably, so every sender sees it: the marker, or — if the directory refuses a new
+    file — a seal line appended to the inbox itself, which `is_closed` also honours. Call with the
+    lock held. Raises `OSError` only if neither could be written."""
+    try:
+        mark_closed(log_dir, task_id)
+        return
+    except OSError:
+        pass
+    append_locked(log_dir, task_id, {"closed": True, "at": _now_iso()})
 
 
 async def lock_async(log_dir: Path, task_id: str, timeout: float = LOCK_TIMEOUT_SECONDS) -> int:
@@ -203,7 +235,8 @@ def send_to_record(
 ) -> dict[str, Any]:
     """Queue `text` for a live-input task this process does not own. Blocking: run it in a worker
     thread, or from a CLI. Refusals raise `SendRefused`, checked in this order under the lock: not a
-    live-input run, input already closed, task settled, owner not confirmed alive.
+    live-input run, input already closed, task settled, its process confirmed exited, owner not
+    confirmed alive.
 
     The owner check is strict: only `alive` passes. An owner that is gone cannot pump the message,
     and an undecidable one — including a legacy record with no start time — cannot be trusted to.
@@ -254,6 +287,16 @@ def _check_open(log_dir: Path, record: store.TaskRecord) -> None:
             f"task {task_id} has settled ({record.status}); continue with resume_task",
             code="settled",
         )
+    if record.pid is not None:
+        leader = identity.task_identity(record.pid, record.start_time, record.markers)
+        if identity.identity_check(leader) == "dead":
+            # Its record may still say running (the owner has not persisted the outcome yet, or
+            # never will), but nothing is left to deliver to.
+            raise SendRefused(
+                f"task {task_id}'s process has exited; continue with resume_task once it has "
+                "settled",
+                code="exited",
+            )
     verdict = identity.identity_check(record.owner)
     if verdict != "alive":
         raise SendRefused(

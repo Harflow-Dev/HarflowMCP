@@ -410,8 +410,8 @@ A claude task started without `max_turns` runs with `--input-format stream-json`
   stdin, so the task still exits and settles on its own and `wait_for_task` is never held open.
 
 A send is refused once input has closed, with **"finished; continue with resume_task"** — which is
-the thing to do. It is also refused for a task without live input, a settled one, and one whose
-owning server is not confirmed alive. It only ever returns `queued`: the event log's
+the thing to do. It is also refused for a task without live input, a settled one, one whose process
+has already exited, and one whose owning server is not confirmed alive. It only ever returns `queued`: the event log's
 `user_message` / `undelivered` events say what actually happened. If a result reports an error the
 task stops forwarding at once, and every message still queued is reported `undelivered` with a
 notice rather than silently dropped.

@@ -118,6 +118,11 @@ MAX_TASKS = 200
 LIVE_IDLE_ENV = "PB_LIVE_IDLE_SECONDS"
 DEFAULT_LIVE_IDLE_SECONDS = 600.0
 
+# What a close is for, so `_close_input` can re-check that it still holds once it has the lock.
+CLOSE_STOP = "stop"
+CLOSE_IDLE = "idle"
+CLOSE_IDLE_BOUND = "idle_bound"
+
 
 def live_idle_seconds(environ: Any = None) -> float:
     """`PB_LIVE_IDLE_SECONDS`, or the default for anything missing, unparsable, or not > 0."""
@@ -567,6 +572,12 @@ class Task:
     """The input pump — retained here, and deliberately not in `watchers`: `_finish_draining`
     must neither wait on nor cancel it. `_monitor` settles it itself (`_finish_pump`)."""
     pump_wake: asyncio.Event = field(default_factory=asyncio.Event)
+    close_failures: int = 0
+    """Consecutive close attempts that could not read the inbox or seal it — see `_close_input`."""
+    input_after_result: int | None = None
+    """`acc.result_count` when polybridge last wrote a message to the run. A turn is owed for it, so
+    until a later result arrives an earlier success is not the run's outcome — persisted, so a
+    recovered run's replay knows it too (`store._resolve`)."""
     last_output_at: float = field(default_factory=time.monotonic)
     """`time.monotonic()` of the last stdout line — the idle bound's clock."""
 
@@ -1233,6 +1244,17 @@ class TaskRegistry:
             return "the run's stdin had closed"
         return None
 
+    def _note_input_written(self, task: Task) -> None:
+        """A message reached the run: a turn is owed for it. Not idle until its result arrives,
+        and an earlier success is not the outcome until then — recorded durably for recovery."""
+        task.acc.awaiting_input = False
+        task.acc.turn_open = True
+        task.input_after_result = task.acc.result_count
+        try:
+            self.persist(task)
+        except Exception:
+            log.warning("task %s: could not record the written input", task.task_id, exc_info=True)
+
     async def _forward_pending(self, task: Task) -> bool:
         """Write whatever is queued. True if anything was taken off the queue.
 
@@ -1260,23 +1282,41 @@ class TaskRegistry:
         finally:
             inbox.unlock(fd)
         if written:
-            # A turn is owed now (or the message folds into the one running): not idle until its
-            # result says so.
-            task.acc.awaiting_input = False
+            self._note_input_written(task)
             await _drain_stdin(task)
         return bool(pending)
 
-    async def _close_input(self, task: Task, *, drop_reason: str | None = None) -> bool:
+    def _close_still_warranted(self, task: Task, kind: str, bound: float) -> bool:
+        """Re-made under the inbox lock: the idle state the pump saw before waiting for the lock
+        may be gone by now (a follow-up turn, a new background task)."""
+        if kind == CLOSE_IDLE:
+            return task.acc.awaiting_input
+        if kind == CLOSE_IDLE_BOUND:
+            return background_idle_bound_reached(
+                task.acc, time.monotonic() - task.last_output_at, bound
+            )
+        return True
+
+    async def _close_input(
+        self,
+        task: Task,
+        *,
+        drop_reason: str | None = None,
+        kind: str = CLOSE_STOP,
+        bound: float = DEFAULT_LIVE_IDLE_SECONDS,
+    ) -> bool:
         """The close protocol: 1) lock the inbox; 2) forward — or, with a drop reason, report
-        undelivered — every message still queued; 3) create the closed marker; 4) unlock;
-        5) close stdin. The same sequence on every path (idle, error, idle bound, exit), so no send
-        can slip in between the last forward and EOF. Returns True once input is closed.
+        undelivered — every message still queued; 3) seal the inbox (marker, or a seal line); 4)
+        unlock; 5) close stdin. The same sequence on every path (idle, error, idle bound, exit), so
+        no send can slip in between the last forward and EOF. Returns True once input is closed.
 
         The decision is re-made under the lock: an error or exit that arrived while waiting for it
-        turns a forwarding close into a dropping one. A close that cannot complete — the inbox
-        unreadable, the marker unwritable — returns False and changes nothing a sender could rely
-        on: stdin stays open while the run lives, and the pump retries. Only once the run has exited
-        and the lock stays busy for `EXIT_CLOSE_GIVE_UP_SECONDS` does `_close_unlocked` take over.
+        turns a forwarding close into a dropping one, and an idle close whose idleness has passed is
+        abandoned (False, nothing changed). A close whose inbox cannot be read or sealed also
+        returns False while the run lives, and the pump retries — up to `CLOSE_RETRY_LIMIT`
+        attempts, after which `_force_close` ends input anyway, because a live run that can never
+        reach EOF would never settle. After exit there is nothing to hold stdin open for, and a lock
+        that stays busy for `EXIT_CLOSE_GIVE_UP_SECONDS` hands over to `_close_unlocked`.
         """
         exited_since: float | None = None
         fd: int | None = None
@@ -1290,45 +1330,77 @@ class TaskRegistry:
                         self._close_unlocked(task, "the run exited and its inbox stayed locked")
                         return True
                 log.warning("task %s: inbox lock busy; still waiting to close input", task.task_id)
-        wrote = 0
         try:
             reason = drop_reason or self._stop_reason(task)
             exited = task.proc is None or task.proc.returncode is not None
+            if reason is None and not self._close_still_warranted(task, kind, bound):
+                return False
             try:
                 pending = self._take_pending(task)
             except OSError:
                 log.warning("task %s: could not read its inbox to close it", task.task_id, exc_info=True)
                 if exited:
-                    # Nothing left to keep stdin open for; report what can be known.
                     self._close_unlocked(task, "its inbox could not be read")
                     return True
-                return False
+                return self._close_failed(task, "its inbox could not be read")
             if reason is None:
                 wrote = self._write_messages(task, pending)
+                if wrote:
+                    self._note_input_written(task)  # a turn is owed for those, EOF or not
             else:
                 self._report_undelivered(task, pending, reason)
             try:
-                inbox.mark_closed(self._log_dir, task.task_id)
+                inbox.seal(self._log_dir, task.task_id)
             except OSError:
-                log.error(
-                    "task %s: could not write its inbox closed marker", task.task_id, exc_info=True
-                )
+                log.error("task %s: could not seal its inbox", task.task_id, exc_info=True)
                 if not exited:
-                    # Input stays open, so another process's send cannot be accepted and then
-                    # never read; the pump retries the close.
-                    if wrote:
-                        task.acc.awaiting_input = False  # those messages are a turn still owed
-                    return False
+                    return self._close_failed(task, "its inbox could not be sealed")
                 task.bridge_notices.append(
-                    "the run exited and its inbox closed marker could not be written; until its "
-                    "record settles, a message sent from another process may be accepted and "
-                    "never delivered"
+                    "the run exited and its inbox could not be sealed; until its record settles, a "
+                    "message sent from another process could be accepted and never delivered"
                 )
+            if kind == CLOSE_IDLE_BOUND and reason is None:
+                # Committed only now: a close that did not happen abandons nothing.
+                self._mark_abandoned(task, bound)
             task.inbox_closed = True
+            task.close_failures = 0
         finally:
             inbox.unlock(fd)
         _close_stdin(task)
         return True
+
+    def _close_failed(self, task: Task, why: str) -> bool:
+        """Count a close that could not complete; after `CLOSE_RETRY_LIMIT` of them, end input
+        regardless (`_force_close`). True if input is now closed."""
+        task.close_failures += 1
+        if task.close_failures < CLOSE_RETRY_LIMIT:
+            return False
+        self._force_close(task, why)
+        return True
+
+    def _force_close(self, task: Task, why: str) -> None:
+        """End input for a live run whose inbox cannot be closed properly. Everything queued in this
+        server is reported undelivered; the owner check still refuses sends once the record settles,
+        but until then a message sent from another process may be accepted and never read — which
+        is said, rather than left silent."""
+        self._report_undelivered(
+            task, list(task.inbox_queue), f"input was closed without the inbox protocol ({why})"
+        )
+        task.inbox_queue.clear()
+        notice = (
+            f"input was closed without the inbox protocol ({why}): until this task settles, a "
+            "message sent to it from another process may be accepted and never delivered"
+        )
+        task.bridge_notices.append(notice)
+        _write_event(task, "notice", {"text": notice})
+        task.inbox_closed = True
+        _close_stdin(task)
+
+    def _mark_abandoned(self, task: Task, bound: float) -> None:
+        task.acc.background_abandoned = True
+        notice = _BACKGROUND_ABANDONED_NOTICE.format(bound=bound)
+        task.bridge_notices.append(notice)
+        _write_event(task, "notice", {"text": notice})
 
     def _close_unlocked(self, task: Task, why: str) -> None:
         """Last resort after exit, when the protocol cannot run: marker FIRST, then everything
@@ -1336,9 +1408,9 @@ class TaskRegistry:
         appending (`inbox.send_to_record`), so one that appended before the marker existed is read
         here, and one that finds it afterwards is refused: nothing acknowledged goes unreported."""
         try:
-            inbox.mark_closed(self._log_dir, task.task_id)
+            inbox.seal(self._log_dir, task.task_id)
         except OSError:
-            log.error("task %s: could not write its inbox closed marker", task.task_id, exc_info=True)
+            log.error("task %s: could not seal its inbox", task.task_id, exc_info=True)
         task.inbox_closed = True
         try:
             appended, task.inbox_offset = inbox.read_new(
@@ -1360,7 +1432,7 @@ class TaskRegistry:
 
         Woken by the stdout drainer after every event and by `send_message`, and otherwise every
         `PUMP_POLL_SECONDS` (which is also how often other processes' appends are noticed). Every
-        exit from the loop goes through `_close_input`; a close that could not complete is retried.
+        exit from the loop goes through `_close_input`; a close that did not happen is retried.
         """
         bound = live_idle_seconds()
         try:
@@ -1368,20 +1440,18 @@ class TaskRegistry:
                 task.pump_wake.clear()
                 acc = task.acc
                 reason = self._stop_reason(task)
-                closing = reason is not None
-                if not closing and await self._forward_pending(task):
+                kind: str | None = CLOSE_STOP if reason is not None else None
+                if kind is None and await self._forward_pending(task):
                     continue
-                if not closing and acc.awaiting_input:
-                    closing = True
-                if not closing and background_idle_bound_reached(
+                if kind is None and acc.awaiting_input:
+                    kind = CLOSE_IDLE
+                if kind is None and background_idle_bound_reached(
                     acc, time.monotonic() - task.last_output_at, bound
                 ):
-                    acc.background_abandoned = True
-                    notice = _BACKGROUND_ABANDONED_NOTICE.format(bound=bound)
-                    task.bridge_notices.append(notice)
-                    _write_event(task, "notice", {"text": notice})
-                    closing = True
-                if closing and await self._close_input(task, drop_reason=reason):
+                    kind = CLOSE_IDLE_BOUND
+                if kind is not None and await self._close_input(
+                    task, drop_reason=reason, kind=kind, bound=bound
+                ):
                     return
                 try:
                     await asyncio.wait_for(task.pump_wake.wait(), timeout=PUMP_POLL_SECONDS)
@@ -1456,6 +1526,7 @@ class TaskRegistry:
                 group=task.group,
                 lineage_detected=task.lineage_detected,
                 live_input=task.live_input,
+                input_after_result=task.input_after_result,
             ),
         )
 
@@ -2324,6 +2395,10 @@ PUMP_POLL_SECONDS = 1.0
 # closing without it (`_close_unlocked`). Every holder keeps the lock for a few file operations, so
 # only a stuck or suspended sender gets anywhere near this.
 EXIT_CLOSE_GIVE_UP_SECONDS = 30.0
+# How many consecutive close attempts may fail to read or seal the inbox, while the run lives, before
+# input is ended anyway (`_force_close`) — a run that can never reach EOF would never settle.
+CLOSE_RETRY_LIMIT = 10
+
 # `_monitor`'s backstop for a pump stuck somewhere other than that bounded close.
 PUMP_STOP_GRACE_SECONDS = EXIT_CLOSE_GIVE_UP_SECONDS + 3 * inbox.LOCK_TIMEOUT_SECONDS
 

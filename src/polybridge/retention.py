@@ -298,6 +298,7 @@ def _delete_task(log_dir: Path, record: store.TaskRecord, stats: dict[str, int],
             return
 
         _delete_task_files(log_dir, task_id)
+        _empty_inbox(log_dir, task_id)
         stats["deleted_tasks"] += 1
     finally:
         try:
@@ -305,6 +306,33 @@ def _delete_task(log_dir: Path, record: store.TaskRecord, stats: dict[str, int],
         except OSError:
             pass
         os.close(lock_fd)
+
+
+def _empty_inbox(log_dir: Path, task_id: str) -> None:
+    """Drop the message payloads a deleted task's inbox still holds, keeping the file itself — it
+    is a lock file, and lock files are never deleted. Done under the inbox's own lock, and skipped
+    if another process holds it (nothing may be queued for a settled task anyway)."""
+    path = log_dir / f"{task_id}.inbox.jsonl"
+    try:
+        fd = os.open(path, os.O_RDWR)
+    except OSError:
+        return
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return
+        try:
+            os.ftruncate(fd, 0)
+        except OSError:
+            log.debug("could not empty the inbox of %s", task_id, exc_info=True)
+        finally:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+    finally:
+        os.close(fd)
 
 
 def _delete_task_files(log_dir: Path, task_id: str) -> None:

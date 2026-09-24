@@ -163,13 +163,17 @@ def test_sweep_keeps_the_inbox_lock_file_but_deletes_the_closed_marker(tmp_path:
     log_dir.mkdir()
     record = make_record()
     store.write(log_dir, record)
-    (log_dir / f"{record.task_id}.inbox.jsonl").write_text("")
+    inbox_file = log_dir / f"{record.task_id}.inbox.jsonl"
+    inbox_file.write_text('{"id": "m1", "text": "a private message"}\n')
+    inode = inbox_file.stat().st_ino
     (log_dir / f"{record.task_id}.inbox.closed").write_text("{}")
 
     stats = retention.sweep(log_dir, 30, datetime.now(timezone.utc))
 
     assert stats["deleted_tasks"] == 1
-    assert (log_dir / f"{record.task_id}.inbox.jsonl").exists()
+    assert inbox_file.exists()
+    assert inbox_file.stat().st_ino == inode  # the same lock file, never replaced
+    assert inbox_file.read_bytes() == b""  # but its message payloads are gone
     assert not (log_dir / f"{record.task_id}.inbox.closed").exists()
 
 

@@ -112,6 +112,10 @@ class TaskRecord:
     lineage_detected: str | None = None
     """Which `lineage.detect_caller` method found this task's caller (`"pb_task_id"` | `"session"`
     | `"ancestry"`), or None if no caller was detected."""
+    input_after_result: int | None = None
+    """How many results the run had reported when polybridge last wrote a message to its stdin
+    (live input). Until a later result exists in the stream, the run owes a turn, so an earlier
+    success is not its outcome — see `_resolve`. None: no message was ever written after spawn."""
     live_input: bool = False
     """Whether the run was spawned with a stdin pipe that takes further messages (`send_message`,
     `polybridge-ctl send`). From the run's own `Invocation`, never inferred from the backend. False
@@ -346,6 +350,11 @@ def _resolve(
         )
 
     state, tail = replay_log(log_dir, record.task_id, record.backend)
+    if record.input_after_result is not None and state.result_count <= record.input_after_result:
+        # A message was written to the run after its last result in this stream, so a turn is
+        # still owed: the replay alone cannot see that (the bridge's writes are not in the agent's
+        # stdout), and an earlier success must not be read as the outcome.
+        state.turn_open = True
     alive = unobserved and process_alive(record.pid, record.markers)
 
     if alive and record.status in TERMINAL_RECORD_STATUSES:
