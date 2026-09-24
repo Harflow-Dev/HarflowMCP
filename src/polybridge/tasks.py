@@ -2041,6 +2041,24 @@ class TaskRegistry:
 
         job.add_done_callback(_release)
 
+    async def settle_phase_writes(self, timeout: float) -> list[str]:
+        """Wait up to `timeout` for outstanding cancel phase-write retries (`_retry_phase`), and
+        return a description of each still pending.
+
+        For a short-lived controller (`polybridge-ctl cancel`/`takeover`): its loop ending would
+        cancel those retries, and lease recovery would then publish `.failed` for an attempt whose
+        SIGTERM was in fact delivered — turning a deliberate cancel into whatever `classify` makes
+        of the exit. A long-lived server has no such deadline and never needs this.
+        """
+        jobs = {key: job for key, job in self._phase_retries.items() if not job.done()}
+        if jobs:
+            await asyncio.wait(list(jobs.values()), timeout=timeout)
+        return [
+            f"{task_id} attempt {n} {phase}"
+            for (task_id, n, phase), job in jobs.items()
+            if not job.done()
+        ]
+
     async def _retry_phase(
         self, task_id: str, n: int, phase: str, payload: dict[str, Any]
     ) -> None:

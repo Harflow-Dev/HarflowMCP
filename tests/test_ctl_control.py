@@ -215,7 +215,8 @@ def test_a_child_whose_cancel_fails_keeps_owning_its_task_until_it_settles(git_r
     assert code == 0, err
     outcome = _one(out)
     assert outcome["kind"] == "unknown"
-    assert "still stopping" in outcome["payload"]["message"]
+    assert "had not exited" in outcome["payload"]["message"]
+    assert "was stopped" not in outcome["payload"]["message"]
     assert time.monotonic() - started < 4
     (record,) = store.read_all(default_log_dir())
     settled = _settled(record.task_id, timeout=20)
@@ -245,6 +246,15 @@ def test_the_unknown_document_is_versioned_and_exits_3(
     assert _doc(capsys) == {"v": 1, "unknown": {"message": "no word"}}
 
 
+def _dead_owner() -> dict:
+    """An identity `ps` confirms dead: a process that has exited and been reaped (a reused pid
+    would show a different start time). A made-up huge pid makes `ps` error, which reads as
+    undecidable and sends a cascade down its slow, owner-still-alive path."""
+    proc = subprocess.Popen(["true"])
+    proc.wait()
+    return {"pid": proc.pid, "start_time": "Thu Jan  1 00:00:00 1970", "markers": []}
+
+
 # --- cancel ----------------------------------------------------------------------------------
 
 
@@ -263,7 +273,7 @@ def test_cancel_stops_a_task_whose_owner_is_gone(
             if ident:
                 break
             time.sleep(0.05)
-        dead_owner = {"pid": 2_000_000_001, "start_time": "x", "markers": []}
+        dead_owner = _dead_owner()
         store.write(
             default_log_dir(),
             store.TaskRecord(
@@ -364,3 +374,95 @@ def test_takeover_attach_json(tmp_path: Path, capsys, monkeypatch) -> None:
     result = _doc(capsys)["result"]
     assert result["status"] == "attached" and result["pid"] == os.getpid()
     assert SESSION in store.live_session_ids(default_log_dir())
+
+
+def _orphan_sleep() -> tuple[int, int, dict]:
+    shell = subprocess.run(
+        ["sh", "-c", "sleep 60 >/dev/null 2>&1 & echo $$ $!"],
+        capture_output=True, text=True, check=True, start_new_session=True,
+    )
+    pgid, pid = (int(x) for x in shell.stdout.split())
+    for _ in range(50):
+        ident = identity.capture(pid, ["sleep"])
+        if ident:
+            return pid, pgid, ident
+        time.sleep(0.05)
+    raise AssertionError("could not capture the sleeper")
+
+
+def _running_record(tmp_path: Path, pid: int, pgid: int, ident: dict) -> None:
+    store.write(
+        default_log_dir(),
+        store.TaskRecord(
+            task_id="t1",
+            backend="claude",
+            session_id="s",
+            repo_path=str(tmp_path),
+            started_at=datetime.now(timezone.utc).isoformat(),
+            markers=["sleep"],
+            pid=pid,
+            pgid=pgid,
+            start_time=ident["start_time"],
+            owner=_dead_owner(),
+        ),
+    )
+
+
+def _flaky_sig(monkeypatch: pytest.MonkeyPatch, failures: int) -> None:
+    from polybridge import control
+
+    real = control.write_phase
+    left = {"n": failures}
+
+    def flaky(log_dir, task_id, family, n, phase, payload):
+        if phase == "sig" and left["n"] > 0:
+            left["n"] -= 1
+            raise control.PhaseWriteError("disk hiccup")
+        return real(log_dir, task_id, family, n, phase, payload)
+
+    monkeypatch.setattr(control, "write_phase", flaky)
+
+
+def test_cancel_stays_alive_until_a_failing_sig_write_lands(
+    tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex round 2: a delivered SIGTERM whose `.sig` write failed is retried in the background;
+    a ctl process exiting first would cancel that retry, and lease recovery would later fail the
+    attempt, so a deliberately cancelled run would not read as cancelled."""
+    pid, pgid, ident = _orphan_sleep()
+    try:
+        _running_record(tmp_path, pid, pgid, ident)
+        _flaky_sig(monkeypatch, failures=4)  # 3 inline attempts + the first background retry
+
+        assert ctl.main(["cancel", "t1", "--json"]) == 0
+
+        result = _doc(capsys)["result"]
+        assert "unrecorded_phase_writes" not in result
+        assert (default_log_dir() / "t1.cancel.1.sig").exists()
+    finally:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def test_cancel_reports_a_sig_write_that_never_landed(
+    tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pid, pgid, ident = _orphan_sleep()
+    try:
+        _running_record(tmp_path, pid, pgid, ident)
+        _flaky_sig(monkeypatch, failures=10_000)
+        monkeypatch.setattr(ctl, "PHASE_WRITE_SETTLE_SECONDS", 1.0)
+
+        assert ctl.main(["cancel", "t1", "--json"]) == 0
+
+        captured = capsys.readouterr()
+        result = json.loads(captured.out)["result"]
+        assert result["unrecorded_phase_writes"] == ["t1 attempt 1 sig"]
+        assert "could not all be recorded" in captured.err
+    finally:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass

@@ -43,6 +43,7 @@ log = logging.getLogger(__name__)
 
 SESSION_LOCK_TIMEOUT_SECONDS = 30.0
 DEATH_CONFIRM_SECONDS = 5.0
+PHASE_WRITE_SETTLE_SECONDS = 60.0
 _DEATH_POLL_SECONDS = 0.2
 
 _NOTE = (
@@ -210,6 +211,13 @@ async def _stop_run(record: store.TaskRecord, registry_factory: Callable[[], Any
         cascade = await registry.cancel_cascade(record.task_id)
     except control.PhaseWriteError as exc:
         raise _Refusal("cancel_failed", f"the cancel could not be attempted: {exc}") from None
+    # The ctl process is about to exit: give a failing `.sig` write the chance to land first, or
+    # lease recovery would later fail the attempt and the stopped run would not read as cancelled.
+    settle = getattr(registry, "settle_phase_writes", None)
+    if settle is not None:
+        unrecorded = await settle(PHASE_WRITE_SETTLE_SECONDS)
+        if unrecorded:
+            log.warning("takeover of %s: unrecorded cancel phases: %s", record.task_id, unrecorded)
 
     survivors = set(cascade.get("sigkill_survivors", []))
     survivors.update(entry["task_id"] for entry in cascade.get("not_signalled", []))

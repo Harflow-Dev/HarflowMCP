@@ -28,6 +28,10 @@ from . import control, detached, identity, inbox, store, takeover
 from . import tasks as tasks_module
 from .tasks import default_log_dir
 
+# How long `cancel`/`takeover` stay alive for a failing `.sig` write to be retried before exiting —
+# the lease (60 s) is what a later recovery waits for anyway.
+PHASE_WRITE_SETTLE_SECONDS = 60.0
+
 _DURATION_RE = re.compile(r"^(\d+)([smhdw])$")
 _DURATION_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
 
@@ -258,8 +262,13 @@ def _cmd_cancel(args: argparse.Namespace) -> int:
         return _fail(args, "unknown_task", f"unknown task_id: {task_id}")
 
     registry = tasks_module.TaskRegistry(log_dir=log_dir, open_monitor=False)
+
+    async def cancel_and_settle() -> tuple[dict[str, Any], list[str]]:
+        cascade = await registry.cancel_cascade(task_id)
+        return cascade, await registry.settle_phase_writes(PHASE_WRITE_SETTLE_SECONDS)
+
     try:
-        cascade = asyncio.run(registry.cancel_cascade(task_id))
+        cascade, unrecorded = asyncio.run(cancel_and_settle())
     except control.PhaseWriteError as exc:
         return _fail(
             args,
@@ -270,6 +279,15 @@ def _cmd_cancel(args: argparse.Namespace) -> int:
     record = store.read(log_dir, task_id)
     status = store.brief(log_dir, record)["status"] if record is not None else None
     result = {"task_id": task_id, "status": status, "cascade": cascade}
+    if unrecorded:
+        # Delivered, but the phase file saying so never landed before this process had to exit;
+        # lease recovery may later record the attempt as failed.
+        result["unrecorded_phase_writes"] = unrecorded
+        print(
+            "polybridge-ctl: warning: signals were delivered but could not all be recorded: "
+            + "; ".join(unrecorded),
+            file=sys.stderr,
+        )
     if args.json:
         print(json.dumps({"v": 1, "result": result}))
     else:

@@ -132,15 +132,17 @@ def run_detached(
         return Outcome("error", message["error"], pid)
 
     reaped = _terminate(pid)
-    message = (
-        f"the task's owning process did not report within {timeout:.0f} s and was stopped; a task "
-        "may or may not have been started — check `polybridge-ctl list`"
-    )
-    if not reaped:
-        message += (
-            f" (the owning process, pid {pid}, is still stopping what it started and keeps owning "
-            "it until it settles)"
+    if reaped:
+        fate = "was stopped"
+    else:
+        fate = (
+            f"was sent SIGTERM but had not exited after {REAP_GRACE_SECONDS:.0f} s (pid {pid}); it "
+            "was not killed, since it may still be stopping a task it started"
         )
+    message = (
+        f"the task's owning process did not report within {timeout:.0f} s and {fate}; a task may "
+        "or may not have been started — check `polybridge-ctl list`"
+    )
     return Outcome("unknown", {"message": message}, pid)
 
 
