@@ -30,10 +30,10 @@ from collections import deque
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
-from . import identity, retention, store
-from .backends import Accumulator, Backend, Enforcement
+from . import control, identity, lineage, retention, store
+from .backends import Accumulator, Backend, Enforcement, check_nested_depth, check_nested_enforcement
 from .backends import get as get_backend
 from .events import EVENTS_SUFFIX, EventLog, events_path
 from .stream import parse_line
@@ -57,6 +57,28 @@ STDERR_TAIL_LINES = 50
 TAIL_LINES_RETURNED = 20
 
 SIGKILL_GRACE_SECONDS = 5.0
+
+# How often the monitor re-checks `control.cancel_verdict` while an attempt is pending, and how
+# often a cascade polls a non-local target's record for a terminal status. No deadline of its own
+# on the monitor side — see `_await_cancel_verdict` — but this is also the tick size for every
+# bounded cascade wait, so it stays short relative to `SIGKILL_GRACE_SECONDS`/`DRAIN_GRACE_SECONDS`.
+CANCEL_VERDICT_POLL_SECONDS = 0.25
+
+# `TaskRegistry.cancel_cascade` re-scans for new targets after every round (a target's own
+# signalling can itself spawn a child, or advance a settled intermediate); this bounds how many
+# times it will do that before reporting what it found rather than looping forever on a lineage
+# that keeps growing.
+CASCADE_MAX_ROUNDS = 5
+
+# Retries for a `.sig` whose write failed after the SIGTERM it records was delivered.
+_SIG_WRITE_ATTEMPTS = 3
+_SIG_WRITE_RETRY_SECONDS = 0.1
+
+# How long `resume`/`resume_record` wait to acquire a session's lock before giving up. Held across
+# the check-and-spawn it protects (see `control.session_lock`'s docstring and the plan's Notes on
+# why that is fine), so this bounds how long a second resume on a busy session waits before it is
+# told to try again rather than starting a competing run.
+SESSION_LOCK_TIMEOUT_SECONDS = 30.0
 
 # How long to keep reading after the process exits. Normally EOF is immediate, but a backgrounded
 # grandchild can inherit the write end of stdout and hold it open indefinitely, which would
@@ -347,6 +369,19 @@ class RepoUnavailableError(RuntimeError):
     """A recovered task's repository is no longer there to resume into."""
 
 
+class _Case2Outcome(NamedTuple):
+    """What became of one non-local cascade target whose owning server looked alive or
+    undecidable (`TaskRegistry._cascade_case2`). `kind` is one of: `"done"` (it settled, whatever
+    it settled to — the caller re-resolves its status rather than trusting this), `"handoff"`
+    (still unsettled at the bound, but its owner is now confirmed dead — case 3 should take it),
+    `"still_settling"` (still unsettled, owner still alive/undecidable — reported, not written),
+    or `"not_signalled"` (never got a signal at all — `reason` is set)."""
+
+    task_id: str
+    kind: str
+    reason: str | None = None
+
+
 def _identity_markers(
     backend: Backend, session_id: str | None, repo_path: Path
 ) -> tuple[str, ...]:
@@ -399,6 +434,24 @@ class Task:
     # this task's pid apart from a reused one. What identifies a run differs per backend: Claude
     # carries its session id on the command line, Codex mints its own and does not.
     markers: tuple[str, ...] = ()
+
+    spawned_by: str | None = None
+    """The task_id of the task whose own agent dispatched this one via polybridge — best-effort,
+    from `lineage.detect_caller`. None for a root task (no caller detected)."""
+    root_task_id: str | None = None
+    """The top of this dispatch chain: this task's own id for a root task, else inherited from the
+    caller's `root_task_id` (or the caller's own id, for a caller one level up from the root)."""
+    depth: int = 0
+    """How many nested dispatches deep this task is; 0 for a root task."""
+    max_depth: int | None = None
+    """The nesting budget this task (and anything it spawns) is checked against — `PB_MAX_DEPTH`
+    for a root task, inherited from the caller otherwise. See `lineage.max_depth_default`."""
+    group: str | None = None
+    """An optional caller-chosen label, inherited by nested dispatches unless overridden — see
+    `TaskRegistry.start`'s `group` parameter."""
+    lineage_detected: str | None = None
+    """Which `lineage.detect_caller` method found this task's caller (`"pb_task_id"` | `"session"`
+    | `"ancestry"`), or None if no caller was detected — i.e. this is a root task."""
 
     status: Status = "running"
     exit_code: int | None = None
@@ -481,6 +534,12 @@ class Task:
             "started_at": self.started_at.isoformat(),
             "duration_seconds": self.duration_seconds,
             "parent_task_id": self.parent_task_id,
+            "spawned_by": self.spawned_by,
+            "root_task_id": self.root_task_id,
+            "depth": self.depth,
+            "max_depth": self.max_depth,
+            "group": self.group,
+            "lineage_detected": self.lineage_detected,
             "notices": list(self.bridge_notices),
             "owner": self.owner,
             # Meaningful only while the task is still running — a settled task has no live server
@@ -535,6 +594,60 @@ class TaskRegistry:
         # deterministic identity instead of depending on this process's own `ps` call.
         self._owner = owner if owner is not None else identity.own_identity()
         self._maintenance: asyncio.Task[Any] | None = None
+        # Strong references to shielded cancel jobs (see `_shielded`), which outlive their caller.
+        self._control_jobs: set[asyncio.Task[Any]] = set()
+
+    async def _detect_caller(self) -> lineage.Caller | None:
+        """Best-effort: which task (if any) dispatched the process calling us.
+
+        Looked up through the `lineage` module attribute at call time — never imported as a bare
+        name — so a test can neutralise it with `monkeypatch.setattr(lineage, "detect_caller",
+        ...)` (see `tests/conftest.py`). `detect_caller` already turns its own failures into None;
+        this wrapper exists so a failure in the `to_thread` dispatch itself (or a misbehaving
+        monkeypatch) cannot become an exception either — per CLAUDE.md, bookkeeping must never
+        change an outcome.
+        """
+        try:
+            return await asyncio.to_thread(lineage.detect_caller, self._log_dir)
+        except Exception:
+            log.debug("caller detection failed", exc_info=True)
+            return None
+
+    def _resolve_lineage(
+        self,
+        caller: lineage.Caller | None,
+        *,
+        child_enforcement: Enforcement,
+        child_backend: str,
+        child_repo: Path,
+    ) -> tuple[str | None, str | None, int, int, str | None]:
+        """`(spawned_by, root_task_id, depth, max_depth, lineage_detected)` for a new dispatch.
+
+        With no detected caller, this is a root task: no depth or enforcement cap applies, and
+        `max_depth` is its own budget for whatever it spawns. With one, the nested-dispatch caps
+        are checked here — `check_nested_depth` and `check_nested_enforcement` both raise
+        `NestedDispatchRefused` (propagated, never caught here) when the child would be weaker
+        than the caller, on depth or on any `Enforcement` field; see `backends.base`.
+        """
+        if caller is None:
+            return None, None, 0, lineage.max_depth_default(), None
+
+        parent_max_depth = (
+            caller.record.max_depth
+            if caller.record.max_depth is not None
+            else lineage.max_depth_default()
+        )
+        check_nested_depth(caller.record.depth, parent_max_depth)
+        check_nested_enforcement(
+            caller.record.enforcement or {},
+            child_enforcement,
+            parent_backend=caller.record.backend,
+            child_backend=child_backend,
+            parent_repo=caller.record.repo_path,
+            child_repo=str(child_repo),
+        )
+        root_task_id = caller.record.root_task_id or caller.record.task_id
+        return caller.record.task_id, root_task_id, caller.record.depth + 1, parent_max_depth, caller.method
 
     async def start(
         self,
@@ -547,6 +660,7 @@ class TaskRegistry:
         model: str | None = None,
         reasoning_effort: str | None = None,
         network: bool | None = None,
+        group: str | None = None,
     ) -> Task:
         """Dispatch a fresh session. Returns once the subprocess exists, not once it finishes."""
         # Only some backends let us name the session up front. Where we can, knowing it immediately
@@ -562,6 +676,18 @@ class TaskRegistry:
             reasoning_effort=reasoning_effort,
             network=network,
         )
+
+        caller = await self._detect_caller()
+        spawned_by, root_task_id, depth, max_depth, lineage_detected = self._resolve_lineage(
+            caller,
+            child_enforcement=backend.enforcement(freedom, network),  # type: ignore[arg-type]
+            child_backend=backend.name,
+            child_repo=repo_path,
+        )
+        # An explicit group wins; otherwise it is inherited from the caller (never invented for a
+        # root task with none given).
+        resolved_group = group if group is not None else (caller.record.group if caller else None)
+
         return await self._spawn(
             argv,
             backend=backend,
@@ -573,6 +699,12 @@ class TaskRegistry:
             model=model,
             reasoning_effort=reasoning_effort,
             network=network,
+            spawned_by=spawned_by,
+            root_task_id=root_task_id,
+            depth=depth,
+            max_depth=max_depth,
+            group=resolved_group,
+            lineage_detected=lineage_detected,
         )
 
     async def resume(
@@ -589,11 +721,6 @@ class TaskRegistry:
                 f"task {parent.task_id} never disclosed a session id, so its conversation cannot "
                 "be resumed; start a new task instead"
             )
-        if self.session_has_live_run(parent.session_id):
-            raise SessionBusyError(
-                f"session {parent.session_id} already has a running task; "
-                "two concurrent runs would corrupt its shared conversation state"
-            )
 
         backend = get_backend(parent.backend)
         # None inherits the parent's recorded request; an explicit boolean overrides it for this
@@ -602,31 +729,63 @@ class TaskRegistry:
         # resume, so this matches the existing shape rather than inventing one. An override the
         # parent's freedom cannot honour raises inside the builder below, exactly as on start.
         effective_network = network if network is not None else parent.network
-        argv = backend.build_resume_argv(
-            followup_prompt,
-            repo=parent.repo_path,
-            freedom=parent.freedom,  # type: ignore[arg-type]
-            session_id=parent.session_id,
-            # Carried over so the continuation runs on the model and effort the run started with,
-            # and so what we report for it stays true.
-            model=parent.model,
-            max_turns=max_turns,
-            reasoning_effort=parent.reasoning_effort,
-            network=effective_network,
+
+        # Caller detection and the nested-dispatch caps run before the session lock — they are
+        # read-only and must never block on, or be blocked by, another resume of this session.
+        caller = await self._detect_caller()
+        spawned_by, root_task_id, depth, max_depth, lineage_detected = self._resolve_lineage(
+            caller,
+            child_enforcement=backend.enforcement(parent.freedom, effective_network),  # type: ignore[arg-type]
+            child_backend=backend.name,
+            child_repo=parent.repo_path,
         )
-        return await self._spawn(
-            argv,
-            backend=backend,
-            prompt=followup_prompt,
-            repo_path=parent.repo_path,
-            session_id=parent.session_id,
-            freedom=parent.freedom,
-            max_turns=max_turns,
-            model=parent.model,
-            reasoning_effort=parent.reasoning_effort,
-            network=effective_network,
-            parent_task_id=parent.task_id,
-        )
+        resolved_group = caller.record.group if caller is not None else parent.group
+
+        try:
+            async with control.session_lock(
+                self._log_dir, parent.session_id, timeout=SESSION_LOCK_TIMEOUT_SECONDS
+            ):
+                if self.session_has_live_run(parent.session_id):
+                    raise SessionBusyError(
+                        f"session {parent.session_id} already has a running task; "
+                        "two concurrent runs would corrupt its shared conversation state"
+                    )
+                argv = backend.build_resume_argv(
+                    followup_prompt,
+                    repo=parent.repo_path,
+                    freedom=parent.freedom,  # type: ignore[arg-type]
+                    session_id=parent.session_id,
+                    # Carried over so the continuation runs on the model and effort the run
+                    # started with, and so what we report for it stays true.
+                    model=parent.model,
+                    max_turns=max_turns,
+                    reasoning_effort=parent.reasoning_effort,
+                    network=effective_network,
+                )
+                return await self._spawn(
+                    argv,
+                    backend=backend,
+                    prompt=followup_prompt,
+                    repo_path=parent.repo_path,
+                    session_id=parent.session_id,
+                    freedom=parent.freedom,
+                    max_turns=max_turns,
+                    model=parent.model,
+                    reasoning_effort=parent.reasoning_effort,
+                    network=effective_network,
+                    parent_task_id=parent.task_id,
+                    spawned_by=spawned_by,
+                    root_task_id=root_task_id,
+                    depth=depth,
+                    max_depth=max_depth,
+                    group=resolved_group,
+                    lineage_detected=lineage_detected,
+                )
+        except control.LockTimeout:
+            raise SessionBusyError(
+                f"another resume of session {parent.session_id} is already in progress; "
+                "try again shortly"
+            ) from None
 
     async def _spawn(
         self,
@@ -642,6 +801,12 @@ class TaskRegistry:
         reasoning_effort: str | None,
         network: bool | None = None,
         parent_task_id: str | None = None,
+        spawned_by: str | None = None,
+        root_task_id: str | None = None,
+        depth: int = 0,
+        max_depth: int | None = None,
+        group: str | None = None,
+        lineage_detected: str | None = None,
     ) -> Task:
         # Re-checked at the point of execution, not only where the argv was built, so no future
         # caller of this method can launch an agent without its backend's guarantees — and, now
@@ -653,6 +818,10 @@ class TaskRegistry:
         backend.assert_safe(argv, freedom, network)  # type: ignore[arg-type]
 
         task_id = str(uuid.uuid4())
+        # A root task (no detected caller) is the root of its own dispatch chain.
+        root_task_id = root_task_id if root_task_id is not None else task_id
+        if max_depth is None:
+            max_depth = lineage.max_depth_default()
         self._log_dir.mkdir(parents=True, exist_ok=True)
         log_path = self._log_dir / f"{task_id}.jsonl"
 
@@ -711,6 +880,17 @@ class TaskRegistry:
         except Exception:
             base_commit, start_dirty = None, None
 
+        # So a nested polybridge server started by this agent (a codex/vibe MCP tool call, a
+        # claude/opencode subprocess) can find its way back to this task via
+        # `lineage.detect_caller`'s PB_TASK_ID method, when the environment survives that far.
+        # Built here, synchronously, so it introduces no await into the no-await window below.
+        spawn_env = {
+            **os.environ,
+            lineage.ENV_TASK_ID: task_id,
+            lineage.ENV_ROOT_TASK_ID: root_task_id,
+            lineage.ENV_DEPTH: str(depth),
+        }
+
         proc = await asyncio.create_subprocess_exec(
             *argv,
             cwd=str(repo_path),
@@ -718,6 +898,7 @@ class TaskRegistry:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             limit=STREAM_LINE_LIMIT,
+            env=spawn_env,
             # Own process group, so cancellation reaches the shell children an agent spawns instead
             # of orphaning them.
             start_new_session=True,
@@ -745,6 +926,12 @@ class TaskRegistry:
             owner=self._owner,
             base_commit=base_commit,
             start_dirty=start_dirty,
+            spawned_by=spawned_by,
+            root_task_id=root_task_id,
+            depth=depth,
+            max_depth=max_depth,
+            group=group,
+            lineage_detected=lineage_detected,
         )
 
         # Written before anything can go wrong, so even a task whose server dies immediately is
@@ -778,6 +965,12 @@ class TaskRegistry:
                     "model": task.model,
                     "reasoning_effort": task.reasoning_effort,
                     "parent_task_id": task.parent_task_id,
+                    "spawned_by": task.spawned_by,
+                    "root_task_id": task.root_task_id,
+                    "depth": task.depth,
+                    "max_depth": task.max_depth,
+                    "group": task.group,
+                    "lineage_detected": task.lineage_detected,
                 },
             )
         except Exception:
@@ -848,6 +1041,12 @@ class TaskRegistry:
                 owner=dict(task.owner) if task.owner is not None else None,
                 base_commit=task.base_commit,
                 start_dirty=task.start_dirty,
+                spawned_by=task.spawned_by,
+                root_task_id=task.root_task_id,
+                depth=task.depth,
+                max_depth=task.max_depth,
+                group=task.group,
+                lineage_detected=task.lineage_detected,
             ),
         )
 
@@ -886,6 +1085,51 @@ class TaskRegistry:
             return True
         return session_id in store.live_session_ids(self._log_dir)
 
+    def _deliver_local_cancel(self, task: Task) -> None:
+        """The synchronous half of a local cancel: `.req` -> flag -> SIGTERM -> `.sig`/`.failed`.
+
+        No `await` anywhere in this method, so ordering versus the monitor's own
+        `cancel_verdict` poll is unobservable — either the monitor sees the flag first (owner's
+        own rule decides) or it sees the phase files first (cross-process rule decides), and both
+        land on the same answer. `begin_attempt` raises `PhaseWriteError` before the flag is set
+        or anything is signalled, so a caller that cannot even open an attempt has changed
+        nothing. A joined attempt (another controller's `.req` already pending) still gets the
+        flag set and a harmless repeat SIGTERM, but writes no phase file of its own — the owning
+        controller's attempt is the one of record.
+        """
+        attempt = control.begin_attempt(self._log_dir, task.task_id, control.CANCEL, self._owner)
+        task.cancel_requested = True
+        delivered = _signal_group(task, signal.SIGTERM)
+        if attempt.owned:
+            try:
+                if delivered:
+                    control.mark_signalled(
+                        self._log_dir,
+                        task.task_id,
+                        control.CANCEL,
+                        attempt.n,
+                        leader_alive=task.proc.returncode is None,
+                    )
+                else:
+                    control.mark_failed(
+                        self._log_dir,
+                        task.task_id,
+                        control.CANCEL,
+                        attempt.n,
+                        reason="process group already gone",
+                    )
+            except control.PhaseWriteError:
+                # The signal has already been delivered (or found undeliverable); a failed
+                # bookkeeping write must not change that outcome, and the owner's own
+                # `cancel_requested` rule decides this task's status regardless of what the
+                # phase files say.
+                log.warning(
+                    "task %s: could not record cancel attempt %d's outcome",
+                    task.task_id,
+                    attempt.n,
+                    exc_info=True,
+                )
+
     async def cancel(self, task: Task) -> Task:
         """Stop a run, waiting for it to actually die before returning.
 
@@ -895,17 +1139,19 @@ class TaskRegistry:
         if task.finished:
             return task
 
-        task.cancel_requested = True
         if task.proc is None:
             # No process was ever attached (only reachable in tests); nothing to signal.
+            task.cancel_requested = True
             task.status = "cancelled"
             task.finished_at = _now()
             task.done.set()
             return task
 
+        self._deliver_local_cancel(task)
+
         if task.termination is None or task.termination.done():
             task.termination = asyncio.create_task(
-                _terminate(task), name=f"pb-terminate-{task.task_id}"
+                _escalate(task), name=f"pb-terminate-{task.task_id}"
             )
         # Shielded so a disconnecting client cannot abandon the escalation to SIGKILL.
         await asyncio.shield(task.termination)
@@ -923,47 +1169,444 @@ class TaskRegistry:
             log.info("task %s cancelled", task.task_id)
         return task
 
-    async def cancel_recovered(self, record: store.TaskRecord) -> store.TaskRecord:
-        """Stop a task this process never spawned, using its recorded process group.
+    def _cascade_targets(
+        self, task_id: str, local_lineage: list[tuple[str, str | None, str | None]]
+    ) -> set[str]:
+        """The full closure of `cancel_cascade`'s targets for `task_id`, recomputed fresh on every
+        round so a target that only appears mid-cascade (a child spawned during the wait, or a
+        settled intermediate that unblocks a grandchild) is still picked up on the next pass.
 
-        There is no subprocess handle to wait on, so liveness is polled instead. The record is only
-        marked cancelled if the process was actually ours and actually signalled — otherwise the
-        response would claim an outcome that never happened.
+        Includes `task_id` itself, every descendant reachable by following `spawned_by` — built
+        from *every* record on disk, live or not, so a completed hop in the middle does not stop
+        the walk reaching a live descendant beyond it — and every record whose `root_task_id`
+        names `task_id`, even one not `spawned_by`-reachable at all: lineage detection is
+        best-effort, and a dispatch that only ever recorded the root is still worth cascading to.
+
+        Runs in a worker thread (it reads every record), so the in-memory tasks arrive as a
+        snapshot `(task_id, spawned_by, root_task_id)` taken on the event loop.
         """
-        alive = store.process_alive(record.pid, record.markers)
-        if not alive:
-            log.info("recovered task %s was already gone; nothing to cancel", record.task_id)
-            return record
+        records = store.read_all(self._log_dir)
+        lineage_rows = [(r.task_id, r.spawned_by, r.root_task_id) for r in records]
+        lineage_rows.extend(local_lineage)
 
-        # Attempted even though the leader looked alive a moment ago: the group may hold children
-        # that outlive it and keep the run's pipes open.
-        signalled = _signal_recorded_group(record, signal.SIGTERM)
-        if signalled and not await _await_recorded_death(record):
-            log.warning("recovered task %s ignored SIGTERM, sending SIGKILL", record.task_id)
-            _signal_recorded_group(record, signal.SIGKILL)
-            # Waited for too: the response is resolved through `store.resolve_status`, which
-            # rechecks liveness, so returning while the group is still dying would answer this
-            # cancellation with "running" and contradict itself.
-            if not await _await_recorded_death(record):
+        children: dict[str, set[str]] = {}
+        for tid, spawned_by, _root in lineage_rows:
+            if spawned_by:
+                children.setdefault(spawned_by, set()).add(tid)
+
+        targets = {task_id}
+        frontier = [task_id]
+        while frontier:
+            current = frontier.pop()
+            for child in children.get(current, ()):
+                if child not in targets:
+                    targets.add(child)
+                    frontier.append(child)
+
+        targets.update(tid for tid, _spawned_by, root in lineage_rows if root == task_id)
+        return targets
+
+    def _triage_target(self, task_id: str) -> tuple[str, Any]:
+        """Decide what a non-local cascade target needs. Blocking (`ps`, disk), so run in a thread.
+
+        Returns `("skip", None)` for a target that is already settled or gone,
+        `("not_signalled", reason)`, or `("case2" | "case3", record)` by whether its owning server
+        is confirmed dead.
+        """
+        record = store.read(self._log_dir, task_id)
+        if record is None:
+            return "skip", None
+        if record.status in store.TERMINAL_RECORD_STATUSES and record.exit_code is not None:
+            return "skip", None
+        leader = identity.task_identity(record.pid, record.start_time, record.markers)
+        verdict, reason = identity.check_detail(leader)
+        if verdict == "dead":
+            return "skip", None
+        if not identity.signalable(verdict, reason):
+            return "not_signalled", reason
+        if record.pgid is None:
+            return "not_signalled", "no process group recorded"
+        if identity.identity_check(record.owner) == "dead":
+            return "case3", record
+        return "case2", record
+
+    def _deliver_recorded_cancel(
+        self, record: store.TaskRecord, *, already_signalled: bool = False
+    ) -> tuple[str, str | None]:
+        """`.req` -> SIGTERM -> `.sig`/`.failed` for a task this server does not own, all at once.
+
+        Synchronous and run as ONE `asyncio.to_thread` call on purpose: cancelling the coroutine
+        awaiting it (a client disconnecting mid-`cancel_task`) cannot stop a worker thread, so a
+        `.req` can never be left behind without its outcome — which would keep the owner's monitor
+        waiting for as long as this server lives, since a live controller's lease is never
+        recovered.
+
+        The leader's identity is re-checked here, immediately before delivery, rather than trusted
+        from discovery: a cascade may have spent seconds on other targets since, and a leader that
+        exited in the meantime may have handed its pid (and so its group id) to something else.
+
+        Returns `("signalled", None)`, `("gone", None)` (the leader is no longer ours to signal and
+        nothing was sent), or `("not_signalled", reason)`. `already_signalled` marks a target handed
+        off from case 2, whose SIGTERM already landed there (its `.sig` is on disk): if it is gone
+        now, that signal worked, so it still reports `signalled`.
+        """
+        task_id = record.task_id
+        leader = identity.task_identity(record.pid, record.start_time, record.markers)
+        verdict, reason = identity.check_detail(leader)
+        if not identity.signalable(verdict, reason):
+            if already_signalled:
+                return "signalled", None
+            if verdict == "dead":
+                return "gone", None
+            return "not_signalled", reason
+        try:
+            attempt = control.begin_attempt(self._log_dir, task_id, control.CANCEL, self._owner)
+        except control.PhaseWriteError as exc:
+            return "not_signalled", f"phase write failed: {exc}"
+
+        delivered = _signal_recorded_group(record, signal.SIGTERM)
+        if delivered:
+            # Written by a joining controller too, not only the attempt's owner: if the owner is
+            # still between its `.req` and its own delivery, it may find the group already gone and
+            # write `.failed` — and a delivery that really happened must not be lost to that.
+            # `.sig` outranks `.failed` in `control.attempt_outcome`.
+            self._record_delivery(task_id, attempt.n, leader_alive=verdict == "alive")
+        elif attempt.owned:
+            try:
+                control.mark_failed(
+                    self._log_dir,
+                    task_id,
+                    control.CANCEL,
+                    attempt.n,
+                    reason="process group already gone",
+                )
+            except control.PhaseWriteError:
                 log.warning(
-                    "recovered task %s survived SIGKILL; it will be reported as still running",
-                    record.task_id,
+                    "cascade: could not record cancel attempt %d's failure for %s",
+                    attempt.n,
+                    task_id,
+                    exc_info=True,
                 )
 
-        if not signalled:
-            log.warning(
-                "recovered task %s looked alive but could not be signalled; leaving its record "
-                "untouched rather than claiming it was cancelled",
-                record.task_id,
-            )
-            return record
+        if delivered or already_signalled:
+            return "signalled", None
+        return "not_signalled", "process group already gone"
 
-        cancelled = replace(
-            record, status="cancelled", finished_at=record.finished_at or _now().isoformat()
+    def _record_delivery(self, task_id: str, n: int, *, leader_alive: bool) -> None:
+        """Write `.sig` for a delivered SIGTERM, retrying briefly on a write error.
+
+        Never falls back to `.failed`: that means delivery failed, and publishing it for a signal
+        that landed would turn a cancelled run into whatever `classify` makes of its exit. If `.sig`
+        cannot be written at all, the attempt stays pending and the owner's monitor waits until
+        this controller exits and its lease expires — slow, but it never records something false.
+        """
+        for attempt_index in range(_SIG_WRITE_ATTEMPTS):
+            try:
+                control.mark_signalled(
+                    self._log_dir, task_id, control.CANCEL, n, leader_alive=leader_alive
+                )
+                return
+            except control.PhaseWriteError:
+                if attempt_index + 1 == _SIG_WRITE_ATTEMPTS:
+                    log.warning(
+                        "cascade: could not record the delivered cancel for %s; its owner will "
+                        "wait for this controller's lease",
+                        task_id,
+                        exc_info=True,
+                    )
+                    return
+                time.sleep(_SIG_WRITE_RETRY_SECONDS)
+
+    @staticmethod
+    def _kill_if_ours(record: store.TaskRecord) -> bool:
+        """SIGKILL the recorded group only if the leader is still provably ours — checked in the
+        same worker call as the signal, so no await separates the evidence from the act."""
+        leader = identity.task_identity(record.pid, record.start_time, record.markers)
+        if not identity.signalable(*identity.check_detail(leader)):
+            return False
+        return _signal_recorded_group(record, signal.SIGKILL)
+
+    def _settled_record(self, task_id: str) -> store.TaskRecord | None:
+        """The record if its owner has settled it — terminal and observed, or terminal with the
+        leader confirmed dead. An unobserved terminal status (a torn-down server's backstop) can
+        sit on a live process, and trusting it would skip the SIGKILL that process still needs."""
+        record = store.read(self._log_dir, task_id)
+        if record is None or record.status not in store.TERMINAL_RECORD_STATUSES:
+            return None
+        if not store.outcome_unobserved(record):
+            return record
+        leader = identity.task_identity(record.pid, record.start_time, record.markers)
+        return record if identity.identity_check(leader) == "dead" else None
+
+    async def _await_record_terminal(
+        self, task_id: str, budget: float
+    ) -> store.TaskRecord | None:
+        """Poll a non-local cascade target's own record until its owner settles it, up to `budget`
+        seconds — the record is expected to be settled by *its own* owning server (this is what
+        lets case 2 lean on the same `cancel_verdict` rule a local cancel uses, rather than
+        re-implementing termination for a process this server never spawned)."""
+        deadline = asyncio.get_running_loop().time() + budget
+        while True:
+            record = await asyncio.to_thread(self._settled_record, task_id)
+            if record is not None:
+                return record
+            if asyncio.get_running_loop().time() >= deadline:
+                return None
+            await asyncio.sleep(CANCEL_VERDICT_POLL_SECONDS)
+
+    async def _cascade_case2(self, record: store.TaskRecord) -> _Case2Outcome:
+        """One non-local cascade target whose owning server looks alive or undecidable: signal it
+        and let that owner's own monitor settle it via `cancel_verdict`, exactly as a local cancel
+        would — escalating to SIGKILL only if it does not, and handing off to case 3 only once the
+        owner itself is confirmed dead rather than merely slow.
+        """
+        task_id = record.task_id
+        kind, reason = await asyncio.to_thread(self._deliver_recorded_cancel, record)
+        if kind == "gone":
+            return _Case2Outcome(task_id, "done")
+        if kind == "not_signalled":
+            return _Case2Outcome(task_id, "not_signalled", reason)
+
+        if await self._await_record_terminal(task_id, SIGKILL_GRACE_SECONDS) is not None:
+            return _Case2Outcome(task_id, "done")
+
+        await asyncio.to_thread(self._kill_if_ours, record)
+
+        if await self._await_record_terminal(task_id, DRAIN_GRACE_SECONDS) is not None:
+            return _Case2Outcome(task_id, "done")
+
+        owner_verdict = await asyncio.to_thread(identity.identity_check, record.owner)
+        if owner_verdict == "dead":
+            return _Case2Outcome(task_id, "handoff")
+        return _Case2Outcome(task_id, "still_settling")
+
+    async def _cascade_case3_batch(
+        self, records: list[store.TaskRecord], already_signalled: frozenset[str] = frozenset()
+    ) -> dict[str, tuple[str, str | None]]:
+        """A batch of non-local cascade targets whose owning server is confirmed dead: nobody else
+        will ever settle their records, so the cascade signals and closes them itself.
+
+        Each target gets its own `.req` -> SIGTERM -> `.sig` delivery (`_deliver_recorded_cancel`;
+        one handed off from case 2 joins its existing attempt), but every leader actually signalled
+        shares one wait/SIGKILL/wait sequence: there is no owner left to race against, so nothing is
+        gained by doing this per target.
+
+        `already_signalled` names targets handed off from case 2, whose SIGTERM already landed there
+        (their `.sig` is on disk): a repeat delivery finding the group gone just means that signal
+        worked, so they are still closed rather than reported as never signalled.
+
+        Returns `{task_id: (outcome, reason)}`, outcome one of `"cancelled"`, `"sigkill_survivor"`,
+        `"not_signalled"` (`reason` set only for the last).
+        """
+        outcomes: dict[str, tuple[str, str | None]] = {}
+        signalled: list[tuple[store.TaskRecord, dict]] = []
+        for record in records:
+            kind, reason = await asyncio.to_thread(
+                self._deliver_recorded_cancel,
+                record,
+                already_signalled=record.task_id in already_signalled,
+            )
+            if kind == "signalled":
+                leader = identity.task_identity(record.pid, record.start_time, record.markers)
+                signalled.append((record, leader))
+            elif kind == "not_signalled":
+                outcomes[record.task_id] = ("not_signalled", reason)
+
+        async def _not_yet_dead(
+            candidates: list[tuple[store.TaskRecord, dict]], budget: float
+        ) -> list[tuple[store.TaskRecord, dict]]:
+            # Only a confirmed `dead` leaves the list: an `undecidable` leader (a transient `ps`
+            # failure, say) may well still be running, and must stay visible as a survivor.
+            deadline = asyncio.get_running_loop().time() + budget
+            remaining = list(candidates)
+            while remaining and asyncio.get_running_loop().time() < deadline:
+                await asyncio.sleep(CANCEL_VERDICT_POLL_SECONDS)
+                remaining = [
+                    pair
+                    for pair in remaining
+                    if await asyncio.to_thread(identity.identity_check, pair[1]) != "dead"
+                ]
+            return remaining
+
+        survivors = await _not_yet_dead(signalled, SIGKILL_GRACE_SECONDS)
+        if survivors:
+            for record, _leader in survivors:
+                await asyncio.to_thread(self._kill_if_ours, record)
+            survivors = await _not_yet_dead(survivors, SIGKILL_GRACE_SECONDS)
+
+        survivor_ids = {record.task_id for record, _leader in survivors}
+        for record, _leader in signalled:
+            outcomes[record.task_id] = (
+                "sigkill_survivor" if record.task_id in survivor_ids else "cancelled",
+                None,
+            )
+            await asyncio.to_thread(
+                control.write_record_if_open,
+                self._log_dir,
+                record.task_id,
+                lambda r: replace(
+                    r, status="cancelled", finished_at=r.finished_at or _now().isoformat()
+                ),
+            )
+
+        return outcomes
+
+    async def cancel_cascade(self, task_id: str) -> dict[str, Any]:
+        """Run `_cancel_cascade` as a registry-held task, shielded from the caller.
+
+        Same reason `cancel` shields `_escalate`: the SIGKILL escalation for tasks this server does
+        not own lives inside the cascade, and a client disconnecting mid-call must not abandon it.
+        """
+        return await self._shielded(self._cancel_cascade(task_id), f"pb-cascade-{task_id}")
+
+    async def _shielded(self, coro: Any, name: str) -> Any:
+        job = asyncio.create_task(coro, name=name)
+        self._control_jobs.add(job)
+        job.add_done_callback(self._control_jobs.discard)
+        return await asyncio.shield(job)
+
+    async def _cancel_cascade(self, task_id: str) -> dict[str, Any]:
+        """Cancel `task_id` and, best-effort, every live descendant this bridge can find via
+        lineage — nested dispatches that task's own agent made through polybridge (`spawned_by`),
+        or any record reporting the same `root_task_id`. Not a sandboxed guarantee: an agent that
+        dispatched outside polybridge entirely is invisible to this.
+
+        Targets are recomputed fresh every round (see `_cascade_targets`), and only the ones not
+        already processed are acted on — so this converges to a fixed point rather than looping
+        forever on a lineage that keeps growing, bounded at `CASCADE_MAX_ROUNDS` either way.
+        """
+        processed: set[str] = set()
+        sigkill_survivors: list[str] = []
+        owner_still_settling: list[str] = []
+        not_signalled: list[dict[str, str]] = []
+        rounds = 0
+
+        for round_index in range(1, CASCADE_MAX_ROUNDS + 1):
+            local_lineage = [(t.task_id, t.spawned_by, t.root_task_id) for t in self._tasks.values()]
+            targets = await asyncio.to_thread(self._cascade_targets, task_id, local_lineage)
+            new_targets = sorted(targets - processed)
+            if not new_targets:
+                break
+            rounds = round_index
+            processed.update(new_targets)
+
+            local_ids: list[str] = []
+            local_coros: list[Any] = []
+            case2_ids: list[str] = []
+            case2_coros: list[Any] = []
+            case3_records: list[store.TaskRecord] = []
+            handed_off: set[str] = set()
+
+            for tid in new_targets:
+                local_task = self._tasks.get(tid)
+                if local_task is not None and not local_task.finished:
+                    local_ids.append(tid)
+                    local_coros.append(self.cancel(local_task))
+                    continue
+
+                kind, payload = await asyncio.to_thread(self._triage_target, tid)
+                if kind == "not_signalled":
+                    not_signalled.append({"task_id": tid, "reason": payload})
+                elif kind == "case3":
+                    case3_records.append(payload)
+                elif kind == "case2":
+                    case2_ids.append(tid)
+                    case2_coros.append(self._cascade_case2(payload))
+
+            if local_coros or case2_coros:
+                # return_exceptions: one target failing (a phase file that cannot be written, say)
+                # must neither abort the cascade nor leave its siblings running unobserved.
+                results = await asyncio.gather(*local_coros, *case2_coros, return_exceptions=True)
+                for tid, outcome in zip([*local_ids, *case2_ids], results):
+                    if isinstance(outcome, BaseException):
+                        if isinstance(outcome, asyncio.CancelledError):
+                            raise outcome
+                        log.warning("cascade: cancelling %s failed", tid, exc_info=outcome)
+                        reason = (
+                            f"phase write failed: {outcome}"
+                            if isinstance(outcome, control.PhaseWriteError)
+                            else f"error: {outcome}"
+                        )
+                        not_signalled.append({"task_id": tid, "reason": reason})
+                        continue
+                    if not isinstance(outcome, _Case2Outcome):
+                        continue
+                    if outcome.kind == "handoff":
+                        fresh = await asyncio.to_thread(store.read, self._log_dir, outcome.task_id)
+                        if fresh is not None:
+                            case3_records.append(fresh)
+                            handed_off.add(outcome.task_id)
+                    elif outcome.kind == "still_settling":
+                        owner_still_settling.append(outcome.task_id)
+                    elif outcome.kind == "not_signalled":
+                        not_signalled.append(
+                            {"task_id": outcome.task_id, "reason": outcome.reason or ""}
+                        )
+
+            if case3_records:
+                case3_outcomes = await self._cascade_case3_batch(
+                    case3_records, frozenset(handed_off)
+                )
+                for tid, (kind, reason) in case3_outcomes.items():
+                    if kind == "sigkill_survivor":
+                        sigkill_survivors.append(tid)
+                    elif kind == "not_signalled":
+                        not_signalled.append({"task_id": tid, "reason": reason or ""})
+
+        cancelled_descendants: list[str] = []
+        for tid in processed:
+            if tid == task_id:
+                continue
+            local_task = self._tasks.get(tid)
+            if local_task is not None:
+                status = local_task.status
+            else:
+                fresh = await asyncio.to_thread(store.read, self._log_dir, tid)
+                if fresh is None:
+                    continue
+                status = (
+                    await asyncio.to_thread(store.resolve_status, self._log_dir, fresh, detail=False)
+                )[0]
+            if status == "cancelled":
+                cancelled_descendants.append(tid)
+
+        return {
+            "cancelled_descendants": sorted(cancelled_descendants),
+            "sigkill_survivors": sorted(set(sigkill_survivors)),
+            "owner_still_settling": sorted(set(owner_still_settling)),
+            "not_signalled": not_signalled,
+            "rounds": rounds,
+        }
+
+    async def cancel_recovered(self, record: store.TaskRecord) -> store.TaskRecord:
+        """Shielded like `cancel_cascade`, for the same reason — see `_cancel_recovered`."""
+        return await self._shielded(
+            self._cancel_recovered(record), f"pb-cancel-recovered-{record.task_id}"
         )
-        store.write(self._log_dir, cancelled)
-        log.info("recovered task %s cancelled", record.task_id)
-        return cancelled
+
+    async def _cancel_recovered(self, record: store.TaskRecord) -> store.TaskRecord:
+        """Stop a task this process never spawned, running the same non-local case-2/case-3 logic
+        `cancel_cascade` uses for a single target — no cascade to descendants, just this one
+        record. Kept for callers that mean to stop exactly this task. Its old unconditional
+        `cancelled` write is gone: the record is only ever closed by the same rules a cascade
+        target is — case 3's shared write once the owner is confirmed dead, or the record's own
+        owner settling it after case 2's signal.
+        """
+        kind, payload = await asyncio.to_thread(self._triage_target, record.task_id)
+        if kind == "case3":
+            await self._cascade_case3_batch([payload])
+        elif kind == "case2":
+            outcome = await self._cascade_case2(payload)
+            if outcome.kind == "handoff":
+                fresh = await asyncio.to_thread(store.read, self._log_dir, record.task_id)
+                if fresh is not None:
+                    await self._cascade_case3_batch([fresh], frozenset({record.task_id}))
+        else:
+            log.info(
+                "recovered task %s not signalled (%s)", record.task_id, payload or "already settled"
+            )
+
+        return store.read(self._log_dir, record.task_id) or record
 
     async def resume_record(
         self,
@@ -979,11 +1622,6 @@ class TaskRegistry:
                 f"task {record.task_id} never disclosed a session id, so its conversation cannot "
                 "be resumed; start a new task instead"
             )
-        if self.session_has_live_run(record.session_id):
-            raise SessionBusyError(
-                f"session {record.session_id} already has a running task; "
-                "two concurrent runs would corrupt its shared conversation state"
-            )
 
         # Revalidated rather than trusted: the recorded path may have been deleted, or replaced by
         # a different repository, since the original run.
@@ -998,29 +1636,60 @@ class TaskRegistry:
         # also None for a record written before the field existed, resuming at the freedom's
         # historical default — and an explicit boolean overrides it for this subprocess only.
         effective_network = network if network is not None else record.network
-        argv = backend.build_resume_argv(
-            followup_prompt,
-            repo=repo_path,
-            freedom=record.freedom,  # type: ignore[arg-type]
-            session_id=record.session_id,
-            model=record.model,
-            max_turns=max_turns,
-            reasoning_effort=record.reasoning_effort,
-            network=effective_network,
+
+        # Same ordering as `resume`: caller detection and the caps run before the session lock.
+        caller = await self._detect_caller()
+        spawned_by, root_task_id, depth, max_depth, lineage_detected = self._resolve_lineage(
+            caller,
+            child_enforcement=backend.enforcement(record.freedom, effective_network),  # type: ignore[arg-type]
+            child_backend=backend.name,
+            child_repo=repo_path,
         )
-        return await self._spawn(
-            argv,
-            backend=backend,
-            prompt=followup_prompt,
-            repo_path=repo_path,
-            session_id=record.session_id,
-            freedom=record.freedom,
-            max_turns=max_turns,
-            model=record.model,
-            reasoning_effort=record.reasoning_effort,
-            network=effective_network,
-            parent_task_id=record.task_id,
-        )
+        resolved_group = caller.record.group if caller is not None else record.group
+
+        try:
+            async with control.session_lock(
+                self._log_dir, record.session_id, timeout=SESSION_LOCK_TIMEOUT_SECONDS
+            ):
+                if self.session_has_live_run(record.session_id):
+                    raise SessionBusyError(
+                        f"session {record.session_id} already has a running task; "
+                        "two concurrent runs would corrupt its shared conversation state"
+                    )
+                argv = backend.build_resume_argv(
+                    followup_prompt,
+                    repo=repo_path,
+                    freedom=record.freedom,  # type: ignore[arg-type]
+                    session_id=record.session_id,
+                    model=record.model,
+                    max_turns=max_turns,
+                    reasoning_effort=record.reasoning_effort,
+                    network=effective_network,
+                )
+                return await self._spawn(
+                    argv,
+                    backend=backend,
+                    prompt=followup_prompt,
+                    repo_path=repo_path,
+                    session_id=record.session_id,
+                    freedom=record.freedom,
+                    max_turns=max_turns,
+                    model=record.model,
+                    reasoning_effort=record.reasoning_effort,
+                    network=effective_network,
+                    parent_task_id=record.task_id,
+                    spawned_by=spawned_by,
+                    root_task_id=root_task_id,
+                    depth=depth,
+                    max_depth=max_depth,
+                    group=resolved_group,
+                    lineage_detected=lineage_detected,
+                )
+        except control.LockTimeout:
+            raise SessionBusyError(
+                f"another resume of session {record.session_id} is already in progress; "
+                "try again shortly"
+            ) from None
 
     def prune(self) -> None:
         """Drop the oldest finished tasks once over capacity.
@@ -1070,17 +1739,6 @@ class TaskRegistry:
         task.add_done_callback(_log_failure)
 
 
-async def _await_recorded_death(record: store.TaskRecord, timeout: float | None = None) -> bool:
-    """Poll a recovered task's process until it is gone. False if it outlasted `timeout`."""
-    # Read at call time rather than bound as a default, so the grace period stays patchable.
-    timeout = SIGKILL_GRACE_SECONDS if timeout is None else timeout
-    deadline = asyncio.get_running_loop().time() + timeout
-    while asyncio.get_running_loop().time() < deadline:
-        await asyncio.sleep(0.25)
-        if not store.process_alive(record.pid, record.markers):
-            return True
-    return not store.process_alive(record.pid, record.markers)
-
 
 def _signal_recorded_group(record: store.TaskRecord, sig: int) -> bool:
     """Signal a recovered task's process group. False if it could not be signalled."""
@@ -1117,12 +1775,17 @@ def _signal_group(task: Task, sig: int) -> bool:
             return False
 
 
-async def _terminate(task: Task) -> None:
-    """SIGTERM the run's process group, escalating to SIGKILL if it does not go quietly."""
+async def _escalate(task: Task) -> None:
+    """Wait for the run to exit after its SIGTERM (already sent synchronously by
+    `TaskRegistry._deliver_local_cancel`), escalating to SIGKILL if it does not go quietly.
+
+    The old `_terminate` minus its own initial SIGTERM: that send now happens in the no-await
+    section before this task is even created, so cancel-phase bookkeeping can complete before any
+    await gives the monitor a chance to run.
+    """
     proc = task.proc
     assert proc is not None
 
-    _signal_group(task, signal.SIGTERM)
     try:
         await asyncio.wait_for(proc.wait(), timeout=SIGKILL_GRACE_SECONDS)
     except asyncio.TimeoutError:
@@ -1286,6 +1949,37 @@ async def _finish_draining(task: Task) -> None:
     await asyncio.gather(*pending, return_exceptions=True)
 
 
+async def _await_cancel_verdict(task: Task, registry: TaskRegistry) -> str:
+    """Whether a cross-process cancel authorizes reading this exit as `cancelled`.
+
+    Polls `control.cancel_verdict` every `CANCEL_VERDICT_POLL_SECONDS` while it reports
+    `"pending"` — another controller's attempt is underway and its own leader-alive verdict has
+    not landed yet. No deadline: an attempt only stays `pending` while its controller looks live
+    or undecidable (see `cancel_verdict`'s own docstring), so this loop is bounded by that
+    controller's lease recovery, not by anything here. Breaks out the moment this task's *own*
+    owner requests a cancel (`task.cancel_requested`) — the caller re-checks that flag itself and
+    it takes priority regardless of what this returns. Any failure reading the verdict is treated
+    as `"none"`, per CLAUDE.md: bookkeeping must never change an outcome.
+    """
+    while True:
+        if task.cancel_requested:
+            return "none"
+        try:
+            verdict = await asyncio.to_thread(
+                control.cancel_verdict, registry.log_dir, task.task_id
+            )
+        except Exception:
+            log.warning(
+                "task %s: could not read the cross-process cancel verdict; treating as none",
+                task.task_id,
+                exc_info=True,
+            )
+            return "none"
+        if verdict != "pending":
+            return verdict
+        await asyncio.sleep(CANCEL_VERDICT_POLL_SECONDS)
+
+
 async def _monitor(task: Task, registry: TaskRegistry) -> None:
     """Await exit, finish reading the stream, then publish the final status.
 
@@ -1299,7 +1993,15 @@ async def _monitor(task: Task, registry: TaskRegistry) -> None:
 
         task.exit_code = exit_code
         task.finished_at = _now()
-        task.status = "cancelled" if task.cancel_requested else _classify(task, exit_code)
+
+        if task.cancel_requested:
+            task.status = "cancelled"
+        else:
+            classified = _classify(task, exit_code)
+            verdict = await _await_cancel_verdict(task, registry)
+            task.status = (
+                "cancelled" if (task.cancel_requested or verdict == "authorized") else classified
+            )
 
         observed = task.acc.session_id
         if observed and observed != task.session_id:

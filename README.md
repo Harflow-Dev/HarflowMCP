@@ -84,12 +84,12 @@ claude-desktop`.
 | Tool | Blocking? | What it does |
 |---|---|---|
 | `list_backends()` | No | What's installed, its version, and what each backend can actually do |
-| `start_task(prompt, repo_path, backend, freedom, model, max_turns, reasoning_effort, network)` | No | Dispatches, returns a `task_id` immediately |
+| `start_task(prompt, repo_path, backend, freedom, model, max_turns, reasoning_effort, network, group)` | No | Dispatches, returns a `task_id` immediately |
 | `get_task_status(task_id)` | No | Status, summary, turns, usage, denials, enforcement, stream tail |
 | `wait_for_task(task_id, timeout_seconds=55)` | Until done or timeout | On timeout returns `running` and **leaves the run alone** |
 | `resume_task(task_id, followup_prompt, max_turns, network)` | No | Continues that session as a **new** task; `network` omitted inherits the parent's, an explicit boolean overrides it |
 | `list_tasks(status, backend)` | No | All tasks, oldest first, optionally filtered |
-| `cancel_task(task_id)` | Until dead | SIGTERM the process group, SIGKILL after 5s |
+| `cancel_task(task_id)` | Until dead | SIGTERM the process group, SIGKILL after 5s; cascades to live descendants and reports them under `cascade` |
 
 ## Backends are not interchangeable, and the tool says so
 
@@ -313,6 +313,55 @@ An MCP client may run several polybridge servers, or restart one. Each task writ
 on, wait for, cancel or resume tasks it did not start. Those come back marked `recovered: true` with
 a `note` describing what is known.
 
+## Nested dispatches: lineage, caps and cascade cancel
+
+An agent running under a polybridge task can itself call polybridge — a nested MCP server inside a
+`claude` or `opencode` run, or a pre-approved tool call from `codex` or `vibe`. Polybridge records
+that relationship on the child: `spawned_by` (the calling task), `root_task_id`, `depth` (0 for a
+root task), `max_depth` (taken from the root's `PB_MAX_DEPTH`, default 2), an optional `group` label
+(a `start_task` parameter, inherited by nested dispatches), and `lineage_detected` — which method
+found the caller, or null if none was found. All of them appear in `get_task_status`, `list_tasks`
+and `polybridge-ctl`. `parent_task_id` keeps its meaning of "resumed from".
+
+**Detection is best-effort.** Every spawned agent gets `PB_TASK_ID`, `PB_ROOT_TASK_ID` and
+`PB_DEPTH` in its environment, but codex and vibe filter the environment before starting their MCP
+servers, so those never arrive there. The caller is therefore looked for three ways, each candidate
+confirmed alive by pid and start time: the `PB_TASK_ID` candidate (only if it is also this
+process's session or an ancestor), a task whose process group is this process's session (claude,
+opencode and codex nested servers share it), and a walk up the process tree (vibe gives each MCP
+call its own session). A task with no detected caller is treated as a root task.
+
+**Caps.** When a caller is detected, a nested `start_task` or `resume_task` is refused unless the
+child's resolved `enforcement` is at least as strict as the caller's on every policy field:
+`os_enforced`, `writes_confined`, `commit_push_blocked` and `direct_commit_commands_denied` (true
+on the parent means true on the child); `publish_attempts_allowed_by_polybridge` (false stays
+false); `network_access` (blocked > enabled = not_controlled > unrestricted); and, under a
+confined parent, the same backend, `writable_roots` a subset of the parent's, and a repo equal to or
+under the parent's — so codex `read_only` cannot spawn codex `write_in_repo`, and a confined parent
+cannot spawn a different backend at all. `depth + 1` may not exceed `max_depth`. The error names the
+rule that was hit. This is a cap on what polybridge will dispatch, not a sandbox: an agent that can
+run commands can still start processes outside polybridge, and a caller that detection misses is
+not capped.
+
+**Cascade cancel.** `cancel_task` stops the task and every live descendant it can find, following
+`spawned_by` through settled intermediates and every task sharing its `root_task_id`, re-scanning
+until no new descendant appears. Tasks this server owns are cancelled as before. A task owned by
+another live server is signalled, then left to that server to settle; if it has not within the
+SIGKILL and drain grace periods and its server is still alive, it is reported under
+`owner_still_settling` and nothing is written for it. A task whose owning server is confirmed dead is
+signalled, SIGKILLed if it survives, and written `cancelled`. The response's `cascade` lists
+`cancelled_descendants`, `sigkill_survivors`, `owner_still_settling` and `not_signalled` (with why —
+a pre-start-time record is only signalled when `ps` actually showed its markers).
+
+**Why a cancel from another process cannot be mis-recorded.** Every cancel writes phase files beside
+the task's record, per attempt: `<id>.cancel.<n>.req` (who is cancelling, with a 60 s lease) before
+any signal, then `.sig` (with whether the leader was alive when signalled) or `.failed`. The owning
+server, seeing its process exit with a `.req` in flight, waits for the outcome instead of guessing:
+only a `.sig` that found the leader alive turns that exit into `cancelled`, even if the agent caught
+SIGTERM and exited 0. A `.failed`, or a canceller that died with its lease expired, leaves the normal
+classification in place. Resumes of one session are serialised by a lock under
+`~/.polybridge/sessions/`, so two servers cannot both resume it.
+
 ## The normalized event log
 
 Alongside a task's raw stream log (`<task_id>.jsonl`, whatever bytes the backend's CLI actually
@@ -351,7 +400,8 @@ never has to filter noise out of it.
 A running server sweeps settled task records at most once every 24 hours, controlled by
 `PB_RETENTION_DAYS` (default 30 days; `0` disables the sweep entirely). A task is only deleted once
 it is terminal, older than the window, has no still-running descendant (from `resume_task`), and no
-active cancel/takeover attempt in flight — and only `polybridge-server` ever runs it;
+cancel/takeover attempt still in flight (a cancel attempt is finished once it has a `.sig` or
+`.failed`, or its canceller died and its lease expired) — and only `polybridge-server` ever runs it;
 `polybridge-ctl` is read-only and never triggers a sweep.
 
 **A deleted task's id stops working for `resume_task` — with one exception.** `resume_task` checks

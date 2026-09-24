@@ -9,6 +9,8 @@ branches on a backend's name.
 
 from __future__ import annotations
 
+import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, NamedTuple, Protocol, runtime_checkable
@@ -248,6 +250,22 @@ class UnsupportedCapability(ValueError):
     """A request a backend cannot honour, which must fail rather than be silently dropped."""
 
 
+class NestedDispatchRefused(UnsupportedCapability):
+    """A nested dispatch (one task spawning another via polybridge) that would be weaker than its
+    parent task on some enforcement field, or that would exceed the parent's depth budget.
+
+    This is a best-effort cap, not a sandbox boundary — see `check_nested_enforcement` and
+    `check_nested_depth` for what it actually compares and why it can be wrong. `rule` names which
+    single check failed (a field name from `POLICY_FIELDS`, or `"backend"`, `"repo"`,
+    `"parent_enforcement_unrecorded"`, `"depth"`), so a caller can log or test on the failure
+    reason without parsing the message.
+    """
+
+    def __init__(self, message: str, *, rule: str) -> None:
+        super().__init__(message)
+        self.rule = rule
+
+
 @runtime_checkable
 class Backend(Protocol):
     name: str
@@ -407,4 +425,174 @@ def check_network(backend: Backend, freedom: Freedom, network: bool | None) -> N
         raise UnsupportedCapability(
             f"the {backend.name} backend cannot block network at freedom {freedom!r}; "
             f"network=False is accepted only at {list(control.can_block)}"
+        )
+
+
+# --- Nested-dispatch caps -----------------------------------------------------------------------
+#
+# A task dispatched *through polybridge itself* (an agent running under one polybridge task that
+# then calls `start_task`/`resume_task` again) can, without a cap, ask for something stronger than
+# the parent task it is running inside of — e.g. a `read_only` claude run spawning an `unrestricted`
+# codex run. `nested_enforcement_violation` compares a parent's recorded `Enforcement` against a
+# proposed child's and says whether the child would be weaker (in the sense of "the parent's own
+# restrictions would not hold for it"). This is advisory, not a sandbox: it is only ever checked
+# when a caller is *detected* (see `lineage.detect_caller`), detection is itself best-effort, and
+# nothing stops an agent from dispatching outside polybridge entirely. Every message this module
+# raises says so.
+
+POLICY_FIELDS: tuple[str, ...] = (
+    "os_enforced",
+    "writes_confined",
+    "commit_push_blocked",
+    "direct_commit_commands_denied",
+    "publish_attempts_allowed_by_polybridge",
+    "network_access",
+    "writable_roots",
+)
+"""Every `Enforcement` field this cap compares. A parent record missing any of these (a legacy
+record predating the field, or an `enforcement=None` record from before A1) cannot be compared at
+all — see `nested_enforcement_violation`'s `parent_enforcement_unrecorded` rule."""
+
+# Ranked so "child rank >= parent rank" means "at least as strict". An unrecognised value on either
+# side is treated conservatively: a parent with a value this table does not know is assumed as
+# strict as possible (rank 2, "blocked"-equivalent) so an unfamiliar parent claim can never be
+# under-compared away; a child with an unrecognised value is assumed as lax as possible (rank 0,
+# "unrestricted"-equivalent) so it can never slip past the check by reporting nonsense.
+NETWORK_STRICTNESS: dict[str, int] = {
+    "blocked": 2,
+    "enabled": 1,
+    "not_controlled": 1,
+    "unrestricted": 0,
+}
+
+# True on the parent means "restricted"; a child that is not is weaker. Checked in this exact
+# order — the first field that fails is the one reported, so a caller only ever sees one cause.
+_MONOTONIC_TRUE_RESTRICTS: tuple[str, ...] = (
+    "os_enforced",
+    "writes_confined",
+    "commit_push_blocked",
+    "direct_commit_commands_denied",
+)
+
+
+def _field(obj: Enforcement | Mapping[str, Any], name: str) -> Any:
+    """Read one enforcement field whether `obj` is a live `Enforcement` or a plain dict (e.g. a
+    `TaskRecord.enforcement` loaded back off disk)."""
+    if isinstance(obj, Mapping):
+        return obj.get(name)
+    return getattr(obj, name, None)
+
+
+def _violation(rule: str, parent_value: Any, child_value: Any) -> tuple[str, str]:
+    return (
+        rule,
+        f"nested dispatch refused: the child task would be weaker than its parent on {rule} "
+        f"(parent={parent_value!r}, child={child_value!r}); this cap is best-effort",
+    )
+
+
+def nested_enforcement_violation(
+    parent: Mapping[str, Any],
+    child: Enforcement | Mapping[str, Any],
+    *,
+    parent_backend: str,
+    child_backend: str,
+    parent_repo: str,
+    child_repo: str,
+) -> tuple[str, str] | None:
+    """The first way `child` would be weaker than `parent`, or None if it never is.
+
+    Checked in this fixed order — `parent_enforcement_unrecorded`, `os_enforced`,
+    `writes_confined`, `commit_push_blocked`, `direct_commit_commands_denied`,
+    `publish_attempts_allowed_by_polybridge`, `network_access`, `backend`, `writable_roots`,
+    `repo` — so only ever the first violated rule is reported. `freedom`, `mechanism` and
+    `caveats` are deliberately never compared: they describe *how* a level is achieved, not how
+    strict it is, and two different mechanisms can enforce the same strength.
+
+    Pure on its inputs except for `os.path.realpath` on the two repo paths (needed to resolve a
+    symlink pointing outside the parent's repo).
+    """
+    parent = parent or {}
+    missing = [f for f in POLICY_FIELDS if f not in parent]
+    if missing:
+        return _violation("parent_enforcement_unrecorded", missing[0], "n/a (parent unrecorded)")
+
+    for field_name in _MONOTONIC_TRUE_RESTRICTS:
+        parent_value = parent[field_name]
+        child_value = _field(child, field_name)
+        if parent_value and not child_value:
+            return _violation(field_name, parent_value, child_value)
+
+    # publish_attempts_allowed_by_polybridge runs the other way: True means "permitted to try
+    # publishing", so a parent that was *not* authorized (False) must not have a child that is.
+    parent_publish = parent["publish_attempts_allowed_by_polybridge"]
+    child_publish = _field(child, "publish_attempts_allowed_by_polybridge")
+    if not parent_publish and child_publish:
+        return _violation(
+            "publish_attempts_allowed_by_polybridge", parent_publish, child_publish
+        )
+
+    parent_network = parent["network_access"]
+    child_network = _field(child, "network_access")
+    parent_rank = NETWORK_STRICTNESS.get(parent_network, 2)
+    child_rank = NETWORK_STRICTNESS.get(child_network, 0)
+    if child_rank < parent_rank:
+        return _violation("network_access", parent_network, child_network)
+
+    # The remaining three rules only bite when the parent itself is confined at all — an
+    # unconfined parent (claude/opencode/vibe at any freedom, codex at `unrestricted`) imposes no
+    # backend, root, or repo constraint on what it spawns.
+    if parent["writes_confined"]:
+        if child_backend != parent_backend:
+            return _violation("backend", parent_backend, child_backend)
+
+        parent_roots = set(parent["writable_roots"])
+        child_roots = set(_field(child, "writable_roots") or ())
+        if not child_roots <= parent_roots:
+            return _violation(
+                "writable_roots", parent["writable_roots"], _field(child, "writable_roots")
+            )
+
+        parent_real = os.path.realpath(parent_repo)
+        child_real = os.path.realpath(child_repo)
+        if child_real != parent_real and os.path.commonpath([parent_real, child_real]) != parent_real:
+            return _violation("repo", parent_repo, child_repo)
+
+    return None
+
+
+def check_nested_enforcement(
+    parent: Mapping[str, Any],
+    child: Enforcement | Mapping[str, Any],
+    *,
+    parent_backend: str,
+    child_backend: str,
+    parent_repo: str,
+    child_repo: str,
+) -> None:
+    """Raise `NestedDispatchRefused` for the first way `child` would be weaker than `parent`."""
+    violation = nested_enforcement_violation(
+        parent,
+        child,
+        parent_backend=parent_backend,
+        child_backend=child_backend,
+        parent_repo=parent_repo,
+        child_repo=child_repo,
+    )
+    if violation is not None:
+        rule, message = violation
+        raise NestedDispatchRefused(message, rule=rule)
+
+
+def check_nested_depth(parent_depth: int, max_depth: int) -> None:
+    """Raise `NestedDispatchRefused` when the child's depth (`parent_depth + 1`) would exceed the
+    parent's own depth budget. Kept separate from `check_nested_enforcement`: depth is a property
+    of the dispatch chain, not of either task's `Enforcement`."""
+    child_depth = parent_depth + 1
+    if child_depth > max_depth:
+        raise NestedDispatchRefused(
+            "nested dispatch refused: it would exceed the dispatch chain's depth budget "
+            f"(parent depth={parent_depth!r}, child depth={child_depth!r} > "
+            f"max_depth={max_depth!r}); this cap is best-effort",
+            rule="depth",
         )

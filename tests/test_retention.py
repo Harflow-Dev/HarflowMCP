@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+import json
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -226,11 +227,13 @@ def test_sweep_keeps_a_settled_old_task_with_a_running_descendant(
 
 
 def test_sweep_keeps_a_task_with_an_active_cancel_attempt(tmp_path: Path) -> None:
+    """An unparsable `.req` (empty, not JSON) can never be proven abandoned — `controller_abandoned`
+    refuses to guess — so `cancel_attempt_active` stays True and the task is kept."""
     log_dir = tmp_path / "tasks"
     log_dir.mkdir()
     record = make_record()
     store.write(log_dir, record)
-    (log_dir / f"{record.task_id}.cancel.1.requested").write_text("")
+    (log_dir / f"{record.task_id}.cancel.1.req").write_text("")
 
     stats = retention.sweep(log_dir, 30, datetime.now(timezone.utc))
 
@@ -244,13 +247,102 @@ def test_sweep_deletes_a_task_whose_latest_attempt_has_failed(tmp_path: Path) ->
     log_dir.mkdir()
     record = make_record()
     store.write(log_dir, record)
-    (log_dir / f"{record.task_id}.cancel.1.requested").write_text("")
+    (log_dir / f"{record.task_id}.cancel.1.req").write_text("")
     (log_dir / f"{record.task_id}.cancel.1.failed").write_text("")
 
     stats = retention.sweep(log_dir, 30, datetime.now(timezone.utc))
 
     assert stats["deleted_tasks"] == 1
     assert store.read(log_dir, record.task_id) is None
+
+
+def test_sweep_deletes_a_task_whose_latest_cancel_attempt_was_signalled(tmp_path: Path) -> None:
+    """A `.sig` settles the attempt regardless of what the `.req` says — `attempt_outcome` checks
+    existence, not payload content, for `.sig`/`.failed`."""
+    log_dir = tmp_path / "tasks"
+    log_dir.mkdir()
+    record = make_record()
+    store.write(log_dir, record)
+    (log_dir / f"{record.task_id}.cancel.1.req").write_text("{}")
+    (log_dir / f"{record.task_id}.cancel.1.sig").write_text('{"leader_alive": false}')
+
+    stats = retention.sweep(log_dir, 30, datetime.now(timezone.utc))
+
+    assert stats["deleted_tasks"] == 1
+    assert store.read(log_dir, record.task_id) is None
+
+
+def test_sweep_keeps_a_task_whose_cancel_controller_is_still_live(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Even with an expired lease, a controller that is confirmed `alive` (not `dead`) is never
+    declared abandoned — the lease alone is not enough."""
+    log_dir = tmp_path / "tasks"
+    log_dir.mkdir()
+    now = datetime.now(timezone.utc)
+    record = make_record()
+    store.write(log_dir, record)
+    req = {"at": _iso(now - timedelta(seconds=120)), "by": {"pid": 999}, "lease_seconds": 60}
+    (log_dir / f"{record.task_id}.cancel.1.req").write_text(json.dumps(req))
+    monkeypatch.setattr(retention.control.identity, "identity_check", lambda identity: "alive")
+
+    stats = retention.sweep(log_dir, 30, now)
+
+    assert stats["kept_active_attempt"] == 1
+    assert stats["deleted_tasks"] == 0
+    assert store.read(log_dir, record.task_id) is not None
+
+
+def test_sweep_deletes_a_task_whose_cancel_controller_died_with_an_expired_lease(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log_dir = tmp_path / "tasks"
+    log_dir.mkdir()
+    now = datetime.now(timezone.utc)
+    record = make_record()
+    store.write(log_dir, record)
+    req = {"at": _iso(now - timedelta(seconds=120)), "by": {"pid": 999}, "lease_seconds": 60}
+    (log_dir / f"{record.task_id}.cancel.1.req").write_text(json.dumps(req))
+    monkeypatch.setattr(retention.control.identity, "identity_check", lambda identity: "dead")
+
+    stats = retention.sweep(log_dir, 30, now)
+
+    assert stats["deleted_tasks"] == 1
+    assert store.read(log_dir, record.task_id) is None
+
+
+def test_takeover_family_semantics_are_unchanged_by_the_cancel_rewrite(tmp_path: Path) -> None:
+    """Cancel now routes through `control.cancel_attempt_active`; takeover still uses the original
+    "active unless the latest attempt has `.failed`" rule this task does not own."""
+    log_dir = tmp_path / "tasks"
+    log_dir.mkdir()
+    record = make_record()
+    store.write(log_dir, record)
+    (log_dir / f"{record.task_id}.takeover.1.requested").write_text("")
+
+    stats = retention.sweep(log_dir, 30, datetime.now(timezone.utc))
+
+    assert stats["kept_active_attempt"] == 1
+    assert stats["deleted_tasks"] == 0
+    assert store.read(log_dir, record.task_id) is not None
+
+
+def test_an_unparsable_cancel_attempt_number_still_forces_the_task_active(tmp_path: Path) -> None:
+    """"x" fails retention's own `int()` parse (unlike control.py's stricter numbering, this rule
+    predates A2 and is only about Python's own int() conversion) and so forces the family active,
+    even though `control.cancel_attempt_active` cannot see this attempt at all — its own
+    `latest_attempt` silently ignores any n outside `[1-9][0-9]*`."""
+    log_dir = tmp_path / "tasks"
+    log_dir.mkdir()
+    record = make_record()
+    store.write(log_dir, record)
+    (log_dir / f"{record.task_id}.cancel.x.req").write_text("{}")
+
+    stats = retention.sweep(log_dir, 30, datetime.now(timezone.utc))
+
+    assert stats["kept_active_attempt"] == 1
+    assert stats["deleted_tasks"] == 0
+    assert store.read(log_dir, record.task_id) is not None
 
 
 def test_sweep_keeps_a_task_whose_lock_is_held_by_another_process(tmp_path: Path) -> None:

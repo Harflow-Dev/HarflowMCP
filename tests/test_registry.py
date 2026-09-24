@@ -15,7 +15,7 @@ from polybridge import backends
 from polybridge.backends.base import FREEDOMS
 from polybridge.backends.base import Enforcement
 from polybridge.backends.codex import CodexBackend
-from polybridge import store
+from polybridge import identity, store
 from polybridge import tasks as tasks_module
 from polybridge.tasks import (
     RepoUnavailableError,
@@ -357,7 +357,12 @@ async def test_a_monitor_that_crashes_still_publishes_a_terminal_status(
 async def test_cancel_recovered_does_not_claim_success_it_cannot_deliver(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Marking it cancelled when the signal failed would have later calls contradict this one."""
+    """Marking it cancelled when nothing could be signalled would have later calls contradict this.
+
+    `cancel_recovered` now runs the same non-local case-2/case-3 gate `cancel_cascade` uses: with
+    no `pgid` recorded there is nothing to signal, regardless of what the leader identity check
+    says, so the record is left untouched.
+    """
     registry = TaskRegistry(log_dir=tmp_path)
     record = store.TaskRecord(
         task_id="orphan",
@@ -370,7 +375,8 @@ async def test_cancel_recovered_does_not_claim_success_it_cannot_deliver(
         pgid=None,  # nothing to signal
     )
     store.write(tmp_path, record)
-    monkeypatch.setattr(store, "process_alive", lambda pid, markers: True)
+    monkeypatch.setattr(identity, "check_detail", lambda ident: ("alive", "start_time_match"))
+    monkeypatch.setattr(identity, "may_signal", lambda ident: True)
 
     result = await registry.cancel_recovered(record)
 
@@ -383,10 +389,14 @@ async def test_cancel_recovered_waits_for_the_sigkill_to_land(
 ) -> None:
     """Returning while the group is still dying makes the response contradict itself.
 
-    `store.resolve_status` rechecks liveness for a `cancelled` record, so answering a cancellation
-    before the process is gone reports the task as still running.
+    A dead owner is required for `cancel_recovered` to reach case 3, which is the only path that
+    writes the record itself — with no real owning server to settle it, case 2 would just wait out
+    its bound and leave the record untouched. `store.resolve_status` rechecks liveness for a
+    `cancelled` record, so answering a cancellation before the process is gone reports the task as
+    still running.
     """
     monkeypatch.setattr(tasks_module, "SIGKILL_GRACE_SECONDS", 0.05)
+    monkeypatch.setattr(tasks_module, "CANCEL_VERDICT_POLL_SECONDS", 0.01)
     registry = TaskRegistry(log_dir=tmp_path)
     record = store.TaskRecord(
         task_id="orphan",
@@ -409,7 +419,15 @@ async def test_cancel_recovered_waits_for_the_sigkill_to_land(
         return True
 
     monkeypatch.setattr(tasks_module, "_signal_recorded_group", signal_group)
-    monkeypatch.setattr(store, "process_alive", lambda pid, markers: not killed)
+    monkeypatch.setattr(identity, "check_detail", lambda ident: ("alive", "start_time_match"))
+    monkeypatch.setattr(identity, "may_signal", lambda ident: not killed)
+    # The owner (no markers) is dead throughout: that is what routes `cancel_recovered` to case 3.
+    # The leader (markers ["s1"]) stays alive until the SIGKILL lands.
+    monkeypatch.setattr(
+        identity,
+        "identity_check",
+        lambda ident: "alive" if (ident or {}).get("markers") and not killed else "dead",
+    )
 
     result = await registry.cancel_recovered(record)
 
@@ -434,12 +452,45 @@ async def test_cancel_recovered_of_an_already_dead_task_changes_nothing(tmp_path
     assert (await registry.cancel_recovered(record)).status == "running"
 
 
+async def test_cancel_recovered_does_not_write_cancelled_for_a_live_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An alive (or undecidable) owner is left to settle its own task; `cancel_recovered` only
+    ever writes the record itself once the owner is confirmed dead (case 3)."""
+    monkeypatch.setattr(tasks_module, "SIGKILL_GRACE_SECONDS", 0.02)
+    monkeypatch.setattr(tasks_module, "DRAIN_GRACE_SECONDS", 0.02)
+    monkeypatch.setattr(tasks_module, "CANCEL_VERDICT_POLL_SECONDS", 0.01)
+    registry = TaskRegistry(log_dir=tmp_path)
+    record = store.TaskRecord(
+        task_id="orphan",
+        backend="claude",
+        session_id="s1",
+        markers=["s1"],
+        repo_path=str(tmp_path),
+        started_at=datetime.now(timezone.utc).isoformat(),
+        pid=1234,
+        pgid=1234,
+    )
+    store.write(tmp_path, record)
+
+    monkeypatch.setattr(tasks_module, "_signal_recorded_group", lambda record, sig: True)
+    monkeypatch.setattr(identity, "check_detail", lambda ident: ("alive", "start_time_match"))
+    monkeypatch.setattr(identity, "may_signal", lambda ident: True)
+    # Owner never resolves to dead: case 2 waits out its bound and hands nothing to case 3.
+    monkeypatch.setattr(identity, "identity_check", lambda ident: "alive")
+
+    result = await registry.cancel_recovered(record)
+
+    assert result.status == "running"
+    assert store.read(tmp_path, "orphan").status == "running"
+
+
 async def test_session_exclusivity_spans_server_processes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Another process's live run on this session must also block a resume."""
     registry = TaskRegistry(log_dir=tmp_path)
-    monkeypatch.setattr(store, "process_alive", lambda pid, markers: True)
+    monkeypatch.setattr(identity, "identity_check", lambda ident: "alive")
     store.write(
         tmp_path,
         store.TaskRecord(

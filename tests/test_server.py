@@ -209,6 +209,20 @@ async def test_unknown_task_id_is_rejected(tool: str, arguments: dict) -> None:
         await call(tool, task_id="no-such-task", **arguments)
 
 
+async def test_cancel_task_response_carries_a_cascade_summary(fake_task: Task) -> None:
+    response = (await call("cancel_task", task_id=fake_task.task_id)).structured_content
+
+    assert response["status"] == "cancelled"
+    assert set(response["cascade"]) == {
+        "cancelled_descendants",
+        "sigkill_survivors",
+        "owner_still_settling",
+        "not_signalled",
+        "rounds",
+    }
+    assert response["cascade"]["rounds"] >= 1
+
+
 async def test_rejects_an_unknown_status_filter() -> None:
     with pytest.raises(MCPError, match="unknown status"):
         await call("list_tasks", status="sleeping")

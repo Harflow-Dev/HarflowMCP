@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from polybridge import store
+from polybridge import control, identity, store
 from polybridge.store import TaskRecord
 
 SESSION = "0b4147f7-3a0e-4fe1-8399-d8c9964ccb2e"
@@ -466,7 +466,9 @@ def test_unidentifiable_but_live_process_is_treated_as_running(
 
 
 def test_live_session_ids_spans_processes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(store, "process_alive", lambda pid, markers: pid == 1)
+    monkeypatch.setattr(
+        identity, "identity_check", lambda ident: "alive" if ident["pid"] == 1 else "dead"
+    )
     store.write(tmp_path, make_record(task_id="live", session_id="s-live", pid=1))
     store.write(tmp_path, make_record(task_id="dead", session_id="s-dead", pid=2))
 
@@ -624,11 +626,60 @@ def test_a_cancellation_that_did_not_take_is_reported_as_still_running(
     assert status == "running"
 
 
+def test_resolve_status_reports_cancelled_for_an_unobserved_dead_process_with_an_authorized_sig(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The process is gone and was never observed to exit, but a cross-process cancel attempt
+    delivered its SIGTERM to the still-alive leader before it died — that is not a guess, so it is
+    reported as cancelled rather than reconstructed from a stream with no result event either way.
+    """
+    monkeypatch.setattr(store, "process_alive", lambda pid, markers: False)
+    record = make_record(status="running", pid=4321, exit_code=None)
+    store.write(tmp_path, record)
+    control.write_phase(
+        tmp_path,
+        record.task_id,
+        control.CANCEL,
+        1,
+        "sig",
+        {"at": datetime.now(timezone.utc).isoformat(), "leader_alive": True},
+    )
+
+    status, note, _, _ = store.resolve_status(tmp_path, record)
+
+    assert status == "cancelled"
+    assert "never observed" in note
+
+
+def test_resolve_status_falls_back_to_reconstruction_when_the_cancel_was_not_authorized(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `.sig leader_alive: false` (or no attempt at all) leaves the usual reconstruction rules in
+    charge — the cancel branch must not swallow every unobserved-and-dead record."""
+    monkeypatch.setattr(store, "process_alive", lambda pid, markers: False)
+    record = make_record(status="running", pid=4321, exit_code=None)
+    store.write(tmp_path, record)
+    control.write_phase(
+        tmp_path,
+        record.task_id,
+        control.CANCEL,
+        1,
+        "sig",
+        {"at": datetime.now(timezone.utc).isoformat(), "leader_alive": False},
+    )
+
+    status, _, _, _ = store.resolve_status(tmp_path, record)
+
+    assert status != "cancelled"
+
+
 def test_live_session_ids_catches_a_run_its_server_wrote_off(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Otherwise a resume starts a second process against a session still being written to."""
-    monkeypatch.setattr(store, "process_alive", lambda pid, markers: pid == 1)
+    monkeypatch.setattr(
+        identity, "identity_check", lambda ident: "alive" if ident["pid"] == 1 else "dead"
+    )
     store.write(
         tmp_path, make_record(task_id="orphan", session_id="s-orphan", pid=1, status="failed")
     )
@@ -642,17 +693,58 @@ def test_live_session_ids_does_not_probe_settled_tasks(
     """The task directory is never pruned, so every settled run must cost nothing to skip."""
     probed: list[int | None] = []
 
-    def counting_alive(pid, markers):
-        probed.append(pid)
-        return False
+    def counting_check(ident):
+        probed.append(ident["pid"])
+        return "dead"
 
-    monkeypatch.setattr(store, "process_alive", counting_alive)
+    monkeypatch.setattr(identity, "identity_check", counting_check)
     store.write(tmp_path, make_record(task_id="settled", pid=7, status="completed", exit_code=0))
     store.write(tmp_path, make_record(task_id="unsettled", pid=8, status="failed"))
 
     store.live_session_ids(tmp_path)
 
     assert probed == [8]
+
+
+def test_live_session_ids_treats_undecidable_as_busy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`undecidable` (e.g. `ps` unavailable) must never be read as "safe to start a second resume
+    on" — the same "never guess a session is free" rule as everywhere else in this control path."""
+    monkeypatch.setattr(identity, "identity_check", lambda ident: "undecidable")
+    store.write(
+        tmp_path, make_record(task_id="unclear", session_id="s-unclear", pid=1, status="failed")
+    )
+
+    assert store.live_session_ids(tmp_path) == {"s-unclear"}
+
+
+def test_live_session_ids_excludes_a_confirmed_dead_pid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(identity, "identity_check", lambda ident: "dead")
+    store.write(
+        tmp_path, make_record(task_id="gone", session_id="s-gone", pid=1, status="failed")
+    )
+
+    assert store.live_session_ids(tmp_path) == set()
+
+
+def test_live_session_ids_excludes_a_record_with_no_pid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A record with no pid never had a process observed at all, so there is nothing to check —
+    and nothing to call `identity_check` with."""
+
+    def unexpected(ident):
+        raise AssertionError("must not be called when pid is None")
+
+    monkeypatch.setattr(identity, "identity_check", unexpected)
+    store.write(
+        tmp_path, make_record(task_id="never-observed", session_id="s-none", pid=None, status="failed")
+    )
+
+    assert store.live_session_ids(tmp_path) == set()
 
 
 def test_round_trips_a_network_request(tmp_path: Path) -> None:

@@ -17,7 +17,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import identity, store
+from . import control, identity, store
 
 log = logging.getLogger(__name__)
 
@@ -151,7 +151,7 @@ def sweep(log_dir: Path, days: int, now: datetime) -> dict[str, int]:
         if has_live_descendant(record.task_id, set()):
             stats["kept_live_descendant"] += 1
             continue
-        _delete_task(log_dir, record, stats)
+        _delete_task(log_dir, record, stats, now)
 
     return stats
 
@@ -226,12 +226,19 @@ def _sweep_temp_files(
             pass
 
 
-def _has_active_attempt(log_dir: Path, task_id: str) -> bool:
+def _has_active_attempt(log_dir: Path, task_id: str, now: datetime | None = None) -> bool:
     """Whether the latest cancel or takeover attempt for `task_id` has not yet finished.
 
-    A2 owns the phase vocabulary and should refine this — as it stands, a *completed* (not just
-    failed) attempt still keeps the task, since only a `.failed` marker is checked for here.
+    Cancel-family activity is delegated to `control.cancel_attempt_active`, which understands the
+    `.req`/`.sig`/`.failed` phase vocabulary and lease-based abandoned-controller recovery (A2).
+    Takeover keeps the original conservative rule — active unless the latest attempt has a
+    `.failed` marker — since A4 owns its own phase semantics. For either family, an attempt number
+    that fails to parse as an int still forces this task active regardless, the same conservative
+    fallback both families have always had.
     """
+    if control.cancel_attempt_active(log_dir, task_id, now):
+        return True
+
     latest_n: dict[str, int] = {}
     forced_active: set[str] = set()
     try:
@@ -248,6 +255,8 @@ def _has_active_attempt(log_dir: Path, task_id: str) -> bool:
         except ValueError:
             forced_active.add(family)  # unparsable n: treat this family as active regardless
             continue
+        if family == control.CANCEL:
+            continue  # cancel-family activity was already decided above
         if n > latest_n.get(family, -1):
             latest_n[family] = n
 
@@ -259,7 +268,7 @@ def _has_active_attempt(log_dir: Path, task_id: str) -> bool:
     return False
 
 
-def _delete_task(log_dir: Path, record: store.TaskRecord, stats: dict[str, int]) -> None:
+def _delete_task(log_dir: Path, record: store.TaskRecord, stats: dict[str, int], now: datetime) -> None:
     task_id = record.task_id
     try:
         lock_fd = os.open(log_dir / f"{task_id}.lock", os.O_CREAT | os.O_RDWR, 0o644)
@@ -281,7 +290,7 @@ def _delete_task(log_dir: Path, record: store.TaskRecord, stats: dict[str, int])
         if not _conclusively_settled(fresh, store.resolve_status(log_dir, fresh, detail=False)[0]):
             return
 
-        if _has_active_attempt(log_dir, task_id):
+        if _has_active_attempt(log_dir, task_id, now):
             stats["kept_active_attempt"] += 1
             return
 

@@ -109,3 +109,127 @@ def test_own_identity_falls_back_when_capture_fails(monkeypatch: pytest.MonkeyPa
 
     assert result == {"pid": os.getpid(), "start_time": None, "markers": []}
     identity.own_identity.cache_clear()
+
+
+# --- check_detail / may_signal / task_identity ------------------------------------------------
+
+
+@pytest.mark.parametrize("malformed", [None, "not-a-mapping", {"pid": -1}, {"pid": True}])
+def test_check_detail_reason_is_invalid_for_a_malformed_identity(malformed) -> None:
+    assert identity.check_detail(malformed) == ("undecidable", "invalid")
+
+
+def test_check_detail_reason_is_ps_failed_when_ps_cannot_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*args, **kwargs):
+        raise OSError("ps unavailable")
+
+    monkeypatch.setattr(identity.subprocess, "run", boom)
+
+    captured = {"pid": os.getpid(), "start_time": "Wed Jan  1 00:00:00 2000", "markers": []}
+    assert identity.check_detail(captured) == ("undecidable", "ps_failed")
+
+
+def test_check_detail_reason_is_pid_absent_for_a_nonexistent_pid() -> None:
+    identity_dict = {"pid": 99999, "start_time": "Wed Jan  1 00:00:00 2000", "markers": []}
+    verdict, reason = identity.check_detail(identity_dict)
+    assert verdict == "dead"
+    assert reason == "pid_absent"
+
+
+def test_check_detail_reason_is_unparsable_for_garbled_ps_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = subprocess.CompletedProcess(args=[], returncode=0, stdout="not a ps line at all\n", stderr="")
+    monkeypatch.setattr(identity, "_run_ps", lambda pid: fake)
+
+    captured = {"pid": os.getpid(), "start_time": None, "markers": []}
+    assert identity.check_detail(captured) == ("undecidable", "unparsable")
+
+
+def test_check_detail_reason_is_start_time_differs_for_a_reused_pid() -> None:
+    captured = identity.capture(os.getpid(), [])
+    assert captured is not None
+    stale = {**captured, "start_time": "Wed Jan  1 00:00:00 2000"}
+
+    assert identity.check_detail(stale) == ("dead", "start_time_differs")
+
+
+def test_check_detail_reason_is_start_time_match_for_our_own_process() -> None:
+    captured = identity.capture(os.getpid(), [])
+    assert captured is not None
+
+    assert identity.check_detail(captured) == ("alive", "start_time_match")
+
+
+def test_check_detail_reason_is_markers_missing_when_a_start_time_matches_but_a_marker_does_not() -> None:
+    captured = identity.capture(os.getpid(), [])
+    assert captured is not None
+    with_bad_marker = {**captured, "markers": ["definitely-not-in-the-cmdline"]}
+
+    assert identity.check_detail(with_bad_marker) == ("undecidable", "markers_missing")
+
+
+def test_check_detail_reason_is_legacy_no_markers_for_a_legacy_record_without_markers() -> None:
+    legacy = {"pid": os.getpid(), "start_time": None, "markers": []}
+    assert identity.check_detail(legacy) == ("undecidable", "legacy_no_markers")
+
+
+def test_check_detail_reason_is_legacy_markers_seen_when_they_match() -> None:
+    proc = subprocess.run(["ps", "-o", "command=", "-p", str(os.getpid())], capture_output=True, text=True)
+    own_command = proc.stdout.strip()
+    marker = own_command.split()[0] if own_command else "python"
+
+    legacy = {"pid": os.getpid(), "start_time": None, "markers": [marker]}
+    assert identity.check_detail(legacy) == ("undecidable", "legacy_markers_seen")
+
+
+def test_check_detail_reason_is_legacy_markers_not_seen_when_they_do_not_match() -> None:
+    legacy = {"pid": os.getpid(), "start_time": None, "markers": ["definitely-not-in-the-cmdline"]}
+    assert identity.check_detail(legacy) == ("dead", "legacy_markers_not_seen")
+
+
+def test_may_signal_is_false_when_ps_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*args, **kwargs):
+        raise OSError("ps unavailable")
+
+    monkeypatch.setattr(identity.subprocess, "run", boom)
+
+    captured = {"pid": os.getpid(), "start_time": "Wed Jan  1 00:00:00 2000", "markers": []}
+    assert identity.may_signal(captured) is False
+
+
+def test_may_signal_is_true_for_legacy_markers_seen() -> None:
+    proc = subprocess.run(["ps", "-o", "command=", "-p", str(os.getpid())], capture_output=True, text=True)
+    own_command = proc.stdout.strip()
+    marker = own_command.split()[0] if own_command else "python"
+
+    legacy = {"pid": os.getpid(), "start_time": None, "markers": [marker]}
+    assert identity.may_signal(legacy) is True
+
+
+def test_may_signal_is_true_for_a_matching_start_time_and_markers() -> None:
+    proc = subprocess.run(["ps", "-o", "command=", "-p", str(os.getpid())], capture_output=True, text=True)
+    own_command = proc.stdout.strip()
+    marker = own_command.split()[0] if own_command else "python"
+    captured = identity.capture(os.getpid(), [marker])
+    assert captured is not None
+
+    assert identity.may_signal(captured) is True
+
+
+def test_may_signal_is_false_when_a_start_time_matches_but_a_marker_is_missing() -> None:
+    captured = identity.capture(os.getpid(), [])
+    assert captured is not None
+    with_bad_marker = {**captured, "markers": ["definitely-not-in-the-cmdline"]}
+
+    assert identity.may_signal(with_bad_marker) is False
+
+
+def test_may_signal_is_false_for_a_dead_process() -> None:
+    identity_dict = {"pid": 99999, "start_time": "Wed Jan  1 00:00:00 2000", "markers": []}
+    assert identity.may_signal(identity_dict) is False
+
+
+def test_task_identity_builds_the_expected_shape() -> None:
+    built = identity.task_identity(123, "Wed Jan  1 00:00:00 2000", ["a", "b"])
+
+    assert built == {"pid": 123, "start_time": "Wed Jan  1 00:00:00 2000", "markers": ["a", "b"]}
+    assert identity.identity_check(identity.task_identity(99999, None, [])) == "dead"

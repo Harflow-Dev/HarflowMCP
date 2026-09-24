@@ -16,9 +16,9 @@ from mcp import MCPError
 from pydantic import StrictBool
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
-from mcp.types import INVALID_PARAMS
+from mcp.types import INTERNAL_ERROR, INVALID_PARAMS
 
-from . import backends, identity, store
+from . import backends, control, identity, store
 from .backends import DEFAULT_BACKEND, DEFAULT_FREEDOM, FREEDOMS
 from .tasks import (
     TERMINAL_STATUSES,
@@ -134,6 +134,17 @@ def _check_model(backend, model: str | None) -> None:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
 
 
+def _check_group(group: str | None) -> None:
+    if group is None:
+        return
+    if not group.strip():
+        raise MCPError(INVALID_PARAMS, "group must be non-empty if provided")
+    if len(group) > 128:
+        raise MCPError(
+            INVALID_PARAMS, f"group must be at most 128 characters, got {len(group)}"
+        )
+
+
 def _check_network(backend, freedom: str, network: bool | None) -> None:
     # Strict on purpose: anything other than a real boolean or None is refused rather than
     # truthy-coerced — "yes"/1/0 must not silently become a network decision, and a coerced
@@ -203,6 +214,7 @@ async def start_task(
     max_turns: int | None = None,
     reasoning_effort: str | None = None,
     network: StrictBool | None = None,
+    group: str | None = None,
 ) -> dict[str, Any]:
     """Dispatch a coding task to a headless agent and return immediately.
 
@@ -240,9 +252,22 @@ async def start_task(
             impose — and False is an error rather than silently dropped;
             enforcement.network_access stays "not_controlled" there. What actually applied is
             stated on the returned task's enforcement.network_access.
+        group: Optional label (1-128 chars), inherited by any nested dispatch this task's own
+            agent makes through polybridge (unless that dispatch gives its own). Purely
+            informational — polybridge does not act on it — useful for tagging a family of
+            dispatches you want to find together later via list_tasks.
 
     Returns the new task_id and its starting state. The run continues in the background; poll
     get_task_status or call wait_for_task to follow it.
+
+    If this task is itself dispatched from inside another polybridge task's agent (a nested MCP
+    call), that ancestry is recorded — `spawned_by`, `root_task_id`, `depth` — on a best-effort
+    basis (see `lineage_detected` on the returned task: which detection method found the caller,
+    or null if none was found and this is treated as a root task). When a caller *is* detected,
+    this dispatch is also checked against it: a nested dispatch weaker than its caller on depth or
+    on any enforcement field is refused outright (`NestedDispatchRefused`). This cap is
+    best-effort, not a sandbox boundary — nothing stops an agent from dispatching outside
+    polybridge entirely.
     """
     if not prompt or not prompt.strip():
         raise MCPError(INVALID_PARAMS, "prompt must be a non-empty string")
@@ -253,18 +278,25 @@ async def start_task(
     _check_reasoning_effort(chosen, reasoning_effort)
     _check_model(chosen, model)
     _check_network(chosen, freedom, network)
+    _check_group(group)
     path = await _validate_repo_path(repo_path)
 
-    task = await _reg().start(
-        prompt,
-        path,
-        backend=chosen,
-        freedom=freedom,
-        model=model,
-        max_turns=max_turns,
-        reasoning_effort=reasoning_effort,
-        network=network,
-    )
+    try:
+        task = await _reg().start(
+            prompt,
+            path,
+            backend=chosen,
+            freedom=freedom,
+            model=model,
+            max_turns=max_turns,
+            reasoning_effort=reasoning_effort,
+            network=network,
+            group=group,
+        )
+    except backends.UnsupportedCapability as exc:
+        # Covers `NestedDispatchRefused` too — it subclasses `UnsupportedCapability`, and this cap
+        # is only ever checked once a caller was actually detected inside `_reg().start`.
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
     return task.brief() | {"enforcement": task.enforcement}
 
 
@@ -531,7 +563,8 @@ async def list_tasks(status: str | None = None, backend: str | None = None) -> l
 
 @mcp.tool()
 async def cancel_task(task_id: str) -> dict[str, Any]:
-    """Stop a running task, terminating the agent and any processes it spawned.
+    """Stop a running task, terminating the agent and any processes it spawned, and cascade the
+    same stop to any live descendants this bridge can find.
 
     Args:
         task_id: Identifier of the task to stop.
@@ -539,19 +572,36 @@ async def cancel_task(task_id: str) -> dict[str, Any]:
     Already-finished tasks are returned unchanged. Work the agent had already written to disk is
     left in place. Tasks started by an earlier polybridge server process can be stopped too, via
     their recorded process group.
-    """
-    task = _reg().get(task_id)
-    if task is not None:
-        await _reg().cancel(task)
-        return task.snapshot()
 
-    record = _reg().recover(task_id)
-    if record is None:
+    The cascade reaches nested dispatches that task's own agent made through polybridge —
+    `spawned_by`/`root_task_id` lineage, best-effort, not a sandboxed guarantee — and the response
+    carries the result as `cascade`: `cancelled_descendants` (ids now cancelled),
+    `sigkill_survivors` (ids that resisted even SIGKILL), `owner_still_settling` (ids belonging to
+    a still-alive bridge server that has not settled them yet), and `not_signalled` (ids that
+    could not be signalled at all, with why).
+    """
+    if _reg().get(task_id) is None and _reg().recover(task_id) is None:
         raise MCPError(INVALID_PARAMS, f"unknown task_id: {task_id}")
 
-    # Snapshot the record cancellation produced, not the one we started from, or the response would
+    try:
+        cascade = await _reg().cancel_cascade(task_id)
+    except control.PhaseWriteError as exc:
+        raise MCPError(
+            INTERNAL_ERROR,
+            f"the cancel for task {task_id} was not attempted because its phase file could not "
+            f"be written, so nothing was signalled: {exc}",
+        ) from None
+
+    # Snapshot the state the cascade produced, not what we started from, or the response would
     # report a status that later calls contradict.
-    return store.snapshot(_reg().log_dir, await _reg().cancel_recovered(record))
+    task = _reg().get(task_id)
+    if task is not None:
+        response = task.snapshot()
+    else:
+        record = _reg().recover(task_id)
+        response = store.snapshot(_reg().log_dir, record) if record is not None else {}
+    response["cascade"] = cascade
+    return response
 
 
 def main() -> None:

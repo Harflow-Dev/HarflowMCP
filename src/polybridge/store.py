@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import events, identity
+from . import control, events, identity
 from .backends import Accumulator
 from .backends import get as get_backend
 from .stream import parse_line
@@ -93,6 +93,25 @@ class TaskRecord:
     start_dirty: bool | None = None
     """Whether `git status --porcelain` was non-empty at spawn — None if the probe failed, timed
     out, or predates this field."""
+    spawned_by: str | None = None
+    """The task_id of the task whose own agent dispatched this one via polybridge — best-effort,
+    from `lineage.detect_caller`. None for a root task (no caller detected), and for any record
+    written before this field existed."""
+    root_task_id: str | None = None
+    """The top of this dispatch chain: this task's own id for a root task, else inherited from the
+    caller's `root_task_id`. None for a record written before this field existed."""
+    depth: int = 0
+    """How many nested dispatches deep this task is; 0 for a root task, and for a record written
+    before this field existed."""
+    max_depth: int | None = None
+    """The nesting budget this task (and anything it spawns) is checked against — see
+    `lineage.max_depth_default`. None for a record written before this field existed."""
+    group: str | None = None
+    """An optional caller-chosen label, inherited by nested dispatches unless overridden — see
+    `TaskRegistry.start`'s `group` parameter."""
+    lineage_detected: str | None = None
+    """Which `lineage.detect_caller` method found this task's caller (`"pb_task_id"` | `"session"`
+    | `"ancestry"`), or None if no caller was detected."""
 
 
 class InvalidTaskId(ValueError):
@@ -346,6 +365,29 @@ def _resolve(
             tail,
             False,
         )
+    if unobserved and not alive:
+        # The process is gone and was never observed to exit, so every other branch below would
+        # have to guess at why. If a cross-process cancel attempt landed on the still-alive leader
+        # before it died, that is not a guess — it is exactly what happened, so report it rather
+        # than reconstructing a status from a stream that has no result event for this either way.
+        try:
+            authorized = control.cancel_verdict(log_dir, record.task_id) == "authorized"
+        except Exception:
+            log.warning(
+                "could not read the cross-process cancel verdict for task %s", record.task_id,
+                exc_info=True,
+            )
+            authorized = False
+        if authorized:
+            return (
+                "cancelled",
+                "Recovered from disk: the process is gone and was never observed to exit, but a "
+                "cross-process cancel delivered its SIGTERM to the still-alive leader before it "
+                "died — reported as cancelled rather than reconstructed from its output.",
+                state,
+                tail,
+                False,
+            )
     # Only an unobserved `failed` is an inference the stream may overrule: it is what the monitor's
     # backstop writes when it never saw the process exit at all. Every other status records
     # something the bridge did — `cancelled` above all — so it stands even without an exit code.
@@ -461,6 +503,12 @@ def snapshot(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
         "started_at": record.started_at,
         "duration_seconds": _duration_seconds(record, record.finished_at),
         "parent_task_id": record.parent_task_id,
+        "spawned_by": record.spawned_by,
+        "root_task_id": record.root_task_id,
+        "depth": record.depth,
+        "max_depth": record.max_depth,
+        "group": record.group,
+        "lineage_detected": record.lineage_detected,
         "summary": state.summary,
         "is_error": state.is_error,
         "total_cost_usd": state.total_cost_usd,
@@ -508,6 +556,12 @@ def brief(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
         "started_at": record.started_at,
         "duration_seconds": _duration_seconds(record, record.finished_at),
         "parent_task_id": record.parent_task_id,
+        "spawned_by": record.spawned_by,
+        "root_task_id": record.root_task_id,
+        "depth": record.depth,
+        "max_depth": record.max_depth,
+        "group": record.group,
+        "lineage_detected": record.lineage_detected,
         "notices": list(record.bridge_notices),
         "owner": record.owner,
         "owned_by_live_server": owned if status == "running" else None,
@@ -521,6 +575,12 @@ def live_session_ids(log_dir: Path) -> set[str]:
     Uses the same "was this outcome actually observed?" test as `resolve_status`, so a run whose
     server was torn down mid-flight still counts as live here. Trusting its recorded status instead
     would let a second resume start against a session that is still being written to.
+
+    Liveness itself is `identity.identity_check`, not `process_alive`: this is a control decision
+    (whether a resume is safe to start), and `process_alive`'s bias toward "still going" is right
+    for a status report but wrong here — see `identity`'s module docstring. A pid that cannot be
+    ruled out (`undecidable`, e.g. `ps` unavailable) still counts as busy, on the same "never guess
+    a session is free" rule; only a confirmed-`dead` pid clears it.
     """
     return {
         record.session_id
@@ -528,5 +588,9 @@ def live_session_ids(log_dir: Path) -> set[str]:
         # A backend that mints its own id may have died before disclosing one; nothing to exclude.
         if record.session_id
         and outcome_unobserved(record)
-        and process_alive(record.pid, record.markers)
+        and record.pid is not None
+        and identity.identity_check(
+            identity.task_identity(record.pid, record.start_time, record.markers)
+        )
+        != "dead"
     }
