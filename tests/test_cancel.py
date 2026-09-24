@@ -1007,3 +1007,78 @@ async def test_escalation_survives_the_caller_going_away(
     await asyncio.wait_for(asyncio.gather(*registry._control_jobs), timeout=5)
 
     assert signals.count(signal.SIGKILL) == 1
+
+
+# --- independent-verification regressions ---------------------------------------------------------
+
+
+async def test_a_delivered_cancel_whose_sig_keeps_failing_is_recorded_once_the_disk_recovers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The `.req` names this long-lived server as controller, so lease recovery can never close an
+    abandoned pending attempt while it lives: the retry must keep going until `.sig` lands."""
+    monkeypatch.setattr(tasks_module, "SIGKILL_GRACE_SECONDS", 0.02)
+    monkeypatch.setattr(tasks_module, "CANCEL_VERDICT_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(tasks_module, "_SIG_WRITE_RETRY_SECONDS", 0)
+    monkeypatch.setattr(tasks_module, "SIG_RETRY_INITIAL_SECONDS", 0.01)
+    monkeypatch.setattr(tasks_module, "SIG_RETRY_MAX_SECONDS", 0.02)
+    registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
+    record = _child_record(tmp_path)
+    store.write(tmp_path, record)
+    monkeypatch.setattr(identity, "check_detail", lambda ident: ("alive", "start_time_match"))
+    monkeypatch.setattr(
+        identity, "identity_check", lambda ident: "dead"  # owner dead (case 3); leader gone after
+    )
+    monkeypatch.setattr(tasks_module, "_signal_recorded_group", lambda record, sig: True)
+
+    real_mark = control.mark_signalled
+    failures = {"left": 8}  # well past the in-line attempts
+
+    def flaky_mark(*args, **kwargs):
+        if failures["left"] > 0:
+            failures["left"] -= 1
+            raise control.PhaseWriteError("transient")
+        return real_mark(*args, **kwargs)
+
+    monkeypatch.setattr(control, "mark_signalled", flaky_mark)
+
+    await registry.cancel_recovered(record)
+    assert control.attempt_outcome(tmp_path, "child", control.CANCEL, 1) == "pending"
+
+    async def sig_written() -> None:
+        while control.attempt_outcome(tmp_path, "child", control.CANCEL, 1) != "sig":
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(sig_written(), timeout=5)
+    assert control.read_phase(tmp_path, "child", control.CANCEL, 1, "sig")["leader_alive"] is True
+    assert not control.phase_path(tmp_path, "child", control.CANCEL, 1, "failed").exists()
+    await asyncio.sleep(0.05)
+    assert not registry._control_jobs
+
+
+async def test_a_record_lock_timeout_after_signalling_is_reported_not_raised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(tasks_module, "SIGKILL_GRACE_SECONDS", 0.02)
+    monkeypatch.setattr(tasks_module, "CANCEL_VERDICT_POLL_SECONDS", 0.01)
+    registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
+    spawn_noop_local_task(registry, tmp_path)
+    store.write(tmp_path, _child_record(tmp_path))
+    monkeypatch.setattr(identity, "check_detail", lambda ident: ("alive", "start_time_match"))
+    monkeypatch.setattr(identity, "identity_check", lambda ident: "dead")
+    signals: list[int] = []
+    monkeypatch.setattr(
+        tasks_module, "_signal_recorded_group", lambda record, sig: signals.append(sig) or True
+    )
+
+    def locked(*args, **kwargs):
+        raise control.LockTimeout("timed out acquiring record lock for child")
+
+    monkeypatch.setattr(control, "write_record_if_open", locked)
+
+    result = await asyncio.wait_for(registry.cancel_cascade("root"), timeout=5)
+
+    assert signal.SIGTERM in signals
+    assert [entry["task_id"] for entry in result["not_recorded"]] == ["child"]
+    assert "could not be recorded" in result["not_recorded"][0]["reason"]
+    assert store.read(tmp_path, "child").status == "running"

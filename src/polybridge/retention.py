@@ -120,10 +120,13 @@ def sweep(log_dir: Path, days: int, now: datetime) -> dict[str, int]:
     by_id = {r.task_id: r for r in records}
     statuses = {r.task_id: store.resolve_status(log_dir, r, detail=False)[0] for r in records}
 
+    # Both edges count as descent: `parent_task_id` (resumed from) and `spawned_by` (dispatched by,
+    # from a nested call). A child that names its ancestor only through `spawned_by` must still
+    # keep that ancestor's record alive while it runs.
     children: dict[str, list[str]] = {}
     for record in records:
-        if record.parent_task_id:
-            children.setdefault(record.parent_task_id, []).append(record.task_id)
+        for ancestor in {record.parent_task_id, record.spawned_by} - {None}:
+            children.setdefault(ancestor, []).append(record.task_id)
 
     def has_live_descendant(task_id: str, seen: set[str]) -> bool:
         for child_id in children.get(task_id, ()):

@@ -577,8 +577,9 @@ async def cancel_task(task_id: str) -> dict[str, Any]:
     `spawned_by`/`root_task_id` lineage, best-effort, not a sandboxed guarantee — and the response
     carries the result as `cascade`: `cancelled_descendants` (ids now cancelled),
     `sigkill_survivors` (ids that resisted even SIGKILL), `owner_still_settling` (ids belonging to
-    a still-alive bridge server that has not settled them yet), and `not_signalled` (ids that
-    could not be signalled at all, with why).
+    a still-alive bridge server that has not settled them yet), `not_signalled` (ids that
+    could not be signalled at all, with why), and `not_recorded` (ids that were signalled but
+    whose `cancelled` status could not be written, with why — their records are left untouched).
     """
     if _reg().get(task_id) is None and _reg().recover(task_id) is None:
         raise MCPError(INVALID_PARAMS, f"unknown task_id: {task_id}")

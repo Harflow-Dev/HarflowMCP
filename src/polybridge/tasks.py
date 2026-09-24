@@ -70,9 +70,12 @@ CANCEL_VERDICT_POLL_SECONDS = 0.25
 # that keeps growing.
 CASCADE_MAX_ROUNDS = 5
 
-# Retries for a `.sig` whose write failed after the SIGTERM it records was delivered.
+# Retries for a `.sig` whose write failed after the SIGTERM it records was delivered: a few quick
+# in-line attempts, then a registry-held background job that keeps going with capped backoff.
 _SIG_WRITE_ATTEMPTS = 3
 _SIG_WRITE_RETRY_SECONDS = 0.1
+SIG_RETRY_INITIAL_SECONDS = 0.5
+SIG_RETRY_MAX_SECONDS = 30.0
 
 # How long `resume`/`resume_record` wait to acquire a session's lock before giving up. Held across
 # the check-and-spawn it protects (see `control.session_lock`'s docstring and the plan's Notes on
@@ -594,8 +597,12 @@ class TaskRegistry:
         # deterministic identity instead of depending on this process's own `ps` call.
         self._owner = owner if owner is not None else identity.own_identity()
         self._maintenance: asyncio.Task[Any] | None = None
-        # Strong references to shielded cancel jobs (see `_shielded`), which outlive their caller.
+        # Strong references to shielded cancel jobs (see `_shielded`) and `.sig` retries (see
+        # `_retry_sig`), which outlive their caller.
         self._control_jobs: set[asyncio.Task[Any]] = set()
+        # The loop cancels run on, captured when one starts, so a `.sig` retry requested from a
+        # worker thread can be scheduled back onto it.
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     async def _detect_caller(self) -> lineage.Caller | None:
         """Best-effort: which task (if any) dispatched the process calling us.
@@ -1100,29 +1107,28 @@ class TaskRegistry:
         attempt = control.begin_attempt(self._log_dir, task.task_id, control.CANCEL, self._owner)
         task.cancel_requested = True
         delivered = _signal_group(task, signal.SIGTERM)
-        if attempt.owned:
+        if attempt.owned and delivered:
+            # One in-line attempt only: this runs on the event loop, so any retry is the background
+            # job's business (see `_record_delivery`).
+            self._record_delivery(
+                task.task_id,
+                attempt.n,
+                leader_alive=task.proc.returncode is None,
+                inline_attempts=1,
+            )
+        elif attempt.owned:
             try:
-                if delivered:
-                    control.mark_signalled(
-                        self._log_dir,
-                        task.task_id,
-                        control.CANCEL,
-                        attempt.n,
-                        leader_alive=task.proc.returncode is None,
-                    )
-                else:
-                    control.mark_failed(
-                        self._log_dir,
-                        task.task_id,
-                        control.CANCEL,
-                        attempt.n,
-                        reason="process group already gone",
-                    )
+                control.mark_failed(
+                    self._log_dir,
+                    task.task_id,
+                    control.CANCEL,
+                    attempt.n,
+                    reason="process group already gone",
+                )
             except control.PhaseWriteError:
-                # The signal has already been delivered (or found undeliverable); a failed
-                # bookkeeping write must not change that outcome, and the owner's own
-                # `cancel_requested` rule decides this task's status regardless of what the
-                # phase files say.
+                # The group was already gone; a failed bookkeeping write must not change that
+                # outcome, and the owner's own `cancel_requested` rule decides this task's status
+                # regardless of what the phase files say.
                 log.warning(
                     "task %s: could not record cancel attempt %d's outcome",
                     task.task_id,
@@ -1139,6 +1145,7 @@ class TaskRegistry:
         if task.finished:
             return task
 
+        self._loop = asyncio.get_running_loop()
         if task.proc is None:
             # No process was ever attached (only reachable in tests); nothing to signal.
             task.cancel_requested = True
@@ -1292,30 +1299,89 @@ class TaskRegistry:
             return "signalled", None
         return "not_signalled", "process group already gone"
 
-    def _record_delivery(self, task_id: str, n: int, *, leader_alive: bool) -> None:
-        """Write `.sig` for a delivered SIGTERM, retrying briefly on a write error.
+    def _record_delivery(
+        self,
+        task_id: str,
+        n: int,
+        *,
+        leader_alive: bool,
+        inline_attempts: int = _SIG_WRITE_ATTEMPTS,
+    ) -> None:
+        """Write `.sig` for a delivered SIGTERM; if that keeps failing, hand it to `_retry_sig`.
 
         Never falls back to `.failed`: that means delivery failed, and publishing it for a signal
-        that landed would turn a cancelled run into whatever `classify` makes of its exit. If `.sig`
-        cannot be written at all, the attempt stays pending and the owner's monitor waits until
-        this controller exits and its lease expires — slow, but it never records something false.
+        that landed would turn a cancelled run into whatever `classify` makes of its exit. Nor may
+        the attempt simply be left pending: its `.req` names this server as controller, and lease
+        recovery only closes an attempt whose controller is dead — so while this server lives, an
+        abandoned pending attempt would keep the owner's monitor waiting and retention keeping the
+        record, forever. The retry job is what makes the pending state last exactly as long as
+        this controller's work does; if the server itself dies, lease recovery takes over.
         """
-        for attempt_index in range(_SIG_WRITE_ATTEMPTS):
+        for attempt_index in range(inline_attempts):
             try:
                 control.mark_signalled(
                     self._log_dir, task_id, control.CANCEL, n, leader_alive=leader_alive
                 )
                 return
             except control.PhaseWriteError:
-                if attempt_index + 1 == _SIG_WRITE_ATTEMPTS:
-                    log.warning(
-                        "cascade: could not record the delivered cancel for %s; its owner will "
-                        "wait for this controller's lease",
-                        task_id,
-                        exc_info=True,
-                    )
+                if attempt_index + 1 < inline_attempts:
+                    time.sleep(_SIG_WRITE_RETRY_SECONDS)
+        log.warning(
+            "cancel of %s: could not record its delivered SIGTERM yet; retrying in the background",
+            task_id,
+        )
+        self._request_sig_retry(task_id, n, leader_alive)
+
+    def _request_sig_retry(self, task_id: str, n: int, leader_alive: bool) -> None:
+        """Schedule `_retry_sig` on the registry's loop, from the loop or from a worker thread."""
+        loop = self._loop
+        if loop is None:  # pragma: no cover - every cancel path captures the loop first
+            log.error("cancel of %s: no event loop to retry its .sig on", task_id)
+            return
+        try:
+            on_loop = asyncio.get_running_loop() is loop
+        except RuntimeError:
+            on_loop = False
+        if on_loop:
+            self._start_sig_retry(task_id, n, leader_alive)
+        else:
+            loop.call_soon_threadsafe(self._start_sig_retry, task_id, n, leader_alive)
+
+    def _start_sig_retry(self, task_id: str, n: int, leader_alive: bool) -> None:
+        job = asyncio.create_task(
+            self._retry_sig(task_id, n, leader_alive), name=f"pb-sig-retry-{task_id}-{n}"
+        )
+        self._control_jobs.add(job)
+        job.add_done_callback(self._control_jobs.discard)
+
+    async def _retry_sig(self, task_id: str, n: int, leader_alive: bool) -> None:
+        """Keep trying to write attempt `n`'s `.sig`, with capped backoff, until it exists.
+
+        No give-up: stopping while this server lives would strand the attempt (see
+        `_record_delivery`). A `.sig` written meanwhile by a joining controller ends it; a
+        `.failed` does not, because `.sig` outranks it and this delivery really happened.
+        """
+        delay = SIG_RETRY_INITIAL_SECONDS
+        while True:
+            await asyncio.sleep(delay)
+            try:
+                if control.attempt_outcome(self._log_dir, task_id, control.CANCEL, n) == "sig":
                     return
-                time.sleep(_SIG_WRITE_RETRY_SECONDS)
+                await asyncio.to_thread(
+                    control.mark_signalled,
+                    self._log_dir,
+                    task_id,
+                    control.CANCEL,
+                    n,
+                    leader_alive=leader_alive,
+                )
+                log.info("cancel of %s: recorded its delivered SIGTERM after retrying", task_id)
+                return
+            except control.PhaseWriteError:
+                delay = min(delay * 2, SIG_RETRY_MAX_SECONDS)
+            except Exception:
+                log.warning("cancel of %s: .sig retry failed unexpectedly", task_id, exc_info=True)
+                delay = min(delay * 2, SIG_RETRY_MAX_SECONDS)
 
     @staticmethod
     def _kill_if_ours(record: store.TaskRecord) -> bool:
@@ -1396,7 +1462,9 @@ class TaskRegistry:
         worked, so they are still closed rather than reported as never signalled.
 
         Returns `{task_id: (outcome, reason)}`, outcome one of `"cancelled"`, `"sigkill_survivor"`,
-        `"not_signalled"` (`reason` set only for the last).
+        `"not_signalled"` or `"not_recorded"` (signalled, but writing `cancelled` failed). `reason`
+        is set for the last two, and on a `"sigkill_survivor"` whose record also could not be
+        written.
         """
         outcomes: dict[str, tuple[str, str | None]] = {}
         signalled: list[tuple[store.TaskRecord, dict]] = []
@@ -1436,18 +1504,28 @@ class TaskRegistry:
 
         survivor_ids = {record.task_id for record, _leader in survivors}
         for record, _leader in signalled:
-            outcomes[record.task_id] = (
-                "sigkill_survivor" if record.task_id in survivor_ids else "cancelled",
-                None,
-            )
-            await asyncio.to_thread(
-                control.write_record_if_open,
-                self._log_dir,
-                record.task_id,
-                lambda r: replace(
-                    r, status="cancelled", finished_at=r.finished_at or _now().isoformat()
-                ),
-            )
+            survivor = record.task_id in survivor_ids
+            try:
+                await asyncio.to_thread(
+                    control.write_record_if_open,
+                    self._log_dir,
+                    record.task_id,
+                    lambda r: replace(
+                        r, status="cancelled", finished_at=r.finished_at or _now().isoformat()
+                    ),
+                )
+            except (control.LockTimeout, OSError) as exc:
+                # The signals have already gone out; raising here would lose the whole cascade
+                # result to an unstructured error after an irreversible cancel. The record is left
+                # exactly as it was — nothing half-written — and the caller is told it was not
+                # published.
+                log.warning("cascade: could not record %s as cancelled", record.task_id, exc_info=True)
+                reason = f"signalled, but the cancellation could not be recorded: {exc}"
+                outcomes[record.task_id] = (
+                    ("sigkill_survivor", reason) if survivor else ("not_recorded", reason)
+                )
+                continue
+            outcomes[record.task_id] = ("sigkill_survivor" if survivor else "cancelled", None)
 
         return outcomes
 
@@ -1460,6 +1538,7 @@ class TaskRegistry:
         return await self._shielded(self._cancel_cascade(task_id), f"pb-cascade-{task_id}")
 
     async def _shielded(self, coro: Any, name: str) -> Any:
+        self._loop = asyncio.get_running_loop()
         job = asyncio.create_task(coro, name=name)
         self._control_jobs.add(job)
         job.add_done_callback(self._control_jobs.discard)
@@ -1479,6 +1558,7 @@ class TaskRegistry:
         sigkill_survivors: list[str] = []
         owner_still_settling: list[str] = []
         not_signalled: list[dict[str, str]] = []
+        not_recorded: list[dict[str, str]] = []
         rounds = 0
 
         for round_index in range(1, CASCADE_MAX_ROUNDS + 1):
@@ -1550,6 +1630,10 @@ class TaskRegistry:
                 for tid, (kind, reason) in case3_outcomes.items():
                     if kind == "sigkill_survivor":
                         sigkill_survivors.append(tid)
+                        if reason:
+                            not_recorded.append({"task_id": tid, "reason": reason})
+                    elif kind == "not_recorded":
+                        not_recorded.append({"task_id": tid, "reason": reason or ""})
                     elif kind == "not_signalled":
                         not_signalled.append({"task_id": tid, "reason": reason or ""})
 
@@ -1575,6 +1659,7 @@ class TaskRegistry:
             "sigkill_survivors": sorted(set(sigkill_survivors)),
             "owner_still_settling": sorted(set(owner_still_settling)),
             "not_signalled": not_signalled,
+            "not_recorded": not_recorded,
             "rounds": rounds,
         }
 

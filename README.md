@@ -350,8 +350,9 @@ another live server is signalled, then left to that server to settle; if it has 
 SIGKILL and drain grace periods and its server is still alive, it is reported under
 `owner_still_settling` and nothing is written for it. A task whose owning server is confirmed dead is
 signalled, SIGKILLed if it survives, and written `cancelled`. The response's `cascade` lists
-`cancelled_descendants`, `sigkill_survivors`, `owner_still_settling` and `not_signalled` (with why —
-a pre-start-time record is only signalled when `ps` actually showed its markers).
+`cancelled_descendants`, `sigkill_survivors`, `owner_still_settling`, `not_signalled` (with why —
+a pre-start-time record is only signalled when `ps` actually showed its markers) and `not_recorded`
+(signalled, but its `cancelled` status could not be written — the record is left untouched).
 
 **Why a cancel from another process cannot be mis-recorded.** Every cancel writes phase files beside
 the task's record, per attempt: `<id>.cancel.<n>.req` (who is cancelling, with a 60 s lease) before
@@ -399,7 +400,7 @@ never has to filter noise out of it.
 
 A running server sweeps settled task records at most once every 24 hours, controlled by
 `PB_RETENTION_DAYS` (default 30 days; `0` disables the sweep entirely). A task is only deleted once
-it is terminal, older than the window, has no still-running descendant (from `resume_task`), and no
+it is terminal, older than the window, has no still-running descendant (from `resume_task` or a nested dispatch), and no
 cancel/takeover attempt still in flight (a cancel attempt is finished once it has a `.sig` or
 `.failed`, or its canceller died and its lease expired) — and only `polybridge-server` ever runs it;
 `polybridge-ctl` is read-only and never triggers a sweep.

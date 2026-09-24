@@ -218,6 +218,7 @@ async def test_cancel_task_response_carries_a_cascade_summary(fake_task: Task) -
         "sigkill_survivors",
         "owner_still_settling",
         "not_signalled",
+        "not_recorded",
         "rounds",
     }
     assert response["cascade"]["rounds"] >= 1

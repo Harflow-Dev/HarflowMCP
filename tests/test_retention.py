@@ -492,3 +492,34 @@ def test_a_parent_is_kept_while_its_unobserved_childs_identity_is_undecidable(
     assert stats["deleted_tasks"] == 0
     assert stats["kept_live_descendant"] == 1
     assert store.read(log_dir, "parent-1") is not None
+
+
+def test_sweep_keeps_an_aged_root_whose_live_child_names_it_only_via_spawned_by(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A nested dispatch records its caller as `spawned_by`, not `parent_task_id`; the root must
+    not be deleted while that child — or its own child — still runs."""
+    log_dir = tmp_path / "tasks"
+    log_dir.mkdir()
+    now = datetime.now(timezone.utc)
+    store.write(log_dir, make_record(task_id="root", pid=1))
+    store.write(log_dir, make_record(task_id="middle", pid=2, spawned_by="root"))
+    store.write(
+        log_dir,
+        make_record(
+            task_id="leaf",
+            pid=3,
+            spawned_by="middle",
+            status="running",
+            exit_code=None,
+            finished_at=None,
+            started_at=_iso(now),
+        ),
+    )
+    monkeypatch.setattr(store, "process_alive", lambda pid, markers: pid == 3)
+
+    stats = retention.sweep(log_dir, 30, now)
+
+    assert store.read(log_dir, "root") is not None
+    assert store.read(log_dir, "middle") is not None
+    assert stats["kept_live_descendant"] == 2
