@@ -228,7 +228,8 @@ def closing_notes(results: Sequence[Result]) -> list[str]:
     """What to do next, said only about clients that actually changed, grouped by the same advice."""
     notes: dict[str, list[str]] = {}
     for result in results:
-        if result.status != "applied":
+        # A removal needs the same follow-up an add does: the desktop app only rereads on restart.
+        if result.status not in ("applied", "removed"):
             continue
         client = CLIENTS.get(result.client)
         if client is None:
@@ -244,10 +245,39 @@ def label(key: str) -> str:
 
 
 def exit_code(results: Sequence[Result]) -> int:
-    """Non-zero if anything went wrong, or if nothing at all was accomplished."""
+    """Install: non-zero if anything went wrong, or if nothing at all was accomplished."""
     progressed = any(result.status in ("applied", "previewed") for result in results)
     problems = any(result.status in ("failed", "unknown") for result in results)
     return 1 if problems or not progressed else 0
+
+
+def status_exit_code(inspections: Sequence[Inspection]) -> int:
+    """Status: zero whenever every inspect ran, however many clients are absent or unregistered.
+
+    Absence is an answer; only a check that could not be completed is a failure.
+    """
+    return 1 if any(inspection.error is not None for inspection in inspections) else 0
+
+
+def uninstall_exit_code(results: Sequence[Result]) -> int:
+    """Uninstall: `not_installed` is success — the goal state holds — and so is a manual step
+    reported as `skipped`. A failure, or an `unknown` such as a timeout, is not.
+
+    Unlike install, "nothing was removed" is not itself a failure: there may have been nothing to.
+    """
+    return 1 if any(result.status in ("failed", "unknown") for result in results) else 0
+
+
+def is_current(inspection: Inspection, command: str | None, path_env: str | None) -> bool | None:
+    """Whether the stored entry launches exactly what install would write now.
+
+    `None` when that cannot be said: nothing is registered, the check did not run, or there is no
+    server binary to compare with. Both the command and its PATH must match — an entry whose PATH
+    predates a newly installed agent CLI still launches, but cannot dispatch to that agent.
+    """
+    if inspection.installed is not True or command is None:
+        return None
+    return inspection.command == command and inspection.path_env == path_env
 
 
 def _availability(client: Client) -> Availability:
@@ -338,6 +368,7 @@ __all__ = [
     "exit_code",
     "get",
     "inspect_all",
+    "is_current",
     "named_clients",
     "label",
     "override_config_path",
@@ -345,5 +376,7 @@ __all__ = [
     "register",
     "run_cli",
     "select",
+    "status_exit_code",
+    "uninstall_exit_code",
     "unregister",
 ]

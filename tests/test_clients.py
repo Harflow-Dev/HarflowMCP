@@ -915,6 +915,57 @@ def test_closing_notes_group_clients_that_need_the_same_thing_done() -> None:
 def test_nothing_is_promised_about_a_client_that_did_not_change() -> None:
     assert clients.closing_notes([Result("codex", "skipped", "")]) == []
     assert clients.closing_notes([Result("codex", "unknown", "")]) == []
+    assert clients.closing_notes([Result("claude-desktop", "not_installed", "")]) == []
+
+
+def test_removing_from_the_desktop_app_also_says_to_restart_it() -> None:
+    notes = clients.closing_notes(
+        [Result("claude-desktop", "removed", ""), Result("codex", "removed", "")]
+    )
+
+    assert notes[0].startswith("Claude desktop app:") and "restart" in notes[0]
+    assert notes[1].startswith("Codex:") and "no restart" in notes[1]
+
+
+def test_status_exit_code_fails_only_on_an_inspect_error() -> None:
+    Inspection = clients.Inspection
+    absent = Inspection("codex", None, available=False, notes=("`codex` is not on PATH",))
+    unregistered = Inspection("vibe", False)
+    registered = Inspection("claude-code", True, command="/x")
+
+    assert clients.status_exit_code([absent, unregistered, registered]) == 0
+    assert clients.status_exit_code([]) == 0
+    assert clients.status_exit_code([registered, Inspection("opencode", None, error="bad")]) == 1
+
+
+@pytest.mark.parametrize(
+    ("statuses", "code"),
+    [
+        (["removed"], 0),
+        (["not_installed"], 0),
+        (["skipped"], 0),
+        (["removed", "not_installed", "skipped"], 0),
+        ([], 0),
+        (["removed", "failed"], 1),
+        (["not_installed", "unknown"], 1),
+    ],
+)
+def test_uninstall_exit_code_treats_not_installed_as_success(statuses, code: int) -> None:
+    results = [Result("codex", status, "") for status in statuses]
+
+    assert clients.uninstall_exit_code(results) == code
+
+
+def test_is_current_needs_both_the_command_and_the_path_to_match() -> None:
+    Inspection = clients.Inspection
+    stored = Inspection("codex", True, command="/x/s", path_env="/a:/b")
+
+    assert clients.is_current(stored, "/x/s", "/a:/b") is True
+    assert clients.is_current(stored, "/y/s", "/a:/b") is False
+    assert clients.is_current(stored, "/x/s", "/a") is False
+    assert clients.is_current(stored, None, None) is None
+    assert clients.is_current(Inspection("codex", False), "/x/s", "/a:/b") is None
+    assert clients.is_current(Inspection("codex", None, error="e"), "/x/s", "/a:/b") is None
 
 
 def test_override_config_path_is_rejected_when_no_selected_client_owns_a_config(
