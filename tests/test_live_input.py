@@ -1139,7 +1139,8 @@ async def test_a_close_that_can_never_seal_ends_input_after_the_retry_limit(
     monkeypatch.setattr(inbox, "seal", never)
     await asyncio.wait_for(registry._pump(task), 5)
 
-    assert attempts["n"] == tasks_module.CLOSE_RETRY_LIMIT
+    # The retry limit, plus the forced close's own last attempt to seal.
+    assert attempts["n"] == tasks_module.CLOSE_RETRY_LIMIT + 1
     assert stdin.closed and task.inbox_closed
     assert any("without the inbox protocol" in n for n in task.bridge_notices)
 
@@ -1336,3 +1337,64 @@ def test_a_sender_that_finds_the_marker_after_appending_is_refused(
     with pytest.raises(inbox.SendRefused) as caught:
         inbox.send_to_record(tmp_path, "t1", "hi", by=None)
     assert caught.value.code == "closed"
+
+
+# --- Codex review round 3: regressions -----------------------------------------------------------
+
+
+async def test_a_forced_close_with_background_work_open_is_abandonment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """EOF from a forced close kills open background work just as the idle bound's does."""
+    registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
+    stdin = _Stdin()
+    task = _stub_task(tmp_path, stdin)
+    claude = backends.ClaudeBackend()
+    for event in (_started("bg", True), _result("STARTED")):
+        claude.ingest(event, task.acc)
+    task.last_output_at -= 10_000
+    monkeypatch.setenv("PB_LIVE_IDLE_SECONDS", "1")
+    monkeypatch.setattr(tasks_module, "PUMP_POLL_SECONDS", 0.01)
+
+    def never(log_dir, task_id):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(inbox, "seal", never)
+    await asyncio.wait_for(registry._pump(task), 5)
+
+    assert stdin.closed
+    assert task.acc.background_abandoned
+    claude.ingest(_updated("bg", "killed"), task.acc)  # what claude reports after that EOF
+    assert claude.classify(task.acc, 0) == "failed"
+
+
+async def test_a_forced_close_that_could_not_read_the_inbox_is_reconciled_before_finishing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
+    stdin = _Stdin()
+    task = _stub_task(tmp_path, stdin)
+    task.acc.result_count, task.acc.awaiting_input = 1, True
+    fd = inbox.lock_sync(tmp_path, task.task_id)
+    inbox.append_locked(tmp_path, task.task_id, inbox.make_message("acknowledged on disk", None))
+    inbox.unlock(fd)
+    monkeypatch.setattr(tasks_module, "PUMP_POLL_SECONDS", 0.01)
+    real_read = inbox.read_new
+    broken = {"on": True}
+
+    def read(*args):
+        if broken["on"]:
+            raise OSError("EIO")
+        return real_read(*args)
+
+    monkeypatch.setattr(inbox, "read_new", read)
+    await asyncio.wait_for(registry._pump(task), 5)
+    assert stdin.closed and task.inbox_closed and not task.inbox_reconciled
+    assert inbox.is_closed(tmp_path, task.task_id)  # the forced close still sealed it
+
+    broken["on"] = False  # the disk recovers before the run is published
+    task.proc.returncode = 0
+    await registry._finish_pump(task)
+    assert task.inbox_reconciled
+    undelivered = [e["text"] for e in _events(tmp_path, task.task_id) if e["kind"] == "undelivered"]
+    assert undelivered == ["acknowledged on disk"]

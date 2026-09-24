@@ -562,8 +562,11 @@ class Task:
     """Whether polybridge has closed (or lost) this live-input run's stdin. Always False for a
     DEVNULL run, which never had one to close."""
     inbox_closed: bool = False
-    """The input pump has run its close protocol: nothing more is accepted, and every message
-    queued before it was either written or reported undelivered."""
+    """Input is closed: nothing more is accepted from this server's `send_message`."""
+    inbox_reconciled: bool = False
+    """Every message queued before the close — in memory and on disk — was written or reported
+    undelivered. Distinct from `inbox_closed`: a forced close can end input before the on-disk
+    inbox could be read, and `_finish_pump` must still reconcile it."""
     inbox_queue: deque[dict[str, Any]] = field(default_factory=deque)
     """Messages `send_message` accepted on this (owning) server, waiting for the pump."""
     inbox_offset: int = 0
@@ -1342,7 +1345,7 @@ class TaskRegistry:
                 if exited:
                     self._close_unlocked(task, "its inbox could not be read")
                     return True
-                return self._close_failed(task, "its inbox could not be read")
+                return self._close_failed(task, "its inbox could not be read", bound)
             if reason is None:
                 wrote = self._write_messages(task, pending)
                 if wrote:
@@ -1354,7 +1357,7 @@ class TaskRegistry:
             except OSError:
                 log.error("task %s: could not seal its inbox", task.task_id, exc_info=True)
                 if not exited:
-                    return self._close_failed(task, "its inbox could not be sealed")
+                    return self._close_failed(task, "its inbox could not be sealed", bound)
                 task.bridge_notices.append(
                     "the run exited and its inbox could not be sealed; until its record settles, a "
                     "message sent from another process could be accepted and never delivered"
@@ -1363,36 +1366,54 @@ class TaskRegistry:
                 # Committed only now: a close that did not happen abandons nothing.
                 self._mark_abandoned(task, bound)
             task.inbox_closed = True
+            task.inbox_reconciled = True
             task.close_failures = 0
         finally:
             inbox.unlock(fd)
         _close_stdin(task)
         return True
 
-    def _close_failed(self, task: Task, why: str) -> bool:
+    def _close_failed(self, task: Task, why: str, bound: float) -> bool:
         """Count a close that could not complete; after `CLOSE_RETRY_LIMIT` of them, end input
-        regardless (`_force_close`). True if input is now closed."""
+        regardless (`_force_close`). True if input is now closed. Called with the inbox lock
+        held."""
         task.close_failures += 1
         if task.close_failures < CLOSE_RETRY_LIMIT:
             return False
-        self._force_close(task, why)
+        self._force_close(task, why, bound)
         return True
 
-    def _force_close(self, task: Task, why: str) -> None:
-        """End input for a live run whose inbox cannot be closed properly. Everything queued in this
-        server is reported undelivered; the owner check still refuses sends once the record settles,
-        but until then a message sent from another process may be accepted and never read — which
-        is said, rather than left silent."""
-        self._report_undelivered(
-            task, list(task.inbox_queue), f"input was closed without the inbox protocol ({why})"
-        )
+    def _force_close(self, task: Task, why: str, bound: float) -> None:
+        """End input for a live run whose inbox cannot be closed properly. Called with the inbox
+        lock held. Still tries to seal (so later sends are refused) and to read the on-disk inbox;
+        whatever it could not account for stays owed — `inbox_reconciled` stays False, and
+        `_finish_pump` retries it before the run is published. EOF kills any background task still
+        open, which is recorded as abandoned, exactly as the idle bound would."""
+        try:
+            inbox.seal(self._log_dir, task.task_id)
+        except OSError:
+            log.error("task %s: could not seal its inbox", task.task_id, exc_info=True)
+        pending = list(task.inbox_queue)
         task.inbox_queue.clear()
+        try:
+            appended, task.inbox_offset = inbox.read_new(
+                self._log_dir, task.task_id, task.inbox_offset
+            )
+            pending.extend(appended)
+            task.inbox_reconciled = True
+        except OSError:
+            log.warning("task %s: could not read its inbox to force it closed", task.task_id)
+        self._report_undelivered(
+            task, pending, f"input was closed without the inbox protocol ({why})"
+        )
         notice = (
             f"input was closed without the inbox protocol ({why}): until this task settles, a "
             "message sent to it from another process may be accepted and never delivered"
         )
         task.bridge_notices.append(notice)
         _write_event(task, "notice", {"text": notice})
+        if task.acc.background_open and not task.acc.background_abandoned:
+            self._mark_abandoned(task, bound)
         task.inbox_closed = True
         _close_stdin(task)
 
@@ -1416,6 +1437,7 @@ class TaskRegistry:
             appended, task.inbox_offset = inbox.read_new(
                 self._log_dir, task.task_id, task.inbox_offset
             )
+            task.inbox_reconciled = True
         except OSError:
             appended = []
             task.bridge_notices.append(
@@ -1483,8 +1505,9 @@ class TaskRegistry:
                 raise
             except Exception:
                 log.debug("task %s: input pump ended with an error", task.task_id, exc_info=True)
-        if task.live_input and not task.inbox_closed:
-            # The pump never finished its close (it failed, or was cancelled above).
+        if task.live_input and not (task.inbox_closed and task.inbox_reconciled):
+            # The pump never finished its close (it failed, or was cancelled above), or a forced
+            # close could not read the on-disk inbox: account for what is still owed.
             self._close_unlocked(task, "the input pump did not finish")
 
     @property

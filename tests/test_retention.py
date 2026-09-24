@@ -177,6 +177,35 @@ def test_sweep_keeps_the_inbox_lock_file_but_deletes_the_closed_marker(tmp_path:
     assert not (log_dir / f"{record.task_id}.inbox.closed").exists()
 
 
+def test_sweep_keeps_a_task_whose_inbox_is_locked_and_retries_it_later(tmp_path: Path) -> None:
+    """The inbox is emptied before the record goes: with the record gone, no later sweep could
+    find the task to empty it."""
+    import fcntl
+
+    log_dir = tmp_path / "tasks"
+    log_dir.mkdir()
+    record = make_record()
+    store.write(log_dir, record)
+    inbox_file = log_dir / f"{record.task_id}.inbox.jsonl"
+    inbox_file.write_text('{"id": "m1", "text": "a private message"}\n')
+
+    fd = os.open(inbox_file, os.O_RDWR)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        stats = retention.sweep(log_dir, 30, datetime.now(timezone.utc))
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+    assert stats["deleted_tasks"] == 0 and stats["kept_locked"] == 1
+    assert store.read(log_dir, record.task_id) is not None
+    assert inbox_file.read_bytes() != b""
+
+    stats = retention.sweep(log_dir, 30, datetime.now(timezone.utc))
+    assert stats["deleted_tasks"] == 1
+    assert store.read(log_dir, record.task_id) is None
+    assert inbox_file.exists() and inbox_file.read_bytes() == b""
+
+
 def test_sweep_keeps_a_young_task(tmp_path: Path) -> None:
     log_dir = tmp_path / "tasks"
     log_dir.mkdir()
