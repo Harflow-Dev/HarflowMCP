@@ -214,6 +214,20 @@ BACKGROUND_TERMINAL_STATUSES = frozenset(
 )
 
 
+# `usage` fields that count tokens for one result, so a live run's total is their sum. Every other
+# `usage` field (service tier, nested breakdowns, …) takes the latest result's value.
+USAGE_TOKEN_FIELDS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+)
+
+
+def _is_count(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 # Tool name -> monitor category. `mcp__`-prefixed names (any MCP server's tool) are matched by
 # prefix below rather than listed here, since the set of MCP tools is unbounded.
 _CATEGORY_BY_TOOL: dict[str, str] = {
@@ -849,16 +863,49 @@ class ClaudeBackend:
         if bad:
             acc.error_result_seen = True
 
+        # A live-input run emits one result per turn. Measured: `total_cost_usd` is cumulative per
+        # process, so it takes the latest value; `num_turns`, `usage` and `permission_denials` are
+        # per result, so they accumulate. A classic run has exactly one result, which makes every
+        # rule here the plain assignment it always was.
         turns = event.get("num_turns")
-        acc.num_turns = turns if isinstance(turns, int) else None
+        if _is_count(turns):
+            acc.num_turns = (acc.num_turns or 0) + turns
         cost = event.get("total_cost_usd")
-        acc.total_cost_usd = float(cost) if isinstance(cost, (int, float)) else None
+        if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+            acc.total_cost_usd = float(cost)
         usage = event.get("usage")
-        acc.usage = usage if isinstance(usage, dict) else None
+        if isinstance(usage, dict):
+            acc.usage = self._merge_usage(acc.usage, usage)
         denials = event.get("permission_denials")
-        acc.denials = denials if isinstance(denials, list) else []
+        if isinstance(denials, list):
+            acc.denials = self._union_denials(acc.denials, denials)
 
         acc.awaiting_input = not acc.background_open
+
+    @staticmethod
+    def _merge_usage(previous: dict[str, Any] | None, usage: dict[str, Any]) -> dict[str, Any]:
+        merged = dict(previous or {})
+        for key, value in usage.items():
+            if key in USAGE_TOKEN_FIELDS and _is_count(value):
+                prior = merged.get(key)
+                merged[key] = (prior if _is_count(prior) else 0) + value
+            else:
+                merged[key] = value
+        return merged
+
+    @staticmethod
+    def _union_denials(
+        previous: list[dict[str, Any]], denials: list[Any]
+    ) -> list[dict[str, Any]]:
+        """Every distinct denial across results, in first-seen order."""
+        union = list(previous)
+        seen = {json.dumps(entry, sort_keys=True, default=str) for entry in union}
+        for entry in denials:
+            key = json.dumps(entry, sort_keys=True, default=str)
+            if key not in seen:
+                seen.add(key)
+                union.append(entry)
+        return union
 
     def normalize(self, event: dict[str, Any], acc: Accumulator) -> list[dict[str, Any]]:
         if not isinstance(event, dict):
@@ -964,9 +1011,13 @@ class ClaudeBackend:
         # which kills them: whatever the last result said, the work it started never finished.
         if acc.background_abandoned:
             return "failed"
-        if acc.terminal.get("subtype") == "error_max_turns":
+        subtype = acc.terminal.get("subtype")
+        if subtype == "error_max_turns":
             return "timed_out"
-        if acc.is_error:
+        # A non-success subtype is a failure even without `is_error` — the same test `ingest`
+        # uses for "a result reported an error", so what stopped the input pump can never read
+        # as a clean completion.
+        if acc.is_error or subtype != "success":
             return "failed"
         # `exit_code is None` means nothing observed the process exit (a recovered run). Claude is
         # the one backend that does not need an observed exit: its `result` event is a real terminal

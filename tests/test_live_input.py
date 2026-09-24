@@ -322,3 +322,108 @@ def test_the_idle_bound_applies_only_to_a_wait_on_background_tasks_alone() -> No
     assert not reached(_feed(_started("bg", True)), silent_for=10_000, bound=600)  # no result yet
     working = _feed(_started("bg", True), _result(), ASSISTANT)
     assert not reached(working, silent_for=10_000, bound=600)  # a turn is running
+
+
+# --- A3.3: accounting across results -------------------------------------------------------------
+
+
+def test_per_result_counters_accumulate_and_cost_takes_the_latest() -> None:
+    acc = _feed(
+        _result(
+            "first",
+            num_turns=2,
+            total_cost_usd=0.0074,
+            usage={
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "cache_creation_input_tokens": 100,
+                "cache_read_input_tokens": 1000,
+                "service_tier": "standard",
+                "server_tool_use": {"web_search_requests": 1},
+            },
+            permission_denials=[{"tool_name": "Bash", "tool_input": {"command": "git push"}}],
+        ),
+        ASSISTANT,
+        _result(
+            "second",
+            num_turns=3,
+            total_cost_usd=0.0299,
+            usage={
+                "input_tokens": 1,
+                "output_tokens": 2,
+                "cache_creation_input_tokens": 3,
+                "cache_read_input_tokens": 4,
+                "service_tier": "priority",
+                "server_tool_use": {"web_search_requests": 0},
+            },
+            permission_denials=[
+                {"tool_input": {"command": "git push"}, "tool_name": "Bash"},
+                {"tool_name": "Write", "tool_input": {"file_path": "/etc/x"}},
+            ],
+        ),
+    )
+    assert acc.result_count == 2
+    assert acc.num_turns == 5
+    assert acc.total_cost_usd == pytest.approx(0.0299)  # cumulative per process: the latest
+    assert acc.usage == {
+        "input_tokens": 11,
+        "output_tokens": 7,
+        "cache_creation_input_tokens": 103,
+        "cache_read_input_tokens": 1004,
+        "service_tier": "priority",
+        "server_tool_use": {"web_search_requests": 0},
+    }
+    # Union, first-seen order, same denial recognised whatever its key order.
+    assert acc.denials == [
+        {"tool_name": "Bash", "tool_input": {"command": "git push"}},
+        {"tool_name": "Write", "tool_input": {"file_path": "/etc/x"}},
+    ]
+    assert acc.summary == "second"
+
+
+def test_a_single_result_accounts_exactly_as_before() -> None:
+    usage = {"input_tokens": 3, "output_tokens": 4, "service_tier": "standard"}
+    acc = _feed(_result("only", num_turns=1, total_cost_usd=0.5, usage=usage, permission_denials=[]))
+    assert (acc.num_turns, acc.total_cost_usd, acc.usage, acc.denials) == (1, 0.5, usage, [])
+    acc = _feed(_result("only"))
+    assert (acc.num_turns, acc.total_cost_usd, acc.usage, acc.denials) == (None, None, None, [])
+
+
+def test_malformed_counters_never_poison_the_totals() -> None:
+    acc = _feed(
+        _result(num_turns=2, total_cost_usd=0.1, usage={"input_tokens": 5}),
+        _result(num_turns=True, total_cost_usd="lots", usage={"input_tokens": "many"}),
+        _result(num_turns="3", usage="nope", permission_denials="none"),
+    )
+    assert acc.num_turns == 2
+    assert acc.total_cost_usd == pytest.approx(0.1)
+    assert acc.usage == {"input_tokens": "many"}  # not a count: the latest value, never summed
+    assert acc.denials == []
+
+
+def test_the_worst_outcome_is_sticky() -> None:
+    claude = backends.ClaudeBackend()
+    acc = _feed(
+        _result("broke", subtype="error_during_execution", is_error=True),
+        ASSISTANT,
+        _result("fine later"),
+    )
+    assert acc.error_result_seen
+    assert acc.terminal["result"] == "broke"
+    assert acc.is_error is True
+    assert acc.summary == "fine later"
+    assert claude.classify(acc, 0) == "failed"
+
+    acc = _feed(_result("fine"), ASSISTANT, _result("capped", subtype="error_max_turns", is_error=True))
+    assert acc.error_result_seen and acc.terminal["result"] == "capped"
+    assert claude.classify(acc, 0) == "timed_out"
+
+
+def test_a_non_success_subtype_is_an_error_even_without_is_error() -> None:
+    claude = backends.ClaudeBackend()
+    acc = _feed(_result("odd", subtype="error_during_execution", is_error=False))
+    assert acc.error_result_seen
+    assert claude.classify(acc, 0) == "failed"
+    acc = _feed(_result("ok"))
+    assert not acc.error_result_seen
+    assert claude.classify(acc, 0) == "completed"
