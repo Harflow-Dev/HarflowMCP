@@ -563,10 +563,14 @@ class Task:
     DEVNULL run, which never had one to close."""
     inbox_closed: bool = False
     """Input is closed: nothing more is accepted from this server's `send_message`."""
+    inbox_sealed: bool = False
+    """The inbox's seal (marker or seal line) actually landed, so every other process sees input as
+    closed. Until it has, another process can still append and be told "queued"."""
     inbox_reconciled: bool = False
     """Every message queued before the close — in memory and on disk — was written or reported
-    undelivered. Distinct from `inbox_closed`: a forced close can end input before the on-disk
-    inbox could be read, and `_finish_pump` must still reconcile it."""
+    undelivered, *and* the seal landed so nothing can be appended after that read. Distinct from
+    `inbox_closed`: a forced close can end input before the on-disk inbox could be read or sealed,
+    and `_finish_pump` must still do a final read before the run is published."""
     inbox_queue: deque[dict[str, Any]] = field(default_factory=deque)
     """Messages `send_message` accepted on this (owning) server, waiting for the pump."""
     inbox_offset: int = 0
@@ -1354,19 +1358,17 @@ class TaskRegistry:
                 self._report_undelivered(task, pending, reason)
             try:
                 inbox.seal(self._log_dir, task.task_id)
+                task.inbox_sealed = True
             except OSError:
                 log.error("task %s: could not seal its inbox", task.task_id, exc_info=True)
                 if not exited:
                     return self._close_failed(task, "its inbox could not be sealed", bound)
-                task.bridge_notices.append(
-                    "the run exited and its inbox could not be sealed; until its record settles, a "
-                    "message sent from another process could be accepted and never delivered"
-                )
+                # Not sealed: `_finish_pump`'s final read still owes whatever lands after this.
             if kind == CLOSE_IDLE_BOUND and reason is None:
                 # Committed only now: a close that did not happen abandons nothing.
                 self._mark_abandoned(task, bound)
             task.inbox_closed = True
-            task.inbox_reconciled = True
+            task.inbox_reconciled = task.inbox_sealed
             task.close_failures = 0
         finally:
             inbox.unlock(fd)
@@ -1391,6 +1393,7 @@ class TaskRegistry:
         open, which is recorded as abandoned, exactly as the idle bound would."""
         try:
             inbox.seal(self._log_dir, task.task_id)
+            task.inbox_sealed = True
         except OSError:
             log.error("task %s: could not seal its inbox", task.task_id, exc_info=True)
         pending = list(task.inbox_queue)
@@ -1400,7 +1403,9 @@ class TaskRegistry:
                 self._log_dir, task.task_id, task.inbox_offset
             )
             pending.extend(appended)
-            task.inbox_reconciled = True
+            # Reconciled only if nothing can be appended after this read: with no seal, another
+            # process still sees input open once the lock is released.
+            task.inbox_reconciled = task.inbox_sealed
         except OSError:
             log.warning("task %s: could not read its inbox to force it closed", task.task_id)
         self._report_undelivered(
@@ -1430,6 +1435,7 @@ class TaskRegistry:
         here, and one that finds it afterwards is refused: nothing acknowledged goes unreported."""
         try:
             inbox.seal(self._log_dir, task.task_id)
+            task.inbox_sealed = True
         except OSError:
             log.error("task %s: could not seal its inbox", task.task_id, exc_info=True)
         task.inbox_closed = True
@@ -1437,7 +1443,7 @@ class TaskRegistry:
             appended, task.inbox_offset = inbox.read_new(
                 self._log_dir, task.task_id, task.inbox_offset
             )
-            task.inbox_reconciled = True
+            task.inbox_reconciled = task.inbox_sealed
         except OSError:
             appended = []
             task.bridge_notices.append(
@@ -1505,10 +1511,46 @@ class TaskRegistry:
                 raise
             except Exception:
                 log.debug("task %s: input pump ended with an error", task.task_id, exc_info=True)
-        if task.live_input and not (task.inbox_closed and task.inbox_reconciled):
-            # The pump never finished its close (it failed, or was cancelled above), or a forced
-            # close could not read the on-disk inbox: account for what is still owed.
+        if task.live_input and not task.inbox_closed:
+            # The pump never finished its close (it failed, or was cancelled above).
             self._close_unlocked(task, "the input pump did not finish")
+        if task.live_input and not task.inbox_reconciled:
+            # A close that could not read the inbox, or could not seal it: another process may have
+            # appended — and been told "queued" — after the last read. One final read, under the
+            # lock where it can be had, reports every line still unread as undelivered.
+            await self._final_inbox_read(task)
+
+    async def _final_inbox_read(self, task: Task) -> None:
+        """Report every message still unread in the on-disk inbox as undelivered, once the run has
+        exited. Senders are refused from here on regardless (its process is confirmed dead), so this
+        read is the last word. Taken under the inbox lock when it can be had within its timeout;
+        otherwise read anyway — a torn line from a stuck writer is left unread, never guessed at."""
+        fd: int | None = None
+        try:
+            fd = await inbox.lock_async(self._log_dir, task.task_id)
+        except control.LockTimeout:
+            log.warning("task %s: inbox lock busy at the final read; reading anyway", task.task_id)
+        try:
+            appended, task.inbox_offset = inbox.read_new(
+                self._log_dir, task.task_id, task.inbox_offset
+            )
+        except OSError:
+            log.warning("task %s: could not read its inbox at the final read", task.task_id)
+            task.bridge_notices.append(
+                "the run's inbox could not be read after it exited; a message sent to it from "
+                "another process may have been accepted and never reported"
+            )
+            return
+        finally:
+            if fd is not None:
+                inbox.unlock(fd)
+        task.inbox_reconciled = True
+        if appended:
+            self._report_undelivered(
+                task,
+                appended,
+                "it was queued after input closed without a seal, and the run has exited",
+            )
 
     @property
     def log_dir(self) -> Path:

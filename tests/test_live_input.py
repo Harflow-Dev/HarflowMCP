@@ -1398,3 +1398,77 @@ async def test_a_forced_close_that_could_not_read_the_inbox_is_reconciled_before
     assert task.inbox_reconciled
     undelivered = [e["text"] for e in _events(tmp_path, task.task_id) if e["kind"] == "undelivered"]
     assert undelivered == ["acknowledged on disk"]
+
+
+# --- Independent verifier, follow-up round: regressions -------------------------------------------
+
+
+async def test_a_message_appended_after_a_forced_close_that_could_not_seal_is_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifier #2: the forced close read the inbox fine but could not seal it. Once its lock was
+    released another process saw no marker, appended, and was told "queued" — and `_finish_pump`
+    skipped the reread because the inbox counted as reconciled. It is reconciled only once sealed."""
+    owner = identity.own_identity()
+    registry = TaskRegistry(log_dir=tmp_path, owner=owner)
+    stdin = _Stdin()
+    task = _stub_task(tmp_path, stdin)
+    task.owner = owner
+    task.acc.result_count, task.acc.awaiting_input = 1, True
+    _record(tmp_path, task_id=task.task_id, owner=owner)
+    monkeypatch.setattr(tasks_module, "PUMP_POLL_SECONDS", 0.01)
+
+    def never(log_dir, task_id):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(inbox, "seal", never)
+    monkeypatch.setattr(identity, "identity_check", lambda ident: "alive")
+    await asyncio.wait_for(registry._pump(task), 5)
+    assert stdin.closed and task.inbox_closed
+    assert not task.inbox_sealed and not task.inbox_reconciled
+
+    queued = inbox.send_to_record(tmp_path, task.task_id, "sent after the forced close", by=None)
+    assert queued["status"] == "queued"  # the unsealed inbox still looks open to a sender
+
+    task.proc.returncode = 0
+    await registry._finish_pump(task)
+
+    assert task.inbox_reconciled
+    undelivered = [e for e in _events(tmp_path, task.task_id) if e["kind"] == "undelivered"]
+    assert [e["message_id"] for e in undelivered] == [queued["message_id"]]
+    assert any("was not delivered" in n for n in task.bridge_notices)
+
+
+async def test_an_exit_path_close_that_could_not_seal_still_gets_the_final_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
+    task = _stub_task(tmp_path, _Stdin())
+    task.proc.returncode = 0
+
+    def never(log_dir, task_id):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(inbox, "seal", never)
+    await asyncio.wait_for(registry._pump(task), 5)
+    assert task.inbox_closed and not task.inbox_reconciled
+
+    fd = inbox.lock_sync(tmp_path, task.task_id)
+    inbox.append_locked(tmp_path, task.task_id, inbox.make_message("late", None))
+    inbox.unlock(fd)
+    await registry._finish_pump(task)
+    undelivered = [e["text"] for e in _events(tmp_path, task.task_id) if e["kind"] == "undelivered"]
+    assert undelivered == ["late"]
+
+
+async def test_a_sealed_close_needs_no_final_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
+    task = _stub_task(tmp_path, _Stdin())
+    task.acc.result_count, task.acc.awaiting_input = 1, True
+    await asyncio.wait_for(registry._pump(task), 5)
+    assert task.inbox_sealed and task.inbox_reconciled
+    calls = []
+    monkeypatch.setattr(registry, "_final_inbox_read", lambda t: calls.append(t))
+    task.proc.returncode = 0
+    await registry._finish_pump(task)
+    assert calls == []
