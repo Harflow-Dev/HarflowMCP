@@ -1850,3 +1850,96 @@ def test_a_null_server_table_reads_as_nothing_registered_on_every_json_client(
     inspection = client.inspect("polybridge", FakeRunner())
 
     assert (inspection.installed, inspection.error) == (False, None)
+
+
+# --- Codex review round 1 regressions ---------------------------------------------------------
+
+
+def test_a_relative_vibe_home_is_resolved_where_vibe_resolves_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`run_cli` launches vibe from HOME, so a relative VIBE_HOME names a file under HOME — the
+    backup must be of that file, not of one under our own working directory."""
+    home = tmp_path / "home"
+    (home / "rel-vibe").mkdir(parents=True)
+    (home / "rel-vibe" / "config.toml").write_text(VIBE_TOML)
+    elsewhere = tmp_path / "cwd"
+    elsewhere.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("VIBE_HOME", "rel-vibe")
+    monkeypatch.chdir(elsewhere)
+
+    result = VibeClient().remove("polybridge", FakeRunner(ok(VIBE_REMOVED)))
+
+    assert result.status == "removed"
+    assert [p.name for p in (home / "rel-vibe").iterdir() if ".bak-" in p.name]
+    assert list(elsewhere.iterdir()) == []
+    assert VibeClient().inspect("polybridge", FakeRunner()).installed is True
+
+
+def test_a_relative_claude_config_dir_is_resolved_against_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    (home / "rel-claude").mkdir(parents=True)
+    (home / "rel-claude" / ".claude.json").write_text(
+        json.dumps({"mcpServers": {"polybridge": {"command": "/x"}}})
+    )
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "rel-claude")
+    monkeypatch.chdir(tmp_path)
+
+    assert ClaudeCodeClient().inspect("polybridge", FakeRunner()).installed is True
+
+
+@pytest.mark.parametrize(
+    "listed", [[None], [{"server_name": "polybridge"}], [{"name": 3}]], ids=["null", "key", "type"]
+)
+def test_codex_inspect_of_an_unreadable_entry_is_an_error_not_an_absence(listed) -> None:
+    inspection = CodexClient().inspect("polybridge", FakeRunner(ok(json.dumps(listed))))
+
+    assert inspection.installed is None
+    assert inspection.error
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ['mcp_servers = ["polybridge"]\n', "[[mcp_servers]]\ncommand = \"/x\"\n"],
+    ids=["strings", "nameless"],
+)
+def test_vibe_inspect_of_an_unreadable_entry_is_an_error_not_an_absence(
+    vibe_config: Path, raw: str
+) -> None:
+    vibe_config.write_text(raw)
+
+    inspection = VibeClient().inspect("polybridge", FakeRunner())
+
+    assert inspection.installed is None
+    assert inspection.error
+
+
+def test_is_current_is_unknown_when_the_inspection_could_not_settle_the_command(
+    opencode_dir: Path,
+) -> None:
+    """Differing entries, one of them matching: that is not evidence of a mismatch."""
+    (opencode_dir / "opencode.json").write_text(json.dumps({"mcp": {"polybridge": OPENCODE_ENTRY}}))
+    other = {**OPENCODE_ENTRY, "command": ["/old/polybridge-server"]}
+    (opencode_dir / "opencode.jsonc").write_text(json.dumps({"mcp": {"polybridge": other}}))
+
+    inspection = OpencodeClient().inspect("polybridge", FakeRunner())
+
+    assert clients.is_current(inspection, "/x/polybridge-server", "/a:/b") is None
+
+
+def test_is_current_is_unknown_for_an_installed_entry_that_errored() -> None:
+    inspection = clients.Inspection("claude-desktop", True, error="entry is not an object")
+
+    assert clients.is_current(inspection, "/x", "/p") is None
+
+
+def test_follow_up_is_the_clients_own_note_for_changes_only() -> None:
+    assert clients.follow_up(Result("claude-desktop", "removed", "")) == (
+        "Claude desktop app: restart it to pick up the change."
+    )
+    assert clients.follow_up(Result("claude-desktop", "not_installed", "")) is None
+    assert clients.follow_up(Result("nobody", "applied", "")) is None

@@ -238,6 +238,14 @@ def closing_notes(results: Sequence[Result]) -> list[str]:
     return [f"{', '.join(labels)}: {note}" for note, labels in notes.items()]
 
 
+def follow_up(result: Result) -> str | None:
+    """`closing_notes` for one result: the client's own note, if this result changed anything."""
+    client = CLIENTS.get(result.client)
+    if client is None or result.status not in ("applied", "removed"):
+        return None
+    return f"{client.label}: {client.post_apply_note}"
+
+
 def label(key: str) -> str:
     """Display name for a result's client. Falls back to the key so reporting cannot raise."""
     client = CLIENTS.get(key)
@@ -271,11 +279,15 @@ def uninstall_exit_code(results: Sequence[Result]) -> int:
 def is_current(inspection: Inspection, command: str | None, path_env: str | None) -> bool | None:
     """Whether the stored entry launches exactly what install would write now.
 
-    `None` when that cannot be said: nothing is registered, the check did not run, or there is no
-    server binary to compare with. Both the command and its PATH must match — an entry whose PATH
-    predates a newly installed agent CLI still launches, but cannot dispatch to that agent.
+    `None` when that cannot be said: nothing is registered, the check did not run or errored, the
+    inspection could not settle what the entry launches (`command is None` — differing duplicates,
+    say), or there is no server binary to compare with. Both the command and its PATH must match —
+    an entry whose PATH predates a newly installed agent CLI still launches, but cannot dispatch to
+    that agent.
     """
-    if inspection.installed is not True or command is None:
+    if inspection.installed is not True or inspection.error is not None:
+        return None
+    if inspection.command is None or command is None:
         return None
     return inspection.command == command and inspection.path_env == path_env
 
@@ -366,6 +378,7 @@ __all__ = [
     "closing_notes",
     "desktop_config_path",
     "exit_code",
+    "follow_up",
     "get",
     "inspect_all",
     "is_current",

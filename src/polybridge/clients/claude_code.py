@@ -37,6 +37,7 @@ from .base import (
     Result,
     RunResult,
     Runner,
+    cli_relative,
     entry_inspection,
 )
 
@@ -45,7 +46,7 @@ def user_config_path() -> Path:
     """Where `claude mcp add -s user` writes: `$CLAUDE_CONFIG_DIR/.claude.json`, else `~/.claude.json`."""
     override = os.environ.get("CLAUDE_CONFIG_DIR")
     if override:
-        return Path(os.path.expanduser(override)) / ".claude.json"
+        return cli_relative(override) / ".claude.json"
     return Path.home() / ".claude.json"
 
 

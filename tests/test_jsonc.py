@@ -88,3 +88,10 @@ def test_a_double_comma_is_still_rejected() -> None:
     """Only a comma *immediately* before a closer is forgiven; the rest is json's to judge."""
     with pytest.raises(ValueError):
         jsonc.loads('{"a": 1,, }')
+
+
+@pytest.mark.parametrize("text", ["{,}", "[,]", '{"mcp": {,}}', "[1,,]", '{"a": [,1]}'])
+def test_a_comma_that_follows_no_value_is_not_repaired(text: str) -> None:
+    """Only a comma after a value is trailing; `{,}` must stay malformed, not become `{}`."""
+    with pytest.raises(ValueError):
+        jsonc.loads(text)

@@ -547,3 +547,34 @@ def test_the_report_keeps_its_columns_aligned_for_long_statuses(capsys) -> None:
 
     lines = capsys.readouterr().out.splitlines()
     assert lines[0].index("nothing registered") == lines[1].index("ok")
+
+
+def test_install_json_without_a_server_binary_still_prints_the_document(
+    tmp_path: Path, which, fake_cli, capsys
+) -> None:
+    """The Mac app parses stdout: an empty one on this failure would be a decode error."""
+    which("codex")
+
+    code, document = run_json(tmp_path, capsys, "--client", "claude-desktop,codex")
+
+    by_key = rows(document)
+    assert code == 1
+    assert document["v"] == 1 and document["server_path"] is None
+    assert {row["action"] for row in document["clients"]} == {"failed"}
+    assert "not on PATH" in by_key["codex"]["error"]
+    assert not any(call[:3] == ["codex", "mcp", "add"] for call in fake_cli.calls)
+    assert not (tmp_path / DESKTOP).exists()
+
+
+def test_json_rows_carry_the_restart_note_for_a_desktop_removal(
+    tmp_path: Path, which, capsys
+) -> None:
+    which(*EVERYTHING)
+    run(tmp_path, "--client", "claude-desktop")
+    capsys.readouterr()
+
+    _, document = run_json(tmp_path, capsys, "--uninstall", "--client", "claude-desktop")
+
+    row = rows(document)["claude-desktop"]
+    assert row["action"] == "removed"
+    assert "Claude desktop app: restart it to pick up the change." in row["notes"]

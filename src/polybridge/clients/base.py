@@ -13,6 +13,7 @@ because only one of them changed anything.
 
 from __future__ import annotations
 
+import os
 import shlex
 import shutil
 import subprocess
@@ -106,6 +107,17 @@ def run_cli(argv: Sequence[str]) -> RunResult:
         completed.stdout + completed.stderr,
         stdout=completed.stdout,
     )
+
+
+def cli_relative(path: str) -> Path:
+    """A path the way a client CLI launched by `run_cli` resolves it: `~` expanded, and a relative
+    path taken against the user's home, because that is the working directory `run_cli` gives it.
+
+    Resolving against our own working directory instead would read, or back up, a different file
+    from the one the CLI then rewrites.
+    """
+    expanded = Path(os.path.expanduser(path))
+    return expanded if expanded.is_absolute() else Path.home() / expanded
 
 
 @dataclass(frozen=True)

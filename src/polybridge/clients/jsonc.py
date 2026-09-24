@@ -19,6 +19,10 @@ def strip(text: str) -> str:
     """`text` with comments and trailing commas removed, and every other character kept."""
     out: list[str] = []
     pending_comma: int | None = None
+    # The last significant character emitted. A comma is only "trailing" when it follows a value;
+    # after `{`, `[` or another `,` it is malformed, and is kept so that `json` rejects it rather
+    # than this tokenizer repairing `{,}` into `{}`.
+    previous = ""
     i = 0
     n = len(text)
     if text.startswith("﻿"):
@@ -31,6 +35,7 @@ def strip(text: str) -> str:
             end = _string_end(text, i)
             out.append(text[i:end])
             pending_comma = None
+            previous = '"'
             i = end
             continue
 
@@ -55,10 +60,11 @@ def strip(text: str) -> str:
 
         if char in "}]" and pending_comma is not None:
             out[pending_comma] = ""
-        if char == ",":
+        if char == "," and previous not in ("", "{", "[", ","):
             pending_comma = len(out)
         else:
             pending_comma = None
+        previous = char
         out.append(char)
         i += 1
 

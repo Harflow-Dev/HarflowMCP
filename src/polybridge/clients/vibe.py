@@ -79,6 +79,7 @@ from .base import (
     Result,
     RunResult,
     Runner,
+    cli_relative,
     entry_inspection,
 )
 from .desktop import back_up
@@ -86,7 +87,7 @@ from .desktop import back_up
 
 def config_path() -> Path:
     override = os.environ.get("VIBE_HOME")
-    base = Path(os.path.expanduser(override)) if override else Path.home() / ".vibe"
+    base = cli_relative(override) if override else Path.home() / ".vibe"
     return base / "config.toml"
 
 
@@ -183,7 +184,12 @@ class VibeClient(CliClient):
         if not isinstance(servers, list):
             return Inspection(self.key, None, error=f"'mcp_servers' in {path} is not an array")
 
-        matching = [e for e in servers if isinstance(e, dict) and e.get("name") == key]
+        if not all(isinstance(e, dict) and isinstance(e.get("name"), str) for e in servers):
+            # One entry we cannot read could be ours, so absence would be a guess.
+            return Inspection(
+                self.key, None, error=f"'mcp_servers' in {path} has an entry with no name"
+            )
+        matching = [e for e in servers if e["name"] == key]
         if not matching:
             return Inspection(self.key, False, notes=(f"read {path}",))
         inspections = [entry_inspection(self.key, entry, str(path)) for entry in matching]

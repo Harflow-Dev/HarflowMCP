@@ -82,7 +82,10 @@ class CodexClient(CliClient):
         if not isinstance(entries, list):
             return Inspection(self.key, None, error=f"`{where}` did not print a JSON array")
 
-        matching = [e for e in entries if isinstance(e, dict) and e.get("name") == key]
+        if not all(isinstance(e, dict) and isinstance(e.get("name"), str) for e in entries):
+            # One entry we cannot read could be ours, so absence would be a guess.
+            return Inspection(self.key, None, error=f"`{where}` listed an entry with no name")
+        matching = [e for e in entries if e["name"] == key]
         if not matching:
             return Inspection(self.key, False, notes=(f"read {where}",))
         transport = matching[0].get("transport")

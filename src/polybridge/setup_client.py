@@ -189,6 +189,9 @@ def json_document(
             else:
                 notes.append(result.detail)
             notes.extend(result.diagnostics)
+            follow_up = clients.follow_up(result)
+            if follow_up is not None:
+                notes.append(follow_up)
         notes.extend(inspection.notes)
         rows.append(
             {
@@ -304,6 +307,17 @@ def _install(args: argparse.Namespace, selected: list[clients.Client]) -> int:
         registration = build_registration()
     except SetupError as exc:
         print(f"error: {exc}", file=sys.stderr)
+        if args.json:
+            # The Mac app parses stdout, so a run that got past argument checking always yields
+            # the document — here with every selected client failed and nothing attempted.
+            reason = str(exc).splitlines()[0]
+            failed = [
+                clients.Result(client.key, "failed", f"nothing was attempted: {reason}")
+                for client in selected
+            ]
+            _print_json(
+                json_document(None, None, clients.inspect_all(selected, SERVER_KEY), failed)
+            )
         return 1
 
     # With --json, stdout carries the document and nothing else; the warnings below go to stderr.
