@@ -406,6 +406,17 @@ def test_envelope_keys_lead_each_line_and_win_over_colliding_fields(tmp_path: Pa
     assert (entry["seq"], entry["kind"], entry["raw_offset"], entry["text"]) == (0, "notice", 7, "hi")
 
 
+def test_every_line_is_schema_version_one(tmp_path: Path) -> None:
+    """The Monitor app reads this file. Changing the envelope must bump `v`, not drift under it."""
+    log = EventLog(tmp_path / "t.events.jsonl", "t")
+    log.write("notice", {"text": "a"})
+    log.write("notice", {"text": "b", "v": 2})
+    log.close()
+
+    lines = [json.loads(line) for line in (tmp_path / "t.events.jsonl").read_text().splitlines()]
+    assert [line["v"] for line in lines] == [1, 1]
+
+
 def test_an_unserializable_event_is_dropped_without_disabling_the_log(tmp_path: Path) -> None:
     circular: dict = {}
     circular["self"] = circular
