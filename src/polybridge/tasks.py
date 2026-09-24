@@ -25,6 +25,7 @@ import os
 import signal
 import time
 import subprocess
+import sys
 import uuid
 from collections import deque
 from dataclasses import dataclass, field, replace
@@ -421,6 +422,33 @@ def _publish_branch_notice(
         return _format_branch_notice(_branch_notice_templates(enforcement)[1], freedom, enforcement)
 
 
+# A4.3: a root task opens the Monitor app in the background. Off darwin, or with this set to "0"
+# (conftest, and everything the app itself launches), nothing is opened.
+OPEN_MONITOR_ENV = "PB_OPEN_MONITOR"
+MONITOR_URL = "polybridge-monitor://task/{task_id}"
+MONITOR_OPEN_TIMEOUT_SECONDS = 30.0
+
+
+async def _launch_monitor(url: str) -> int:
+    """`open -g <url>`: hand the URL to the Monitor app without bringing it to the front. Returns
+    the exit status; the process is always reaped."""
+    proc = await asyncio.create_subprocess_exec(
+        "open",
+        "-g",
+        url,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    try:
+        return await asyncio.wait_for(proc.wait(), timeout=MONITOR_OPEN_TIMEOUT_SECONDS)
+    except BaseException:
+        if proc.returncode is None:
+            proc.kill()
+            await asyncio.shield(proc.wait())
+        raise
+
+
 class SessionBusyError(RuntimeError):
     """A session already has a live run, so a second one would fight it for session state."""
 
@@ -693,6 +721,8 @@ class TaskRegistry:
         # `polybridge-ctl run`/`resume`, which the app itself drives.
         self._open_monitor = open_monitor
         self._monitor_launcher = monitor_launcher
+        # Strong references to the background `open` jobs (see `_maybe_open_monitor`).
+        self._monitor_jobs: set[asyncio.Task[Any]] = set()
         self._log_dir = log_dir or default_log_dir()
         self._max_tasks = max_tasks
         # Computed once per registry rather than per task: every task this registry spawns shares
@@ -1095,6 +1125,8 @@ class TaskRegistry:
         except Exception:
             log.exception("task %s: could not write task_started event", task_id)
 
+        self._maybe_open_monitor(task)
+
         # Outside the no-await window, and still before any await: the prompt is the first stdin
         # line of a live-input run (a positional would be ignored), written synchronously so it is
         # queued ahead of anything else, then flushed below.
@@ -1135,6 +1167,53 @@ class TaskRegistry:
             f" resumed-from={parent_task_id}" if parent_task_id else "",
         )
         return task
+
+    def _maybe_open_monitor(self, task: Task) -> None:
+        """Open the Monitor app on this task, in the background, for a root task only (A4.3).
+
+        Synchronous — it only schedules — so it adds no await after registration. A root task is
+        one with no detected caller and no `PB_TASK_ID` in this server's environment: a nested
+        dispatch belongs to a tree the user is already watching. Skipped off darwin, when
+        `PB_OPEN_MONITOR=0`, and for a registry built with `open_monitor=False` (`polybridge-ctl
+        run`/`resume`, which the app drives). Nothing here can change the dispatch's outcome, and
+        the response never claims the app opened.
+        """
+        try:
+            if not self._open_monitor or task.lineage_detected is not None:
+                return
+            if os.environ.get(lineage.ENV_TASK_ID):
+                return
+            if sys.platform != "darwin" or os.environ.get(OPEN_MONITOR_ENV) == "0":
+                return
+            job = asyncio.create_task(
+                self._open_monitor_job(task), name=f"pb-open-monitor-{task.task_id}"
+            )
+            self._monitor_jobs.add(job)
+            job.add_done_callback(self._monitor_jobs.discard)
+        except Exception:
+            log.debug("task %s: could not schedule opening the Monitor", task.task_id, exc_info=True)
+
+    async def _open_monitor_job(self, task: Task) -> None:
+        launcher = self._monitor_launcher or _launch_monitor
+        try:
+            code = await launcher(MONITOR_URL.format(task_id=task.task_id))
+        except Exception as exc:
+            notice = (
+                f"The Monitor app could not be opened ({type(exc).__name__}: {exc}); the task "
+                "runs regardless."
+            )
+        else:
+            if code == 0:
+                return
+            notice = (
+                f"The Monitor app could not be opened (`open -g` exited {code}); the task runs "
+                "regardless."
+            )
+        task.bridge_notices.append(notice)
+        try:
+            self.persist(task)
+        except Exception:
+            log.exception("task %s: could not persist the Monitor notice", task.task_id)
 
     def _write_initial_input(self, task: Task, data: bytes) -> None:
         """Queue a live-input run's prompt on its stdin — synchronous, so nothing can be written

@@ -18,6 +18,13 @@ def isolated_registry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.fixture(autouse=True)
+def no_monitor_app(monkeypatch: pytest.MonkeyPatch):
+    """`PB_OPEN_MONITOR=0`: a root task must never open the real Monitor app from a test (A4.3).
+    Tests of that behaviour inject a launcher and lift this themselves."""
+    monkeypatch.setenv("PB_OPEN_MONITOR", "0")
+
+
+@pytest.fixture(autouse=True)
 def no_caller_detected(monkeypatch: pytest.MonkeyPatch):
     """Neutralise best-effort caller detection everywhere by default.
 
