@@ -204,6 +204,16 @@ _MODE_CAVEATS: dict[str, tuple[str, ...]] = {
 }
 
 
+# Statuses that end a background task, on `system/task_updated`'s `patch.status` and on
+# `system/task_notification`'s `status`. Measured: "completed" (both), "killed" (task_updated) and
+# "stopped" (notification) on 2.1.281; the rest are the conservative remainder of the obvious
+# vocabulary. An unrecognised status keeps the task open — the input pump's idle bound is what
+# ends a wait that never resolves, never a guess here.
+BACKGROUND_TERMINAL_STATUSES = frozenset(
+    {"completed", "failed", "killed", "stopped", "cancelled", "error"}
+)
+
+
 # Tool name -> monitor category. `mcp__`-prefixed names (any MCP server's tool) are matched by
 # prefix below rather than listed here, since the set of MCP tools is unbounded.
 _CATEGORY_BY_TOOL: dict[str, str] = {
@@ -770,27 +780,85 @@ class ClaudeBackend:
             acc.session_id = session_id
 
         event_type = event.get("type")
-        if event_type == "system" and event.get("subtype") == "init":
+        if event_type == "system":
+            self._ingest_system(event, acc)
+        elif event_type in ("assistant", "user"):
+            # Turn activity: whatever happened before, the agent is working now — including the
+            # follow-up turn claude starts by itself when a background task finishes.
+            acc.turn_open = True
+            acc.awaiting_input = False
+        elif event_type == "result":
+            self._ingest_result(event, acc)
+
+    @staticmethod
+    def _ingest_system(event: dict[str, Any], acc: Accumulator) -> None:
+        subtype = event.get("subtype")
+        task_id = event.get("task_id")
+        task_id = task_id if isinstance(task_id, str) and task_id else None
+        if subtype == "init":
             servers = event.get("mcp_servers")
             if isinstance(servers, list):
                 acc.mcp_servers = servers
             tools = event.get("tools")
             if isinstance(tools, list):
                 acc.available_tool_count = len(tools)
-        elif event_type == "result":
+        elif subtype == "task_started":
+            # A foreground Bash emits task_started too (is_backgrounded false, measured); only a
+            # backgrounded one outlives its turn.
+            if task_id is not None and event.get("is_backgrounded") is True:
+                acc.background_open.add(task_id)
+        elif subtype == "task_updated":
+            patch = event.get("patch")
+            patch = patch if isinstance(patch, dict) else {}
+            if task_id is None:
+                return
+            # Unmeasured, and conservative: a task moved to the background later is open too.
+            if patch.get("is_backgrounded") is True:
+                acc.background_open.add(task_id)
+            if patch.get("status") in BACKGROUND_TERMINAL_STATUSES:
+                ClaudeBackend._close_background(task_id, acc)
+        elif subtype == "task_notification":
+            if task_id is not None and event.get("status") in BACKGROUND_TERMINAL_STATUSES:
+                ClaudeBackend._close_background(task_id, acc)
+
+    @staticmethod
+    def _close_background(task_id: str, acc: Accumulator) -> None:
+        if task_id not in acc.background_open:
+            return
+        acc.background_open.discard(task_id)
+        # The last open background task finishing after a result makes the run idle, unless a
+        # turn is running. Claude may still start a follow-up turn for it (measured); closing stdin
+        # now does not stop that turn, which finishes and emits its own result (also measured).
+        if not acc.background_open and acc.result_count and not acc.turn_open:
+            acc.awaiting_input = True
+
+    def _ingest_result(self, event: dict[str, Any], acc: Accumulator) -> None:
+        acc.result_count += 1
+        acc.turn_open = False
+        acc.saw_final_message = True
+        text = event.get("result")
+        acc.summary = text if isinstance(text, str) else None
+
+        is_error = bool(event.get("is_error"))
+        bad = is_error or event.get("subtype") != "success"
+        # The worst outcome is sticky: once a result reported an error, a later clean one (a
+        # follow-up turn for a background task, say) must not overwrite what `classify` sees.
+        if not acc.error_result_seen:
             acc.terminal = event
-            acc.saw_final_message = True
-            text = event.get("result")
-            acc.summary = text if isinstance(text, str) else None
-            acc.is_error = bool(event.get("is_error"))
-            turns = event.get("num_turns")
-            acc.num_turns = turns if isinstance(turns, int) else None
-            cost = event.get("total_cost_usd")
-            acc.total_cost_usd = float(cost) if isinstance(cost, (int, float)) else None
-            usage = event.get("usage")
-            acc.usage = usage if isinstance(usage, dict) else None
-            denials = event.get("permission_denials")
-            acc.denials = denials if isinstance(denials, list) else []
+            acc.is_error = is_error
+        if bad:
+            acc.error_result_seen = True
+
+        turns = event.get("num_turns")
+        acc.num_turns = turns if isinstance(turns, int) else None
+        cost = event.get("total_cost_usd")
+        acc.total_cost_usd = float(cost) if isinstance(cost, (int, float)) else None
+        usage = event.get("usage")
+        acc.usage = usage if isinstance(usage, dict) else None
+        denials = event.get("permission_denials")
+        acc.denials = denials if isinstance(denials, list) else []
+
+        acc.awaiting_input = not acc.background_open
 
     def normalize(self, event: dict[str, Any], acc: Accumulator) -> list[dict[str, Any]]:
         if not isinstance(event, dict):
@@ -891,6 +959,10 @@ class ClaudeBackend:
 
     def classify(self, acc: Accumulator, exit_code: int | None) -> Status:
         if acc.terminal is None:
+            return "failed"
+        # The input pump closed stdin on a run still waiting on background tasks (the idle bound),
+        # which kills them: whatever the last result said, the work it started never finished.
+        if acc.background_abandoned:
             return "failed"
         if acc.terminal.get("subtype") == "error_max_turns":
             return "timed_out"

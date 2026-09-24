@@ -283,6 +283,32 @@ class Accumulator:
     """How many stream events the monitor normalizer failed on. Counted by the drain path, never
     read by `classify`, so a normalizer bug can never change a run's reported outcome."""
 
+    result_count: int = 0
+    """How many end-of-turn results the stream has carried. One on a classic run; one per turn on
+    a live-input run, which is why the per-result counters are accumulated rather than assigned."""
+
+    turn_open: bool = False
+    """A turn is running: the agent has shown activity since the last result. Distinguishes a run
+    waiting only on background tasks (the idle bound applies) from one that is simply working."""
+
+    background_open: set[str] = field(default_factory=set)
+    """Ids of background tasks the agent started and the stream has not yet reported finished. A
+    live-input run is not idle while any are open: closing its stdin would kill them (measured)."""
+
+    awaiting_input: bool = False
+    """A live-input run is idle: a result has arrived, no turn is running, and no background task
+    is open. The input pump closes stdin once this holds with nothing queued. Set by `ingest`,
+    cleared by `ingest` on turn activity and by the pump when it writes a message."""
+
+    error_result_seen: bool = False
+    """A result reported an error (or a non-success subtype). Sticky: the input pump stops
+    forwarding and closes stdin, and every message still queued is reported undelivered."""
+
+    background_abandoned: bool = False
+    """Set by the input pump when a run waited on background tasks alone, with no output, for the
+    idle bound, and stdin was closed anyway — which kills them. A backend's `classify` reports that
+    as a failure, never a clean completion."""
+
     stream_state: dict[str, Any] = field(default_factory=dict)
     """Backend-private scratch space for an ingest algorithm that needs memory across events (e.g.
     vibe's current-turn tracking). Lives here, per task, rather than on the backend instance:

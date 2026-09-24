@@ -112,6 +112,39 @@ DRAIN_GRACE_SECONDS = 10.0
 
 MAX_TASKS = 200
 
+# Live input: how long a run may wait on background tasks alone — a result in, nothing else
+# running, no output at all — before the input pump closes its stdin anyway. Closing kills those
+# tasks (measured), so the run is then reported `failed`, never a clean completion.
+LIVE_IDLE_ENV = "PB_LIVE_IDLE_SECONDS"
+DEFAULT_LIVE_IDLE_SECONDS = 600.0
+
+
+def live_idle_seconds(environ: Any = None) -> float:
+    """`PB_LIVE_IDLE_SECONDS`, or the default for anything missing, unparsable, or not > 0."""
+    raw = (os.environ if environ is None else environ).get(LIVE_IDLE_ENV)
+    if raw is None:
+        return DEFAULT_LIVE_IDLE_SECONDS
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_LIVE_IDLE_SECONDS
+    if not (value > 0) or value == float("inf"):
+        return DEFAULT_LIVE_IDLE_SECONDS
+    return value
+
+
+def background_idle_bound_reached(acc: Accumulator, silent_for: float, bound: float) -> bool:
+    """Whether a live run has waited on background tasks alone for the idle bound: a result has
+    arrived, no turn is running, it is not idle only because background tasks are open, and there
+    has been no output for `bound` seconds."""
+    return (
+        acc.result_count > 0
+        and bool(acc.background_open)
+        and not acc.turn_open
+        and not acc.awaiting_input
+        and silent_for >= bound
+    )
+
 # Short and strict on purpose: these are local, read-only ref lookups (never a fetch or ls-remote),
 # so a slow or hanging git must not be allowed to delay a dispatch. The budget is for the *whole*
 # check, not per call — several probes each allowed the full timeout would stack up into a delay
