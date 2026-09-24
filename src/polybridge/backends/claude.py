@@ -71,6 +71,7 @@ from .base import (
     check_freedom,
     check_network,
     check_reasoning_effort,
+    interactive_session_id_ok,
 )
 
 BINARY = "claude"
@@ -415,6 +416,14 @@ class ClaudeBackend:
             "message": {"role": "user", "content": [{"type": "text", "text": text}]},
         }
         return (json.dumps(line, ensure_ascii=False) + "\n").encode("utf-8")
+
+
+    def interactive_resume_argv(self, session_id: str, repo_path: Path) -> list[str] | None:
+        """`claude --resume <id>`, run in the repository (measured: it loads the prior
+        conversation; an untrusted folder shows claude's own trust dialog first)."""
+        if not interactive_session_id_ok(session_id, repo_path):
+            return None
+        return [self.binary, "--resume", session_id]
 
     def _common(
         self,

@@ -45,6 +45,9 @@ class _RecordingBackend:
     def encode_live_message(self, text):
         raise backends.UnsupportedCapability("no live input")
 
+    def interactive_resume_argv(self, session_id, repo_path):
+        return [self.binary, "--resume", session_id]
+
     def enforcement(self, freedom, network=None):
         return Enforcement(
             freedom=freedom, mechanism="none", os_enforced=False, writes_confined=False

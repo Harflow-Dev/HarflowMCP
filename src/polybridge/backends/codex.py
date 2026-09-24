@@ -80,6 +80,7 @@ from .base import (
     check_freedom,
     check_network,
     check_reasoning_effort,
+    interactive_session_id_ok,
     classic_invocation_problem,
 )
 
@@ -835,6 +836,16 @@ class CodexBackend:
             f"the {self.name} backend has no live input, so a message cannot be added to a running "
             "task; continue its session with resume_task instead"
         )
+
+
+    def interactive_resume_argv(self, session_id: str, repo_path: Path) -> list[str] | None:
+        """`codex -c check_for_update_on_startup=false resume <thread_id>`, run in the repository
+        (measured: loads the prior conversation; an untrusted directory gets codex's own trust
+        prompt, which writes a `[projects."<dir>"]` entry to ~/.codex/config.toml). `-c` is a
+        global option, so it precedes `resume` — the same placement `build_resume_argv` needs."""
+        if not interactive_session_id_ok(session_id, repo_path):
+            return None
+        return [self.binary, "-c", "check_for_update_on_startup=false", "resume", session_id]
 
     def classify(self, acc: Accumulator, exit_code: int | None) -> Status:
         # No terminal success/failure event exists, so the exit code is the authority and the closing

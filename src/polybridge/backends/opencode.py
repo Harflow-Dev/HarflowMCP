@@ -66,6 +66,7 @@ from .base import (
     check_freedom,
     check_network,
     check_reasoning_effort,
+    interactive_session_id_ok,
     classic_invocation_problem,
 )
 
@@ -557,6 +558,13 @@ class OpencodeBackend:
             f"the {self.name} backend has no live input, so a message cannot be added to a running "
             "task; continue its session with resume_task instead"
         )
+
+
+    def interactive_resume_argv(self, session_id: str, repo_path: Path) -> list[str] | None:
+        """`opencode <repo> -s <id>` (measured: loads the prior conversation, no prompts)."""
+        if not interactive_session_id_ok(session_id, repo_path):
+            return None
+        return [self.binary, str(repo_path), "-s", session_id]
 
     def classify(self, acc: Accumulator, exit_code: int | None) -> Status:
         # `reason: "stop"` is a real end-of-run signal, not merely "some text arrived", so unlike

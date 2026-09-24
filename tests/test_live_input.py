@@ -62,6 +62,9 @@ class _CatDouble:
     def encode_live_message(self, text):
         return backends.ClaudeBackend().encode_live_message(text)
 
+    def interactive_resume_argv(self, session_id, repo_path):
+        return [self.binary, "--resume", session_id]
+
 
 def _events(log_dir: Path, task_id: str) -> list[dict]:
     return [json.loads(line) for line in events_path(log_dir, task_id).read_text().splitlines()]
@@ -496,6 +499,9 @@ class _FakeClaude:
 
     def encode_live_message(self, text):
         return self._claude.encode_live_message(text)
+
+    def interactive_resume_argv(self, session_id, repo_path):
+        return [self.binary, "--resume", session_id]
 
 
 @pytest.fixture

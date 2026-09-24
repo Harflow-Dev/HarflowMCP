@@ -123,6 +123,7 @@ from .base import (
     check_freedom,
     check_network,
     check_reasoning_effort,
+    interactive_session_id_ok,
     classic_invocation_problem,
     reject_model,
 )
@@ -697,6 +698,14 @@ class VibeBackend:
             f"the {self.name} backend has no live input, so a message cannot be added to a running "
             "task; continue its session with resume_task instead"
         )
+
+
+    def interactive_resume_argv(self, session_id: str, repo_path: Path) -> list[str] | None:
+        """`vibe --trust --workdir <repo> --resume <id>` (measured: loads the prior conversation,
+        no prompts)."""
+        if not interactive_session_id_ok(session_id, repo_path):
+            return None
+        return [self.binary, "--trust", "--workdir", str(repo_path), "--resume", session_id]
 
     def classify(self, acc: Accumulator, exit_code: int | None) -> Status:
         # No terminal event exists, so the exit code is the authority and the closing message is

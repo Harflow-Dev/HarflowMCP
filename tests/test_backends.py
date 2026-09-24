@@ -80,6 +80,9 @@ class _NoEffortBackend:
     def encode_live_message(self, text: str) -> bytes:
         raise backends.UnsupportedCapability("no live input")
 
+    def interactive_resume_argv(self, session_id, repo_path):
+        return [self.binary, "--resume", session_id]
+
 
 class _PartialEffortBackend:
     """A Backend double that accepts only some of EFFORTS, to exercise the "names what it has"
@@ -110,6 +113,9 @@ class _PartialEffortBackend:
 
     def encode_live_message(self, text: str) -> bytes:
         raise backends.UnsupportedCapability("no live input")
+
+    def interactive_resume_argv(self, session_id, repo_path):
+        return [self.binary, "--resume", session_id]
 
 
 def start(backend, **kwargs):
@@ -3378,3 +3384,49 @@ def test_claude_live_and_classic_shapes_differ_only_in_the_input_wiring(freedom:
     classic_options = classic[: classic.index("--")]
     index = classic_options.index("--max-turns")
     assert live_options == classic_options[:index] + classic_options[index + 2 :]
+
+
+# --- interactive resume (takeover, A4.1) ----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("claude", ["claude", "--resume", "abc-123"]),
+        ("codex", ["codex", "-c", "check_for_update_on_startup=false", "resume", "abc-123"]),
+        ("opencode", ["opencode", "/work/repo", "-s", "abc-123"]),
+        ("vibe", ["vibe", "--trust", "--workdir", "/work/repo", "--resume", "abc-123"]),
+    ],
+)
+def test_interactive_resume_argv_is_the_measured_command(name: str, expected: list[str]) -> None:
+    backend = backends.get(name)
+
+    assert backend.interactive_resume_argv("abc-123", Path("/work/repo")) == expected
+
+
+@pytest.mark.parametrize("name", sorted(backends.BACKENDS))
+@pytest.mark.parametrize(
+    "session_id",
+    ["", "--dangerously-skip-permissions", "-s", "a b", "a\nb", "a;b", "x" * 257, None],
+)
+def test_interactive_resume_argv_refuses_ids_a_cli_could_parse_as_an_option(
+    name: str, session_id
+) -> None:
+    """Session ids come out of the agent's own stream; claude and vibe take them as an *optional*
+    option value and codex as a positional, so a `-`-prefixed id would become an option."""
+    assert backends.get(name).interactive_resume_argv(session_id, Path("/work/repo")) is None
+
+
+@pytest.mark.parametrize("name", sorted(backends.BACKENDS))
+def test_interactive_resume_argv_refuses_a_relative_repo(name: str) -> None:
+    assert backends.get(name).interactive_resume_argv("abc", Path("repo")) is None
+
+
+@pytest.mark.parametrize("name", sorted(backends.BACKENDS))
+def test_interactive_resume_argv_accepts_every_id_shape_the_clis_mint(name: str) -> None:
+    for session_id in (
+        "0199a3f2-7c1e-7b8a-9d0e-123456789abc",  # claude / codex / vibe uuid
+        "ses_3f1a9c0b2d7eFFabc",  # opencode
+    ):
+        argv = backends.get(name).interactive_resume_argv(session_id, Path("/work/repo"))
+        assert argv is not None and argv[-1] == session_id

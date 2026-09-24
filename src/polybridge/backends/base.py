@@ -10,6 +10,7 @@ branches on a backend's name.
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -426,6 +427,28 @@ class Backend(Protocol):
         included. Raises `UnsupportedCapability` on a backend without live input — the pump in
         `tasks.py` calls this so it never needs to know any backend's wire format."""
         ...
+
+    def interactive_resume_argv(self, session_id: str, repo_path: Path) -> list[str] | None:
+        """The command that resumes `session_id` in this CLI's own interactive UI, for a human
+        taking a task over. `argv[0]` is the bare `binary`; the caller resolves it. Built at call
+        time and never stored. None when no safe command exists — see
+        `interactive_session_id_ok`."""
+        ...
+
+
+# Every measured interactive resume takes the session id as an *optional* option value (claude
+# `--resume [value]`, vibe `--resume [SESSION_ID]`) or a positional (codex `resume [SESSION_ID]`),
+# so an id beginning with `-` would be parsed as an option. Session ids come out of the agent's own
+# stream, which is untrusted, so anything outside the shapes the four CLIs actually mint is refused.
+_INTERACTIVE_SESSION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}")
+
+
+def interactive_session_id_ok(session_id: str | None, repo_path: Path) -> bool:
+    return (
+        isinstance(session_id, str)
+        and _INTERACTIVE_SESSION_ID_RE.fullmatch(session_id) is not None
+        and Path(repo_path).is_absolute()
+    )
 
 
 def check_freedom(freedom: str) -> Freedom:
