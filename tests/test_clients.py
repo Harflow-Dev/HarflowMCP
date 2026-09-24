@@ -1479,3 +1479,127 @@ def test_run_cli_keeps_stdout_apart_for_parsers() -> None:
 
     assert result.stdout == "out\n"
     assert "err" in result.output
+
+
+# --- opencode: inspect through the JSONC tokenizer, remove by hand -------------------------------
+
+OPENCODE_ENTRY = {
+    "type": "local",
+    "command": ["/x/polybridge-server"],
+    "environment": {"PATH": "/a:/b"},
+}
+
+
+@pytest.fixture
+def opencode_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    directory = tmp_path / "config" / "opencode"
+    directory.mkdir(parents=True)
+    return directory
+
+
+def test_opencode_inspect_reads_a_commented_jsonc_config(opencode_dir: Path) -> None:
+    (opencode_dir / "opencode.jsonc").write_text(
+        '{\n  // hand-written\n  "$schema": "https://opencode.ai/config.json",\n'
+        f'  "mcp": {{"polybridge": {json.dumps(OPENCODE_ENTRY)},}},\n}}\n'
+    )
+
+    inspection = OpencodeClient().inspect("polybridge", FakeRunner())
+
+    assert inspection.installed is True
+    assert inspection.command == "/x/polybridge-server"
+    assert inspection.path_env == "/a:/b"
+
+
+@pytest.mark.parametrize("name", ["opencode.json", "config.json"])
+def test_opencode_inspect_reads_each_file_add_may_have_written(opencode_dir: Path, name: str) -> None:
+    (opencode_dir / name).write_text(json.dumps({"mcp": {"polybridge": OPENCODE_ENTRY}}))
+
+    assert OpencodeClient().inspect("polybridge", FakeRunner()).installed is True
+
+
+def test_opencode_inspect_with_no_config_is_not_installed(opencode_dir: Path) -> None:
+    inspection = OpencodeClient().inspect("polybridge", FakeRunner())
+
+    assert inspection.installed is False
+    assert inspection.error is None
+
+
+def test_opencode_inspect_defaults_to_dot_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".config" / "opencode").mkdir(parents=True)
+    (tmp_path / ".config" / "opencode" / "opencode.jsonc").write_text(
+        json.dumps({"mcp": {"polybridge": OPENCODE_ENTRY}})
+    )
+
+    assert OpencodeClient().inspect("polybridge", FakeRunner()).installed is True
+
+
+def test_opencode_inspect_of_entries_that_differ_between_files_claims_no_command(
+    opencode_dir: Path,
+) -> None:
+    """Which file wins is not measured, so no single command is reported."""
+    (opencode_dir / "opencode.json").write_text(json.dumps({"mcp": {"polybridge": OPENCODE_ENTRY}}))
+    other = {**OPENCODE_ENTRY, "command": ["/old/polybridge-server"]}
+    (opencode_dir / "opencode.jsonc").write_text(json.dumps({"mcp": {"polybridge": other}}))
+
+    inspection = OpencodeClient().inspect("polybridge", FakeRunner())
+
+    assert inspection.installed is True
+    assert inspection.command is None
+    assert any("differ" in note for note in inspection.notes)
+
+
+def test_opencode_inspect_of_a_multi_part_command_does_not_report_the_bare_binary(
+    opencode_dir: Path,
+) -> None:
+    entry = {**OPENCODE_ENTRY, "command": ["/x/polybridge-server", "--debug"]}
+    (opencode_dir / "opencode.jsonc").write_text(json.dumps({"mcp": {"polybridge": entry}}))
+
+    assert OpencodeClient().inspect("polybridge", FakeRunner()).command == (
+        "/x/polybridge-server --debug"
+    )
+
+
+@pytest.mark.parametrize(
+    "raw", ["{not json", "[]", '{"mcp": []}', '{"a": 1 /* open'], ids=["syntax", "array", "mcp", "comment"]
+)
+def test_opencode_inspect_of_a_malformed_config_is_an_error(opencode_dir: Path, raw: str) -> None:
+    (opencode_dir / "opencode.jsonc").write_text(raw)
+
+    (inspection,) = clients.inspect_all(
+        [OpencodeClient(binary=sys.executable)], "polybridge", run=FakeRunner()
+    )
+
+    assert inspection.installed is None
+    assert "opencode.jsonc" in inspection.error
+
+
+def test_opencode_remove_changes_nothing_and_names_the_file(opencode_dir: Path) -> None:
+    config = opencode_dir / "opencode.jsonc"
+    config.write_text(json.dumps({"mcp": {"polybridge": OPENCODE_ENTRY}}))
+    before = config.read_text()
+
+    result = OpencodeClient().remove("polybridge", FakeRunner())
+
+    assert result.status == "skipped"
+    assert str(config) in result.detail
+    assert "mcp.polybridge" in result.detail and "manually" in result.detail
+    assert config.read_text() == before
+
+
+def test_opencode_remove_with_nothing_registered_is_not_installed(opencode_dir: Path) -> None:
+    assert OpencodeClient().remove("polybridge", FakeRunner()).status == "not_installed"
+
+
+def test_opencode_remove_of_a_config_it_cannot_parse_is_a_failure(opencode_dir: Path) -> None:
+    (opencode_dir / "opencode.jsonc").write_text("{not json")
+
+    (result,) = clients.unregister(
+        [OpencodeClient(binary=sys.executable)], "polybridge", run=FakeRunner()
+    )
+
+    assert result.status == "failed"
