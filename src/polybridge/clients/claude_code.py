@@ -98,7 +98,9 @@ class ClaudeCodeClient(CliClient):
             return Inspection(self.key, None, error=f"{path} is not valid JSON ({exc})")
         if not isinstance(config, dict):
             return Inspection(self.key, None, error=f"{path} does not contain a JSON object")
-        servers = config.get("mcpServers", {})
+        servers = config.get("mcpServers")
+        if servers is None:
+            servers = {}
         if not isinstance(servers, dict):
             return Inspection(self.key, None, error=f"'mcpServers' in {path} is not a JSON object")
         if key not in servers:

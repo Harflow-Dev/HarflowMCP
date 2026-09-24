@@ -1820,3 +1820,33 @@ def test_every_registered_cli_client_overrides_the_raising_defaults(client: CliC
     """CliClient's inspect/remove only raise; a registered client left on them would always error."""
     for member in ("inspect", "remove"):
         assert getattr(type(client), member) is not getattr(CliClient, member), member
+
+
+
+@pytest.mark.parametrize(
+    ("client", "write"),
+    [
+        (ClaudeCodeClient(), lambda home: (home / "claude" / ".claude.json", '{"mcpServers": null}')),
+        (
+            OpencodeClient(),
+            lambda home: (home / "config" / "opencode" / "opencode.jsonc", '{"mcp": null}'),
+        ),
+        (DesktopClient(), lambda home: (home / "desktop.json", '{"mcpServers": null}')),
+    ],
+    ids=lambda value: getattr(value, "key", ""),
+)
+def test_a_null_server_table_reads_as_nothing_registered_on_every_json_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, client, write
+) -> None:
+    """The desktop app already treated `null` as empty; the other JSON readers now agree."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    path, raw = write(tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(raw)
+    if isinstance(client, DesktopClient):
+        client = client.with_config_path(path)
+
+    inspection = client.inspect("polybridge", FakeRunner())
+
+    assert (inspection.installed, inspection.error) == (False, None)

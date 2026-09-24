@@ -538,3 +538,12 @@ def test_json_document_puts_a_failed_actions_detail_in_error() -> None:
     assert row["error"] == "timed out"
     assert "inspect: list broke" in row["notes"]
     assert "ran: codex mcp remove polybridge" in row["notes"]
+
+
+def test_the_report_keeps_its_columns_aligned_for_long_statuses(capsys) -> None:
+    setup_client._report(
+        [Result("codex", "not_installed", "nothing registered"), Result("vibe", "removed", "ok")]
+    )
+
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0].index("nothing registered") == lines[1].index("ok")

@@ -57,7 +57,9 @@ def entries_for(key: str, directory: Path) -> tuple[list[Path], list[tuple[Path,
             raise SetupError(f"{path} could not be parsed ({exc})") from None
         if not isinstance(config, dict):
             raise SetupError(f"{path} does not contain a JSON object")
-        servers = config.get("mcp", {})
+        servers = config.get("mcp")
+        if servers is None:
+            servers = {}
         if not isinstance(servers, dict):
             raise SetupError(f"'mcp' in {path} is not a JSON object")
         if key in servers:

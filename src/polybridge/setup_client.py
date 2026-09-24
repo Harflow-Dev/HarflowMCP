@@ -118,9 +118,13 @@ def _selected(args: argparse.Namespace) -> list[clients.Client]:
 def _report(results: list[clients.Result]) -> None:
     labels = {result.client: clients.label(result.client) for result in results}
     width = max((len(label) for label in labels.values()), default=0)
+    # Sized to the longest status present, so `not_installed` does not push its row out of line.
+    status_width = max((len(result.status) for result in results), default=0)
     for result in results:
-        indent = f"  {'':<{width}}  {'':<9}  "
-        print(f"  {labels[result.client]:<{width}}  {result.status:<9}  {result.detail}")
+        indent = f"  {'':<{width}}  {'':<{status_width}}  "
+        print(
+            f"  {labels[result.client]:<{width}}  {result.status:<{status_width}}  {result.detail}"
+        )
         # Only the trouble cases get their commands printed; a preview already reads as one.
         if result.status in ("failed", "unknown"):
             for step in result.steps:
@@ -129,7 +133,9 @@ def _report(results: list[clients.Result]) -> None:
             print(f"{indent}{line}")
 
 
-def _report_status(inspections: list[clients.Inspection], expected: clients.Registration | None) -> None:
+def _report_status(
+    inspections: list[clients.Inspection], expected: clients.Registration | None
+) -> None:
     labels = {inspection.client: clients.label(inspection.client) for inspection in inspections}
     width = max((len(label) for label in labels.values()), default=0)
     for inspection in inspections:
