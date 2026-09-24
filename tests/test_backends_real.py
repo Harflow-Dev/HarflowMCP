@@ -109,8 +109,11 @@ def repo(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def run(argv: list[str], cwd: Path) -> tuple[int | None, str, str]:
+def run(argv: list[str], cwd: Path, stdin_data: bytes | None = None) -> tuple[int | None, str, str]:
     """Run `argv` to completion, or kill its whole process group at `RUN_TIMEOUT_SECONDS`.
+
+    `stdin_data` is a live-input Invocation's `initial_input`: written, then stdin closed, the way a
+    live run is wired. Everything else runs on DEVNULL, as the backend's Invocation says.
 
     `exit_code=None` marks a kill, and every caller treats that as a failed probe rather than a
     pass — a CLI that did not answer locally is exactly the case the module docstring warns may
@@ -125,14 +128,17 @@ def run(argv: list[str], cwd: Path) -> tuple[int | None, str, str]:
     proc = subprocess.Popen(
         argv,
         cwd=cwd,
-        stdin=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL if stdin_data is None else subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
         start_new_session=True,
     )
     try:
-        stdout, stderr = proc.communicate(timeout=RUN_TIMEOUT_SECONDS)
+        stdout, stderr = proc.communicate(
+            input=None if stdin_data is None else stdin_data.decode("utf-8"),
+            timeout=RUN_TIMEOUT_SECONDS,
+        )
         return proc.returncode, stdout, stderr
     except subprocess.TimeoutExpired:
         with contextlib.suppress(ProcessLookupError):
@@ -200,7 +206,7 @@ def test_real_resume_argv_parses_and_a_bogus_flag_is_caught(name: str, repo: Pat
     if not backends.is_installed(backend):
         pytest.skip(f"`{backend.binary}` is not installed")
 
-    argv = backend.build_resume_argv(
+    invocation = backend.build_resume_argv(
         PROMPT,
         repo=repo,
         freedom="read_only",
@@ -209,8 +215,9 @@ def test_real_resume_argv_parses_and_a_bogus_flag_is_caught(name: str, repo: Pat
         max_turns=None,
         reasoning_effort=None,
     )
+    argv = invocation.argv
 
-    ok_code, ok_out, ok_err = run(argv, repo)
+    ok_code, ok_out, ok_err = run(argv, repo, invocation.initial_input)
     # A kill is not a pass. It means the CLI neither accepted nor refused locally within the
     # timeout, which is the one case the module docstring flags as possibly having reached a
     # provider — so it is reported, never shrugged off as "not a parse rejection".
@@ -223,7 +230,7 @@ def test_real_resume_argv_parses_and_a_bogus_flag_is_caught(name: str, repo: Pat
         f"what this binary accepts: exit={ok_code} stdout={ok_out!r} stderr={ok_err!r}"
     )
 
-    bad_code, bad_out, bad_err = run(with_bogus_flag(argv), repo)
+    bad_code, bad_out, bad_err = run(with_bogus_flag(argv), repo, invocation.initial_input)
     assert bad_code is not None, (
         f"control inconclusive: {name} was killed at {RUN_TIMEOUT_SECONDS}s instead of refusing a "
         f"bogus flag: stdout={bad_out!r} stderr={bad_err!r}"
@@ -248,7 +255,7 @@ def test_the_pre_fix_codex_resume_shape_is_still_rejected_by_the_real_cli(repo: 
     argv = backend.build_resume_argv(
         PROMPT, repo=repo, freedom="read_only", session_id=BOGUS_SESSION_ID,
         model=None, max_turns=None, reasoning_effort=None,
-    )
+    ).argv
     separator = argv.index("--")
     assert argv[separator - 1] == "resume"
     pre_fix = [*argv[:2], "resume", *argv[2 : separator - 1], *argv[separator:]]
