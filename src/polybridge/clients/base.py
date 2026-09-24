@@ -155,7 +155,10 @@ class Inspection:
     and the Mac app acts on the first.
 
     `command` and `path_env` are what the stored entry would launch, so a caller can compare them with
-    what install would write now. `available` is filled in by the orchestration, not by the client.
+    what install would write now. `command` is for display; `argv` is the launch itself, executable
+    and arguments kept apart, and is what comparisons use — a flattened string cannot tell
+    `/a/First` + `Last/server` from `/a/First Last/server`. `available` is filled in by the
+    orchestration, not by the client.
     """
 
     client: str
@@ -165,6 +168,7 @@ class Inspection:
     error: str | None = None
     notes: tuple[str, ...] = ()
     available: bool = True
+    argv: tuple[str, ...] | None = None
 
 
 def entry_inspection(client: str, entry: object, where: str) -> Inspection:
@@ -179,18 +183,27 @@ def entry_inspection(client: str, entry: object, where: str) -> Inspection:
             client, True, error=f"the entry in {where} is not an object", notes=(f"read {where}",)
         )
     command = entry.get("command")
-    args = entry.get("args")
+    args = entry.get("args") or []
     env = entry.get("env")
     path_env = env.get("PATH") if isinstance(env, dict) else None
-    if isinstance(command, str) and args:
-        command = shlex.join([command, *(str(arg) for arg in args)]) if isinstance(args, list) else None
+    argv: tuple[str, ...] | None = None
+    if isinstance(command, str) and isinstance(args, list):
+        argv = (command, *(str(arg) for arg in args))
     return Inspection(
         client,
         True,
-        command=command if isinstance(command, str) else None,
+        command=display_command(argv),
         path_env=path_env if isinstance(path_env, str) else None,
         notes=(f"read {where}",),
+        argv=argv,
     )
+
+
+def display_command(argv: tuple[str, ...] | None) -> str | None:
+    """The launch as one readable string: the bare executable when there are no arguments."""
+    if not argv:
+        return None
+    return argv[0] if len(argv) == 1 else shlex.join(argv)
 
 
 class Client(Protocol):

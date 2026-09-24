@@ -19,13 +19,20 @@ no single command rather than guessing a precedence.
 from __future__ import annotations
 
 import os
-import shlex
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from . import jsonc
-from .base import CliClient, Inspection, Registration, Result, Runner, SetupError
+from .base import (
+    CliClient,
+    Inspection,
+    Registration,
+    Result,
+    Runner,
+    SetupError,
+    display_command,
+)
 
 CANDIDATES = ("config.json", "opencode.json", "opencode.jsonc")
 
@@ -67,18 +74,18 @@ def entries_for(key: str, directory: Path) -> tuple[list[Path], list[tuple[Path,
     return read, found
 
 
-def _launch(entry: Any) -> tuple[str | None, str | None]:
-    """(command, PATH) an opencode entry launches. A non-local entry launches no command."""
+def _launch(entry: Any) -> tuple[tuple[str, ...] | None, str | None]:
+    """(argv, PATH) an opencode entry launches. A non-local entry launches no command."""
     if not isinstance(entry, dict) or entry.get("type", "local") != "local":
         return None, None
     command = entry.get("command")
     if isinstance(command, list) and command and all(isinstance(part, str) for part in command):
-        launched = command[0] if len(command) == 1 else shlex.join(command)
+        argv: tuple[str, ...] | None = tuple(command)
     else:
-        launched = None
+        argv = None
     environment = entry.get("environment")
     path_env = environment.get("PATH") if isinstance(environment, dict) else None
-    return launched, path_env if isinstance(path_env, str) else None
+    return argv, path_env if isinstance(path_env, str) else None
 
 
 @dataclass(frozen=True)
@@ -105,8 +112,15 @@ class OpencodeClient(CliClient):
             return Inspection(
                 self.key, True, notes=(*notes, "the entries differ between files")
             )
-        command, path_env = launches.pop()
-        return Inspection(self.key, True, command=command, path_env=path_env, notes=notes)
+        argv, path_env = launches.pop()
+        return Inspection(
+            self.key,
+            True,
+            command=display_command(argv),
+            path_env=path_env,
+            notes=notes,
+            argv=argv,
+        )
 
     def remove(self, key: str, run: Runner) -> Result:
         """opencode has no `mcp remove`, so this says what to delete rather than deleting it.

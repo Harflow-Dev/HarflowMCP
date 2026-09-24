@@ -193,7 +193,7 @@ class VibeClient(CliClient):
         if not matching:
             return Inspection(self.key, False, notes=(f"read {path}",))
         inspections = [entry_inspection(self.key, entry, str(path)) for entry in matching]
-        if len({(i.command, i.path_env) for i in inspections}) > 1:
+        if len({(i.argv, i.path_env) for i in inspections}) > 1:
             return Inspection(
                 self.key,
                 True,

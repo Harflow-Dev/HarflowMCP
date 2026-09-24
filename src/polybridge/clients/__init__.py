@@ -287,9 +287,13 @@ def is_current(inspection: Inspection, command: str | None, path_env: str | None
     """
     if inspection.installed is not True or inspection.error is not None:
         return None
-    if inspection.command is None or command is None:
+    # `argv`, not the display string: install writes the bare server path with no arguments.
+    launched = inspection.argv
+    if launched is None and inspection.command is not None:
+        launched = (inspection.command,)
+    if launched is None or command is None:
         return None
-    return inspection.command == command and inspection.path_env == path_env
+    return launched == (command,) and inspection.path_env == path_env
 
 
 def _availability(client: Client) -> Availability:

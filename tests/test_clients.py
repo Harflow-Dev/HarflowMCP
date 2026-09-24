@@ -1943,3 +1943,51 @@ def test_follow_up_is_the_clients_own_note_for_changes_only() -> None:
     )
     assert clients.follow_up(Result("claude-desktop", "not_installed", "")) is None
     assert clients.follow_up(Result("nobody", "applied", "")) is None
+
+
+# --- Codex review round 2 regression ----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "client_and_entry",
+    [
+        ("desktop", {"command": "/t/First", "args": ["Last/polybridge-server"], "env": {"PATH": "/p"}}),
+        ("opencode", {"type": "local", "command": ["/t/First", "Last/polybridge-server"],
+                      "environment": {"PATH": "/p"}}),
+    ],
+    ids=["args-shape", "opencode-array"],
+)
+def test_arguments_never_compare_equal_to_a_path_with_a_space(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, client_and_entry
+) -> None:
+    """`/t/First` + `Last/polybridge-server` flattens to the same string as `/t/First
+    Last/polybridge-server`; the launch argv does not, so it must be what is compared."""
+    kind, entry = client_and_entry
+    if kind == "desktop":
+        path = tmp_path / "desktop.json"
+        path.write_text(json.dumps({"mcpServers": {"polybridge": entry}}))
+        client = DesktopClient(config_path=path)
+    else:
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+        (tmp_path / "config" / "opencode").mkdir(parents=True)
+        (tmp_path / "config" / "opencode" / "opencode.jsonc").write_text(
+            json.dumps({"mcp": {"polybridge": entry}})
+        )
+        client = OpencodeClient()
+
+    inspection = client.inspect("polybridge", FakeRunner())
+
+    assert inspection.argv == ("/t/First", "Last/polybridge-server")
+    assert clients.is_current(inspection, "/t/First Last/polybridge-server", "/p") is False
+    assert clients.is_current(inspection, "/t/First", "/p") is False
+
+
+def test_a_bare_entry_under_a_path_with_a_space_is_current(tmp_path: Path) -> None:
+    path = tmp_path / "desktop.json"
+    server = "/t/First Last/polybridge-server"
+    path.write_text(json.dumps({"mcpServers": {"polybridge": {"command": server, "env": {"PATH": "/p"}}}}))
+
+    inspection = DesktopClient(config_path=path).inspect("polybridge", FakeRunner())
+
+    assert inspection.command == server
+    assert clients.is_current(inspection, server, "/p") is True
