@@ -58,7 +58,7 @@ class _FakeBackend:
         self.name = name
         self._argv = argv or ["/bin/echo", "hi"]
         self.binary = self._argv[0]
-        self.capabilities = SimpleNamespace(chooses_session_id=False)
+        self.capabilities = SimpleNamespace(chooses_session_id=False, supports_live_input=False)
         self._enforcement_kwargs = enforcement_kwargs or {}
 
     def build_start_argv(self, prompt, **kwargs):

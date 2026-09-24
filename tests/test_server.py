@@ -571,8 +571,10 @@ async def test_send_message_validates_its_arguments() -> None:
         await call("send_message", task_id="nope", text="  ")
 
 
-async def test_send_message_reaches_a_recorded_task_via_its_inbox() -> None:
-    from polybridge import identity, inbox
+async def test_send_message_reaches_a_recorded_task_via_its_inbox(identities) -> None:
+    from conftest import ALIVE_OWNER
+
+    from polybridge import inbox
 
     log_dir = server._reg().log_dir
     store.write(
@@ -583,7 +585,7 @@ async def test_send_message_reaches_a_recorded_task_via_its_inbox() -> None:
             session_id="s",
             repo_path="/tmp",
             started_at=datetime.now(timezone.utc).isoformat(),
-            owner=identity.own_identity(),
+            owner=ALIVE_OWNER,
             live_input=True,
         ),
     )

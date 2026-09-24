@@ -447,7 +447,16 @@ from polybridge import control, identity, inbox  # noqa: E402
 from polybridge import tasks as tasks_module  # noqa: E402
 from polybridge.tasks import Task  # noqa: E402
 
+from conftest import ALIVE_OWNER  # noqa: E402
+
 FAKE_AGENT = Path(__file__).with_name("fake_claude_agent.py")
+
+
+@pytest.fixture(autouse=True)
+def _no_ps_needed(identities):
+    """Every owner/leader verdict here comes from the `identities` stub, never from `ps`: a send's
+    owner check must not pass or fail by accident of the environment (verifier #4)."""
+    return identities
 SETTLE_SECONDS = 20.0
 
 
@@ -497,7 +506,7 @@ def fake(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setitem(backends.BACKENDS, backend.name, backend)
     stdin_log = tmp_path / "agent-stdin.jsonl"
     monkeypatch.setenv("FAKE_CLAUDE_LOG", str(stdin_log))
-    registry = TaskRegistry(log_dir=tmp_path / "streams", owner=identity.own_identity())
+    registry = TaskRegistry(log_dir=tmp_path / "streams", owner=ALIVE_OWNER)
     return SimpleNamespace(backend=backend, registry=registry, stdin_log=stdin_log, repo=tmp_path)
 
 
@@ -791,7 +800,7 @@ async def test_a_send_racing_the_close_is_either_delivered_or_refused(tmp_path: 
     """The close protocol holds the inbox lock from its last read to the marker: a sender that got
     the lock first is forwarded; one that comes after is refused. Simulated by holding the lock (as
     a sender would) while the pump tries to close, appending, then releasing."""
-    registry = TaskRegistry(log_dir=tmp_path, owner=identity.own_identity())
+    registry = TaskRegistry(log_dir=tmp_path, owner=ALIVE_OWNER)
     store.write(
         tmp_path,
         store.TaskRecord(
@@ -800,7 +809,7 @@ async def test_a_send_racing_the_close_is_either_delivered_or_refused(tmp_path: 
             session_id="s",
             repo_path=str(tmp_path),
             started_at=datetime.now(timezone.utc).isoformat(),
-            owner=identity.own_identity(),
+            owner=ALIVE_OWNER,
             live_input=True,
         ),
     )
@@ -826,7 +835,7 @@ async def test_a_send_racing_the_close_is_either_delivered_or_refused(tmp_path: 
 
 async def test_concurrent_senders_never_lose_an_acknowledged_message(tmp_path: Path) -> None:
     """Many senders race a closing pump: every "queued" message ends up written or reported."""
-    owner = identity.own_identity()
+    owner = ALIVE_OWNER
     registry = TaskRegistry(log_dir=tmp_path, owner=owner)
     store.write(
         tmp_path,
@@ -928,7 +937,7 @@ def _record(tmp_path: Path, **overrides) -> None:
         session_id="s",
         repo_path=str(tmp_path),
         started_at=datetime.now(timezone.utc).isoformat(),
-        owner=identity.own_identity(),
+        owner=ALIVE_OWNER,
         live_input=True,
     )
     fields.update(overrides)
@@ -1203,12 +1212,13 @@ async def test_the_idle_bound_is_only_marked_abandoned_when_the_close_happens(
     assert claude.classify(task.acc, 0) == "completed"
 
 
-def test_a_send_to_a_task_whose_process_has_exited_is_refused(tmp_path: Path) -> None:
+def test_a_send_to_a_task_whose_process_has_exited_is_refused(tmp_path: Path, identities) -> None:
     """Round 2: the record may still say running, but nothing is left to deliver to."""
     import subprocess
 
     gone = subprocess.Popen(["/usr/bin/true"])
-    gone.wait()  # a real pid, reaped: `ps` finds nothing, which is `dead`, not undecidable
+    gone.wait()
+    identities.dead(gone.pid)
     _record(tmp_path, pid=gone.pid, start_time="Mon Jan  1 00:00:00 2001", markers=["true"])
     with pytest.raises(inbox.SendRefused) as caught:
         inbox.send_to_record(tmp_path, "t1", "hi", by=None)
@@ -1409,7 +1419,7 @@ async def test_a_message_appended_after_a_forced_close_that_could_not_seal_is_re
     """Verifier #2: the forced close read the inbox fine but could not seal it. Once its lock was
     released another process saw no marker, appended, and was told "queued" — and `_finish_pump`
     skipped the reread because the inbox counted as reconciled. It is reconciled only once sealed."""
-    owner = identity.own_identity()
+    owner = ALIVE_OWNER
     registry = TaskRegistry(log_dir=tmp_path, owner=owner)
     stdin = _Stdin()
     task = _stub_task(tmp_path, stdin)

@@ -736,7 +736,7 @@ class _TrivialBackend:
 
     name = "trivial"
     binary = "/bin/echo"
-    capabilities = SimpleNamespace(chooses_session_id=False)
+    capabilities = SimpleNamespace(chooses_session_id=False, supports_live_input=False)
 
     def build_start_argv(self, prompt, **kwargs):
         return Invocation([self.binary, "{}"])
@@ -778,6 +778,7 @@ class _NetworkAwareBackend(_TrivialBackend):
     name = "netaware"
     capabilities = SimpleNamespace(
         chooses_session_id=False,
+        supports_live_input=False,
         network_control=SimpleNamespace(
             can_enable=("write_in_repo",), can_block=("write_in_repo",)
         ),
@@ -803,6 +804,7 @@ class _NoBarrierBackend(_TrivialBackend):
     name = "nobarrier"
     capabilities = SimpleNamespace(
         chooses_session_id=False,
+        supports_live_input=False,
         network_control=SimpleNamespace(can_enable=tuple(FREEDOMS), can_block=()),
     )
 

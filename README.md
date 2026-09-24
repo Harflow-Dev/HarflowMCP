@@ -426,6 +426,20 @@ The owning server delivers the messages. If it restarts mid-run the turn in flig
 (the agent is its own session leader), but messages queued and not yet written are lost with it,
 and a background job still open is killed when the agent's stdin reaches EOF.
 
+Two caveats worth knowing before relying on it:
+
+- **"queued" on the owning server means in memory.** A `send_message` handled by the server that
+  owns the task goes into that server's in-memory queue, not onto disk; the pump normally writes it
+  within a second. If that server dies abruptly in between, the message is lost and **no event
+  records it** — neither `user_message` nor `undelivered`. (A `polybridge-ctl send`, or a send from
+  a different server, is appended to the on-disk inbox instead, and is reported either way.)
+- **A local process holding the inbox lock can hold a live task open.** Every send and every close
+  take an `flock` on `<task_id>.inbox.jsonl`. A process that takes that lock and then stalls — or a
+  hostile local process — keeps an idle live task from closing its stdin for as long as it holds
+  it, because closing without the lock could accept a message after the last forward. The server's
+  event loop stays responsive and other tasks are unaffected; only that task waits. Cancelling it
+  still works.
+
 ## `polybridge-ctl`: a CLI over the same records
 
 ```bash

@@ -25,7 +25,7 @@ class _RecordingBackend:
 
     name = "recording-double"
     binary = "/bin/sh"
-    capabilities = SimpleNamespace(chooses_session_id=False)
+    capabilities = SimpleNamespace(chooses_session_id=False, supports_live_input=False)
 
     def __init__(self, script: str, normalize_fn=None, classify_result: str = "completed") -> None:
         self.script = script

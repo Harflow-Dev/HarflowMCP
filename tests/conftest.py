@@ -40,3 +40,39 @@ def git_repo(tmp_path: Path) -> Path:
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
     return repo
+
+
+# A synthetic owner identity that `identities` reports alive. Tests that need a *live* owning server
+# use this instead of `identity.own_identity()`, whose verdict depends on a working `ps`.
+ALIVE_OWNER = {"pid": 424_242, "start_time": "Wed Jan  1 00:00:00 2026", "markers": []}
+
+
+class IdentityStub:
+    """Stands in for `identity.identity_check`: verdicts keyed by pid, `undecidable` otherwise —
+    the same answer a sandbox with no working `ps` gives, so a test never passes by accident of
+    the environment."""
+
+    def __init__(self) -> None:
+        self.verdicts: dict[int, str] = {ALIVE_OWNER["pid"]: "alive"}
+
+    def alive(self, pid: int) -> None:
+        self.verdicts[pid] = "alive"
+
+    def dead(self, pid: int) -> None:
+        self.verdicts[pid] = "dead"
+
+    def __call__(self, ident) -> str:
+        if not isinstance(ident, dict) or ident.get("pid") is None:
+            return "undecidable"
+        return self.verdicts.get(ident["pid"], "undecidable")
+
+
+@pytest.fixture
+def identities(monkeypatch: pytest.MonkeyPatch) -> IdentityStub:
+    """Replace `identity.identity_check` (looked up at call time by `inbox`, `store`, `control`)
+    with an `IdentityStub`, so live-input send checks do not depend on `ps`."""
+    from polybridge import identity
+
+    stub = IdentityStub()
+    monkeypatch.setattr(identity, "identity_check", stub)
+    return stub

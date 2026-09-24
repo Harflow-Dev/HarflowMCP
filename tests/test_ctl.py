@@ -8,7 +8,9 @@ from pathlib import Path
 
 import pytest
 
-from polybridge import ctl, identity, inbox, store
+from conftest import ALIVE_OWNER
+
+from polybridge import ctl, inbox, store
 
 
 def _iso(dt: datetime) -> str:
@@ -204,7 +206,7 @@ def _live_running(**overrides) -> store.TaskRecord:
         "exit_code": None,
         "finished_at": None,
         "live_input": True,
-        "owner": identity.own_identity(),
+        "owner": ALIVE_OWNER,
     }
     return make_record(**(fields | overrides))
 
@@ -215,7 +217,8 @@ def _one_doc(capsys: pytest.CaptureFixture) -> dict:
     return json.loads(lines[0])
 
 
-def test_send_queues_a_message_in_the_inbox(home: Path, capsys: pytest.CaptureFixture) -> None:
+def test_send_queues_a_message_in_the_inbox(
+    identities, home: Path, capsys: pytest.CaptureFixture) -> None:
     store.write(_log_dir(home), _live_running())
 
     code = ctl.main(["send", "task-1", "please also check the tests", "--json"])
@@ -229,7 +232,8 @@ def test_send_queues_a_message_in_the_inbox(home: Path, capsys: pytest.CaptureFi
     assert messages[0]["id"] == doc["result"]["message_id"]
 
 
-def test_send_after_close_says_to_resume(home: Path, capsys: pytest.CaptureFixture) -> None:
+def test_send_after_close_says_to_resume(
+    identities, home: Path, capsys: pytest.CaptureFixture) -> None:
     store.write(_log_dir(home), _live_running())
     inbox.mark_closed(_log_dir(home), "task-1")
 
@@ -250,7 +254,8 @@ def test_send_after_close_says_to_resume(home: Path, capsys: pytest.CaptureFixtu
     ],
     ids=["settled", "not-live", "no-owner"],
 )
-def test_send_refusals_are_json_errors(home: Path, capsys: pytest.CaptureFixture, record, code) -> None:
+def test_send_refusals_are_json_errors(
+    identities, home: Path, capsys: pytest.CaptureFixture, record, code) -> None:
     store.write(_log_dir(home), record())
 
     assert ctl.main(["send", "task-1", "hi", "--json"]) == 1
@@ -258,7 +263,7 @@ def test_send_refusals_are_json_errors(home: Path, capsys: pytest.CaptureFixture
 
 
 def test_send_rejects_bad_ids_unknown_tasks_and_empty_text(
-    home: Path, capsys: pytest.CaptureFixture
+    identities, home: Path, capsys: pytest.CaptureFixture
 ) -> None:
     assert ctl.main(["send", "../x", "hi", "--json"]) == 1
     assert _one_doc(capsys)["error"]["code"] == "invalid_task_id"
@@ -269,7 +274,8 @@ def test_send_rejects_bad_ids_unknown_tasks_and_empty_text(
     assert _one_doc(capsys)["error"]["code"] == "empty_text"
 
 
-def test_send_without_json_prints_a_line(home: Path, capsys: pytest.CaptureFixture) -> None:
+def test_send_without_json_prints_a_line(
+    identities, home: Path, capsys: pytest.CaptureFixture) -> None:
     store.write(_log_dir(home), _live_running())
     assert ctl.main(["send", "task-1", "hi"]) == 0
     assert "queued" in capsys.readouterr().out
