@@ -1125,8 +1125,6 @@ class TaskRegistry:
         except Exception:
             log.exception("task %s: could not write task_started event", task_id)
 
-        self._maybe_open_monitor(task)
-
         # Outside the no-await window, and still before any await: the prompt is the first stdin
         # line of a live-input run (a positional would be ignored), written synchronously so it is
         # queued ahead of anything else, then flushed below.
@@ -1157,6 +1155,11 @@ class TaskRegistry:
         except Exception:
             log.exception("task %s: could not persist after identity capture", task_id)
 
+        # Last, and with no await between here and the caller building its response from this
+        # task: the background job cannot run first, so however the launcher fares, the
+        # `start_task` result is the same.
+        self._maybe_open_monitor(task)
+
         log.info(
             "task %s started (%s pid=%s session=%s repo=%s%s)",
             task_id,
@@ -1171,7 +1174,8 @@ class TaskRegistry:
     def _maybe_open_monitor(self, task: Task) -> None:
         """Open the Monitor app on this task, in the background, for a root task only (A4.3).
 
-        Synchronous — it only schedules — so it adds no await after registration. A root task is
+        Synchronous — it only schedules — and called as `_spawn`'s last step, after registration. A
+        root task is
         one with no detected caller and no `PB_TASK_ID` in this server's environment: a nested
         dispatch belongs to a tree the user is already watching. Skipped off darwin, when
         `PB_OPEN_MONITOR=0`, and for a registry built with `open_monitor=False` (`polybridge-ctl

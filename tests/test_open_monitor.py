@@ -152,30 +152,29 @@ async def test_a_failing_launcher_only_adds_a_notice(
     assert store.read(tmp_path / "tasks", task.task_id).bridge_notices == task.bridge_notices
 
 
+@pytest.mark.parametrize("result", [0, 1, OSError("no app")])
 async def test_start_task_response_is_the_same_whatever_the_launcher_does(
-    tmp_path: Path, git_repo: Path, backend: _Backend, opening_enabled, monkeypatch
+    tmp_path: Path, git_repo: Path, backend: _Backend, opening_enabled, monkeypatch, result
 ) -> None:
-    """The response is built before the launcher has run, and never mentions the app."""
+    """The launcher is scheduled as `_spawn`'s last step with no await before the response is
+    built, so even one that fails instantly cannot reach the response — which never mentions the
+    app either way. (Found in acceptance: scheduled earlier, a fast failure's notice landed in
+    the response of `start_task`.)"""
     monkeypatch.setattr(server.backends, "is_installed", lambda b: True)
-    gate = asyncio.Event()
-
-    async def slow_failing(url: str) -> int:
-        await gate.wait()
-        raise OSError("no app")
-
-    registry = TaskRegistry(log_dir=tmp_path / "tasks", monitor_launcher=slow_failing)
+    launcher = Launcher(result)
+    registry = TaskRegistry(log_dir=tmp_path / "tasks", monitor_launcher=launcher)
     monkeypatch.setattr(server, "_registry", registry)
 
     response = await server.start_task("hi", str(git_repo), backend="fake-open")
 
     assert response["notices"] == []
     assert "monitor" not in str(response).lower()
-    gate.set()
     task = registry.get(response["task_id"])
     await asyncio.wait_for(task.done.wait(), timeout=10)
     await asyncio.gather(*registry._monitor_jobs, return_exceptions=True)
+    assert launcher.urls == [f"polybridge-monitor://task/{task.task_id}"]
     assert task.status == "completed"
-    assert len(task.bridge_notices) == 1
+    assert len(task.bridge_notices) == (0 if result == 0 else 1)
 
 
 async def test_the_default_launcher_runs_open_g_and_reaps_it(monkeypatch) -> None:
