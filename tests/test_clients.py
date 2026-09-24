@@ -340,7 +340,7 @@ def test_vibe_argv_has_no_separator_and_puts_the_command_behind_a_flag() -> None
 
 
 def test_vibe_remove_argv() -> None:
-    assert VibeClient().remove_argv(REGISTRATION) == ["vibe", "mcp", "remove", "polybridge"]
+    assert VibeClient().remove_argv("polybridge") == ["vibe", "mcp", "remove", "polybridge"]
 
 
 @pytest.mark.parametrize(
@@ -731,6 +731,12 @@ class Exploding:
     def apply(self, registration, run):
         raise self.exc
 
+    def inspect(self, key, run):
+        raise self.exc
+
+    def remove(self, key, run):
+        raise self.exc
+
 
 @pytest.mark.parametrize(
     "exc",
@@ -760,6 +766,93 @@ def test_an_exception_with_no_message_still_reports_something(
 
     assert result.status == "failed"
     assert "RuntimeError" in result.detail
+
+
+class Absent(Exploding):
+    """A well-behaved client with nothing registered."""
+
+    key = "opencode"
+    label = "opencode"
+
+    def __init__(self) -> None:
+        super().__init__(RuntimeError("unused"))
+
+    def inspect(self, key, run):
+        return clients.Inspection(self.key, False)
+
+    def remove(self, key, run):
+        return Result(self.key, "not_installed", "nothing to remove")
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"), RuntimeError("kaboom")],
+    ids=["non-utf8-config", "bug"],
+)
+def test_an_inspect_that_raises_is_that_clients_error_and_the_others_still_run(
+    exc: Exception,
+) -> None:
+    results = clients.inspect_all([Exploding(exc), Absent()], "polybridge", run=FakeRunner())
+
+    assert results[0].installed is None
+    assert results[0].error
+    assert results[1].installed is False
+    assert results[1].error is None
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"), RuntimeError("kaboom")],
+    ids=["non-utf8-config", "bug"],
+)
+def test_a_remove_that_raises_is_a_failure_and_the_others_still_run(exc: Exception) -> None:
+    results = clients.unregister([Exploding(exc), Absent()], "polybridge", run=FakeRunner())
+
+    assert [result.status for result in results] == ["failed", "not_installed"]
+    assert results[0].detail
+
+
+def test_an_unavailable_client_is_not_inspected_and_reads_as_not_checked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`installed=None`, never False: the file was not read, so absence was not observed."""
+    monkeypatch.setattr("polybridge.clients.base.shutil.which", lambda _: None)
+
+    (inspection,) = clients.inspect_all([CodexClient()], "polybridge", run=FakeRunner())
+
+    assert inspection.available is False
+    assert inspection.installed is None
+    assert inspection.error is None
+    assert any("not on PATH" in note for note in inspection.notes)
+
+
+def test_an_availability_check_that_crashes_is_an_inspect_error_not_an_absence() -> None:
+    class Broken(Exploding):
+        def availability(self):
+            raise self.exc
+
+    (inspection,) = clients.inspect_all(
+        [Broken(RuntimeError("cannot stat"))], "polybridge", run=FakeRunner()
+    )
+
+    assert inspection.available is False
+    assert inspection.installed is None
+    assert inspection.error == "cannot stat"
+
+
+def test_an_absent_client_is_skipped_on_uninstall_unless_it_was_named(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("polybridge.clients.base.shutil.which", lambda _: None)
+    codex = CodexClient()
+
+    skipped = clients.unregister([codex], "polybridge", run=FakeRunner())
+    failed = clients.unregister(
+        [codex], "polybridge", run=FakeRunner(), named=frozenset({"codex"})
+    )
+
+    assert [result.status for result in skipped] == ["skipped"]
+    assert [result.status for result in failed] == ["failed"]
 
 
 def test_parse_selection_accepts_repeats_commas_and_all() -> None:
@@ -822,6 +915,57 @@ def test_closing_notes_group_clients_that_need_the_same_thing_done() -> None:
 def test_nothing_is_promised_about_a_client_that_did_not_change() -> None:
     assert clients.closing_notes([Result("codex", "skipped", "")]) == []
     assert clients.closing_notes([Result("codex", "unknown", "")]) == []
+    assert clients.closing_notes([Result("claude-desktop", "not_installed", "")]) == []
+
+
+def test_removing_from_the_desktop_app_also_says_to_restart_it() -> None:
+    notes = clients.closing_notes(
+        [Result("claude-desktop", "removed", ""), Result("codex", "removed", "")]
+    )
+
+    assert notes[0].startswith("Claude desktop app:") and "restart" in notes[0]
+    assert notes[1].startswith("Codex:") and "no restart" in notes[1]
+
+
+def test_status_exit_code_fails_only_on_an_inspect_error() -> None:
+    Inspection = clients.Inspection
+    absent = Inspection("codex", None, available=False, notes=("`codex` is not on PATH",))
+    unregistered = Inspection("vibe", False)
+    registered = Inspection("claude-code", True, command="/x")
+
+    assert clients.status_exit_code([absent, unregistered, registered]) == 0
+    assert clients.status_exit_code([]) == 0
+    assert clients.status_exit_code([registered, Inspection("opencode", None, error="bad")]) == 1
+
+
+@pytest.mark.parametrize(
+    ("statuses", "code"),
+    [
+        (["removed"], 0),
+        (["not_installed"], 0),
+        (["skipped"], 0),
+        (["removed", "not_installed", "skipped"], 0),
+        ([], 0),
+        (["removed", "failed"], 1),
+        (["not_installed", "unknown"], 1),
+    ],
+)
+def test_uninstall_exit_code_treats_not_installed_as_success(statuses, code: int) -> None:
+    results = [Result("codex", status, "") for status in statuses]
+
+    assert clients.uninstall_exit_code(results) == code
+
+
+def test_is_current_needs_both_the_command_and_the_path_to_match() -> None:
+    Inspection = clients.Inspection
+    stored = Inspection("codex", True, command="/x/s", path_env="/a:/b")
+
+    assert clients.is_current(stored, "/x/s", "/a:/b") is True
+    assert clients.is_current(stored, "/y/s", "/a:/b") is False
+    assert clients.is_current(stored, "/x/s", "/a") is False
+    assert clients.is_current(stored, None, None) is None
+    assert clients.is_current(Inspection("codex", False), "/x/s", "/a:/b") is None
+    assert clients.is_current(Inspection("codex", None, error="e"), "/x/s", "/a:/b") is None
 
 
 def test_override_config_path_is_rejected_when_no_selected_client_owns_a_config(
@@ -1044,3 +1188,806 @@ def test_desktop_preview_writes_nothing(tmp_path: Path) -> None:
     assert result.status == "previewed"
     assert not path.exists()
     assert any("polybridge" in line for line in result.diagnostics)
+
+
+# --- the desktop app: inspect and remove -----------------------------------------------------------
+
+
+def test_desktop_inspect_reports_nothing_registered_when_there_is_no_config(tmp_path: Path) -> None:
+    client, path = desktop(tmp_path)
+
+    inspection = client.inspect("polybridge", FakeRunner())
+
+    assert inspection.installed is False
+    assert inspection.error is None
+    assert not path.exists()
+
+
+def test_desktop_inspect_reads_the_stored_command_and_path(tmp_path: Path) -> None:
+    client, _ = desktop(tmp_path)
+    client.apply(REGISTRATION, FakeRunner())
+
+    inspection = client.inspect("polybridge", FakeRunner())
+
+    assert inspection.installed is True
+    assert inspection.command == REGISTRATION.command
+    assert inspection.path_env == REGISTRATION.path_env
+
+
+def test_desktop_inspect_ignores_other_servers(tmp_path: Path) -> None:
+    client, path = desktop(tmp_path)
+    path.write_text(json.dumps({"mcpServers": {"not-polybridge": {"command": "x"}}}))
+
+    assert client.inspect("polybridge", FakeRunner()).installed is False
+
+
+def test_desktop_inspect_of_a_malformed_config_is_an_error_not_an_absence(tmp_path: Path) -> None:
+    client, path = desktop(tmp_path)
+    path.write_text("{not json")
+
+    (inspection,) = clients.inspect_all([client], "polybridge", run=FakeRunner())
+
+    assert inspection.installed is None
+    assert "not valid JSON" in inspection.error
+
+
+def test_desktop_inspect_folds_args_into_the_command(tmp_path: Path) -> None:
+    """An entry that passes extra args launches something else, so it must not compare equal."""
+    client, path = desktop(tmp_path)
+    path.write_text(
+        json.dumps({"mcpServers": {"polybridge": {"command": "/x/server", "args": ["--debug"]}}})
+    )
+
+    assert client.inspect("polybridge", FakeRunner()).command == "/x/server --debug"
+
+
+def test_desktop_remove_deletes_only_our_key_and_backs_up_first(tmp_path: Path) -> None:
+    client, path = desktop(tmp_path)
+    path.write_text(json.dumps({"theme": "dark", "mcpServers": {"argent": {"command": "argent"}}}))
+    client.apply(REGISTRATION, FakeRunner())
+    before = path.read_text()
+
+    result = client.remove("polybridge", FakeRunner())
+
+    assert result.status == "removed"
+    written = json.loads(path.read_text())
+    assert written == {"theme": "dark", "mcpServers": {"argent": {"command": "argent"}}}
+    backups = [p for p in tmp_path.iterdir() if ".bak-" in p.name and p.read_text() == before]
+    assert backups, "the config as it was just before the removal must be backed up"
+    assert any(str(backups[0]) in line for line in result.diagnostics)
+
+
+def test_desktop_remove_with_nothing_registered_writes_nothing(tmp_path: Path) -> None:
+    client, path = desktop(tmp_path)
+    path.write_text(json.dumps({"mcpServers": {"argent": {}}}))
+    mtime = path.stat().st_mtime_ns
+
+    result = client.remove("polybridge", FakeRunner())
+
+    assert result.status == "not_installed"
+    assert path.stat().st_mtime_ns == mtime
+    assert [p.name for p in tmp_path.iterdir()] == [path.name], "no backup for a no-op"
+
+
+def test_desktop_remove_with_no_config_at_all_is_not_installed(tmp_path: Path) -> None:
+    client, path = desktop(tmp_path)
+
+    assert client.remove("polybridge", FakeRunner()).status == "not_installed"
+    assert not path.exists()
+
+
+def test_desktop_remove_refuses_a_config_it_cannot_parse(tmp_path: Path) -> None:
+    client, path = desktop(tmp_path)
+    path.write_text("{not json")
+
+    (result,) = clients.unregister([client], "polybridge", run=FakeRunner())
+
+    assert result.status == "failed"
+    assert path.read_text() == "{not json"
+
+
+def test_desktop_remove_refuses_a_non_object_mcp_servers(tmp_path: Path) -> None:
+    client, path = desktop(tmp_path)
+    path.write_text(json.dumps({"mcpServers": ["polybridge"]}))
+
+    (result,) = clients.unregister([client], "polybridge", run=FakeRunner())
+
+    assert result.status == "failed"
+    assert json.loads(path.read_text()) == {"mcpServers": ["polybridge"]}
+
+
+def test_desktop_remove_refuses_when_the_file_changed_underneath_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, path = desktop(tmp_path)
+    client.apply(REGISTRATION, FakeRunner())
+    original = path.read_text()
+    reads = iter([original, original, '{"mcpServers": {"someone-else": {}}}'])
+    monkeypatch.setattr("polybridge.clients.desktop.read_raw", lambda _: next(reads))
+
+    result = client.remove("polybridge", FakeRunner())
+
+    assert result.status == "failed"
+    assert "changed while it was being edited" in result.detail
+    assert path.read_text() == original
+
+
+# --- Claude Code: inspect and remove ---------------------------------------------------------------
+
+
+@pytest.fixture
+def claude_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
+    (tmp_path / "claude").mkdir()
+    return tmp_path / "claude" / ".claude.json"
+
+
+def test_claude_code_inspect_honours_claude_config_dir(claude_config: Path) -> None:
+    claude_config.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "polybridge": {"type": "stdio", "command": "/x/s", "args": [], "env": {"PATH": "/p"}}
+                }
+            }
+        )
+    )
+
+    inspection = ClaudeCodeClient().inspect("polybridge", FakeRunner())
+
+    assert inspection.installed is True
+    assert inspection.command == "/x/s"
+    assert inspection.path_env == "/p"
+    assert any(str(claude_config) in note for note in inspection.notes)
+
+
+def test_claude_code_inspect_defaults_to_the_home_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".claude.json").write_text(json.dumps({"mcpServers": {"polybridge": {"command": "/h"}}}))
+
+    assert ClaudeCodeClient().inspect("polybridge", FakeRunner()).command == "/h"
+
+
+def test_claude_code_inspect_ignores_project_scoped_entries(claude_config: Path) -> None:
+    """Only user scope is ours; an entry under `projects[*]` was put there by someone else."""
+    claude_config.write_text(
+        json.dumps({"projects": {"/repo": {"mcpServers": {"polybridge": {"command": "/x"}}}}})
+    )
+
+    inspection = ClaudeCodeClient().inspect("polybridge", FakeRunner())
+
+    assert inspection.installed is False
+
+
+def test_claude_code_inspect_with_no_config_is_not_installed(claude_config: Path) -> None:
+    assert ClaudeCodeClient().inspect("polybridge", FakeRunner()).installed is False
+
+
+def test_claude_code_inspect_never_runs_a_command(claude_config: Path) -> None:
+    """`claude mcp get` launches the server, so nothing may be run at all — FakeRunner() raises."""
+    claude_config.write_text(json.dumps({"mcpServers": {"polybridge": {"command": "/x"}}}))
+
+    ClaudeCodeClient().inspect("polybridge", FakeRunner())
+
+
+@pytest.mark.parametrize(
+    "raw", ["{not json", "[]", json.dumps({"mcpServers": []})], ids=["syntax", "array", "servers"]
+)
+def test_claude_code_inspect_of_a_malformed_config_is_an_error(claude_config: Path, raw: str) -> None:
+    claude_config.write_text(raw)
+
+    inspection = ClaudeCodeClient().inspect("polybridge", FakeRunner())
+
+    assert inspection.installed is None
+    assert inspection.error
+
+
+def test_claude_code_remove_is_user_scoped_and_reports_removed() -> None:
+    runner = FakeRunner(ok("Removed MCP server polybridge from user config"))
+
+    result = ClaudeCodeClient().remove("polybridge", runner)
+
+    assert runner.calls == [["claude", "mcp", "remove", "polybridge", "-s", "user"]]
+    assert result.status == "removed"
+
+
+def test_claude_code_remove_of_an_absent_entry_is_not_installed() -> None:
+    result = ClaudeCodeClient().remove("polybridge", FakeRunner(fails(1, NOT_FOUND)))
+
+    assert result.status == "not_installed"
+
+
+def test_claude_code_remove_does_not_read_another_names_absence_as_ours() -> None:
+    result = ClaudeCodeClient().remove(
+        "polybridge", FakeRunner(fails(1, 'No MCP server named "polybridge-old" in user scope'))
+    )
+
+    assert result.status == "failed"
+
+
+def test_claude_code_remove_timeout_is_unknown() -> None:
+    assert ClaudeCodeClient().remove("polybridge", FakeRunner(times_out())).status == "unknown"
+
+
+def test_claude_code_remove_failure_carries_the_output() -> None:
+    result = ClaudeCodeClient().remove("polybridge", FakeRunner(fails(1, "EACCES")))
+
+    assert result.status == "failed"
+    assert "EACCES" in result.diagnostics[0]
+
+
+# --- Codex: inspect and remove --------------------------------------------------------------------
+
+CODEX_LISTED = json.dumps(
+    [
+        {"name": "argent", "transport": {"type": "stdio", "command": "argent", "args": []}},
+        {
+            "name": "polybridge",
+            "enabled": True,
+            "transport": {
+                "type": "stdio",
+                "command": "/x/polybridge-server",
+                "args": [],
+                "env": {"PATH": "/a:/b"},
+                "env_vars": [],
+                "cwd": None,
+            },
+        },
+    ]
+)
+CODEX_REMOVED = "Removed global MCP server 'polybridge'."
+CODEX_NOT_FOUND = "No MCP server named 'polybridge' found."
+
+
+def test_codex_inspect_runs_list_json_and_reads_the_transport() -> None:
+    runner = FakeRunner(ok(CODEX_LISTED))
+
+    inspection = CodexClient().inspect("polybridge", runner)
+
+    assert runner.calls == [["codex", "mcp", "list", "--json"]]
+    assert inspection.installed is True
+    assert inspection.command == "/x/polybridge-server"
+    assert inspection.path_env == "/a:/b"
+
+
+def test_codex_inspect_of_an_empty_list_is_not_installed() -> None:
+    assert CodexClient().inspect("polybridge", FakeRunner(ok("[]"))).installed is False
+
+
+def test_codex_inspect_parses_stdout_only_so_a_stderr_warning_cannot_corrupt_it() -> None:
+    def runner(argv):
+        return RunResult(tuple(argv), 0, "[]\nWARNING: something", stdout="[]\n")
+
+    assert CodexClient().inspect("polybridge", runner).installed is False
+
+
+def test_codex_inspect_does_not_match_a_longer_name() -> None:
+    listed = json.dumps([{"name": "polybridge-old", "transport": {"command": "/x"}}])
+
+    assert CodexClient().inspect("polybridge", FakeRunner(ok(listed))).installed is False
+
+
+@pytest.mark.parametrize(
+    "response",
+    [fails(1, "boom"), times_out(), ok("not json"), ok('{"name": "polybridge"}')],
+    ids=["exit-1", "timeout", "not-json", "not-an-array"],
+)
+def test_codex_inspect_that_cannot_tell_is_an_error_not_an_absence(response) -> None:
+    inspection = CodexClient().inspect("polybridge", FakeRunner(response))
+
+    assert inspection.installed is None
+    assert inspection.error
+
+
+def test_codex_inspect_of_a_non_stdio_transport_claims_no_command() -> None:
+    listed = json.dumps([{"name": "polybridge", "transport": {"type": "streamable_http"}}])
+
+    inspection = CodexClient().inspect("polybridge", FakeRunner(ok(listed)))
+
+    assert inspection.installed is True
+    assert inspection.command is None
+
+
+def test_codex_remove_reports_removed_on_the_measured_message() -> None:
+    runner = FakeRunner(ok(CODEX_REMOVED))
+
+    result = CodexClient().remove("polybridge", runner)
+
+    assert runner.calls == [["codex", "mcp", "remove", "polybridge"]]
+    assert result.status == "removed"
+
+
+def test_codex_remove_of_an_absent_entry_is_not_installed_despite_exit_zero() -> None:
+    assert CodexClient().remove("polybridge", FakeRunner(ok(CODEX_NOT_FOUND))).status == (
+        "not_installed"
+    )
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "something unexpected",
+        "Removed global MCP server 'polybridge-old'.",
+        "No MCP server named 'polybridge-old' found.",
+        "Not removed global MCP server 'polybridge'.",
+    ],
+)
+def test_codex_remove_with_an_unrecognised_message_is_unknown(output: str) -> None:
+    """remove exits 0 whether or not anything was there, so wording is all there is."""
+    assert CodexClient().remove("polybridge", FakeRunner(ok(output))).status == "unknown"
+
+
+def test_codex_remove_timeout_is_unknown_and_failure_is_failed() -> None:
+    assert CodexClient().remove("polybridge", FakeRunner(times_out())).status == "unknown"
+    assert CodexClient().remove("polybridge", FakeRunner(fails(1, "boom"))).status == "failed"
+
+
+def test_run_cli_keeps_stdout_apart_for_parsers() -> None:
+    result = run_cli(python("import sys; print('out'); print('err', file=sys.stderr)"))
+
+    assert result.stdout == "out\n"
+    assert "err" in result.output
+
+
+# --- opencode: inspect through the JSONC tokenizer, remove by hand -------------------------------
+
+OPENCODE_ENTRY = {
+    "type": "local",
+    "command": ["/x/polybridge-server"],
+    "environment": {"PATH": "/a:/b"},
+}
+
+
+@pytest.fixture
+def opencode_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    directory = tmp_path / "config" / "opencode"
+    directory.mkdir(parents=True)
+    return directory
+
+
+def test_opencode_inspect_reads_a_commented_jsonc_config(opencode_dir: Path) -> None:
+    (opencode_dir / "opencode.jsonc").write_text(
+        '{\n  // hand-written\n  "$schema": "https://opencode.ai/config.json",\n'
+        f'  "mcp": {{"polybridge": {json.dumps(OPENCODE_ENTRY)},}},\n}}\n'
+    )
+
+    inspection = OpencodeClient().inspect("polybridge", FakeRunner())
+
+    assert inspection.installed is True
+    assert inspection.command == "/x/polybridge-server"
+    assert inspection.path_env == "/a:/b"
+
+
+@pytest.mark.parametrize("name", ["opencode.json", "config.json"])
+def test_opencode_inspect_reads_each_file_add_may_have_written(opencode_dir: Path, name: str) -> None:
+    (opencode_dir / name).write_text(json.dumps({"mcp": {"polybridge": OPENCODE_ENTRY}}))
+
+    assert OpencodeClient().inspect("polybridge", FakeRunner()).installed is True
+
+
+def test_opencode_inspect_with_no_config_is_not_installed(opencode_dir: Path) -> None:
+    inspection = OpencodeClient().inspect("polybridge", FakeRunner())
+
+    assert inspection.installed is False
+    assert inspection.error is None
+
+
+def test_opencode_inspect_defaults_to_dot_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".config" / "opencode").mkdir(parents=True)
+    (tmp_path / ".config" / "opencode" / "opencode.jsonc").write_text(
+        json.dumps({"mcp": {"polybridge": OPENCODE_ENTRY}})
+    )
+
+    assert OpencodeClient().inspect("polybridge", FakeRunner()).installed is True
+
+
+def test_opencode_inspect_of_entries_that_differ_between_files_claims_no_command(
+    opencode_dir: Path,
+) -> None:
+    """Which file wins is not measured, so no single command is reported."""
+    (opencode_dir / "opencode.json").write_text(json.dumps({"mcp": {"polybridge": OPENCODE_ENTRY}}))
+    other = {**OPENCODE_ENTRY, "command": ["/old/polybridge-server"]}
+    (opencode_dir / "opencode.jsonc").write_text(json.dumps({"mcp": {"polybridge": other}}))
+
+    inspection = OpencodeClient().inspect("polybridge", FakeRunner())
+
+    assert inspection.installed is True
+    assert inspection.command is None
+    assert any("differ" in note for note in inspection.notes)
+
+
+def test_opencode_inspect_of_a_multi_part_command_does_not_report_the_bare_binary(
+    opencode_dir: Path,
+) -> None:
+    entry = {**OPENCODE_ENTRY, "command": ["/x/polybridge-server", "--debug"]}
+    (opencode_dir / "opencode.jsonc").write_text(json.dumps({"mcp": {"polybridge": entry}}))
+
+    assert OpencodeClient().inspect("polybridge", FakeRunner()).command == (
+        "/x/polybridge-server --debug"
+    )
+
+
+@pytest.mark.parametrize(
+    "raw", ["{not json", "[]", '{"mcp": []}', '{"a": 1 /* open'], ids=["syntax", "array", "mcp", "comment"]
+)
+def test_opencode_inspect_of_a_malformed_config_is_an_error(opencode_dir: Path, raw: str) -> None:
+    (opencode_dir / "opencode.jsonc").write_text(raw)
+
+    (inspection,) = clients.inspect_all(
+        [OpencodeClient(binary=sys.executable)], "polybridge", run=FakeRunner()
+    )
+
+    assert inspection.installed is None
+    assert "opencode.jsonc" in inspection.error
+
+
+def test_opencode_remove_changes_nothing_and_names_the_file(opencode_dir: Path) -> None:
+    config = opencode_dir / "opencode.jsonc"
+    config.write_text(json.dumps({"mcp": {"polybridge": OPENCODE_ENTRY}}))
+    before = config.read_text()
+
+    result = OpencodeClient().remove("polybridge", FakeRunner())
+
+    assert result.status == "skipped"
+    assert str(config) in result.detail
+    assert "mcp.polybridge" in result.detail and "manually" in result.detail
+    assert config.read_text() == before
+
+
+def test_opencode_remove_with_nothing_registered_is_not_installed(opencode_dir: Path) -> None:
+    assert OpencodeClient().remove("polybridge", FakeRunner()).status == "not_installed"
+
+
+def test_opencode_remove_of_a_config_it_cannot_parse_is_a_failure(opencode_dir: Path) -> None:
+    (opencode_dir / "opencode.jsonc").write_text("{not json")
+
+    (result,) = clients.unregister(
+        [OpencodeClient(binary=sys.executable)], "polybridge", run=FakeRunner()
+    )
+
+    assert result.status == "failed"
+
+
+# --- vibe: inspect via tomllib, remove behind a backup ---------------------------------------------
+
+VIBE_TOML = (
+    "# hand-written\n"
+    "[[mcp_servers]]\n"
+    'name = "unrelated"\n'
+    'transport = "stdio"\n'
+    'command = "/bin/true"\n'
+    "\n"
+    "[[mcp_servers]]\n"
+    'name = "polybridge"\n'
+    'transport = "stdio"\n'
+    'command = "/x/polybridge-server"\n'
+    "\n"
+    "[mcp_servers.env]\n"
+    'PATH = "/a:/b"\n'
+)
+
+
+@pytest.fixture
+def vibe_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.setenv("VIBE_HOME", str(tmp_path / "vibe"))
+    (tmp_path / "vibe").mkdir()
+    return tmp_path / "vibe" / "config.toml"
+
+
+def test_vibe_inspect_honours_vibe_home(vibe_config: Path) -> None:
+    vibe_config.write_text(VIBE_TOML)
+
+    inspection = VibeClient().inspect("polybridge", FakeRunner())
+
+    assert inspection.installed is True
+    assert inspection.command == "/x/polybridge-server"
+    assert inspection.path_env == "/a:/b"
+
+
+def test_vibe_inspect_defaults_to_dot_vibe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("VIBE_HOME", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".vibe").mkdir()
+    (tmp_path / ".vibe" / "config.toml").write_text(VIBE_TOML)
+
+    assert VibeClient().inspect("polybridge", FakeRunner()).installed is True
+
+
+def test_vibe_inspect_with_only_other_servers_is_not_installed(vibe_config: Path) -> None:
+    vibe_config.write_text(VIBE_TOML.replace('"polybridge"', '"polybridge-old"'))
+
+    assert VibeClient().inspect("polybridge", FakeRunner()).installed is False
+
+
+def test_vibe_inspect_with_no_config_is_not_installed(vibe_config: Path) -> None:
+    assert VibeClient().inspect("polybridge", FakeRunner()).installed is False
+
+
+@pytest.mark.parametrize(
+    "raw", ["[[mcp_servers]\n", "mcp_servers = 3\n", b"\xff"], ids=["syntax", "type", "bytes"]
+)
+def test_vibe_inspect_of_a_malformed_config_is_an_error(vibe_config: Path, raw) -> None:
+    if isinstance(raw, bytes):
+        vibe_config.write_bytes(raw)
+    else:
+        vibe_config.write_text(raw)
+
+    inspection = VibeClient().inspect("polybridge", FakeRunner())
+
+    assert inspection.installed is None
+    assert inspection.error
+
+
+def test_vibe_remove_backs_up_first_then_removes(vibe_config: Path) -> None:
+    vibe_config.write_text(VIBE_TOML)
+    seen: list[str] = []
+
+    def runner(argv):
+        # The backup must already exist, holding the comments, when vibe is asked to remove.
+        backups = [p for p in vibe_config.parent.iterdir() if ".bak-" in p.name]
+        seen.extend(p.read_text() for p in backups)
+        return RunResult(tuple(argv), 0, VIBE_REMOVED)
+
+    result = VibeClient().remove("polybridge", runner)
+
+    assert result.status == "removed"
+    assert seen == [VIBE_TOML]
+    assert any("backed up" in line and ".bak-" in line for line in result.diagnostics)
+
+
+def test_vibe_remove_of_an_absent_entry_is_not_installed(vibe_config: Path) -> None:
+    result = VibeClient().remove("polybridge", FakeRunner(ok(VIBE_NOT_CONFIGURED)))
+
+    assert result.status == "not_installed"
+
+
+def test_vibe_remove_with_no_config_makes_no_backup(vibe_config: Path) -> None:
+    result = VibeClient().remove("polybridge", FakeRunner(ok(VIBE_NOT_CONFIGURED)))
+
+    assert result.diagnostics == ()
+    assert list(vibe_config.parent.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("response", "status"),
+    [
+        (times_out(), "unknown"),
+        (fails(1, "boom"), "failed"),
+        (ok("something unexpected"), "unknown"),
+        (ok("Removed MCP server `polybridge-old`."), "unknown"),
+    ],
+    ids=["timeout", "failure", "unrecognised", "longer-name"],
+)
+def test_vibe_remove_never_claims_more_than_it_saw(vibe_config: Path, response, status) -> None:
+    vibe_config.write_text(VIBE_TOML)
+
+    result = VibeClient().remove("polybridge", FakeRunner(response))
+
+    assert result.status == status
+    assert any("backed up" in line for line in result.diagnostics), "the backup is still named"
+
+
+def test_vibe_remove_does_not_run_vibe_when_the_backup_fails(
+    vibe_config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vibe_config.write_text(VIBE_TOML)
+
+    def refuse(path):
+        raise SetupError("no room for a backup")
+
+    monkeypatch.setattr("polybridge.clients.vibe.back_up", refuse)
+
+    (result,) = clients.unregister(
+        [VibeClient(binary=sys.executable)], "polybridge", run=FakeRunner()
+    )
+
+    assert result.status == "failed"
+    assert "no room" in result.detail
+
+
+# --- the Protocol, on every client and every test double ----------------------------------------
+
+
+PROTOCOL_MEMBERS = ("availability", "preview", "apply", "inspect", "remove")
+
+
+@pytest.mark.parametrize(
+    "client",
+    [*clients.CLIENTS.values(), Exploding(RuntimeError()), Absent()],
+    ids=lambda c: f"{type(c).__name__}",
+)
+def test_every_client_and_test_double_implements_the_whole_protocol(client) -> None:
+    for attribute in ("key", "label", "post_apply_note"):
+        assert isinstance(getattr(client, attribute), str)
+    for member in PROTOCOL_MEMBERS:
+        assert callable(getattr(client, member, None)), member
+
+
+@pytest.mark.parametrize(
+    "client",
+    [c for c in clients.CLIENTS.values() if isinstance(c, CliClient)],
+    ids=lambda c: c.key,
+)
+def test_every_registered_cli_client_overrides_the_raising_defaults(client: CliClient) -> None:
+    """CliClient's inspect/remove only raise; a registered client left on them would always error."""
+    for member in ("inspect", "remove"):
+        assert getattr(type(client), member) is not getattr(CliClient, member), member
+
+
+
+@pytest.mark.parametrize(
+    ("client", "write"),
+    [
+        (ClaudeCodeClient(), lambda home: (home / "claude" / ".claude.json", '{"mcpServers": null}')),
+        (
+            OpencodeClient(),
+            lambda home: (home / "config" / "opencode" / "opencode.jsonc", '{"mcp": null}'),
+        ),
+        (DesktopClient(), lambda home: (home / "desktop.json", '{"mcpServers": null}')),
+    ],
+    ids=lambda value: getattr(value, "key", ""),
+)
+def test_a_null_server_table_reads_as_nothing_registered_on_every_json_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, client, write
+) -> None:
+    """The desktop app already treated `null` as empty; the other JSON readers now agree."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    path, raw = write(tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(raw)
+    if isinstance(client, DesktopClient):
+        client = client.with_config_path(path)
+
+    inspection = client.inspect("polybridge", FakeRunner())
+
+    assert (inspection.installed, inspection.error) == (False, None)
+
+
+# --- Codex review round 1 regressions ---------------------------------------------------------
+
+
+def test_a_relative_vibe_home_is_resolved_where_vibe_resolves_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`run_cli` launches vibe from HOME, so a relative VIBE_HOME names a file under HOME — the
+    backup must be of that file, not of one under our own working directory."""
+    home = tmp_path / "home"
+    (home / "rel-vibe").mkdir(parents=True)
+    (home / "rel-vibe" / "config.toml").write_text(VIBE_TOML)
+    elsewhere = tmp_path / "cwd"
+    elsewhere.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("VIBE_HOME", "rel-vibe")
+    monkeypatch.chdir(elsewhere)
+
+    result = VibeClient().remove("polybridge", FakeRunner(ok(VIBE_REMOVED)))
+
+    assert result.status == "removed"
+    assert [p.name for p in (home / "rel-vibe").iterdir() if ".bak-" in p.name]
+    assert list(elsewhere.iterdir()) == []
+    assert VibeClient().inspect("polybridge", FakeRunner()).installed is True
+
+
+def test_a_relative_claude_config_dir_is_resolved_against_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    (home / "rel-claude").mkdir(parents=True)
+    (home / "rel-claude" / ".claude.json").write_text(
+        json.dumps({"mcpServers": {"polybridge": {"command": "/x"}}})
+    )
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "rel-claude")
+    monkeypatch.chdir(tmp_path)
+
+    assert ClaudeCodeClient().inspect("polybridge", FakeRunner()).installed is True
+
+
+@pytest.mark.parametrize(
+    "listed", [[None], [{"server_name": "polybridge"}], [{"name": 3}]], ids=["null", "key", "type"]
+)
+def test_codex_inspect_of_an_unreadable_entry_is_an_error_not_an_absence(listed) -> None:
+    inspection = CodexClient().inspect("polybridge", FakeRunner(ok(json.dumps(listed))))
+
+    assert inspection.installed is None
+    assert inspection.error
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ['mcp_servers = ["polybridge"]\n', "[[mcp_servers]]\ncommand = \"/x\"\n"],
+    ids=["strings", "nameless"],
+)
+def test_vibe_inspect_of_an_unreadable_entry_is_an_error_not_an_absence(
+    vibe_config: Path, raw: str
+) -> None:
+    vibe_config.write_text(raw)
+
+    inspection = VibeClient().inspect("polybridge", FakeRunner())
+
+    assert inspection.installed is None
+    assert inspection.error
+
+
+def test_is_current_is_unknown_when_the_inspection_could_not_settle_the_command(
+    opencode_dir: Path,
+) -> None:
+    """Differing entries, one of them matching: that is not evidence of a mismatch."""
+    (opencode_dir / "opencode.json").write_text(json.dumps({"mcp": {"polybridge": OPENCODE_ENTRY}}))
+    other = {**OPENCODE_ENTRY, "command": ["/old/polybridge-server"]}
+    (opencode_dir / "opencode.jsonc").write_text(json.dumps({"mcp": {"polybridge": other}}))
+
+    inspection = OpencodeClient().inspect("polybridge", FakeRunner())
+
+    assert clients.is_current(inspection, "/x/polybridge-server", "/a:/b") is None
+
+
+def test_is_current_is_unknown_for_an_installed_entry_that_errored() -> None:
+    inspection = clients.Inspection("claude-desktop", True, error="entry is not an object")
+
+    assert clients.is_current(inspection, "/x", "/p") is None
+
+
+def test_follow_up_is_the_clients_own_note_for_changes_only() -> None:
+    assert clients.follow_up(Result("claude-desktop", "removed", "")) == (
+        "Claude desktop app: restart it to pick up the change."
+    )
+    assert clients.follow_up(Result("claude-desktop", "not_installed", "")) is None
+    assert clients.follow_up(Result("nobody", "applied", "")) is None
+
+
+# --- Codex review round 2 regression ----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "client_and_entry",
+    [
+        ("desktop", {"command": "/t/First", "args": ["Last/polybridge-server"], "env": {"PATH": "/p"}}),
+        ("opencode", {"type": "local", "command": ["/t/First", "Last/polybridge-server"],
+                      "environment": {"PATH": "/p"}}),
+    ],
+    ids=["args-shape", "opencode-array"],
+)
+def test_arguments_never_compare_equal_to_a_path_with_a_space(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, client_and_entry
+) -> None:
+    """`/t/First` + `Last/polybridge-server` flattens to the same string as `/t/First
+    Last/polybridge-server`; the launch argv does not, so it must be what is compared."""
+    kind, entry = client_and_entry
+    if kind == "desktop":
+        path = tmp_path / "desktop.json"
+        path.write_text(json.dumps({"mcpServers": {"polybridge": entry}}))
+        client = DesktopClient(config_path=path)
+    else:
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+        (tmp_path / "config" / "opencode").mkdir(parents=True)
+        (tmp_path / "config" / "opencode" / "opencode.jsonc").write_text(
+            json.dumps({"mcp": {"polybridge": entry}})
+        )
+        client = OpencodeClient()
+
+    inspection = client.inspect("polybridge", FakeRunner())
+
+    assert inspection.argv == ("/t/First", "Last/polybridge-server")
+    assert clients.is_current(inspection, "/t/First Last/polybridge-server", "/p") is False
+    assert clients.is_current(inspection, "/t/First", "/p") is False
+
+
+def test_a_bare_entry_under_a_path_with_a_space_is_current(tmp_path: Path) -> None:
+    path = tmp_path / "desktop.json"
+    server = "/t/First Last/polybridge-server"
+    path.write_text(json.dumps({"mcpServers": {"polybridge": {"command": server, "env": {"PATH": "/p"}}}}))
+
+    inspection = DesktopClient(config_path=path).inspect("polybridge", FakeRunner())
+
+    assert inspection.command == server
+    assert clients.is_current(inspection, server, "/p") is True

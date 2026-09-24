@@ -49,9 +49,30 @@ skip a freshly installed app. The four CLIs are genuinely detected, by looking f
 ```bash
 polybridge-setup --client codex,opencode   # register with only these
 polybridge-setup --dry-run                 # print what would be written or run
+polybridge-setup --status                  # is each client registered, and is it current?
+polybridge-setup --uninstall               # remove the registration from each client
+polybridge-setup --status --json           # the same, as one versioned JSON document
 ```
 
-Each client is reported separately, and one failing never stops the others. The five statuses
+`--status` and `--uninstall` do not need the server binary, so they still work after it has been
+removed. `--status` changes nothing and runs nothing except `codex mcp list --json`: Claude Code's
+own `mcp get` launches the server, so its `~/.claude.json` (or `$CLAUDE_CONFIG_DIR/.claude.json`) is
+read directly, as are the desktop app's JSON, opencode's JSONC and vibe's TOML. An entry is
+`current` only if both its command and its PATH match what install would write now.
+`--dry-run` applies to install only and is rejected with the other two.
+
+`--uninstall` removes only our own entry. The desktop app's file is backed up first, as on install.
+vibe's `mcp remove` rewrites `config.toml` and strips its comments, so that file is backed up with a
+timestamp before vibe is asked, and the report names the backup. opencode has no `mcp remove`: the
+report names the file to edit, and nothing is changed.
+
+`--json` prints `{"v": 1, "server_path": …, "clients": [{"key", "available", "installed",
+"command", "current", "action", "error", "notes"}]}` and nothing else on stdout. `installed` and
+`current` are `null` when they cannot be said — the client is absent, the check failed, or there is no
+server binary to compare with — never `false` by default. `action` is what this run did to that
+client (a status below), or `null` for `--status`. The shape changes only with `v`.
+
+Each client is reported separately, and one failing never stops the others. The seven statuses
 distinguish things that are easy to conflate:
 
 - `applied` — the desktop config was written, or a CLI's own `add` command exited zero. For the CLIs
@@ -60,11 +81,15 @@ distinguish things that are easy to conflate:
 - `previewed` — `--dry-run`; nothing was touched.
 - `skipped` — that client's binary isn't on PATH, so there was nothing to register with.
 - `failed` — it did not work, and the report says what ran and what came back.
-- `unknown` — a CLI timed out. It may already have written its config, so calling it `failed` would
-  be a guess stated as a fact.
+- `unknown` — a CLI timed out, or answered in words it does not recognise. It may already have
+  written its config, so calling it `failed` would be a guess stated as a fact.
+- `removed` — `--uninstall` removed the entry (for a CLI: its `remove` command reported so).
+- `not_installed` — `--uninstall` found nothing to remove.
 
 A non-zero exit from `polybridge-setup` therefore means "not everything was confirmed", not
-"something definitely failed".
+"something definitely failed". Each action judges that for itself: `--status` exits 1 only when a
+check could not be completed, never because a client is absent; `--uninstall` treats `not_installed`
+and opencode's manual step as success, and exits 1 on any `failed` or `unknown`.
 
 Updating Claude Code is the one destructive step. Its `mcp add` refuses to overwrite and has no
 `--force`, so an existing entry is removed first. If the replacement then fails, the report says to

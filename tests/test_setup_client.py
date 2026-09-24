@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,47 @@ from polybridge import setup_client
 from polybridge.clients import Result, SetupError
 
 EVERYTHING = {"polybridge-server", "claude", "codex", "opencode", "vibe", "git"}
+
+
+class FakeCli:
+    """Stands in for every client CLI, so no test here can reach a real config.
+
+    `shutil.which` being patched only changes what *looks* installed: the argv still names the bare
+    binary, so without this a test that "applied" to Codex ran the real `codex mcp add` against the
+    real `~/.codex/config.toml` — which is exactly what one did, from 2026-08-12 until this fixture.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+        self.replies: dict[tuple[str, ...], tuple[int, str]] = {}
+
+    def reply(self, prefix: tuple[str, ...], returncode: int, stdout: str) -> None:
+        self.replies[prefix] = (returncode, stdout)
+
+    def __call__(self, argv, **kwargs):
+        argv = list(argv)
+        self.calls.append(argv)
+        returncode, stdout = next(
+            (reply for prefix, reply in self.replies.items() if tuple(argv[: len(prefix)]) == prefix),
+            (0, ""),
+        )
+        return subprocess.CompletedProcess(argv, returncode, stdout, "")
+
+
+@pytest.fixture(autouse=True)
+def fake_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeCli:
+    """Every client CLI faked, and every config location a client reads pointed into tmp_path."""
+    fake = FakeCli()
+    fake.reply(("codex", "mcp", "list", "--json"), 0, "[]")
+    monkeypatch.setattr("polybridge.clients.base.subprocess.run", fake)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home / "claude"))
+    monkeypatch.setenv("CODEX_HOME", str(home / "codex"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / "config"))
+    monkeypatch.setenv("VIBE_HOME", str(home / "vibe"))
+    return fake
 
 
 @pytest.fixture
@@ -187,3 +229,352 @@ def test_a_successful_report_does_not_repeat_the_command(capsys) -> None:
     setup_client._report([Result("codex", "applied", "add command succeeded", steps=("codex …",))])
 
     assert "ran:" not in capsys.readouterr().out
+
+
+# --- actions: install (default), --status, --uninstall -------------------------------------------
+
+DESKTOP = "claude_desktop_config.json"
+ROW_KEYS = {"key", "available", "installed", "command", "current", "action", "error", "notes"}
+
+
+def run_json(tmp_path: Path, capsys, *argv: str, desktop: bool = True) -> tuple[int, dict]:
+    """`desktop=False` for a `--client` selection without the desktop app, which rightly rejects
+    `--desktop-config`; HOME is inside tmp_path either way."""
+    code = run(tmp_path, "--json", *argv) if desktop else setup_client.main(["--json", *argv])
+    out = capsys.readouterr().out
+    return code, json.loads(out)
+
+
+def nothing_registered(fake_cli: FakeCli) -> None:
+    """Each CLI's measured "there was nothing to remove" reply."""
+    fake_cli.reply(("claude", "mcp", "remove"), 1, 'No MCP server named "polybridge" in user scope')
+    fake_cli.reply(("codex", "mcp", "remove"), 0, "No MCP server named 'polybridge' found.")
+    fake_cli.reply(
+        ("vibe", "mcp", "remove"), 0, "MCP server `polybridge` is not configured in the user config."
+    )
+
+
+def rows(document: dict) -> dict[str, dict]:
+    return {row["key"]: row for row in document["clients"]}
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [["--status", "--uninstall"], ["--status", "--dry-run"], ["--uninstall", "--dry-run"]],
+    ids=["status+uninstall", "status+dry-run", "uninstall+dry-run"],
+)
+def test_conflicting_actions_are_rejected_before_anything_runs(
+    tmp_path: Path, which, fake_cli, capsys, argv: list[str]
+) -> None:
+    which(*EVERYTHING)
+
+    with pytest.raises(SystemExit) as excinfo:
+        run(tmp_path, *argv)
+
+    assert excinfo.value.code == 2
+    assert fake_cli.calls == []
+    assert not (tmp_path / DESKTOP).exists()
+
+
+def test_dry_run_rejection_says_what_it_applies_to(tmp_path: Path, which, capsys) -> None:
+    which(*EVERYTHING)
+
+    with pytest.raises(SystemExit):
+        run(tmp_path, "--status", "--dry-run")
+
+    assert "--dry-run only applies to install" in capsys.readouterr().err
+
+
+def test_status_does_not_need_the_server_binary(tmp_path: Path, which, capsys) -> None:
+    which("claude", "codex", "opencode", "vibe")
+
+    code, document = run_json(tmp_path, capsys, "--status")
+
+    assert code == 0
+    assert document["server_path"] is None
+    assert all(row["current"] is None for row in document["clients"])
+
+
+def test_uninstall_does_not_need_the_server_binary(
+    tmp_path: Path, which, fake_cli, capsys
+) -> None:
+    which("claude", "codex", "opencode", "vibe")
+    nothing_registered(fake_cli)
+
+    code = run(tmp_path, "--uninstall")
+
+    assert code == 0
+    assert "not on PATH" not in capsys.readouterr().err
+
+
+def test_install_still_requires_the_server_binary(tmp_path: Path, which, capsys) -> None:
+    which("codex")
+
+    assert run(tmp_path) == 1
+    assert "uv tool install" in capsys.readouterr().err
+
+
+def test_status_json_is_version_one_with_exactly_the_documented_fields(
+    tmp_path: Path, which, capsys
+) -> None:
+    """The Mac app reads this. A field added, renamed or retyped here must bump `v`."""
+    which(*EVERYTHING)
+
+    code, document = run_json(tmp_path, capsys, "--status")
+
+    assert code == 0
+    assert set(document) == {"v", "server_path", "clients"}
+    assert document["v"] == 1
+    assert document["server_path"] == "/fake/bin/polybridge-server"
+    assert [row["key"] for row in document["clients"]] == [
+        "claude-desktop",
+        "claude-code",
+        "codex",
+        "opencode",
+        "vibe",
+    ]
+    for row in document["clients"]:
+        assert set(row) == ROW_KEYS
+        assert isinstance(row["key"], str)
+        assert isinstance(row["available"], bool)
+        assert row["installed"] in (True, False, None)
+        assert row["command"] is None or isinstance(row["command"], str)
+        assert row["current"] in (True, False, None)
+        assert row["action"] is None, "--status acts on nothing"
+        assert row["error"] is None or isinstance(row["error"], str)
+        assert isinstance(row["notes"], list) and all(isinstance(n, str) for n in row["notes"])
+
+
+def test_status_reports_an_install_as_current_and_a_stale_one_as_not(
+    tmp_path: Path, which, capsys
+) -> None:
+    which(*EVERYTHING)
+    assert run(tmp_path, "--client", "claude-desktop") == 0
+    capsys.readouterr()
+
+    _, document = run_json(tmp_path, capsys, "--status", "--client", "claude-desktop")
+    row = rows(document)["claude-desktop"]
+    assert (row["installed"], row["command"], row["current"]) == (
+        True,
+        "/fake/bin/polybridge-server",
+        True,
+    )
+
+    config = json.loads((tmp_path / DESKTOP).read_text())
+    config["mcpServers"]["polybridge"]["env"]["PATH"] = "/somewhere/else"
+    (tmp_path / DESKTOP).write_text(json.dumps(config))
+
+    _, document = run_json(tmp_path, capsys, "--status", "--client", "claude-desktop")
+    assert rows(document)["claude-desktop"]["current"] is False
+
+
+def test_status_exits_zero_with_every_client_absent(tmp_path: Path, which, capsys) -> None:
+    which()
+
+    code, document = run_json(tmp_path, capsys, "--status")
+
+    assert code == 0
+    by_key = rows(document)
+    assert by_key["codex"]["available"] is False
+    assert by_key["codex"]["installed"] is None
+    assert by_key["claude-desktop"]["installed"] is False
+
+
+def test_status_exits_one_when_an_inspect_errors(tmp_path: Path, which, capsys) -> None:
+    which(*EVERYTHING)
+    (tmp_path / DESKTOP).write_text("{not json")
+
+    code, document = run_json(tmp_path, capsys, "--status")
+
+    assert code == 1
+    assert "not valid JSON" in rows(document)["claude-desktop"]["error"]
+
+
+def test_status_runs_nothing_but_codex_s_listing(tmp_path: Path, which, fake_cli, capsys) -> None:
+    """Read-only: no add, no remove, and never `claude mcp get`, which launches the server."""
+    which(*EVERYTHING)
+
+    run(tmp_path, "--status")
+
+    assert fake_cli.calls == [["codex", "mcp", "list", "--json"]]
+
+
+def test_status_table_is_readable(tmp_path: Path, which, capsys) -> None:
+    which("polybridge-server", "codex", "git")
+
+    code = run(tmp_path, "--status")
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "server:  /fake/bin/polybridge-server" in out
+    assert "not installed" in out
+    assert "unavailable" in out
+
+
+def test_uninstall_removes_from_the_desktop_app_and_says_to_restart(
+    tmp_path: Path, which, capsys
+) -> None:
+    which(*EVERYTHING)
+    run(tmp_path, "--client", "claude-desktop")
+    capsys.readouterr()
+
+    code = run(tmp_path, "--uninstall", "--client", "claude-desktop")
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "removed" in out
+    assert "Claude desktop app: restart it" in out
+    assert json.loads((tmp_path / DESKTOP).read_text())["mcpServers"] == {}
+
+
+def test_uninstall_treats_nothing_to_remove_as_success(
+    tmp_path: Path, which, fake_cli, capsys
+) -> None:
+    which(*EVERYTHING)
+    nothing_registered(fake_cli)
+
+    code, document = run_json(tmp_path, capsys, "--uninstall")
+
+    assert code == 0
+    assert {row["key"]: row["action"] for row in document["clients"]} == {
+        "claude-desktop": "not_installed",
+        "claude-code": "not_installed",
+        "codex": "not_installed",
+        "opencode": "not_installed",
+        "vibe": "not_installed",
+    }
+    assert document["server_path"] is None
+
+
+def test_uninstall_leaves_opencode_to_the_user_and_still_exits_zero(
+    tmp_path: Path, which, capsys
+) -> None:
+    which("opencode")
+    config = tmp_path / "home" / "config" / "opencode" / "opencode.jsonc"
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({"mcp": {"polybridge": {"type": "local", "command": ["/x"]}}}))
+
+    code, document = run_json(
+        tmp_path, capsys, "--uninstall", "--client", "opencode", desktop=False
+    )
+
+    row = rows(document)["opencode"]
+    assert code == 0
+    assert row["action"] == "skipped"
+    assert row["installed"] is True, "nothing was removed, and the row must say so"
+    assert any("manually" in note and str(config) in note for note in row["notes"])
+
+
+def test_uninstall_exits_one_on_a_remove_failure(tmp_path: Path, which, fake_cli, capsys) -> None:
+    which("codex")
+    fake_cli.reply(("codex", "mcp", "remove"), 1, "permission denied")
+
+    code, document = run_json(
+        tmp_path, capsys, "--uninstall", "--client", "codex", desktop=False
+    )
+
+    row = rows(document)["codex"]
+    assert code == 1
+    assert row["action"] == "failed"
+    assert row["error"] == "remove command failed (exit 1)"
+    assert "ran: codex mcp remove polybridge" in row["notes"]
+
+
+def test_uninstall_exits_one_on_an_unknown_outcome(tmp_path: Path, which, fake_cli, capsys) -> None:
+    which("codex")
+    fake_cli.reply(("codex", "mcp", "remove"), 0, "something new")
+
+    code = setup_client.main(["--uninstall", "--client", "codex"])
+
+    assert code == 1
+
+
+def test_uninstall_of_a_named_client_that_is_not_installed_is_an_error(
+    tmp_path: Path, which, capsys
+) -> None:
+    which()
+
+    assert setup_client.main(["--uninstall", "--client", "codex"]) == 1
+    assert "not on PATH" in capsys.readouterr().out
+
+
+def test_install_json_is_the_only_thing_on_stdout(tmp_path: Path, which, capsys) -> None:
+    which(*EVERYTHING)
+
+    code, document = run_json(tmp_path, capsys, "--client", "claude-desktop,codex")
+
+    by_key = rows(document)
+    assert code == 0
+    assert document["server_path"] == "/fake/bin/polybridge-server"
+    assert by_key["claude-desktop"]["action"] == "applied"
+    assert by_key["claude-desktop"]["installed"] is True
+    assert by_key["claude-desktop"]["current"] is True
+    assert by_key["codex"]["action"] == "applied"
+
+
+def test_install_dry_run_json_describes_the_unchanged_state(tmp_path: Path, which, capsys) -> None:
+    which(*EVERYTHING)
+
+    code, document = run_json(tmp_path, capsys, "--dry-run", "--client", "claude-desktop")
+
+    row = rows(document)["claude-desktop"]
+    assert code == 0
+    assert row["action"] == "previewed"
+    assert row["installed"] is False
+    assert not (tmp_path / DESKTOP).exists()
+
+
+def test_json_document_puts_a_failed_actions_detail_in_error() -> None:
+    from polybridge.clients import Inspection
+
+    document = setup_client.json_document(
+        "/s",
+        "/p",
+        [Inspection("codex", None, error="list broke")],
+        [Result("codex", "unknown", "timed out", steps=("codex mcp remove polybridge",))],
+    )
+
+    (row,) = document["clients"]
+    assert row["error"] == "timed out"
+    assert "inspect: list broke" in row["notes"]
+    assert "ran: codex mcp remove polybridge" in row["notes"]
+
+
+def test_the_report_keeps_its_columns_aligned_for_long_statuses(capsys) -> None:
+    setup_client._report(
+        [Result("codex", "not_installed", "nothing registered"), Result("vibe", "removed", "ok")]
+    )
+
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0].index("nothing registered") == lines[1].index("ok")
+
+
+def test_install_json_without_a_server_binary_still_prints_the_document(
+    tmp_path: Path, which, fake_cli, capsys
+) -> None:
+    """The Mac app parses stdout: an empty one on this failure would be a decode error."""
+    which("codex")
+
+    code, document = run_json(tmp_path, capsys, "--client", "claude-desktop,codex")
+
+    by_key = rows(document)
+    assert code == 1
+    assert document["v"] == 1 and document["server_path"] is None
+    assert {row["action"] for row in document["clients"]} == {"failed"}
+    assert "not on PATH" in by_key["codex"]["error"]
+    assert not any(call[:3] == ["codex", "mcp", "add"] for call in fake_cli.calls)
+    assert not (tmp_path / DESKTOP).exists()
+
+
+def test_json_rows_carry_the_restart_note_for_a_desktop_removal(
+    tmp_path: Path, which, capsys
+) -> None:
+    which(*EVERYTHING)
+    run(tmp_path, "--client", "claude-desktop")
+    capsys.readouterr()
+
+    _, document = run_json(tmp_path, capsys, "--uninstall", "--client", "claude-desktop")
+
+    row = rows(document)["claude-desktop"]
+    assert row["action"] == "removed"
+    assert "Claude desktop app: restart it to pick up the change." in row["notes"]

@@ -12,15 +12,42 @@ and prints the exact command that restores it. The entry at risk is only ever ou
 server is touched.
 
 `claude mcp get` is deliberately not used to probe first: it prints human prose rather than JSON, and
-it *launches the server* to health-check it (measured).
+it *launches the server* to health-check it (measured). So `inspect` reads the config file itself —
+top-level `mcpServers` in `~/.claude.json`, or `$CLAUDE_CONFIG_DIR/.claude.json` when that is set
+(measured, claude 2.1.281: `mcp add -s user` writes exactly there). Only user scope: the entries under
+`projects[*]` are other scopes, and `add` never writes them.
+
+`remove` is `claude mcp remove <key> -s user`, whose exit code is meaningful (measured): 0 with
+`Removed MCP server <key> from user config`, or 1 with the not-found signature below when absent.
 """
 
 from __future__ import annotations
 
+import json
+import os
 import shlex
 from dataclasses import dataclass
+from pathlib import Path
 
-from .base import CliClient, Registration, Result, RunResult, Runner
+from .base import (
+    CLI_TIMEOUT_SECONDS,
+    CliClient,
+    Inspection,
+    Registration,
+    Result,
+    RunResult,
+    Runner,
+    cli_relative,
+    entry_inspection,
+)
+
+
+def user_config_path() -> Path:
+    """Where `claude mcp add -s user` writes: `$CLAUDE_CONFIG_DIR/.claude.json`, else `~/.claude.json`."""
+    override = os.environ.get("CLAUDE_CONFIG_DIR")
+    if override:
+        return cli_relative(override) / ".claude.json"
+    return Path.home() / ".claude.json"
 
 
 def says_already_exists(result: RunResult, key: str) -> bool:
@@ -56,8 +83,54 @@ class ClaudeCodeClient(CliClient):
     def env_flag(self, registration: Registration) -> list[str]:
         return ["-e", f"PATH={registration.path_env}"]
 
-    def remove_argv(self, registration: Registration) -> list[str]:
-        return [self.binary, "mcp", "remove", registration.key, "-s", "user"]
+    def remove_argv(self, key: str) -> list[str]:
+        return [self.binary, "mcp", "remove", key, "-s", "user"]
+
+    def inspect(self, key: str, run: Runner) -> Inspection:
+        """Read-only, and never through `claude mcp get`, which launches the server. `run` is unused."""
+        path = user_config_path()
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return Inspection(self.key, False, notes=(f"no config at {path}",))
+        try:
+            config = json.loads(raw)
+        except ValueError as exc:
+            return Inspection(self.key, None, error=f"{path} is not valid JSON ({exc})")
+        if not isinstance(config, dict):
+            return Inspection(self.key, None, error=f"{path} does not contain a JSON object")
+        servers = config.get("mcpServers")
+        if servers is None:
+            servers = {}
+        if not isinstance(servers, dict):
+            return Inspection(self.key, None, error=f"'mcpServers' in {path} is not a JSON object")
+        if key not in servers:
+            return Inspection(self.key, False, notes=(f"read {path}",))
+        return entry_inspection(self.key, servers[key], str(path))
+
+    def remove(self, key: str, run: Runner) -> Result:
+        removed = run(self.remove_argv(key))
+        steps = (shlex.join(removed.argv),)
+        if removed.ok:
+            return Result(
+                self.key, "removed", f"remove command succeeded ({self.config_hint})", steps=steps
+            )
+        if says_not_found(removed, key):
+            return Result(self.key, "not_installed", "nothing registered at user scope", steps=steps)
+        if removed.timed_out:
+            return Result(
+                self.key,
+                "unknown",
+                f"timed out after {CLI_TIMEOUT_SECONDS:.0f}s; the entry may or may not still be there",
+                steps=steps,
+            )
+        return Result(
+            self.key,
+            "failed",
+            f"remove command failed (exit {removed.returncode})",
+            steps=steps,
+            diagnostics=(removed.tail,) if removed.tail else (),
+        )
 
     def apply(self, registration: Registration, run: Runner) -> Result:
         added = run(self.add_argv(registration))
@@ -67,7 +140,7 @@ class ClaudeCodeClient(CliClient):
 
     def replace(self, registration: Registration, run: Runner, *, first_add: RunResult) -> Result:
         restore = shlex.join(self.add_argv(registration))
-        removed = run(self.remove_argv(registration))
+        removed = run(self.remove_argv(registration.key))
         steps = (shlex.join(first_add.argv), shlex.join(removed.argv))
 
         if removed.timed_out:
