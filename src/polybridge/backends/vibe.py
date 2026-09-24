@@ -108,6 +108,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from . import normalize as nz
 from .base import (
     FREEDOMS,
     Accumulator,
@@ -610,6 +611,74 @@ class VibeBackend:
         acc.summary = text
         acc.saw_final_message = True
 
+    def normalize(self, event: dict[str, Any], acc: Accumulator) -> list[dict[str, Any]]:
+        if not isinstance(event, dict):
+            return []
+        # Gate on EVERY entry type, not just messages: replayed history (turnId null, or a stale
+        # id from a turn that already ended) must produce nothing — including effects and
+        # callbacks — exactly like the gate `ingest` applies to assistant messages above.
+        current_turn_id = acc.stream_state.get("current_turn_id")
+        turn_id = event.get("turnId")
+        if current_turn_id is None or not _is_live_turn_id(turn_id) or turn_id != current_turn_id:
+            return []
+
+        source_ts = nz.iso_from_epoch_ms(event.get("createdAt"))
+        entry_type = event.get("type")
+        if entry_type == "message":
+            return self._normalize_message(event, source_ts)
+        if entry_type == "effect":
+            return self._normalize_effect(event, source_ts)
+        if entry_type == "callback":
+            return self._normalize_callback(event, source_ts)
+        # reasoning, checkpoint, and anything else: never surfaced.
+        return []
+
+    @staticmethod
+    def _normalize_message(event: dict[str, Any], source_ts: str | None) -> list[dict[str, Any]]:
+        role = event.get("role")
+        text = _entry_text(event)
+        if text is None:
+            return []
+        if role == "user":
+            if event.get("source") != "turn_start":
+                return []
+            return [nz.user_message(text, source="initial", source_ts=source_ts)]
+        if role == "assistant":
+            if _STOP_EVENT_PATTERN.fullmatch(text.strip()) is not None:
+                return [nz.notice(text, source_ts=source_ts)]
+            return [nz.assistant_text(text, source_ts=source_ts)]
+        return []
+
+    @staticmethod
+    def _normalize_effect(event: dict[str, Any], source_ts: str | None) -> list[dict[str, Any]]:
+        detail = event.get("detail")
+        detail = detail if isinstance(detail, dict) else {}
+        tool = detail.get("toolName")
+        tool_input = detail.get("input")
+        input_dict = tool_input if isinstance(tool_input, dict) else {}
+        kind = detail.get("kind")
+        category = _EFFECT_CATEGORY_BY_KIND.get(kind, "other") if isinstance(kind, str) else "other"
+        return [
+            nz.tool_call(
+                call_id=event.get("id"),
+                tool=tool,
+                category=category,
+                input=tool_input,
+                path=_effect_path(input_dict),
+                command=_effect_command(input_dict),
+                edit=_effect_edit(kind, input_dict),
+                source_ts=source_ts,
+            )
+        ]
+
+    @staticmethod
+    def _normalize_callback(event: dict[str, Any], source_ts: str | None) -> list[dict[str, Any]]:
+        if not _is_approval_callback(event):
+            return []
+        description = _callback_description(event)
+        text = f"auto-denied: {description}" if description else "auto-denied"
+        return [nz.notice(text, source_ts=source_ts)]
+
     def classify(self, acc: Accumulator, exit_code: int | None) -> Status:
         # No terminal event exists, so the exit code is the authority and the closing message is
         # only corroboration — the same shape as codex, and for the same reason an *observed* zero
@@ -659,6 +728,53 @@ def _record_denial(event: dict[str, Any], acc: Accumulator) -> None:
     # the payload contradicting the signal the status was derived from. The fallback repeats only
     # what was actually observed rather than inventing a tool, command or title for it.
     acc.denials.append(denial or {"kind": "approval"})
+
+
+def _callback_description(event: dict[str, Any]) -> str | None:
+    """What an auto-denied approval callback was for — the command it would have run if present,
+    else the event's own `title`. Command first because the title is generic ("Allow bash?") and
+    says nothing about what was refused. Same fields `_record_denial` reads, for the same reasons."""
+    detail = event.get("detail")
+    detail = detail if isinstance(detail, dict) else {}
+    effect = detail.get("effect")
+    effect = effect if isinstance(effect, dict) else {}
+    command = effect.get("input")
+    command = command.get("command") if isinstance(command, dict) else None
+    if isinstance(command, str) and command:
+        return command
+    title = event.get("title")
+    return title if isinstance(title, str) and title else None
+
+
+# An `effect`'s `detail.kind` -> monitor category.
+_EFFECT_CATEGORY_BY_KIND: dict[str, str] = {
+    "file_read": "read",
+    "file_search": "search",
+    "file_edit": "edit",
+    "file_write": "write",
+    "shell": "shell",
+}
+
+
+def _effect_path(input_dict: dict[str, Any]) -> str | None:
+    for key in ("filePath", "path"):
+        value = input_dict.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _effect_command(input_dict: dict[str, Any]) -> str | None:
+    value = input_dict.get("command")
+    return value if isinstance(value, str) and value else None
+
+
+def _effect_edit(kind: Any, input_dict: dict[str, Any]) -> tuple[str, str] | None:
+    if kind != "file_edit":
+        return None
+    old = input_dict.get("oldString")
+    new = input_dict.get("newString")
+    return (old, new) if isinstance(old, str) and isinstance(new, str) else None
 
 
 def _entry_text(event: dict[str, Any]) -> str | None:

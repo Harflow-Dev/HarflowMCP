@@ -699,6 +699,9 @@ class _TrivialBackend:
     def ingest(self, event, acc):
         return None
 
+    def normalize(self, event, acc):
+        return []
+
     def classify(self, acc, exit_code):
         return "completed"
 

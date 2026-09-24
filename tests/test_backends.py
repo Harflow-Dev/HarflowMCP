@@ -71,6 +71,9 @@ class _NoEffortBackend:
         network_control=NetworkControl(can_enable=(), can_block=()),
     )
 
+    def normalize(self, event: dict, acc: Accumulator) -> list:
+        return []
+
 
 class _PartialEffortBackend:
     """A Backend double that accepts only some of EFFORTS, to exercise the "names what it has"
@@ -94,6 +97,9 @@ class _PartialEffortBackend:
         ),
         network_control=NetworkControl(can_enable=(), can_block=()),
     )
+
+    def normalize(self, event: dict, acc: Accumulator) -> list:
+        return []
 
 
 def start(backend, **kwargs):

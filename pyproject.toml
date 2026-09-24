@@ -13,6 +13,7 @@ dependencies = ["mcp>=2.0,<3"]
 [project.scripts]
 polybridge-server = "polybridge.server:main"
 polybridge-setup = "polybridge.setup_client:main"
+polybridge-ctl = "polybridge.ctl:main"
 
 [dependency-groups]
 dev = ["pytest>=8", "pytest-asyncio>=0.24"]

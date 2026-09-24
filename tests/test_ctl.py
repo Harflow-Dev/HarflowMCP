@@ -1,0 +1,195 @@
+"""`polybridge-ctl`: the read-only CLI over on-disk task records."""
+
+from __future__ import annotations
+
+import json
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+
+from polybridge import ctl, store
+
+
+def _iso(dt: datetime) -> str:
+    return dt.isoformat()
+
+
+def make_record(**overrides) -> store.TaskRecord:
+    now = datetime.now(timezone.utc)
+    base = {
+        "task_id": "task-1",
+        "backend": "claude",
+        "session_id": "s1",
+        "markers": ["s1"],
+        "repo_path": "/tmp/repo",
+        "started_at": _iso(now),
+        "status": "completed",
+        "exit_code": 0,
+        "finished_at": _iso(now),
+        "owner": {"pid": 4242, "start_time": "Wed Jan  1 00:00:00 2000", "markers": []},
+    }
+    return store.TaskRecord(**(base | overrides))
+
+
+@pytest.fixture(autouse=True)
+def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """`ctl` reads `tasks.default_log_dir()`, which is `Path.home() / ".polybridge" / "tasks"` —
+    redirect HOME so nothing here ever touches the real `~/.polybridge`."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    return tmp_path
+
+
+def _log_dir(home: Path) -> Path:
+    from polybridge.tasks import default_log_dir
+
+    return default_log_dir()
+
+
+def test_list_json_is_exactly_one_document(home: Path, capsys: pytest.CaptureFixture) -> None:
+    store.write(_log_dir(home), make_record())
+
+    code = ctl.main(["list", "--json"])
+
+    assert code == 0
+    out = capsys.readouterr().out
+    lines = [line for line in out.splitlines() if line.strip()]
+    assert len(lines) == 1
+    doc = json.loads(lines[0])
+    assert doc["v"] == 1
+    assert len(doc["tasks"]) == 1
+    assert doc["tasks"][0]["task_id"] == "task-1"
+    assert doc["tasks"][0]["owner"]["pid"] == 4242
+
+
+def test_list_json_with_no_tasks_is_still_one_document(
+    home: Path, capsys: pytest.CaptureFixture
+) -> None:
+    code = ctl.main(["list", "--json"])
+
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc == {"v": 1, "tasks": []}
+
+
+def test_list_plain_table_names_its_columns(home: Path, capsys: pytest.CaptureFixture) -> None:
+    store.write(_log_dir(home), make_record())
+
+    code = ctl.main(["list"])
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "task_id" in out
+    assert "task-1" in out
+    assert "4242" in out  # owner pid
+
+
+def test_list_since_filters_out_older_tasks(home: Path, capsys: pytest.CaptureFixture) -> None:
+    now = datetime.now(timezone.utc)
+    log_dir = _log_dir(home)
+    store.write(log_dir, make_record(task_id="recent", started_at=_iso(now - timedelta(hours=1))))
+    store.write(log_dir, make_record(task_id="old", started_at=_iso(now - timedelta(days=30))))
+
+    code = ctl.main(["list", "--since", "1d", "--json"])
+
+    assert code == 0
+    doc = json.loads(capsys.readouterr().out)
+    task_ids = {t["task_id"] for t in doc["tasks"]}
+    assert task_ids == {"recent"}
+
+
+def test_a_bad_since_value_is_a_usage_error(home: Path, capsys: pytest.CaptureFixture) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        ctl.main(["list", "--since", "not-a-duration", "--json"])
+
+    assert exc_info.value.code == 2
+    captured = capsys.readouterr()
+    doc = json.loads(captured.out)
+    assert doc["v"] == 1
+    assert doc["error"]["code"] == "usage"
+    assert captured.err.strip()
+
+
+def test_status_json_for_a_known_task(home: Path, capsys: pytest.CaptureFixture) -> None:
+    store.write(_log_dir(home), make_record())
+
+    code = ctl.main(["status", "task-1", "--json"])
+
+    assert code == 0
+    out = capsys.readouterr().out
+    lines = [line for line in out.splitlines() if line.strip()]
+    assert len(lines) == 1
+    doc = json.loads(lines[0])
+    assert doc["v"] == 1
+    assert doc["task"]["task_id"] == "task-1"
+    assert doc["task"]["status"] == "completed"
+
+
+def test_status_json_for_an_unknown_task(home: Path, capsys: pytest.CaptureFixture) -> None:
+    code = ctl.main(["status", "no-such-task", "--json"])
+
+    assert code == 1
+    captured = capsys.readouterr()
+    doc = json.loads(captured.out)
+    assert doc == {
+        "v": 1,
+        "error": {"code": "unknown_task", "message": "unknown task_id: no-such-task"},
+    }
+    assert "no-such-task" in captured.err
+
+
+def test_status_json_for_an_invalid_task_id(home: Path, capsys: pytest.CaptureFixture) -> None:
+    code = ctl.main(["status", "../escape", "--json"])
+
+    assert code == 1
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["error"]["code"] == "invalid_task_id"
+
+
+def test_status_plain_text_for_an_unknown_task_prints_nothing_to_stdout(
+    home: Path, capsys: pytest.CaptureFixture
+) -> None:
+    code = ctl.main(["status", "no-such-task"])
+
+    assert code == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "no-such-task" in captured.err
+
+
+def test_bad_subcommand_is_a_usage_error(home: Path, capsys: pytest.CaptureFixture) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        ctl.main(["bogus"])
+
+    assert exc_info.value.code == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.strip()
+
+
+def test_bad_subcommand_with_json_still_emits_a_usage_document(
+    home: Path, capsys: pytest.CaptureFixture
+) -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        ctl.main(["bogus", "--json"])
+
+    assert exc_info.value.code == 2
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["v"] == 1
+    assert doc["error"]["code"] == "usage"
+
+
+def test_ctl_never_constructs_a_task_registry(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """ctl is read-only: it must not start retention or hold a live registry."""
+    from polybridge import tasks as tasks_module
+
+    def boom(*args, **kwargs):
+        raise AssertionError("polybridge-ctl must never construct a TaskRegistry")
+
+    monkeypatch.setattr(tasks_module, "TaskRegistry", boom)
+    store.write(_log_dir(home), make_record())
+
+    assert ctl.main(["list", "--json"]) == 0
+    assert ctl.main(["status", "task-1", "--json"]) == 0

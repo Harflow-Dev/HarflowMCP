@@ -233,6 +233,10 @@ class Accumulator:
     event_count: int = 0
     unparsable_lines: int = 0
 
+    normalize_errors: int = 0
+    """How many stream events the monitor normalizer failed on. Counted by the drain path, never
+    read by `classify`, so a normalizer bug can never change a run's reported outcome."""
+
     stream_state: dict[str, Any] = field(default_factory=dict)
     """Backend-private scratch space for an ingest algorithm that needs memory across events (e.g.
     vibe's current-turn tracking). Lives here, per task, rather than on the backend instance:
@@ -304,6 +308,19 @@ class Backend(Protocol):
 
     def ingest(self, event: dict[str, Any], acc: Accumulator) -> None:
         """Fold one stream event into the normalised view."""
+        ...
+
+    def normalize(self, event: dict[str, Any], acc: Accumulator) -> list[dict[str, Any]]:
+        """Translate one stream event into zero or more monitor events for `<task_id>.events.jsonl`.
+
+        Called AFTER `ingest` has folded the same event into `acc`, so it may read `acc` (e.g.
+        vibe's current turn, cumulative usage). It must not mutate `acc` except for
+        `acc.stream_state` keys prefixed `normalize_`. Each returned dict carries `kind` plus that
+        kind's fields, and optionally `source_ts` (an ISO-8601 string, the backend's own timestamp
+        for the event) which the writer lifts into the envelope. It never returns `task_started` or
+        `task_finished` — the bridge writes those itself. A raise is caught and counted by the
+        caller, but implementations should still be defensive: streams are untrusted input.
+        """
         ...
 
     def classify(self, acc: Accumulator, exit_code: int | None) -> Status:

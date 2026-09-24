@@ -313,6 +313,54 @@ An MCP client may run several polybridge servers, or restart one. Each task writ
 on, wait for, cancel or resume tasks it did not start. Those come back marked `recovered: true` with
 a `note` describing what is known.
 
+## The normalized event log
+
+Alongside a task's raw stream log (`<task_id>.jsonl`, whatever bytes the backend's CLI actually
+produced) and its record (`<task_id>.meta.json`), each task also writes
+`<task_id>.events.jsonl` — one JSON object per line, in a shape that means the same thing across
+every backend rather than each one's own stream format. Every line carries an envelope:
+`v` (schema version, currently `1`), `seq` (0-based, starting at `task_started`), `observed_at`
+(when polybridge wrote the line), `source_ts` (the backend's own timestamp for the event, when it
+has one), `raw_offset` (byte offset into the raw stream log the event was derived from, null for
+`task_started`/`task_finished` and for any event recorded while the raw log itself could not be
+written), `task_id`, and `kind` — one of `task_started`, `task_finished`, `assistant_text`,
+`tool_call`, `tool_result`, `user_message`, `usage`, or `notice`.
+
+This file is written only by the server process that owns the task — never by a recovered task's
+new server, and never by `polybridge-ctl`. So a task recovered after its original server died has
+an events log that simply stops where that server's did, exactly like its raw stream log; there is
+no owner left to keep appending to it.
+
+## `polybridge-ctl`: a read-only CLI over the same records
+
+```bash
+polybridge-ctl list [--since 7d] [--json]
+polybridge-ctl status <task_id> [--json]
+```
+
+Reads exactly what the MCP tools read — `store` and `tasks.default_log_dir()` — but never starts
+retention, never constructs a `TaskRegistry`, and never signals a process. `--json` output is
+always exactly one document on stdout, versioned the same way the event log is:
+`{"v": 1, "tasks": [...]}` for `list`, `{"v": 1, "task": {...}}` for `status`, and
+`{"v": 1, "error": {"code": ..., "message": ...}}` on failure. `--since` accepts a duration like
+`7d`, `12h`, or `30m`. Diagnostics go to stderr, never stdout, so a script parsing `--json` output
+never has to filter noise out of it.
+
+## Retention
+
+A running server sweeps settled task records at most once every 24 hours, controlled by
+`PB_RETENTION_DAYS` (default 30 days; `0` disables the sweep entirely). A task is only deleted once
+it is terminal, older than the window, has no still-running descendant (from `resume_task`), and no
+active cancel/takeover attempt in flight — and only `polybridge-server` ever runs it;
+`polybridge-ctl` is read-only and never triggers a sweep.
+
+**A deleted task's id stops working for `resume_task` — with one exception.** `resume_task` checks
+its own in-memory registry before falling back to the on-disk record, so a server that still holds
+the task as a live Python object (never evicted, because eviction only happens once the registry is
+over capacity) can keep resuming it even after retention deletes its record and logs. Any other
+server — including the same one after a restart, or once that task is finally pruned from memory —
+sees no record at all and reports it as an unknown task id, the same as if it had never existed.
+
 ## Development
 
 ```bash

@@ -48,6 +48,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from . import normalize as nz
 from .base import (
     EFFORTS,
     FREEDOMS,
@@ -186,6 +187,74 @@ _MODE_CAVEATS: dict[str, tuple[str, ...]] = {
         _UNRESTRICTED_COMPAT_BREAK_CAVEAT,
     ),
 }
+
+
+# Tool name -> monitor category. `mcp__`-prefixed names (any MCP server's tool) are matched by
+# prefix below rather than listed here, since the set of MCP tools is unbounded.
+_CATEGORY_BY_TOOL: dict[str, str] = {
+    "Read": "read",
+    "NotebookRead": "read",
+    "Grep": "search",
+    "Glob": "search",
+    "LS": "search",
+    "Edit": "edit",
+    "MultiEdit": "edit",
+    "NotebookEdit": "edit",
+    "Write": "write",
+    "Bash": "shell",
+    "BashOutput": "shell",
+    "KillShell": "shell",
+    "KillBash": "shell",
+    "WebFetch": "web",
+    "WebSearch": "web",
+}
+
+
+def _tool_category(name: Any) -> str:
+    if not isinstance(name, str):
+        return "other"
+    if name.startswith("mcp__"):
+        return "mcp"
+    return _CATEGORY_BY_TOOL.get(name, "other")
+
+
+def _tool_path(input_dict: dict[str, Any]) -> str | None:
+    for key in ("file_path", "notebook_path", "path"):
+        value = input_dict.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _tool_command(input_dict: dict[str, Any]) -> str | None:
+    value = input_dict.get("command")
+    return value if isinstance(value, str) and value else None
+
+
+def _tool_edit(name: Any, input_dict: dict[str, Any]) -> tuple[str, str] | None:
+    if name != "Edit":
+        return None
+    old = input_dict.get("old_string")
+    new = input_dict.get("new_string")
+    return (old, new) if isinstance(old, str) and isinstance(new, str) else None
+
+
+def _tool_result_text(content: Any) -> Any:
+    """A `tool_result` block's `content` is either a str or a list of `{"type":"text","text":…}`
+    blocks — join the latter into one string. Anything else is passed through for `tool_result`'s
+    own JSON-preview fallback rather than dropped."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        texts = [
+            block.get("text")
+            for block in content
+            if isinstance(block, dict)
+            and block.get("type") == "text"
+            and isinstance(block.get("text"), str)
+        ]
+        return "".join(texts)
+    return content
 
 
 class UnsafeInvocationError(RuntimeError):
@@ -573,6 +642,103 @@ class ClaudeBackend:
             acc.usage = usage if isinstance(usage, dict) else None
             denials = event.get("permission_denials")
             acc.denials = denials if isinstance(denials, list) else []
+
+    def normalize(self, event: dict[str, Any], acc: Accumulator) -> list[dict[str, Any]]:
+        if not isinstance(event, dict):
+            return []
+        source_ts = nz.iso_string(event.get("timestamp"))
+        parent = event.get("parent_tool_use_id")
+        subagent = isinstance(parent, str) and parent != ""
+
+        event_type = event.get("type")
+        if event_type == "assistant":
+            return self._normalize_assistant(event, source_ts, subagent)
+        if event_type == "user":
+            return self._normalize_user(event, source_ts, subagent)
+        if event_type == "result":
+            return [nz.usage(acc, source_ts=source_ts)]
+        return []
+
+    @staticmethod
+    def _normalize_assistant(
+        event: dict[str, Any], source_ts: str | None, subagent: bool
+    ) -> list[dict[str, Any]]:
+        message = event.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            return []
+
+        events: list[dict[str, Any]] = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            block_type = block.get("type")
+            if block_type == "text":
+                # A subagent's own prose must not read as the main thread speaking.
+                if subagent:
+                    continue
+                text = block.get("text")
+                if isinstance(text, str):
+                    events.append(nz.assistant_text(text, source_ts=source_ts))
+            elif block_type == "tool_use":
+                name = block.get("name")
+                tool_input = block.get("input")
+                input_dict = tool_input if isinstance(tool_input, dict) else {}
+                events.append(
+                    nz.tool_call(
+                        call_id=block.get("id"),
+                        tool=name,
+                        category=_tool_category(name),
+                        input=tool_input,
+                        path=_tool_path(input_dict),
+                        command=_tool_command(input_dict),
+                        edit=_tool_edit(name, input_dict),
+                        source_ts=source_ts,
+                    )
+                )
+            # `thinking` blocks, and anything else: never surfaced — no thinking text, ever.
+        return events
+
+    @staticmethod
+    def _normalize_user(
+        event: dict[str, Any], source_ts: str | None, subagent: bool
+    ) -> list[dict[str, Any]]:
+        message = event.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+
+        # A str `message.content` is itself a user text, same isSynthetic/subagent gating as a
+        # `text` block below.
+        if isinstance(content, str):
+            if subagent or event.get("isSynthetic"):
+                return []
+            return [nz.user_message(content, source="initial", source_ts=source_ts)]
+
+        if not isinstance(content, list):
+            return []
+
+        events: list[dict[str, Any]] = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            block_type = block.get("type")
+            if block_type == "tool_result":
+                events.append(
+                    nz.tool_result(
+                        call_id=block.get("tool_use_id"),
+                        ok=not block.get("is_error"),
+                        output=_tool_result_text(block.get("content")),
+                        source_ts=source_ts,
+                    )
+                )
+            elif block_type == "text":
+                # Skill bodies injected by the harness (isSynthetic), and a subagent's own prompt
+                # text, must never read as the main thread's user speaking.
+                if subagent or event.get("isSynthetic"):
+                    continue
+                text = block.get("text")
+                if isinstance(text, str):
+                    events.append(nz.user_message(text, source="initial", source_ts=source_ts))
+        return events
 
     def classify(self, acc: Accumulator, exit_code: int | None) -> Status:
         if acc.terminal is None:

@@ -65,6 +65,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from . import normalize as nz
 from .base import (
     EFFORTS,
     Accumulator,
@@ -208,6 +209,41 @@ PERMITTED_C_PAIRS: frozenset[str] = frozenset(
     {NEVER_ASK[1], NETWORK_ENABLE_PAIR, NETWORK_DISABLE_PAIR}
     | {f'{EFFORT_KEY}="{level}"' for level in EFFORTS}
 )
+
+
+def _codex_message(event: dict[str, Any]) -> str | None:
+    """A top-level error/`*.failed` event's message, which codex puts at either `event["message"]`
+    or `event["error"]["message"]`."""
+    message = event.get("message")
+    if isinstance(message, str) and message:
+        return message
+    error = event.get("error")
+    if isinstance(error, dict):
+        nested = error.get("message")
+        if isinstance(nested, str) and nested:
+            return nested
+    return None
+
+
+def _codex_mcp_name(server: Any, tool: Any) -> str:
+    if isinstance(server, str) and isinstance(tool, str):
+        return f"{server}.{tool}"
+    if isinstance(server, str):
+        return server
+    if isinstance(tool, str):
+        return tool
+    return ""
+
+
+def _codex_mcp_result_text(content: Any) -> str | None:
+    if not isinstance(content, list):
+        return None
+    texts = [
+        part.get("text")
+        for part in content
+        if isinstance(part, dict) and isinstance(part.get("text"), str)
+    ]
+    return "".join(texts) if texts else None
 
 
 class UnsafeInvocationError(RuntimeError):
@@ -652,6 +688,135 @@ class CodexBackend:
             message = event.get("message")
             if isinstance(message, str):
                 acc.notices.append(message)
+
+    def normalize(self, event: dict[str, Any], acc: Accumulator) -> list[dict[str, Any]]:
+        # Codex has no timestamps in its stream at all: no source_ts is ever attached here.
+        if not isinstance(event, dict):
+            return []
+        event_type = event.get("type")
+
+        if event_type == "item.started":
+            return self._normalize_item_started(event, acc)
+        if event_type == "item.completed":
+            return self._normalize_item_completed(event, acc)
+        if event_type == "turn.completed":
+            return [nz.usage(acc)]
+        if event_type == "error" or (isinstance(event_type, str) and event_type.endswith(".failed")):
+            message = _codex_message(event)
+            return [nz.notice(message)] if message else []
+        return []
+
+    @classmethod
+    def _normalize_item_started(
+        cls, event: dict[str, Any], acc: Accumulator
+    ) -> list[dict[str, Any]]:
+        item = event.get("item")
+        if not isinstance(item, dict):
+            return []
+        item_type = item.get("type")
+        call_id = item.get("id")
+
+        if item_type == "command_execution":
+            cls._mark_started(acc, call_id)
+            command = item.get("command")
+            return [
+                nz.tool_call(
+                    call_id=call_id, tool="shell", category="shell", command=command, input=command
+                )
+            ]
+        if item_type == "mcp_tool_call":
+            cls._mark_started(acc, call_id)
+            name = _codex_mcp_name(item.get("server"), item.get("tool"))
+            return [
+                nz.tool_call(
+                    call_id=call_id, tool=name, category="mcp", input=item.get("arguments")
+                )
+            ]
+        return []
+
+    @classmethod
+    def _normalize_item_completed(
+        cls, event: dict[str, Any], acc: Accumulator
+    ) -> list[dict[str, Any]]:
+        item = event.get("item")
+        if not isinstance(item, dict):
+            return []
+        item_type = item.get("type")
+
+        if item_type == "command_execution":
+            return cls._completed_command_execution(item, acc)
+        if item_type == "mcp_tool_call":
+            return cls._completed_mcp_tool_call(item, acc)
+        if item_type == "agent_message":
+            text = item.get("text")
+            return [nz.assistant_text(text)] if isinstance(text, str) else []
+        if item_type == "error":
+            message = item.get("message")
+            return [nz.notice(message)] if isinstance(message, str) and message else []
+        return []
+
+    @classmethod
+    def _completed_command_execution(
+        cls, item: dict[str, Any], acc: Accumulator
+    ) -> list[dict[str, Any]]:
+        call_id = item.get("id")
+        events: list[dict[str, Any]] = []
+        if not cls._was_started(acc, call_id):
+            command = item.get("command")
+            events.append(
+                nz.tool_call(
+                    call_id=call_id, tool="shell", category="shell", command=command, input=command
+                )
+            )
+        exit_code = item.get("exit_code")
+        # `bool` is an `int` subclass, and `False == 0` — guarded so a stray boolean exit code
+        # cannot masquerade as a clean exit.
+        clean_exit = (
+            isinstance(exit_code, int) and not isinstance(exit_code, bool) and exit_code == 0
+        )
+        ok = clean_exit and item.get("status") != "failed"
+        events.append(
+            nz.tool_result(
+                call_id=call_id, ok=ok, exit_code=exit_code, output=item.get("aggregated_output")
+            )
+        )
+        return events
+
+    @classmethod
+    def _completed_mcp_tool_call(
+        cls, item: dict[str, Any], acc: Accumulator
+    ) -> list[dict[str, Any]]:
+        call_id = item.get("id")
+        events: list[dict[str, Any]] = []
+        if not cls._was_started(acc, call_id):
+            name = _codex_mcp_name(item.get("server"), item.get("tool"))
+            events.append(
+                nz.tool_call(
+                    call_id=call_id, tool=name, category="mcp", input=item.get("arguments")
+                )
+            )
+        error = item.get("error")
+        error_dict = error if isinstance(error, dict) else None
+        ok = item.get("status") == "completed" and error_dict is None
+        if ok:
+            result = item.get("result")
+            content = result.get("content") if isinstance(result, dict) else None
+            output = _codex_mcp_result_text(content)
+        else:
+            message = error_dict.get("message") if error_dict else None
+            output = message if isinstance(message, str) else None
+        events.append(nz.tool_result(call_id=call_id, ok=ok, output=output))
+        return events
+
+    @staticmethod
+    def _mark_started(acc: Accumulator, call_id: Any) -> None:
+        started = acc.stream_state.setdefault("normalize_started_calls", set())
+        started.add(call_id)
+
+    @staticmethod
+    def _was_started(acc: Accumulator, call_id: Any) -> bool:
+        started = acc.stream_state.get("normalize_started_calls")
+        return isinstance(started, set) and call_id in started
 
     def classify(self, acc: Accumulator, exit_code: int | None) -> Status:
         # No terminal success/failure event exists, so the exit code is the authority and the closing

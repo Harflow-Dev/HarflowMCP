@@ -50,6 +50,7 @@ import math
 from pathlib import Path
 from typing import Any
 
+from . import normalize as nz
 from .base import (
     EFFORTS,
     FREEDOMS,
@@ -476,16 +477,68 @@ class OpencodeBackend:
         elif event_type == "error":
             acc.is_error = True
             acc.terminal = event
-            error = event.get("error")
-            if isinstance(error, dict):
-                data = error.get("data")
-                message = data.get("message") if isinstance(data, dict) else None
-                name = error.get("name")
-                detail = message if isinstance(message, str) else None
-                if isinstance(name, str):
-                    detail = f"{name}: {detail}" if detail else name
-                if detail:
-                    acc.notices.append(detail)
+            detail = _error_detail(event)
+            if detail:
+                acc.notices.append(detail)
+
+    def normalize(self, event: dict[str, Any], acc: Accumulator) -> list[dict[str, Any]]:
+        if not isinstance(event, dict):
+            return []
+        source_ts = nz.iso_from_epoch_ms(event.get("timestamp"))
+        event_type = event.get("type")
+        part = event.get("part")
+        part = part if isinstance(part, dict) else {}
+
+        if event_type == "tool_use":
+            return self._normalize_tool_use(part, source_ts)
+        if event_type == "text":
+            text = part.get("text")
+            return [nz.assistant_text(text, source_ts=source_ts)] if isinstance(text, str) else []
+        if event_type == "step_finish":
+            return [nz.usage(acc, source_ts=source_ts)]
+        if event_type == "error":
+            detail = _error_detail(event)
+            return [nz.notice(detail, source_ts=source_ts)] if detail else []
+        return []
+
+    @staticmethod
+    def _normalize_tool_use(part: dict[str, Any], source_ts: str | None) -> list[dict[str, Any]]:
+        call_id = part.get("callID") or part.get("id")
+        tool = part.get("tool")
+        state = part.get("state")
+        state = state if isinstance(state, dict) else {}
+        tool_input = state.get("input")
+        input_dict = tool_input if isinstance(tool_input, dict) else {}
+        category = _tool_category(tool)
+
+        events: list[dict[str, Any]] = [
+            nz.tool_call(
+                call_id=call_id,
+                tool=tool,
+                category=category,
+                input=tool_input,
+                path=_tool_path(input_dict),
+                command=_tool_command(input_dict),
+                edit=_tool_edit(tool, input_dict),
+                source_ts=source_ts,
+            )
+        ]
+
+        status = state.get("status")
+        if status in ("completed", "error"):
+            metadata = state.get("metadata")
+            exit_code = metadata.get("exit") if isinstance(metadata, dict) else None
+            output = state.get("output") if status == "completed" else state.get("error")
+            events.append(
+                nz.tool_result(
+                    call_id=call_id,
+                    ok=status == "completed",
+                    exit_code=exit_code,
+                    output=output,
+                    source_ts=source_ts,
+                )
+            )
+        return events
 
     def classify(self, acc: Accumulator, exit_code: int | None) -> Status:
         # `reason: "stop"` is a real end-of-run signal, not merely "some text arrived", so unlike
@@ -497,6 +550,64 @@ class OpencodeBackend:
         if exit_code is not None and exit_code != 0:
             return "failed"
         return "completed" if acc.saw_final_message else "failed"
+
+
+def _error_detail(event: dict[str, Any]) -> str | None:
+    """The notice text for an `error` event — shared by `ingest` and `normalize` so the monitor's
+    notice says exactly what `ingest` already decided was worth surfacing."""
+    error = event.get("error")
+    if not isinstance(error, dict):
+        return None
+    data = error.get("data")
+    message = data.get("message") if isinstance(data, dict) else None
+    name = error.get("name")
+    detail = message if isinstance(message, str) else None
+    if isinstance(name, str):
+        detail = f"{name}: {detail}" if detail else name
+    return detail if detail else None
+
+
+# Tool name -> monitor category, per opencode's own tool names (lowercase, unlike claude's).
+_CATEGORY_BY_TOOL: dict[str, str] = {
+    "read": "read",
+    "grep": "search",
+    "glob": "search",
+    "list": "search",
+    "edit": "edit",
+    "multiedit": "edit",
+    "patch": "edit",
+    "write": "write",
+    "bash": "shell",
+    "webfetch": "web",
+    "websearch": "web",
+}
+
+
+def _tool_category(tool: Any) -> str:
+    if not isinstance(tool, str):
+        return "other"
+    return _CATEGORY_BY_TOOL.get(tool, "other")
+
+
+def _tool_path(input_dict: dict[str, Any]) -> str | None:
+    for key in ("filePath", "path"):
+        value = input_dict.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _tool_command(input_dict: dict[str, Any]) -> str | None:
+    value = input_dict.get("command")
+    return value if isinstance(value, str) and value else None
+
+
+def _tool_edit(tool: Any, input_dict: dict[str, Any]) -> tuple[str, str] | None:
+    if tool != "edit":
+        return None
+    old = input_dict.get("oldString")
+    new = input_dict.get("newString")
+    return (old, new) if isinstance(old, str) and isinstance(new, str) else None
 
 
 def _usable_number(value: Any) -> float | None:

@@ -32,9 +32,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
-from . import store
+from . import identity, retention, store
 from .backends import Accumulator, Backend, Enforcement
 from .backends import get as get_backend
+from .events import EVENTS_SUFFIX, EventLog, events_path
 from .stream import parse_line
 
 log = logging.getLogger(__name__)
@@ -69,6 +70,11 @@ MAX_TASKS = 200
 # check, not per call — several probes each allowed the full timeout would stack up into a delay
 # before the agent even starts.
 GIT_PROBE_BUDGET_SECONDS = 3.0
+
+# Separate budget from GIT_PROBE_BUDGET_SECONDS: this is its own `to_thread` hop, run unconditionally
+# (unlike the branch-disclosure probe, which is skipped outright below `publish`), so it needs its
+# own accounting rather than sharing one that was sized for a check some dispatches never pay.
+GIT_BASELINE_BUDGET_SECONDS = 1.5
 
 _UNDETERMINED_PUBLISH_NOTICE = (
     "this task was dispatched at freedom {freedom!r}, which authorizes it to commit, push, and "
@@ -177,6 +183,23 @@ def _git_read(repo_path: Path, deadline: float, *args: str) -> str | None:
     if result.returncode != 0:
         return None
     return result.stdout.strip()
+
+
+def _git_baseline(repo_path: Path) -> tuple[str | None, bool | None]:
+    """`(base_commit, start_dirty)` at spawn time, best-effort — nulls on any failure.
+
+    Same rule as `_publish_branch_notice`: a slow, missing, or broken git must never change a
+    dispatch's outcome, so every failure mode here is absorbed rather than raised.
+    """
+    try:
+        deadline = time.monotonic() + GIT_BASELINE_BUDGET_SECONDS
+        base_commit = _git_read(repo_path, deadline, "rev-parse", "--verify", "--quiet", "HEAD")
+        status = _git_read(repo_path, deadline, "--no-optional-locks", "status", "--porcelain")
+        start_dirty = None if status is None else status != ""
+        return base_commit, start_dirty
+    except Exception:
+        log.warning("could not determine git baseline for %s", repo_path, exc_info=True)
+        return None, None
 
 
 def _default_branch_remote(repo_path: Path, deadline: float) -> str | None:
@@ -387,6 +410,22 @@ class Task:
     # already name an unrelated process, and signalling that process's group would be a disaster.
     pgid: int | None = None
 
+    events: EventLog | None = None
+    """The task's normalized event log — see `events.py`. None only in tests that build a `Task`
+    directly without going through `_spawn`."""
+    start_time: str | None = None
+    """This task's own process start time, from `identity.capture` shortly after spawn. Null
+    ("pending") until that capture lands — see `_spawn` — so `identity.identity_check` on a record
+    with a null `start_time` falls back to its legacy pid+markers comparison."""
+    owner: dict[str, Any] | None = None
+    """The bridge server process that dispatched this task — `identity.own_identity()` at spawn."""
+    base_commit: str | None = None
+    """`git rev-parse HEAD` in the repo at spawn, before the agent ran. None if the repo had no
+    commit yet, or the probe failed or timed out."""
+    start_dirty: bool | None = None
+    """Whether `git status --porcelain` was non-empty at spawn. None if the probe failed or
+    timed out."""
+
     acc: Accumulator = field(default_factory=Accumulator)
     bridge_notices: list[str] = field(default_factory=list)
     """Notices the bridge itself generates about the dispatch, kept on a channel separate from
@@ -443,6 +482,10 @@ class Task:
             "duration_seconds": self.duration_seconds,
             "parent_task_id": self.parent_task_id,
             "notices": list(self.bridge_notices),
+            "owner": self.owner,
+            # Meaningful only while the task is still running — a settled task has no live server
+            # to speak of, so this is null rather than a claim about the process that finished it.
+            "owned_by_live_server": (True if not self.finished else None),
         }
 
     def snapshot(self) -> dict[str, Any]:
@@ -465,6 +508,9 @@ class Task:
             "available_tool_count": self.acc.available_tool_count,
             "usage": self.acc.usage,
             "enforcement": self.enforcement,
+            "base_commit": self.base_commit,
+            "start_dirty": self.start_dirty,
+            "events_log": str(self.log_path.with_name(f"{self.task_id}{EVENTS_SUFFIX}")),
         }
         # Only meaningful when something went wrong, and usually empty otherwise.
         if self.status == "failed" and self.stderr_tail:
@@ -475,10 +521,20 @@ class Task:
 class TaskRegistry:
     """In-memory registry of dispatched runs, bounded to `max_tasks` finished entries."""
 
-    def __init__(self, log_dir: Path | None = None, max_tasks: int = MAX_TASKS) -> None:
+    def __init__(
+        self,
+        log_dir: Path | None = None,
+        max_tasks: int = MAX_TASKS,
+        owner: dict[str, Any] | None = None,
+    ) -> None:
         self._tasks: dict[str, Task] = {}
         self._log_dir = log_dir or default_log_dir()
         self._max_tasks = max_tasks
+        # Computed once per registry rather than per task: every task this registry spawns shares
+        # the same owning server process. `owner` is accepted as a parameter so tests can inject a
+        # deterministic identity instead of depending on this process's own `ps` call.
+        self._owner = owner if owner is not None else identity.own_identity()
+        self._maintenance: asyncio.Task[Any] | None = None
 
     async def start(
         self,
@@ -643,6 +699,18 @@ class TaskRegistry:
         if network is True and enforcement.network_access == "not_controlled":
             bridge_notices.append(_UNCONTROLLED_NETWORK_NOTICE)
 
+        # A second, independent `to_thread` hop from the branch-disclosure one above: this one is
+        # unconditional (every dispatch gets a baseline, regardless of freedom), so it needs its
+        # own bounded wait rather than piggybacking on a budget sized for a check some dispatches
+        # skip outright. Still strictly before the spawn, so it cannot introduce an await into the
+        # no-await window between `create_subprocess_exec` and registration below.
+        try:
+            base_commit, start_dirty = await asyncio.wait_for(
+                asyncio.to_thread(_git_baseline, repo_path), timeout=GIT_BASELINE_BUDGET_SECONDS
+            )
+        except Exception:
+            base_commit, start_dirty = None, None
+
         proc = await asyncio.create_subprocess_exec(
             *argv,
             cwd=str(repo_path),
@@ -674,6 +742,9 @@ class TaskRegistry:
             proc=proc,
             pgid=proc.pid,
             bridge_notices=bridge_notices,
+            owner=self._owner,
+            base_commit=base_commit,
+            start_dirty=start_dirty,
         )
 
         # Written before anything can go wrong, so even a task whose server dies immediately is
@@ -690,6 +761,49 @@ class TaskRegistry:
         # client disconnecting mid-call) and leave a live agent process no tool can reach.
         self._tasks[task_id] = task
         self.prune()
+
+        # The first event a task's log ever gets, written synchronously right after registration —
+        # no await has run yet and the drainer tasks just created cannot have executed, so this is
+        # always seq 0. Guarded on its own: a broken event log must not cost the dispatch itself.
+        try:
+            task.events = EventLog(events_path(self._log_dir, task_id), task_id)
+            task.events.write(
+                "task_started",
+                {
+                    "backend": task.backend,
+                    "freedom": task.freedom,
+                    "network": task.network,
+                    "repo_path": str(task.repo_path),
+                    "prompt": task.prompt,
+                    "model": task.model,
+                    "reasoning_effort": task.reasoning_effort,
+                    "parent_task_id": task.parent_task_id,
+                },
+            )
+        except Exception:
+            log.exception("task %s: could not write task_started event", task_id)
+
+        # Best-effort start-time capture, so a later server can tell this pid apart from a reused
+        # one (see `identity.identity_check`). `except Exception`, not `BaseException`: a
+        # `CancelledError` here must propagate — the task is already registered, so nothing is lost
+        # by not finishing this step.
+        try:
+            captured = await asyncio.wait_for(
+                asyncio.to_thread(identity.capture, proc.pid, task.markers), timeout=2.0
+            )
+        except Exception:
+            captured = None
+        if captured is not None:
+            task.start_time = captured["start_time"]
+
+        # A second, explicit persist so the on-disk record carries the start time once captured.
+        # The monitor may already have finished and persisted a terminal status by the time this
+        # runs — `persist` always rebuilds from the in-memory `Task`, so this stays consistent with
+        # whatever the monitor last wrote rather than clobbering it with stale spawn-time data.
+        try:
+            self.persist(task)
+        except Exception:
+            log.exception("task %s: could not persist after identity capture", task_id)
 
         log.info(
             "task %s started (%s pid=%s session=%s repo=%s%s)",
@@ -730,6 +844,10 @@ class TaskRegistry:
                 finished_at=task.finished_at.isoformat() if task.finished_at else None,
                 enforcement=dict(task.enforcement),
                 bridge_notices=list(task.bridge_notices),
+                start_time=task.start_time,
+                owner=dict(task.owner) if task.owner is not None else None,
+                base_commit=task.base_commit,
+                start_dirty=task.start_dirty,
             ),
         )
 
@@ -921,6 +1039,36 @@ class TaskRegistry:
             del self._tasks[task.task_id]
             log.debug("evicted finished task %s", task.task_id)
 
+    def start_maintenance(self) -> None:
+        """Kick off a background retention sweep, at most once per registry instance.
+
+        Lazily started here rather than from `__init__`, so a registry constructed directly by a
+        unit test never triggers a sweep against real disk state — only `server._reg()` calls this,
+        on a real event loop. `retention.maybe_sweep` runs in a thread since it does blocking file
+        and `flock` I/O; the resulting `asyncio.Task` is held on `self._maintenance` so the event
+        loop keeps a strong reference to it (a bare `create_task` result is only weakly referenced).
+        """
+        if self._maintenance is not None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        task = loop.create_task(
+            asyncio.to_thread(retention.maybe_sweep, self._log_dir), name="pb-maintenance"
+        )
+        self._maintenance = task
+
+        def _log_failure(done: asyncio.Task[Any]) -> None:
+            if done.cancelled():
+                return
+            exc = done.exception()
+            if exc is not None:
+                log.debug("background maintenance sweep failed", exc_info=exc)
+
+        task.add_done_callback(_log_failure)
+
 
 async def _await_recorded_death(record: store.TaskRecord, timeout: float | None = None) -> bool:
     """Poll a recovered task's process until it is gone. False if it outlasted `timeout`."""
@@ -994,7 +1142,11 @@ async def _drain_stdout(task: Task, registry: TaskRegistry) -> None:
     reader = task.proc.stdout
     handle = None
     try:
-        handle = task.log_path.open("a", encoding="utf-8")
+        # Binary, not text mode: `raw_offset` below is `handle.tell()`, which counts bytes, and a
+        # text-mode handle's tell() is not a reliable byte offset. `text` is still encoded with the
+        # same `errors="replace"` decoding used for everything else here, so the file on disk stays
+        # valid UTF-8 and `replay_log` reads it exactly as before.
+        handle = task.log_path.open("ab")
     except OSError:
         log.warning("task %s: cannot open %s; continuing without a raw log", task.task_id, task.log_path)
 
@@ -1014,10 +1166,12 @@ async def _drain_stdout(task: Task, registry: TaskRegistry) -> None:
                 break
 
             text = raw.decode("utf-8", errors="replace")
+            raw_offset: int | None = None
             if handle is not None:
                 try:
-                    handle.write(text)
+                    handle.write(text.encode("utf-8"))
                     handle.flush()
+                    raw_offset = handle.tell()
                 except OSError:
                     log.warning("task %s: raw log write failed; dropping it", task.task_id)
                     handle.close()
@@ -1032,7 +1186,9 @@ async def _drain_stdout(task: Task, registry: TaskRegistry) -> None:
             if event is None:
                 task.acc.unparsable_lines += 1
                 continue
-            get_backend(task.backend).ingest(event, task.acc)
+            backend = get_backend(task.backend)
+            backend.ingest(event, task.acc)
+            _record_events(task, backend, event, raw_offset)
 
             # Recorded the moment it is disclosed, not at the end of the run. A backend that mints
             # its own session id only reveals it mid-stream, so waiting until exit would mean a
@@ -1052,6 +1208,36 @@ async def _drain_stdout(task: Task, registry: TaskRegistry) -> None:
     finally:
         if handle is not None:
             handle.close()
+
+
+def _record_events(task: Task, backend: Backend, event: dict[str, Any], raw_offset: int | None) -> None:
+    """Normalize one raw stream event and append the results to the task's event log.
+
+    Guarded on its own, separately from `ingest` above: a broken normalizer must never touch
+    `task.status` or `task.drain_failed` — those describe the run itself, which the raw stream and
+    `ingest` have already faithfully advanced regardless of what this does. Written after the raw
+    line it derives from, never before, so `raw_offset` always points at bytes already on disk.
+    """
+    if task.events is None:
+        return
+    try:
+        normalized = backend.normalize(event, task.acc)  # type: ignore[attr-defined]
+    except Exception:
+        task.acc.normalize_errors += 1
+        log.debug("task %s: normalize() failed for one event", task.task_id, exc_info=True)
+        return
+    for entry in normalized:
+        fields = dict(entry)
+        kind = fields.pop("kind", None)
+        if kind is None:
+            task.acc.normalize_errors += 1
+            continue
+        source_ts = fields.pop("source_ts", None)
+        try:
+            task.events.write(kind, fields, raw_offset=raw_offset, source_ts=source_ts)
+        except Exception:
+            task.acc.normalize_errors += 1
+            log.debug("task %s: could not write a normalized event", task.task_id, exc_info=True)
 
 
 async def _drain_stderr(task: Task) -> None:
@@ -1182,6 +1368,22 @@ async def _monitor(task: Task, registry: TaskRegistry) -> None:
                 registry.prune()
             except Exception:  # pragma: no cover - bookkeeping must never mask a finished run
                 log.exception("task %s: recording the finished run failed", task.task_id)
+            # Guarded separately from the persist/prune above: a broken event log must not affect
+            # whether the run's terminal status and record landed, which is already done by here.
+            try:
+                if task.events is not None:
+                    task.events.write(
+                        "task_finished",
+                        {
+                            "status": task.status,
+                            "exit_code": task.exit_code,
+                            "summary": task.acc.summary,
+                            "observed": task.exit_code is not None,
+                        },
+                    )
+                    task.events.close()
+            except Exception:
+                log.exception("task %s: could not write the task_finished event", task.task_id)
 
 
 def _classify(task: Task, exit_code: int) -> Status:

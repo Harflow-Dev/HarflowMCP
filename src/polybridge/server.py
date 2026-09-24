@@ -18,7 +18,7 @@ from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
 from mcp.types import INVALID_PARAMS
 
-from . import backends, store
+from . import backends, identity, store
 from .backends import DEFAULT_BACKEND, DEFAULT_FREEDOM, FREEDOMS
 from .tasks import (
     TERMINAL_STATUSES,
@@ -83,6 +83,7 @@ def _reg() -> TaskRegistry:
     global _registry
     if _registry is None:
         _registry = TaskRegistry()
+        _registry.start_maintenance()
     return _registry
 
 
@@ -352,7 +353,7 @@ async def _poll_recovered(
     for step in range(1, steps + 1):
         if loop.time() >= deadline:
             break
-        if store.resolve_status(_reg().log_dir, record)[0] in TERMINAL_STATUSES:
+        if store.resolve_status(_reg().log_dir, record, detail=False)[0] in TERMINAL_STATUSES:
             break
         await asyncio.sleep(min(PROGRESS_INTERVAL_SECONDS, max(0.0, deadline - loop.time())))
 
@@ -568,6 +569,9 @@ def main() -> None:
     log.info("polybridge starting (backends available: %s)", ", ".join(available) or "none")
     if missing:
         log.warning("backends unavailable, their CLI is not on PATH: %s", ", ".join(missing))
+    # Warmed here rather than left to the first dispatch, so every task's `owner` is computed
+    # once at startup instead of paying a `ps` call on the first `start_task`.
+    identity.own_identity()
     mcp.run()
 
 

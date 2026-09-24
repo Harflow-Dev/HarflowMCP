@@ -691,3 +691,142 @@ def test_a_pre_change_record_with_no_network_field_still_loads_as_none(tmp_path:
 
     assert loaded is not None
     assert loaded.network is None
+
+
+# --- ownership, identity, and the detail=False settlement shortcut ---------------------------
+
+
+def test_a_pre_change_record_with_none_of_the_ownership_fields_still_loads(tmp_path: Path) -> None:
+    """A record written before start_time/owner/base_commit/start_dirty existed has none of the
+    four keys at all."""
+    store.write(tmp_path, make_record())
+    path = store.record_path(tmp_path, "task-1")
+    raw = json.loads(path.read_text())
+    for key in ("start_time", "owner", "base_commit", "start_dirty"):
+        del raw[key]
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    loaded = store.read(tmp_path, "task-1")
+
+    assert loaded is not None
+    assert loaded.start_time is None
+    assert loaded.owner is None
+    assert loaded.base_commit is None
+    assert loaded.start_dirty is None
+
+
+def test_an_observed_terminal_record_skips_replay_with_detail_false(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`brief` and any other `detail=False` caller must not pay for a replay a settled, observed
+    task has no use for."""
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("replay_log must not be called for an observed terminal record")
+
+    monkeypatch.setattr(store, "replay_log", unexpected)
+    record = make_record(status="completed", exit_code=0)
+    store.write(tmp_path, record)
+
+    status, note, state, tail = store.resolve_status(tmp_path, record, detail=False)
+
+    assert status == "completed"
+    assert state.summary is None  # a fresh Accumulator, never replayed
+    assert tail == []
+
+    brief = store.brief(tmp_path, record)
+    assert brief["status"] == "completed"
+
+
+def test_snapshot_always_replays_even_for_an_observed_terminal_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`snapshot` needs the summary/usage/etc. that only a replay produces, so it must not take
+    the `detail=False` shortcut regardless of how settled the record is."""
+    called = False
+    real_replay = store.replay_log
+
+    def spying_replay(*args, **kwargs):
+        nonlocal called
+        called = True
+        return real_replay(*args, **kwargs)
+
+    monkeypatch.setattr(store, "replay_log", spying_replay)
+    record = make_record(status="completed", exit_code=0)
+    write_log(tmp_path, record.task_id, RESULT_EVENT)
+
+    snap = store.snapshot(tmp_path, record)
+
+    assert called
+    assert snap["status"] == "completed"
+    assert snap["summary"] == "Created hello.txt."
+
+
+def test_an_unobserved_record_still_replays_even_with_detail_false(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The `detail=False` shortcut only applies to a record that was actually observed to finish —
+    an unobserved one still needs the full resolution (liveness check, possible replay-based
+    reconstruction), because trusting the bare recorded status could be the very lie
+    `outcome_unobserved` exists to catch."""
+    monkeypatch.setattr(store, "process_alive", lambda pid, markers: False)
+    record = make_record(status="failed", exit_code=None)
+    write_log(tmp_path, record.task_id, RESULT_EVENT)
+
+    status, _, _, _ = store.resolve_status(tmp_path, record, detail=False)
+
+    assert status == "completed"
+
+
+def test_owned_by_live_server_note_and_flag_when_identity_check_reports_alive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(store, "process_alive", lambda pid, markers: True)
+    monkeypatch.setattr(store.identity, "identity_check", lambda owner: "alive")
+    owner = {"pid": 4242, "start_time": "Wed Jan  1 00:00:00 2000", "markers": []}
+    record = make_record(status="running", exit_code=None, owner=owner)
+
+    status, note, _, _ = store.resolve_status(tmp_path, record)
+
+    assert status == "running"
+    assert "4242" in note
+    assert "owned by a live polybridge server process" in note
+
+    snap = store.snapshot(tmp_path, record)
+    assert snap["owned_by_live_server"] is True
+    assert snap["owner"] == owner
+
+    brief = store.brief(tmp_path, record)
+    assert brief["owned_by_live_server"] is True
+    assert brief["owner"] == owner
+
+
+def test_owned_by_live_server_is_false_when_identity_check_cannot_confirm_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A live process with an unconfirmable owner keeps the old, weaker wording — `undecidable`
+    must never be treated as a match (see `identity.identity_check`)."""
+    monkeypatch.setattr(store, "process_alive", lambda pid, markers: True)
+    monkeypatch.setattr(store.identity, "identity_check", lambda owner: "undecidable")
+    record = make_record(status="running", exit_code=None)
+
+    status, note, _, _ = store.resolve_status(tmp_path, record)
+
+    assert status == "running"
+    assert "owned by a live polybridge server process" not in note
+
+    snap = store.snapshot(tmp_path, record)
+    assert snap["owned_by_live_server"] is False
+
+
+def test_owned_by_live_server_is_null_once_the_task_has_settled(tmp_path: Path) -> None:
+    """The flag is only meaningful while a task is running — a settled task has no live server
+    left to speak of."""
+    record = make_record(status="completed", exit_code=0)
+    store.write(tmp_path, record)
+
+    snap = store.snapshot(tmp_path, record)
+    brief = store.brief(tmp_path, record)
+
+    assert snap["owned_by_live_server"] is None
+    assert brief["owned_by_live_server"] is None

@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from . import events, identity
 from .backends import Accumulator
 from .backends import get as get_backend
 from .stream import parse_line
@@ -78,6 +79,20 @@ class TaskRecord:
     bridge_notices: list[str] = field(default_factory=list)
     """Notices the bridge itself generated about the dispatch, kept apart from the backend's own
     `Accumulator.notices` — see `Task.bridge_notices` for why."""
+    start_time: str | None = None
+    """The task's own process start time, from `identity.capture` — captured shortly after spawn,
+    so it is null ("pending") until that capture lands, and null forever for a record written
+    before this field existed. Paired with `markers` for `identity.identity_check`."""
+    owner: dict[str, Any] | None = None
+    """The bridge server process that dispatched this task — `identity.own_identity()` at spawn.
+    Distinct from `pid`/`pgid`, which identify the task's own subprocess, not the server that
+    started it. None for a record written before this field existed."""
+    base_commit: str | None = None
+    """`git rev-parse HEAD` in the repo at spawn, before the agent ran — None if the repo had no
+    commit yet, or the probe failed or timed out."""
+    start_dirty: bool | None = None
+    """Whether `git status --porcelain` was non-empty at spawn — None if the probe failed, timed
+    out, or predates this field."""
 
 
 class InvalidTaskId(ValueError):
@@ -256,17 +271,51 @@ def outcome_unobserved(record: TaskRecord) -> bool:
     return record.status == "running" or record.exit_code is None
 
 
-def resolve_status(log_dir: Path, record: TaskRecord) -> tuple[str, str, Accumulator, list[str]]:
+_OWNED_BY_LIVE_SERVER_NOTE = (
+    "Recovered from disk: this task is owned by a live polybridge server process (pid {pid}), "
+    "which is reading its output and will record its outcome; this process sees only what that "
+    "server has persisted so far. Status and cancellation work."
+)
+
+
+def resolve_status(
+    log_dir: Path, record: TaskRecord, *, detail: bool = True
+) -> tuple[str, str, Accumulator, list[str]]:
     """The single place a recovered task's status is decided.
 
     Shared by `snapshot` and `brief` so the same task can never be listed as one status and
-    reported as another.
+    reported as another. `detail=False` (used by `brief`, `_poll_recovered`, and retention) skips
+    replaying the stream log when the record is already terminal and was actually observed to
+    finish — replay is by far the most expensive part of resolving a status, and a listing has no
+    use for the summary/usage/etc. it would buy. `detail=True` (the default, used by `snapshot`)
+    always replays.
     """
-    state, tail = replay_log(log_dir, record.task_id, record.backend)
+    status, note, state, tail, _owned = _resolve(log_dir, record, detail=detail)
+    return status, note, state, tail
+
+
+def _resolve(
+    log_dir: Path, record: TaskRecord, *, detail: bool
+) -> tuple[str, str, Accumulator, list[str], bool]:
+    """Same as `resolve_status`, plus whether a live owning server was found — see
+    `identity.identity_check`. Kept private so `resolve_status` can keep its existing 4-tuple
+    shape for every caller and test that predates ownership."""
     unobserved = outcome_unobserved(record)
+
+    if not detail and record.status in TERMINAL_RECORD_STATUSES and not unobserved:
+        return (
+            record.status,
+            "Recovered from disk: recorded by the bridge server that ran it.",
+            Accumulator(),
+            [],
+            False,
+        )
+
+    state, tail = replay_log(log_dir, record.task_id, record.backend)
     alive = unobserved and process_alive(record.pid, record.markers)
 
     if alive and record.status in TERMINAL_RECORD_STATUSES:
+        owned = identity.identity_check(record.owner) == "alive"
         return (
             "running",
             f"Recovered from disk: this task is recorded as '{record.status}', but its process is "
@@ -277,22 +326,25 @@ def resolve_status(log_dir: Path, record: TaskRecord) -> tuple[str, str, Accumul
             "cancel it and dispatch again.",
             state,
             tail,
+            owned,
         )
     if alive:
-        return (
-            "running",
-            "Recovered from disk: this task was started by an earlier bridge server process and "
+        owned = identity.identity_check(record.owner) == "alive"
+        note = (
+            _OWNED_BY_LIVE_SERVER_NOTE.format(pid=(record.owner or {}).get("pid"))
+            if owned
+            else "Recovered from disk: this task was started by an earlier bridge server process and "
             "is still running. Status and cancellation work; its live output is not being read by "
-            "this process, so the summary appears only once it finishes.",
-            state,
-            tail,
+            "this process, so the summary appears only once it finishes."
         )
+        return ("running", note, state, tail, owned)
     if record.status in TERMINAL_RECORD_STATUSES and not unobserved:
         return (
             record.status,
             "Recovered from disk: recorded by the bridge server that ran it.",
             state,
             tail,
+            False,
         )
     # Only an unobserved `failed` is an inference the stream may overrule: it is what the monitor's
     # backstop writes when it never saw the process exit at all. Every other status records
@@ -305,6 +357,7 @@ def resolve_status(log_dir: Path, record: TaskRecord) -> tuple[str, str, Accumul
             "guessed the run was doing.",
             state,
             tail,
+            False,
         )
     if state.terminal is not None or state.saw_final_message:
         # `record.exit_code` is passed through as-is, None included. Substituting 0 here used to
@@ -321,6 +374,7 @@ def resolve_status(log_dir: Path, record: TaskRecord) -> tuple[str, str, Accumul
             + _reconstruction_note(status, state),
             state,
             tail,
+            False,
         )
     return (
         "failed",
@@ -329,6 +383,7 @@ def resolve_status(log_dir: Path, record: TaskRecord) -> tuple[str, str, Accumul
         "inferred rather than observed. Nothing it had already written to the repo was undone.",
         state,
         tail,
+        False,
     )
 
 
@@ -394,7 +449,7 @@ def _notices(record: TaskRecord, state: Accumulator) -> list[str]:
 
 def snapshot(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
     """A recovered task's state, shaped like a live snapshot so callers need no special casing."""
-    status, note, state, tail = resolve_status(log_dir, record)
+    status, note, state, tail, owned = _resolve(log_dir, record, detail=True)
 
     return {
         "task_id": record.task_id,
@@ -424,6 +479,11 @@ def snapshot(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
         # The enforcement actually captured at spawn, not re-derived from today's code — see
         # `_enforcement`.
         "enforcement": _enforcement(record),
+        "owner": record.owner,
+        "owned_by_live_server": owned if status == "running" else None,
+        "base_commit": record.base_commit,
+        "start_dirty": record.start_dirty,
+        "events_log": str(events.events_path(log_dir, record.task_id)),
         "recovered": True,
         "note": note,
     }
@@ -435,9 +495,9 @@ def brief(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
     Carries the bridge's own notices but not the backend's, matching `Task.brief` so `list_tasks`
     never mixes shapes between live and recovered entries. The backend's notices would need the
     stream replayed, which a listing should not pay for — and they are stream detail, which is what
-    `snapshot` is for.
+    `snapshot` is for. Uses `detail=False`, so a settled, observed task costs no replay here either.
     """
-    status, _, _, _ = resolve_status(log_dir, record)
+    status, _, _, _, owned = _resolve(log_dir, record, detail=False)
     return {
         "task_id": record.task_id,
         "backend": record.backend,
@@ -449,6 +509,8 @@ def brief(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
         "duration_seconds": _duration_seconds(record, record.finished_at),
         "parent_task_id": record.parent_task_id,
         "notices": list(record.bridge_notices),
+        "owner": record.owner,
+        "owned_by_live_server": owned if status == "running" else None,
         "recovered": True,
     }
 
