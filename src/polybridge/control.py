@@ -206,13 +206,21 @@ NOSIG_PREFIX = "nosig-"
 _JOIN_TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
 
 
+class JoinsUnreadable(OSError):
+    """The task directory could not be enumerated, so which joiner intents exist is unknown."""
+
+
 def join_tokens(log_dir: Path, task_id: str, family: str, n: int) -> list[str]:
-    """Tokens of every joiner intent (`<id>.<family>.<n>.join-<token>`) recorded for attempt `n`."""
+    """Tokens of every joiner intent (`<id>.<family>.<n>.join-<token>`) recorded for attempt `n`.
+
+    Raises `JoinsUnreadable` when the directory cannot be listed: an empty answer there would read
+    as "no joiners" and let a `.failed` settle an attempt early.
+    """
     store.validate_task_id(task_id)
     try:
         entries = list(log_dir.iterdir())
-    except OSError:
-        return []
+    except OSError as exc:
+        raise JoinsUnreadable(f"could not list {log_dir}: {exc}") from exc
     tokens: list[str] = []
     for path in entries:
         match = _PHASE_FILE_RE.match(path.name)
@@ -239,7 +247,12 @@ def joins_outstanding(
     if phase_path(log_dir, task_id, family, n, "sig").exists():
         return False
     resolved_now = now or datetime.now(timezone.utc)
-    for token in join_tokens(log_dir, task_id, family, n):
+    try:
+        tokens = join_tokens(log_dir, task_id, family, n)
+    except JoinsUnreadable:
+        # Undecidable, like an unreadable intent file: treated as outstanding.
+        return True
+    for token in tokens:
         if phase_path(log_dir, task_id, family, n, f"{NOSIG_PREFIX}{token}").exists():
             continue
         intent = read_phase(log_dir, task_id, family, n, f"{JOIN_PREFIX}{token}")

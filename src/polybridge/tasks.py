@@ -1310,26 +1310,30 @@ class TaskRegistry:
         else:
             return "not_signalled", "the cancel attempt kept settling concurrently; retry"
 
-        delivered = _signal_recorded_group(record, signal.SIGTERM)
+        # Re-checked immediately before the signal, with nothing in between: the phase writes and
+        # withdraw rounds above take time, and a leader that exited meanwhile — its group kept
+        # alive by a child, or its pgid reused — must neither be signalled nor recorded as having
+        # been alive. `leader_alive` comes from this final observation only.
+        verdict, reason = identity.check_detail(leader)
+        if identity.signalable(verdict, reason):
+            delivered = _signal_recorded_group(record, signal.SIGTERM)
+            undelivered_reason = "process group already gone"
+        else:
+            delivered = False
+            undelivered_reason = f"leader no longer ours to signal ({reason})"
+
         if delivered:
             # Written by a joining controller too, not only the attempt's owner — that is also what
             # resolves a joiner's intent. `.sig` outranks `.failed` in `control.attempt_outcome`.
             self._record_delivery(task_id, attempt.n, leader_alive=verdict == "alive")
         elif join_token is not None:
             self._record_phase(
-                task_id,
-                attempt.n,
-                control.nosig_phase(join_token),
-                {"reason": "process group already gone"},
+                task_id, attempt.n, control.nosig_phase(join_token), {"reason": undelivered_reason}
             )
         elif attempt.owned:
             try:
                 control.mark_failed(
-                    self._log_dir,
-                    task_id,
-                    control.CANCEL,
-                    attempt.n,
-                    reason="process group already gone",
+                    self._log_dir, task_id, control.CANCEL, attempt.n, reason=undelivered_reason
                 )
             except control.PhaseWriteError:
                 log.warning(
@@ -1341,7 +1345,9 @@ class TaskRegistry:
 
         if delivered or already_signalled:
             return "signalled", None
-        return "not_signalled", "process group already gone"
+        if verdict == "dead":
+            return "gone", None
+        return "not_signalled", undelivered_reason
 
     def _record_delivery(
         self,

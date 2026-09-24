@@ -652,3 +652,30 @@ def test_a_failed_attempt_with_an_outstanding_joiner_is_not_settled(tmp_path: Pa
     control.write_phase(tmp_path, "t1", control.CANCEL, 1, control.nosig_phase(token), {})
     assert control.attempt_state(tmp_path, "t1", control.CANCEL, 1) == "failed"
     assert control.cancel_verdict(tmp_path, "t1") == "not_authorized"
+
+
+def test_an_unlistable_directory_counts_as_an_outstanding_joiner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Not being able to enumerate intents is undecidable, not "no joiners": a `.failed` must not
+    settle the attempt on the strength of an empty answer."""
+    controller = {"pid": 1, "start_time": "x", "markers": []}
+    control.begin_attempt(tmp_path, "t1", control.CANCEL, controller)
+    control.mark_failed(tmp_path, "t1", control.CANCEL, 1, reason="gone")
+    assert control.attempt_state(tmp_path, "t1", control.CANCEL, 1) == "failed"
+
+    real_iterdir = Path.iterdir
+
+    def unlistable(self):
+        if self == tmp_path:
+            raise PermissionError("cannot list")
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", unlistable)
+    monkeypatch.setattr(control, "latest_attempt", lambda *a: 1)
+
+    with pytest.raises(control.JoinsUnreadable):
+        control.join_tokens(tmp_path, "t1", control.CANCEL, 1)
+    assert control.joins_outstanding(tmp_path, "t1", control.CANCEL, 1) is True
+    assert control.attempt_state(tmp_path, "t1", control.CANCEL, 1) == "pending"
+    assert control.cancel_verdict(tmp_path, "t1") == "pending"

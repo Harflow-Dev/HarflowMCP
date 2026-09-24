@@ -933,19 +933,67 @@ async def test_a_joining_controller_records_its_own_successful_delivery(
     assert control.cancel_verdict(tmp_path, "child") == "authorized"
 
 
+@pytest.mark.parametrize(
+    ("first", "final", "leader_alive"),
+    [
+        (("undecidable", "legacy_markers_seen"), ("alive", "start_time_match"), True),
+        (("alive", "start_time_match"), ("undecidable", "legacy_markers_seen"), False),
+    ],
+)
 async def test_leader_alive_and_the_signal_decision_come_from_one_observation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    first: tuple[str, str],
+    final: tuple[str, str],
+    leader_alive: bool,
 ) -> None:
+    """Both come from the final check made immediately before the signal, never an earlier one."""
     registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
     record = _child_record(tmp_path)
     store.write(tmp_path, record)
-    observations = iter([("alive", "start_time_match"), ("undecidable", "ps_failed")])
+    observations = iter([first, final])
     monkeypatch.setattr(identity, "check_detail", lambda ident: next(observations))
     monkeypatch.setattr(tasks_module, "_signal_recorded_group", lambda record, sig: True)
 
     assert registry._deliver_recorded_cancel(record) == ("signalled", None)
     payload = control.read_phase(tmp_path, "child", control.CANCEL, 1, "sig")
-    assert payload["leader_alive"] is True
+    assert payload["leader_alive"] is leader_alive
+
+
+async def test_a_leader_that_exits_before_the_signal_is_not_signalled_or_read_as_cancelled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Confirmed alive at the first check; by the time the phase writes are done it has exited,
+    though a child still holds the group. Signalling then would turn a natural exit into
+    `cancelled` — so nothing is signalled and the joiner's intent is resolved with `nosig`."""
+    registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
+    record = _child_record(tmp_path)
+    store.write(tmp_path, record)
+    control.begin_attempt(tmp_path, "child", control.CANCEL, CONTROLLER_A)
+    leader_state = {"v": ("alive", "start_time_match")}
+    monkeypatch.setattr(identity, "check_detail", lambda ident: leader_state["v"])
+    real_join = control.begin_join
+
+    def join_while_leader_exits(*args, **kwargs):
+        token = real_join(*args, **kwargs)
+        leader_state["v"] = ("dead", "start_time_differs")
+        return token
+
+    monkeypatch.setattr(control, "begin_join", join_while_leader_exits)
+    signals: list[int] = []
+    # the group is still signallable: a child of the exited leader keeps it alive
+    monkeypatch.setattr(
+        tasks_module, "_signal_recorded_group", lambda record, sig: signals.append(sig) or True
+    )
+
+    assert registry._deliver_recorded_cancel(record) == ("gone", None)
+
+    assert signals == []
+    assert not control.phase_path(tmp_path, "child", control.CANCEL, 1, "sig").exists()
+    (token,) = control.join_tokens(tmp_path, "child", control.CANCEL, 1)
+    assert control.phase_path(tmp_path, "child", control.CANCEL, 1, f"nosig-{token}").exists()
+    control.mark_failed(tmp_path, "child", control.CANCEL, 1, reason="process group already gone")
+    assert control.cancel_verdict(tmp_path, "child") != "authorized"
 
 
 async def test_a_failed_sig_write_is_retried_and_never_replaced_by_failed(

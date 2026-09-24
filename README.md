@@ -363,7 +363,16 @@ SIGTERM and exited 0. A `.failed`, or a canceller that died with its lease expir
 classification in place. A second canceller that joins an attempt already under way first records an intent
 file (`<id>.cancel.<n>.join-<token>`), then resolves it with the shared `.sig` or its own `nosig-<token>`;
 a `.failed` only settles the attempt once no such intent is outstanding, so a delivery whose `.sig` is
-still being written can never be outrun by it. Resumes of one session are serialised by a lock under
+still being written can never be outrun by it.
+
+**When in doubt, it waits rather than guesses.** A canceller checks the leader's identity (pid and
+start time) immediately before every signal and records `leader_alive` from that check alone. Any
+phase or intent file that cannot be read or listed, or a phase that cannot be written, is treated
+as undecided. The price is deliberate: a disk that keeps failing, or someone tampering with
+`~/.polybridge/tasks/` by hand, can leave an owner's monitor waiting and keep a task's record past
+retention — until the disk recovers, or the canceller exits and its 60 s lease expires. The
+alternative, settling on missing evidence, would record a cancel that never happened or lose one
+that did. Resumes of one session are serialised by a lock under
 `~/.polybridge/sessions/`, so two servers cannot both resume it.
 
 ## The normalized event log
