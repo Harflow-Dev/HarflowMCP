@@ -1,22 +1,30 @@
 """polybridge-ctl: a CLI over the task records `polybridge-server` writes to disk.
 
-Deliberately separate from the MCP server: this never starts retention, never constructs a
-`TaskRegistry`, and never signals a process. Its one write is `send`, which appends a message to a
-live-input task's inbox under that inbox's lock (see `inbox.py`) for the owning server to deliver. It reads exactly what `store` and
-`tasks.default_log_dir` already expose, which is also why `list`'s status resolution is cheap for a
-settled task — see `store.resolve_status`'s `detail=False` shortcut.
+Deliberately separate from the MCP server, and it never starts retention. `list` and `status` only
+read what `store` and `tasks.default_log_dir` already expose (which is also why `list`'s status
+resolution is cheap for a settled task — see `store.resolve_status`'s `detail=False` shortcut), and
+never construct a `TaskRegistry`. `send` appends a message to a live-input task's inbox under that
+inbox's lock (see `inbox.py`) for the owning server to deliver.
+
+The control commands act (A4.2): `cancel` runs the same cascade as `cancel_task` from a registry
+this process owns; `takeover` / `takeover-attach` are the human-only takeover (`takeover.py`); `run`
+and `resume` fork a process that owns the new task until it settles (`detached.py`). Every command
+prints one versioned JSON document (`"v": 1`) with `--json`.
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import re
 import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
-from . import identity, inbox, store
+from . import control, detached, identity, inbox, store, takeover
+from . import tasks as tasks_module
 from .tasks import default_log_dir
 
 _DURATION_RE = re.compile(r"^(\d+)([smhdw])$")
@@ -68,7 +76,51 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     send_p.add_argument("text")
     send_p.add_argument("--json", action="store_true")
 
-    return parser, list_p, status_p, send_p
+    cancel_p = sub.add_parser(
+        "cancel", help="cancel a task and, best-effort, its live descendants (like cancel_task)"
+    )
+    cancel_p.add_argument("task_id")
+    cancel_p.add_argument("--json", action="store_true")
+
+    takeover_p = sub.add_parser(
+        "takeover",
+        help="stop a task's headless run and print the command that resumes its session "
+        "interactively (for a person, never an agent)",
+    )
+    takeover_p.add_argument("task_id")
+    takeover_p.add_argument("--json", action="store_true")
+
+    attach_p = sub.add_parser(
+        "takeover-attach", help="record the interactive terminal's process for a takeover"
+    )
+    attach_p.add_argument("task_id")
+    attach_p.add_argument("--pid", type=int, required=True)
+    attach_p.add_argument("--json", action="store_true")
+
+    run_p = sub.add_parser("run", help="start a task, owned by a detached process until it settles")
+    run_p.add_argument("--backend", required=True)
+    run_p.add_argument("--repo", required=True)
+    run_p.add_argument("--freedom", default=None)
+    run_p.add_argument("--prompt", required=True)
+    run_p.add_argument("--model", default=None)
+    run_p.add_argument("--max-turns", type=int, default=None)
+    run_p.add_argument("--reasoning-effort", default=None)
+    run_p.add_argument("--network", choices=("true", "false"), default=None)
+    run_p.add_argument("--group", default=None)
+    run_p.add_argument("--json", action="store_true")
+
+    resume_p = sub.add_parser(
+        "resume", help="continue a finished task's session, owned by a detached process"
+    )
+    resume_p.add_argument("task_id")
+    resume_p.add_argument("text")
+    resume_p.add_argument("--max-turns", type=int, default=None)
+    resume_p.add_argument("--network", choices=("true", "false"), default=None)
+    resume_p.add_argument("--json", action="store_true")
+
+    return (
+        parser, list_p, status_p, send_p, cancel_p, takeover_p, attach_p, run_p, resume_p,
+    )
 
 
 def _print_table(entries: list[dict[str, Any]]) -> None:
@@ -188,14 +240,188 @@ def _cmd_send(args: argparse.Namespace) -> int:
     return 0
 
 
+def _fail(args: argparse.Namespace, code: str, message: str) -> int:
+    print(f"polybridge-ctl: error: {message}", file=sys.stderr)
+    if getattr(args, "json", False):
+        print(json.dumps({"v": 1, "error": {"code": code, "message": message}}))
+    return 1
+
+
+def _cmd_cancel(args: argparse.Namespace) -> int:
+    try:
+        task_id = store.validate_task_id(args.task_id)
+    except store.InvalidTaskId:
+        return _fail(args, "invalid_task_id", f"not a valid task id: {args.task_id!r}")
+    log_dir = default_log_dir()
+    if store.read(log_dir, task_id) is None:
+        return _fail(args, "unknown_task", f"unknown task_id: {task_id}")
+
+    registry = tasks_module.TaskRegistry(log_dir=log_dir, open_monitor=False)
+    try:
+        cascade = asyncio.run(registry.cancel_cascade(task_id))
+    except control.PhaseWriteError as exc:
+        return _fail(
+            args,
+            "phase_write_failed",
+            f"the cancel was not attempted because its phase file could not be written, so "
+            f"nothing was signalled: {exc}",
+        )
+    record = store.read(log_dir, task_id)
+    status = store.brief(log_dir, record)["status"] if record is not None else None
+    result = {"task_id": task_id, "status": status, "cascade": cascade}
+    if args.json:
+        print(json.dumps({"v": 1, "result": result}))
+    else:
+        print(f"{task_id}: {status}")
+    return 0
+
+
+def _cmd_takeover(args: argparse.Namespace) -> int:
+    log_dir = default_log_dir()
+    try:
+        result = asyncio.run(
+            takeover.take_over(
+                log_dir,
+                args.task_id,
+                registry_factory=lambda: tasks_module.TaskRegistry(
+                    log_dir=log_dir, open_monitor=False
+                ),
+            )
+        )
+    except control.TakeoverRefused as exc:
+        return _fail(args, exc.code, str(exc))
+    if args.json:
+        print(json.dumps({"v": 1, "result": result}))
+    else:
+        print(f"cd {result['cwd']}")
+        print(" ".join(result["argv"]))
+        print(result["note"], file=sys.stderr)
+    return 0
+
+
+def _cmd_takeover_attach(args: argparse.Namespace) -> int:
+    try:
+        result = takeover.attach(default_log_dir(), args.task_id, args.pid)
+    except control.TakeoverRefused as exc:
+        return _fail(args, exc.code, str(exc))
+    if args.json:
+        print(json.dumps({"v": 1, "result": result}))
+    else:
+        print(f"attached pid {result['pid']} to the takeover of {result['task_id']}")
+    return 0
+
+
+def _network(raw: str | None) -> bool | None:
+    return None if raw is None else raw == "true"
+
+
+def _run_action(args: argparse.Namespace):
+    async def action(registry: Any) -> Any:
+        # The MCP tool's own checks, so `run` accepts exactly what `start_task` accepts.
+        from mcp import MCPError
+        from mcp.types import INVALID_PARAMS
+
+        from . import server
+        from .backends import DEFAULT_FREEDOM
+
+        if not args.prompt.strip():
+            raise MCPError(INVALID_PARAMS, "prompt must be a non-empty string")
+        freedom = args.freedom or DEFAULT_FREEDOM
+        network = _network(args.network)
+        chosen = server._backend(args.backend)
+        server._check_freedom(freedom)
+        server._check_turn_cap(chosen, args.max_turns)
+        server._check_reasoning_effort(chosen, args.reasoning_effort)
+        server._check_model(chosen, args.model)
+        server._check_network(chosen, freedom, network)
+        server._check_group(args.group)
+        path = await server._validate_repo_path(args.repo)
+        return await registry.start(
+            args.prompt,
+            path,
+            backend=chosen,
+            freedom=freedom,
+            model=args.model,
+            max_turns=args.max_turns,
+            reasoning_effort=args.reasoning_effort,
+            network=network,
+            group=args.group,
+        )
+
+    return action
+
+
+def _resume_action(args: argparse.Namespace):
+    async def action(registry: Any) -> Any:
+        from mcp import MCPError
+        from mcp.types import INVALID_PARAMS
+
+        from . import backends, server
+
+        try:
+            task_id = store.validate_task_id(args.task_id)
+        except store.InvalidTaskId as exc:
+            raise MCPError(INVALID_PARAMS, str(exc)) from None
+        if not args.text.strip():
+            raise MCPError(INVALID_PARAMS, "text must be a non-empty string")
+        record = await asyncio.to_thread(store.read, registry.log_dir, task_id)
+        if record is None:
+            raise MCPError(INVALID_PARAMS, f"unknown task_id: {task_id}")
+        # The same gate `resume_task` applies to a task this process did not start.
+        if await asyncio.to_thread(store.process_alive, record.pid, record.markers):
+            raise MCPError(
+                INVALID_PARAMS,
+                f"task {task_id} is still running; wait for it or cancel it before resuming",
+            )
+        network = _network(args.network)
+        server._check_turn_cap(backends.get(record.backend), args.max_turns)
+        server._check_network(backends.get(record.backend), record.freedom, network)
+        return await registry.resume_record(
+            record, args.text, max_turns=args.max_turns, network=network
+        )
+
+    return action
+
+
+def _ctl_log_path() -> Path:
+    return default_log_dir().parent / "ctl.log"
+
+
+def _cmd_detached(args: argparse.Namespace, action: Any) -> int:
+    log_dir = default_log_dir()
+    outcome = detached.run_detached(
+        action,
+        log_path=_ctl_log_path(),
+        # No retention and no open-app: the app drives these commands itself.
+        registry_factory=lambda: tasks_module.TaskRegistry(log_dir=log_dir, open_monitor=False),
+    )
+    if outcome.kind == "task":
+        if args.json:
+            print(json.dumps({"v": 1, "result": outcome.payload}))
+        else:
+            print(outcome.payload["task_id"])
+        return 0
+    if outcome.kind == "error":
+        return _fail(
+            args,
+            str(outcome.payload.get("code", "start_failed")),
+            str(outcome.payload.get("message", "")),
+        )
+    print(f"polybridge-ctl: {outcome.payload['message']}", file=sys.stderr)
+    if args.json:
+        print(json.dumps({"v": 1, "unknown": outcome.payload}))
+    return 3
+
+
 def main(argv: list[str] | None = None) -> int:
     """Entry point for the `polybridge-ctl` console script, which calls `sys.exit(main())`."""
     argv = sys.argv[1:] if argv is None else list(argv)
     json_requested = "--json" in argv
 
-    parser, list_p, status_p, send_p = _build_parser()
-    for each in (parser, list_p, status_p, send_p):
+    parsers = _build_parser()
+    for each in parsers:
         each.json_requested = json_requested
+    parser, list_p = parsers[0], parsers[1]
 
     args = parser.parse_args(argv)
 
@@ -203,6 +429,16 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_list(args, list_p)
     if args.command == "send":
         return _cmd_send(args)
+    if args.command == "cancel":
+        return _cmd_cancel(args)
+    if args.command == "takeover":
+        return _cmd_takeover(args)
+    if args.command == "takeover-attach":
+        return _cmd_takeover_attach(args)
+    if args.command == "run":
+        return _cmd_detached(args, _run_action(args))
+    if args.command == "resume":
+        return _cmd_detached(args, _resume_action(args))
     return _cmd_status(args)
 
 

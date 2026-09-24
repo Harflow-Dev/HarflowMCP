@@ -30,6 +30,7 @@ from collections import deque
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
+from collections.abc import Awaitable, Callable
 from typing import Any, Literal, NamedTuple
 
 from . import control, identity, inbox, lineage, retention, store
@@ -683,8 +684,15 @@ class TaskRegistry:
         log_dir: Path | None = None,
         max_tasks: int = MAX_TASKS,
         owner: dict[str, Any] | None = None,
+        *,
+        open_monitor: bool = True,
+        monitor_launcher: Callable[[str], Awaitable[int]] | None = None,
     ) -> None:
         self._tasks: dict[str, Task] = {}
+        # Whether a root task this registry starts opens the Monitor app (A4.3). False for
+        # `polybridge-ctl run`/`resume`, which the app itself drives.
+        self._open_monitor = open_monitor
+        self._monitor_launcher = monitor_launcher
         self._log_dir = log_dir or default_log_dir()
         self._max_tasks = max_tasks
         # Computed once per registry rather than per task: every task this registry spawns shares
