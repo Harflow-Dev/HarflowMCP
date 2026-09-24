@@ -798,9 +798,15 @@ class ClaudeBackend:
             self._ingest_system(event, acc)
         elif event_type in ("assistant", "user"):
             # Turn activity: whatever happened before, the agent is working now — including the
-            # follow-up turn claude starts by itself when a background task finishes.
-            acc.turn_open = True
-            acc.awaiting_input = False
+            # follow-up turn claude starts by itself when a background task finishes. A subagent's
+            # own events (non-empty `parent_tool_use_id`) are not the main thread's turn: after a
+            # result they can only come from a background subagent, which `background_open`
+            # already tracks — letting them open the turn would keep a stalled one from ever
+            # reaching the idle bound.
+            parent = event.get("parent_tool_use_id")
+            if not (isinstance(parent, str) and parent):
+                acc.turn_open = True
+                acc.awaiting_input = False
         elif event_type == "result":
             self._ingest_result(event, acc)
 
@@ -1018,6 +1024,14 @@ class ClaudeBackend:
         # uses for "a result reported an error", so what stopped the input pump can never read
         # as a clean completion.
         if acc.is_error or subtype != "success":
+            return "failed"
+        # A live run can hold several results. Activity after the last one means a later turn
+        # never finished, so that earlier success is stale evidence, whatever the exit code. With
+        # no observed exit (a recovered run), open background work is unfinished for the same
+        # reason; an observed exit has already had claude report them killed or stopped.
+        if acc.turn_open:
+            return "failed"
+        if exit_code is None and acc.background_open:
             return "failed"
         # `exit_code is None` means nothing observed the process exit (a recovered run). Claude is
         # the one backend that does not need an observed exit: its `result` event is a real terminal

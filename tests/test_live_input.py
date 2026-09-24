@@ -998,3 +998,187 @@ def test_a_held_inbox_lock_times_out_the_sender(tmp_path: Path) -> None:
         assert caught.value.code == "lock_timeout"
     finally:
         inbox.unlock(fd)
+
+
+# --- Codex review round 1: regressions -----------------------------------------------------------
+
+
+def test_background_subagent_events_after_a_result_do_not_reopen_the_turn() -> None:
+    """A background subagent's own events carry `parent_tool_use_id`. Treating them as main-turn
+    activity kept a stalled one from ever reaching the idle bound."""
+    from polybridge.tasks import background_idle_bound_reached as reached
+
+    subagent = {
+        "type": "assistant",
+        "parent_tool_use_id": "toolu_agent",
+        "message": {"content": [{"type": "text", "text": "sub"}]},
+    }
+    subagent_tool = {**TOOL_RESULT, "parent_tool_use_id": "toolu_agent"}
+    acc = _feed(_started("agent", True), _result("STARTED"), subagent, subagent_tool)
+    assert not acc.turn_open
+    assert acc.background_open == {"agent"}
+    assert reached(acc, silent_for=600, bound=600)
+    # And once it finishes, the run is idle.
+    backends.ClaudeBackend().ingest(_notification("agent", "completed"), acc)
+    assert acc.awaiting_input
+
+
+def test_a_later_turn_that_never_finished_is_not_a_completion() -> None:
+    claude = backends.ClaudeBackend()
+    acc = _feed(ASSISTANT, _result("first"), ASSISTANT)
+    assert claude.classify(acc, None) == "failed"
+    assert claude.classify(acc, 0) == "failed"
+    acc = _feed(ASSISTANT, _result("first"), ASSISTANT, _result("second"))
+    assert claude.classify(acc, None) == "completed"
+
+
+def test_open_background_work_at_an_unobserved_exit_is_not_a_completion() -> None:
+    claude = backends.ClaudeBackend()
+    acc = _feed(_started("bg", True), _result("STARTED"))
+    assert claude.classify(acc, None) == "failed"
+    assert claude.classify(acc, 0) == "completed"  # observed: claude reports its kills itself
+
+
+def test_a_torn_inbox_line_does_not_swallow_the_next_message(tmp_path: Path) -> None:
+    _record(tmp_path)
+    path = inbox.inbox_path(tmp_path, "t1")
+    path.write_bytes(b'{"id": "crashed", "text": "half a mess')  # a writer died mid-line
+    result = inbox.send_to_record(tmp_path, "t1", "after the crash", by=None)
+    messages, _ = inbox.read_new(tmp_path, "t1", 0)
+    assert [m["id"] for m in messages] == [result["message_id"]]
+
+
+async def test_an_error_arriving_while_waiting_for_the_lock_stops_forwarding(tmp_path: Path) -> None:
+    registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
+    stdin = _Stdin()
+    task = _stub_task(tmp_path, stdin)
+    task.acc.result_count = 1
+    task.inbox_queue.append(inbox.make_message("must not run", None))
+
+    fd = inbox.lock_sync(tmp_path, task.task_id)
+    pump = asyncio.create_task(registry._pump(task))
+    await asyncio.sleep(0.2)  # the pump is waiting for the lock to forward
+    task.acc.error_result_seen = True
+    inbox.unlock(fd)
+    await asyncio.wait_for(pump, 5)
+
+    assert stdin.written == []
+    undelivered = [e for e in _events(tmp_path, task.task_id) if e["kind"] == "undelivered"]
+    assert [e["text"] for e in undelivered] == ["must not run"]
+    assert "reported an error" in undelivered[0]["reason"]
+
+
+async def test_a_close_that_cannot_write_its_marker_keeps_input_open_and_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
+    stdin = _Stdin()
+    task = _stub_task(tmp_path, stdin)
+    task.acc.result_count, task.acc.awaiting_input = 1, True
+    monkeypatch.setattr(tasks_module, "PUMP_POLL_SECONDS", 0.05)
+    real_mark = inbox.mark_closed
+    failures = {"left": 3}
+
+    def flaky_mark(log_dir, task_id):
+        if failures["left"]:
+            failures["left"] -= 1
+            raise OSError("read-only directory")
+        real_mark(log_dir, task_id)
+
+    monkeypatch.setattr(inbox, "mark_closed", flaky_mark)
+    pump = asyncio.create_task(registry._pump(task))
+    await asyncio.sleep(0.05)
+    assert not stdin.closed and not task.inbox_closed  # no marker, so input is still open
+    await asyncio.wait_for(pump, 5)
+    assert failures["left"] == 0
+    assert stdin.closed and task.inbox_closed and inbox.is_closed(tmp_path, task.task_id)
+
+
+async def test_an_unreadable_inbox_loses_nothing_while_the_run_lives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
+    stdin = _Stdin()
+    task = _stub_task(tmp_path, stdin)
+    task.inbox_queue.append(inbox.make_message("kept", None))
+    monkeypatch.setattr(tasks_module, "PUMP_POLL_SECONDS", 0.05)
+    real_read = inbox.read_new
+    failures = {"left": 2}
+
+    def flaky_read(*args):
+        if failures["left"]:
+            failures["left"] -= 1
+            raise OSError("EIO")
+        return real_read(*args)
+
+    monkeypatch.setattr(inbox, "read_new", flaky_read)
+    pump = asyncio.create_task(registry._pump(task))
+    await _until(lambda: stdin.written)
+    assert _texts(stdin.written) == ["kept"]
+    task.acc.result_count, task.acc.awaiting_input = 1, True
+    task.pump_wake.set()
+    await asyncio.wait_for(pump, 5)
+    assert stdin.closed
+
+
+async def test_after_exit_a_lock_that_stays_busy_falls_back_without_losing_messages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The last-resort close reads the on-disk inbox too, not only this server's queue."""
+    registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
+    stdin = _Stdin()
+    task = _stub_task(tmp_path, stdin)
+    task.proc.returncode = 3
+    task.inbox_queue.append(inbox.make_message("in memory", None))
+    fd = inbox.lock_sync(tmp_path, task.task_id)
+    inbox.append_locked(tmp_path, task.task_id, inbox.make_message("on disk", None))
+
+    real_lock = inbox.lock_async
+
+    async def quick_lock(log_dir, task_id, timeout=inbox.LOCK_TIMEOUT_SECONDS):
+        return await real_lock(log_dir, task_id, timeout=0.1)
+
+    monkeypatch.setattr(inbox, "lock_async", quick_lock)
+    monkeypatch.setattr(tasks_module, "EXIT_CLOSE_GIVE_UP_SECONDS", 0.3)
+    try:
+        await asyncio.wait_for(registry._pump(task), 5)
+    finally:
+        inbox.unlock(fd)
+
+    assert task.inbox_closed and inbox.is_closed(tmp_path, task.task_id)
+    undelivered = sorted(
+        e["text"] for e in _events(tmp_path, task.task_id) if e["kind"] == "undelivered"
+    )
+    assert undelivered == ["in memory", "on disk"]
+
+
+async def test_finish_pump_fallback_reads_the_disk_inbox(tmp_path: Path) -> None:
+    registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
+    task = _stub_task(tmp_path, _Stdin())
+    task.proc.returncode = 0
+    fd = inbox.lock_sync(tmp_path, task.task_id)
+    inbox.append_locked(tmp_path, task.task_id, inbox.make_message("on disk", None))
+    inbox.unlock(fd)
+    # No pump at all (it failed to start, say): the monitor's fallback still accounts for it.
+    await registry._finish_pump(task)
+    undelivered = [e["text"] for e in _events(tmp_path, task.task_id) if e["kind"] == "undelivered"]
+    assert undelivered == ["on disk"]
+    assert inbox.is_closed(tmp_path, task.task_id)
+
+
+def test_a_sender_that_finds_the_marker_after_appending_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The last-resort close creates the marker without the lock, then reads: a sender whose
+    append raced it must not report "queued" for a message that read may have missed."""
+    _record(tmp_path)
+    real_append = inbox.append_locked
+
+    def append_then_close(log_dir, task_id, message):
+        real_append(log_dir, task_id, message)
+        inbox.mark_closed(log_dir, task_id)  # the unlocked close lands right after the append
+
+    monkeypatch.setattr(inbox, "append_locked", append_then_close)
+    with pytest.raises(inbox.SendRefused) as caught:
+        inbox.send_to_record(tmp_path, "t1", "hi", by=None)
+    assert caught.value.code == "closed"

@@ -173,9 +173,21 @@ def read_new(log_dir: Path, task_id: str, offset: int) -> tuple[list[dict[str, A
 
 
 def append_locked(log_dir: Path, task_id: str, message: dict[str, Any]) -> None:
-    """Append one message line, durably. Call with the lock held."""
+    """Append one message line, durably. Call with the lock held.
+
+    A writer that crashed mid-line leaves a fragment with no newline. Appending straight after it
+    would merge the two into one unparsable line, and `read_new` would skip an acknowledged
+    message along with the fragment — so the fragment is terminated first, becoming a line of its
+    own that `read_new` skips.
+    """
     line = (json.dumps(message, ensure_ascii=False, default=str) + "\n").encode("utf-8")
-    with inbox_path(log_dir, task_id).open("ab") as handle:
+    path = inbox_path(log_dir, task_id)
+    with path.open("ab") as handle:
+        if handle.tell() > 0:
+            with path.open("rb") as reader:
+                reader.seek(-1, os.SEEK_END)
+                if reader.read(1) != b"\n":
+                    line = b"\n" + line
         handle.write(line)
         handle.flush()
         os.fsync(handle.fileno())
@@ -216,6 +228,12 @@ def send_to_record(
             raise SendRefused(
                 f"could not queue the message for task {task_id}: {exc}", code="write_failed"
             ) from exc
+        # Re-checked after the append: the owner's last-resort close (after its run exited with this
+        # lock held too long) creates the marker without the lock and only then reads the inbox. A
+        # marker seen now means that read may already have happened, so the message is refused
+        # rather than acknowledged; one appended before the marker existed is read and reported.
+        if is_closed(log_dir, task_id):
+            raise SendRefused(f"task {task_id} has {CLOSED_MESSAGE}", code="closed")
         return queued_response(task_id, message)
     finally:
         unlock(fd)
