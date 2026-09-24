@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import logging
 import os
 import shutil
@@ -232,8 +233,14 @@ async def take_over(
         try:
             async with _session_lock(log_dir, record.session_id):
                 try:
-                    n = control.begin_takeover(
-                        log_dir, task_id, controller=controller, session_id=record.session_id
+                    n = await asyncio.to_thread(
+                        functools.partial(
+                            control.begin_takeover,
+                            log_dir,
+                            task_id,
+                            controller=controller,
+                            session_id=record.session_id,
+                        )
                     )
                 except control.PhaseWriteError as exc:
                     raise control.TakeoverRefused(
@@ -265,7 +272,7 @@ async def take_over(
                         f"another run started on session {record.session_id} meanwhile: "
                         f"{', '.join(holders)}",
                     )
-                control.mark_takeover_ready(log_dir, task_id, n)
+                await asyncio.to_thread(control.mark_takeover_ready, log_dir, task_id, n)
         except control.LockTimeout:
             raise _Refusal("session_busy", "the session lock could not be taken to finish") from None
     except _Refusal as refusal:

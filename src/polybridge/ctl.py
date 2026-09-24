@@ -18,6 +18,7 @@ import argparse
 import asyncio
 import json
 import re
+import shlex
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -293,8 +294,8 @@ def _cmd_takeover(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps({"v": 1, "result": result}))
     else:
-        print(f"cd {result['cwd']}")
-        print(" ".join(result["argv"]))
+        print(f"cd {shlex.quote(result['cwd'])}")
+        print(shlex.join(result["argv"]))
         print(result["note"], file=sys.stderr)
     return 0
 
