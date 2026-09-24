@@ -339,3 +339,82 @@ def detect_caller(
     except Exception:
         log.debug("caller detection failed", exc_info=True)
         return None
+
+
+# The real function, bound before anything can replace the module attribute (tests stub
+# `detect_caller` so registries never walk the real process tree): `detect_caller_detail` is a
+# separate seam with its own stub, and must not silently inherit that one.
+_real_detect_caller = detect_caller
+
+
+@dataclass(frozen=True)
+class Detection:
+    """`detect_caller_detail`'s answer. `caller` is a confirmed caller, or None. When it is None,
+    `undecidable` says why "no caller" could not be *established* — None there means the negative
+    was actually checked: the process table was readable, this process was in it, and every
+    record related to this process by session or ancestry was confirmed `dead`."""
+
+    caller: Caller | None
+    undecidable: str | None = None
+
+
+def detect_caller_detail(
+    log_dir: Path,
+    *,
+    environ: Mapping[str, str] | None = None,
+    getsid: Callable[[int], int] = os.getsid,
+    getpid: Callable[[], int] = os.getpid,
+    process_table: Callable[[], Mapping[int, int] | None] | None = None,
+    check: Callable[[Mapping[str, Any]], str] | None = None,
+) -> Detection:
+    """`detect_caller` for a gate that must fail closed (takeover is for people only).
+
+    `detect_caller` returns None both when there is positively no caller and when it could not
+    look — `ps` missing or denied, an unreadable session, an exception — which is the right answer
+    for lineage (a task with no detected caller is simply a root) and the wrong one for a gate. This
+    tells the two apart: `Detection(None, None)` only once the negative was actually established.
+    """
+    table_fn = process_table if process_table is not None else _default_process_table
+    check_fn = check if check is not None else identity.identity_check
+    try:
+        caller = _real_detect_caller(
+            log_dir,
+            environ=environ,
+            getsid=getsid,
+            getpid=getpid,
+            process_table=table_fn,
+            check=check_fn,
+        )
+        if caller is not None:
+            return Detection(caller)
+        table = table_fn()
+        if table is None:
+            return Detection(
+                None,
+                "the process table could not be read (ps failed or was denied), so this "
+                "process's ancestry cannot be checked",
+            )
+        own_pid = getpid()
+        if own_pid not in table:
+            return Detection(
+                None, "this process is missing from the process table, so its ancestry is unknown"
+            )
+        sid = _own_sid(getsid)
+        if sid is None:
+            return Detection(None, "this process's session id could not be read")
+        chain = set(ancestors(own_pid, table))
+        for record in _candidates(log_dir):
+            related = (record.pgid is not None and record.pgid == sid) or (
+                record.pid is not None and record.pid in chain
+            )
+            if related and check_fn(_candidate_identity(record)) != "dead":
+                # Not confirmed alive (detect_caller would have returned it), not confirmed gone.
+                return Detection(
+                    None,
+                    f"task {record.task_id} is related to this process and could not be "
+                    "confirmed alive or gone",
+                )
+        return Detection(None)
+    except Exception as exc:
+        log.debug("caller detection failed", exc_info=True)
+        return Detection(None, f"caller detection failed: {type(exc).__name__}: {exc}")

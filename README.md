@@ -495,7 +495,9 @@ starts retention.
   exist, so check `polybridge-ctl list`. The owner logs to `~/.polybridge/ctl.log`; SIGTERM/SIGINT to
   it cancel its task. Neither command opens the Monitor app.
 - **`takeover`** is for a person at the Monitor, never an agent: it refuses when `PB_TASK_ID` is set
-  or a calling task is detected, because the interactive session runs under the user's own default
+  or a calling task is detected — and also when detection cannot establish that there is none
+  (`caller_undecidable`: `ps` missing or denied, an unreadable ancestry or session, a related task
+  whose liveness cannot be decided) — because the interactive session runs under the user's own default
   permissions, not the task's `freedom`. It reserves the session, stops a live headless run (cascade
   cancel, then confirms the process is gone — a survivor, or a run whose liveness cannot be decided,
   refuses), and returns `{argv, cwd, session_id, note}`: the absolute command that resumes the

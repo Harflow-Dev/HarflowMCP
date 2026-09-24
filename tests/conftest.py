@@ -37,6 +37,11 @@ def no_caller_detected(monkeypatch: pytest.MonkeyPatch):
     it, so they are unaffected.
     """
     monkeypatch.setattr(lineage, "detect_caller", lambda *args, **kwargs: None)
+    # The fail-closed variant takeover uses: "positively no caller" by default. Tests of the
+    # undecidable cases stub it themselves or restore the real one.
+    monkeypatch.setattr(
+        lineage, "detect_caller_detail", lambda *args, **kwargs: lineage.Detection(None)
+    )
 
 
 @pytest.fixture

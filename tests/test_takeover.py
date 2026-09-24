@@ -362,7 +362,7 @@ async def test_an_agent_caller_is_refused_before_anything_is_written(
     assert refused.value.code == "agent_caller"
 
     caller = lineage.Caller(finished_record(repo, task_id="parent"), "ancestry")
-    monkeypatch.setattr(lineage, "detect_caller", lambda *a, **k: caller)
+    monkeypatch.setattr(lineage, "detect_caller_detail", lambda *a, **k: lineage.Detection(caller))
     with pytest.raises(control.TakeoverRefused) as refused:
         await _take_over(log_dir)
     assert refused.value.code == "agent_caller"
@@ -767,3 +767,71 @@ async def test_the_returned_binary_is_absolute_even_from_a_relative_path_entry(
 
     assert result["argv"][0] == os.path.abspath("bin/claude")
     assert os.path.isabs(result["argv"][0])
+
+
+# --- the humans-only gate fails closed ------------------------------------------------------
+
+from polybridge.lineage import detect_caller_detail as _real_detect_caller_detail  # noqa: E402
+
+
+def _deny_ps(monkeypatch: pytest.MonkeyPatch) -> None:
+    """What a sandbox that denies `ps` looks like to both lookups: the identity probe cannot run,
+    and the process-table scan raises PermissionError."""
+
+    def denied(*args, **kwargs):
+        raise PermissionError("operation not permitted: ps")
+
+    monkeypatch.setattr(identity, "_run_ps", lambda pid: None)
+    monkeypatch.setattr(lineage.subprocess, "run", denied)
+    monkeypatch.setattr(lineage, "_table_cache", None)
+    monkeypatch.setattr(lineage, "_table_cached_at", None)
+
+
+async def test_takeover_is_refused_when_ps_is_denied(
+    log_dir: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifier finding: detection returning None when `ps` is denied used to read as "a person",
+    so the humans-only gate failed open in exactly the environment where it could not see."""
+    store.write(log_dir, finished_record(repo))
+    monkeypatch.setattr(lineage, "detect_caller_detail", _real_detect_caller_detail)
+    _deny_ps(monkeypatch)
+
+    with pytest.raises(control.TakeoverRefused) as refused:
+        await _take_over(log_dir)
+
+    assert refused.value.code == "caller_undecidable"
+    assert "process table could not be read" in str(refused.value)
+    assert phases_on_disk(log_dir) == []
+
+    with pytest.raises(control.TakeoverRefused) as refused:
+        takeover.attach(log_dir, "task-1", os.getpid())
+    assert refused.value.code == "caller_undecidable"
+
+
+@pytest.mark.parametrize(
+    "why",
+    ["the process table could not be read", "task x is related to this process and could not be confirmed alive or gone"],
+)
+async def test_any_undecidable_detection_refuses_takeover(
+    log_dir: Path, repo: Path, monkeypatch: pytest.MonkeyPatch, why: str
+) -> None:
+    store.write(log_dir, finished_record(repo))
+    monkeypatch.setattr(lineage, "detect_caller_detail", lambda *a, **k: lineage.Detection(None, why))
+
+    with pytest.raises(control.TakeoverRefused) as refused:
+        await _take_over(log_dir)
+
+    assert refused.value.code == "caller_undecidable" and why in str(refused.value)
+    assert phases_on_disk(log_dir) == []
+
+
+async def test_real_detection_that_positively_finds_no_caller_lets_a_person_through(
+    log_dir: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With a working `ps` and no record related to this process, the real gate lets it through."""
+    store.write(log_dir, finished_record(repo))
+    monkeypatch.setattr(lineage, "detect_caller_detail", _real_detect_caller_detail)
+
+    result = await _take_over(log_dir)
+
+    assert result["session_id"] == SESSION

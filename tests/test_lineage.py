@@ -496,3 +496,77 @@ def test_ancestry_is_not_shadowed_by_a_dead_record_that_once_held_the_same_pid(
 
     assert caller is not None
     assert caller.record.task_id == "new-run"
+
+
+# --- detect_caller_detail: the fail-closed variant (takeover's gate) ------------------------------
+
+from polybridge.lineage import detect_caller_detail as real_detect_caller_detail  # noqa: E402
+
+
+def test_detail_positively_no_caller_once_the_negative_is_checked(tmp_path: Path) -> None:
+    make_record(tmp_path, "stale", pid=100, pgid=None)  # its pid is our ancestor, but it is dead
+
+    detection = real_detect_caller_detail(
+        tmp_path,
+        environ={},
+        getsid=lambda _: 4242,
+        getpid=lambda: 999,
+        process_table=lambda: {999: 100, 100: 50},
+        check=always("dead"),
+    )
+
+    assert detection == lineage.Detection(None, None)
+
+
+def test_detail_reports_a_confirmed_caller(tmp_path: Path) -> None:
+    make_record(tmp_path, "parent", pid=100, pgid=None)
+
+    detection = real_detect_caller_detail(
+        tmp_path,
+        environ={},
+        getsid=lambda _: 4242,
+        getpid=lambda: 999,
+        process_table=lambda: {999: 100},
+        check=always("alive"),
+    )
+
+    assert detection.caller is not None and detection.caller.record.task_id == "parent"
+
+
+@pytest.mark.parametrize(
+    ("table", "getsid", "verdict", "reason"),
+    [
+        (None, lambda _: 4242, "dead", "process table could not be read"),
+        ({1234: 1}, lambda _: 4242, "dead", "missing from the process table"),
+        ({999: 1}, raising_getsid, "dead", "session id could not be read"),
+        ({999: 100}, lambda _: 4242, "undecidable", "could not be confirmed alive or gone"),
+    ],
+)
+def test_detail_refuses_to_call_it_negative_when_it_could_not_look(
+    tmp_path: Path, table, getsid, verdict: str, reason: str
+) -> None:
+    make_record(tmp_path, "related", pid=100, pgid=None)
+
+    detection = real_detect_caller_detail(
+        tmp_path,
+        environ={},
+        getsid=getsid,
+        getpid=lambda: 999,
+        process_table=lambda: table,
+        check=always(verdict),
+    )
+
+    assert detection.caller is None
+    assert detection.undecidable is not None and reason in detection.undecidable
+
+
+def test_detail_turns_an_exception_into_undecidable(tmp_path: Path) -> None:
+    def boom():
+        raise RuntimeError("table exploded")
+
+    detection = real_detect_caller_detail(
+        tmp_path, environ={}, getsid=lambda _: 1, getpid=lambda: 2, process_table=boom,
+        check=always("dead"),
+    )
+
+    assert detection.caller is None and "table exploded" in (detection.undecidable or "")

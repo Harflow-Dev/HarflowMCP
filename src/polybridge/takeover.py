@@ -2,9 +2,9 @@
 
 Humans only: this is reached through `polybridge-ctl takeover` / `takeover-attach`, never through
 MCP, and both refuse when the caller looks like an agent — `PB_TASK_ID` in the environment, or a
-caller `lineage.detect_caller` can confirm. The interactive session runs under the user's own
-default permissions, not the task's freedom, so an agent reaching this would escape its own
-enforcement.
+caller `lineage.detect_caller_detail` can confirm — and when detection cannot establish that there
+is no agent caller at all (fail closed). The interactive session runs under the user's own default
+permissions, not the task's freedom, so an agent reaching this would escape its own enforcement.
 
 The steps, each a phase file of the attempt (see `control.py`'s takeover section):
 
@@ -57,30 +57,56 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def agent_caller_reason(log_dir: Path, environ: Mapping[str, str] | None = None) -> str | None:
-    """Why the current process looks like an agent, or None for a person.
+def caller_refusal(
+    log_dir: Path, environ: Mapping[str, str] | None = None
+) -> tuple[str, str] | None:
+    """`(code, reason)` when takeover must be refused because of who is asking, else None.
 
-    Stricter than caller detection alone: `PB_TASK_ID` in the environment refuses even when the
-    task it names cannot be confirmed, since only a polybridge-spawned agent (or something it
-    started) carries it. `lineage.detect_caller` is looked up at call time so tests can stub it.
+    Fails closed. `PB_TASK_ID` in the environment refuses even when the task it names cannot be
+    confirmed, since only a polybridge-spawned agent (or something it started) carries it. A
+    confirmed caller refuses (`agent_caller`). And so does detection that could not establish there
+    is *no* caller — `ps` missing or denied, an unreadable ancestry or session, a related task whose
+    liveness cannot be decided (`caller_undecidable`): a gate that reads "could not tell" as "a
+    person" is open to exactly the environments where it cannot see. `lineage.detect_caller_detail`
+    is looked up at call time so tests can stub it.
     """
     env = os.environ if environ is None else environ
     if env.get(lineage.ENV_TASK_ID):
-        return f"{lineage.ENV_TASK_ID} is set, so this is running inside a polybridge task"
-    caller = lineage.detect_caller(log_dir)
-    if caller is not None:
-        return f"it was called from task {caller.record.task_id} (detected by {caller.method})"
+        return (
+            "agent_caller",
+            f"{lineage.ENV_TASK_ID} is set, so this is running inside a polybridge task",
+        )
+    detection = lineage.detect_caller_detail(log_dir)
+    if detection.caller is not None:
+        return (
+            "agent_caller",
+            f"it was called from task {detection.caller.record.task_id} "
+            f"(detected by {detection.caller.method})",
+        )
+    if detection.undecidable is not None:
+        return (
+            "caller_undecidable",
+            f"it could not be established that no agent is running this ({detection.undecidable})",
+        )
     return None
 
 
 def _refuse_agents(log_dir: Path, environ: Mapping[str, str] | None) -> None:
-    reason = agent_caller_reason(log_dir, environ)
-    if reason is not None:
-        raise control.TakeoverRefused(
-            "agent_caller",
+    refusal = caller_refusal(log_dir, environ)
+    if refusal is None:
+        return
+    code, reason = refusal
+    if code == "agent_caller":
+        message = (
             f"takeover is for a person at the Monitor, not an agent: {reason}. An interactive "
-            "session would not carry the task's enforcement.",
+            "session would not carry the task's enforcement."
         )
+    else:
+        message = (
+            f"takeover is for a person at the Monitor, and {reason}; refusing rather than "
+            "guessing, since an interactive session would not carry the task's enforcement."
+        )
+    raise control.TakeoverRefused(code, message)
 
 
 def _lineage_tree(log_dir: Path, task_id: str) -> set[str]:
