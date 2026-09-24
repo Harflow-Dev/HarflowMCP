@@ -446,18 +446,61 @@ Two caveats worth knowing before relying on it:
 polybridge-ctl list [--since 7d] [--json]
 polybridge-ctl status <task_id> [--json]
 polybridge-ctl send <task_id> <text> [--json]
+polybridge-ctl cancel <task_id> [--json]
+polybridge-ctl takeover <task_id> [--json]
+polybridge-ctl takeover-attach <task_id> --pid <pid> [--json]
+polybridge-ctl run --backend B --repo R --prompt P [--freedom F] [--model M] [--max-turns N]
+                   [--reasoning-effort E] [--network true|false] [--group G] [--json]
+polybridge-ctl resume <task_id> <text> [--max-turns N] [--network true|false] [--json]
 ```
 
-Reads exactly what the MCP tools read — `store` and `tasks.default_log_dir()` — but never starts
-retention, never constructs a `TaskRegistry`, and never signals a process. Its one write is `send`,
-which appends to a live-input task's inbox under the inbox lock for the owning server to deliver,
-with the same refusals as `send_message`. `--json` output is
-always exactly one document on stdout, versioned the same way the event log is:
+`list` and `status` read exactly what the MCP tools read — `store` and `tasks.default_log_dir()` —
+and never construct a `TaskRegistry`. `send` appends to a live-input task's inbox under the inbox
+lock for the owning server to deliver, with the same refusals as `send_message`. No command ever
+starts retention.
+
+- **`cancel`** runs the same cascade as `cancel_task`, from a registry the ctl process owns, and
+  returns `{task_id, status, cascade}`.
+- **`run` / `resume`** fork a detached process that owns the new task until it settles (it drains
+  the agent's output and records the outcome). The command itself returns as soon as the task
+  exists: `{"task_id"}` (exit 0), or `{"error": …}` (exit 1) for anything that stopped it —
+  validation (`run` accepts exactly what `start_task` accepts), the nested-dispatch caps, a busy
+  session, a spawn failure. If the owner says nothing within 30 s it is stopped (cancelling anything
+  it had started) and the answer is `{"v": 1, "unknown": {...}}` with exit 3 — a task may or may not
+  exist, so check `polybridge-ctl list`. The owner logs to `~/.polybridge/ctl.log`; SIGTERM/SIGINT to
+  it cancel its task. Neither command opens the Monitor app.
+- **`takeover`** is for a person at the Monitor, never an agent: it refuses when `PB_TASK_ID` is set
+  or a calling task is detected, because the interactive session runs under the user's own default
+  permissions, not the task's `freedom`. It reserves the session, stops a live headless run (cascade
+  cancel, then confirms the process is gone — a survivor, or a run whose liveness cannot be decided,
+  refuses), and returns `{argv, cwd, session_id, note}`: the absolute command that resumes the
+  session in that CLI's own interactive UI. A task that had already finished keeps its status. Every
+  refusal after the reservation is recorded, so a retry starts a fresh attempt.
+- **`takeover-attach`** records the terminal's process within 120 s of the takeover. From the
+  takeover until that window lapses unattached, or until the attached process is confirmed gone,
+  `resume_task` on the session is refused with the usual "session busy" error. Snapshots and
+  listings of a taken-over task carry `taken_over: true` and `taken_over_note`.
+
+| Backend | Interactive command handed out by `takeover` |
+|---|---|
+| claude | `claude --resume <session_id>` (claude's own folder-trust dialog in an untrusted folder) |
+| codex | `codex -c check_for_update_on_startup=false resume <thread_id>` (codex's own trust prompt) |
+| opencode | `opencode <repo> -s <session_id>` |
+| vibe | `vibe --trust --workdir <repo> --resume <session_id>` |
+
+`--json` output is always exactly one document on stdout, versioned the same way the event log is:
 `{"v": 1, "tasks": [...]}` for `list`, `{"v": 1, "task": {...}}` for `status`,
-`{"v": 1, "result": {...}}` for `send`, and
-`{"v": 1, "error": {"code": ..., "message": ...}}` on failure. `--since` accepts a duration like
-`7d`, `12h`, or `30m`. Diagnostics go to stderr, never stdout, so a script parsing `--json` output
-never has to filter noise out of it.
+`{"v": 1, "result": {...}}` for the others, `{"v": 1, "unknown": {...}}` for an unanswered `run`/
+`resume`, and `{"v": 1, "error": {"code": ..., "message": ...}}` on failure. `--since` accepts a
+duration like `7d`, `12h`, or `30m`. Diagnostics go to stderr, never stdout, so a script parsing
+`--json` output never has to filter noise out of it.
+
+## Opening the Monitor app
+
+On macOS, a root task — no detected caller and no `PB_TASK_ID` — started through the MCP server runs
+`open -g polybridge-monitor://task/<id>` in the background. It never blocks or changes the dispatch:
+a failure becomes a notice on the task, and the `start_task` response never claims the app opened.
+`PB_OPEN_MONITOR=0` turns it off (the test suite sets it, and so does everything the app launches).
 
 ## Retention
 
@@ -465,7 +508,8 @@ A running server sweeps settled task records at most once every 24 hours, contro
 `PB_RETENTION_DAYS` (default 30 days; `0` disables the sweep entirely). A task is only deleted once
 it is terminal, older than the window, has no still-running descendant (from `resume_task` or a nested dispatch), and no
 cancel/takeover attempt still in flight (a cancel attempt is finished once it has a `.sig` or
-`.failed`, or its canceller died and its lease expired) — and only `polybridge-server` ever runs it;
+`.failed`, or its canceller died and its lease expired; a takeover attempt once it no longer holds
+its session) — and only `polybridge-server` ever runs it;
 `polybridge-ctl` never triggers a sweep. Lock files — `<task_id>.lock` and the live-input inbox
 `<task_id>.inbox.jsonl` — are never deleted.
 

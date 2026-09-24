@@ -1,6 +1,6 @@
 """Cross-process control: per-attempt phase files, and the two locks built on the same primitive.
 
-A cancellation (and, later, a takeover — A4) has to be coordinated across server processes that
+A cancellation or a takeover (A4) has to be coordinated across server processes that
 share nothing but the filesystem. The design here is deliberately conservative: every step that
 matters is a single atomic filesystem operation (a hard link, which only one of several racing
 writers can win), and every read either finds a fact or admits it could not tell — never a guess.
