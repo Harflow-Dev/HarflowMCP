@@ -11,8 +11,11 @@ the task exists. So the command forks:
   to own the task until it settles. SIGTERM/SIGINT cancel whatever it started.
 * the **parent** waits on that pipe for `HANDSHAKE_TIMEOUT_SECONDS`, prints what arrived, and exits
   with a matching status. Nothing arriving (a hang, or a child that died first) is reported as
-  `unknown` — not `error`, because a task may already exist — after the child is terminated and
-  reaped; the child cancels anything it had already spawned on its way out.
+  `unknown` — not `error`, because a task may already exist — after the child is sent SIGTERM and,
+  within `REAP_GRACE_SECONDS`, reaped. The child cancels anything it had already spawned on its way
+  out, and **keeps owning any task that has not settled** — exiting would leave the agent running
+  with nobody draining its pipes. For the same reason the parent never SIGKILLs it: a child still
+  stopping its task when the grace runs out is left to finish, and the answer says so.
 """
 
 from __future__ import annotations
@@ -37,6 +40,7 @@ log = logging.getLogger(__name__)
 
 HANDSHAKE_TIMEOUT_SECONDS = 30.0
 REAP_GRACE_SECONDS = 15.0
+RELEASE_RETRY_SECONDS = 5.0
 CANCELLED_EXIT = 143
 
 Action = Callable[[Any], Awaitable[Any]]
@@ -127,18 +131,17 @@ def run_detached(
         _reap(pid)
         return Outcome("error", message["error"], pid)
 
-    _terminate(pid)
-    return Outcome(
-        "unknown",
-        {
-            "message": (
-                "the task's owning process did not report within "
-                f"{timeout:.0f} s and was stopped; a task may or may not have been started — "
-                "check `polybridge-ctl list`"
-            )
-        },
-        pid,
+    reaped = _terminate(pid)
+    message = (
+        f"the task's owning process did not report within {timeout:.0f} s and was stopped; a task "
+        "may or may not have been started — check `polybridge-ctl list`"
     )
+    if not reaped:
+        message += (
+            f" (the owning process, pid {pid}, is still stopping what it started and keeps owning "
+            "it until it settles)"
+        )
+    return Outcome("unknown", {"message": message}, pid)
 
 
 def _detach_stdio(log_path: Path) -> None:
@@ -172,9 +175,9 @@ def _read_line(fd: int, timeout: float) -> bytes:
     return buffer.split(b"\n", 1)[0]
 
 
-def _reap(pid: int, grace: float = REAP_GRACE_SECONDS) -> bool:
-    """Wait for `pid` to exit, up to `grace`. True once reaped."""
-    deadline = time.monotonic() + grace
+def _reap(pid: int, grace: float | None = None) -> bool:
+    """Wait for `pid` to exit, up to `grace` (default `REAP_GRACE_SECONDS`). True once reaped."""
+    deadline = time.monotonic() + (REAP_GRACE_SECONDS if grace is None else grace)
     while True:
         try:
             done, _ = os.waitpid(pid, os.WNOHANG)
@@ -187,19 +190,51 @@ def _reap(pid: int, grace: float = REAP_GRACE_SECONDS) -> bool:
         time.sleep(0.05)
 
 
-def _terminate(pid: int) -> None:
-    """SIGTERM the child (it cancels what it started), reap it; SIGKILL if it will not go."""
+def _terminate(pid: int) -> bool:
+    """SIGTERM the child — it cancels what it started — and reap it. Never SIGKILL: a child still
+    busy stopping a task owns that task's pipes, and killing it would orphan the agent. Returns
+    whether it was reaped within the grace."""
     try:
         os.kill(pid, signal.SIGTERM)
     except ProcessLookupError:
         pass
-    if _reap(pid):
-        return
-    try:
-        os.kill(pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    _reap(pid, grace=5.0)
+    return _reap(pid)
+
+
+async def _release_started(registry: Any) -> None:
+    """Cancel every task this process started, and do not return while any is unsettled.
+
+    A cancel can fail (a phase file that cannot be written refuses before signalling), and exiting
+    then would leave the agent running with nobody reading its output. So this keeps retrying, and
+    meanwhile keeps the loop — and with it the task's drainers and monitor — alive. A repeated
+    signal does not interrupt it.
+    """
+    me = asyncio.current_task()
+    while True:
+        pending = [task for task in registry.list() if not task.finished]
+        if not pending:
+            return
+        for task in pending:
+            try:
+                await registry.cancel_cascade(task.task_id)
+            except asyncio.CancelledError:
+                if me is not None:
+                    me.uncancel()
+            except Exception:
+                log.warning("could not cancel task %s; still owning it", task.task_id, exc_info=True)
+        pending = [task for task in registry.list() if not task.finished]
+        if not pending:
+            return
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*(task.done.wait() for task in pending)),
+                timeout=RELEASE_RETRY_SECONDS,
+            )
+        except (TimeoutError, asyncio.TimeoutError):
+            pass
+        except asyncio.CancelledError:
+            if me is not None:
+                me.uncancel()
 
 
 async def _child(action: Action, write_fd: int, registry_factory: Callable[[], Any]) -> int:
@@ -249,12 +284,7 @@ async def _child(action: Action, write_fd: int, registry_factory: Callable[[], A
     except asyncio.CancelledError:
         main.uncancel()
         log.info("stopped by a signal; cancelling what this process started")
-        for task in registry.list():
-            if not task.finished:
-                try:
-                    await registry.cancel_cascade(task.task_id)
-                except Exception:
-                    log.warning("could not cancel task %s", task.task_id, exc_info=True)
+        await _release_started(registry)
         return CANCELLED_EXIT
     finally:
         if pending_fd is not None:

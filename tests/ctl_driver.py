@@ -7,7 +7,9 @@ and calls the real `ctl.main` (mode `ctl`) or `detached.run_detached` with a tes
 `hang`, `start_then_hang`), printing the outcome as JSON.
 
 Environment: `PB_FAKE_SCRIPT` (the fake agent's `sh -c` script), `PB_FAKE_CALLER` (a TaskRecord as
-JSON to report as the detected caller; unset = none).
+JSON to report as the detected caller; unset = none), `PB_FAKE_REAP_GRACE` (the parent's reap grace,
+seconds), `PB_FAKE_CANCEL_FAILS=1` (every cancel attempt's phase write fails, so nothing is ever
+signalled).
 """
 
 from __future__ import annotations
@@ -18,7 +20,7 @@ import os
 import sys
 from pathlib import Path
 
-from polybridge import backends, ctl, detached, lineage, store
+from polybridge import backends, control, ctl, detached, lineage, store
 from polybridge.backends import Enforcement, Invocation
 from polybridge.tasks import TaskRegistry, default_log_dir
 
@@ -69,6 +71,14 @@ def main() -> int:
     raw_caller = os.environ.get("PB_FAKE_CALLER")
     caller = lineage.Caller(store.TaskRecord(**json.loads(raw_caller)), "pb_task_id") if raw_caller else None
     lineage.detect_caller = lambda *args, **kwargs: caller
+    if os.environ.get("PB_FAKE_REAP_GRACE"):
+        detached.REAP_GRACE_SECONDS = float(os.environ["PB_FAKE_REAP_GRACE"])
+    if os.environ.get("PB_FAKE_CANCEL_FAILS") == "1":
+
+        def refuse(*args, **kwargs):
+            raise control.PhaseWriteError("the disk refuses phase files")
+
+        control.begin_attempt = refuse
 
     mode, *rest = sys.argv[1:]
     if mode == "ctl":

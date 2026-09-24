@@ -87,10 +87,17 @@ def _lineage_tree(log_dir: Path, task_id: str) -> set[str]:
     return lineage.lineage_closure(rows, task_id)
 
 
-def other_session_holders(log_dir: Path, task_id: str, session_id: str) -> list[str]:
-    """Runs other than `task_id` and its lineage descendants that may hold `session_id`: live
-    records on it, and other tasks' takeover reservations of it."""
-    tree = _lineage_tree(log_dir, task_id)
+def other_session_holders(
+    log_dir: Path, task_id: str, session_id: str, *, exclude_lineage: bool = False
+) -> list[str]:
+    """Runs other than `task_id` that may hold `session_id`: live records on it, and other tasks'
+    takeover reservations of it.
+
+    `exclude_lineage` also leaves out the target's lineage descendants — only right before a
+    cascade that is about to stop them. Anywhere else they count like any other run: a finished
+    target is not cascaded, so a descendant that resumed its session would still be writing to it.
+    """
+    tree = _lineage_tree(log_dir, task_id) if exclude_lineage else {task_id}
     holders = {tid for tid in store.live_session_task_ids(log_dir, session_id) if tid not in tree}
     holders.update(
         tid
@@ -107,8 +114,12 @@ class _Refusal(Exception):
         self.reason = reason
 
 
-def _interactive_command(log_dir: Path, record: store.TaskRecord) -> list[str]:
-    """Step 2: the command to hand out, or `_Refusal`. Blocking (`ps`, disk), run in a thread."""
+def _interactive_command(
+    log_dir: Path, record: store.TaskRecord, *, will_cascade: bool
+) -> list[str]:
+    """Step 2: the command to hand out, or `_Refusal`. Blocking (`ps`, disk), run in a thread.
+    `will_cascade`: the target is live and about to be cascade-cancelled, so its own lineage does
+    not count as another holder of the session yet (the check before `.ready` recounts it)."""
     if not record.session_id:
         raise _Refusal("no_session", "the task never disclosed a session id, so there is nothing to resume")
     try:
@@ -128,9 +139,14 @@ def _interactive_command(log_dir: Path, record: store.TaskRecord) -> list[str]:
     binary = shutil.which(argv[0])
     if binary is None:
         raise _Refusal("binary_not_found", f"`{argv[0]}` is not on PATH")
+    # `which` keeps a relative PATH entry relative; the app runs this from `cwd`, not from here.
+    # `abspath` only anchors it — it resolves no symlink.
+    binary = os.path.abspath(binary)
     if not repo.is_dir():
         raise _Refusal("repo_unavailable", f"the repository no longer exists: {record.repo_path}")
-    holders = other_session_holders(log_dir, record.task_id, record.session_id)
+    holders = other_session_holders(
+        log_dir, record.task_id, record.session_id, exclude_lineage=will_cascade
+    )
     if holders:
         raise _Refusal(
             "session_busy",
@@ -138,6 +154,28 @@ def _interactive_command(log_dir: Path, record: store.TaskRecord) -> list[str]:
             "one instead",
         )
     return [binary, *argv[1:]]
+
+
+def _open_attempt(
+    log_dir: Path, task_id: str, controller: dict, session_id: str | None
+) -> tuple[int, store.TaskRecord]:
+    """Step 1 under `<id>.lock` (the caller already holds the session lock — the order used
+    everywhere): retention deletes a task only while holding that lock and after checking for an
+    active attempt, so a `.req` published under it can never be swept away with the task. Returns
+    the attempt number and the record as re-read under the lock."""
+    with control.record_lock_sync(log_dir, task_id):
+        record = store.read(log_dir, task_id)
+        if record is None:
+            raise control.TakeoverRefused("unknown_task", f"unknown task_id: {task_id}")
+        try:
+            n = control.begin_takeover(
+                log_dir, task_id, controller=controller, session_id=session_id
+            )
+            return n, record
+        except control.PhaseWriteError as exc:
+            raise control.TakeoverRefused(
+                "phase_write_failed", f"the takeover could not be recorded: {exc}"
+            ) from None
 
 
 def _liveness(record: store.TaskRecord) -> tuple[str, str]:
@@ -232,28 +270,22 @@ async def take_over(
     try:
         try:
             async with _session_lock(log_dir, record.session_id):
-                try:
-                    n = await asyncio.to_thread(
-                        functools.partial(
-                            control.begin_takeover,
-                            log_dir,
-                            task_id,
-                            controller=controller,
-                            session_id=record.session_id,
-                        )
+                n, record = await asyncio.to_thread(
+                    _open_attempt, log_dir, task_id, controller, record.session_id
+                )
+                state, reason = await asyncio.to_thread(_liveness, record)
+                argv = await asyncio.to_thread(
+                    functools.partial(
+                        _interactive_command, log_dir, record, will_cascade=state == "live"
                     )
-                except control.PhaseWriteError as exc:
-                    raise control.TakeoverRefused(
-                        "phase_write_failed", f"the takeover could not be recorded: {exc}"
-                    ) from None
-                argv = await asyncio.to_thread(_interactive_command, log_dir, record)
+                )
         except control.LockTimeout:
             raise control.TakeoverRefused(
                 "session_busy",
-                f"session {record.session_id} is being resumed or taken over right now; try again",
+                f"session {record.session_id} or task {task_id} is locked right now (being "
+                "resumed, taken over or swept); try again",
             ) from None
 
-        state, reason = await asyncio.to_thread(_liveness, record)
         if state == "undecidable":
             raise _Refusal(
                 "not_stopped", f"whether the headless run is still alive cannot be decided ({reason})"

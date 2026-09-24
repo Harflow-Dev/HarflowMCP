@@ -666,7 +666,7 @@ def test_attach_with_another_run_on_the_session_writes_failed(
     assert failed_reason(log_dir, 1) == "another run holds the session"
 
 
-def test_a_descendant_on_the_same_session_does_not_count_as_another_holder(
+def test_lineage_is_excluded_only_right_before_a_cascade(
     log_dir: Path, repo: Path, verdicts: Verdicts
 ) -> None:
     ready_attempt(log_dir, repo)
@@ -678,4 +678,92 @@ def test_a_descendant_on_the_same_session_does_not_count_as_another_holder(
     )
     verdicts.by_pid[778] = "alive"
 
-    assert takeover.other_session_holders(log_dir, "task-1", SESSION) == []
+    assert takeover.other_session_holders(log_dir, "task-1", SESSION, exclude_lineage=True) == []
+    assert takeover.other_session_holders(log_dir, "task-1", SESSION) == ["child"]
+
+
+async def test_a_finished_target_whose_descendant_resumed_its_session_is_refused(
+    log_dir: Path, repo: Path, verdicts: Verdicts
+) -> None:
+    """Codex round 1: A spawns B and finishes; B resumes A's session as C. A finished target is not
+    cascaded, so excluding its lineage would hand out a command competing with C."""
+    store.write(log_dir, finished_record(repo))
+    store.write(
+        log_dir,
+        finished_record(
+            repo, task_id="c", spawned_by="b", root_task_id="task-1", status="running",
+            exit_code=None, pid=779, start_time="x",
+        ),
+    )
+    store.write(log_dir, finished_record(repo, task_id="b", spawned_by="task-1", root_task_id="task-1"))
+    verdicts.by_pid[779] = "alive"
+
+    with pytest.raises(control.TakeoverRefused) as refused:
+        await _take_over(log_dir)
+
+    assert refused.value.code == "session_busy" and "c" in str(refused.value)
+    assert (log_dir / "task-1.takeover.1.failed").exists()
+    assert not (log_dir / "task-1.takeover.1.ready").exists()
+
+
+async def test_the_req_is_published_under_the_record_lock(
+    log_dir: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex round 1: retention deletes a task under `<id>.lock` after checking for an active
+    attempt, so a `.req` written without that lock could be swept away with the task."""
+    import fcntl
+
+    store.write(log_dir, finished_record(repo))
+    held: list[bool] = []
+    real_begin = control.begin_takeover
+
+    def checking_begin(*args, **kwargs):
+        fd = os.open(control.record_lock_path(log_dir, "task-1"), os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            held.append(False)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except BlockingIOError:
+            held.append(True)
+        finally:
+            os.close(fd)
+        return real_begin(*args, **kwargs)
+
+    monkeypatch.setattr(control, "begin_takeover", checking_begin)
+
+    await _take_over(log_dir)
+
+    assert held == [True]
+
+
+async def test_a_task_swept_before_the_lock_is_unknown_and_leaves_no_req(
+    log_dir: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store.write(log_dir, finished_record(repo))
+    real_lock = control.record_lock_sync
+
+    def sweeping_lock(log_dir_, task_id, *args, **kwargs):
+        store.record_path(log_dir_, task_id).unlink()  # retention got there first
+        return real_lock(log_dir_, task_id, *args, **kwargs)
+
+    monkeypatch.setattr(control, "record_lock_sync", sweeping_lock)
+
+    with pytest.raises(control.TakeoverRefused) as refused:
+        await _take_over(log_dir)
+
+    assert refused.value.code == "unknown_task"
+    assert phases_on_disk(log_dir) == []
+
+
+async def test_the_returned_binary_is_absolute_even_from_a_relative_path_entry(
+    log_dir: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex round 1: `shutil.which` keeps a relative PATH entry relative, and the app runs the
+    command from `cwd`, not from here. Anchored, not symlink-resolved."""
+    store.write(log_dir, finished_record(repo))
+    monkeypatch.setattr(takeover.shutil, "which", lambda name: "bin/claude")
+
+    result = await _take_over(log_dir)
+
+    assert result["argv"][0] == os.path.abspath("bin/claude")
+    assert os.path.isabs(result["argv"][0])

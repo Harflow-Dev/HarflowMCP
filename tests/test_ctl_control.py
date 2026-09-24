@@ -33,8 +33,10 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
-def drive(*args: str, script: str | None = None, caller: dict | None = None) -> tuple[int, str, str]:
-    env = dict(os.environ)
+def drive(
+    *args: str, script: str | None = None, caller: dict | None = None, **extra_env: str
+) -> tuple[int, str, str]:
+    env = dict(os.environ) | extra_env
     env.pop("PB_TASK_ID", None)
     if script is not None:
         env["PB_FAKE_SCRIPT"] = script
@@ -198,6 +200,34 @@ def test_a_timed_out_child_cancels_the_task_it_already_started(git_repo: Path) -
     assert identity.identity_check(
         identity.task_identity(record.pid, record.start_time, record.markers)
     ) == "dead"
+
+
+def test_a_child_whose_cancel_fails_keeps_owning_its_task_until_it_settles(git_repo: Path) -> None:
+    """Codex round 1: the child used to exit after a failed cancel, leaving the agent running with
+    nobody draining its pipes. Now it keeps owning the task — the parent, whose reap grace runs out
+    first, does not SIGKILL it and says so — and the task settles observed, with its exit code."""
+    started = time.monotonic()
+    code, out, err = drive(
+        "start_then_hang", "1", str(git_repo), script="sleep 4",
+        PB_FAKE_CANCEL_FAILS="1", PB_FAKE_REAP_GRACE="1",
+    )
+
+    assert code == 0, err
+    outcome = _one(out)
+    assert outcome["kind"] == "unknown"
+    assert "still stopping" in outcome["payload"]["message"]
+    assert time.monotonic() - started < 4
+    (record,) = store.read_all(default_log_dir())
+    settled = _settled(record.task_id, timeout=20)
+    assert settled.status == "completed" and settled.exit_code == 0
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            os.kill(outcome["child_pid"], 0)
+        except ProcessLookupError:
+            break
+        assert time.monotonic() < deadline, "the owning child never exited"
+        time.sleep(0.1)
 
 
 def test_the_unknown_document_is_versioned_and_exits_3(
