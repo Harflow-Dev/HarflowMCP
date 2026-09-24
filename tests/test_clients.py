@@ -1259,3 +1259,110 @@ def test_desktop_remove_refuses_when_the_file_changed_underneath_it(
     assert result.status == "failed"
     assert "changed while it was being edited" in result.detail
     assert path.read_text() == original
+
+
+# --- Claude Code: inspect and remove ---------------------------------------------------------------
+
+
+@pytest.fixture
+def claude_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
+    (tmp_path / "claude").mkdir()
+    return tmp_path / "claude" / ".claude.json"
+
+
+def test_claude_code_inspect_honours_claude_config_dir(claude_config: Path) -> None:
+    claude_config.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "polybridge": {"type": "stdio", "command": "/x/s", "args": [], "env": {"PATH": "/p"}}
+                }
+            }
+        )
+    )
+
+    inspection = ClaudeCodeClient().inspect("polybridge", FakeRunner())
+
+    assert inspection.installed is True
+    assert inspection.command == "/x/s"
+    assert inspection.path_env == "/p"
+    assert any(str(claude_config) in note for note in inspection.notes)
+
+
+def test_claude_code_inspect_defaults_to_the_home_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / ".claude.json").write_text(json.dumps({"mcpServers": {"polybridge": {"command": "/h"}}}))
+
+    assert ClaudeCodeClient().inspect("polybridge", FakeRunner()).command == "/h"
+
+
+def test_claude_code_inspect_ignores_project_scoped_entries(claude_config: Path) -> None:
+    """Only user scope is ours; an entry under `projects[*]` was put there by someone else."""
+    claude_config.write_text(
+        json.dumps({"projects": {"/repo": {"mcpServers": {"polybridge": {"command": "/x"}}}}})
+    )
+
+    inspection = ClaudeCodeClient().inspect("polybridge", FakeRunner())
+
+    assert inspection.installed is False
+
+
+def test_claude_code_inspect_with_no_config_is_not_installed(claude_config: Path) -> None:
+    assert ClaudeCodeClient().inspect("polybridge", FakeRunner()).installed is False
+
+
+def test_claude_code_inspect_never_runs_a_command(claude_config: Path) -> None:
+    """`claude mcp get` launches the server, so nothing may be run at all — FakeRunner() raises."""
+    claude_config.write_text(json.dumps({"mcpServers": {"polybridge": {"command": "/x"}}}))
+
+    ClaudeCodeClient().inspect("polybridge", FakeRunner())
+
+
+@pytest.mark.parametrize(
+    "raw", ["{not json", "[]", json.dumps({"mcpServers": []})], ids=["syntax", "array", "servers"]
+)
+def test_claude_code_inspect_of_a_malformed_config_is_an_error(claude_config: Path, raw: str) -> None:
+    claude_config.write_text(raw)
+
+    inspection = ClaudeCodeClient().inspect("polybridge", FakeRunner())
+
+    assert inspection.installed is None
+    assert inspection.error
+
+
+def test_claude_code_remove_is_user_scoped_and_reports_removed() -> None:
+    runner = FakeRunner(ok("Removed MCP server polybridge from user config"))
+
+    result = ClaudeCodeClient().remove("polybridge", runner)
+
+    assert runner.calls == [["claude", "mcp", "remove", "polybridge", "-s", "user"]]
+    assert result.status == "removed"
+
+
+def test_claude_code_remove_of_an_absent_entry_is_not_installed() -> None:
+    result = ClaudeCodeClient().remove("polybridge", FakeRunner(fails(1, NOT_FOUND)))
+
+    assert result.status == "not_installed"
+
+
+def test_claude_code_remove_does_not_read_another_names_absence_as_ours() -> None:
+    result = ClaudeCodeClient().remove(
+        "polybridge", FakeRunner(fails(1, 'No MCP server named "polybridge-old" in user scope'))
+    )
+
+    assert result.status == "failed"
+
+
+def test_claude_code_remove_timeout_is_unknown() -> None:
+    assert ClaudeCodeClient().remove("polybridge", FakeRunner(times_out())).status == "unknown"
+
+
+def test_claude_code_remove_failure_carries_the_output() -> None:
+    result = ClaudeCodeClient().remove("polybridge", FakeRunner(fails(1, "EACCES")))
+
+    assert result.status == "failed"
+    assert "EACCES" in result.diagnostics[0]
