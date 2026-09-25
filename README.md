@@ -536,6 +536,41 @@ On macOS, a root task — no detected caller and no `PB_TASK_ID` — started thr
 a failure becomes a notice on the task, and the `start_task` response never claims the app opened.
 `PB_OPEN_MONITOR=0` turns it off (the test suite sets it, and so does everything the app launches).
 
+## The Monitor app (macOS)
+
+`macos/PolybridgeMonitor/` is a Swift package (macOS 14+, SwiftUI, SwiftTerm pinned to 1.20.0): a
+menu-bar app with one window that shows polybridge tasks live and lets a person act on them.
+
+```bash
+cd macos/PolybridgeMonitor && swift build && swift test   # MonitorCore unit tests; no GUI needed
+macos/build-app.sh                                         # builds macos/build/Polybridge Monitor.app
+rm -rf ~/Applications/'Polybridge Monitor.app' && cp -R 'macos/build/Polybridge Monitor.app' ~/Applications/
+```
+
+`build-app.sh` only builds (ad-hoc signed, not sandboxed, bundle id `dev.polybridge.monitor`,
+`LSUIElement`); installing is the copy above, and opening it once from `~/Applications` registers
+the `polybridge-monitor://` scheme.
+
+What it reads and runs — it never writes polybridge's own state:
+
+- **Lists and status** only from `polybridge-ctl list/status --json`, refreshed on FSEvents for
+  `*.meta.json` under `~/.polybridge/tasks/` (debounced to 1 s), plus a slow poll while anything runs.
+- **Live timelines** by tailing `<task_id>.events.jsonl` (v1) for the tasks on screen, by byte
+  offset; unknown kinds are ignored. Titles come from each log's first line.
+- **Changes** from `git -C <repo> diff <base_commit>` plus untracked files — git's answer, not the
+  agent's — labelled when the baseline was missing or the tree was already dirty.
+- **Actions** only through `polybridge-ctl` (`send`, `resume`, `cancel`, `run`, `takeover`,
+  `takeover-attach`) and `polybridge-setup` (Settings → Harnesses; Install/Remove only on click).
+- **Tools** are found in the folder set in Settings, then `uv tool dir --bin`, `~/.local/bin`,
+  `/opt/homebrew/bin`, `/usr/local/bin`. Everything it launches gets the login-shell `PATH`, no
+  `PB_*` variables, and `PB_OPEN_MONITOR=0`. A `polybridge-ctl` that lacks a subcommand or answers
+  another `"v"` is reported as too old, never guessed at.
+- **Take over** runs the argv `takeover` returns, in its `cwd`, as
+  `/bin/zsh -l -c 'exec "$@"' polybridge-takeover <argv…>` in an embedded terminal (argv as an
+  array, never shell text; `exec` keeps the pid), then attaches that pid. If the attach is refused
+  the app closes the terminal rather than leave an unreserved session open. "In Terminal.app" hands
+  the same argv over as data files read by a fixed script that attaches its own pid before `exec`.
+
 ## Retention
 
 A running server sweeps settled task records at most once every 24 hours, controlled by
