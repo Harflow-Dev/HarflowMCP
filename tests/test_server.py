@@ -89,11 +89,13 @@ async def test_unknown_backend_is_rejected(git_repo: Path) -> None:
         await call("start_task", prompt="x", repo_path=str(git_repo), backend="gemini")
 
 
+@pytest.mark.usefixtures("fake_backend_clis")
 async def test_unknown_freedom_is_rejected(git_repo: Path) -> None:
     with pytest.raises(MCPError, match="unknown freedom"):
         await call("start_task", prompt="x", repo_path=str(git_repo), freedom="yolo")
 
 
+@pytest.mark.usefixtures("fake_backend_clis")
 async def test_turn_cap_on_codex_fails_rather_than_being_ignored(git_repo: Path) -> None:
     """Dropping it silently would leave the caller believing a cap was applied."""
     with pytest.raises(MCPError, match="no turn cap"):
@@ -102,6 +104,7 @@ async def test_turn_cap_on_codex_fails_rather_than_being_ignored(git_repo: Path)
         )
 
 
+@pytest.mark.usefixtures("fake_backend_clis")
 async def test_model_on_vibe_fails_rather_than_being_ignored(git_repo: Path) -> None:
     """vibe has no model-selection flag at all — a silent no-op is exactly what this repo forbids."""
     with pytest.raises(MCPError, match="no model selection flag"):
@@ -126,6 +129,7 @@ async def test_model_on_vibe_resume_surfaces_as_invalid_params_not_an_internal_e
         await call("resume_task", task_id=fake_task.task_id, followup_prompt="carry on")
 
 
+@pytest.mark.usefixtures("fake_backend_clis")
 async def test_invalid_reasoning_effort_fails_before_a_task_exists(git_repo: Path) -> None:
     """Not just a backend-specific quirk: an out-of-vocabulary value is rejected up front."""
     with pytest.raises(MCPError, match="unknown reasoning_effort"):
@@ -133,6 +137,7 @@ async def test_invalid_reasoning_effort_fails_before_a_task_exists(git_repo: Pat
     assert (await call("list_tasks")).structured_content["result"] == []
 
 
+@pytest.mark.usefixtures("fake_backend_clis")
 async def test_valid_reasoning_effort_reaches_the_argv_and_the_persisted_record(
     git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -179,6 +184,7 @@ async def test_valid_reasoning_effort_reaches_the_argv_and_the_persisted_record(
     assert record.reasoning_effort == "high"
 
 
+@pytest.mark.usefixtures("fake_backend_clis")
 async def test_rejects_a_directory_that_is_not_a_git_repo(tmp_path: Path) -> None:
     plain = tmp_path / "not-a-repo"
     plain.mkdir()
@@ -186,6 +192,7 @@ async def test_rejects_a_directory_that_is_not_a_git_repo(tmp_path: Path) -> Non
         await call("start_task", prompt="do a thing", repo_path=str(plain))
 
 
+@pytest.mark.usefixtures("fake_backend_clis")
 async def test_rejects_a_path_that_does_not_exist(tmp_path: Path) -> None:
     with pytest.raises(MCPError, match="does not exist"):
         await call("start_task", prompt="x", repo_path=str(tmp_path / "nope"))
@@ -374,6 +381,7 @@ async def test_a_non_boolean_network_is_refused_rather_than_coerced(value) -> No
     assert "valid boolean" in str(result.content)
 
 
+@pytest.mark.usefixtures("fake_backend_clis")
 async def test_network_true_on_codex_read_only_fails_rather_than_being_ignored(
     git_repo: Path,
 ) -> None:
@@ -391,6 +399,7 @@ async def test_network_true_on_codex_read_only_fails_rather_than_being_ignored(
         )
 
 
+@pytest.mark.usefixtures("fake_backend_clis")
 async def test_network_false_on_a_backend_with_no_barrier_fails_loudly(git_repo: Path) -> None:
     """claude has no sandbox at all, so it cannot impose the barrier `False` asks for. Accepting
     it and reporting `not_controlled` would answer a request with "we don't know"."""
@@ -416,6 +425,7 @@ async def test_resume_task_also_refuses_a_non_boolean_network() -> None:
     assert "valid boolean" in str(result.content)
 
 
+@pytest.mark.usefixtures("fake_backend_clis")
 async def test_a_valid_network_request_reaches_the_argv_enforcement_and_the_record(
     git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

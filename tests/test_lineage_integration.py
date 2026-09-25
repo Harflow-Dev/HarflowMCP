@@ -471,6 +471,7 @@ async def test_caps_refuse_a_weaker_resume_record_on_writable_roots(
 # --- Caps applied via the server tool ------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("fake_backend_clis")
 async def test_start_task_maps_nested_dispatch_refused_to_invalid_params(
     git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -533,11 +534,13 @@ async def test_resume_task_maps_nested_dispatch_refused_to_invalid_params(
 # --- group parameter validation on the server tool ------------------------------------------------
 
 
+@pytest.mark.usefixtures("fake_backend_clis")
 async def test_start_task_rejects_an_empty_group(git_repo: Path) -> None:
     with pytest.raises(MCPError, match="non-empty"):
         await call("start_task", prompt="x", repo_path=str(git_repo), group="   ")
 
 
+@pytest.mark.usefixtures("fake_backend_clis")
 async def test_start_task_rejects_an_overlong_group(git_repo: Path) -> None:
     with pytest.raises(MCPError, match="128"):
         await call("start_task", prompt="x", repo_path=str(git_repo), group="g" * 129)

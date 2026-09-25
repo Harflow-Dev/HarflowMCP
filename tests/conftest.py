@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -52,6 +53,30 @@ def git_repo(tmp_path: Path) -> Path:
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True)
     return repo
+
+
+# The server refuses a backend whose CLI is not on PATH before it validates anything else, so a
+# test of those later checks needs *a* binary there — never the real one, which a CI runner lacks
+# and a developer machine may or may not have. Nothing these tests reach runs the binary; if one ever
+# does, the stand-in fails loudly instead of pretending to be an agent.
+FAKE_CLI = """#!/bin/sh
+echo "fake $(basename "$0") stand-in from tests/conftest.py was invoked: $*" >&2
+exit 97
+"""
+
+
+@pytest.fixture
+def fake_backend_clis(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    from polybridge.backends import BACKENDS
+
+    bin_dir = tmp_path / "fake-bin"
+    bin_dir.mkdir()
+    for backend in BACKENDS.values():
+        fake = bin_dir / backend.binary
+        fake.write_text(FAKE_CLI)
+        fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    return bin_dir
 
 
 # A synthetic owner identity that `identities` reports alive. Tests that need a *live* owning server
