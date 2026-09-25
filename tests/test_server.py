@@ -222,8 +222,11 @@ async def test_cancel_task_response_carries_a_cascade_summary(fake_task: Task) -
         "not_signalled",
         "not_recorded",
         "rounds",
+        "cascade_incomplete",
+        "unconverged",
     }
     assert response["cascade"]["rounds"] >= 1
+    assert response["cascade"]["cascade_incomplete"] is False
 
 
 async def test_rejects_an_unknown_status_filter() -> None:

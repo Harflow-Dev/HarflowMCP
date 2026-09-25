@@ -379,7 +379,10 @@ SIGKILL and drain grace periods and its server is still alive, it is reported un
 signalled, SIGKILLed if it survives, and written `cancelled`. The response's `cascade` lists
 `cancelled_descendants`, `sigkill_survivors`, `owner_still_settling`, `not_signalled` (with why —
 a pre-start-time record is only signalled when `ps` actually showed its markers) and `not_recorded`
-(signalled, but its `cancelled` status could not be written — the record is left untouched).
+(signalled, but its `cancelled` status could not be written — the record is left untouched). It re-scans at
+most 5 rounds; if the last round still found new descendants it scans once more, and anything new
+there — never signalled — is listed in `unconverged` with `cascade_incomplete: true` (otherwise
+`false` and `[]`). A takeover refuses an incomplete cascade as `descendants_not_stopped`.
 
 **Why a cancel from another process cannot be mis-recorded.** Every cancel writes phase files beside
 the task's record, per attempt: `<id>.cancel.<n>.req` (who is cancelling, with a 60 s lease) before

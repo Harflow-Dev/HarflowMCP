@@ -552,7 +552,7 @@ async def test_a_survivor_refuses_the_takeover(
 
     class _Registry:
         async def cancel_cascade(self, task_id):
-            return {"sigkill_survivors": [task_id], "not_signalled": [], "owner_still_settling": []}
+            return {"sigkill_survivors": [task_id], "not_signalled": [], "owner_still_settling": [], "cascade_incomplete": False, "unconverged": []}
 
     with pytest.raises(control.TakeoverRefused) as refused:
         await takeover.take_over(log_dir, "task-1", registry_factory=_Registry)
@@ -575,7 +575,7 @@ async def test_a_run_that_starts_on_the_session_before_ready_refuses(
                 finished_record(repo, task_id="late", status="running", exit_code=None, pid=888, start_time="x"),
             )
             verdicts.by_pid[888] = "alive"
-            return {"sigkill_survivors": [], "not_signalled": [], "owner_still_settling": []}
+            return {"sigkill_survivors": [], "not_signalled": [], "owner_still_settling": [], "cascade_incomplete": False, "unconverged": []}
 
     with pytest.raises(control.TakeoverRefused) as refused:
         await takeover.take_over(log_dir, "task-1", registry_factory=_Registry)
@@ -896,7 +896,7 @@ async def test_every_kind_of_unstopped_descendant_blocks_the_takeover(
     store.write(log_dir, finished_record(repo, status="running", exit_code=None, start_time="x"))
     monkeypatch.setattr(identity, "check_detail", lambda ident: ("alive", "start_time_match"))
     verdicts.by_pid[999_991] = "dead"
-    result = {"sigkill_survivors": [], "not_signalled": [], "owner_still_settling": []} | cascade
+    result = {"sigkill_survivors": [], "not_signalled": [], "owner_still_settling": [], "cascade_incomplete": False, "unconverged": []} | cascade
 
     class _Registry:
         async def cancel_cascade(self, task_id):
@@ -907,5 +907,34 @@ async def test_every_kind_of_unstopped_descendant_blocks_the_takeover(
 
     assert refused.value.code == "descendants_not_stopped"
     assert expected in str(refused.value)
+    assert (log_dir / "task-1.takeover.1.failed").exists()
+    assert not (log_dir / "task-1.takeover.1.ready").exists()
+
+
+async def test_an_incomplete_cascade_refuses_the_takeover(
+    log_dir: Path, repo: Path, verdicts: Verdicts, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cascade that hit its round cap without a fixed point may have missed descendants that
+    are still running under the task's authority: fail closed."""
+    store.write(log_dir, finished_record(repo, status="running", exit_code=None, start_time="x"))
+    monkeypatch.setattr(identity, "check_detail", lambda ident: ("alive", "start_time_match"))
+    verdicts.by_pid[999_991] = "dead"
+
+    class _Registry:
+        async def cancel_cascade(self, task_id):
+            return {
+                "sigkill_survivors": [],
+                "not_signalled": [],
+                "owner_still_settling": [],
+                "cascade_incomplete": True,
+                "unconverged": ["late-kid"],
+            }
+
+    with pytest.raises(control.TakeoverRefused) as refused:
+        await takeover.take_over(log_dir, "task-1", registry_factory=_Registry)
+
+    assert refused.value.code == "descendants_not_stopped"
+    assert "late-kid" in str(refused.value)
+    assert "incomplete" in str(refused.value)
     assert (log_dir / "task-1.takeover.1.failed").exists()
     assert not (log_dir / "task-1.takeover.1.ready").exists()

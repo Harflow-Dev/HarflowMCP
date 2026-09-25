@@ -273,6 +273,15 @@ async def _stop_run(record: store.TaskRecord, registry_factory: Callable[[], Any
             blocked.append(f"{tid} (not signalled: {not_signalled[tid]})")
         else:
             blocked.append(f"{tid} (its owning server has not settled it)")
+    # A cascade that hit its round cap without a fixed point may have missed descendants still
+    # running; an older registry that never reports the field is not taken as complete either.
+    if cascade.get("cascade_incomplete", True) is not False:
+        unconverged = [str(tid) for tid in cascade.get("unconverged") or []]
+        blocked.append(
+            "the cascade was incomplete (it hit its round limit without reaching every "
+            "descendant" + (f"; never processed: {', '.join(unconverged)}" if unconverged else "")
+            + ")"
+        )
     if blocked:
         raise _Refusal(
             "descendants_not_stopped",

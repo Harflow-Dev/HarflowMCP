@@ -2277,12 +2277,14 @@ class TaskRegistry:
         not_signalled: list[dict[str, str]] = []
         not_recorded: list[dict[str, str]] = []
         rounds = 0
+        converged = False
 
         for round_index in range(1, CASCADE_MAX_ROUNDS + 1):
             local_lineage = [(t.task_id, t.spawned_by, t.root_task_id) for t in self._tasks.values()]
             targets = await asyncio.to_thread(self._cascade_targets, task_id, local_lineage)
             new_targets = sorted(targets - processed)
             if not new_targets:
+                converged = True
                 break
             rounds = round_index
             processed.update(new_targets)
@@ -2354,6 +2356,16 @@ class TaskRegistry:
                     elif kind == "not_signalled":
                         not_signalled.append({"task_id": tid, "reason": reason or ""})
 
+        # Fail closed at the round cap: the last round may itself have spawned or advanced
+        # descendants, so scan once more. Anything new there was never signalled and appears in no
+        # other list — reported, so a caller (takeover above all) cannot read the cascade as the
+        # whole tree stopped.
+        unconverged: list[str] = []
+        if not converged:
+            local_lineage = [(t.task_id, t.spawned_by, t.root_task_id) for t in self._tasks.values()]
+            final_targets = await asyncio.to_thread(self._cascade_targets, task_id, local_lineage)
+            unconverged = sorted(final_targets - processed)
+
         cancelled_descendants: list[str] = []
         for tid in processed:
             if tid == task_id:
@@ -2378,6 +2390,8 @@ class TaskRegistry:
             "not_signalled": not_signalled,
             "not_recorded": not_recorded,
             "rounds": rounds,
+            "cascade_incomplete": bool(unconverged),
+            "unconverged": unconverged,
         }
 
     async def cancel_recovered(self, record: store.TaskRecord) -> store.TaskRecord:

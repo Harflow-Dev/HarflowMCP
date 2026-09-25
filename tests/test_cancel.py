@@ -1290,3 +1290,48 @@ async def test_phase_retries_are_deduplicated_per_attempt_and_released_when_done
     registry._request_phase_retry("child", 1, "failed-probe", {})
     assert registry._phase_retries[("child", 1, "failed-probe")] is not first
     await asyncio.wait_for(asyncio.gather(*registry._control_jobs), timeout=5)
+
+
+async def test_a_lineage_that_keeps_growing_past_the_round_cap_reports_incomplete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every scan finds one more descendant, so no fixed point is ever reached within
+    CASCADE_MAX_ROUNDS. The result must say so — and name what was never processed — rather than
+    look like a complete cascade (takeover reads it as the whole tree being stopped)."""
+    registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
+    scans = {"n": 0}
+
+    def growing_targets(task_id, local_lineage):
+        scans["n"] += 1
+        return {"root", *(f"d{i}" for i in range(1, scans["n"] + 1))}
+
+    monkeypatch.setattr(registry, "_cascade_targets", growing_targets)
+    monkeypatch.setattr(registry, "_triage_target", lambda tid: ("skip", None))
+
+    result = await asyncio.wait_for(registry.cancel_cascade("root"), timeout=5)
+
+    assert result["rounds"] == tasks_module.CASCADE_MAX_ROUNDS
+    assert result["cascade_incomplete"] is True
+    assert result["unconverged"], "the descendant found after the last round is named"
+    processed = {"root", *(f"d{i}" for i in range(1, tasks_module.CASCADE_MAX_ROUNDS + 1))}
+    assert not set(result["unconverged"]) & processed
+
+
+async def test_a_lineage_that_stops_growing_at_the_cap_is_complete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
+    scans = {"n": 0}
+    cap = tasks_module.CASCADE_MAX_ROUNDS
+
+    def targets(task_id, local_lineage):
+        scans["n"] += 1
+        return {"root", *(f"d{i}" for i in range(1, min(scans["n"], cap - 1) + 1))}
+
+    monkeypatch.setattr(registry, "_cascade_targets", targets)
+    monkeypatch.setattr(registry, "_triage_target", lambda tid: ("skip", None))
+
+    result = await asyncio.wait_for(registry.cancel_cascade("root"), timeout=5)
+
+    assert result["cascade_incomplete"] is False
+    assert result["unconverged"] == []
