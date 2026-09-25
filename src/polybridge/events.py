@@ -24,7 +24,7 @@ EVENT_LOG_VERSION = 1
 
 # The closed set of `kind` values in a v1 events log — the Monitor app (Stage C) switches on these,
 # so adding one is a contract change: update this set, README.md's list, and the app's
-# `TaskEvent.Kind` (macos/PolybridgeMonitor/Sources/MonitorCore/Events.swift) together.
+# `TaskEvent.Kind` (macos/PbCore/MonitorCore/Sources/MonitorCore/Events.swift) together.
 # Found by reading every emit site: the bridge's own writes in `tasks.py` (`task_started`,
 # `task_finished`, `user_message`, `notice`, `undelivered`) and the helpers every backend's
 # `normalize` builds events with (`backends/normalize.py`). Pinned by `tests/test_events.py`.

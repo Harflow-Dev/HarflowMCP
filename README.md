@@ -541,14 +541,45 @@ a failure becomes a notice on the task, and the `start_task` response never clai
 
 ## The Monitor app (macOS)
 
-`macos/PolybridgeMonitor/` is a Swift package (macOS 14+, SwiftUI, SwiftTerm pinned to 1.20.0): a
-menu-bar app with one window that shows polybridge tasks live and lets a person act on them.
+`macos/PolybridgeMonitor/` is the root Swift package (macOS 14+, SwiftUI, SwiftTerm pinned to
+1.20.0): a menu-bar app with one window that shows polybridge tasks live and lets a person act on
+them. Its UI layer follows a coordinator/VM/use-case architecture, one SwiftPM package per module, wired by path —
+see `macos/AGENTS.md` for the architecture rules and each package's own `AGENTS.md` for what that
+package owns:
+
+```
+macos/
+  PolybridgeMonitor/    the app shell: App.swift, AppDelegate, AppCoordinator, AppModulesRegistry
+  PbFoundation/         PbUtilities, PbCommon, PbUI — generic helpers, the architecture contract layer, UI tokens/components
+  PbCore/               MonitorCore (I/O, no dependencies), PbRepository, PbTerminal
+  PbFeatures/           MainWindowFeature, MenuBarFeature, SettingsFeature — one package per screen group
+```
+
+To browse every package in one Xcode window, open `macos/PolybridgeMonitor.xcworkspace`. SwiftUI
+previews run from the library packages (pick a feature or PbUI scheme with My Mac as the destination),
+not from the `PolybridgeMonitor` executable scheme. The app itself is still built with `macos/build-app.sh`.
+
+Every package under `macos/PbFoundation/`, `macos/PbCore/` and `macos/PbFeatures/` builds and tests
+on its own, and so does the root package itself:
 
 ```bash
-cd macos/PolybridgeMonitor && swift build && swift test   # MonitorCore unit tests; no GUI needed
+swiftformat macos && swiftlint lint                        # format, then lint (SwiftFormat 0.62.1, SwiftLint 0.65.0)
+scripts/check-private-refs.sh                              # the private-reference guard CI runs
+for p in macos/PbFoundation/* macos/PbCore/* macos/PbFeatures/* macos/PolybridgeMonitor; do
+  (cd "$p" && swift build && swift test)                  # MonitorCore etc.; no GUI needed
+done
 macos/build-app.sh                                         # builds macos/build/Polybridge Monitor.app
 rm -rf ~/Applications/'Polybridge Monitor.app' && cp -R 'macos/build/Polybridge Monitor.app' ~/Applications/
 ```
+
+Lint rules live in `.swiftlint.yml` and `.swiftformat` at the repo root. MonitorCore's sources move
+unchanged, so their existing violations are recorded in `.swiftlint-baseline.json`; any new
+violation still fails.
+
+**CI.** `.github/workflows/lint.yml` runs SwiftFormat (`--lint`), SwiftLint and
+`scripts/check-private-refs.sh` on Linux. `.github/workflows/test.yml` runs `swift test` in every
+Monitor package (one matrix entry each), `macos/build-app.sh`, and `uv run pytest` with a temporary
+`HOME`/`CODEX_HOME`, all on macOS runners. The headless app smoke is a local gate only.
 
 `build-app.sh` only builds (ad-hoc signed, not sandboxed, bundle id `dev.polybridge.monitor`,
 `LSUIElement`); installing is the copy above, and opening it once from `~/Applications` registers
