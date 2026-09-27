@@ -591,7 +591,7 @@ for p in macos/PbFoundation/* macos/PbCore/* macos/PbFeatures/* macos/Polybridge
   (cd "$p" && swift build && swift test)                  # MonitorCore etc.; no GUI needed
 done
 macos/build-app.sh                                         # builds macos/build/Polybridge Monitor.app
-rm -rf ~/Applications/'Polybridge Monitor.app' && cp -R 'macos/build/Polybridge Monitor.app' ~/Applications/
+rm -rf '/Applications/Polybridge Monitor.app' && cp -R 'macos/build/Polybridge Monitor.app' /Applications/
 ```
 
 Lint rules live in `.swiftlint.yml` and `.swiftformat` at the repo root. MonitorCore's sources move
@@ -604,11 +604,11 @@ Monitor package (one matrix entry each), `macos/build-app.sh`, and `uv run pytes
 `HOME`/`CODEX_HOME`, all on macOS runners. The headless app smoke is a local gate only.
 
 `build-app.sh` only builds (ad-hoc signed, not sandboxed, bundle id `dev.polybridge.monitor`);
-installing is the copy above, and opening it once from `~/Applications` registers the
+installing is the copy above, and opening it once from `/Applications` registers the
 `polybridge-monitor://` scheme. It also best-effort unregisters the build copy from LaunchServices
 after building, so task links resolve to an installed copy rather than silently launching the build
 copy again; if nothing is installed yet, the scheme simply has no handler until the app is opened
-once from `~/Applications`.
+once from `/Applications`.
 
 What it reads and runs — it never writes polybridge's own state:
 
