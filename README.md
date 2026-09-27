@@ -478,6 +478,7 @@ Two caveats worth knowing before relying on it:
 ```bash
 polybridge-ctl list [--since 7d] [--json]
 polybridge-ctl status <task_id> [--json]
+polybridge-ctl backends [--json]
 polybridge-ctl send <task_id> <text> [--json]
 polybridge-ctl cancel <task_id> [--json]
 polybridge-ctl takeover <task_id> [--json]
@@ -497,6 +498,10 @@ starts retention.
   `cmd.exe`/PowerShell), built the same way for a live task and a recovered one by
   `backends.resume_command`. `null` when no session id has been disclosed yet, the repo path is not
   absolute, or the backend has no safe interactive resume for it.
+- **`backends`** lists the registered backends (`backends.BACKENDS`, registry order) and whether each
+  one's binary is on PATH (`backends.is_installed` = `shutil.which`) — no `--version` probe, so it
+  answers immediately. An additive command under the existing v2 contract: it changes no other
+  document's shape.
 - **`cancel`** runs the same cascade as `cancel_task`, from a registry the ctl process owns, and
   returns `{task_id, status, cascade}`.
 - **`run` / `resume`** fork a detached process that owns the new task until it settles (it drains
@@ -536,6 +541,7 @@ starts retention.
 (currently 2 — a separate contract from `polybridge-setup`'s and the event log's, which each stay at
 their own v1):
 `{"v": 2, "tasks": [...]}` for `list`, `{"v": 2, "task": {...}}` for `status`,
+`{"v": 2, "backends": [...]}` for `backends`,
 `{"v": 2, "result": {...}}` for the others, `{"v": 2, "unknown": {...}}` for an unanswered `run`/
 `resume`, and `{"v": 2, "error": {"code": ..., "message": ...}}` on failure. `--since` accepts a
 duration like `7d`, `12h`, or `30m`. Diagnostics go to stderr, never stdout, so a script parsing
@@ -608,6 +614,10 @@ What it reads and runs — it never writes polybridge's own state:
 
 - **Lists and status** only from `polybridge-ctl list/status --json`, refreshed on FSEvents for
   `*.meta.json` under `~/.polybridge/tasks/` (debounced to 1 s), plus a slow poll while anything runs.
+- **The sidebar's backend filter** is always-present, horizontally scrollable capsule tabs — "All"
+  plus every backend `polybridge-ctl backends` reports, in registry order, plus any backend seen
+  only in task history — never only the backends that already have tasks; a tab for a backend not
+  found on PATH stays selectable, dimmed, with an honest empty state when its filtered list is empty.
 - **Live timelines** by tailing `<task_id>.events.jsonl` (v1) for the tasks on screen, by byte
   offset; unknown kinds are ignored. Titles come from each log's first line.
 - **Summary** from the agent's own report, never git: its final answer, refusals/warnings, the
