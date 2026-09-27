@@ -10,10 +10,12 @@ with.
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import logging
 import os
 import re
+from collections.abc import Collection
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -154,7 +156,7 @@ def sweep(log_dir: Path, days: int, now: datetime) -> dict[str, int]:
         if has_live_descendant(record.task_id, set()):
             stats["kept_live_descendant"] += 1
             continue
-        _delete_task(log_dir, record, stats, now)
+        _delete_task(log_dir, record, stats, now, _family(record.task_id, children), by_id)
 
     return stats
 
@@ -260,45 +262,118 @@ def _has_active_attempt(log_dir: Path, task_id: str, now: datetime | None = None
     return False
 
 
-def _delete_task(log_dir: Path, record: store.TaskRecord, stats: dict[str, int], now: datetime) -> None:
-    task_id = record.task_id
+def _family(task_id: str, children: dict[str, list[str]]) -> frozenset[str]:
+    """`task_id` and every descendant the snapshot knows of, settled or not."""
+    family = {task_id}
+    stack = [task_id]
+    while stack:
+        for child_id in children.get(stack.pop(), ()):
+            if child_id not in family:
+                family.add(child_id)
+                stack.append(child_id)
+    return frozenset(family)
+
+
+def _has_fresh_descendant(
+    log_dir: Path, family: frozenset[str], snapshot_ids: Collection[str]
+) -> bool:
+    """Whether a record written after the sweep's snapshot descends from anything in `family`.
+
+    The snapshot's own descendants were already judged in `sweep` (`has_live_descendant`), so only
+    a record that appeared since can still save the task — a resume's child, written under a
+    session lock the caller now holds. It may name any family member, not just the task itself:
+    resuming a settled grandchild produces a record naming that grandchild. A fresh record whose
+    parent is another fresh record needs no second pass, since that parent is fresh too and names
+    the family itself. Only new ids are read, never the whole store again; one that cannot be read
+    counts, since unreadable is not provably unrelated.
+    """
     try:
-        lock_fd = os.open(log_dir / f"{task_id}.lock", os.O_CREAT | os.O_RDWR, 0o644)
+        entries = list(log_dir.iterdir())
     except OSError:
-        # Without the lock nothing may be deleted, but one unopenable lock must not abort the
-        # whole sweep — and with it the stamp, which would retry the same failure every start.
-        stats["kept_locked"] += 1
-        return
-    try:
+        return True
+    for path in entries:
+        name = path.name
+        if not name.endswith(store.RECORD_SUFFIX):
+            continue
+        child_id = name[: -len(store.RECORD_SUFFIX)]
         try:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            stats["kept_locked"] += 1
-            return
+            store.validate_task_id(child_id)
+        except store.InvalidTaskId:
+            continue  # not a task record at all, whatever it is
+        if child_id in snapshot_ids:
+            continue
+        child = store.read(log_dir, child_id)
+        if child is None or {child.parent_task_id, child.spawned_by} & family:
+            return True
+    return False
 
-        fresh = store.read(log_dir, task_id)
-        if fresh is None:
-            return  # already gone — another sweep, or a takeover, got there first
-        if not _conclusively_settled(fresh, store.resolve_status(log_dir, fresh, detail=False)[0]):
-            return
 
-        if _has_active_attempt(log_dir, task_id, now):
-            stats["kept_active_attempt"] += 1
-            return
+def _delete_task(
+    log_dir: Path,
+    record: store.TaskRecord,
+    stats: dict[str, int],
+    now: datetime,
+    family: frozenset[str],
+    by_id: dict[str, store.TaskRecord],
+) -> None:
+    task_id = record.task_id
+    # Session locks first, then `<id>.lock` — the invariant order. A resume holds its session lock
+    # across check-and-spawn, and resuming *any* family member creates a descendant of this task, so
+    # every family session is taken — they differ once a `spawned_by` child is involved. Each is
+    # non-blocking: a busy one means such a child may be moments from existing, and the task stays
+    # for a later sweep that will see it. Non-blocking also means no ordering can deadlock.
+    sessions = sorted(
+        {by_id[m].session_id for m in family if m in by_id and by_id[m].session_id}
+    )
+    with contextlib.ExitStack() as locks:
+        for session_id in sessions:
+            try:
+                locks.enter_context(control.session_lock_sync(log_dir, session_id, timeout=0))
+            except (control.LockTimeout, OSError):
+                stats["kept_locked"] += 1
+                return
 
-        # Emptied first: once the record is gone no later sweep can find this task again, so an
-        # inbox that cannot be emptied now (its lock is busy) keeps the whole task for a retry.
-        if not _empty_inbox(log_dir, task_id):
-            stats["kept_locked"] += 1
-            return
-        _delete_task_files(log_dir, task_id)
-        stats["deleted_tasks"] += 1
-    finally:
         try:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            lock_fd = os.open(log_dir / f"{task_id}.lock", os.O_CREAT | os.O_RDWR, 0o644)
         except OSError:
-            pass
-        os.close(lock_fd)
+            # Without the lock nothing may be deleted, but one unopenable lock must not abort the
+            # whole sweep — and with it the stamp, which would retry the same failure every start.
+            stats["kept_locked"] += 1
+            return
+        try:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                stats["kept_locked"] += 1
+                return
+
+            fresh = store.read(log_dir, task_id)
+            if fresh is None:
+                return  # already gone — another sweep, or a takeover, got there first
+            if not _conclusively_settled(fresh, store.resolve_status(log_dir, fresh, detail=False)[0]):
+                return
+
+            if _has_fresh_descendant(log_dir, family, by_id.keys()):
+                stats["kept_live_descendant"] += 1
+                return
+
+            if _has_active_attempt(log_dir, task_id, now):
+                stats["kept_active_attempt"] += 1
+                return
+
+            # Emptied first: once the record is gone no later sweep can find this task again, so an
+            # inbox that cannot be emptied now (its lock is busy) keeps the whole task for a retry.
+            if not _empty_inbox(log_dir, task_id):
+                stats["kept_locked"] += 1
+                return
+            _delete_task_files(log_dir, task_id)
+            stats["deleted_tasks"] += 1
+        finally:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            os.close(lock_fd)
 
 
 def _empty_inbox(log_dir: Path, task_id: str) -> bool:

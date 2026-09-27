@@ -620,6 +620,9 @@ class Task:
 
     done: asyncio.Event = field(default_factory=asyncio.Event)
     cancel_requested: bool = False
+    # Whether any `persist` of this task landed on disk. A record that did and is now gone was
+    # deleted (retention); one that never did is merely unwritten, and resuming it stays allowed.
+    record_landed: bool = False
     drain_failed: bool = False
 
     # Held so the event loop keeps strong references: a bare create_task() result is only weakly
@@ -893,6 +896,18 @@ class TaskRegistry:
                     raise SessionBusyError(
                         f"session {parent.session_id} already has a running task, or is held by a takeover in "
                         "the Monitor; two concurrent runs would corrupt its shared conversation state"
+                    )
+                # The retention sweep takes this session lock before it deletes, so a parent still
+                # on disk here cannot vanish under the spawn below — and one that landed and is
+                # gone means the sweep deleted first, leaving nothing for the child to resume from.
+                if (
+                    parent.record_landed
+                    and await asyncio.to_thread(store.read, self._log_dir, parent.task_id) is None
+                ):
+                    raise SessionUnknownError(
+                        f"task {parent.task_id}'s record is no longer readable on disk (retention "
+                        "removes aged tasks), so its conversation cannot be resumed; start a new "
+                        "task instead"
                     )
                 invocation = backend.build_resume_argv(
                     followup_prompt,
@@ -1650,7 +1665,7 @@ class TaskRegistry:
         return self._log_dir
 
     def persist(self, task: Task) -> None:
-        store.write(
+        landed = store.write_landed(
             self._log_dir,
             store.TaskRecord(
                 task_id=task.task_id,
@@ -1687,6 +1702,8 @@ class TaskRegistry:
                 input_after_result=task.input_after_result,
             ),
         )
+        if landed:
+            task.record_landed = True
 
     def get(self, task_id: str) -> Task | None:
         return self._tasks.get(task_id)
@@ -2473,6 +2490,15 @@ class TaskRegistry:
                     raise SessionBusyError(
                         f"session {record.session_id} already has a running task, or is held by a takeover in "
                         "the Monitor; two concurrent runs would corrupt its shared conversation state"
+                    )
+                # Same revalidation as `resume`: the sweep holds this lock while deleting, so a
+                # parent still readable here survives the spawn below — and one already gone was
+                # deleted first, leaving nothing for the child to resume from.
+                if await asyncio.to_thread(store.read, self._log_dir, record.task_id) is None:
+                    raise SessionUnknownError(
+                        f"task {record.task_id}'s record is no longer readable on disk (retention "
+                        "removes aged tasks), so its conversation cannot be resumed; start a new "
+                        "task instead"
                     )
                 invocation = backend.build_resume_argv(
                     followup_prompt,

@@ -126,6 +126,7 @@ async def test_model_on_vibe_resume_surfaces_as_invalid_params_not_an_internal_e
     fake_task.model = "mistral-medium"
     fake_task.status = "completed"
     fake_task.done.set()
+    server._reg().persist(fake_task)
 
     with pytest.raises(MCPError, match="no model selection flag"):
         await call("resume_task", task_id=fake_task.task_id, followup_prompt="carry on")
@@ -614,6 +615,7 @@ async def test_resume_forwards_network_through_both_server_branches(
         parent.status = "completed"
         parent.done.set()
         registry._tasks[parent.task_id] = parent
+        registry.persist(parent)
         task_id = parent.task_id
     else:
         record = store.TaskRecord(

@@ -21,6 +21,7 @@ from polybridge import tasks as tasks_module
 from polybridge.tasks import (
     RepoUnavailableError,
     SessionBusyError,
+    SessionUnknownError,
     Task,
     TaskRegistry,
 )
@@ -138,6 +139,7 @@ async def test_resume_runs_at_the_parents_reasoning_effort(
     parent = make_task(tmp_path, "parent", session_id="s1", finished=True)
     parent.reasoning_effort = "high"
     registry._tasks[parent.task_id] = parent
+    registry.persist(parent)
 
     captured: dict = {}
 
@@ -176,6 +178,7 @@ async def test_resume_record_runs_at_the_recorded_reasoning_effort(
         status="completed",
         reasoning_effort="xhigh",
     )
+    store.write(registry.log_dir, record)
 
     captured: dict = {}
 
@@ -215,6 +218,7 @@ async def test_resume_record_with_no_stored_effort_can_still_resume(
         status="completed",
     )
     assert record.reasoning_effort is None
+    store.write(registry.log_dir, record)
 
     captured: dict = {}
 
@@ -526,6 +530,75 @@ async def test_resuming_a_task_whose_repo_is_gone_fails_clearly(tmp_path: Path) 
 
     with pytest.raises(RepoUnavailableError, match="no longer exists"):
         await registry.resume_record(record, "carry on")
+
+
+async def test_resume_record_refuses_when_the_parent_record_vanished_before_the_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The retention sweep deletes under the session lock; a record it removed between the
+    caller's read and the lock leaves nothing for the child to resume from."""
+
+    async def fake_spawn(argv, **kwargs):
+        raise AssertionError("must not reach spawn")
+
+    registry = TaskRegistry(log_dir=tmp_path)
+    record = store.TaskRecord(
+        task_id="old",
+        backend="claude",
+        session_id="s1",
+        markers=["s1"],
+        repo_path=str(tmp_path),
+        started_at=datetime.now(timezone.utc).isoformat(),
+        status="completed",
+    )
+    store.write(registry.log_dir, record)
+    store.record_path(registry.log_dir, record.task_id).unlink()
+    monkeypatch.setattr(registry, "_spawn", fake_spawn)
+
+    with pytest.raises(SessionUnknownError, match="no longer readable on disk"):
+        await registry.resume_record(record, "carry on")
+
+
+async def test_resume_refuses_when_the_parents_record_vanished_before_the_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same refusal on the live-parent path: a finished parent's record can age out between the
+    registry read and the session lock."""
+
+    async def fake_spawn(argv, **kwargs):
+        raise AssertionError("must not reach spawn")
+
+    registry = TaskRegistry(log_dir=tmp_path)
+    parent = make_task(tmp_path, "parent", session_id="s1", finished=True)
+    registry._tasks[parent.task_id] = parent
+    registry.persist(parent)
+    store.record_path(registry.log_dir, parent.task_id).unlink()
+    monkeypatch.setattr(registry, "_spawn", fake_spawn)
+
+    with pytest.raises(SessionUnknownError, match="no longer readable on disk"):
+        await registry.resume(parent, "carry on")
+
+
+async def test_resume_still_runs_for_a_live_parent_whose_record_never_landed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A record that was never written is not one retention deleted: `store.write` never fails a
+    dispatch, so a finished in-memory task can have no record at all and must stay resumable."""
+    registry = TaskRegistry(log_dir=tmp_path)
+    parent = make_task(tmp_path, "parent", session_id="s1", finished=True)
+    registry._tasks[parent.task_id] = parent
+    spawned: list[str] = []
+
+    async def fake_spawn(invocation, **kwargs):
+        spawned.append(kwargs["parent_task_id"])
+        return make_task(tmp_path, "child", session_id="s1")
+
+    monkeypatch.setattr(registry, "_spawn", fake_spawn)
+
+    await registry.resume(parent, "carry on")
+
+    assert not parent.record_landed
+    assert spawned == ["parent"]
 
 
 async def test_cancelling_a_finished_task_is_a_no_op(tmp_path: Path) -> None:
@@ -909,6 +982,7 @@ async def test_resume_inherits_the_parents_network_request(
     parent.freedom = "write_in_repo"
     parent.network = True
     registry._tasks[parent.task_id] = parent
+    registry.persist(parent)
 
     captured: dict = {}
 
@@ -937,6 +1011,7 @@ async def test_an_explicit_network_on_resume_overrides_the_parents(
     parent.freedom = "write_in_repo"
     parent.network = True
     registry._tasks[parent.task_id] = parent
+    registry.persist(parent)
 
     captured: dict = {}
 
@@ -970,6 +1045,7 @@ async def test_resume_record_inherits_the_recorded_network_request(
         freedom="write_in_repo",
         network=True,
     )
+    store.write(registry.log_dir, record)
 
     captured: dict = {}
 
@@ -1003,6 +1079,7 @@ async def test_a_pre_change_record_resumes_at_the_freedoms_historical_default(
         status="completed",
         freedom="write_in_repo",
     )
+    store.write(registry.log_dir, record)
 
     captured: dict = {}
 
@@ -1057,6 +1134,7 @@ async def test_resume_record_honours_an_explicit_network_override(
         freedom="write_in_repo",
         network=True,
     )
+    store.write(registry.log_dir, record)
 
     captured: dict = {}
 

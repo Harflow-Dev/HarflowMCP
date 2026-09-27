@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from polybridge import retention, store
+from polybridge import control, retention, store
 
 
 def _iso(dt: datetime) -> str:
@@ -273,6 +273,131 @@ def test_sweep_keeps_a_settled_old_task_with_a_running_descendant(
     assert stats["kept_live_descendant"] == 1
     assert stats["deleted_tasks"] == 0
     assert store.read(log_dir, "parent") is not None
+
+
+def test_sweep_keeps_a_task_whose_child_appeared_after_the_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The snapshot's `children` map cannot see a child a concurrent resume writes mid-sweep, so
+    `_delete_task` re-checks for one under the session lock that resume itself holds."""
+    log_dir = tmp_path / "tasks"
+    log_dir.mkdir()
+    now = datetime.now(timezone.utc)
+    parent = make_record(task_id="parent")
+    store.write(log_dir, parent)
+
+    real_sweep_temp_files = retention._sweep_temp_files
+
+    def write_a_child_then_sweep_temp_files(ld, by_id, statuses, hook_now, stats):
+        store.write(
+            ld,
+            make_record(
+                task_id="child",
+                parent_task_id="parent",
+                status="running",
+                exit_code=None,
+                finished_at=None,
+                started_at=_iso(hook_now),
+            ),
+        )
+        real_sweep_temp_files(ld, by_id, statuses, hook_now, stats)
+
+    monkeypatch.setattr(retention, "_sweep_temp_files", write_a_child_then_sweep_temp_files)
+
+    stats = retention.sweep(log_dir, 30, now)
+
+    assert stats["kept_live_descendant"] == 1
+    assert stats["deleted_tasks"] == 0
+    assert store.read(log_dir, "parent") is not None
+
+
+def test_sweep_keeps_a_task_whose_session_lock_is_held_by_an_in_flight_resume(
+    tmp_path: Path,
+) -> None:
+    """A resume holds its session lock across the spawn, so a busy one means a child naming this
+    task may be seconds from being written — the deletion must not race it."""
+    log_dir = tmp_path / "tasks"
+    log_dir.mkdir()
+    record = make_record(session_id="busy-session")
+    store.write(log_dir, record)
+    lock_path = control.session_lock_path(log_dir, "busy-session")
+    lock_path.parent.mkdir(parents=True)
+    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        stats = retention.sweep(log_dir, 30, datetime.now(timezone.utc))
+
+        assert stats["kept_locked"] == 1
+        assert stats["deleted_tasks"] == 0
+        assert store.read(log_dir, record.task_id) is not None
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+    # With the resume done and no child left behind, a later sweep deletes it.
+    stats = retention.sweep(log_dir, 30, datetime.now(timezone.utc))
+    assert stats["deleted_tasks"] == 1
+    assert store.read(log_dir, record.task_id) is None
+
+
+def test_sweep_keeps_an_ancestor_whose_settled_childs_resume_appeared_after_the_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Resuming a settled grandchild writes a record naming that grandchild, not the root — the
+    root must still be kept, since its conversation now has a running member."""
+    log_dir = tmp_path / "tasks"
+    log_dir.mkdir()
+    now = datetime.now(timezone.utc)
+    store.write(log_dir, make_record(task_id="root"))
+    store.write(log_dir, make_record(task_id="middle", parent_task_id="root"))
+
+    real_sweep_temp_files = retention._sweep_temp_files
+
+    def resume_middle_then_sweep_temp_files(ld, by_id, statuses, hook_now, stats):
+        store.write(
+            ld,
+            make_record(
+                task_id="leaf",
+                parent_task_id="middle",
+                status="running",
+                exit_code=None,
+                finished_at=None,
+                started_at=_iso(hook_now),
+            ),
+        )
+        real_sweep_temp_files(ld, by_id, statuses, hook_now, stats)
+
+    monkeypatch.setattr(retention, "_sweep_temp_files", resume_middle_then_sweep_temp_files)
+
+    stats = retention.sweep(log_dir, 30, now)
+
+    assert stats["deleted_tasks"] == 0
+    assert store.read(log_dir, "root") is not None
+    assert store.read(log_dir, "middle") is not None
+
+
+def test_sweep_keeps_a_task_while_a_descendants_other_session_is_locked(tmp_path: Path) -> None:
+    """A `spawned_by` child has a session of its own; a resume of it holds that lock, not the
+    parent's, and would create a descendant of the parent — so the parent waits for it too."""
+    log_dir = tmp_path / "tasks"
+    log_dir.mkdir()
+    store.write(log_dir, make_record(task_id="spawner", session_id="s-spawner"))
+    store.write(
+        log_dir, make_record(task_id="spawned", session_id="s-spawned", spawned_by="spawner")
+    )
+    lock_path = control.session_lock_path(log_dir, "s-spawned")
+    lock_path.parent.mkdir(parents=True)
+    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        stats = retention.sweep(log_dir, 30, datetime.now(timezone.utc))
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+    assert stats["deleted_tasks"] == 0
+    assert stats["kept_locked"] == 2
+    assert store.read(log_dir, "spawner") is not None
 
 
 def test_sweep_keeps_a_task_with_an_active_cancel_attempt(tmp_path: Path) -> None:

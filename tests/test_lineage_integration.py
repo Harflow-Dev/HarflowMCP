@@ -564,6 +564,7 @@ async def test_session_lock_serialises_concurrent_resume_record_calls(
         started_at=datetime.now(timezone.utc).isoformat(),
         status="completed",
     )
+    store.write(registry.log_dir, record)
 
     release_first = asyncio.Event()
     entered_spawn = asyncio.Event()
