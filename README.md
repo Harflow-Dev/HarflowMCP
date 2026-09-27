@@ -550,7 +550,13 @@ a failure becomes a notice on the task, and the `start_task` response never clai
 
 `macos/PolybridgeMonitor/` is the root Swift package (macOS 14+, SwiftUI): a regular Dock app with
 one window and a menu bar item that shows polybridge tasks live and lets a person act on them; it
-keeps running after the window closes. Its UI layer follows a
+keeps running after the window closes. It also guards against two copies running at once: if
+another non-terminated copy with the same bundle identifier is already running from a **different**
+bundle path (e.g. an installed copy and a freshly built one), a second launch normally hands over to
+the running one and quits — forwarding any `polybridge-monitor://` URLs it was opened with, or
+requesting a plain reopen if it was a bare launch — instead of leaving two copies open. This is
+best-effort, not guaranteed: a copy opened by hand may flash briefly before quitting, and two truly
+simultaneous launches are not guaranteed to resolve to one. Its UI layer follows a
 coordinator/VM/use-case architecture, one SwiftPM package per module, wired by path —
 see `macos/AGENTS.md` for the architecture rules and each package's own `AGENTS.md` for what that
 package owns:
@@ -591,7 +597,10 @@ Monitor package (one matrix entry each), `macos/build-app.sh`, and `uv run pytes
 
 `build-app.sh` only builds (ad-hoc signed, not sandboxed, bundle id `dev.polybridge.monitor`);
 installing is the copy above, and opening it once from `~/Applications` registers the
-`polybridge-monitor://` scheme.
+`polybridge-monitor://` scheme. It also best-effort unregisters the build copy from LaunchServices
+after building, so task links resolve to an installed copy rather than silently launching the build
+copy again; if nothing is installed yet, the scheme simply has no handler until the app is opened
+once from `~/Applications`.
 
 What it reads and runs — it never writes polybridge's own state:
 
