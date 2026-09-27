@@ -347,6 +347,118 @@ def test_codex_normalize_never_mutates_acc_beyond_normalize_prefixed_stream_stat
 
 
 # ---------------------------------------------------------------------------------------------
+# codex file_change — codex used to drop this item type outright (measured); it is now a
+# tool_call/tool_result pair per changed path, call_id keyed by path rather than list index.
+# ---------------------------------------------------------------------------------------------
+
+CODEX_FILE_CHANGE_STARTED_ONE = {
+    "type": "item.started",
+    "item": {"id": "fc_1", "type": "file_change",
+              "changes": [{"path": "a.py", "kind": "update"}], "status": "in_progress"},
+}
+CODEX_FILE_CHANGE_COMPLETED_ONE = {
+    "type": "item.completed",
+    "item": {"id": "fc_1", "type": "file_change",
+              "changes": [{"path": "a.py", "kind": "update"}], "status": "completed"},
+}
+
+CODEX_FILE_CHANGE_STARTED_MULTI = {
+    "type": "item.started",
+    "item": {"id": "fc_2", "type": "file_change",
+              "changes": [{"path": "a.py", "kind": "update"}, {"path": "b.py", "kind": "add"}],
+              "status": "in_progress"},
+}
+CODEX_FILE_CHANGE_COMPLETED_MULTI_REORDERED = {
+    "type": "item.completed",
+    "item": {"id": "fc_2", "type": "file_change",
+              "changes": [{"path": "b.py", "kind": "add"}, {"path": "a.py", "kind": "update"}],
+              "status": "completed"},
+}
+
+CODEX_FILE_CHANGE_COMPLETED_NO_START = {
+    "type": "item.completed",
+    "item": {"id": "fc_3", "type": "file_change",
+              "changes": [{"path": "c.py", "kind": "delete"}], "status": "completed"},
+}
+
+CODEX_FILE_CHANGE_COMPLETED_FAILED = {
+    "type": "item.completed",
+    "item": {"id": "fc_4", "type": "file_change",
+              "changes": [{"path": "d.py", "kind": "update"}], "status": "failed"},
+}
+
+CODEX_FILE_CHANGE_NO_CHANGES = {
+    "type": "item.completed",
+    "item": {"id": "fc_5", "type": "file_change", "changes": [], "status": "completed"},
+}
+
+
+def test_codex_file_change_started_then_completed() -> None:
+    _acc, produced = run(
+        CodexBackend(), [CODEX_FILE_CHANGE_STARTED_ONE, CODEX_FILE_CHANGE_COMPLETED_ONE]
+    )
+
+    assert [event["kind"] for event in produced] == ["tool_call", "tool_result"]
+    assert produced[0]["path"] == "a.py"
+    assert produced[0]["tool"] == "file_change"
+    assert produced[0]["category"] == "edit"
+    assert produced[1]["call_id"] == produced[0]["call_id"]
+    assert produced[1]["ok"] is True
+
+
+def test_codex_file_change_multi_change_emits_one_call_per_change() -> None:
+    _acc, produced = run(CodexBackend(), [CODEX_FILE_CHANGE_STARTED_MULTI])
+
+    assert [event["kind"] for event in produced] == ["tool_call", "tool_call"]
+    assert {event["path"] for event in produced} == {"a.py", "b.py"}
+    assert len({event["call_id"] for event in produced}) == 2
+
+
+def test_codex_file_change_completion_only_item_synthesizes_its_calls() -> None:
+    _acc, produced = run(CodexBackend(), [CODEX_FILE_CHANGE_COMPLETED_NO_START])
+
+    assert [event["kind"] for event in produced] == ["tool_call", "tool_result"]
+    assert produced[0]["path"] == "c.py"
+    assert produced[1]["ok"] is True
+
+
+def test_codex_file_change_repeated_completion_emits_its_call_and_result_once() -> None:
+    _acc, produced = run(
+        CodexBackend(), [CODEX_FILE_CHANGE_COMPLETED_NO_START, CODEX_FILE_CHANGE_COMPLETED_NO_START]
+    )
+
+    assert [event["kind"] for event in produced] == ["tool_call", "tool_result"]
+
+
+def test_codex_file_change_reordered_between_start_and_completion_still_pairs_by_path() -> None:
+    _acc, produced = run(
+        CodexBackend(),
+        [CODEX_FILE_CHANGE_STARTED_MULTI, CODEX_FILE_CHANGE_COMPLETED_MULTI_REORDERED],
+    )
+
+    assert [event["kind"] for event in produced] == [
+        "tool_call", "tool_call", "tool_result", "tool_result",
+    ]
+    calls_by_path = {event["path"]: event["call_id"] for event in produced if event["kind"] == "tool_call"}
+    results = [event for event in produced if event["kind"] == "tool_result"]
+    assert {result["call_id"] for result in results} == set(calls_by_path.values())
+    assert all(result["ok"] for result in results)
+
+
+def test_codex_file_change_failed_status_yields_ok_false() -> None:
+    _acc, produced = run(CodexBackend(), [CODEX_FILE_CHANGE_COMPLETED_FAILED])
+
+    assert [event["kind"] for event in produced] == ["tool_call", "tool_result"]
+    assert produced[1]["ok"] is False
+
+
+def test_codex_file_change_with_no_changes_emits_nothing() -> None:
+    _acc, produced = run(CodexBackend(), [CODEX_FILE_CHANGE_NO_CHANGES])
+
+    assert produced == []
+
+
+# ---------------------------------------------------------------------------------------------
 # opencode
 # ---------------------------------------------------------------------------------------------
 
@@ -552,6 +664,80 @@ def test_vibe_approval_callback_without_a_command_falls_back_to_its_title() -> N
     _acc, produced = run(VibeBackend(), [VIBE_DENY_START, callback])
 
     assert produced[1]["text"] == "auto-denied: Allow bash?"
+
+
+# ---------------------------------------------------------------------------------------------
+# vibe effect -> tool_result — vibe re-emits the same effect id as it moves from a non-terminal
+# status to a terminal one (measured), so the tool_call fires once (already covered above by
+# test_vibe_live_effect_is_a_tool_call_with_no_result, where the effect carries no "state" at
+# all) and the tool_result fires once, exactly when state.status first reads terminal.
+# ---------------------------------------------------------------------------------------------
+
+VIBE_EFFECT_EDIT_IN_PROGRESS = {
+    "type": "effect", "sessionId": VIBE_SESSION, "turnId": VIBE_TURN_A, "createdAt": 1700000002000,
+    "id": "eff_edit", "title": "edit_file",
+    "detail": {"toolName": "edit_file", "kind": "file_edit",
+               "input": {"filePath": "a.py", "oldString": "foo", "newString": "bar"}},
+    "state": {"status": "in_progress"},
+}
+VIBE_EFFECT_EDIT_COMPLETED = {
+    "type": "effect", "sessionId": VIBE_SESSION, "turnId": VIBE_TURN_A, "createdAt": 1700000002500,
+    "id": "eff_edit", "title": "edit_file",
+    "detail": {"toolName": "edit_file", "kind": "file_edit",
+               "input": {"filePath": "a.py", "oldString": "foo", "newString": "bar"}},
+    "state": {"status": "completed", "output": {"filePath": "a.py"}},
+}
+VIBE_EFFECT_EDIT_FAILED_FIRST_SIGHT = {
+    "type": "effect", "sessionId": VIBE_SESSION, "turnId": VIBE_TURN_A, "createdAt": 1700000002000,
+    "id": "eff_failed", "title": "edit_file",
+    "detail": {"toolName": "edit_file", "kind": "file_edit",
+               "input": {"filePath": "b.py", "oldString": "foo", "newString": "bar"}},
+    "state": {"status": "failed", "error": "could not apply patch"},
+}
+VIBE_EFFECT_WRITE_CANCELLED = {
+    "type": "effect", "sessionId": VIBE_SESSION, "turnId": VIBE_TURN_A, "createdAt": 1700000002000,
+    "id": "eff_cancelled", "title": "write_file",
+    "detail": {"toolName": "write_file", "kind": "file_write", "input": {"filePath": "c.py"}},
+    "state": {"status": "cancelled"},
+}
+
+
+def test_vibe_effect_non_terminal_then_terminal_yields_exactly_one_call_and_one_result() -> None:
+    _acc, produced = run(
+        VibeBackend(), [VIBE_TURN_START_A, VIBE_EFFECT_EDIT_IN_PROGRESS, VIBE_EFFECT_EDIT_COMPLETED]
+    )
+
+    kinds = [event["kind"] for event in produced]
+    assert kinds.count("tool_call") == 1
+    assert kinds.count("tool_result") == 1
+    call = next(event for event in produced if event["kind"] == "tool_call")
+    result = next(event for event in produced if event["kind"] == "tool_result")
+    assert call["call_id"] == "eff_edit" == result["call_id"]
+    assert call["path"] == "a.py"
+    assert result["ok"] is True
+
+
+def test_vibe_effect_terminal_on_first_sight_yields_call_then_result() -> None:
+    _acc, produced = run(VibeBackend(), [VIBE_TURN_START_A, VIBE_EFFECT_EDIT_FAILED_FIRST_SIGHT])
+
+    kinds = [event["kind"] for event in produced]
+    assert kinds[-2:] == ["tool_call", "tool_result"]
+    result = produced[-1]
+    assert result["call_id"] == "eff_failed"
+    assert result["ok"] is False
+
+
+def test_vibe_effect_cancelled_status_yields_ok_false() -> None:
+    _acc, produced = run(VibeBackend(), [VIBE_TURN_START_A, VIBE_EFFECT_WRITE_CANCELLED])
+
+    result = next(event for event in produced if event["kind"] == "tool_result")
+    assert result["ok"] is False
+
+
+def test_vibe_effect_non_terminal_status_yields_no_result() -> None:
+    _acc, produced = run(VibeBackend(), [VIBE_TURN_START_A, VIBE_EFFECT_EDIT_IN_PROGRESS])
+
+    assert [event["kind"] for event in produced] == ["user_message", "tool_call"]
 
 
 # ---------------------------------------------------------------------------------------------

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -384,6 +385,51 @@ def test_recovered_snapshot_matches_the_live_snapshot_shape(tmp_path: Path) -> N
     assert set(recovered) - set(live) == {"recovered", "note"}
 
 
+def test_both_snapshot_builders_carry_the_resume_command(tmp_path: Path) -> None:
+    """Monitor piece 3/3: `resume_command` is computed by both the live and recovered snapshot
+    builders from the same `backends.resume_command`, never stored on the record itself."""
+    from polybridge.tasks import Task
+
+    live = Task(
+        task_id="t",
+        backend="claude",
+        session_id=SESSION,
+        repo_path=tmp_path,
+        prompt="x",
+        max_turns=5,
+        log_path=tmp_path / "t.jsonl",
+        started_at=datetime.now(timezone.utc),
+    ).snapshot()
+
+    recovered = store.snapshot(tmp_path, make_record(repo_path=str(tmp_path)))
+
+    expected = f"cd {tmp_path} && claude --resume {SESSION}"
+    assert live["resume_command"] == expected
+    assert recovered["resume_command"] == expected
+
+
+def test_both_snapshot_builders_report_null_with_no_session_id(tmp_path: Path) -> None:
+    from polybridge.tasks import Task
+
+    live = Task(
+        task_id="t",
+        backend="claude",
+        session_id=None,
+        repo_path=tmp_path,
+        prompt="x",
+        max_turns=5,
+        log_path=tmp_path / "t.jsonl",
+        started_at=datetime.now(timezone.utc),
+    ).snapshot()
+
+    recovered = store.snapshot(
+        tmp_path, make_record(session_id=None, markers=[], repo_path=str(tmp_path))
+    )
+
+    assert live["resume_command"] is None
+    assert recovered["resume_command"] is None
+
+
 def test_brief_reports_liveness(tmp_path: Path) -> None:
     entry = store.brief(tmp_path, make_record(pid=999_999_999))
 
@@ -463,6 +509,109 @@ def test_unidentifiable_but_live_process_is_treated_as_running(
     monkeypatch.setattr(store.subprocess, "run", no_ps)
 
     assert store.process_alive(os.getpid(), [SESSION]) is True
+
+
+# --- record_process_alive: what the record's own evidence says about liveness -------------------
+#
+# The case this exists for: vibe 2.25.8 renames its own process (`setproctitle("Vibe CLI")`) after
+# spawn, so `ps -o command=` no longer shows its argv and the recorded markers never match. A
+# record that also carries the spawn-time start time can still be recognised.
+
+
+def _retitled_record(**overrides) -> TaskRecord:
+    """A record whose live process renamed itself: start time present and matching, markers
+    absent from the command line (this test process stands in for the retitled `Vibe CLI`)."""
+    captured = identity.capture(os.getpid(), [])
+    assert captured is not None
+    base = {
+        "pid": os.getpid(),
+        "start_time": captured["start_time"],
+        "markers": ["definitely-not-in-the-cmdline"],
+    }
+    return make_record(**(base | overrides))
+
+
+def test_record_process_alive_trusts_a_matching_start_time_over_missing_markers() -> None:
+    """The reported bug: a retitled live run must not read as gone just because it was renamed."""
+    assert store.record_process_alive(_retitled_record()) is True
+
+
+def test_record_process_alive_is_true_for_an_ordinary_alive_process() -> None:
+    captured = identity.capture(os.getpid(), [])
+    assert captured is not None
+    record = make_record(pid=os.getpid(), start_time=captured["start_time"], markers=[])
+
+    assert store.record_process_alive(record) is True
+
+
+def test_record_process_alive_is_false_when_the_start_time_differs() -> None:
+    """A different process landed on the same pid: the strongest evidence says this is not ours."""
+    record = make_record(
+        pid=os.getpid(), start_time="Wed Jan  1 00:00:00 2000", markers=[]
+    )
+
+    assert store.record_process_alive(record) is False
+
+
+def test_record_process_alive_is_false_when_the_pid_is_gone() -> None:
+    record = make_record(pid=99999, start_time="Wed Jan  1 00:00:00 2000", markers=[])
+
+    assert store.record_process_alive(record) is False
+
+
+def test_record_process_alive_is_true_when_ps_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A status must never manufacture a false "gone" — `ps_failed` is undecidable, not dead."""
+    monkeypatch.setattr(identity, "_run_ps", lambda pid: None)
+    record = make_record(
+        pid=os.getpid(),
+        start_time="Wed Jan  1 00:00:00 2000",
+        markers=["definitely-not-in-the-cmdline"],
+    )
+
+    assert store.record_process_alive(record) is True
+
+
+def test_record_process_alive_is_true_for_unparsable_ps_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same rule as `ps_failed`: `ps` ran but could not be read, so the run is not proven gone."""
+    fake = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="not a ps line at all\n", stderr=""
+    )
+    monkeypatch.setattr(identity, "_run_ps", lambda pid: fake)
+    record = make_record(
+        pid=os.getpid(),
+        start_time="Wed Jan  1 00:00:00 2000",
+        markers=["definitely-not-in-the-cmdline"],
+    )
+
+    assert store.record_process_alive(record) is True
+
+
+@pytest.mark.parametrize("pid", [None, 0, -1])
+def test_record_process_alive_is_false_for_a_missing_or_invalid_pid(pid: int | None) -> None:
+    """No process, nothing to be alive — including pid 0, which `os.kill(0, 0)` would "confirm"."""
+    assert store.record_process_alive(make_record(pid=pid, start_time="Wed Jan  1 00:00:00 2000")) is False
+
+
+def test_record_process_alive_falls_back_to_the_legacy_markers_path_without_a_start_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A record with no start time (legacy, or a capture that has not landed) uses today's
+    pid+markers test unchanged."""
+    calls: list[tuple[int | None, list[str]]] = []
+
+    def fake_process_alive(pid, markers):
+        calls.append((pid, markers))
+        return pid == 1234
+
+    monkeypatch.setattr(store, "process_alive", fake_process_alive)
+
+    assert store.record_process_alive(make_record(pid=1234, start_time=None, markers=["m"])) is True
+    assert store.record_process_alive(make_record(pid=1235, start_time=None, markers=["m"])) is False
+    assert calls == [(1234, ["m"]), (1235, ["m"])]
 
 
 def test_live_session_ids_spans_processes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -613,6 +762,103 @@ def test_a_backend_whose_terminal_event_is_real_is_still_credited(
 
     assert status == "completed"
     assert "never observed" in note
+
+
+# A live vibe turn, trimmed to the fields `ingest` reads: a `turn_start` marker, then the turn's
+# own assistant message. This is the shape a still-running retitled run leaves in the raw log.
+VIBE_TURN = "d19bbb84-150d-4782-96d5-5f26079c2549"
+VIBE_LIVE_TURN_STREAM = [
+    {"type": "message", "role": "user", "sessionId": SESSION, "turnId": VIBE_TURN,
+     "source": "turn_start", "content": [{"type": "text", "text": "do a thing"}]},
+    {"type": "message", "role": "assistant", "sessionId": SESSION, "turnId": VIBE_TURN,
+     "source": None, "content": [{"type": "text", "text": "still working on it"}]},
+]
+
+
+def test_a_running_vibe_record_whose_process_was_retitled_still_reads_running(
+    tmp_path: Path,
+) -> None:
+    """The reported bug (2026-09-26): a live vibe run renames itself to `Vibe CLI`, so its
+    recorded markers never match the command line again.
+
+    Must fail before the fix: the old marker-only `process_alive` answered False for the live
+    process, so the record fell through to `classify` — and vibe, having no terminal event,
+    requires an observed zero exit, so a stream that had merely spoken read `failed` for the
+    whole run. A matching start time keeps it `running`.
+    """
+    record = _retitled_record(backend="vibe", status="running", exit_code=None)
+    write_log(tmp_path, record.task_id, *VIBE_LIVE_TURN_STREAM)
+
+    status, note, state, _ = store.resolve_status(tmp_path, record)
+
+    assert status == "running"
+    # The replayed assistant message was evidence, not an outcome — it must not be summarised.
+    assert state.saw_final_message is True
+    assert "still alive" not in note  # a `running` record, not a terminal one contradicted
+
+
+def test_the_same_record_with_a_differing_start_time_falls_through_as_today(
+    tmp_path: Path,
+) -> None:
+    """A start time that no longer matches is a reused pid: dead, so the usual reconstruction
+    applies and the run reads `failed` exactly as it did before the fix."""
+    record = make_record(
+        backend="vibe",
+        status="running",
+        exit_code=None,
+        pid=os.getpid(),
+        start_time="Wed Jan  1 00:00:00 2000",
+        markers=["definitely-not-in-the-cmdline"],
+    )
+    write_log(tmp_path, record.task_id, *VIBE_LIVE_TURN_STREAM)
+
+    status, _, _, _ = store.resolve_status(tmp_path, record)
+
+    assert status == "failed"
+
+
+@pytest.mark.parametrize("status", ["failed", "cancelled"])
+def test_an_unobserved_terminal_record_with_an_uncertain_identity_still_reads_running(
+    tmp_path: Path, status: str
+) -> None:
+    """An unobserved terminal record (exit code None) whose process identity is uncertain — a
+    start time that matches but markers that do not — is rechecked against the process, and the
+    process is not provably gone, so the record's guess must not stand."""
+    record = _retitled_record(status=status, exit_code=None)
+
+    resolved, note, _, _ = store.resolve_status(tmp_path, record)
+
+    assert resolved == "running"
+    assert "still alive" in note
+
+
+@pytest.mark.parametrize(
+    ("status", "exit_code"),
+    [("failed", 1), ("completed", 0)],
+)
+def test_an_observed_terminal_record_keeps_its_outcome_despite_an_uncertain_identity(
+    tmp_path: Path, status: str, exit_code: int
+) -> None:
+    """An observed exit settles the run outright, so a live-looking identity probe (this test
+    process, matching start time, missing markers) must not resurrect the record as `running`."""
+    record = _retitled_record(status=status, exit_code=exit_code)
+    write_log(tmp_path, record.task_id, *VIBE_LIVE_TURN_STREAM)
+
+    resolved, _, _, _ = store.resolve_status(tmp_path, record)
+
+    assert resolved == status
+
+
+def test_brief_and_snapshot_report_running_for_the_retitled_live_record(
+    tmp_path: Path,
+) -> None:
+    """`ctl list` (brief) and `get_task_status`/the Monitor sidebar (snapshot) must agree, so the
+    reproduced record reads `running` through both — not `failed` in the listing."""
+    record = _retitled_record(backend="vibe", status="running", exit_code=None)
+    write_log(tmp_path, record.task_id, *VIBE_LIVE_TURN_STREAM)
+
+    assert store.brief(tmp_path, record)["status"] == "running"
+    assert store.snapshot(tmp_path, record)["status"] == "running"
 
 
 def test_a_cancellation_that_did_not_take_is_reported_as_still_running(
@@ -876,7 +1122,9 @@ def test_owned_by_live_server_note_and_flag_when_identity_check_reports_alive(
     monkeypatch.setattr(store, "process_alive", lambda pid, markers: True)
     monkeypatch.setattr(store.identity, "identity_check", lambda owner: "alive")
     owner = {"pid": 4242, "start_time": "Wed Jan  1 00:00:00 2000", "markers": []}
-    record = make_record(status="running", exit_code=None, owner=owner)
+    # A pid, so the liveness probe below has a process to attest to (a record with no pid is
+    # settled by definition — nothing was ever observed to spawn).
+    record = make_record(status="running", exit_code=None, pid=4321, owner=owner)
 
     status, note, _, _ = store.resolve_status(tmp_path, record)
 
@@ -900,7 +1148,7 @@ def test_owned_by_live_server_is_false_when_identity_check_cannot_confirm_it(
     must never be treated as a match (see `identity.identity_check`)."""
     monkeypatch.setattr(store, "process_alive", lambda pid, markers: True)
     monkeypatch.setattr(store.identity, "identity_check", lambda owner: "undecidable")
-    record = make_record(status="running", exit_code=None)
+    record = make_record(status="running", exit_code=None, pid=4321)
 
     status, note, _, _ = store.resolve_status(tmp_path, record)
 

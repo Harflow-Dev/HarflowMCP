@@ -745,7 +745,21 @@ class CodexBackend:
                     call_id=call_id, tool=name, category="mcp", input=item.get("arguments")
                 )
             ]
+        if item_type == "file_change":
+            return cls._started_file_change(item, acc)
         return []
+
+    @classmethod
+    def _started_file_change(cls, item: dict[str, Any], acc: Accumulator) -> list[dict[str, Any]]:
+        """One `tool_call` per change in a `file_change` item, `call_id` keyed by path (not
+        index) so start/completion pairing survives the changes being reordered in between."""
+        events: list[dict[str, Any]] = []
+        for call_id, path, change in cls._file_change_entries(item):
+            cls._mark_started(acc, call_id)
+            events.append(
+                nz.tool_call(call_id=call_id, tool="file_change", category="edit", path=path, input=change)
+            )
+        return events
 
     @classmethod
     def _normalize_item_completed(
@@ -760,6 +774,8 @@ class CodexBackend:
             return cls._completed_command_execution(item, acc)
         if item_type == "mcp_tool_call":
             return cls._completed_mcp_tool_call(item, acc)
+        if item_type == "file_change":
+            return cls._completed_file_change(item, acc)
         if item_type == "agent_message":
             text = item.get("text")
             return [nz.assistant_text(text)] if isinstance(text, str) else []
@@ -820,6 +836,56 @@ class CodexBackend:
             output = message if isinstance(message, str) else None
         events.append(nz.tool_result(call_id=call_id, ok=ok, output=output))
         return events
+
+    @classmethod
+    def _completed_file_change(cls, item: dict[str, Any], acc: Accumulator) -> list[dict[str, Any]]:
+        """One `tool_result` per change, `ok` from the item's own `status` — codex reports no
+        per-change status, only one for the whole `file_change` item. A change whose call was
+        never started (a completion-only item) gets its `tool_call` synthesized first, exactly
+        like the shell/MCP completion paths above."""
+        ok = item.get("status") == "completed"
+        completed = acc.stream_state.setdefault("normalize_completed_file_changes", set())
+        events: list[dict[str, Any]] = []
+        for call_id, path, change in cls._file_change_entries(item):
+            # A repeated completion of the same change must not count the edit twice.
+            if call_id in completed:
+                continue
+            completed.add(call_id)
+            if not cls._was_started(acc, call_id):
+                cls._mark_started(acc, call_id)
+                events.append(
+                    nz.tool_call(
+                        call_id=call_id, tool="file_change", category="edit", path=path, input=change
+                    )
+                )
+            events.append(nz.tool_result(call_id=call_id, ok=ok, output=None))
+        return events
+
+    @classmethod
+    def _file_change_entries(
+        cls, item: dict[str, Any]
+    ) -> list[tuple[str, str, dict[str, Any]]]:
+        """`(call_id, path, change)` for every well-formed change in a `file_change` item's
+        `changes` list. A `file_change` with no changes (or a malformed list) yields nothing."""
+        changes = item.get("changes")
+        if not isinstance(changes, list):
+            return []
+        item_id = item.get("id")
+        entries: list[tuple[str, str, dict[str, Any]]] = []
+        for change in changes:
+            if not isinstance(change, dict):
+                continue
+            path = change.get("path")
+            if not isinstance(path, str) or not path:
+                continue
+            entries.append((cls._file_change_call_id(item_id, path), path, change))
+        return entries
+
+    @staticmethod
+    def _file_change_call_id(item_id: Any, path: str) -> str:
+        # Path, not index, so pairing between item.started and item.completed survives the
+        # changes list being reordered in between (measured as possible on this item type).
+        return f"{item_id}:{path}"
 
     @staticmethod
     def _mark_started(acc: Accumulator, call_id: Any) -> None:

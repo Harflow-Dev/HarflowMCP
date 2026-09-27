@@ -162,10 +162,12 @@ def sweep(log_dir: Path, days: int, now: datetime) -> dict[str, int]:
 def _conclusively_settled(record: store.TaskRecord, status: str | None) -> bool:
     """Settled per `resolve_status`, and — where nothing observed the exit — its process proven gone.
 
-    `resolve_status` leans on `process_alive`, which answers "no" for a live process whose command
-    line no longer carries its markers. That is the right lean for reporting a status, but deletion
-    is a control decision, and there `undecidable` must never count: an unobserved record is only
-    deletable once `identity_check` says `dead`.
+    `resolve_status` leans on `record_process_alive`, which answers "yes" for a process whose
+    recorded start time matches — even when its command line no longer carries its markers
+    (a process that renamed itself after spawn), and falls back to `process_alive`'s pid+markers
+    test for a record with no start time. That is the right lean for reporting a status — never
+    manufacture a false "gone" — but deletion is a control decision, and there `undecidable` must
+    never count: an unobserved record is only deletable once `identity_check` says `dead`.
     """
     if status not in store.TERMINAL_RECORD_STATUSES:
         return False

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+import subprocess
 import time
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -797,6 +798,52 @@ async def test_cascade_refuses_to_signal_a_legacy_record_when_ps_fails(
         for entry in result["not_signalled"]
     )
     assert store.read(tmp_path, "legacy").status == "running"
+
+
+async def test_cascade_refuses_to_signal_a_retitled_process_whose_markers_are_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """vibe 2.25.8 renames its live process to `Vibe CLI`, so a running task's markers never match
+    again. Status now reads such a run as still going (`store.record_process_alive` trusts the
+    start time); a signal must not follow — `undecidable` never authorises one (`may_signal`), so
+    the retitled run keeps running and the cancel reports why it was not signalled."""
+    registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
+    record = store.TaskRecord(
+        task_id="retitled",
+        backend="claude",
+        session_id="s-retitled",
+        markers=["vibe", "/tmp/repo"],
+        repo_path="/tmp/repo",
+        started_at=_now_iso(),
+        pid=4321,
+        pgid=4321,
+        owner=None,
+        # Single-spaced, the way `identity.capture` normalises `ps` lstart output — a raw
+        # `Wed Jan  1` (two spaces) would not compare equal to the normalised line below.
+        start_time="Wed Jan 1 00:00:00 2000",
+        status="running",
+    )
+    store.write(tmp_path, record)
+
+    # `ps` finds the process: the recorded start time matches, the command line is the retitle.
+    fake = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout="Wed Jan  1 00:00:00 2000 Vibe CLI\n", stderr=""
+    )
+    monkeypatch.setattr(identity, "_run_ps", lambda pid: fake)
+
+    signalled: list[int] = []
+    monkeypatch.setattr(
+        tasks_module, "_signal_recorded_group", lambda record, sig: signalled.append(sig) or True
+    )
+
+    result = await asyncio.wait_for(registry.cancel_cascade("retitled"), timeout=5)
+
+    assert signalled == []
+    assert any(
+        entry["task_id"] == "retitled" and entry["reason"] == "markers_missing"
+        for entry in result["not_signalled"]
+    )
+    assert store.read(tmp_path, "retitled").status == "running"
 
 
 # --- round-1 review regressions -------------------------------------------------------------------

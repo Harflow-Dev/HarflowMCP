@@ -25,6 +25,7 @@ from typing import Any
 from . import control, events, identity
 from .backends import Accumulator
 from .backends import get as get_backend
+from .backends import resume_command
 from .stream import parse_line
 
 log = logging.getLogger(__name__)
@@ -262,6 +263,34 @@ def process_alive(pid: int | None, markers: Sequence[str]) -> bool:
     return all(marker in cmdline for marker in markers) if markers else True
 
 
+def record_process_alive(record: TaskRecord) -> bool:
+    """Whether the process a record describes is still running *and* is still that task.
+
+    Uses the strongest evidence the record carries: `start_time`, captured at spawn. A backend
+    may rename its own process after spawn — vibe 2.25.8 calls `setproctitle("Vibe CLI")`, so
+    `ps -o command=` then shows `Vibe CLI` and its argv markers never match — so with a
+    `start_time` the verdict comes from `identity.check_detail`, and anything but `dead` counts
+    as alive: `alive`, and `undecidable` (incl. `markers_missing` and `ps_failed`), keeping the
+    rule that a status must never manufacture a false "gone" for a run that is still going. A
+    record with no `start_time` (legacy, or a capture that has not landed yet) falls back to
+    today's `process_alive` pid+markers test. A missing or invalid pid is False: there is no
+    process to be alive.
+
+    Not for *signal authorisation*: `may_signal`/`signalable` stay stricter (a matching start time
+    plus every marker, or the legacy `legacy_markers_seen` case) — see `identity`'s module
+    docstring. The resume guards use it because for them uncertainty must refuse, which `True` does.
+    """
+    pid = record.pid
+    if pid is None or pid <= 0:
+        return False
+    if record.start_time is not None:
+        verdict, _ = identity.check_detail(
+            identity.task_identity(pid, record.start_time, record.markers)
+        )
+        return verdict != "dead"
+    return process_alive(pid, record.markers)
+
+
 def replay_log(log_dir: Path, task_id: str, backend_name: str) -> tuple[Accumulator, list[str]]:
     """Rebuild what the stream said, so a recovered task reports the same fields as a live one."""
     backend = get_backend(backend_name)
@@ -355,7 +384,7 @@ def _resolve(
         # still owed: the replay alone cannot see that (the bridge's writes are not in the agent's
         # stdout), and an earlier success must not be read as the outcome.
         state.turn_open = True
-    alive = unobserved and process_alive(record.pid, record.markers)
+    alive = unobserved and record_process_alive(record)
 
     if alive and record.status in TERMINAL_RECORD_STATUSES:
         owned = identity.identity_check(record.owner) == "alive"
@@ -557,6 +586,7 @@ def snapshot(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
         "base_commit": record.base_commit,
         "start_dirty": record.start_dirty,
         "events_log": str(events.events_path(log_dir, record.task_id)),
+        "resume_command": resume_command(record.backend, record.session_id, record.repo_path),
         "recovered": True,
         "note": note,
     } | control.taken_over_fields(log_dir, record.task_id)

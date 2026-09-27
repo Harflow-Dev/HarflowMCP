@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 from mcp import Client, MCPError
 
-from polybridge import server, store
+from polybridge import identity, server, store
 from polybridge.tasks import Task
 
 
@@ -256,6 +258,54 @@ async def test_cannot_resume_a_task_that_is_still_running(fake_task: Task) -> No
         await call("resume_task", task_id=fake_task.task_id, followup_prompt="carry on")
 
 
+async def test_resume_of_a_recovered_record_refuses_a_retitled_live_run() -> None:
+    """The same guard on the recovered-record branch: a live vibe run renamed itself to
+    `Vibe CLI`, so its markers never match the command line again — but its start time does, so
+    the resume must be refused rather than started against a session still being written to."""
+    captured = identity.capture(os.getpid(), [])
+    assert captured is not None
+    record = store.TaskRecord(
+        task_id="retitled-1",
+        backend="claude",
+        session_id="session-1",
+        markers=["definitely-not-in-the-cmdline"],
+        repo_path="/tmp",
+        started_at=datetime.now(timezone.utc).isoformat(),
+        pid=os.getpid(),
+        status="completed",
+        exit_code=0,
+        start_time=captured["start_time"],
+    )
+    store.write(server._reg().log_dir, record)
+
+    with pytest.raises(MCPError, match="still running"):
+        await call("resume_task", task_id="retitled-1", followup_prompt="carry on")
+
+
+async def test_resume_of_a_recovered_record_refuses_when_ps_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`ps_failed` is undecidable, not dead — uncertainty must block a resume, so the guard
+    refuses rather than starting a second run on a session that may still be live."""
+    monkeypatch.setattr(identity, "_run_ps", lambda pid: None)
+    record = store.TaskRecord(
+        task_id="no-ps-1",
+        backend="claude",
+        session_id="session-1",
+        markers=["session-1"],
+        repo_path="/tmp",
+        started_at=datetime.now(timezone.utc).isoformat(),
+        pid=4321,
+        status="completed",
+        exit_code=0,
+        start_time="Wed Jan  1 00:00:00 2000",
+    )
+    store.write(server._reg().log_dir, record)
+
+    with pytest.raises(MCPError, match="still running"):
+        await call("resume_task", task_id="no-ps-1", followup_prompt="carry on")
+
+
 async def test_cannot_resume_a_task_with_no_session_id(fake_task: Task) -> None:
     """Codex only discloses its id mid-run, so a run that died early cannot be continued."""
     fake_task.session_id = None
@@ -324,6 +374,40 @@ async def test_waiting_on_a_recovered_task_does_not_believe_a_stale_terminal_rec
         pgid=4321,
         status="failed",  # what a torn-down server wrote about a run that kept going
         exit_code=None,
+    )
+    store.write(server._reg().log_dir, record)
+
+    ctx = _RecordingContext()
+    await server._poll_recovered(record, 1, ctx)
+
+    assert len(ctx.reports) > 1, "the wait ended early instead of polling for its full timeout"
+
+
+async def test_waiting_keeps_polling_a_retitled_live_vibe_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reported bug through the wait path: a live vibe run renamed itself to `Vibe CLI`, so
+    its markers never match the command line again, but its recorded start time does. Believing
+    the marker-only test ended the wait after one tick and reported a `failed` nobody observed."""
+    monkeypatch.setattr(server, "PROGRESS_INTERVAL_SECONDS", 0.01)
+    captured = identity.capture(os.getpid(), [])
+    assert captured is not None
+    # `ps` sees the retitled process: the recorded start time matches, the markers do not.
+    fake = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout=f"{captured['start_time']} Vibe CLI\n", stderr=""
+    )
+    monkeypatch.setattr(identity, "_run_ps", lambda pid: fake)
+    record = store.TaskRecord(
+        task_id="retitled",
+        backend="vibe",
+        session_id="session-1",
+        markers=["definitely-not-in-the-cmdline"],
+        repo_path="/tmp",
+        started_at=datetime.now(timezone.utc).isoformat(),
+        pid=4321,
+        status="running",
+        exit_code=None,
+        start_time=captured["start_time"],
     )
     store.write(server._reg().log_dir, record)
 

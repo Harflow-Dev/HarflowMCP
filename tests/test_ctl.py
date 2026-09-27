@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import argparse
+import asyncio
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from mcp import MCPError
 
 from conftest import ALIVE_OWNER
 
-from polybridge import ctl, inbox, store
+from polybridge import ctl, identity, inbox, store
+from polybridge.tasks import TaskRegistry
 
 
 def _iso(dt: datetime) -> str:
@@ -58,7 +63,7 @@ def test_list_json_is_exactly_one_document(home: Path, capsys: pytest.CaptureFix
     lines = [line for line in out.splitlines() if line.strip()]
     assert len(lines) == 1
     doc = json.loads(lines[0])
-    assert doc["v"] == 1
+    assert doc["v"] == 2
     assert len(doc["tasks"]) == 1
     assert doc["tasks"][0]["task_id"] == "task-1"
     assert doc["tasks"][0]["owner"]["pid"] == 4242
@@ -71,7 +76,7 @@ def test_list_json_with_no_tasks_is_still_one_document(
 
     assert code == 0
     doc = json.loads(capsys.readouterr().out)
-    assert doc == {"v": 1, "tasks": []}
+    assert doc == {"v": 2, "tasks": []}
 
 
 def test_list_plain_table_names_its_columns(home: Path, capsys: pytest.CaptureFixture) -> None:
@@ -107,7 +112,7 @@ def test_a_bad_since_value_is_a_usage_error(home: Path, capsys: pytest.CaptureFi
     assert exc_info.value.code == 2
     captured = capsys.readouterr()
     doc = json.loads(captured.out)
-    assert doc["v"] == 1
+    assert doc["v"] == 2
     assert doc["error"]["code"] == "usage"
     assert captured.err.strip()
 
@@ -122,7 +127,7 @@ def test_status_json_for_a_known_task(home: Path, capsys: pytest.CaptureFixture)
     lines = [line for line in out.splitlines() if line.strip()]
     assert len(lines) == 1
     doc = json.loads(lines[0])
-    assert doc["v"] == 1
+    assert doc["v"] == 2
     assert doc["task"]["task_id"] == "task-1"
     assert doc["task"]["status"] == "completed"
 
@@ -134,7 +139,7 @@ def test_status_json_for_an_unknown_task(home: Path, capsys: pytest.CaptureFixtu
     captured = capsys.readouterr()
     doc = json.loads(captured.out)
     assert doc == {
-        "v": 1,
+        "v": 2,
         "error": {"code": "unknown_task", "message": "unknown task_id: no-such-task"},
     }
     assert "no-such-task" in captured.err
@@ -177,7 +182,7 @@ def test_bad_subcommand_with_json_still_emits_a_usage_document(
 
     assert exc_info.value.code == 2
     doc = json.loads(capsys.readouterr().out)
-    assert doc["v"] == 1
+    assert doc["v"] == 2
     assert doc["error"]["code"] == "usage"
 
 
@@ -195,6 +200,54 @@ def test_ctl_never_constructs_a_task_registry(
 
     assert ctl.main(["list", "--json"]) == 0
     assert ctl.main(["status", "task-1", "--json"]) == 0
+
+
+# --- resume: the still-running guard ------------------------------------------------------------
+
+
+def _run_resume_guard(log_dir: Path, task_id: str) -> None:
+    """Runs `ctl resume`'s action in-process, up to and including its guard.
+
+    The real command forks (`detached.run_detached`), and the fork is tested from a fresh
+    interpreter (`ctl_driver.py`); the guard itself is a read-and-check against the record, so
+    it runs here. Refusal raises the same MCPError the forked child would report back.
+    """
+    args = argparse.Namespace(task_id=task_id, text="go on", max_turns=None, network=None)
+    action = ctl._resume_action(args)
+    registry = TaskRegistry(log_dir=log_dir, open_monitor=False)
+    asyncio.run(action(registry))
+
+
+def test_resume_refuses_a_retitled_live_run(home: Path) -> None:
+    """`ctl resume` applies the same gate `resume_task` does: a live vibe run renamed itself to
+    `Vibe CLI`, so its markers never match the command line again — but its start time does, so
+    the resume must be refused rather than started against a session still being written to."""
+    captured = identity.capture(os.getpid(), [])
+    assert captured is not None
+    store.write(
+        _log_dir(home),
+        make_record(
+            pid=os.getpid(),
+            start_time=captured["start_time"],
+            markers=["definitely-not-in-the-cmdline"],
+        ),
+    )
+
+    with pytest.raises(MCPError, match="still running"):
+        _run_resume_guard(_log_dir(home), "task-1")
+
+
+def test_resume_refuses_when_ps_fails(home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`ps_failed` is undecidable, not dead — uncertainty must block a resume, exactly as on the
+    server's `resume_task` guard."""
+    monkeypatch.setattr(identity, "_run_ps", lambda pid: None)
+    store.write(
+        _log_dir(home),
+        make_record(pid=4321, start_time="Wed Jan  1 00:00:00 2000", markers=["s1"]),
+    )
+
+    with pytest.raises(MCPError, match="still running"):
+        _run_resume_guard(_log_dir(home), "task-1")
 
 
 # --- send (live input) ------------------------------------------------------------------------
@@ -225,7 +278,7 @@ def test_send_queues_a_message_in_the_inbox(
 
     assert code == 0
     doc = _one_doc(capsys)
-    assert doc["v"] == 1
+    assert doc["v"] == 2
     assert doc["result"]["status"] == "queued"
     messages, _ = inbox.read_new(_log_dir(home), "task-1", 0)
     assert [m["text"] for m in messages] == ["please also check the tests"]

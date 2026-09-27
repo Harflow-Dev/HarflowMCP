@@ -27,10 +27,23 @@ introduced this module and CLAUDE.md's per-CLI section.
 * **An auto-denied approval leaves no other trace, measured.** A `git commit` run against a repo
   whose `[tools.bash]` allowlist did not cover it emitted a `callback`
   (`detail.kind: "approval"`, carrying the tool name and the exact command), then an `effect` with
-  `state.status: "cancelled"`, and then **ended with no assistant message at all, at exit 0** — so
-  `classify` reports `failed` with an empty summary. The `callback` is therefore the only thing that
-  can explain the failure, and `ingest` records it on `acc.denials` (surfaced as
-  `permission_denials`); without that the caller is told a run failed but never why.
+  `state.status: "cancelled"`, and then **ended with no assistant message at all, at exit 0**. The
+  `callback` is therefore the only thing that can explain how the turn ended, and `ingest` records
+  it on `acc.denials` (surfaced as `permission_denials`); without that the caller is never told a
+  command was refused. Since 2026-09-26 such a turn no longer reads as a failure by itself: the
+  withdrawal of the turn's close (a pre-refusal narration is not an answer) is accompanied by
+  `stream_state["ended_on_refusal"]` and one outcome-neutral warning on `acc.notices`, and a run
+  that ends this way at an *observed* zero exit reports **`completed` with that warning** rather
+  than `failed` with an empty summary — the refusal says the agent was stopped, not that the run
+  failed, and a real dispatch whose every edit had landed was reported `failed` only because its
+  last action was refused. A later assistant message in the turn clears the flag and removes only
+  that warning; a new turn resets both with the other turn-scoped fields; the denial itself stays
+  on `acc.denials` either way. Every genuine failure signal still wins in `classify` — an error,
+  a non-zero or unobserved exit, a turn-cap breach (checked explicitly, so a denial cannot
+  complete a turn that also breached its cap). The accepted trade-off, stated so it is not
+  rediscovered as a bug: this reintroduces the 2026-09-22 false success — a run that narrates, is
+  refused, changes nothing and exits 0 reads `completed`; the warning is the signal, and for an
+  editing task the worktree is the check.
 * No terminal event, no dollar cost, no token counts — `reports_cost_usd=False`, and
   `total_cost_usd`/`usage` stay `None`. `num_turns` also stays `None`: counting `turn_start` records
   would not correspond to what `--max-turns` actually caps, and a wrong number is worse than none.
@@ -531,9 +544,9 @@ class VibeBackend:
                 return
             # Programmatic mode auto-denies every approval request, so a callback is a *refusal* that
             # already happened. Measured: `git commit` outside the user's bash allowlist produced one
-            # of these and the run then ended with no assistant message at exit 0 — `failed` with no
-            # summary. Without recording it the caller is told the run failed but never why, which is
-            # exactly the inference CLAUDE.md says belongs in the payload instead.
+            # of these and the run then ended with no assistant message at exit 0. Without recording
+            # it the caller cannot tell why the run ended where it did, which is exactly the
+            # inference CLAUDE.md says belongs in the payload instead.
             if not _is_approval_callback(event):
                 # Not a refusal at all — a selection request, or some future callback kind. It
                 # neither belongs on `denials` nor says anything about whether the run finished,
@@ -547,18 +560,29 @@ class VibeBackend:
             # Withdraw any close this turn had already recorded, the same way the stop-event branch
             # below does — because a message that arrived *before* a refusal was narration of work
             # the agent then never got to do, not an answer. Measured on a dispatch that changed
-            # zero files: it narrated its next step, had bash denied, never spoke again, and was
-            # reported `completed` with the narration as its summary.
+            # zero files: it narrated its next step, had bash denied, and never spoke again, so
+            # the narration must not be allowed to stand in for an answer.
             #
             # Deliberately NOT latched, which is the one way this differs from the stop-event
             # branch. A turn-cap breach is terminal, so nothing after it can re-establish a clean
-            # close. A refusal is not: an agent denied one incidental command may work around it and
-            # genuinely finish, and a later assistant message in this turn re-sets both fields. So
-            # the evidence is withdrawn only until the agent speaks again, and `classify` reports
-            # `failed` exactly when it never does. The denial itself stays on `acc.denials` either
+            # close. A refusal is not: an agent denied one incidental command may work around it
+            # and genuinely finish, and a later assistant message in this turn re-establishes the
+            # close and clears the flag below. The denial itself stays on `acc.denials` either
             # way — recovery does not erase that it was refused.
+            #
+            # Since 2026-09-26 a turn that ends on a refusal and then exits 0 reports `completed`
+            # with a warning, not `failed` with no summary: the refusal says the agent was stopped,
+            # not that the run failed, and a real dispatch whose every edit had landed was reported
+            # `failed` only because its last action was refused. So the withdrawal is accompanied
+            # by `ended_on_refusal` and one warning on `acc.notices` (see `_record_refusal_warning`
+            # for why there is at most one, and why its wording is outcome-neutral). Every genuine
+            # failure signal still wins in `classify`: an error, a non-zero or unobserved exit, and
+            # a turn-cap breach. The accepted trade-off: a run that narrates, is refused, changes
+            # nothing and exits 0 reads `completed` again — the warning is the signal, and for an
+            # editing task the worktree is the check.
             acc.summary = None
             acc.saw_final_message = False
+            _record_refusal_warning(acc, event)
             return
 
         if entry_type != "message":
@@ -580,6 +604,10 @@ class VibeBackend:
             # turn-scoped for the same reason.
             acc.stream_state["current_turn_id"] = turn_id
             acc.stream_state.pop("stop_event_seen", None)
+            # Turn-scoped like the latch above: a refusal in the turn that just ended must not
+            # colour this one. The warning itself leaves with the rest of `notices` below.
+            acc.stream_state.pop("ended_on_refusal", None)
+            acc.stream_state.pop("refusal_warning", None)
             acc.summary = None
             acc.saw_final_message = False
             acc.is_error = None
@@ -622,6 +650,10 @@ class VibeBackend:
             # Anything after the breach in the same turn cannot re-establish a clean close.
             return
 
+        # A genuine answer, so the agent recovered from the refusal if there was one: this turn no
+        # longer ended on it. The flag and its warning are cleared here — the warning would
+        # otherwise misdescribe a clean close — while the denial itself stays on `acc.denials`.
+        _clear_refusal_warning(acc)
         acc.summary = text
         acc.saw_final_message = True
 
@@ -641,7 +673,7 @@ class VibeBackend:
         if entry_type == "message":
             return self._normalize_message(event, source_ts)
         if entry_type == "effect":
-            return self._normalize_effect(event, source_ts)
+            return self._normalize_effect(event, source_ts, acc)
         if entry_type == "callback":
             return self._normalize_callback(event, source_ts)
         # reasoning, checkpoint, and anything else: never surfaced.
@@ -664,7 +696,18 @@ class VibeBackend:
         return []
 
     @staticmethod
-    def _normalize_effect(event: dict[str, Any], source_ts: str | None) -> list[dict[str, Any]]:
+    def _normalize_effect(
+        event: dict[str, Any], source_ts: str | None, acc: Accumulator
+    ) -> list[dict[str, Any]]:
+        """One `tool_call` the first time this effect's `id` is seen, one `tool_result` the first
+        time its `state.status` is observed terminal (`completed`/`failed`/`cancelled`).
+
+        vibe re-emits the same effect `id` as it moves from a non-terminal status to a terminal
+        one (measured), so both are deduped against per-task `stream_state` sets rather than
+        assumed to fire once each: the Timeline must never gain a second row for one effect, and a
+        `tool_result` must never fire twice for one `call_id`. An id already terminal the first
+        time it is seen yields both events, in call-then-result order.
+        """
         detail = event.get("detail")
         detail = detail if isinstance(detail, dict) else {}
         tool = detail.get("toolName")
@@ -672,18 +715,40 @@ class VibeBackend:
         input_dict = tool_input if isinstance(tool_input, dict) else {}
         kind = detail.get("kind")
         category = _EFFECT_CATEGORY_BY_KIND.get(kind, "other") if isinstance(kind, str) else "other"
-        return [
-            nz.tool_call(
-                call_id=event.get("id"),
-                tool=tool,
-                category=category,
-                input=tool_input,
-                path=_effect_path(input_dict),
-                command=_effect_command(input_dict),
-                edit=_effect_edit(kind, input_dict),
-                source_ts=source_ts,
+        call_id = event.get("id")
+
+        events: list[dict[str, Any]] = []
+        seen_calls = acc.stream_state.setdefault("normalize_seen_effect_calls", set())
+        if call_id not in seen_calls:
+            seen_calls.add(call_id)
+            events.append(
+                nz.tool_call(
+                    call_id=call_id,
+                    tool=tool,
+                    category=category,
+                    input=tool_input,
+                    path=_effect_path(input_dict),
+                    command=_effect_command(input_dict),
+                    edit=_effect_edit(kind, input_dict),
+                    source_ts=source_ts,
+                )
             )
-        ]
+
+        state = event.get("state")
+        status = state.get("status") if isinstance(state, dict) else None
+        if status in _TERMINAL_EFFECT_STATUSES:
+            seen_results = acc.stream_state.setdefault("normalize_seen_effect_results", set())
+            if call_id not in seen_results:
+                seen_results.add(call_id)
+                events.append(
+                    nz.tool_result(
+                        call_id=call_id,
+                        ok=status == "completed",
+                        output=_effect_result_output(state),
+                        source_ts=source_ts,
+                    )
+                )
+        return events
 
     @staticmethod
     def _normalize_callback(event: dict[str, Any], source_ts: str | None) -> list[dict[str, Any]]:
@@ -710,14 +775,28 @@ class VibeBackend:
     def classify(self, acc: Accumulator, exit_code: int | None) -> Status:
         # No terminal event exists, so the exit code is the authority and the closing message is
         # only corroboration — the same shape as codex, and for the same reason an *observed* zero
-        # exit is mandatory: with `exit_code is None` (a recovered run nothing saw exit) a closing
-        # assistant message proves the agent spoke, not that the run finished. Spelled out rather
-        # than left to `!= 0` incidentally rejecting None.
+        # exit is mandatory: with `exit_code is None` (a recovered run nothing saw exit) neither a
+        # closing assistant message nor a turn that ended on a refusal proves the run finished.
+        # Spelled out rather than left to `!= 0` incidentally rejecting None.
+        #
+        # Every failure signal wins first: an error, a non-observed or non-zero exit, and the
+        # turn-cap latch — checked explicitly here rather than left to the withdrawal alone, so a
+        # denial in a turn that also breached its cap cannot complete it. Only then does a turn
+        # that ended on a refusal complete at a clean exit (decided 2026-09-26): the refusal says
+        # the agent was stopped, not that the run failed, so such a run reports `completed` with the
+        # warning `_record_refusal_warning` placed on `notices`, rather than `failed` with no
+        # summary. The accepted trade-off: a run that narrates, is refused, changes nothing and
+        # exits 0 reads `completed` — the warning is the signal, and for an editing task the
+        # worktree is the check.
         if acc.is_error:
             return "failed"
         if exit_code is None or exit_code != 0:
             return "failed"
-        return "completed" if acc.saw_final_message else "failed"
+        if acc.stream_state.get("stop_event_seen"):
+            return "failed"
+        if acc.saw_final_message or acc.stream_state.get("ended_on_refusal"):
+            return "completed"
+        return "failed"
 
 
 def _is_approval_callback(event: dict[str, Any]) -> bool:
@@ -751,11 +830,63 @@ def _record_denial(event: dict[str, Any], acc: Accumulator) -> None:
         if isinstance(value, str) and value
     }
     # A recognised approval always lands, even with every descriptive field malformed or missing.
-    # `ingest` has already withdrawn the turn's close on the strength of the same `kind`, so
-    # dropping the entry here would report `failed` alongside an empty `permission_denials` —
-    # the payload contradicting the signal the status was derived from. The fallback repeats only
+    # `ingest` has already withdrawn the turn's close and raised the refusal warning on the strength
+    # of the same `kind`, so dropping the entry here would leave that outcome with an empty
+    # `permission_denials` — the payload contradicting the signal the status was derived from. The fallback repeats only
     # what was actually observed rather than inventing a tool, command or title for it.
     acc.denials.append(denial or {"kind": "approval"})
+
+
+def _refusal_warning_text(event: dict[str, Any]) -> str:
+    """The one warning a live-turn refusal places on `acc.notices`.
+
+    The description is the command the approval would have run, else the event's title, else
+    "an action" — a recognised approval can carry neither command nor title, and the warning must
+    not be keyed on the description's presence (`_callback_description` then returns None).
+
+    The wording is outcome-neutral by design: it is written at refusal time, before anything
+    could know how the run ends, so it can also reach running snapshots and runs that later fail
+    without claiming an outcome it does not have.
+    """
+    description = _callback_description(event) or "an action"
+    return (
+        f"An action was refused (`{description}`) and no assistant response followed it. A clean "
+        "exit is reported completed despite this; for an editing task, check the worktree — the "
+        "requested changes may not all have landed."
+    )
+
+
+def _record_refusal_warning(acc: Accumulator, event: dict[str, Any]) -> None:
+    """Mark the turn as ended on a refusal, keeping exactly one warning for it on `acc.notices`.
+
+    A second trailing refusal replaces the first — the last refused action is the one that
+    matters. Replacement and removal touch only that warning; unrelated notices stay, in order.
+    The exact text is tracked in `stream_state` so the warning can later be removed precisely (by
+    a recovering assistant message, or a new turn) without disturbing anything else in the list.
+    The flag itself is a boolean, never derived from the description: a recognised approval with
+    no usable metadata must still count as a refusal.
+    """
+    _clear_refusal_warning(acc)
+    warning = _refusal_warning_text(event)
+    acc.stream_state["ended_on_refusal"] = True
+    acc.stream_state["refusal_warning"] = warning
+    acc.notices.append(warning)
+
+
+def _clear_refusal_warning(acc: Accumulator) -> None:
+    """Clear the refusal flag and remove exactly the tracked warning from `acc.notices`, if any.
+
+    The denial itself stays on `acc.denials`: clearing the warning says the turn no longer ended
+    on the refusal, not that it never happened.
+    """
+    warning = acc.stream_state.pop("refusal_warning", None)
+    acc.stream_state.pop("ended_on_refusal", None)
+    if warning is not None:
+        try:
+            acc.notices.remove(warning)
+        except ValueError:
+            # A new turn already reset `notices` wholesale; there is nothing left to remove.
+            pass
 
 
 def _callback_description(event: dict[str, Any]) -> str | None:
@@ -772,6 +903,11 @@ def _callback_description(event: dict[str, Any]) -> str | None:
         return command
     title = event.get("title")
     return title if isinstance(title, str) and title else None
+
+
+# An effect's `state.status` values that mean it is done, one way or another (measured: vibe's own
+# vocabulary for a settled effect). Anything else (`in_progress`, absent state) is still running.
+_TERMINAL_EFFECT_STATUSES: frozenset[str] = frozenset({"completed", "failed", "cancelled"})
 
 
 # An `effect`'s `detail.kind` -> monitor category.
@@ -803,6 +939,14 @@ def _effect_edit(kind: Any, input_dict: dict[str, Any]) -> tuple[str, str] | Non
     old = input_dict.get("oldString")
     new = input_dict.get("newString")
     return (old, new) if isinstance(old, str) and isinstance(new, str) else None
+
+
+def _effect_result_output(state: dict[str, Any]) -> Any:
+    """An effect's result payload for `tool_result.output`: its `output` on success, else its
+    `error` (a failed/cancelled effect carries the latter instead, measured)."""
+    if "output" in state and state["output"] is not None:
+        return state["output"]
+    return state.get("error")
 
 
 def _entry_text(event: dict[str, Any]) -> str | None:

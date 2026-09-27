@@ -9,7 +9,7 @@ inbox's lock (see `inbox.py`) for the owning server to deliver.
 The control commands act (A4.2): `cancel` runs the same cascade as `cancel_task` from a registry
 this process owns; `takeover` / `takeover-attach` are the human-only takeover (`takeover.py`); `run`
 and `resume` fork a process that owns the new task until it settles (`detached.py`). Every command
-prints one versioned JSON document (`"v": 1`) with `--json`.
+prints one versioned JSON document (`"v": 2`, `CTL_JSON_VERSION`) with `--json`.
 """
 
 from __future__ import annotations
@@ -27,6 +27,11 @@ from typing import Any
 from . import control, detached, identity, inbox, store, takeover
 from . import tasks as tasks_module
 from .tasks import default_log_dir
+
+# Bumped to 2 when `status`/`list`'s snapshot/brief documents gained `resume_command` (Monitor
+# piece 3/3). `setup` and the event log are separate contracts and stay at v1 — see CLAUDE.md's
+# "The Monitor app is a consumer of three frozen contracts".
+CTL_JSON_VERSION = 2
 
 # How long `cancel`/`takeover` stay alive for a failing `.sig` write to be retried before exiting —
 # the lease (60 s) is what a later recovery waits for anyway.
@@ -55,7 +60,7 @@ class _ArgumentParser(argparse.ArgumentParser):
 
     def error(self, message: str) -> None:
         if self.json_requested:
-            print(json.dumps({"v": 1, "error": {"code": "usage", "message": message}}))
+            print(json.dumps({"v": CTL_JSON_VERSION, "error": {"code": "usage", "message": message}}))
         print(f"{self.prog}: error: {message}", file=sys.stderr)
         raise SystemExit(2)
 
@@ -181,7 +186,7 @@ def _cmd_list(args: argparse.Namespace, parser: _ArgumentParser) -> int:
 
     entries = [store.brief(log_dir, record) for record in records]
     if args.json:
-        print(json.dumps({"v": 1, "tasks": entries}))
+        print(json.dumps({"v": CTL_JSON_VERSION, "tasks": entries}))
     else:
         _print_table(entries)
     return 0
@@ -195,7 +200,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
         message = f"not a valid task id: {args.task_id!r}"
         print(f"polybridge-ctl: error: {message}", file=sys.stderr)
         if args.json:
-            print(json.dumps({"v": 1, "error": {"code": "invalid_task_id", "message": message}}))
+            print(json.dumps({"v": CTL_JSON_VERSION, "error": {"code": "invalid_task_id", "message": message}}))
         return 1
 
     record = store.read(log_dir, task_id)
@@ -203,12 +208,12 @@ def _cmd_status(args: argparse.Namespace) -> int:
         message = f"unknown task_id: {task_id}"
         print(f"polybridge-ctl: error: {message}", file=sys.stderr)
         if args.json:
-            print(json.dumps({"v": 1, "error": {"code": "unknown_task", "message": message}}))
+            print(json.dumps({"v": CTL_JSON_VERSION, "error": {"code": "unknown_task", "message": message}}))
         return 1
 
     snapshot = store.snapshot(log_dir, record)
     if args.json:
-        print(json.dumps({"v": 1, "task": snapshot}))
+        print(json.dumps({"v": CTL_JSON_VERSION, "task": snapshot}))
     else:
         for key, value in snapshot.items():
             print(f"{key}: {value}")
@@ -219,7 +224,7 @@ def _cmd_send(args: argparse.Namespace) -> int:
     def fail(code: str, message: str) -> int:
         print(f"polybridge-ctl: error: {message}", file=sys.stderr)
         if args.json:
-            print(json.dumps({"v": 1, "error": {"code": code, "message": message}}))
+            print(json.dumps({"v": CTL_JSON_VERSION, "error": {"code": code, "message": message}}))
         return 1
 
     try:
@@ -239,7 +244,7 @@ def _cmd_send(args: argparse.Namespace) -> int:
         return fail(exc.code, str(exc))
 
     if args.json:
-        print(json.dumps({"v": 1, "result": result}))
+        print(json.dumps({"v": CTL_JSON_VERSION, "result": result}))
     else:
         print(f"queued {result['message_id']} for {task_id} (not yet delivered)")
     return 0
@@ -248,7 +253,7 @@ def _cmd_send(args: argparse.Namespace) -> int:
 def _fail(args: argparse.Namespace, code: str, message: str) -> int:
     print(f"polybridge-ctl: error: {message}", file=sys.stderr)
     if getattr(args, "json", False):
-        print(json.dumps({"v": 1, "error": {"code": code, "message": message}}))
+        print(json.dumps({"v": CTL_JSON_VERSION, "error": {"code": code, "message": message}}))
     return 1
 
 
@@ -289,7 +294,7 @@ def _cmd_cancel(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
     if args.json:
-        print(json.dumps({"v": 1, "result": result}))
+        print(json.dumps({"v": CTL_JSON_VERSION, "result": result}))
     else:
         print(f"{task_id}: {status}")
     return 0
@@ -310,7 +315,7 @@ def _cmd_takeover(args: argparse.Namespace) -> int:
     except control.TakeoverRefused as exc:
         return _fail(args, exc.code, str(exc))
     if args.json:
-        print(json.dumps({"v": 1, "result": result}))
+        print(json.dumps({"v": CTL_JSON_VERSION, "result": result}))
     else:
         print(f"cd {shlex.quote(result['cwd'])}")
         print(shlex.join(result["argv"]))
@@ -324,7 +329,7 @@ def _cmd_takeover_attach(args: argparse.Namespace) -> int:
     except control.TakeoverRefused as exc:
         return _fail(args, exc.code, str(exc))
     if args.json:
-        print(json.dumps({"v": 1, "result": result}))
+        print(json.dumps({"v": CTL_JSON_VERSION, "result": result}))
     else:
         print(f"attached pid {result['pid']} to the takeover of {result['task_id']}")
     return 0
@@ -387,7 +392,7 @@ def _resume_action(args: argparse.Namespace):
         if record is None:
             raise MCPError(INVALID_PARAMS, f"unknown task_id: {task_id}")
         # The same gate `resume_task` applies to a task this process did not start.
-        if await asyncio.to_thread(store.process_alive, record.pid, record.markers):
+        if await asyncio.to_thread(store.record_process_alive, record):
             raise MCPError(
                 INVALID_PARAMS,
                 f"task {task_id} is still running; wait for it or cancel it before resuming",
@@ -416,7 +421,7 @@ def _cmd_detached(args: argparse.Namespace, action: Any) -> int:
     )
     if outcome.kind == "task":
         if args.json:
-            print(json.dumps({"v": 1, "result": outcome.payload}))
+            print(json.dumps({"v": CTL_JSON_VERSION, "result": outcome.payload}))
         else:
             print(outcome.payload["task_id"])
         return 0
@@ -428,7 +433,7 @@ def _cmd_detached(args: argparse.Namespace, action: Any) -> int:
         )
     print(f"polybridge-ctl: {outcome.payload['message']}", file=sys.stderr)
     if args.json:
-        print(json.dumps({"v": 1, "unknown": outcome.payload}))
+        print(json.dumps({"v": CTL_JSON_VERSION, "unknown": outcome.payload}))
     return 3
 
 

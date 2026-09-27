@@ -44,6 +44,7 @@ from .backends import (
     check_nested_enforcement,
 )
 from .backends import get as get_backend
+from .backends import resume_command
 from .events import EVENTS_SUFFIX, EventLog, events_path
 from .stream import parse_line
 
@@ -697,6 +698,7 @@ class Task:
             "base_commit": self.base_commit,
             "start_dirty": self.start_dirty,
             "events_log": str(self.log_path.with_name(f"{self.task_id}{EVENTS_SUFFIX}")),
+            "resume_command": resume_command(self.backend, self.session_id, self.repo_path),
         }
         # Only meaningful when something went wrong, and usually empty otherwise.
         if self.status == "failed" and self.stderr_tail:

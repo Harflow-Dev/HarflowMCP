@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import logging
+import shlex
 import shutil
 import subprocess
+from pathlib import Path
 from typing import Any
 
 from .base import (
@@ -104,6 +106,40 @@ def describe_all() -> list[dict[str, Any]]:
     return [describe(backend) for backend in BACKENDS.values()]
 
 
+def resume_command(backend_name: str, session_id: str | None, repo_path: str | Path) -> str | None:
+    """The command a human pastes into their own terminal to resume `session_id`: `cd <repo> &&
+    <the backend's interactive resume argv>`. Computed fresh for a snapshot (live or recovered),
+    never stored on a record — see `Task.snapshot`/`store.snapshot`.
+
+    Assumes the string is pasted into a POSIX shell (bash/zsh); it is not `cmd.exe`/PowerShell
+    syntax. `argv[0]` is the bare binary name, exactly as `interactive_resume_argv` returns it — no
+    PATH lookup here, unlike `takeover.py`'s `_interactive_command`, since this string is meant to
+    be pasted into a shell that will do its own lookup.
+
+    None whenever no safe command exists: an unknown backend; a NUL byte in `session_id` or
+    `repo_path` (checked here rather than trusting the resulting argv alone — claude's and codex's
+    interactive argv never carry the repo path as an operand at all, so a NUL-bearing `repo_path`
+    would otherwise slip straight past that check and into the `cd` operand); `
+    interactive_resume_argv` itself returning None (an unsafe/option-like id, a relative repo, or a
+    backend with no safe interactive command); or a NUL surviving into the argv it returned.
+
+    Never raises: this feeds directly into a snapshot, and bookkeeping must never change an
+    outcome, so any unexpected failure here is swallowed into `None` rather than allowed to break
+    the snapshot that carries it.
+    """
+    try:
+        repo_str = str(repo_path)
+        if (session_id is not None and "\0" in session_id) or "\0" in repo_str:
+            return None
+        backend = get(backend_name)
+        argv = backend.interactive_resume_argv(session_id, Path(repo_path))  # type: ignore[arg-type]
+        if argv is None or any("\0" in part for part in argv):
+            return None
+        return f"cd {shlex.quote(repo_str)} && {shlex.join(argv)}"
+    except Exception:
+        return None
+
+
 __all__ = [
     "BACKENDS",
     "DEFAULT_BACKEND",
@@ -140,5 +176,6 @@ __all__ = [
     "nested_enforcement_violation",
     "reject_model",
     "reject_turn_cap",
+    "resume_command",
     "version",
 ]

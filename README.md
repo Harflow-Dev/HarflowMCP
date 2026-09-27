@@ -490,6 +490,11 @@ and never construct a `TaskRegistry`. `send` appends to a live-input task's inbo
 lock for the owning server to deliver, with the same refusals as `send_message`. No command ever
 starts retention.
 
+- **`status`**'s `task` document (and `get_task_status`) carries `resume_command`: a ready-to-paste
+  `cd <repo> && <argv>` string that resumes the task's session in a POSIX shell (bash/zsh — not
+  `cmd.exe`/PowerShell), built the same way for a live task and a recovered one by
+  `backends.resume_command`. `null` when no session id has been disclosed yet, the repo path is not
+  absolute, or the backend has no safe interactive resume for it.
 - **`cancel`** runs the same cascade as `cancel_task`, from a registry the ctl process owns, and
   returns `{task_id, status, cascade}`.
 - **`run` / `resume`** fork a detached process that owns the new task until it settles (it drains
@@ -497,7 +502,7 @@ starts retention.
   exists: `{"task_id"}` (exit 0), or `{"error": …}` (exit 1) for anything that stopped it —
   validation (`run` accepts exactly what `start_task` accepts), the nested-dispatch caps, a busy
   session, a spawn failure. If the owner says nothing within 30 s it is stopped (cancelling anything
-  it had started) and the answer is `{"v": 1, "unknown": {...}}` with exit 3 — a task may or may not
+  it had started) and the answer is `{"v": 2, "unknown": {...}}` with exit 3 — a task may or may not
   exist, so check `polybridge-ctl list`. The owner logs to `~/.polybridge/ctl.log`; SIGTERM/SIGINT to
   it cancel its task. Neither command opens the Monitor app.
 - **`takeover`** is for a person at the Monitor, never an agent: it refuses when `PB_TASK_ID` is set
@@ -525,10 +530,12 @@ starts retention.
 | opencode | `opencode <repo> -s <session_id>` |
 | vibe | `vibe --trust --workdir <repo> --resume <session_id>` |
 
-`--json` output is always exactly one document on stdout, versioned the same way the event log is:
-`{"v": 1, "tasks": [...]}` for `list`, `{"v": 1, "task": {...}}` for `status`,
-`{"v": 1, "result": {...}}` for the others, `{"v": 1, "unknown": {...}}` for an unanswered `run`/
-`resume`, and `{"v": 1, "error": {"code": ..., "message": ...}}` on failure. `--since` accepts a
+`--json` output is always exactly one document on stdout, versioned with its own `CTL_JSON_VERSION`
+(currently 2 — a separate contract from `polybridge-setup`'s and the event log's, which each stay at
+their own v1):
+`{"v": 2, "tasks": [...]}` for `list`, `{"v": 2, "task": {...}}` for `status`,
+`{"v": 2, "result": {...}}` for the others, `{"v": 2, "unknown": {...}}` for an unanswered `run`/
+`resume`, and `{"v": 2, "error": {"code": ..., "message": ...}}` on failure. `--since` accepts a
 duration like `7d`, `12h`, or `30m`. Diagnostics go to stderr, never stdout, so a script parsing
 `--json` output never has to filter noise out of it.
 
@@ -541,9 +548,10 @@ a failure becomes a notice on the task, and the `start_task` response never clai
 
 ## The Monitor app (macOS)
 
-`macos/PolybridgeMonitor/` is the root Swift package (macOS 14+, SwiftUI, SwiftTerm pinned to
-1.20.0): a menu-bar app with one window that shows polybridge tasks live and lets a person act on
-them. Its UI layer follows a coordinator/VM/use-case architecture, one SwiftPM package per module, wired by path —
+`macos/PolybridgeMonitor/` is the root Swift package (macOS 14+, SwiftUI): a regular Dock app with
+one window and a menu bar item that shows polybridge tasks live and lets a person act on them; it
+keeps running after the window closes. Its UI layer follows a
+coordinator/VM/use-case architecture, one SwiftPM package per module, wired by path —
 see `macos/AGENTS.md` for the architecture rules and each package's own `AGENTS.md` for what that
 package owns:
 
@@ -551,7 +559,7 @@ package owns:
 macos/
   PolybridgeMonitor/    the app shell: App.swift, AppDelegate, AppCoordinator, AppModulesRegistry
   PbFoundation/         PbUtilities, PbCommon, PbUI — generic helpers, the architecture contract layer, UI tokens/components
-  PbCore/               MonitorCore (I/O, no dependencies), PbRepository, PbTerminal
+  PbCore/               MonitorCore (I/O, no dependencies), PbRepository
   PbFeatures/           MainWindowFeature, MenuBarFeature, SettingsFeature — one package per screen group
 ```
 
@@ -581,9 +589,9 @@ violation still fails.
 Monitor package (one matrix entry each), `macos/build-app.sh`, and `uv run pytest` with a temporary
 `HOME`/`CODEX_HOME`, all on macOS runners. The headless app smoke is a local gate only.
 
-`build-app.sh` only builds (ad-hoc signed, not sandboxed, bundle id `dev.polybridge.monitor`,
-`LSUIElement`); installing is the copy above, and opening it once from `~/Applications` registers
-the `polybridge-monitor://` scheme.
+`build-app.sh` only builds (ad-hoc signed, not sandboxed, bundle id `dev.polybridge.monitor`);
+installing is the copy above, and opening it once from `~/Applications` registers the
+`polybridge-monitor://` scheme.
 
 What it reads and runs — it never writes polybridge's own state:
 
@@ -591,19 +599,29 @@ What it reads and runs — it never writes polybridge's own state:
   `*.meta.json` under `~/.polybridge/tasks/` (debounced to 1 s), plus a slow poll while anything runs.
 - **Live timelines** by tailing `<task_id>.events.jsonl` (v1) for the tasks on screen, by byte
   offset; unknown kinds are ignored. Titles come from each log's first line.
-- **Changes** from `git -C <repo> diff <base_commit>` plus untracked files — git's answer, not the
-  agent's — labelled when the baseline was missing or the tree was already dirty.
+- **Summary** from the agent's own report, never git: its final answer, refusals/warnings, the
+  files its own edit tools reported touching (paired `tool_call`/`tool_result` events by
+  `call_id` — a shell command that edits a file is invisible here), usage/cost, and what was
+  enforced.
 - **Actions** only through `polybridge-ctl` (`send`, `resume`, `cancel`, `run`, `takeover`,
   `takeover-attach`) and `polybridge-setup` (Settings → Harnesses; Install/Remove only on click).
 - **Tools** are found in the folder set in Settings, then `uv tool dir --bin`, `~/.local/bin`,
   `/opt/homebrew/bin`, `/usr/local/bin`. Everything it launches gets the login-shell `PATH`, no
   `PB_*` variables, and `PB_OPEN_MONITOR=0`. A `polybridge-ctl` that lacks a subcommand or answers
   another `"v"` is reported as too old, never guessed at.
-- **Take over** runs the argv `takeover` returns, in its `cwd`, as
-  `/bin/zsh -l -c 'exec "$@"' polybridge-takeover <argv…>` in an embedded terminal (argv as an
-  array, never shell text; `exec` keeps the pid), then attaches that pid. If the attach is refused
-  the app closes the terminal rather than leave an unreserved session open. "In Terminal.app" hands
-  the same argv over as data files read by a fixed script that attaches its own pid before `exec`.
+- **Take over** always opens Terminal.app — there is no embedded terminal in the app. It hands the
+  argv `takeover` returns over as NUL-separated data files (never shell text) read by a fixed script,
+  which attaches its own pid (`takeover-attach`) before `exec`ing the CLI in that same pid; if the
+  attach is refused the script exits without starting the session.
+
+When the app notices `polybridge-ctl`/`polybridge-setup` are missing or out of date, it offers to
+install polybridge itself — a banner in the sidebar, the menu bar, and Settings → Harnesses, with
+an "Install polybridge" (or "Update polybridge") button. The source is always GitHub
+(`git+https://github.com/hainayanda/Polybridge.git`, unpinned), installed with `uv`; if `uv` isn't
+found the app offers to install that too, with its own confirmation, using astral's official
+installer. Installing needs system `git` (via the Command Line Tools) as well. The app only ever
+imports the login shell's `PATH` for this — a shell-only `UV_*` setting has no effect on what the
+app does.
 
 ## Retention
 

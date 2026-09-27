@@ -516,7 +516,7 @@ async def resume_task(
             record = _reg().recover(task_id)
             if record is None:
                 raise MCPError(INVALID_PARAMS, f"unknown task_id: {task_id}")
-            if store.process_alive(record.pid, record.markers):
+            if store.record_process_alive(record):
                 raise MCPError(
                     INVALID_PARAMS,
                     f"task {task_id} is still running (started by an earlier polybridge server "

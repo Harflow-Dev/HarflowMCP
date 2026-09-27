@@ -6,6 +6,7 @@ Stream fixtures below are events captured from real runs, not invented.
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 
 import pytest
@@ -2570,14 +2571,22 @@ VIBE_DENIED_RUN = [
 
 
 def test_vibe_an_auto_denied_approval_is_reported_not_silently_lost() -> None:
-    """The run fails with no output at all, so the denial is the only thing that explains it."""
+    """The run ends with no assistant message at all, so the denial is the only thing that explains
+    how the turn ended. A clean exit is reported `completed` with the warning — not `failed` with
+    nothing (decided 2026-09-26): the refusal says the agent was stopped, not that the run failed."""
     acc = ingest(VibeBackend(), VIBE_DENIED_RUN)
 
     assert acc.saw_final_message is False
     assert acc.summary is None
-    assert VibeBackend().classify(acc, 0) == "failed"
+    assert VibeBackend().classify(acc, 0) == "completed"
     assert acc.denials == [
         {"tool": "bash", "command": "git commit -am wip", "title": "Allow bash?"}
+    ]
+    assert acc.stream_state.get("ended_on_refusal") is True
+    assert acc.notices == [
+        "An action was refused (`git commit -am wip`) and no assistant response followed it. "
+        "A clean exit is reported completed despite this; for an editing task, check the worktree — "
+        "the requested changes may not all have landed."
     ]
 
 
@@ -2610,6 +2619,12 @@ def test_vibe_a_replayed_callback_before_any_turn_start_is_not_reported_as_a_den
     )
 
     assert acc.denials == []
+    # The new refusal state must not leak either: no flag, no warning, and with nothing after it the
+    # run has no evidence of finishing at all.
+    assert acc.stream_state.get("ended_on_refusal") is None
+    assert acc.stream_state.get("refusal_warning") is None
+    assert acc.notices == []
+    assert VibeBackend().classify(acc, 0) == "failed"
 
 
 def test_vibe_a_callback_with_a_non_matching_turn_id_is_not_reported_as_a_denial() -> None:
@@ -2891,6 +2906,10 @@ def test_vibe_a_denied_first_turn_does_not_leak_into_a_later_successful_turn() -
     assert acc.summary == "done"
     assert acc.saw_final_message is True
     assert VibeBackend().classify(acc, 0) == "completed"
+    # Nor does its refusal flag or warning: turn 2 did not end on the refusal.
+    assert acc.stream_state.get("ended_on_refusal") is None
+    assert acc.stream_state.get("refusal_warning") is None
+    assert acc.notices == []
 
 
 def test_vibe_a_later_distinct_turn_start_is_the_one_that_decides_the_outcome() -> None:
@@ -3054,19 +3073,25 @@ VIBE_DENIED_AFTER_SPEAKING = [
 
 
 def test_vibe_a_denial_after_a_progress_line_is_not_a_finished_run() -> None:
-    """The narration was a mid-work progress line, not an answer — the denial ended the run.
-
-    Reporting `completed` here hands the caller a result where there was none, and the summary reads
-    like one. Measured on a real dispatch that changed zero files: the last assistant message came
-    at entry 30 and the denial at entry 33, with nothing spoken after it.
+    """The narration was a mid-work progress line, not an answer, so it must not become the
+    summary. But the denial itself no longer fails a clean exit (decided 2026-09-26): the run reads
+    `completed` with the warning. The accepted trade-off is exactly this case, measured on a real
+    dispatch that changed zero files — the last assistant message came at entry 30 and the denial at
+    entry 33, with nothing spoken after it — so the warning is then the only signal, and the
+    worktree is the check.
     """
     acc = ingest(VibeBackend(), VIBE_DENIED_AFTER_SPEAKING)
 
     assert acc.saw_final_message is False
     assert acc.summary is None
-    assert VibeBackend().classify(acc, 0) == "failed"
+    assert VibeBackend().classify(acc, 0) == "completed"
     assert acc.denials == [
         {"tool": "bash", "command": "git commit -am wip", "title": "Allow bash?"}
+    ]
+    assert acc.notices == [
+        "An action was refused (`git commit -am wip`) and no assistant response followed it. "
+        "A clean exit is reported completed despite this; for an editing task, check the worktree — "
+        "the requested changes may not all have landed."
     ]
 
 
@@ -3090,12 +3115,17 @@ def test_vibe_a_denial_the_agent_recovered_from_still_completes() -> None:
     assert VibeBackend().classify(acc, 0) == "completed"
     # Recovery does not erase the refusal — the caller still needs to know it happened.
     assert len(acc.denials) == 1
+    # But the turn no longer ended on it, so the flag and its warning are gone: the warning would
+    # otherwise misdescribe a clean close.
+    assert acc.stream_state.get("ended_on_refusal") is None
+    assert acc.notices == []
 
 
 def test_vibe_a_replayed_denial_does_not_withdraw_the_live_turns_answer() -> None:
     """A --resume run replays prior history, denials included. Those must not reach live-turn state
-    at all — and now that a denial *withdraws* the close, a leak would be worse than a spurious
-    entry on `denials`: it would turn a genuinely finished resumed run into `failed`."""
+    at all — a denial *withdraws* the close and raises the refusal warning, so a leak would be worse
+    than a spurious entry on `denials`: it would strip a genuinely finished resumed run of its
+    summary and attach a warning about a refusal that belonged to an earlier session."""
     acc = ingest(
         VibeBackend(),
         [
@@ -3117,6 +3147,10 @@ def test_vibe_a_replayed_denial_does_not_withdraw_the_live_turns_answer() -> Non
     assert acc.saw_final_message is True
     assert acc.denials == []
     assert VibeBackend().classify(acc, 0) == "completed"
+    # Replay sets neither the refusal flag nor its warning — only a live-turn refusal does.
+    assert acc.stream_state.get("ended_on_refusal") is None
+    assert acc.stream_state.get("refusal_warning") is None
+    assert acc.notices == []
 
 
 @pytest.mark.parametrize(
@@ -3187,13 +3221,19 @@ def test_vibe_a_denial_and_a_turn_cap_breach_in_either_order_end_failed(order: s
     assert acc.stream_state.get("stop_event_seen") is True
     assert VibeBackend().classify(acc, 0) == "failed"
     assert len(acc.denials) == 1
+    # The stop event must not clear the refusal flag or its warning (its branch returns before the
+    # assistant-message path that clears them), and the explicit latch in `classify` is what keeps
+    # the combination failed at a clean exit rather than completed-on-refusal.
+    assert acc.stream_state.get("ended_on_refusal") is True
+    assert any("An action was refused" in notice for notice in acc.notices)
 
 
 def test_vibe_an_approval_with_no_usable_metadata_is_still_reported() -> None:
     """`ingest` withdraws the close on the strength of `kind: "approval"` alone, so the denial has
-    to land even when every descriptive field is missing — otherwise the run reports `failed` with
-    an empty `permission_denials`, the payload contradicting the signal the status came from. The
-    fallback states only what was observed; it does not invent a tool or command."""
+    to land even when every descriptive field is missing — otherwise the payload contradicts the
+    signal the status came from. The fallback states only what was observed; it does not invent a
+    tool or command. The refusal still counts at a clean exit (the flag is a boolean, never derived
+    from the description), and the warning falls back to "an action"."""
     acc = ingest(
         VibeBackend(),
         [
@@ -3207,8 +3247,176 @@ def test_vibe_an_approval_with_no_usable_metadata_is_still_reported() -> None:
     )
 
     assert acc.saw_final_message is False
-    assert VibeBackend().classify(acc, 0) == "failed"
+    assert VibeBackend().classify(acc, 0) == "completed"
     assert acc.denials == [{"kind": "approval"}]
+    assert acc.notices == [
+        "An action was refused (`an action`) and no assistant response followed it. "
+        "A clean exit is reported completed despite this; for an editing task, check the worktree — "
+        "the requested changes may not all have landed."
+    ]
+
+
+def test_vibe_a_refusal_then_a_nonzero_exit_is_still_a_failure() -> None:
+    """The warning is written at refusal time, so it reaches runs that later fail too — which is
+    exactly why its wording is outcome-neutral."""
+    acc = ingest(VibeBackend(), VIBE_DENIED_RUN)
+
+    assert any("An action was refused" in notice for notice in acc.notices)
+    assert VibeBackend().classify(acc, 1) == "failed"
+
+
+def test_vibe_a_refusal_on_a_recovered_run_with_no_observed_exit_is_still_a_failure() -> None:
+    """`ended_on_refusal` is not terminal evidence: nothing observed a clean exit, so a recovered
+    record cannot read `completed` off the back of a refusal."""
+    acc = ingest(VibeBackend(), VIBE_DENIED_RUN)
+
+    assert VibeBackend().classify(acc, None) == "failed"
+
+
+def test_vibe_a_second_trailing_refusal_replaces_the_first_warning() -> None:
+    """The last refused action is the one that matters, so exactly one warning stands — replacing,
+    not accumulating."""
+    second_refusal = {
+        "type": "callback", "sessionId": VIBE_DENIED_SESSION, "turnId": VIBE_DENIED_TURN,
+        "title": "Allow bash?",
+        "detail": {"kind": "approval",
+                   "effect": {"toolName": "bash", "input": {"command": "swiftformat --lint macos"}}},
+    }
+    acc = ingest(VibeBackend(), [VIBE_DENIED_RUN[0], VIBE_DENIED_RUN[2], second_refusal])
+
+    refusals = [notice for notice in acc.notices if "An action was refused" in notice]
+    assert len(refusals) == 1
+    assert "swiftformat --lint macos" in refusals[0]
+    assert "git commit -am wip" not in refusals[0]
+    assert acc.stream_state["refusal_warning"] == refusals[0]
+    assert acc.stream_state.get("ended_on_refusal") is True
+    assert len(acc.denials) == 2
+
+
+def test_vibe_a_refusal_then_is_error_is_still_a_failure() -> None:
+    """`is_error` outranks the refusal-completion rule, like every other failure signal."""
+    acc = ingest(VibeBackend(), VIBE_DENIED_RUN)
+    acc.is_error = True
+
+    assert VibeBackend().classify(acc, 0) == "failed"
+
+
+def test_vibe_unrelated_notices_survive_the_warnings_replacement_and_removal_in_order() -> None:
+    """Replacement (a second refusal) and removal (recovery) touch only the tracked warning; other
+    notices stay, in order."""
+    backend = VibeBackend()
+    acc = Accumulator()
+    backend.ingest(VIBE_DENIED_RUN[0], acc)
+    acc.notices.append("an unrelated notice")
+    backend.ingest(VIBE_DENIED_RUN[2], acc)
+    backend.ingest(
+        {
+            "type": "callback", "sessionId": VIBE_DENIED_SESSION, "turnId": VIBE_DENIED_TURN,
+            "title": "Allow bash?",
+            "detail": {"kind": "approval",
+                       "effect": {"toolName": "bash", "input": {"command": "swiftformat macos"}}},
+        },
+        acc,
+    )
+
+    # Replacement: one warning, and the unrelated notice keeps its place and order.
+    refusals = [notice for notice in acc.notices if "An action was refused" in notice]
+    assert len(refusals) == 1
+    assert acc.notices[0] == "an unrelated notice"
+
+    backend.ingest(
+        {"type": "message", "role": "assistant", "sessionId": VIBE_DENIED_SESSION,
+         "turnId": VIBE_DENIED_TURN, "source": None,
+         "content": [{"type": "text", "text": "Worked around it; here is the answer."}]},
+        acc,
+    )
+
+    # Removal on recovery: only the warning goes.
+    assert acc.notices == ["an unrelated notice"]
+    assert acc.stream_state.get("ended_on_refusal") is None
+
+
+def test_vibe_a_new_turn_start_as_the_final_event_resets_the_refusal_flag_and_warning() -> None:
+    """The marker itself must clear both — no later answer can be allowed to mask a missing reset."""
+    acc = ingest(
+        VibeBackend(),
+        [
+            *VIBE_DENIED_RUN,
+            {"type": "message", "role": "user", "sessionId": VIBE_DENIED_SESSION,
+             "turnId": "a-fresh-turn", "source": "turn_start",
+             "content": [{"type": "text", "text": "now do something else"}]},
+        ],
+    )
+
+    assert acc.stream_state.get("ended_on_refusal") is None
+    assert acc.stream_state.get("refusal_warning") is None
+    assert acc.notices == []
+
+
+def test_vibe_task_payload_carries_the_warning_and_a_recovered_record_stays_failed(
+    tmp_path: Path,
+) -> None:
+    """The warning must reach the caller through the payload, not just `classify`: a live snapshot
+    of a finished run reports `completed` with the warning in `notices`, and a recovered record
+    whose exit was never observed stays `failed` — the refusal flag is not terminal evidence."""
+    from datetime import datetime, timezone
+
+    from polybridge import store
+    from polybridge.tasks import Task
+
+    backend = VibeBackend()
+
+    # Live: the shape `Task.snapshot` serves once `_monitor` has published a terminal status.
+    task = Task(
+        task_id="t",
+        backend="vibe",
+        session_id=VIBE_DENIED_SESSION,
+        repo_path=tmp_path,
+        prompt="x",
+        max_turns=None,
+        log_path=tmp_path / "t.jsonl",
+        started_at=datetime.now(timezone.utc),
+    )
+    task.acc = ingest(backend, VIBE_DENIED_RUN)
+    task.exit_code = 0
+    task.status = backend.classify(task.acc, 0)
+
+    snap = task.snapshot()
+
+    assert snap["status"] == "completed"
+    assert snap["summary"] is None
+    assert snap["permission_denials"] == [
+        {"tool": "bash", "command": "git commit -am wip", "title": "Allow bash?"}
+    ]
+    assert any("An action was refused (`git commit -am wip`)" in n for n in snap["notices"])
+
+    # Recovered: nothing observed the exit, so the same stream must not read `completed`.
+    record = store.TaskRecord(
+        task_id="t-rec",
+        backend="vibe",
+        session_id=VIBE_DENIED_SESSION,
+        markers=[VIBE_DENIED_SESSION],
+        repo_path=str(tmp_path),
+        started_at=datetime.now(timezone.utc).isoformat(),
+        pid=999_999_999,
+        prompt="x",
+        status="running",
+        exit_code=None,
+    )
+    store.log_path(tmp_path, record.task_id).write_text(
+        "".join(json.dumps(event) + "\n" for event in VIBE_DENIED_RUN), encoding="utf-8"
+    )
+
+    status, _note, state, _tail = store.resolve_status(tmp_path, record)
+    recovered = store.snapshot(tmp_path, record)
+
+    assert status == "failed"
+    # The replayed stream still carries the denial and the warning, so the caller can see why.
+    assert state.denials == [
+        {"tool": "bash", "command": "git commit -am wip", "title": "Allow bash?"}
+    ]
+    assert recovered["status"] == "failed"
+    assert any("An action was refused" in n for n in recovered["notices"])
 
 
 # --- live input (stage A3) --------------------------------------------------------------------
@@ -3430,3 +3638,107 @@ def test_interactive_resume_argv_accepts_every_id_shape_the_clis_mint(name: str)
     ):
         argv = backends.get(name).interactive_resume_argv(session_id, Path("/work/repo"))
         assert argv is not None and argv[-1] == session_id
+
+
+# --- resume_command (Monitor piece 3/3: copy the resume command) ---------------------------
+
+
+@pytest.mark.parametrize(
+    ("name", "expected_argv"),
+    [
+        ("claude", ["claude", "--resume", "abc-123"]),
+        ("codex", ["codex", "-c", "check_for_update_on_startup=false", "resume", "abc-123"]),
+        ("opencode", ["opencode", "/work/repo", "-s", "abc-123"]),
+        ("vibe", ["vibe", "--trust", "--workdir", "/work/repo", "--resume", "abc-123"]),
+    ],
+)
+def test_resume_command_matches_each_backends_measured_argv(
+    name: str, expected_argv: list[str]
+) -> None:
+    command = backends.resume_command(name, "abc-123", "/work/repo")
+
+    assert command == f"cd /work/repo && {shlex.join(expected_argv)}"
+
+
+@pytest.mark.parametrize("name", sorted(backends.BACKENDS))
+@pytest.mark.parametrize(
+    "repo",
+    [
+        "/work/has space",
+        "/work/it's mine",
+        "/work/$(echo pwned)",
+        "/work/`echo pwned`",
+        "/work/a;b",
+        "/work/a\nb",
+    ],
+    ids=["space", "apostrophe", "dollar-paren", "backticks", "semicolon", "newline"],
+)
+def test_resume_command_quotes_a_hostile_repo_path_safely(name: str, repo: str) -> None:
+    """Round-trip through `shlex.split`: whatever a shell would see must reconstruct to exactly
+    `["cd", repo, "&&", *argv]`, whatever the path contains — this is what makes the string safe
+    to paste into bash/zsh rather than merely readable."""
+    argv = backends.get(name).interactive_resume_argv("abc-123", Path(repo))
+    assert argv is not None  # sanity: every backend accepts this id/repo shape
+
+    command = backends.resume_command(name, "abc-123", repo)
+
+    assert command is not None
+    assert shlex.split(command) == ["cd", repo, "&&", *argv]
+
+
+@pytest.mark.parametrize("name", sorted(backends.BACKENDS))
+def test_resume_command_none_for_a_relative_repo(name: str) -> None:
+    assert backends.resume_command(name, "abc-123", "repo") is None
+
+
+@pytest.mark.parametrize("name", sorted(backends.BACKENDS))
+def test_resume_command_none_for_an_option_like_id(name: str) -> None:
+    assert backends.resume_command(name, "--dangerously-skip-permissions", "/work/repo") is None
+
+
+def test_resume_command_none_for_an_unknown_backend() -> None:
+    assert backends.resume_command("not-a-backend", "abc-123", "/work/repo") is None
+
+
+@pytest.mark.parametrize("name", sorted(backends.BACKENDS))
+def test_resume_command_none_when_interactive_resume_argv_returns_none(
+    name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Patched on the *class*, not the shared singleton instance `backends.get(name)` returns:
+    # `monkeypatch.setattr` on an instance whose attribute only exists via the class restores a
+    # bound method as a permanent instance attribute on teardown, which then shadows the class for
+    # every later test sharing that same module-level singleton.
+    monkeypatch.setattr(type(backends.get(name)), "interactive_resume_argv", lambda self, *_a: None)
+
+    assert backends.resume_command(name, "abc-123", "/work/repo") is None
+
+
+@pytest.mark.parametrize("name", sorted(backends.BACKENDS))
+def test_resume_command_none_for_a_nul_in_the_repo_path(name: str) -> None:
+    """claude and codex never carry the repo path in their interactive argv at all, so a NUL
+    there can only be caught by checking `repo_path` itself, not by trusting the returned argv."""
+    assert backends.resume_command(name, "abc-123", "/work/repo\0evil") is None
+
+
+@pytest.mark.parametrize("name", sorted(backends.BACKENDS))
+def test_resume_command_none_for_a_nul_in_the_session_id(name: str) -> None:
+    assert backends.resume_command(name, "abc\0123", "/work/repo") is None
+
+
+def test_resume_command_none_when_session_id_is_none() -> None:
+    assert backends.resume_command("claude", None, "/work/repo") is None
+
+
+def test_resume_command_swallows_any_unexpected_exception(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bookkeeping must never change an outcome (CLAUDE.md): whatever goes wrong inside this
+    formatter, a snapshot calling it must get `None` back, never an exception."""
+
+    def _boom(self: object, *_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("boom")
+
+    # Patched on the class — see the note in
+    # test_resume_command_none_when_interactive_resume_argv_returns_none for why the shared
+    # singleton instance must not be monkeypatched directly.
+    monkeypatch.setattr(type(backends.get("claude")), "interactive_resume_argv", _boom)
+
+    assert backends.resume_command("claude", "abc-123", "/work/repo") is None
