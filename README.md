@@ -620,6 +620,13 @@ What it reads and runs — it never writes polybridge's own state:
   found on PATH stays selectable, dimmed, with an honest empty state when its filtered list is empty.
 - **Live timelines** by tailing `<task_id>.events.jsonl` (v1) for the tasks on screen, by byte
   offset; unknown kinds are ignored. Titles come from each log's first line.
+- **A follow-up continues the same conversation**, never a new row: the sidebar groups tasks
+  connected by `parent_task_id` (a resume chain — distinct from `spawned_by`, which is who *called*
+  `start_task`/`resume_task`) into one row and one detail screen. The row/screen is named by the
+  chain's first task and shows the newest one's status; the newest task's own sub-tasks (and any
+  earlier turn's) still nest underneath it. Sending a follow-up (Continue) keeps the same
+  conversation selected — the new turn appears under the old once the listing refreshes, rather than
+  navigating to the freshly resumed task id.
 - **Summary** from the agent's own report, never git: its final answer, refusals/warnings, the
   files its own edit tools reported touching (paired `tool_call`/`tool_result` events by
   `call_id` — a shell command that edits a file is invisible here), usage/cost, and what was
