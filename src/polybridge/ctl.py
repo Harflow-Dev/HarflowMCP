@@ -8,8 +8,10 @@ inbox's lock (see `inbox.py`) for the owning server to deliver.
 
 The control commands act (A4.2): `cancel` runs the same cascade as `cancel_task` from a registry
 this process owns; `takeover` / `takeover-attach` are the human-only takeover (`takeover.py`); `run`
-and `resume` fork a process that owns the new task until it settles (`detached.py`). Every command
-prints one versioned JSON document (`"v": 2`, `CTL_JSON_VERSION`) with `--json`.
+and `resume` fork a process that owns the new task until it settles (`detached.py`). `backends`
+reports the registered backends and whether each binary is on PATH (`backends.is_installed`) — no
+`--version` probe, no subprocess. Every command prints one versioned JSON document
+(`"v": 2`, `CTL_JSON_VERSION`) with `--json`.
 """
 
 from __future__ import annotations
@@ -24,7 +26,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from . import control, detached, identity, inbox, store, takeover
+from . import backends, control, detached, identity, inbox, store, takeover
 from . import tasks as tasks_module
 from .tasks import default_log_dir
 
@@ -74,6 +76,11 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
         "--since", default=None, help="only tasks started within this long ago, e.g. 7d, 12h"
     )
     list_p.add_argument("--json", action="store_true")
+
+    backends_p = sub.add_parser(
+        "backends", help="list the registered backends and whether each is on PATH"
+    )
+    backends_p.add_argument("--json", action="store_true")
 
     status_p = sub.add_parser("status", help="show one task's full state")
     status_p.add_argument("task_id")
@@ -129,7 +136,16 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     resume_p.add_argument("--json", action="store_true")
 
     return (
-        parser, list_p, status_p, send_p, cancel_p, takeover_p, attach_p, run_p, resume_p,
+        parser,
+        list_p,
+        backends_p,
+        status_p,
+        send_p,
+        cancel_p,
+        takeover_p,
+        attach_p,
+        run_p,
+        resume_p,
     )
 
 
@@ -189,6 +205,24 @@ def _cmd_list(args: argparse.Namespace, parser: _ArgumentParser) -> int:
         print(json.dumps({"v": CTL_JSON_VERSION, "tasks": entries}))
     else:
         _print_table(entries)
+    return 0
+
+
+def _cmd_backends(args: argparse.Namespace) -> int:
+    entries = [
+        {
+            "backend": backend.name,
+            "binary": backend.binary,
+            "installed": backends.is_installed(backend),
+        }
+        for backend in backends.BACKENDS.values()
+    ]
+    if args.json:
+        print(json.dumps({"v": CTL_JSON_VERSION, "backends": entries}))
+    else:
+        for entry in entries:
+            state = "installed" if entry["installed"] else "not found on PATH"
+            print(f"{entry['backend']}  {state}")
     return 0
 
 
@@ -451,6 +485,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "list":
         return _cmd_list(args, list_p)
+    if args.command == "backends":
+        return _cmd_backends(args)
     if args.command == "send":
         return _cmd_send(args)
     if args.command == "cancel":

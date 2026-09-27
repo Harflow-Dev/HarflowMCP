@@ -332,3 +332,69 @@ def test_send_without_json_prints_a_line(
     store.write(_log_dir(home), _live_running())
     assert ctl.main(["send", "task-1", "hi"]) == 0
     assert "queued" in capsys.readouterr().out
+
+
+# --- backends (registry + PATH presence) --------------------------------------------------------
+
+
+def test_backends_json_reports_the_registry_in_order(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    from polybridge import backends as backends_module
+
+    claude_binary = backends_module.BACKENDS["claude"].binary
+    monkeypatch.setattr(
+        backends_module.shutil,
+        "which",
+        lambda binary: None if binary == claude_binary else f"/usr/local/bin/{binary}",
+    )
+
+    assert ctl.main(["backends", "--json"]) == 0
+
+    doc = _one_doc(capsys)
+    assert doc["v"] == 2
+    assert [b["backend"] for b in doc["backends"]] == ["claude", "codex", "opencode", "vibe"]
+    assert doc["backends"] == [
+        {"backend": name, "binary": backend.binary, "installed": name != "claude"}
+        for name, backend in backends_module.BACKENDS.items()
+    ]
+
+
+def test_backends_plain_text_is_one_line_per_backend(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    from polybridge import backends as backends_module
+
+    vibe_binary = backends_module.BACKENDS["vibe"].binary
+    monkeypatch.setattr(
+        backends_module.shutil,
+        "which",
+        lambda binary: f"/usr/local/bin/{binary}" if binary == vibe_binary else None,
+    )
+
+    assert ctl.main(["backends"]) == 0
+
+    assert capsys.readouterr().out.splitlines() == [
+        "claude  not found on PATH",
+        "codex  not found on PATH",
+        "opencode  not found on PATH",
+        "vibe  installed",
+    ]
+
+
+def test_backends_never_spawns_a_subprocess(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """`backends` answers from `shutil.which` alone — unlike `describe()`, it never probes
+    `--version`, so it stays fast enough for the Monitor's refresh cadence."""
+
+    from polybridge import backends as backends_module
+
+    def boom(*args, **kwargs):
+        raise AssertionError("ctl backends must never spawn a subprocess")
+
+    monkeypatch.setattr(backends_module.subprocess, "run", boom)
+    monkeypatch.setattr(backends_module.subprocess, "Popen", boom)
+
+    assert ctl.main(["backends", "--json"]) == 0
+    assert ctl.main(["backends"]) == 0
