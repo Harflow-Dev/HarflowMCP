@@ -416,7 +416,9 @@ every backend rather than each one's own stream format. Every line carries an en
 has one), `raw_offset` (byte offset into the raw stream log the event was derived from, null for
 `task_started`/`task_finished` and for any event recorded while the raw log itself could not be
 written), `task_id`, and `kind` — one of `task_started`, `task_finished`, `assistant_text`,
-`tool_call`, `tool_result`, `user_message`, `usage`, `notice`, or `undelivered`. That set is
+`assistant_delta`, `tool_call`, `tool_result`, `user_message`, `usage`, `notice`, or `undelivered`.
+`assistant_delta` is one streamed chunk of claude text (`message_id`, `block_index`, `text`); the
+final `assistant_text` for that block carries the same `message_id`/`block_index`. That set is
 closed (`events.EVENT_KINDS`): writing any other kind raises, and a test pins the set to this list
 and to every emit site, because the Monitor app switches on it — a new kind is a contract change.
 On a live-input

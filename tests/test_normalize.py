@@ -11,6 +11,7 @@ from __future__ import annotations
 import dataclasses
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -204,6 +205,152 @@ def test_claude_result_emits_cumulative_usage() -> None:
     assert produced == [
         {"kind": "usage", "usage": {"input_tokens": 100, "output_tokens": 20},
          "total_cost_usd": 0.1, "num_turns": 2}
+    ]
+
+
+# --- claude partial-message streaming — real captures in tests/fixtures, measured 2.1.283
+
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
+MSG_ALPHA = "msg_011CfTaSzei3XQY9j1eet8Jm"
+MSG_OMEGA = "msg_011CfTaTHhP3erbSfHFiNJxb"
+MSG_BETA = "msg_011CfTaUeUKv91tU7zeFzK9V"
+
+
+def fixture_events(name: str) -> list[dict]:
+    return [
+        json.loads(line)
+        for line in (FIXTURES / name).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def test_claude_partial_stream_emits_one_delta_per_text_block_with_its_identity() -> None:
+    """The multi-block classic capture: ALPHA deltas (message 1, block 1), a Bash tool_use whose
+    input_json/signature/thinking deltas yield nothing, then OMEGA (message 2, block 1). Every
+    other stream_event shape — message_start, content_block_start/stop, message_delta,
+    message_stop, thinking/signature/input_json deltas — produces nothing."""
+    _acc, produced = run(ClaudeBackend(), fixture_events("claude_partial_multiblock.jsonl"))
+
+    assert [event["kind"] for event in produced] == [
+        "assistant_delta", "assistant_text", "tool_call", "tool_result",
+        "assistant_delta", "assistant_text", "usage",
+    ]
+    deltas = [event for event in produced if event["kind"] == "assistant_delta"]
+    # The chunk only, never cumulative; stream_event lines carry no timestamp of their own.
+    assert deltas == [
+        {"kind": "assistant_delta", "text": "ALPHA", "message_id": MSG_ALPHA, "block_index": 1},
+        {"kind": "assistant_delta", "text": "OMEGA", "message_id": MSG_OMEGA, "block_index": 1},
+    ]
+    texts = [event for event in produced if event["kind"] == "assistant_text"]
+    assert texts == [
+        {"kind": "assistant_text", "text": "ALPHA", "message_id": MSG_ALPHA, "block_index": 1,
+         "source_ts": "2026-09-27T07:49:32.157Z"},
+        {"kind": "assistant_text", "text": "OMEGA", "message_id": MSG_OMEGA, "block_index": 1,
+         "source_ts": "2026-09-27T07:49:34.939Z"},
+    ]
+    # The tool_use block is still one tool_call, emitted once, between the two texts.
+    assert produced[2]["tool"] == "Bash"
+    assert produced[2]["command"] == "echo hi"
+
+
+def test_claude_partial_stream_survives_live_input_and_resume() -> None:
+    """The live-input --resume capture: deltas still arrive, so the flag works in both shapes."""
+    _acc, produced = run(ClaudeBackend(), fixture_events("claude_partial_live_resume.jsonl"))
+
+    deltas = [event for event in produced if event["kind"] == "assistant_delta"]
+    assert deltas == [
+        {"kind": "assistant_delta", "text": "BETA", "message_id": MSG_BETA, "block_index": 1},
+    ]
+    text = next(event for event in produced if event["kind"] == "assistant_text")
+    assert text == {"kind": "assistant_text", "text": "BETA", "message_id": MSG_BETA,
+                    "block_index": 1, "source_ts": "2026-09-27T07:49:53.119Z"}
+
+
+def test_claude_assistant_text_without_stream_state_keeps_its_exact_shape() -> None:
+    """No preceding message_start/content_block_start — no flag, or a replayed capture — means no
+    message_id/block_index, byte-for-byte the pre-streaming event."""
+    _acc, produced = run(ClaudeBackend(), [CLAUDE_ASSISTANT_EVENT])
+
+    assert produced[0] == {"kind": "assistant_text", "text": "Let me edit the file.",
+                           "source_ts": "2026-09-24T10:00:00.000Z"}
+
+
+def test_claude_delta_with_no_known_message_id_is_still_emitted_unmerged() -> None:
+    """A delta that never saw a message_start still streams — without a message_id, so a consumer
+    cannot merge it into any earlier text."""
+    _acc, produced = run(
+        ClaudeBackend(),
+        [{"type": "stream_event", "event": {"type": "content_block_delta", "index": 3,
+                                            "delta": {"type": "text_delta", "text": "orphan"}}}],
+    )
+
+    assert produced == [{"kind": "assistant_delta", "text": "orphan", "block_index": 3}]
+
+
+def test_claude_subagent_stream_events_emit_nothing_and_disturb_no_state() -> None:
+    """A subagent's own stream (parent_tool_use_id) is suppressed like its prose, and must not
+    overwrite the main thread's message id/block index either."""
+    subagent_stream = [
+        {"type": "stream_event", "parent_tool_use_id": "toolu_sub",
+         "event": {"type": "message_start", "message": {"id": "msg_sub"}}},
+        {"type": "stream_event", "parent_tool_use_id": "toolu_sub",
+         "event": {"type": "content_block_start", "index": 7, "content_block": {"type": "text"}}},
+        {"type": "stream_event", "parent_tool_use_id": "toolu_sub",
+         "event": {"type": "content_block_delta", "index": 7,
+                   "delta": {"type": "text_delta", "text": "subagent prose"}}},
+    ]
+    acc, produced = run(ClaudeBackend(), subagent_stream)
+
+    assert produced == []
+    assert "normalize_stream_message_id" not in acc.stream_state
+
+    events = [
+        {"type": "stream_event", "event": {"type": "message_start", "message": {"id": "msg_main"}}},
+        {"type": "stream_event", "event": {"type": "content_block_start", "index": 1,
+                                           "content_block": {"type": "text", "text": ""}}},
+        *subagent_stream,
+        {"type": "assistant", "message": {"id": "msg_main",
+                                          "content": [{"type": "text", "text": "main"}]}},
+    ]
+    _acc, produced = run(ClaudeBackend(), events)
+
+    assert produced == [{"kind": "assistant_text", "text": "main",
+                         "message_id": "msg_main", "block_index": 1}]
+
+
+def test_claude_stream_state_never_mixes_across_tasks() -> None:
+    """The stream state lives on the accumulator, never globally: a second task's accumulator that
+    saw no message_start must not inherit the first task's message id."""
+    _acc_a, produced_a = run(
+        ClaudeBackend(),
+        [{"type": "stream_event", "event": {"type": "message_start", "message": {"id": "msg_a"}}}],
+    )
+    assert produced_a == []
+
+    _acc_b, produced_b = run(
+        ClaudeBackend(),
+        [{"type": "assistant", "message": {"id": "msg_a",
+                                           "content": [{"type": "text", "text": "other task"}]}}],
+    )
+
+    assert produced_b == [{"kind": "assistant_text", "text": "other task"}]
+
+
+def test_claude_block_index_is_omitted_when_the_assistant_event_carries_several_blocks() -> None:
+    """Claude streams one assistant event per block (measured), so the recorded block index is
+    unambiguous only for a single-block event; the message id is still safe either way."""
+    events = [
+        {"type": "stream_event", "event": {"type": "message_start", "message": {"id": "msg_m"}}},
+        {"type": "stream_event", "event": {"type": "content_block_start", "index": 2,
+                                           "content_block": {"type": "text", "text": ""}}},
+        {"type": "assistant", "message": {"id": "msg_m", "content": [
+            {"type": "text", "text": "one"}, {"type": "text", "text": "two"}]}},
+    ]
+    _acc, produced = run(ClaudeBackend(), events)
+
+    assert produced == [
+        {"kind": "assistant_text", "text": "one", "message_id": "msg_m"},
+        {"kind": "assistant_text", "text": "two", "message_id": "msg_m"},
     ]
 
 

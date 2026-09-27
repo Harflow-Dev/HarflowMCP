@@ -755,6 +755,7 @@ LEGACY_ARGV: dict[str, dict[str, dict[str, list[str]]]] = {
         "read_only": {
             "start": [
                 "claude", "-p", "--output-format", "stream-json", "--verbose",
+                "--include-partial-messages",
                 "--permission-mode", "plan",
                 "--disallowedTools", "Bash(git commit:*),Bash(git push:*)",
                 "--session-id", SESSION,
@@ -762,6 +763,7 @@ LEGACY_ARGV: dict[str, dict[str, dict[str, list[str]]]] = {
             ],
             "resume": [
                 "claude", "-p", "--output-format", "stream-json", "--verbose",
+                "--include-partial-messages",
                 "--permission-mode", "plan",
                 "--disallowedTools", "Bash(git commit:*),Bash(git push:*)",
                 "--resume", "abc-123",
@@ -771,6 +773,7 @@ LEGACY_ARGV: dict[str, dict[str, dict[str, list[str]]]] = {
         "write_in_repo": {
             "start": [
                 "claude", "-p", "--output-format", "stream-json", "--verbose",
+                "--include-partial-messages",
                 "--permission-mode", "acceptEdits",
                 "--disallowedTools", "Bash(git commit:*),Bash(git push:*)",
                 "--session-id", SESSION,
@@ -778,6 +781,7 @@ LEGACY_ARGV: dict[str, dict[str, dict[str, list[str]]]] = {
             ],
             "resume": [
                 "claude", "-p", "--output-format", "stream-json", "--verbose",
+                "--include-partial-messages",
                 "--permission-mode", "acceptEdits",
                 "--disallowedTools", "Bash(git commit:*),Bash(git push:*)",
                 "--resume", "abc-123",
@@ -787,6 +791,7 @@ LEGACY_ARGV: dict[str, dict[str, dict[str, list[str]]]] = {
         "publish": {
             "start": [
                 "claude", "-p", "--output-format", "stream-json", "--verbose",
+                "--include-partial-messages",
                 "--permission-mode", "acceptEdits",
                 "--allowedTools", "Bash(git commit:*),Bash(git push:*),Bash(gh pr create:*)",
                 "--session-id", SESSION,
@@ -794,6 +799,7 @@ LEGACY_ARGV: dict[str, dict[str, dict[str, list[str]]]] = {
             ],
             "resume": [
                 "claude", "-p", "--output-format", "stream-json", "--verbose",
+                "--include-partial-messages",
                 "--permission-mode", "acceptEdits",
                 "--allowedTools", "Bash(git commit:*),Bash(git push:*),Bash(gh pr create:*)",
                 "--resume", "abc-123",
@@ -803,12 +809,14 @@ LEGACY_ARGV: dict[str, dict[str, dict[str, list[str]]]] = {
         "unrestricted": {
             "start": [
                 "claude", "-p", "--output-format", "stream-json", "--verbose",
+                "--include-partial-messages",
                 "--permission-mode", "bypassPermissions",
                 "--session-id", SESSION,
                 "--", "do a thing",
             ],
             "resume": [
                 "claude", "-p", "--output-format", "stream-json", "--verbose",
+                "--include-partial-messages",
                 "--permission-mode", "bypassPermissions",
                 "--resume", "abc-123",
                 "--", "more",
@@ -1144,6 +1152,41 @@ def test_claude_requires_verbose_because_the_cli_does() -> None:
     assert "--verbose" in start(ClaudeBackend())
 
 
+def test_claude_streams_partial_messages_in_every_shape() -> None:
+    """--include-partial-messages rides in the option region of all four argv shapes —
+    start/resume x live/classic — and each shape passes assert_safe exactly as built."""
+    shapes = (
+        start_invocation(ClaudeBackend()),
+        resume_invocation(ClaudeBackend()),
+        start_invocation(ClaudeBackend(), max_turns=4),
+        resume_invocation(ClaudeBackend(), max_turns=4),
+    )
+    for invocation in shapes:
+        assert invocation.argv.count("--include-partial-messages") == 1
+        ClaudeBackend().assert_safe(invocation, "write_in_repo")
+
+
+def test_claude_rejects_a_duplicate_partial_messages_flag() -> None:
+    argv = with_extra_options(start(ClaudeBackend()), "--include-partial-messages")
+    with pytest.raises(ClaudeUnsafe, match="--include-partial-messages appears 2 times"):
+        ClaudeBackend().assert_safe(inv(argv), "write_in_repo")
+
+
+def test_claude_rejects_an_argv_missing_partial_messages() -> None:
+    """Streaming off is not a shape this backend builds: it would silently lose deltas with no
+    error anywhere to notice."""
+    argv = [token for token in start(ClaudeBackend()) if token != "--include-partial-messages"]
+    with pytest.raises(ClaudeUnsafe, match="--include-partial-messages appears 0 times"):
+        ClaudeBackend().assert_safe(inv(argv), "write_in_repo")
+
+
+def test_claude_refuses_an_unrecognised_token_on_the_classic_shape_too() -> None:
+    """The strict option walk polices both shapes, not just the live one."""
+    argv = with_extra_options(start(ClaudeBackend(), max_turns=3), "--frobnicate")
+    with pytest.raises(ClaudeUnsafe, match="unrecognised option token"):
+        ClaudeBackend().assert_safe(inv(argv), "write_in_repo")
+
+
 def test_claude_start_and_resume_use_mutually_exclusive_session_flags() -> None:
     started, resumed = start(ClaudeBackend()), resume(ClaudeBackend())
     assert "--session-id" in started and "--resume" not in started
@@ -1348,8 +1391,9 @@ def test_claude_refuses_every_measured_non_canonical_option_form(evasion: str) -
 CLAUDE_ATTACHED_FLAG_FORMS = [
     f"{flag}=x"
     for flag in (
-        "--output-format", "--permission-mode", "--disallowedTools", "--allowedTools",
-        "--max-turns", "--model", "--effort", "--session-id", "--resume",
+        "--verbose", "--include-partial-messages", "--output-format", "--permission-mode",
+        "--disallowedTools", "--allowedTools", "--max-turns", "--model", "--effort",
+        "--session-id", "--resume",
     )
 ]
 
@@ -2398,6 +2442,101 @@ def test_claude_with_no_terminal_event_is_a_failure() -> None:
     acc = ingest(ClaudeBackend(), CLAUDE_EVENTS[:1])
 
     assert ClaudeBackend().classify(acc, 0) == "failed"
+
+
+# --- claude partial-message streaming (--include-partial-messages, measured 2.1.283) ---------
+# Real captures, trimmed/redacted: a multi-block classic reply and a live-input --resume run.
+
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+
+def fixture_lines(name: str) -> list[dict]:
+    return [
+        json.loads(line)
+        for line in (FIXTURES / name).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def test_claude_stream_activity_keeps_a_turn_open_after_a_result() -> None:
+    """result -> background task completion -> message_start/deltas -> interruption (no second
+    result): the streamed follow-up turn is open, so the earlier success is stale evidence and the
+    run must not read as idle to the live-input pump."""
+    backend = ClaudeBackend()
+    events = [
+        {"type": "system", "subtype": "task_started", "task_id": "t1", "is_backgrounded": True},
+        {
+            "type": "result", "subtype": "success", "is_error": False, "session_id": SESSION,
+            "result": "first answer", "num_turns": 1, "total_cost_usd": 0.1,
+        },
+        {"type": "system", "subtype": "task_updated", "task_id": "t1",
+         "patch": {"status": "completed"}},
+    ]
+    acc = Accumulator()
+    for event in events:
+        backend.ingest(json.loads(json.dumps(event)), acc)
+
+    # The background close alone would idle the pump: last task done, a result seen, no turn.
+    assert acc.awaiting_input is True
+
+    follow_up = [
+        {"type": "stream_event", "session_id": SESSION, "parent_tool_use_id": None,
+         "event": {"type": "message_start", "message": {"id": "msg_1"}}},
+        {"type": "stream_event", "session_id": SESSION, "parent_tool_use_id": None,
+         "event": {"type": "content_block_start", "index": 0,
+                   "content_block": {"type": "text", "text": ""}}},
+        {"type": "stream_event", "session_id": SESSION, "parent_tool_use_id": None,
+         "event": {"type": "content_block_delta", "index": 0,
+                   "delta": {"type": "text_delta", "text": "half an answ"}}},
+    ]
+    for event in follow_up:
+        backend.ingest(json.loads(json.dumps(event)), acc)
+
+    assert acc.turn_open is True
+    assert acc.awaiting_input is False
+    # The interruption never emitted a second result, so the earlier success must not stand.
+    assert backend.classify(acc, 0) == "failed"
+
+
+def test_claude_subagent_stream_events_do_not_open_the_turn() -> None:
+    """A subagent's own stream (non-empty parent_tool_use_id) is not the main thread's turn — same
+    rule as its assistant/user events."""
+    acc = ingest(
+        ClaudeBackend(),
+        [
+            {"type": "result", "subtype": "success", "is_error": False, "session_id": SESSION,
+             "result": "done", "num_turns": 1, "total_cost_usd": 0.1},
+            {"type": "stream_event", "session_id": SESSION, "parent_tool_use_id": "toolu_sub",
+             "event": {"type": "message_start", "message": {"id": "msg_sub"}}},
+            {"type": "stream_event", "session_id": SESSION, "parent_tool_use_id": "toolu_sub",
+             "event": {"type": "content_block_delta", "index": 0,
+                       "delta": {"type": "text_delta", "text": "subagent prose"}}},
+        ],
+    )
+
+    assert acc.turn_open is False
+    assert acc.awaiting_input is True
+
+
+def test_claude_interleaved_stream_events_change_no_outcome() -> None:
+    """The real partial-stream capture through ingest must produce exactly the outcome the same
+    stream with every stream_event line removed produces: summary, cost, counts and
+    classification all still come from assistant/result alone."""
+    full = fixture_lines("claude_partial_multiblock.jsonl")
+    stripped = [event for event in full if event.get("type") != "stream_event"]
+    backend = ClaudeBackend()
+    acc_full = ingest(backend, full)
+    acc_stripped = ingest(backend, stripped)
+
+    assert acc_full.summary == acc_stripped.summary == "OMEGA"
+    assert acc_full.total_cost_usd == acc_stripped.total_cost_usd == pytest.approx(0.1767795)
+    assert acc_full.num_turns == acc_stripped.num_turns == 2
+    assert acc_full.result_count == acc_stripped.result_count == 1
+    assert acc_full.saw_final_message is acc_stripped.saw_final_message is True
+    assert acc_full.usage == acc_stripped.usage
+    assert acc_full.denials == acc_stripped.denials == []
+    assert acc_full.turn_open is acc_stripped.turn_open is False
+    assert backend.classify(acc_full, 0) == backend.classify(acc_stripped, 0) == "completed"
 
 
 def test_opencode_normalisation() -> None:

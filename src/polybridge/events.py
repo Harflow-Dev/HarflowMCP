@@ -32,6 +32,7 @@ EVENT_KINDS = frozenset(
     {
         "task_started",
         "assistant_text",
+        "assistant_delta",
         "tool_call",
         "tool_result",
         "user_message",

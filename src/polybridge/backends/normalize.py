@@ -134,8 +134,43 @@ def tool_result(
     return event
 
 
-def assistant_text(text: str, source_ts: str | None = None) -> dict[str, Any]:
+def assistant_text(
+    text: str,
+    source_ts: str | None = None,
+    *,
+    message_id: str | None = None,
+    block_index: int | None = None,
+) -> dict[str, Any]:
+    """Build an `assistant_text` monitor event. `message_id`/`block_index` identify the content
+    block the text came from, and are present only when the backend's own stream disclosed them
+    (claude's partial-message stream); an assistant text with no such state keeps the exact
+    pre-streaming shape."""
     event: dict[str, Any] = {"kind": "assistant_text", "text": text}
+    if message_id is not None:
+        event["message_id"] = message_id
+    if block_index is not None:
+        event["block_index"] = block_index
+    if source_ts is not None:
+        event["source_ts"] = source_ts
+    return event
+
+
+def assistant_delta(
+    text: str,
+    *,
+    message_id: str | None = None,
+    block_index: int | None = None,
+    source_ts: str | None = None,
+) -> dict[str, Any]:
+    """Build an `assistant_delta` monitor event: one streamed text chunk — the chunk only, never
+    cumulative — keyed by the `(message_id, block_index)` its final `assistant_text` will carry.
+    A delta with no known message id is still emitted, without one: a consumer must not merge it
+    into any earlier text."""
+    event: dict[str, Any] = {"kind": "assistant_delta", "text": text}
+    if message_id is not None:
+        event["message_id"] = message_id
+    if block_index is not None:
+        event["block_index"] = block_index
     if source_ts is not None:
         event["source_ts"] = source_ts
     return event

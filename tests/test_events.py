@@ -461,11 +461,26 @@ def test_every_normalize_helper_builds_a_listed_kind() -> None:
         nz.tool_call(call_id="c1", tool="Bash", category="shell", input={"command": "ls"}),
         nz.tool_result(call_id="c1", ok=True, output="ok"),
         nz.assistant_text("hi"),
+        nz.assistant_delta("hi", message_id="m", block_index=1),
         nz.user_message("hi", "initial"),
         nz.notice("n"),
         nz.usage(acc),
     ]
     assert {event["kind"] for event in built} <= events_module.EVENT_KINDS
+
+
+def test_assistant_delta_is_a_listed_kind_and_the_log_version_stays_one(tmp_path: Path) -> None:
+    """A new event *kind* is additive under the frozen v1 envelope — an older Monitor decodes it
+    as `.unknown` rather than rejecting the log — so `assistant_delta` must NOT bump
+    `EVENT_LOG_VERSION`, which would make older Monitors reject every new log."""
+    path = tmp_path / "t.events.jsonl"
+    log = EventLog(path, "t")
+    assert log.write("assistant_delta", {"text": "chunk", "message_id": "m", "block_index": 1})
+    log.close()
+
+    entry = json.loads(path.read_text())
+    assert entry["kind"] == "assistant_delta"
+    assert entry["v"] == events_module.EVENT_LOG_VERSION == 1
 
 
 def _emitted_literal_kinds() -> set[str]:

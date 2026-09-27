@@ -23,6 +23,14 @@ CLI facts established by measurement, not assumption:
   and has no `--` and no positional at all. Mid-turn messages fold into the running turn; after a
   `result` the process idles until more input or EOF. Every run is live except one with `max_turns`
   (an unmeasured combination), which keeps the classic `-- <prompt>` shape on stdin DEVNULL.
+* **Partial messages** (claude 2.1.283, real captures in `tests/fixtures/claude_partial_*.jsonl`):
+  `--include-partial-messages` adds `stream_event` lines to the stream-json output in both the
+  classic and the live shape, and on resume. Each message opens with a `message_start` carrying the
+  message id; each content block with a `content_block_start` (its `index`) and
+  `content_block_delta`s — `text_delta` carries a text chunk, while `thinking_delta`,
+  `signature_delta` and `input_json_delta` never carry surfaced text. Claude still emits one
+  `assistant` event *per content block*, after that block's deltas and before its
+  `content_block_stop`, so a streamed text chunk's identity is `(message id, block index)`.
 
 **`publish` (measured, and it refuted an earlier plan for this level).** Dropping the deny patterns
 alone is not enough: with `acceptEdits` and no denies, `git commit` was still refused with "This
@@ -103,7 +111,7 @@ FORBIDDEN_FLAGS = ("--strict-mcp-config", "--setting-sources", "--safe-mode", "-
 # attached alias form `--disallowed-tools=...`. Long aliases (`--allowed-tools`,
 # `--disallowed-tools`) are deliberately absent even though claude accepts them: this backend never
 # writes them, so admitting them here would reopen the same hole under a different spelling.
-BOOLEAN_FLAGS = ("--verbose",)
+BOOLEAN_FLAGS = ("--verbose", "--include-partial-messages")
 VALUE_FLAGS = (
     "--output-format",
     "--input-format",
@@ -448,6 +456,9 @@ class ClaudeBackend:
             "stream-json",
             # Required, not stylistic: the CLI refuses to start without it.
             "--verbose",
+            # Streams text as it arrives (measured, 2.1.283): adds `stream_event` lines in both
+            # the classic and the live shape, and on resume. No other stream content changes.
+            "--include-partial-messages",
             "--permission-mode",
             PERMISSION_MODES[freedom],
         ]
@@ -554,6 +565,9 @@ class ClaudeBackend:
         seen = self._parse_options(options, argv)
 
         self._exactly_one(seen, "--verbose", argv)
+        # Exactly once, like --verbose: a second copy would be a shape this backend never writes,
+        # and a missing one silently loses streaming without any error to notice.
+        self._exactly_one(seen, "--include-partial-messages", argv)
 
         input_values = seen.get("--input-format", [])
         if live:
@@ -816,6 +830,18 @@ class ClaudeBackend:
             if not (isinstance(parent, str) and parent):
                 acc.turn_open = True
                 acc.awaiting_input = False
+        elif event_type == "stream_event":
+            # Stream activity counts as turn activity: summary, `saw_final_message`, cost and
+            # result counts still come only from `assistant`/`result`, so classification is
+            # unchanged — but a main-thread `stream_event` proves a turn is being produced right
+            # now. Without this, a follow-up turn that starts streaming after a result reads as
+            # idle to the live-input pump, and a recovered run whose new message never finished
+            # would read as the earlier success. A subagent's own stream (non-empty
+            # `parent_tool_use_id`) is not the main thread's turn, same rule as above.
+            parent = event.get("parent_tool_use_id")
+            if not (isinstance(parent, str) and parent):
+                acc.turn_open = True
+                acc.awaiting_input = False
         elif event_type == "result":
             self._ingest_result(event, acc)
 
@@ -931,21 +957,98 @@ class ClaudeBackend:
 
         event_type = event.get("type")
         if event_type == "assistant":
-            return self._normalize_assistant(event, source_ts, subagent)
+            return self._normalize_assistant(event, acc, source_ts, subagent)
         if event_type == "user":
             return self._normalize_user(event, source_ts, subagent)
+        if event_type == "stream_event":
+            return self._normalize_stream_event(event, acc, source_ts, subagent)
         if event_type == "result":
             return [nz.usage(acc, source_ts=source_ts)]
         return []
 
     @staticmethod
+    def _normalize_stream_event(
+        event: dict[str, Any],
+        acc: Accumulator,
+        source_ts: str | None,
+        subagent: bool,
+    ) -> list[dict[str, Any]]:
+        """`--include-partial-messages` stream events. Only a main-thread `text_delta` produces
+        anything — one `assistant_delta` per chunk — and only main-thread events may touch the
+        stream state, so a subagent's own stream can neither read as the main thread speaking nor
+        overwrite the message id/block index its text blocks are identified by."""
+        inner = event.get("event")
+        if not isinstance(inner, dict) or subagent:
+            return []
+        inner_type = inner.get("type")
+        if inner_type == "message_start":
+            message = inner.get("message")
+            message_id = message.get("id") if isinstance(message, dict) else None
+            if isinstance(message_id, str) and message_id:
+                acc.stream_state["normalize_stream_message_id"] = message_id
+                # Block indices restart per message; a stale index from the previous one must not
+                # label this message's blocks.
+                acc.stream_state.pop("normalize_stream_block_index", None)
+                acc.stream_state.pop("normalize_stream_block_type", None)
+            return []
+        if inner_type == "content_block_start":
+            index = inner.get("index")
+            if _is_count(index):
+                block = inner.get("content_block")
+                acc.stream_state["normalize_stream_block_index"] = index
+                acc.stream_state["normalize_stream_block_type"] = (
+                    block.get("type") if isinstance(block, dict) else None
+                )
+            return []
+        if inner_type == "content_block_delta":
+            delta = inner.get("delta")
+            if not (isinstance(delta, dict) and delta.get("type") == "text_delta"):
+                # thinking/signature/input_json deltas carry nothing polybridge surfaces.
+                return []
+            text = delta.get("text")
+            if not isinstance(text, str):
+                return []
+            index = inner.get("index")
+            message_id = acc.stream_state.get("normalize_stream_message_id")
+            return [
+                nz.assistant_delta(
+                    text,
+                    message_id=message_id if isinstance(message_id, str) else None,
+                    block_index=index if _is_count(index) else None,
+                    source_ts=source_ts,
+                )
+            ]
+        return []
+
+    @staticmethod
     def _normalize_assistant(
-        event: dict[str, Any], source_ts: str | None, subagent: bool
+        event: dict[str, Any],
+        acc: Accumulator,
+        source_ts: str | None,
+        subagent: bool,
     ) -> list[dict[str, Any]]:
         message = event.get("message")
         content = message.get("content") if isinstance(message, dict) else None
         if not isinstance(content, list):
             return []
+
+        # With partial streaming (measured, claude 2.1.283), `message_start` and
+        # `content_block_start` preceded this event, so the message id and the index of the block
+        # this event carries are known. Claude emits one `assistant` event per content block, so the
+        # recorded index is unambiguous only when this event carries exactly one block; a message
+        # with no preceding stream state (no flag, or a replayed capture) keeps today's shape —
+        # no `message_id`, no `block_index`.
+        state = acc.stream_state
+        message_id = message.get("id") if isinstance(message, dict) else None
+        identified = (
+            isinstance(message_id, str)
+            and message_id
+            and message_id == state.get("normalize_stream_message_id")
+        )
+        block_index = None
+        if identified and len(content) == 1:
+            candidate = state.get("normalize_stream_block_index")
+            block_index = candidate if _is_count(candidate) else None
 
         events: list[dict[str, Any]] = []
         for block in content:
@@ -958,7 +1061,14 @@ class ClaudeBackend:
                     continue
                 text = block.get("text")
                 if isinstance(text, str):
-                    events.append(nz.assistant_text(text, source_ts=source_ts))
+                    events.append(
+                        nz.assistant_text(
+                            text,
+                            source_ts=source_ts,
+                            message_id=message_id if identified else None,
+                            block_index=block_index,
+                        )
+                    )
             elif block_type == "tool_use":
                 name = block.get("name")
                 tool_input = block.get("input")
