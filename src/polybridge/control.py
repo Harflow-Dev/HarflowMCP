@@ -269,9 +269,13 @@ def attempt_state(
     is outstanding: a joiner that signalled may still be writing its `.sig`, and a `.failed` read
     first would publish the ordinary classified result for a run that was in fact cancelled."""
     outcome = attempt_outcome(log_dir, task_id, family, n)
-    if outcome == "failed" and joins_outstanding(log_dir, task_id, family, n, now):
+    if outcome != "failed":
+        return outcome
+    if joins_outstanding(log_dir, task_id, family, n, now):
         return "pending"
-    return outcome
+    # Read again: a joiner's `.sig` can land between the first read and the join check, which then
+    # reports nothing outstanding *because* of that `.sig` — and `.sig` outranks `.failed`.
+    return attempt_outcome(log_dir, task_id, family, n)
 
 
 def begin_join(

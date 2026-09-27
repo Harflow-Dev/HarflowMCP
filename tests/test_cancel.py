@@ -1233,6 +1233,31 @@ async def test_a_joiners_delayed_sig_cannot_be_outrun_by_the_owners_failed(
     assert control.phase_path(tmp_path, "child", control.CANCEL, 1, "failed").exists()
 
 
+def test_a_sig_landing_between_the_outcome_read_and_the_join_check_still_authorizes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The race behind a CI flake: `attempt_state` reads the outcome (`.sig` absent, so `failed`),
+    then a joiner's delayed `.sig` lands, then `joins_outstanding` sees `.sig` and reports nothing
+    outstanding. The attempt must read as `sig` — a delivered cancel — never as `failed`."""
+    record = _child_record(tmp_path)
+    store.write(tmp_path, record)
+    assert control.begin_attempt(tmp_path, "child", control.CANCEL, CONTROLLER_A).owned
+    control.begin_join(tmp_path, "child", control.CANCEL, 1, CONTROLLER_A)
+    control.mark_failed(tmp_path, "child", control.CANCEL, 1, reason="process group already gone")
+
+    real_joins_outstanding = control.joins_outstanding
+
+    def sig_lands_first(log_dir, task_id, family, n, now=None):
+        control.mark_signalled(log_dir, task_id, family, n, leader_alive=True)
+        return real_joins_outstanding(log_dir, task_id, family, n, now)
+
+    monkeypatch.setattr(control, "joins_outstanding", sig_lands_first)
+
+    assert control.attempt_state(tmp_path, "child", control.CANCEL, 1) == "sig"
+    monkeypatch.setattr(control, "joins_outstanding", real_joins_outstanding)
+    assert control.cancel_verdict(tmp_path, "child") == "authorized"
+
+
 async def test_a_joiner_that_could_not_deliver_resolves_its_intent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
