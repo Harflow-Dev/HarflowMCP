@@ -115,6 +115,7 @@ def sweep(log_dir: Path, days: int, now: datetime) -> dict[str, int]:
         "kept_live_descendant": 0,
         "kept_active_attempt": 0,
         "kept_locked": 0,
+        "kept_delete_failed": 0,
         "deleted_temp_files": 0,
     }
 
@@ -366,7 +367,9 @@ def _delete_task(
             if not _empty_inbox(log_dir, task_id):
                 stats["kept_locked"] += 1
                 return
-            _delete_task_files(log_dir, task_id)
+            if not _delete_task_files(log_dir, task_id):
+                stats["kept_delete_failed"] += 1
+                return
             stats["deleted_tasks"] += 1
         finally:
             try:
@@ -408,19 +411,21 @@ def _empty_inbox(log_dir: Path, task_id: str) -> bool:
         os.close(fd)
 
 
-def _delete_task_files(log_dir: Path, task_id: str) -> None:
+def _delete_task_files(log_dir: Path, task_id: str) -> bool:
     """Delete every `{task_id}.*` file except the lock files — `.lock`, and `.inbox.jsonl`, which is
-    the inbox's `flock` target (see `inbox.py`) — with the record (`.meta.json`) last: a crash
-    mid-sweep then leaves a record the next sweep retries, rather than orphaned stream files with
-    nothing on disk to say they ever belonged to a task."""
+    the inbox's `flock` target (see `inbox.py`) — with the record (`.meta.json`) last, and only once
+    everything else is gone: the record is what lets a later sweep find this task again, so removing
+    it past a failed unlink would orphan that file (prompts, raw output) for good. False when
+    anything, the record included, was left behind."""
     try:
         entries = list(log_dir.iterdir())
     except OSError:
-        return
+        return False
     lock_names = {f"{task_id}.lock", f"{task_id}.inbox.jsonl"}
     record_name = f"{task_id}{store.RECORD_SUFFIX}"
     prefix = f"{task_id}."
     record_path: Path | None = None
+    complete = True
     for path in entries:
         name = path.name
         if name in lock_names or not name.startswith(prefix):
@@ -430,10 +435,17 @@ def _delete_task_files(log_dir: Path, task_id: str) -> None:
             continue
         try:
             path.unlink()
-        except OSError:
+        except FileNotFoundError:
             pass
+        except OSError:
+            complete = False
+    if not complete:
+        return False
     if record_path is not None:
         try:
             record_path.unlink()
-        except OSError:
+        except FileNotFoundError:
             pass
+        except OSError:
+            return False
+    return True

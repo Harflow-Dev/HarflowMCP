@@ -745,3 +745,34 @@ def test_sweep_keeps_an_aged_root_whose_live_child_names_it_only_via_spawned_by(
     assert store.read(log_dir, "root") is not None
     assert store.read(log_dir, "middle") is not None
     assert stats["kept_live_descendant"] == 2
+
+
+def test_a_failed_artifact_delete_keeps_the_record_for_a_later_sweep(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The record is how a later sweep finds the task again; removing it past a failed unlink
+    would leave that artifact (prompts, raw output) on disk for good."""
+    log_dir = tmp_path / "tasks"
+    log_dir.mkdir()
+    record = make_record()
+    store.write(log_dir, record)
+    stream = log_dir / f"{record.task_id}.jsonl"
+    stream.write_text("raw output\n")
+    real_unlink = Path.unlink
+
+    def refuse_the_stream(self, *args, **kwargs):
+        if self == stream:
+            raise PermissionError("busy")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", refuse_the_stream)
+    stats = retention.sweep(log_dir, 30, datetime.now(timezone.utc))
+
+    assert stats["deleted_tasks"] == 0
+    assert stats["kept_delete_failed"] == 1
+    assert store.read(log_dir, record.task_id) is not None
+
+    monkeypatch.setattr(Path, "unlink", real_unlink)
+    stats = retention.sweep(log_dir, 30, datetime.now(timezone.utc))
+    assert stats["deleted_tasks"] == 1
+    assert not stream.exists() and store.read(log_dir, record.task_id) is None
