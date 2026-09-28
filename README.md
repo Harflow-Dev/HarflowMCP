@@ -110,12 +110,31 @@ claude-desktop`.
 |---|---|---|
 | `list_backends()` | No | What's installed, its version, and what each backend can actually do |
 | `start_task(prompt, repo_path, backend, freedom, model, max_turns, reasoning_effort, network, group)` | No | Dispatches, returns a `task_id` immediately |
-| `get_task_status(task_id)` | No | Status, summary, turns, usage, denials, enforcement, stream tail |
-| `wait_for_task(task_id, timeout_seconds=55)` | Until done or timeout | On timeout returns `running` and **leaves the run alone** |
+| `get_task_status(task_id, include_tail=False)` | No | Status, summary, turns, usage, denials, enforcement, `recent_activity`; `last_output_tail` omitted by default (or shortened for failed tasks), set `include_tail=True` for the full 20-line tail |
+| `wait_for_task(task_id, timeout_seconds=55, include_tail=False)` | Until done or timeout | Same shaping as `get_task_status`; on timeout returns `running` and **leaves the run alone** |
 | `resume_task(task_id, followup_prompt, max_turns, network)` | No | Continues that session as a **new** task; `network` omitted inherits the parent's, an explicit boolean overrides it |
 | `list_tasks(status, backend)` | No | All tasks, oldest first, optionally filtered |
-| `cancel_task(task_id)` | Until dead | SIGTERM the process group, SIGKILL after 5s; cascades to live descendants and reports them under `cascade` |
+| `cancel_task(task_id)` | Until dead | SIGTERM the process group, SIGKILL after 5s; cascades to live descendants; returns shaped payload with `recent_activity` and short tail for failed |
 | `send_message(task_id, text)` | No | Adds a message to a running **live-input** task (claude, no `max_turns`); returns `queued`, never `delivered` |
+| `get_task_events(task_id, limit=50, before_seq, after_seq, kinds)` | No | Fetch normalized events from the task's event log; oldest→newest within page; bounded by seq cursors, kind filter, 200-item limit, 256 KiB page budget; `has_more`, `next_before_seq`/`next_after_seq` for paging |
+
+## Lean status payloads: `recent_activity` instead of the raw tail
+
+By default, `get_task_status`, `wait_for_task`, and `cancel_task` now return a **lean payload** that
+omits the bulky `last_output_tail` (20 × 2000 chars, ~10k tokens) for running/completed tasks. Failed
+tasks retain a short diagnostic tail (5 lines × 500 chars). Every response includes `recent_activity`:
+a list of ≤ 5 one-line strings (≤ 160 chars each) summarizing the most recent meaningful events
+(tool calls, failed tool results, assistant/user messages, notices, undelivered messages), sourced
+from the task's normalized `<task_id>.events.jsonl` log.
+
+To get the full raw stream, either:
+- Pass `include_tail=True` to `get_task_status` or `wait_for_task` (restores the legacy 20-line tail),
+- Use `raw_stream_log` from the response to read the complete stream file directly, or
+- Call `get_task_events` for paged, bounded access to the normalized event log with kind filtering
+  and proper truncation of large fields.
+
+This shaping happens at the MCP layer only (`server.py`), so the Monitor app's frozen contract and
+`polybridge-ctl` continue to receive the full `last_output_tail` unchanged.
 
 ## Backends are not interchangeable, and the tool says so
 

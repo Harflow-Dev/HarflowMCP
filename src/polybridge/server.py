@@ -20,6 +20,7 @@ from mcp.types import INTERNAL_ERROR, INVALID_PARAMS
 
 from . import backends, control, identity, inbox, store
 from .backends import DEFAULT_BACKEND, DEFAULT_FREEDOM, FREEDOMS
+from .events import EVENT_KINDS, events_path, read_page, read_recent
 from .tasks import (
     TERMINAL_STATUSES,
     RepoUnavailableError,
@@ -42,6 +43,36 @@ DEFAULT_WAIT_SECONDS = 55
 # Emitted while waiting so the client can see the wait is alive; per the MCP spec a client may also
 # reset its request timeout on progress, which is what makes longer explicit waits viable.
 PROGRESS_INTERVAL_SECONDS = 5.0
+
+# What an MCP status response carries in place of the full raw tail (see `_status_payload`).
+RECENT_ACTIVITY_LIMIT = 5
+SHORT_TAIL_LINES = 5
+SHORT_TAIL_LINE_CHARS = 500
+
+
+def _status_payload(
+    snapshot: dict[str, Any], *, include_tail: bool, log_dir: Path, task_id: str
+) -> dict[str, Any]:
+    """The MCP shape of a status snapshot: `recent_activity` always, the raw tail only on request.
+
+    The full `last_output_tail` is up to 20 raw stream lines of 2000 chars — about 10k tokens on
+    every poll, which an orchestrator rarely needs. `recent_activity` answers "what is it doing" in
+    a few one-liners instead; a failed run keeps a short raw tail, since that is when the raw lines
+    help. The snapshot itself is untouched, so `polybridge-ctl` (the Monitor's contract) still
+    carries the full tail. Blocking file I/O: callers run this off the event loop.
+    """
+    payload = dict(snapshot)
+    payload["recent_activity"] = read_recent(events_path(log_dir, task_id), limit=RECENT_ACTIVITY_LIMIT)
+    if include_tail:
+        return payload
+    tail = payload.pop("last_output_tail", None)
+    if snapshot.get("status") == "failed" and isinstance(tail, list):
+        payload["last_output_tail"] = [
+            line[:SHORT_TAIL_LINE_CHARS] if isinstance(line, str) else line
+            for line in tail[-SHORT_TAIL_LINES:]
+        ]
+    return payload
+
 
 mcp = MCPServer(
     "polybridge",
@@ -306,16 +337,25 @@ async def start_task(
 
 
 @mcp.tool()
-async def get_task_status(task_id: str) -> dict[str, Any]:
+async def get_task_status(
+    task_id: str,
+    include_tail: bool = False,
+) -> dict[str, Any]:
     """Report a dispatched task's current state without blocking.
 
     Args:
         task_id: Identifier returned by start_task or resume_task.
+        include_tail: If True, include the full last_output_tail (20 lines × 2000 chars each);
+            if False (default), the tail is omitted for running/completed tasks and shortened
+            to 5 lines × 500 chars for failed tasks. The caller can request the full raw stream
+            log path from `raw_stream_log` for complete output, or use get_task_events for
+            normalized events.
 
-    Carries the agent's closing summary, turn count, token usage and any permission denials once the
-    run has finished, plus the tail of its event stream while it is still going. `total_cost_usd` is
-    null for backends that do not report cost — Codex reports tokens only, and vibe reports neither
-    cost nor tokens nor a turn count.
+    Returns the task's status, summary, enforcement, and `recent_activity` — a list of ≤ 5 one-line
+    strings describing the most recent meaningful events (tool calls, failed tool results, assistant
+    messages, notices). For running tasks this gives a live summary without the bulk of the
+    raw stream. `total_cost_usd` is null for backends that do not report cost — Codex reports
+    tokens only, and vibe reports neither cost nor tokens nor a turn count.
 
     `enforcement` states what the run's restrictions actually amounted to, and `mcp_servers` (where
     the backend reports them) shows what the agent loaded. Tasks started by an earlier polybridge
@@ -324,7 +364,10 @@ async def get_task_status(task_id: str) -> dict[str, Any]:
     """
     task = _reg().get(task_id)
     if task is not None:
-        return task.snapshot()
+        snapshot = task.snapshot()
+        return await asyncio.to_thread(
+            _status_payload, snapshot, include_tail=include_tail, log_dir=_reg().log_dir, task_id=task_id
+        )
 
     record = _reg().recover(task_id)
     if record is None:
@@ -333,7 +376,10 @@ async def get_task_status(task_id: str) -> dict[str, Any]:
             f"unknown task_id: {task_id}. No task with that id is running, and no record of one "
             f"exists under {_reg().log_dir}. Use list_tasks to see what is known.",
         )
-    return store.snapshot(_reg().log_dir, record)
+    snapshot = store.snapshot(_reg().log_dir, record)
+    return await asyncio.to_thread(
+        _status_payload, snapshot, include_tail=include_tail, log_dir=_reg().log_dir, task_id=task_id
+    )
 
 
 async def _await_with_progress(task: Task, timeout_seconds: int, ctx: Context | None) -> None:
@@ -414,6 +460,7 @@ async def _poll_recovered(
 async def wait_for_task(
     task_id: str,
     timeout_seconds: int = DEFAULT_WAIT_SECONDS,
+    include_tail: bool = False,
     ctx: Context | None = None,
 ) -> dict[str, Any]:
     """Wait for a task to finish, giving up after a timeout without disturbing the run.
@@ -423,11 +470,16 @@ async def wait_for_task(
         timeout_seconds: How long to wait before returning early. Keep this modest — your MCP client
             applies its own request timeout (often 60s), and exceeding it fails the *call* with a
             timeout error even though the task keeps running.
+        include_tail: If True, include the full last_output_tail (20 lines × 2000 chars each);
+            if False (default), the tail is omitted for running/completed tasks and shortened
+            to 5 lines × 500 chars for failed tasks.
         ctx: Injected by the server; not a caller argument.
 
     If the task is still going when the wait ends, the result comes back with status "running" and a
     `next_step` hint: call this again, or poll get_task_status. The dispatched process is never
-    signalled here, so waiting is always safe and repeating it costs nothing.
+    signalled here, so waiting is always safe and repeating it costs nothing. Returns
+    `recent_activity` — a list of ≤ 5 one-line strings describing the most recent meaningful events
+    — for a live summary without the bulk of the raw stream.
 
     A coding task can easily run for many minutes. Expect several calls rather than one long one.
     """
@@ -456,7 +508,10 @@ async def wait_for_task(
             f"still running after {timeout_seconds}s and unaffected by this wait — "
             "call wait_for_task again, or poll get_task_status"
         )
-    return snapshot
+
+    return await asyncio.to_thread(
+        _status_payload, snapshot, include_tail=include_tail, log_dir=_reg().log_dir, task_id=task_id
+    )
 
 
 @mcp.tool()
@@ -602,12 +657,104 @@ async def cancel_task(task_id: str) -> dict[str, Any]:
     # report a status that later calls contradict.
     task = _reg().get(task_id)
     if task is not None:
-        response = task.snapshot()
+        snapshot = task.snapshot()
     else:
         record = _reg().recover(task_id)
-        response = store.snapshot(_reg().log_dir, record) if record is not None else {}
+        snapshot = store.snapshot(_reg().log_dir, record) if record is not None else {}
+    
+    response = await asyncio.to_thread(
+        _status_payload, snapshot, include_tail=False, log_dir=_reg().log_dir, task_id=task_id
+    )
     response["cascade"] = cascade
     return response
+
+
+@mcp.tool()
+async def get_task_events(
+    task_id: str,
+    limit: int = 50,
+    before_seq: int | None = None,
+    after_seq: int | None = None,
+    kinds: list[str] | None = None,
+) -> dict[str, Any]:
+    """Fetch normalized events from a task's event log.
+
+    Args:
+        task_id: Identifier of the task whose events to read.
+        limit: Maximum number of events to return, capped at 200. Default is 50.
+        before_seq: Exclusive upper bound — return events with seq < before_seq (older events).
+            Cannot be used with after_seq.
+        after_seq: Exclusive lower bound — return events with seq > after_seq (newer events).
+            Cannot be used with before_seq.
+        kinds: Optional filter by event kind. Must be a non-empty list of known kinds from
+            `task_started`, `assistant_text`, `assistant_delta`, `tool_call`, `tool_result`,
+            `user_message`, `usage`, `notice`, `task_finished`, `undelivered`.
+            `assistant_delta` is excluded by default unless explicitly listed. Pass `null`
+            to get all kinds except assistant_delta.
+
+    Returns events in oldest→newest order within the page, with:
+    - `events`: list of event objects with their `seq`, `kind`, and data fields
+    - `has_more`: true if there are more matching events in the requested direction
+    - `next_before_seq`: the `seq` of the oldest event in this page (for paging older)
+    - `next_after_seq`: the `seq` of the newest event in this page (for paging newer)
+    - `skipped_oversized`: count of lines > 1 MiB that were skipped (not parsed, not counted as events)
+
+    Each returned event has its long string fields truncated to 2000 chars, lists to 50 items,
+    and dict nesting to depth 4, with `"truncated": true` added if anything was cut. An event still
+    over 16 KiB after that (a very wide dict) is replaced by a stub carrying only `seq`, `kind`,
+    `observed_at`, `truncated: true`, `oversized: true` and its size in `bytes`. A page
+    stops early once its serialized size would pass 256 KiB (has_more remains true, cursors still
+    valid). A page is never empty while has_more is true.
+
+    Default (no before_seq/after_seq): newest page — the most recent events.
+    Both cursors cannot be used at once. kinds=[] or an unknown kind raises INVALID_PARAMS.
+    """
+    try:
+        store.validate_task_id(task_id)
+    except store.InvalidTaskId as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+    if limit < 1 or limit > 200:
+        raise MCPError(INVALID_PARAMS, f"limit must be between 1 and 200, got {limit}")
+
+    if before_seq is not None and after_seq is not None:
+        raise MCPError(
+            INVALID_PARAMS, "cannot specify both before_seq and after_seq; use one or the other"
+        )
+
+    if kinds is not None:
+        if not kinds:
+            raise MCPError(INVALID_PARAMS, "kinds must be a non-empty list")
+        for kind in kinds:
+            if kind not in EVENT_KINDS:
+                raise MCPError(
+                    INVALID_PARAMS,
+                    f"unknown kind {kind!r}; must be one of {sorted(EVENT_KINDS)}",
+                )
+
+    task = _reg().get(task_id)
+    record = _reg().recover(task_id) if task is None else None
+
+    if task is None and record is None:
+        raise MCPError(INVALID_PARAMS, f"unknown task_id: {task_id}")
+
+    page_result = await asyncio.to_thread(
+        read_page,
+        events_path(_reg().log_dir, task_id),
+        limit=limit,
+        before_seq=before_seq,
+        after_seq=after_seq,
+        kinds=kinds,
+    )
+
+    return {
+        "task_id": task_id,
+        "events": page_result.events,
+        "has_more": page_result.has_more,
+        "next_before_seq": page_result.next_before_seq,
+        "next_after_seq": page_result.next_after_seq,
+        "skipped_oversized": page_result.skipped_oversized,
+    }
 
 
 @mcp.tool()
