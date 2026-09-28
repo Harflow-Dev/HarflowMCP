@@ -58,7 +58,7 @@ def backend(monkeypatch: pytest.MonkeyPatch) -> _Backend:
 
 @pytest.fixture
 def opening_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("PB_OPEN_MONITOR", raising=False)
+    monkeypatch.setenv("PB_OPEN_MONITOR", "1")
     monkeypatch.delenv("PB_TASK_ID", raising=False)
     monkeypatch.setattr(sys, "platform", "darwin")
 
@@ -117,7 +117,7 @@ async def test_a_nested_task_does_not_open_the_monitor(
     assert launcher.urls == []
 
 
-@pytest.mark.parametrize("skip", ["pb_task_id", "env_off", "not_darwin", "registry_off"])
+@pytest.mark.parametrize("skip", ["pb_task_id", "env_off", "env_unset", "not_darwin", "registry_off"])
 async def test_opening_is_skipped(
     tmp_path: Path, git_repo: Path, backend: _Backend, opening_enabled, monkeypatch, skip: str
 ) -> None:
@@ -125,6 +125,8 @@ async def test_opening_is_skipped(
         monkeypatch.setenv("PB_TASK_ID", "someone")
     elif skip == "env_off":
         monkeypatch.setenv("PB_OPEN_MONITOR", "0")
+    elif skip == "env_unset":
+        monkeypatch.delenv("PB_OPEN_MONITOR", raising=False)
     elif skip == "not_darwin":
         monkeypatch.setattr(sys, "platform", "linux")
     launcher = Launcher()

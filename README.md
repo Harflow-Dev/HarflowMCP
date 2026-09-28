@@ -568,10 +568,12 @@ duration like `7d`, `12h`, or `30m`. Diagnostics go to stderr, never stdout, so 
 
 ## Opening the Monitor app
 
-On macOS, a root task — no detected caller and no `PB_TASK_ID` — started through the MCP server runs
-`open -g polybridge-monitor://task/<id>` in the background. It never blocks or changes the dispatch:
-a failure becomes a notice on the task, and the `start_task` response never claims the app opened.
-`PB_OPEN_MONITOR=0` turns it off (the test suite sets it, and so does everything the app launches).
+Off by default: open the Monitor yourself. With `PB_OPEN_MONITOR=1` in the MCP server's
+environment, a root task on macOS — no detected caller and no `PB_TASK_ID` — started through the
+MCP server runs `open -g polybridge-monitor://task/<id>` in the background. It never blocks or
+changes the dispatch: a failure becomes a notice on the task, and the `start_task` response never
+claims the app opened. (It used to be on by default, which brought the app forward on every
+dispatch an agent made.)
 
 ## The Monitor app (macOS)
 

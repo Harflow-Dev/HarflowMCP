@@ -249,6 +249,16 @@ _UNCONTROLLED_NETWORK_NOTICE = (
 )
 
 
+# These probes run in the polybridge server itself, before any agent sandbox exists, so a target
+# repository must not get to run code through them (Codex PR review). Its config can name programs
+# git runs on its behalf: `core.fsmonitor` (disabled here; `-c` also reaches submodules' child
+# gits), and a promisor remote's lazy fetch, which can run `core.sshCommand` or a remote helper
+# (`GIT_NO_LAZY_FETCH`). Only ref lookups are ever made — nothing that reads file contents, which
+# is where clean/process filters would run; that is why there is no `git status` here.
+GIT_SAFE_CONFIG = ("-c", "core.fsmonitor=false")
+GIT_SAFE_ENV = {"GIT_NO_LAZY_FETCH": "1"}
+
+
 def _git_read(repo_path: Path, deadline: float, *args: str) -> str | None:
     """Run one read-only git ref lookup. `None` for a non-zero exit — including git's own graceful
     "not applicable" cases, like `--quiet` on a detached HEAD — never an exception for those.
@@ -262,7 +272,8 @@ def _git_read(repo_path: Path, deadline: float, *args: str) -> str | None:
     if remaining <= 0:
         raise subprocess.TimeoutExpired(cmd="git", timeout=GIT_PROBE_BUDGET_SECONDS)
     result = subprocess.run(
-        ["git", "-C", str(repo_path), *args],
+        ["git", "-C", str(repo_path), *GIT_SAFE_CONFIG, *args],
+        env={**os.environ, **GIT_SAFE_ENV},
         capture_output=True,
         text=True,
         timeout=remaining,
@@ -276,15 +287,17 @@ def _git_read(repo_path: Path, deadline: float, *args: str) -> str | None:
 def _git_baseline(repo_path: Path) -> tuple[str | None, bool | None]:
     """`(base_commit, start_dirty)` at spawn time, best-effort — nulls on any failure.
 
+    `start_dirty` is always None now: telling a dirty worktree needs `git status`, which reads file
+    contents and so runs the repository's own clean/process filters in this process (see
+    `GIT_SAFE_CONFIG`). Nothing in polybridge or the Monitor acts on it, so it is not probed rather
+    than probed unsafely; the field stays for payload compatibility.
+
     Same rule as `_publish_branch_notice`: a slow, missing, or broken git must never change a
     dispatch's outcome, so every failure mode here is absorbed rather than raised.
     """
     try:
         deadline = time.monotonic() + GIT_BASELINE_BUDGET_SECONDS
-        base_commit = _git_read(repo_path, deadline, "rev-parse", "--verify", "--quiet", "HEAD")
-        status = _git_read(repo_path, deadline, "--no-optional-locks", "status", "--porcelain")
-        start_dirty = None if status is None else status != ""
-        return base_commit, start_dirty
+        return _git_read(repo_path, deadline, "rev-parse", "--verify", "--quiet", "HEAD"), None
     except Exception:
         log.warning("could not determine git baseline for %s", repo_path, exc_info=True)
         return None, None
@@ -423,8 +436,9 @@ def _publish_branch_notice(
         return _format_branch_notice(_branch_notice_templates(enforcement)[1], freedom, enforcement)
 
 
-# A4.3: a root task opens the Monitor app in the background. Off darwin, or with this set to "0"
-# (conftest, and everything the app itself launches), nothing is opened.
+# A4.3: a root task can open the Monitor app in the background — opt-in, with this set to "1".
+# Opening it by default brought the app to the front on every dispatch an agent made, which the
+# owner asked to stop (2026-09-28): the Monitor is opened by hand unless this asks otherwise.
 OPEN_MONITOR_ENV = "PB_OPEN_MONITOR"
 MONITOR_URL = "polybridge-monitor://task/{task_id}"
 MONITOR_OPEN_TIMEOUT_SECONDS = 30.0
@@ -1194,8 +1208,8 @@ class TaskRegistry:
         Synchronous — it only schedules — and called as `_spawn`'s last step, after registration. A
         root task is
         one with no detected caller and no `PB_TASK_ID` in this server's environment: a nested
-        dispatch belongs to a tree the user is already watching. Skipped off darwin, when
-        `PB_OPEN_MONITOR=0`, and for a registry built with `open_monitor=False` (`polybridge-ctl
+        dispatch belongs to a tree the user is already watching. Off unless `PB_OPEN_MONITOR=1`;
+        skipped off darwin too, and for a registry built with `open_monitor=False` (`polybridge-ctl
         run`/`resume`, which the app drives). Nothing here can change the dispatch's outcome, and
         the response never claims the app opened.
         """
@@ -1204,7 +1218,7 @@ class TaskRegistry:
                 return
             if os.environ.get(lineage.ENV_TASK_ID):
                 return
-            if sys.platform != "darwin" or os.environ.get(OPEN_MONITOR_ENV) == "0":
+            if sys.platform != "darwin" or os.environ.get(OPEN_MONITOR_ENV) != "1":
                 return
             job = asyncio.create_task(
                 self._open_monitor_job(task), name=f"pb-open-monitor-{task.task_id}"

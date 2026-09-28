@@ -1232,3 +1232,31 @@ async def test_the_enforcement_reported_and_persisted_reflects_the_network_reque
     record = store.read(tmp_path, task.task_id)
     assert record is not None
     assert record.enforcement["network_access"] == "enabled"
+
+
+def test_the_git_probes_never_run_repository_configured_programs(tmp_path: Path) -> None:
+    """The baseline and branch probes run in the server process before any agent sandbox exists,
+    so neither a `core.fsmonitor` hook nor a clean filter on a tracked, modified file may run."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    run = lambda *a: subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True)
+    run("init", "-q")
+    run("config", "user.email", "t@t")
+    run("config", "user.name", "t")
+    (repo / ".gitattributes").write_text("*.txt filter=evil\n")
+    (repo / "file.txt").write_text("one")
+    run("add", ".")
+    run("commit", "-qm", "x")
+    marker = tmp_path / "ran"
+    hook = tmp_path / "hook.sh"
+    hook.write_text(f"#!/bin/sh\ntouch {marker}\ncat\n")
+    hook.chmod(0o755)
+    run("config", "core.fsmonitor", str(hook))
+    run("config", "filter.evil.clean", str(hook))
+    (repo / "file.txt").write_text("two")
+
+    base_commit, _ = tasks_module._git_baseline(repo)
+    tasks_module._publish_branch_notice("publish", repo, _codex_enforcement("publish"))
+
+    assert base_commit is not None
+    assert not marker.exists()

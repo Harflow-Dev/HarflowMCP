@@ -22,6 +22,8 @@ from . import backends, control, identity, inbox, store
 from .backends import DEFAULT_BACKEND, DEFAULT_FREEDOM, FREEDOMS
 from .events import EVENT_KINDS, events_path, read_page, read_recent
 from .tasks import (
+    GIT_SAFE_CONFIG,
+    GIT_SAFE_ENV,
     TERMINAL_STATUSES,
     RepoUnavailableError,
     SessionBusyError,
@@ -215,7 +217,8 @@ def _resolve_repo_path(repo_path: str) -> Path:
         raise MCPError(INVALID_PARAMS, f"repo_path is not a directory: {path}")
 
     probe = subprocess.run(
-        ["git", "-C", str(path), "rev-parse", "--is-inside-work-tree"],
+        ["git", "-C", str(path), *GIT_SAFE_CONFIG, "rev-parse", "--is-inside-work-tree"],
+        env={**os.environ, **GIT_SAFE_ENV},
         capture_output=True,
         text=True,
         check=False,
