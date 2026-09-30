@@ -556,6 +556,9 @@ class Task:
     group: str | None = None
     """An optional caller-chosen label, inherited by nested dispatches unless overridden — see
     `TaskRegistry.start`'s `group` parameter."""
+    title: str | None = None
+    """An optional short human-readable label — see `start_task`'s `title`. Never inherited from a
+    caller; a resume carries the resumed task's own."""
     lineage_detected: str | None = None
     """Which `lineage.detect_caller` method found this task's caller (`"pb_task_id"` | `"session"`
     | `"ancestry"`), or None if no caller was detected — i.e. this is a root task."""
@@ -683,6 +686,7 @@ class Task:
             "depth": self.depth,
             "max_depth": self.max_depth,
             "group": self.group,
+            "title": self.title,
             "lineage_detected": self.lineage_detected,
             "live_input": self.live_input,
             "notices": list(self.bridge_notices),
@@ -822,6 +826,7 @@ class TaskRegistry:
         reasoning_effort: str | None = None,
         network: bool | None = None,
         group: str | None = None,
+        title: str | None = None,
     ) -> Task:
         """Dispatch a fresh session. Returns once the subprocess exists, not once it finishes."""
         # Only some backends let us name the session up front. Where we can, knowing it immediately
@@ -865,6 +870,7 @@ class TaskRegistry:
             depth=depth,
             max_depth=max_depth,
             group=resolved_group,
+            title=title,
             lineage_detected=lineage_detected,
         )
 
@@ -952,6 +958,8 @@ class TaskRegistry:
                     depth=depth,
                     max_depth=max_depth,
                     group=resolved_group,
+                    # The resumed task's own title, whoever the caller is — unlike `group`.
+                    title=parent.title,
                     lineage_detected=lineage_detected,
                 )
         except control.LockTimeout:
@@ -979,6 +987,7 @@ class TaskRegistry:
         depth: int = 0,
         max_depth: int | None = None,
         group: str | None = None,
+        title: str | None = None,
         lineage_detected: str | None = None,
     ) -> Task:
         # Re-checked at the point of execution, not only where the argv was built, so no future
@@ -1109,6 +1118,7 @@ class TaskRegistry:
             depth=depth,
             max_depth=max_depth,
             group=group,
+            title=title,
             lineage_detected=lineage_detected,
             live_input=invocation.live_input,
         )
@@ -1149,6 +1159,7 @@ class TaskRegistry:
                     "depth": task.depth,
                     "max_depth": task.max_depth,
                     "group": task.group,
+                    "title": task.title,
                     "lineage_detected": task.lineage_detected,
                     "live_input": task.live_input,
                 },
@@ -1711,6 +1722,7 @@ class TaskRegistry:
                 depth=task.depth,
                 max_depth=task.max_depth,
                 group=task.group,
+                title=task.title,
                 lineage_detected=task.lineage_detected,
                 live_input=task.live_input,
                 input_after_result=task.input_after_result,
@@ -2541,6 +2553,7 @@ class TaskRegistry:
                     depth=depth,
                     max_depth=max_depth,
                     group=resolved_group,
+                    title=record.title,
                     lineage_detected=lineage_detected,
                 )
         except control.LockTimeout:

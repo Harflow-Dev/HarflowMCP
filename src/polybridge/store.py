@@ -110,6 +110,10 @@ class TaskRecord:
     group: str | None = None
     """An optional caller-chosen label, inherited by nested dispatches unless overridden — see
     `TaskRegistry.start`'s `group` parameter."""
+    title: str | None = None
+    """An optional short human-readable label for the Monitor — see `start_task`'s `title`. A
+    resume carries the resumed task's title; a fresh start never inherits one. None for a record
+    written before this field existed."""
     lineage_detected: str | None = None
     """Which `lineage.detect_caller` method found this task's caller (`"pb_task_id"` | `"session"`
     | `"ancestry"`), or None if no caller was detected."""
@@ -561,6 +565,7 @@ def snapshot(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
         "depth": record.depth,
         "max_depth": record.max_depth,
         "group": record.group,
+        "title": record.title,
         "lineage_detected": record.lineage_detected,
         "live_input": record.live_input,
         "summary": state.summary,
@@ -616,6 +621,7 @@ def brief(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
         "depth": record.depth,
         "max_depth": record.max_depth,
         "group": record.group,
+        "title": record.title,
         "lineage_detected": record.lineage_detected,
         "live_input": record.live_input,
         "notices": list(record.bridge_notices),

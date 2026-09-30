@@ -106,6 +106,7 @@ def make_lineage_record(
     depth: int = 0,
     max_depth: int | None = 2,
     group: str | None = None,
+    title: str | None = None,
     session_id: str | None = None,
     status: str = "running",
     root_task_id: str | None = None,
@@ -124,6 +125,7 @@ def make_lineage_record(
         depth=depth,
         max_depth=max_depth,
         group=group,
+        title=title,
         root_task_id=root_task_id,
         status=status,
     )
@@ -544,6 +546,195 @@ async def test_start_task_rejects_an_empty_group(git_repo: Path) -> None:
 async def test_start_task_rejects_an_overlong_group(git_repo: Path) -> None:
     with pytest.raises(MCPError, match="128"):
         await call("start_task", prompt="x", repo_path=str(git_repo), group="g" * 129)
+
+
+# --- title: recorded everywhere, never inherited from a caller ------------------------------------
+
+
+def _started_event(registry: TaskRegistry, task_id: str) -> dict:
+    lines = [
+        json.loads(line)
+        for line in (registry.log_dir / f"{task_id}.events.jsonl").read_text().splitlines()
+    ]
+    return next(e for e in lines if e["kind"] == "task_started")
+
+
+async def test_a_title_reaches_the_task_its_record_and_the_task_started_event(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = TaskRegistry(log_dir=tmp_path / "streams")
+    fake = _FakeBackend()
+    monkeypatch.setitem(backends.BACKENDS, fake.name, fake)
+
+    task = await registry.start("hi", tmp_path, backend=fake, title="Fix login")
+    await task.done.wait()
+
+    assert task.title == "Fix login"
+    assert task.brief()["title"] == "Fix login"
+    assert task.snapshot()["title"] == "Fix login"
+    record = store.read(registry.log_dir, task.task_id)
+    assert record is not None
+    assert record.title == "Fix login"
+    assert store.brief(registry.log_dir, record)["title"] == "Fix login"
+    assert store.snapshot(registry.log_dir, record)["title"] == "Fix login"
+    assert _started_event(registry, task.task_id)["title"] == "Fix login"
+
+
+async def test_a_task_started_without_a_title_has_none_everywhere(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = TaskRegistry(log_dir=tmp_path / "streams")
+    fake = _FakeBackend()
+    monkeypatch.setitem(backends.BACKENDS, fake.name, fake)
+
+    task = await registry.start("hi", tmp_path, backend=fake)
+    await task.done.wait()
+
+    assert task.title is None
+    assert task.brief()["title"] is None
+    record = store.read(registry.log_dir, task.task_id)
+    assert record is not None
+    assert record.title is None
+    assert _started_event(registry, task.task_id)["title"] is None
+
+
+async def test_a_spawned_task_under_a_titled_caller_gets_no_title(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = TaskRegistry(log_dir=tmp_path / "streams")
+    fake = _FakeBackend(enforcement_kwargs={"writable_roots": ("/tmp",)})
+    monkeypatch.setitem(backends.BACKENDS, fake.name, fake)
+    parent = make_lineage_record(
+        tmp_path,
+        "parent-task",
+        backend=fake.name,
+        enforcement=fake.enforcement("write_in_repo").as_dict(),
+        title="Caller title",
+        root_task_id="parent-task",
+    )
+    monkeypatch.setattr(lineage, "detect_caller", lambda *a, **k: Caller(parent, "session"))
+
+    task = await registry.start("hi", tmp_path, backend=fake, freedom="write_in_repo")
+    await task.done.wait()
+
+    assert task.spawned_by == "parent-task"
+    assert task.title is None
+
+
+async def test_an_explicit_title_is_kept_under_a_titled_caller(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = TaskRegistry(log_dir=tmp_path / "streams")
+    fake = _FakeBackend(enforcement_kwargs={"writable_roots": ("/tmp",)})
+    monkeypatch.setitem(backends.BACKENDS, fake.name, fake)
+    parent = make_lineage_record(
+        tmp_path,
+        "parent-task",
+        backend=fake.name,
+        enforcement=fake.enforcement("write_in_repo").as_dict(),
+        title="Caller title",
+        root_task_id="parent-task",
+    )
+    monkeypatch.setattr(lineage, "detect_caller", lambda *a, **k: Caller(parent, "session"))
+
+    task = await registry.start(
+        "hi", tmp_path, backend=fake, freedom="write_in_repo", title="Own title"
+    )
+    await task.done.wait()
+
+    assert task.title == "Own title"
+
+
+async def test_a_live_resume_carries_the_resumed_tasks_title_not_the_callers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = TaskRegistry(log_dir=tmp_path / "streams")
+    fake = _FakeBackend(enforcement_kwargs={"writable_roots": ("/tmp",)})
+    monkeypatch.setitem(backends.BACKENDS, fake.name, fake)
+    parent = await registry.start("hi", tmp_path, backend=fake, title="B")
+    await parent.done.wait()
+    parent.session_id = "s1"
+    caller = make_lineage_record(
+        tmp_path,
+        "caller-task",
+        backend=fake.name,
+        enforcement=fake.enforcement("write_in_repo").as_dict(),
+        title="A",
+        root_task_id="caller-task",
+    )
+    monkeypatch.setattr(lineage, "detect_caller", lambda *a, **k: Caller(caller, "session"))
+
+    child = await registry.resume(parent, "carry on")
+    await child.done.wait()
+
+    assert child.title == "B"
+    record = store.read(registry.log_dir, child.task_id)
+    assert record is not None
+    assert record.title == "B"
+
+
+async def test_a_recovered_resume_carries_the_recorded_title_not_the_callers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = TaskRegistry(log_dir=tmp_path / "streams")
+    fake = _FakeBackend(enforcement_kwargs={"writable_roots": ("/tmp",)})
+    monkeypatch.setitem(backends.BACKENDS, fake.name, fake)
+    resumed = make_lineage_record(
+        tmp_path,
+        "resumed-task",
+        backend=fake.name,
+        session_id="s1",
+        status="completed",
+        title="B",
+    )
+    store.write(registry.log_dir, resumed)
+    caller = make_lineage_record(
+        tmp_path,
+        "caller-task",
+        backend=fake.name,
+        enforcement=fake.enforcement("write_in_repo").as_dict(),
+        title="A",
+        root_task_id="caller-task",
+    )
+    monkeypatch.setattr(lineage, "detect_caller", lambda *a, **k: Caller(caller, "session"))
+
+    child = await registry.resume_record(resumed, "carry on")
+    await child.done.wait()
+
+    assert child.title == "B"
+
+
+@pytest.mark.usefixtures("fake_backend_clis")
+@pytest.mark.parametrize("title", ["x" * 91, "line\nbreak", "tab\there", "bell\x07", "del\x7f"])
+async def test_start_task_rejects_a_bad_title(git_repo: Path, title: str) -> None:
+    with pytest.raises(MCPError, match="title"):
+        await call("start_task", prompt="x", repo_path=str(git_repo), title=title)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, None),
+        ("", None),
+        ("   ", None),
+        ("  Fix login  ", "Fix login"),
+        ("x" * 90, "x" * 90),
+        ("  " + "x" * 90 + "  ", "x" * 90),
+    ],
+)
+def test_normalize_title(raw: str | None, expected: str | None) -> None:
+    assert server._normalize_title(raw) == expected
+
+
+def test_normalize_title_rejects_91_characters() -> None:
+    with pytest.raises(MCPError, match="90"):
+        server._normalize_title("x" * 91)
+
+
+@pytest.mark.parametrize("bad", ["a\nb", "a\tb", "a\x00b", "a\x7fb", "a​b", "a b"])
+def test_normalize_title_rejects_control_characters(bad: str) -> None:
+    with pytest.raises(MCPError, match="control"):
+        server._normalize_title(bad)
 
 
 # --- Session lock around resume_record's check-and-spawn --------------------------------------

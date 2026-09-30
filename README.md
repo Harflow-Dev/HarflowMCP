@@ -109,7 +109,7 @@ claude-desktop`.
 | Tool | Blocking? | What it does |
 |---|---|---|
 | `list_backends()` | No | What's installed, its version, and what each backend can actually do |
-| `start_task(prompt, repo_path, backend, freedom, model, max_turns, reasoning_effort, network, group)` | No | Dispatches, returns a `task_id` immediately |
+| `start_task(prompt, repo_path, backend, freedom, model, max_turns, reasoning_effort, network, group, title)` | No | Dispatches, returns a `task_id` immediately |
 | `get_task_status(task_id, include_tail=False)` | No | Status, summary, turns, usage, denials, enforcement, `recent_activity`; `last_output_tail` omitted by default (or shortened for failed tasks), set `include_tail=True` for the full 20-line tail |
 | `wait_for_task(task_id, timeout_seconds=55, include_tail=False)` | Until done or timeout | Same shaping as `get_task_status`; on timeout returns `running` and **leaves the run alone** |
 | `resume_task(task_id, followup_prompt, max_turns, network)` | No | Continues that session as a **new** task; `network` omitted inherits the parent's, an explicit boolean overrides it |
@@ -368,6 +368,17 @@ root task), `max_depth` (taken from the root's `PB_MAX_DEPTH`, default 2), an op
 (a `start_task` parameter, inherited by nested dispatches), and `lineage_detected` — which method
 found the caller, or null if none was found. All of them appear in `get_task_status`, `list_tasks`
 and `polybridge-ctl`. `parent_task_id` keeps its meaning of "resumed from".
+
+**`title`.** `start_task` also takes an optional `title`: a short human-readable label (trimmed;
+at most 90 characters; control characters are rejected; empty means none) that the Monitor shows
+in place of a prompt-derived name. It appears as `title` in `get_task_status`, `list_tasks`, the
+`task_started` event and the task record. Inheritance: an explicit title wins; `resume_task`
+takes no title and the continuation carries the *resumed task's* title, whoever the caller is
+(unlike `group`, which follows the caller); a fresh start, including a nested dispatch under a
+titled caller, never inherits one. There is no `polybridge-ctl run --title` and no
+`CTL_JSON_VERSION` bump, so mixed versions degrade quietly, by design: an older installed
+`polybridge-ctl` drops `title` from its output, an older server writing a record can erase it,
+and an older server does not accept the parameter at all.
 
 **Detection is best-effort.** Every spawned agent gets `PB_TASK_ID`, `PB_ROOT_TASK_ID` and
 `PB_DEPTH` in its environment, but codex and vibe filter the environment before starting their MCP

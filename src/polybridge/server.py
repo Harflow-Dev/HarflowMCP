@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +46,9 @@ DEFAULT_WAIT_SECONDS = 55
 # Emitted while waiting so the client can see the wait is alive; per the MCP spec a client may also
 # reset its request timeout on progress, which is what makes longer explicit waits viable.
 PROGRESS_INTERVAL_SECONDS = 5.0
+
+# Matches the Monitor's `TaskTitle.maxLength`.
+MAX_TITLE_LENGTH = 90
 
 # What an MCP status response carries in place of the full raw tail (see `_status_payload`).
 RECENT_ACTIVITY_LIMIT = 5
@@ -183,6 +187,31 @@ def _check_group(group: str | None) -> None:
         )
 
 
+def _normalize_title(title: str | None) -> str | None:
+    if title is None:
+        return None
+    stripped = title.strip()
+    if not stripped:
+        return None
+    if len(stripped) > MAX_TITLE_LENGTH:
+        raise MCPError(
+            INVALID_PARAMS,
+            f"title must be at most {MAX_TITLE_LENGTH} characters, got {len(stripped)}; "
+            "shorten it or omit it",
+        )
+    if any(
+        # Zl/Zp: U+2028/U+2029 break a line as surely as "\n" does.
+        unicodedata.category(ch).startswith("C") or unicodedata.category(ch) in ("Zl", "Zp")
+        for ch in stripped
+    ):
+        raise MCPError(
+            INVALID_PARAMS,
+            "title must not contain control characters (including newlines); "
+            "use a single plain line of text",
+        )
+    return stripped
+
+
 def _check_network(backend, freedom: str, network: bool | None) -> None:
     # Strict on purpose: anything other than a real boolean or None is refused rather than
     # truthy-coerced — "yes"/1/0 must not silently become a network decision, and a coerced
@@ -254,6 +283,7 @@ async def start_task(
     reasoning_effort: str | None = None,
     network: StrictBool | None = None,
     group: str | None = None,
+    title: str | None = None,
 ) -> dict[str, Any]:
     """Dispatch a coding task to a headless agent and return immediately.
 
@@ -295,6 +325,10 @@ async def start_task(
             agent makes through polybridge (unless that dispatch gives its own). Purely
             informational — polybridge does not act on it — useful for tagging a family of
             dispatches you want to find together later via list_tasks.
+        title: Optional short human-readable label (at most 90 characters after trimming, no
+            control characters) shown for this task in the Monitor. Purely informational. It is
+            never inherited from a calling task: a dispatch without a title has none. A
+            resume_task continuation carries the resumed task's title.
 
     Returns the new task_id and its starting state. The run continues in the background; poll
     get_task_status or call wait_for_task to follow it.
@@ -318,6 +352,7 @@ async def start_task(
     _check_model(chosen, model)
     _check_network(chosen, freedom, network)
     _check_group(group)
+    normalized_title = _normalize_title(title)
     path = await _validate_repo_path(repo_path)
 
     try:
@@ -331,6 +366,7 @@ async def start_task(
             reasoning_effort=reasoning_effort,
             network=network,
             group=group,
+            title=normalized_title,
         )
     except backends.UnsupportedCapability as exc:
         # Covers `NestedDispatchRefused` too — it subclasses `UnsupportedCapability`, and this cap

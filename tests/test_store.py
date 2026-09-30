@@ -81,6 +81,51 @@ def test_a_pre_change_record_with_no_effort_field_still_loads_as_none(tmp_path: 
     assert loaded.reasoning_effort is None
 
 
+def test_round_trips_a_title(tmp_path: Path) -> None:
+    store.write(tmp_path, make_record(title="Fix login"))
+
+    loaded = store.read(tmp_path, "task-1")
+
+    assert loaded is not None
+    assert loaded.title == "Fix login"
+
+
+def test_a_pre_change_record_with_no_title_key_still_loads_as_none(tmp_path: Path) -> None:
+    store.write(tmp_path, make_record(title="x"))
+    path = store.record_path(tmp_path, "task-1")
+    raw = json.loads(path.read_text())
+    del raw["title"]
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    loaded = store.read(tmp_path, "task-1")
+
+    assert loaded is not None
+    assert loaded.title is None
+    assert store.brief(tmp_path, loaded)["title"] is None
+    assert store.snapshot(tmp_path, loaded)["title"] is None
+
+
+def test_live_and_recovered_briefs_both_expose_the_same_title(tmp_path: Path) -> None:
+    from polybridge.tasks import Task
+
+    record = make_record(title="Fix login", status="completed", exit_code=0)
+    write_log(tmp_path, record.task_id, RESULT_EVENT)
+    live = Task(
+        task_id="t",
+        backend="claude",
+        session_id=SESSION,
+        repo_path=tmp_path,
+        prompt="x",
+        max_turns=5,
+        log_path=tmp_path / "t.jsonl",
+        started_at=datetime.now(timezone.utc),
+        title="Fix login",
+    )
+
+    assert store.brief(tmp_path, record)["title"] == live.brief()["title"] == "Fix login"
+    assert store.snapshot(tmp_path, record)["title"] == live.snapshot()["title"] == "Fix login"
+
+
 def test_round_trips_enforcement_and_bridge_notices(tmp_path: Path) -> None:
     enforcement = {
         "freedom": "write_in_repo",
