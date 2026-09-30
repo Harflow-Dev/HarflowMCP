@@ -102,6 +102,8 @@ def test_run_returns_the_task_id_and_the_child_owns_the_task_to_the_end(git_repo
         ["--backend", "nope", "--prompt", "hi"],
         ["--backend", "fake", "--prompt", "   "],
         ["--backend", "fake", "--prompt", "hi", "--freedom", "godmode"],
+        ["--backend", "fake", "--prompt", "hi", "--title", "two\nlines"],
+        ["--backend", "fake", "--prompt", "hi", "--title", "x" * 91],
     ],
 )
 def test_run_reports_validation_errors_from_the_child(git_repo: Path, argv_tail) -> None:
@@ -111,6 +113,24 @@ def test_run_reports_validation_errors_from_the_child(git_repo: Path, argv_tail)
     doc = _one(out)
     assert doc["v"] == 2 and doc["error"]["code"] == "invalid_params" and doc["error"]["message"]
     assert store.read_all(default_log_dir()) == []
+
+
+def test_run_records_a_title_normalised_like_start_task(git_repo: Path) -> None:
+    code, out, err = drive(
+        "ctl", "run", "--backend", "fake", "--repo", str(git_repo), "--prompt", "hi",
+        "--title", "  MT-2477 iOS review  ", "--json",
+    )
+
+    assert code == 0, err
+    record = _settled(_one(out)["result"]["task_id"])
+    assert record.title == "MT-2477 iOS review"
+
+
+def test_run_without_a_title_records_none(git_repo: Path) -> None:
+    code, out, err = drive("ctl", "run", "--backend", "fake", "--repo", str(git_repo), "--prompt", "hi", "--json")
+
+    assert code == 0, err
+    assert _settled(_one(out)["result"]["task_id"]).title is None
 
 
 def test_run_reports_a_bad_repo(tmp_path: Path) -> None:

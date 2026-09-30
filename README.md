@@ -375,8 +375,8 @@ in place of a prompt-derived name. It appears as `title` in `get_task_status`, `
 `task_started` event and the task record. Inheritance: an explicit title wins; `resume_task`
 takes no title and the continuation carries the *resumed task's* title, whoever the caller is
 (unlike `group`, which follows the caller); a fresh start, including a nested dispatch under a
-titled caller, never inherits one. There is no `polybridge-ctl run --title` and no
-`CTL_JSON_VERSION` bump, so mixed versions degrade quietly, by design: an older installed
+titled caller, never inherits one. `polybridge-ctl run --title T` sets it the same way, with the
+same validation. There is no `CTL_JSON_VERSION` bump, so mixed versions degrade quietly, by design: an older installed
 `polybridge-ctl` drops `title` from its output, an older server writing a record can erase it,
 and an older server does not accept the parameter at all.
 
@@ -514,7 +514,7 @@ polybridge-ctl cancel <task_id> [--json]
 polybridge-ctl takeover <task_id> [--json]
 polybridge-ctl takeover-attach <task_id> --pid <pid> [--json]
 polybridge-ctl run --backend B --repo R --prompt P [--freedom F] [--model M] [--max-turns N]
-                   [--reasoning-effort E] [--network true|false] [--group G] [--json]
+                   [--reasoning-effort E] [--network true|false] [--group G] [--title T] [--json]
 polybridge-ctl resume <task_id> <text> [--max-turns N] [--network true|false] [--json]
 ```
 

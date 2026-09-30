@@ -124,6 +124,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     run_p.add_argument("--reasoning-effort", default=None)
     run_p.add_argument("--network", choices=("true", "false"), default=None)
     run_p.add_argument("--group", default=None)
+    run_p.add_argument("--title", default=None)
     run_p.add_argument("--json", action="store_true")
 
     resume_p = sub.add_parser(
@@ -393,6 +394,7 @@ def _run_action(args: argparse.Namespace):
         server._check_model(chosen, args.model)
         server._check_network(chosen, freedom, network)
         server._check_group(args.group)
+        title = server._normalize_title(args.title)
         path = await server._validate_repo_path(args.repo)
         return await registry.start(
             args.prompt,
@@ -404,6 +406,7 @@ def _run_action(args: argparse.Namespace):
             reasoning_effort=args.reasoning_effort,
             network=network,
             group=args.group,
+            title=title,
         )
 
     return action
