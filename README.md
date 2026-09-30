@@ -646,12 +646,13 @@ What it reads and runs — it never writes polybridge's own state:
 
 - **Lists and status** only from `polybridge-ctl list/status --json`, refreshed on FSEvents for
   `*.meta.json` under `~/.polybridge/tasks/` (debounced to 1 s), plus a slow poll while anything runs.
-- **The sidebar's backend filter** is always-present, horizontally scrollable capsule tabs — "All"
-  plus every backend `polybridge-ctl backends` reports, in registry order, plus any backend seen
-  only in task history — never only the backends that already have tasks; a tab for a backend not
-  found on PATH stays selectable, dimmed, with an honest empty state when its filtered list is empty.
+- **The sidebar's backend filter** is an always-visible "All agents" menu — "All" plus every
+  backend `polybridge-ctl backends` reports, in registry order, plus any backend seen only in task
+  history — never only the backends that already have tasks; a backend not found on PATH stays
+  selectable, marked as such, with an honest empty state when its filtered list is empty.
 - **Live timelines** by tailing `<task_id>.events.jsonl` (v1) for the tasks on screen, by byte
-  offset; unknown kinds are ignored. Titles come from each log's first line.
+  offset; unknown kinds are ignored. Titles are the task's own `title` when it was started with one,
+  otherwise taken from each log's first line.
 - **A follow-up continues the same conversation**, never a new row: the sidebar groups tasks
   connected by `parent_task_id` (a resume chain — distinct from `spawned_by`, which is who *called*
   `start_task`/`resume_task`) into one row and one detail screen. The row/screen is named by the
