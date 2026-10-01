@@ -7,3 +7,9 @@ build/
 .pytest_cache/
 uv.lock
 .DS_Store
+.build/
+DerivedData/
+xcuserdata/
+macos/build/
+.swiftpm/
+.vscode-build/

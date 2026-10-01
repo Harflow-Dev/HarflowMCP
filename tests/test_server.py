@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+import subprocess
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 from mcp import Client, MCPError
 
-from polybridge import server, store
-from polybridge.tasks import Task
+from polybridge import identity, server, store
+from polybridge.tasks import Task, TAIL_LINES_RETURNED
 
 
 async def call(tool: str, **arguments):
@@ -44,16 +48,18 @@ def fake_task(tmp_path: Path) -> Task:
     return task
 
 
-async def test_all_seven_tools_are_exposed() -> None:
+async def test_all_nine_tools_are_exposed() -> None:
     async with Client(server.mcp) as client:
         names = sorted(tool.name for tool in (await client.list_tools()).tools)
 
     assert names == [
         "cancel_task",
+        "get_task_events",
         "get_task_status",
         "list_backends",
         "list_tasks",
         "resume_task",
+        "send_message",
         "start_task",
         "wait_for_task",
     ]
@@ -88,11 +94,31 @@ async def test_unknown_backend_is_rejected(git_repo: Path) -> None:
         await call("start_task", prompt="x", repo_path=str(git_repo), backend="gemini")
 
 
+async def test_missing_backend_cli_names_the_path_and_how_to_re_register(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The server's PATH is frozen at registration, so a CLI a terminal finds can still be missing
+    here; the error must say which PATH was searched and how to refresh it, not just "install it"."""
+    monkeypatch.setattr(server.backends, "is_installed", lambda backend: False)
+    monkeypatch.setenv("PATH", "/frozen/at/install:/usr/bin")
+
+    with pytest.raises(MCPError) as excinfo:
+        await call("start_task", prompt="x", repo_path=str(git_repo), backend="codex")
+
+    message = str(excinfo.value)
+    assert "`codex`" in message
+    assert "(/frozen/at/install:/usr/bin)" in message
+    assert "Settings → Harnesses → Update" in message
+    assert "`polybridge-setup`" in message
+
+
+@pytest.mark.usefixtures("fake_backend_clis")
 async def test_unknown_freedom_is_rejected(git_repo: Path) -> None:
     with pytest.raises(MCPError, match="unknown freedom"):
         await call("start_task", prompt="x", repo_path=str(git_repo), freedom="yolo")
 
 
+@pytest.mark.usefixtures("fake_backend_clis")
 async def test_turn_cap_on_codex_fails_rather_than_being_ignored(git_repo: Path) -> None:
     """Dropping it silently would leave the caller believing a cap was applied."""
     with pytest.raises(MCPError, match="no turn cap"):
@@ -101,6 +127,7 @@ async def test_turn_cap_on_codex_fails_rather_than_being_ignored(git_repo: Path)
         )
 
 
+@pytest.mark.usefixtures("fake_backend_clis")
 async def test_model_on_vibe_fails_rather_than_being_ignored(git_repo: Path) -> None:
     """vibe has no model-selection flag at all — a silent no-op is exactly what this repo forbids."""
     with pytest.raises(MCPError, match="no model selection flag"):
@@ -120,11 +147,13 @@ async def test_model_on_vibe_resume_surfaces_as_invalid_params_not_an_internal_e
     fake_task.model = "mistral-medium"
     fake_task.status = "completed"
     fake_task.done.set()
+    server._reg().persist(fake_task)
 
     with pytest.raises(MCPError, match="no model selection flag"):
         await call("resume_task", task_id=fake_task.task_id, followup_prompt="carry on")
 
 
+@pytest.mark.usefixtures("fake_backend_clis")
 async def test_invalid_reasoning_effort_fails_before_a_task_exists(git_repo: Path) -> None:
     """Not just a backend-specific quirk: an out-of-vocabulary value is rejected up front."""
     with pytest.raises(MCPError, match="unknown reasoning_effort"):
@@ -132,6 +161,7 @@ async def test_invalid_reasoning_effort_fails_before_a_task_exists(git_repo: Pat
     assert (await call("list_tasks")).structured_content["result"] == []
 
 
+@pytest.mark.usefixtures("fake_backend_clis")
 async def test_valid_reasoning_effort_reaches_the_argv_and_the_persisted_record(
     git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -139,8 +169,9 @@ async def test_valid_reasoning_effort_reaches_the_argv_and_the_persisted_record(
     disk, not only an in-memory kwarg a weaker assertion could pass without either one being true."""
     captured: dict = {}
 
-    async def fake_spawn(argv, **kwargs):
-        captured["argv"] = argv
+    async def fake_spawn(invocation, **kwargs):
+        captured["argv"] = invocation.argv
+        captured["invocation"] = invocation
         captured.update(kwargs)
         task = Task(
             task_id="fake-task",
@@ -177,6 +208,7 @@ async def test_valid_reasoning_effort_reaches_the_argv_and_the_persisted_record(
     assert record.reasoning_effort == "high"
 
 
+@pytest.mark.usefixtures("fake_backend_clis")
 async def test_rejects_a_directory_that_is_not_a_git_repo(tmp_path: Path) -> None:
     plain = tmp_path / "not-a-repo"
     plain.mkdir()
@@ -184,6 +216,7 @@ async def test_rejects_a_directory_that_is_not_a_git_repo(tmp_path: Path) -> Non
         await call("start_task", prompt="do a thing", repo_path=str(plain))
 
 
+@pytest.mark.usefixtures("fake_backend_clis")
 async def test_rejects_a_path_that_does_not_exist(tmp_path: Path) -> None:
     with pytest.raises(MCPError, match="does not exist"):
         await call("start_task", prompt="x", repo_path=str(tmp_path / "nope"))
@@ -209,6 +242,24 @@ async def test_unknown_task_id_is_rejected(tool: str, arguments: dict) -> None:
         await call(tool, task_id="no-such-task", **arguments)
 
 
+async def test_cancel_task_response_carries_a_cascade_summary(fake_task: Task) -> None:
+    response = (await call("cancel_task", task_id=fake_task.task_id)).structured_content
+
+    assert response["status"] == "cancelled"
+    assert set(response["cascade"]) == {
+        "cancelled_descendants",
+        "sigkill_survivors",
+        "owner_still_settling",
+        "not_signalled",
+        "not_recorded",
+        "rounds",
+        "cascade_incomplete",
+        "unconverged",
+    }
+    assert response["cascade"]["rounds"] >= 1
+    assert response["cascade"]["cascade_incomplete"] is False
+
+
 async def test_rejects_an_unknown_status_filter() -> None:
     with pytest.raises(MCPError, match="unknown status"):
         await call("list_tasks", status="sleeping")
@@ -227,6 +278,54 @@ async def test_listing_can_filter_by_backend(fake_task: Task) -> None:
 async def test_cannot_resume_a_task_that_is_still_running(fake_task: Task) -> None:
     with pytest.raises(MCPError, match="still running"):
         await call("resume_task", task_id=fake_task.task_id, followup_prompt="carry on")
+
+
+async def test_resume_of_a_recovered_record_refuses_a_retitled_live_run() -> None:
+    """The same guard on the recovered-record branch: a live vibe run renamed itself to
+    `Vibe CLI`, so its markers never match the command line again — but its start time does, so
+    the resume must be refused rather than started against a session still being written to."""
+    captured = identity.capture(os.getpid(), [])
+    assert captured is not None
+    record = store.TaskRecord(
+        task_id="retitled-1",
+        backend="claude",
+        session_id="session-1",
+        markers=["definitely-not-in-the-cmdline"],
+        repo_path="/tmp",
+        started_at=datetime.now(timezone.utc).isoformat(),
+        pid=os.getpid(),
+        status="completed",
+        exit_code=0,
+        start_time=captured["start_time"],
+    )
+    store.write(server._reg().log_dir, record)
+
+    with pytest.raises(MCPError, match="still running"):
+        await call("resume_task", task_id="retitled-1", followup_prompt="carry on")
+
+
+async def test_resume_of_a_recovered_record_refuses_when_ps_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`ps_failed` is undecidable, not dead — uncertainty must block a resume, so the guard
+    refuses rather than starting a second run on a session that may still be live."""
+    monkeypatch.setattr(identity, "_run_ps", lambda pid: None)
+    record = store.TaskRecord(
+        task_id="no-ps-1",
+        backend="claude",
+        session_id="session-1",
+        markers=["session-1"],
+        repo_path="/tmp",
+        started_at=datetime.now(timezone.utc).isoformat(),
+        pid=4321,
+        status="completed",
+        exit_code=0,
+        start_time="Wed Jan  1 00:00:00 2000",
+    )
+    store.write(server._reg().log_dir, record)
+
+    with pytest.raises(MCPError, match="still running"):
+        await call("resume_task", task_id="no-ps-1", followup_prompt="carry on")
 
 
 async def test_cannot_resume_a_task_with_no_session_id(fake_task: Task) -> None:
@@ -306,6 +405,40 @@ async def test_waiting_on_a_recovered_task_does_not_believe_a_stale_terminal_rec
     assert len(ctx.reports) > 1, "the wait ended early instead of polling for its full timeout"
 
 
+async def test_waiting_keeps_polling_a_retitled_live_vibe_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reported bug through the wait path: a live vibe run renamed itself to `Vibe CLI`, so
+    its markers never match the command line again, but its recorded start time does. Believing
+    the marker-only test ended the wait after one tick and reported a `failed` nobody observed."""
+    monkeypatch.setattr(server, "PROGRESS_INTERVAL_SECONDS", 0.01)
+    captured = identity.capture(os.getpid(), [])
+    assert captured is not None
+    # `ps` sees the retitled process: the recorded start time matches, the markers do not.
+    fake = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout=f"{captured['start_time']} Vibe CLI\n", stderr=""
+    )
+    monkeypatch.setattr(identity, "_run_ps", lambda pid: fake)
+    record = store.TaskRecord(
+        task_id="retitled",
+        backend="vibe",
+        session_id="session-1",
+        markers=["definitely-not-in-the-cmdline"],
+        repo_path="/tmp",
+        started_at=datetime.now(timezone.utc).isoformat(),
+        pid=4321,
+        status="running",
+        exit_code=None,
+        start_time=captured["start_time"],
+    )
+    store.write(server._reg().log_dir, record)
+
+    ctx = _RecordingContext()
+    await server._poll_recovered(record, 1, ctx)
+
+    assert len(ctx.reports) > 1, "the wait ended early instead of polling for its full timeout"
+
+
 async def test_waiting_on_a_recovered_task_stops_once_it_has_really_settled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -354,6 +487,7 @@ async def test_a_non_boolean_network_is_refused_rather_than_coerced(value) -> No
     assert "valid boolean" in str(result.content)
 
 
+@pytest.mark.usefixtures("fake_backend_clis")
 async def test_network_true_on_codex_read_only_fails_rather_than_being_ignored(
     git_repo: Path,
 ) -> None:
@@ -371,6 +505,7 @@ async def test_network_true_on_codex_read_only_fails_rather_than_being_ignored(
         )
 
 
+@pytest.mark.usefixtures("fake_backend_clis")
 async def test_network_false_on_a_backend_with_no_barrier_fails_loudly(git_repo: Path) -> None:
     """claude has no sandbox at all, so it cannot impose the barrier `False` asks for. Accepting
     it and reporting `not_controlled` would answer a request with "we don't know"."""
@@ -396,6 +531,7 @@ async def test_resume_task_also_refuses_a_non_boolean_network() -> None:
     assert "valid boolean" in str(result.content)
 
 
+@pytest.mark.usefixtures("fake_backend_clis")
 async def test_a_valid_network_request_reaches_the_argv_enforcement_and_the_record(
     git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -409,8 +545,9 @@ async def test_a_valid_network_request_reaches_the_argv_enforcement_and_the_reco
     """
     captured: dict = {}
 
-    async def fake_spawn(argv, **kwargs):
-        captured["argv"] = argv
+    async def fake_spawn(invocation, **kwargs):
+        captured["argv"] = invocation.argv
+        captured["invocation"] = invocation
         captured.update(kwargs)
         task = Task(
             task_id="fake-task",
@@ -462,8 +599,9 @@ async def test_resume_forwards_network_through_both_server_branches(
     """
     captured: dict = {}
 
-    async def fake_spawn(argv, **kwargs):
-        captured["argv"] = argv
+    async def fake_spawn(invocation, **kwargs):
+        captured["argv"] = invocation.argv
+        captured["invocation"] = invocation
         captured.update(kwargs)
         task = Task(
             task_id="resumed",
@@ -498,6 +636,7 @@ async def test_resume_forwards_network_through_both_server_branches(
         parent.status = "completed"
         parent.done.set()
         registry._tasks[parent.task_id] = parent
+        registry.persist(parent)
         task_id = parent.task_id
     else:
         record = store.TaskRecord(
@@ -518,3 +657,524 @@ async def test_resume_forwards_network_through_both_server_branches(
 
     assert captured["network"] is True
     assert "sandbox_workspace_write.network_access=true" in captured["argv"]
+
+
+# --- send_message (live input) ------------------------------------------------------------------
+
+
+async def test_send_message_queues_for_a_live_task_the_server_owns(fake_task: Task) -> None:
+    fake_task.live_input = True
+    result = (await call("send_message", task_id="task-1", text="also this")).structured_content
+    assert result["status"] == "queued"
+    assert [m["text"] for m in fake_task.inbox_queue] == ["also this"]
+    assert fake_task.pump_wake.is_set()
+
+
+async def test_send_message_refuses_a_task_without_live_input(fake_task: Task) -> None:
+    with pytest.raises(MCPError, match="not started with live input"):
+        await call("send_message", task_id="task-1", text="hi")
+
+
+async def test_send_message_after_close_says_to_resume(fake_task: Task) -> None:
+    fake_task.live_input = True
+    fake_task.inbox_closed = True
+    with pytest.raises(MCPError, match="finished; continue with resume_task"):
+        await call("send_message", task_id="task-1", text="hi")
+
+
+async def test_send_message_validates_its_arguments() -> None:
+    with pytest.raises(MCPError, match="not a valid task id"):
+        await call("send_message", task_id="../etc", text="hi")
+    with pytest.raises(MCPError, match="unknown task_id"):
+        await call("send_message", task_id="nope", text="hi")
+    with pytest.raises(MCPError, match="non-empty"):
+        await call("send_message", task_id="nope", text="  ")
+
+
+async def test_send_message_reaches_a_recorded_task_via_its_inbox(identities) -> None:
+    from conftest import ALIVE_OWNER
+
+    from polybridge import inbox
+
+    log_dir = server._reg().log_dir
+    store.write(
+        log_dir,
+        store.TaskRecord(
+            task_id="other",
+            backend="claude",
+            session_id="s",
+            repo_path="/tmp",
+            started_at=datetime.now(timezone.utc).isoformat(),
+            owner=ALIVE_OWNER,
+            live_input=True,
+        ),
+    )
+    result = (await call("send_message", task_id="other", text="hello")).structured_content
+    assert result["status"] == "queued"
+    messages, _ = inbox.read_new(log_dir, "other", 0)
+    assert [m["text"] for m in messages] == ["hello"]
+
+
+# --- Tests for lean status payloads ----------------------------------------------------------------
+
+
+async def test_get_task_status_default_omits_last_output_tail(fake_task: Task) -> None:
+    """Default: no tail for running/completed tasks."""
+    result = (await call("get_task_status", task_id=fake_task.task_id)).structured_content
+    assert "last_output_tail" not in result
+    assert "recent_activity" in result
+
+
+async def test_get_task_status_with_include_tail_restores_full_tail(
+    fake_task: Task, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """include_tail=True restores the legacy full tail."""
+    # Set up some tail content
+    fake_task.tail = deque(["line1", "line2", "line3"] * 10)  # 30 lines
+
+    result = (
+        await call("get_task_status", task_id=fake_task.task_id, include_tail=True)
+    ).structured_content
+
+    assert "last_output_tail" in result
+    assert len(result["last_output_tail"]) == TAIL_LINES_RETURNED
+
+
+async def test_wait_for_task_default_omits_last_output_tail(fake_task: Task) -> None:
+    """Default wait_for_task: no tail for running tasks."""
+    result = (
+        await call("wait_for_task", task_id=fake_task.task_id, timeout_seconds=1)
+    ).structured_content
+    assert "last_output_tail" not in result
+    assert "recent_activity" in result
+
+
+async def test_wait_for_task_with_include_tail_restores_full_tail(
+    fake_task: Task, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """wait_for_task include_tail=True restores the legacy full tail."""
+    fake_task.tail = deque(["line1", "line2"] * 20)
+
+    result = (
+        await call(
+            "wait_for_task", task_id=fake_task.task_id, timeout_seconds=1, include_tail=True
+        )
+    ).structured_content
+
+    assert "last_output_tail" in result
+
+
+async def test_cancel_task_response_has_recent_activity(fake_task: Task) -> None:
+    """cancel_task response is shaped with recent_activity."""
+    result = (await call("cancel_task", task_id=fake_task.task_id)).structured_content
+    assert "recent_activity" in result
+    assert "cascade" in result
+
+
+# --- Tests for get_task_events tool --------------------------------------------------------------
+
+
+async def test_get_task_events_basic(fake_task: Task, tmp_path: Path) -> None:
+    """Basic get_task_events returns events from the task's events log."""
+    from polybridge.events import EventLog, events_path
+    import os
+
+    log_dir = server._reg().log_dir
+    task_id = fake_task.task_id
+    event_path = events_path(log_dir, task_id)
+    
+    # Ensure the directory exists
+    os.makedirs(str(event_path.parent), exist_ok=True)
+    
+    # Write events directly as JSONL (simulating what would be written by a real task)
+    with event_path.open("w") as f:
+        f.write(
+            json.dumps(
+                {
+                    "v": 1,
+                    "seq": 0,
+                    "observed_at": "2026-01-01T00:00:00Z",
+                    "task_id": task_id,
+                    "kind": "tool_call",
+                    "category": "shell",
+                    "tool": "bash",
+                    "call_id": "c1",
+                }
+            )
+            + "\n"
+        )
+        f.write(
+            json.dumps(
+                {
+                    "v": 1,
+                    "seq": 1,
+                    "observed_at": "2026-01-01T00:00:01Z",
+                    "task_id": task_id,
+                    "kind": "tool_call",
+                    "category": "shell",
+                    "tool": "git",
+                    "call_id": "c2",
+                }
+            )
+            + "\n"
+        )
+
+    result = (await call("get_task_events", task_id=task_id, limit=10)).structured_content
+
+    assert "task_id" in result
+    assert result["task_id"] == task_id
+    assert "events" in result
+    assert len(result["events"]) == 2
+    assert result["events"][0]["kind"] == "tool_call"
+    assert result["events"][0]["category"] == "shell"
+    assert result["has_more"] is False
+
+
+async def test_get_task_events_unknown_task_id_raises() -> None:
+    """Unknown task_id raises INVALID_PARAMS."""
+    with pytest.raises(MCPError, match="unknown task_id"):
+        await call("get_task_events", task_id="no-such-task")
+
+
+async def test_get_task_events_invalid_task_id_raises() -> None:
+    """Invalid task_id raises INVALID_PARAMS."""
+    with pytest.raises(MCPError, match="not a valid task id"):
+        await call("get_task_events", task_id="../etc/passwd")
+
+
+async def test_get_task_events_invalid_limit_raises() -> None:
+    """limit < 1 or > 200 raises INVALID_PARAMS."""
+    with pytest.raises(MCPError, match="limit must be between"):
+        await call("get_task_events", task_id="task-1", limit=0)
+    with pytest.raises(MCPError, match="limit must be between"):
+        await call("get_task_events", task_id="task-1", limit=201)
+
+
+async def test_get_task_events_both_cursors_raises() -> None:
+    """Both before_seq and after_seq raises INVALID_PARAMS."""
+    with pytest.raises(MCPError, match="cannot specify both before_seq and after_seq"):
+        await call("get_task_events", task_id="task-1", before_seq=10, after_seq=5)
+
+
+async def test_get_task_events_empty_kinds_raises() -> None:
+    """kinds=[] raises INVALID_PARAMS."""
+    with pytest.raises(MCPError, match="kinds must be a non-empty list"):
+        await call("get_task_events", task_id="task-1", kinds=[])
+
+
+async def test_get_task_events_unknown_kind_raises(fake_task: Task) -> None:
+    """Unknown kind in kinds raises INVALID_PARAMS."""
+    # Use a valid task_id that exists
+    with pytest.raises(MCPError, match="unknown kind"):
+        await call("get_task_events", task_id=fake_task.task_id, kinds=["unknown_kind"])
+
+
+async def test_get_task_events_kinds_filter(fake_task: Task, tmp_path: Path) -> None:
+    """kinds filter works correctly."""
+    from polybridge.events import events_path
+    import os
+
+    log_dir = server._reg().log_dir
+    task_id = fake_task.task_id
+    event_path = events_path(log_dir, task_id)
+    
+    # Ensure the directory exists
+    os.makedirs(str(event_path.parent), exist_ok=True)
+    
+    # Write events directly
+    with event_path.open("w") as f:
+        f.write(
+            json.dumps(
+                {
+                    "v": 1,
+                    "seq": 0,
+                    "observed_at": "2026-01-01T00:00:00Z",
+                    "task_id": task_id,
+                    "kind": "tool_call",
+                    "tool": "bash",
+                }
+            )
+            + "\n"
+        )
+        f.write(
+            json.dumps(
+                {
+                    "v": 1,
+                    "seq": 1,
+                    "observed_at": "2026-01-01T00:00:01Z",
+                    "task_id": task_id,
+                    "kind": "assistant_text",
+                    "text": "hi",
+                }
+            )
+            + "\n"
+        )
+        f.write(
+            json.dumps(
+                {
+                    "v": 1,
+                    "seq": 2,
+                    "observed_at": "2026-01-01T00:00:02Z",
+                    "task_id": task_id,
+                    "kind": "tool_call",
+                    "tool": "git",
+                }
+            )
+            + "\n"
+        )
+
+    result = (
+        await call("get_task_events", task_id=task_id, kinds=["tool_call"])
+    ).structured_content
+
+    assert len(result["events"]) == 2
+    assert all(e["kind"] == "tool_call" for e in result["events"])
+
+
+async def test_get_task_events_excludes_assistant_delta_by_default(
+    fake_task: Task, tmp_path: Path
+) -> None:
+    """assistant_delta excluded by default."""
+    from polybridge.events import events_path
+    import os
+
+    log_dir = server._reg().log_dir
+    task_id = fake_task.task_id
+    event_path = events_path(log_dir, task_id)
+    
+    # Ensure the directory exists
+    os.makedirs(str(event_path.parent), exist_ok=True)
+    
+    # Write events directly
+    with event_path.open("w") as f:
+        f.write(
+            json.dumps(
+                {
+                    "v": 1,
+                    "seq": 0,
+                    "observed_at": "2026-01-01T00:00:00Z",
+                    "task_id": task_id,
+                    "kind": "assistant_delta",
+                    "text": "chunk",
+                    "message_id": "m1",
+                    "block_index": 0,
+                }
+            )
+            + "\n"
+        )
+        f.write(
+            json.dumps(
+                {
+                    "v": 1,
+                    "seq": 1,
+                    "observed_at": "2026-01-01T00:00:01Z",
+                    "task_id": task_id,
+                    "kind": "assistant_text",
+                    "text": "done",
+                    "message_id": "m1",
+                    "block_index": 0,
+                }
+            )
+            + "\n"
+        )
+
+    result = (await call("get_task_events", task_id=task_id, limit=50)).structured_content
+
+    # assistant_delta should be excluded
+    assert len(result["events"]) == 1
+    assert result["events"][0]["kind"] == "assistant_text"
+
+
+async def test_get_task_events_includes_assistant_delta_when_requested(
+    fake_task: Task, tmp_path: Path
+) -> None:
+    """assistant_delta included when explicitly requested."""
+    from polybridge.events import events_path
+    import os
+
+    log_dir = server._reg().log_dir
+    task_id = fake_task.task_id
+    event_path = events_path(log_dir, task_id)
+    
+    # Ensure the directory exists
+    os.makedirs(str(event_path.parent), exist_ok=True)
+    
+    # Write events directly
+    with event_path.open("w") as f:
+        f.write(
+            json.dumps(
+                {
+                    "v": 1,
+                    "seq": 0,
+                    "observed_at": "2026-01-01T00:00:00Z",
+                    "task_id": task_id,
+                    "kind": "assistant_delta",
+                    "text": "chunk",
+                    "message_id": "m1",
+                    "block_index": 0,
+                }
+            )
+            + "\n"
+        )
+
+    result = (
+        await call("get_task_events", task_id=task_id, kinds=["assistant_delta"])
+    ).structured_content
+
+    assert len(result["events"]) == 1
+    assert result["events"][0]["kind"] == "assistant_delta"
+
+
+async def test_get_task_events_before_seq(fake_task: Task, tmp_path: Path) -> None:
+    """before_seq returns events older than the cursor."""
+    from polybridge.events import events_path
+    import os
+
+    log_dir = server._reg().log_dir
+    task_id = fake_task.task_id
+    event_path = events_path(log_dir, task_id)
+    
+    # Ensure the directory exists
+    os.makedirs(str(event_path.parent), exist_ok=True)
+    
+    # Write events directly
+    with event_path.open("w") as f:
+        for i in range(10):
+            f.write(
+                json.dumps(
+                    {
+                        "v": 1,
+                        "seq": i,
+                        "observed_at": f"2026-01-01T00:00:{i:02d}Z",
+                        "task_id": task_id,
+                        "kind": "tool_call",
+                        "tool": f"cmd{i}",
+                    }
+                )
+                + "\n"
+            )
+
+    result = (
+        await call("get_task_events", task_id=task_id, limit=50, before_seq=5)
+    ).structured_content
+
+    assert len(result["events"]) == 5  # seq 0-4
+    assert result["has_more"] is False
+
+
+async def test_get_task_events_after_seq(fake_task: Task, tmp_path: Path) -> None:
+    """after_seq returns events newer than the cursor."""
+    from polybridge.events import events_path
+    import os
+
+    log_dir = server._reg().log_dir
+    task_id = fake_task.task_id
+    event_path = events_path(log_dir, task_id)
+    
+    # Ensure the directory exists
+    os.makedirs(str(event_path.parent), exist_ok=True)
+    
+    # Write events directly
+    with event_path.open("w") as f:
+        for i in range(10):
+            f.write(
+                json.dumps(
+                    {
+                        "v": 1,
+                        "seq": i,
+                        "observed_at": f"2026-01-01T00:00:{i:02d}Z",
+                        "task_id": task_id,
+                        "kind": "tool_call",
+                        "tool": f"cmd{i}",
+                    }
+                )
+                + "\n"
+            )
+
+    result = (
+        await call("get_task_events", task_id=task_id, limit=50, after_seq=5)
+    ).structured_content
+
+    assert len(result["events"]) == 4  # seq 6-9
+    assert result["has_more"] is False
+
+
+async def test_get_task_events_paging_newest_first(fake_task: Task, tmp_path: Path) -> None:
+    """Default (no cursor) returns newest page."""
+    from polybridge.events import events_path
+    import os
+
+    log_dir = server._reg().log_dir
+    task_id = fake_task.task_id
+    event_path = events_path(log_dir, task_id)
+    
+    # Ensure the directory exists
+    os.makedirs(str(event_path.parent), exist_ok=True)
+    
+    # Write events directly
+    with event_path.open("w") as f:
+        for i in range(10):
+            f.write(
+                json.dumps(
+                    {
+                        "v": 1,
+                        "seq": i,
+                        "observed_at": f"2026-01-01T00:00:{i:02d}Z",
+                        "task_id": task_id,
+                        "kind": "tool_call",
+                        "tool": f"cmd{i}",
+                    }
+                )
+                + "\n"
+            )
+
+    result = (await call("get_task_events", task_id=task_id, limit=5)).structured_content
+
+    assert len(result["events"]) == 5
+    # Should be the newest 5: seq 5-9
+    assert result["events"][0]["tool"] == "cmd5"
+    assert result["events"][4]["tool"] == "cmd9"
+    assert result["has_more"] is True
+
+
+async def test_get_task_status_on_failed_task_keeps_short_tail(
+    fake_task: Task, tmp_path: Path
+) -> None:
+    """Failed tasks keep a short tail (5 lines × 500 chars) by default."""
+    fake_task.status = "failed"
+    fake_task.tail = deque(["line " + "x" * 1000 for _ in range(20)])
+
+    result = (await call("get_task_status", task_id=fake_task.task_id)).structured_content
+
+    assert "last_output_tail" in result
+    assert len(result["last_output_tail"]) == 5
+    # Each line should be truncated to 500 chars
+    for line in result["last_output_tail"]:
+        assert len(line) <= 500
+
+
+async def test_get_task_status_on_recovered_task_shaped(
+    fake_task: Task, tmp_path: Path
+) -> None:
+    """Recovered task path gets the same shaping."""
+    from polybridge import store
+
+    log_dir = server._reg().log_dir
+    # Create a fake recovered record
+    record = store.TaskRecord(
+        task_id="recovered-1",
+        backend="claude",
+        session_id="s",
+        repo_path=str(tmp_path),
+        started_at=datetime.now(timezone.utc).isoformat(),
+        status="completed",
+    )
+    store.write(log_dir, record)
+    # Make sure it's not in the live registry
+    server._reg()._tasks.pop("recovered-1", None)
+
+    result = (await call("get_task_status", task_id="recovered-1")).structured_content
+
+    assert "last_output_tail" not in result
+    assert "recent_activity" in result
+

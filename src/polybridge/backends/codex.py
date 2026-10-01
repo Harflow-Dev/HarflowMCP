@@ -65,12 +65,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from . import normalize as nz
 from .base import (
     EFFORTS,
     Accumulator,
     Capabilities,
     Enforcement,
     Freedom,
+    Invocation,
     NetworkControl,
     ReasoningEffort,
     Status,
@@ -78,6 +80,8 @@ from .base import (
     check_freedom,
     check_network,
     check_reasoning_effort,
+    interactive_session_id_ok,
+    classic_invocation_problem,
 )
 
 BINARY = "codex"
@@ -210,6 +214,41 @@ PERMITTED_C_PAIRS: frozenset[str] = frozenset(
 )
 
 
+def _codex_message(event: dict[str, Any]) -> str | None:
+    """A top-level error/`*.failed` event's message, which codex puts at either `event["message"]`
+    or `event["error"]["message"]`."""
+    message = event.get("message")
+    if isinstance(message, str) and message:
+        return message
+    error = event.get("error")
+    if isinstance(error, dict):
+        nested = error.get("message")
+        if isinstance(nested, str) and nested:
+            return nested
+    return None
+
+
+def _codex_mcp_name(server: Any, tool: Any) -> str:
+    if isinstance(server, str) and isinstance(tool, str):
+        return f"{server}.{tool}"
+    if isinstance(server, str):
+        return server
+    if isinstance(tool, str):
+        return tool
+    return ""
+
+
+def _codex_mcp_result_text(content: Any) -> str | None:
+    if not isinstance(content, list):
+        return None
+    texts = [
+        part.get("text")
+        for part in content
+        if isinstance(part, dict) and isinstance(part.get("text"), str)
+    ]
+    return "".join(texts) if texts else None
+
+
 class UnsafeInvocationError(RuntimeError):
     """An argv was assembled without this backend's required guarantees."""
 
@@ -252,6 +291,7 @@ class CodexBackend:
                 "surrounding network can still defeat it"
             ),
         ),
+        supports_live_input=False,
     )
 
     def build_start_argv(
@@ -265,15 +305,16 @@ class CodexBackend:
         max_turns: int | None,
         reasoning_effort: str | None,
         network: bool | None = None,
-    ) -> list[str]:
+    ) -> Invocation:
         if session_id is not None:
             raise ValueError("codex mints its own session id; one cannot be supplied")
         self._reject_turn_cap(max_turns)
         argv = [BINARY, "exec", *self._options(repo, freedom, model, reasoning_effort, network)]
         # `--` then the prompt: last, and explicitly not parsed as an option however it looks.
         argv += ["--", self._check_prompt(prompt)]
-        self.assert_safe(argv, freedom, network)
-        return argv
+        invocation = Invocation(argv)
+        self.assert_safe(invocation, freedom, network)
+        return invocation
 
     def build_resume_argv(
         self,
@@ -286,7 +327,7 @@ class CodexBackend:
         max_turns: int | None,
         reasoning_effort: str | None,
         network: bool | None = None,
-    ) -> list[str]:
+    ) -> Invocation:
         if not session_id:
             raise ValueError("resuming codex needs the thread id its first run reported")
         self._reject_turn_cap(max_turns)
@@ -299,8 +340,9 @@ class CodexBackend:
         ]
         # `codex exec resume [SESSION_ID] [PROMPT]` — both positional, after `--`.
         argv += ["--", session_id, self._check_prompt(prompt)]
-        self.assert_safe(argv, freedom, network)
-        return argv
+        invocation = Invocation(argv)
+        self.assert_safe(invocation, freedom, network)
+        return invocation
 
     def _options(
         self,
@@ -354,7 +396,14 @@ class CodexBackend:
             raise ValueError("prompt must be a non-empty string")
         return prompt
 
-    def assert_safe(self, argv: list[str], freedom: Freedom, network: bool | None = None) -> None:
+    def assert_safe(
+        self, invocation: Invocation, freedom: Freedom, network: bool | None = None
+    ) -> None:
+        # No live input here: only a devnull-stdin Invocation is a shape this backend ever builds.
+        problem = classic_invocation_problem(invocation)
+        if problem is not None:
+            raise UnsafeInvocationError(problem)
+        argv = invocation.argv
         # Rejects an unknown freedom outright rather than letting SANDBOX_MODES[freedom] raise a
         # bare KeyError below. The network request is resolved here too — assert_safe is the
         # final execution seam, re-run at spawn time, so an unhonourable (freedom, network) pair
@@ -652,6 +701,217 @@ class CodexBackend:
             message = event.get("message")
             if isinstance(message, str):
                 acc.notices.append(message)
+
+    def normalize(self, event: dict[str, Any], acc: Accumulator) -> list[dict[str, Any]]:
+        # Codex has no timestamps in its stream at all: no source_ts is ever attached here.
+        if not isinstance(event, dict):
+            return []
+        event_type = event.get("type")
+
+        if event_type == "item.started":
+            return self._normalize_item_started(event, acc)
+        if event_type == "item.completed":
+            return self._normalize_item_completed(event, acc)
+        if event_type == "turn.completed":
+            return [nz.usage(acc)]
+        if event_type == "error" or (isinstance(event_type, str) and event_type.endswith(".failed")):
+            message = _codex_message(event)
+            return [nz.notice(message)] if message else []
+        return []
+
+    @classmethod
+    def _normalize_item_started(
+        cls, event: dict[str, Any], acc: Accumulator
+    ) -> list[dict[str, Any]]:
+        item = event.get("item")
+        if not isinstance(item, dict):
+            return []
+        item_type = item.get("type")
+        call_id = item.get("id")
+
+        if item_type == "command_execution":
+            cls._mark_started(acc, call_id)
+            command = item.get("command")
+            return [
+                nz.tool_call(
+                    call_id=call_id, tool="shell", category="shell", command=command, input=command
+                )
+            ]
+        if item_type == "mcp_tool_call":
+            cls._mark_started(acc, call_id)
+            name = _codex_mcp_name(item.get("server"), item.get("tool"))
+            return [
+                nz.tool_call(
+                    call_id=call_id, tool=name, category="mcp", input=item.get("arguments")
+                )
+            ]
+        if item_type == "file_change":
+            return cls._started_file_change(item, acc)
+        return []
+
+    @classmethod
+    def _started_file_change(cls, item: dict[str, Any], acc: Accumulator) -> list[dict[str, Any]]:
+        """One `tool_call` per change in a `file_change` item, `call_id` keyed by path (not
+        index) so start/completion pairing survives the changes being reordered in between."""
+        events: list[dict[str, Any]] = []
+        for call_id, path, change in cls._file_change_entries(item):
+            cls._mark_started(acc, call_id)
+            events.append(
+                nz.tool_call(call_id=call_id, tool="file_change", category="edit", path=path, input=change)
+            )
+        return events
+
+    @classmethod
+    def _normalize_item_completed(
+        cls, event: dict[str, Any], acc: Accumulator
+    ) -> list[dict[str, Any]]:
+        item = event.get("item")
+        if not isinstance(item, dict):
+            return []
+        item_type = item.get("type")
+
+        if item_type == "command_execution":
+            return cls._completed_command_execution(item, acc)
+        if item_type == "mcp_tool_call":
+            return cls._completed_mcp_tool_call(item, acc)
+        if item_type == "file_change":
+            return cls._completed_file_change(item, acc)
+        if item_type == "agent_message":
+            text = item.get("text")
+            return [nz.assistant_text(text)] if isinstance(text, str) else []
+        if item_type == "error":
+            message = item.get("message")
+            return [nz.notice(message)] if isinstance(message, str) and message else []
+        return []
+
+    @classmethod
+    def _completed_command_execution(
+        cls, item: dict[str, Any], acc: Accumulator
+    ) -> list[dict[str, Any]]:
+        call_id = item.get("id")
+        events: list[dict[str, Any]] = []
+        if not cls._was_started(acc, call_id):
+            command = item.get("command")
+            events.append(
+                nz.tool_call(
+                    call_id=call_id, tool="shell", category="shell", command=command, input=command
+                )
+            )
+        exit_code = item.get("exit_code")
+        # `bool` is an `int` subclass, and `False == 0` — guarded so a stray boolean exit code
+        # cannot masquerade as a clean exit.
+        clean_exit = (
+            isinstance(exit_code, int) and not isinstance(exit_code, bool) and exit_code == 0
+        )
+        ok = clean_exit and item.get("status") != "failed"
+        events.append(
+            nz.tool_result(
+                call_id=call_id, ok=ok, exit_code=exit_code, output=item.get("aggregated_output")
+            )
+        )
+        return events
+
+    @classmethod
+    def _completed_mcp_tool_call(
+        cls, item: dict[str, Any], acc: Accumulator
+    ) -> list[dict[str, Any]]:
+        call_id = item.get("id")
+        events: list[dict[str, Any]] = []
+        if not cls._was_started(acc, call_id):
+            name = _codex_mcp_name(item.get("server"), item.get("tool"))
+            events.append(
+                nz.tool_call(
+                    call_id=call_id, tool=name, category="mcp", input=item.get("arguments")
+                )
+            )
+        error = item.get("error")
+        error_dict = error if isinstance(error, dict) else None
+        ok = item.get("status") == "completed" and error_dict is None
+        if ok:
+            result = item.get("result")
+            content = result.get("content") if isinstance(result, dict) else None
+            output = _codex_mcp_result_text(content)
+        else:
+            message = error_dict.get("message") if error_dict else None
+            output = message if isinstance(message, str) else None
+        events.append(nz.tool_result(call_id=call_id, ok=ok, output=output))
+        return events
+
+    @classmethod
+    def _completed_file_change(cls, item: dict[str, Any], acc: Accumulator) -> list[dict[str, Any]]:
+        """One `tool_result` per change, `ok` from the item's own `status` — codex reports no
+        per-change status, only one for the whole `file_change` item. A change whose call was
+        never started (a completion-only item) gets its `tool_call` synthesized first, exactly
+        like the shell/MCP completion paths above."""
+        ok = item.get("status") == "completed"
+        completed = acc.stream_state.setdefault("normalize_completed_file_changes", set())
+        events: list[dict[str, Any]] = []
+        for call_id, path, change in cls._file_change_entries(item):
+            # A repeated completion of the same change must not count the edit twice.
+            if call_id in completed:
+                continue
+            completed.add(call_id)
+            if not cls._was_started(acc, call_id):
+                cls._mark_started(acc, call_id)
+                events.append(
+                    nz.tool_call(
+                        call_id=call_id, tool="file_change", category="edit", path=path, input=change
+                    )
+                )
+            events.append(nz.tool_result(call_id=call_id, ok=ok, output=None))
+        return events
+
+    @classmethod
+    def _file_change_entries(
+        cls, item: dict[str, Any]
+    ) -> list[tuple[str, str, dict[str, Any]]]:
+        """`(call_id, path, change)` for every well-formed change in a `file_change` item's
+        `changes` list. A `file_change` with no changes (or a malformed list) yields nothing."""
+        changes = item.get("changes")
+        if not isinstance(changes, list):
+            return []
+        item_id = item.get("id")
+        entries: list[tuple[str, str, dict[str, Any]]] = []
+        for change in changes:
+            if not isinstance(change, dict):
+                continue
+            path = change.get("path")
+            if not isinstance(path, str) or not path:
+                continue
+            entries.append((cls._file_change_call_id(item_id, path), path, change))
+        return entries
+
+    @staticmethod
+    def _file_change_call_id(item_id: Any, path: str) -> str:
+        # Path, not index, so pairing between item.started and item.completed survives the
+        # changes list being reordered in between (measured as possible on this item type).
+        return f"{item_id}:{path}"
+
+    @staticmethod
+    def _mark_started(acc: Accumulator, call_id: Any) -> None:
+        started = acc.stream_state.setdefault("normalize_started_calls", set())
+        started.add(call_id)
+
+    @staticmethod
+    def _was_started(acc: Accumulator, call_id: Any) -> bool:
+        started = acc.stream_state.get("normalize_started_calls")
+        return isinstance(started, set) and call_id in started
+
+    def encode_live_message(self, text: str) -> bytes:
+        raise UnsupportedCapability(
+            f"the {self.name} backend has no live input, so a message cannot be added to a running "
+            "task; continue its session with resume_task instead"
+        )
+
+
+    def interactive_resume_argv(self, session_id: str, repo_path: Path) -> list[str] | None:
+        """`codex -c check_for_update_on_startup=false resume <thread_id>`, run in the repository
+        (measured: loads the prior conversation; an untrusted directory gets codex's own trust
+        prompt, which writes a `[projects."<dir>"]` entry to ~/.codex/config.toml). `-c` is a
+        global option, so it precedes `resume` — the same placement `build_resume_argv` needs."""
+        if not interactive_session_id_ok(session_id, repo_path):
+            return None
+        return [self.binary, "-c", "check_for_update_on_startup=false", "resume", session_id]
 
     def classify(self, acc: Accumulator, exit_code: int | None) -> Status:
         # No terminal success/failure event exists, so the exit code is the authority and the closing

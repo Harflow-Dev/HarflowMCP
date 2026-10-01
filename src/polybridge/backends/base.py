@@ -9,6 +9,9 @@ branches on a backend's name.
 
 from __future__ import annotations
 
+import os
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, NamedTuple, Protocol, runtime_checkable
@@ -19,6 +22,44 @@ FREEDOMS: tuple[Freedom, ...] = ("read_only", "write_in_repo", "publish", "unres
 DEFAULT_FREEDOM: Freedom = "write_in_repo"
 
 Status = Literal["running", "completed", "failed", "timed_out", "cancelled"]
+
+StdinMode = Literal["devnull", "pipe"]
+STDIN_DEVNULL: StdinMode = "devnull"
+STDIN_PIPE: StdinMode = "pipe"
+
+
+@dataclass(frozen=True)
+class Invocation:
+    """Everything `_spawn` needs to launch one run: the argv, how its stdin is wired, and the first
+    bytes to write to it.
+
+    Returned by the argv builders instead of a bare argv, so the stdin mode comes from the run that
+    was actually built — never from the backend's name or its static capability. A live-input run
+    (`stdin_mode="pipe"`) carries its prompt as `initial_input`, because a CLI reading its input as a
+    stream ignores a positional prompt (measured on claude). Every other run is `"devnull"` with no
+    initial input: codex and vibe block forever reading an open stdin, so DEVNULL is mandatory there.
+    """
+
+    argv: list[str]
+    stdin_mode: StdinMode = STDIN_DEVNULL
+    initial_input: bytes | None = None
+
+    @property
+    def live_input(self) -> bool:
+        return self.stdin_mode == STDIN_PIPE
+
+
+def classic_invocation_problem(invocation: Any) -> str | None:
+    """Why `invocation` is not a plain devnull-stdin run, or None if it is — for backends with no
+    live input. A bare argv list is refused too: a caller that skipped the Invocation could not have
+    said how the process's stdin is wired."""
+    if not isinstance(invocation, Invocation):
+        return f"expected an Invocation, got {type(invocation).__name__}: {invocation!r}"
+    if invocation.stdin_mode != STDIN_DEVNULL:
+        return f"stdin_mode is {invocation.stdin_mode!r}, but this backend has no live input"
+    if invocation.initial_input is not None:
+        return "initial_input is set, but this backend has no live input to write it to"
+    return None
 
 # Stopping at xhigh is deliberate, not an oversight — but "every model measured accepts" is only
 # true of codex (per ~/.codex/models_cache.json), where no canonical level can produce a
@@ -134,6 +175,12 @@ class Capabilities(NamedTuple):
 
     network_control: NetworkControl
 
+    supports_live_input: bool
+    """Whether a run can take further messages on stdin while it works (`send_message`). A capability
+    of the backend, not a promise about every run: claude falls back to the classic one-shot shape
+    when `max_turns` is set (that combination is unmeasured), so what a *task* got is its own
+    `live_input` field, never this one."""
+
     def as_dict(self) -> dict[str, Any]:
         # `_asdict()` does not recurse into a nested NamedTuple — it would serialize as a bare
         # JSON list and lose its field names — so each nested block is expanded explicitly.
@@ -233,6 +280,36 @@ class Accumulator:
     event_count: int = 0
     unparsable_lines: int = 0
 
+    normalize_errors: int = 0
+    """How many stream events the monitor normalizer failed on. Counted by the drain path, never
+    read by `classify`, so a normalizer bug can never change a run's reported outcome."""
+
+    result_count: int = 0
+    """How many end-of-turn results the stream has carried. One on a classic run; one per turn on
+    a live-input run, which is why the per-result counters are accumulated rather than assigned."""
+
+    turn_open: bool = False
+    """A turn is running: the agent has shown activity since the last result. Distinguishes a run
+    waiting only on background tasks (the idle bound applies) from one that is simply working."""
+
+    background_open: set[str] = field(default_factory=set)
+    """Ids of background tasks the agent started and the stream has not yet reported finished. A
+    live-input run is not idle while any are open: closing its stdin would kill them (measured)."""
+
+    awaiting_input: bool = False
+    """A live-input run is idle: a result has arrived, no turn is running, and no background task
+    is open. The input pump closes stdin once this holds with nothing queued. Set by `ingest`,
+    cleared by `ingest` on turn activity and by the pump when it writes a message."""
+
+    error_result_seen: bool = False
+    """A result reported an error (or a non-success subtype). Sticky: the input pump stops
+    forwarding and closes stdin, and every message still queued is reported undelivered."""
+
+    background_abandoned: bool = False
+    """Set by the input pump when a run waited on background tasks alone, with no output, for the
+    idle bound, and stdin was closed anyway — which kills them. A backend's `classify` reports that
+    as a failure, never a clean completion."""
+
     stream_state: dict[str, Any] = field(default_factory=dict)
     """Backend-private scratch space for an ingest algorithm that needs memory across events (e.g.
     vibe's current-turn tracking). Lives here, per task, rather than on the backend instance:
@@ -242,6 +319,22 @@ class Accumulator:
 
 class UnsupportedCapability(ValueError):
     """A request a backend cannot honour, which must fail rather than be silently dropped."""
+
+
+class NestedDispatchRefused(UnsupportedCapability):
+    """A nested dispatch (one task spawning another via polybridge) that would be weaker than its
+    parent task on some enforcement field, or that would exceed the parent's depth budget.
+
+    This is a best-effort cap, not a sandbox boundary — see `check_nested_enforcement` and
+    `check_nested_depth` for what it actually compares and why it can be wrong. `rule` names which
+    single check failed (a field name from `POLICY_FIELDS`, or `"backend"`, `"repo"`,
+    `"parent_enforcement_unrecorded"`, `"depth"`), so a caller can log or test on the failure
+    reason without parsing the message.
+    """
+
+    def __init__(self, message: str, *, rule: str) -> None:
+        super().__init__(message)
+        self.rule = rule
 
 
 @runtime_checkable
@@ -261,7 +354,7 @@ class Backend(Protocol):
         max_turns: int | None,
         reasoning_effort: str | None,
         network: bool | None = None,
-    ) -> list[str]: ...
+    ) -> Invocation: ...
 
     def build_resume_argv(
         self,
@@ -274,10 +367,16 @@ class Backend(Protocol):
         max_turns: int | None,
         reasoning_effort: str | None,
         network: bool | None = None,
-    ) -> list[str]: ...
+    ) -> Invocation: ...
 
-    def assert_safe(self, argv: list[str], freedom: Freedom, network: bool | None = None) -> None:
-        """Raise unless the argv still carries this backend's required guarantees.
+    def assert_safe(
+        self, invocation: Invocation, freedom: Freedom, network: bool | None = None
+    ) -> None:
+        """Raise unless the invocation still carries this backend's required guarantees.
+
+        The whole `Invocation`, not just its argv: a live-input argv paired with a devnull stdin (or
+        a one-shot argv paired with a pipe) is a mismatch between what the CLI is told and how it is
+        wired, and must be refused here like any other unsafe shape. A bare list is refused too.
 
         `freedom` and `network` together are the authorization the caller actually asked for —
         neither is, nor can be, derived from `argv` itself. An argv built for `read_only` can be
@@ -306,9 +405,50 @@ class Backend(Protocol):
         """Fold one stream event into the normalised view."""
         ...
 
+    def normalize(self, event: dict[str, Any], acc: Accumulator) -> list[dict[str, Any]]:
+        """Translate one stream event into zero or more monitor events for `<task_id>.events.jsonl`.
+
+        Called AFTER `ingest` has folded the same event into `acc`, so it may read `acc` (e.g.
+        vibe's current turn, cumulative usage). It must not mutate `acc` except for
+        `acc.stream_state` keys prefixed `normalize_`. Each returned dict carries `kind` plus that
+        kind's fields, and optionally `source_ts` (an ISO-8601 string, the backend's own timestamp
+        for the event) which the writer lifts into the envelope. It never returns `task_started` or
+        `task_finished` — the bridge writes those itself. A raise is caught and counted by the
+        caller, but implementations should still be defensive: streams are untrusted input.
+        """
+        ...
+
     def classify(self, acc: Accumulator, exit_code: int | None) -> Status:
         """Decide the terminal status from this backend's own signals."""
         ...
+
+    def encode_live_message(self, text: str) -> bytes:
+        """One message for a live-input run's stdin, in this CLI's own input format, newline
+        included. Raises `UnsupportedCapability` on a backend without live input — the pump in
+        `tasks.py` calls this so it never needs to know any backend's wire format."""
+        ...
+
+    def interactive_resume_argv(self, session_id: str, repo_path: Path) -> list[str] | None:
+        """The command that resumes `session_id` in this CLI's own interactive UI, for a human
+        taking a task over. `argv[0]` is the bare `binary`; the caller resolves it. Built at call
+        time and never stored. None when no safe command exists — see
+        `interactive_session_id_ok`."""
+        ...
+
+
+# Every measured interactive resume takes the session id as an *optional* option value (claude
+# `--resume [value]`, vibe `--resume [SESSION_ID]`) or a positional (codex `resume [SESSION_ID]`),
+# so an id beginning with `-` would be parsed as an option. Session ids come out of the agent's own
+# stream, which is untrusted, so anything outside the shapes the four CLIs actually mint is refused.
+_INTERACTIVE_SESSION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}")
+
+
+def interactive_session_id_ok(session_id: str | None, repo_path: Path) -> bool:
+    return (
+        isinstance(session_id, str)
+        and _INTERACTIVE_SESSION_ID_RE.fullmatch(session_id) is not None
+        and Path(repo_path).is_absolute()
+    )
 
 
 def check_freedom(freedom: str) -> Freedom:
@@ -390,4 +530,174 @@ def check_network(backend: Backend, freedom: Freedom, network: bool | None) -> N
         raise UnsupportedCapability(
             f"the {backend.name} backend cannot block network at freedom {freedom!r}; "
             f"network=False is accepted only at {list(control.can_block)}"
+        )
+
+
+# --- Nested-dispatch caps -----------------------------------------------------------------------
+#
+# A task dispatched *through polybridge itself* (an agent running under one polybridge task that
+# then calls `start_task`/`resume_task` again) can, without a cap, ask for something stronger than
+# the parent task it is running inside of — e.g. a `read_only` claude run spawning an `unrestricted`
+# codex run. `nested_enforcement_violation` compares a parent's recorded `Enforcement` against a
+# proposed child's and says whether the child would be weaker (in the sense of "the parent's own
+# restrictions would not hold for it"). This is advisory, not a sandbox: it is only ever checked
+# when a caller is *detected* (see `lineage.detect_caller`), detection is itself best-effort, and
+# nothing stops an agent from dispatching outside polybridge entirely. Every message this module
+# raises says so.
+
+POLICY_FIELDS: tuple[str, ...] = (
+    "os_enforced",
+    "writes_confined",
+    "commit_push_blocked",
+    "direct_commit_commands_denied",
+    "publish_attempts_allowed_by_polybridge",
+    "network_access",
+    "writable_roots",
+)
+"""Every `Enforcement` field this cap compares. A parent record missing any of these (a legacy
+record predating the field, or an `enforcement=None` record from before A1) cannot be compared at
+all — see `nested_enforcement_violation`'s `parent_enforcement_unrecorded` rule."""
+
+# Ranked so "child rank >= parent rank" means "at least as strict". An unrecognised value on either
+# side is treated conservatively: a parent with a value this table does not know is assumed as
+# strict as possible (rank 2, "blocked"-equivalent) so an unfamiliar parent claim can never be
+# under-compared away; a child with an unrecognised value is assumed as lax as possible (rank 0,
+# "unrestricted"-equivalent) so it can never slip past the check by reporting nonsense.
+NETWORK_STRICTNESS: dict[str, int] = {
+    "blocked": 2,
+    "enabled": 1,
+    "not_controlled": 1,
+    "unrestricted": 0,
+}
+
+# True on the parent means "restricted"; a child that is not is weaker. Checked in this exact
+# order — the first field that fails is the one reported, so a caller only ever sees one cause.
+_MONOTONIC_TRUE_RESTRICTS: tuple[str, ...] = (
+    "os_enforced",
+    "writes_confined",
+    "commit_push_blocked",
+    "direct_commit_commands_denied",
+)
+
+
+def _field(obj: Enforcement | Mapping[str, Any], name: str) -> Any:
+    """Read one enforcement field whether `obj` is a live `Enforcement` or a plain dict (e.g. a
+    `TaskRecord.enforcement` loaded back off disk)."""
+    if isinstance(obj, Mapping):
+        return obj.get(name)
+    return getattr(obj, name, None)
+
+
+def _violation(rule: str, parent_value: Any, child_value: Any) -> tuple[str, str]:
+    return (
+        rule,
+        f"nested dispatch refused: the child task would be weaker than its parent on {rule} "
+        f"(parent={parent_value!r}, child={child_value!r}); this cap is best-effort",
+    )
+
+
+def nested_enforcement_violation(
+    parent: Mapping[str, Any],
+    child: Enforcement | Mapping[str, Any],
+    *,
+    parent_backend: str,
+    child_backend: str,
+    parent_repo: str,
+    child_repo: str,
+) -> tuple[str, str] | None:
+    """The first way `child` would be weaker than `parent`, or None if it never is.
+
+    Checked in this fixed order — `parent_enforcement_unrecorded`, `os_enforced`,
+    `writes_confined`, `commit_push_blocked`, `direct_commit_commands_denied`,
+    `publish_attempts_allowed_by_polybridge`, `network_access`, `backend`, `writable_roots`,
+    `repo` — so only ever the first violated rule is reported. `freedom`, `mechanism` and
+    `caveats` are deliberately never compared: they describe *how* a level is achieved, not how
+    strict it is, and two different mechanisms can enforce the same strength.
+
+    Pure on its inputs except for `os.path.realpath` on the two repo paths (needed to resolve a
+    symlink pointing outside the parent's repo).
+    """
+    parent = parent or {}
+    missing = [f for f in POLICY_FIELDS if f not in parent]
+    if missing:
+        return _violation("parent_enforcement_unrecorded", missing[0], "n/a (parent unrecorded)")
+
+    for field_name in _MONOTONIC_TRUE_RESTRICTS:
+        parent_value = parent[field_name]
+        child_value = _field(child, field_name)
+        if parent_value and not child_value:
+            return _violation(field_name, parent_value, child_value)
+
+    # publish_attempts_allowed_by_polybridge runs the other way: True means "permitted to try
+    # publishing", so a parent that was *not* authorized (False) must not have a child that is.
+    parent_publish = parent["publish_attempts_allowed_by_polybridge"]
+    child_publish = _field(child, "publish_attempts_allowed_by_polybridge")
+    if not parent_publish and child_publish:
+        return _violation(
+            "publish_attempts_allowed_by_polybridge", parent_publish, child_publish
+        )
+
+    parent_network = parent["network_access"]
+    child_network = _field(child, "network_access")
+    parent_rank = NETWORK_STRICTNESS.get(parent_network, 2)
+    child_rank = NETWORK_STRICTNESS.get(child_network, 0)
+    if child_rank < parent_rank:
+        return _violation("network_access", parent_network, child_network)
+
+    # The remaining three rules only bite when the parent itself is confined at all — an
+    # unconfined parent (claude/opencode/vibe at any freedom, codex at `unrestricted`) imposes no
+    # backend, root, or repo constraint on what it spawns.
+    if parent["writes_confined"]:
+        if child_backend != parent_backend:
+            return _violation("backend", parent_backend, child_backend)
+
+        parent_roots = set(parent["writable_roots"])
+        child_roots = set(_field(child, "writable_roots") or ())
+        if not child_roots <= parent_roots:
+            return _violation(
+                "writable_roots", parent["writable_roots"], _field(child, "writable_roots")
+            )
+
+        parent_real = os.path.realpath(parent_repo)
+        child_real = os.path.realpath(child_repo)
+        if child_real != parent_real and os.path.commonpath([parent_real, child_real]) != parent_real:
+            return _violation("repo", parent_repo, child_repo)
+
+    return None
+
+
+def check_nested_enforcement(
+    parent: Mapping[str, Any],
+    child: Enforcement | Mapping[str, Any],
+    *,
+    parent_backend: str,
+    child_backend: str,
+    parent_repo: str,
+    child_repo: str,
+) -> None:
+    """Raise `NestedDispatchRefused` for the first way `child` would be weaker than `parent`."""
+    violation = nested_enforcement_violation(
+        parent,
+        child,
+        parent_backend=parent_backend,
+        child_backend=child_backend,
+        parent_repo=parent_repo,
+        child_repo=child_repo,
+    )
+    if violation is not None:
+        rule, message = violation
+        raise NestedDispatchRefused(message, rule=rule)
+
+
+def check_nested_depth(parent_depth: int, max_depth: int) -> None:
+    """Raise `NestedDispatchRefused` when the child's depth (`parent_depth + 1`) would exceed the
+    parent's own depth budget. Kept separate from `check_nested_enforcement`: depth is a property
+    of the dispatch chain, not of either task's `Enforcement`."""
+    child_depth = parent_depth + 1
+    if child_depth > max_depth:
+        raise NestedDispatchRefused(
+            "nested dispatch refused: it would exceed the dispatch chain's depth budget "
+            f"(parent depth={parent_depth!r}, child depth={child_depth!r} > "
+            f"max_depth={max_depth!r}); this cap is best-effort",
+            rule="depth",
         )

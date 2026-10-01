@@ -6,12 +6,15 @@ Stream fixtures below are events captured from real runs, not invented.
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 
 import pytest
 
 from polybridge import backends
 from polybridge.backends import (
+    STDIN_PIPE,
+    Invocation,
     EFFORTS,
     FREEDOMS,
     Accumulator,
@@ -69,7 +72,17 @@ class _NoEffortBackend:
             accepted_in_real_run=False, levels_change_behaviour=False,
         ),
         network_control=NetworkControl(can_enable=(), can_block=()),
+        supports_live_input=False,
     )
+
+    def normalize(self, event: dict, acc: Accumulator) -> list:
+        return []
+
+    def encode_live_message(self, text: str) -> bytes:
+        raise backends.UnsupportedCapability("no live input")
+
+    def interactive_resume_argv(self, session_id, repo_path):
+        return [self.binary, "--resume", session_id]
 
 
 class _PartialEffortBackend:
@@ -93,7 +106,17 @@ class _PartialEffortBackend:
             caveats=("fake",),
         ),
         network_control=NetworkControl(can_enable=(), can_block=()),
+        supports_live_input=False,
     )
+
+    def normalize(self, event: dict, acc: Accumulator) -> list:
+        return []
+
+    def encode_live_message(self, text: str) -> bytes:
+        raise backends.UnsupportedCapability("no live input")
+
+    def interactive_resume_argv(self, session_id, repo_path):
+        return [self.binary, "--resume", session_id]
 
 
 def start(backend, **kwargs):
@@ -107,7 +130,38 @@ def start(backend, **kwargs):
         "reasoning_effort": None,
         "network": None,
     } | kwargs
+    return start_invocation(backend, **kwargs).argv
+
+
+def start_invocation(backend, **kwargs):
+    session_id = SESSION if backend.capabilities.chooses_session_id else None
+    args = {
+        "repo": REPO,
+        "freedom": "write_in_repo",
+        "session_id": session_id,
+        "model": None,
+        "max_turns": None,
+        "reasoning_effort": None,
+        "network": None,
+    } | kwargs
     return backend.build_start_argv("do a thing", **args)
+
+
+def inv(argv):
+    """Pair a (possibly hand-edited) argv with the stdin wiring a builder gives that shape, so the
+    argv-policy tests below keep exercising argv policy. The wiring rules themselves are pinned
+    separately, with explicit Invocations, in the live-input section. A claude argv with no `--` is
+    the live shape: a pipe with one canonical prompt line. Everything else runs with stdin DEVNULL.
+    An Invocation a builder returned is passed through untouched."""
+    if isinstance(argv, Invocation):
+        return argv
+    if argv[:2] == ["claude", "-p"] and "--" not in argv:
+        return Invocation(
+            list(argv),
+            stdin_mode=STDIN_PIPE,
+            initial_input=ClaudeBackend().encode_live_message("do a thing"),
+        )
+    return Invocation(list(argv))
 
 
 def with_extra_options(argv: list[str], *extra: str) -> list[str]:
@@ -117,6 +171,19 @@ def with_extra_options(argv: list[str], *extra: str) -> list[str]:
 
 
 def resume(backend, **kwargs):
+    args = {
+        "repo": REPO,
+        "freedom": "write_in_repo",
+        "session_id": "abc-123",
+        "model": None,
+        "max_turns": None,
+        "reasoning_effort": None,
+        "network": None,
+    } | kwargs
+    return backend.build_resume_argv("more", **args).argv
+
+
+def resume_invocation(backend, **kwargs):
     args = {
         "repo": REPO,
         "freedom": "write_in_repo",
@@ -156,8 +223,8 @@ def test_describe_covers_every_freedom(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.parametrize("backend", ALL, ids=lambda b: b.name)
 @pytest.mark.parametrize("freedom", FREEDOMS)
 def test_every_backend_builds_an_argv_it_considers_safe(backend, freedom: str) -> None:
-    backend.assert_safe(start(backend, freedom=freedom), freedom)
-    backend.assert_safe(resume(backend, freedom=freedom), freedom)
+    backend.assert_safe(inv(start(backend, freedom=freedom)), freedom)
+    backend.assert_safe(inv(resume(backend, freedom=freedom)), freedom)
 
 
 def _argvs_or_none(backend, freedom: str, network):
@@ -219,10 +286,10 @@ def test_assert_safe_refuses_an_argv_built_for_a_different_authorization(
             # not wave it through either: whatever exception carries the refusal, a raise here
             # is the loud failure this repo requires rather than a silent drop.
             with pytest.raises((RuntimeError, backends.UnsupportedCapability)):
-                backend.assert_safe(built_argv, claimed_freedom, claimed_network)
+                backend.assert_safe(inv(built_argv), claimed_freedom, claimed_network)
         else:
             with pytest.raises(RuntimeError):
-                backend.assert_safe(built_argv, claimed_freedom, claimed_network)
+                backend.assert_safe(inv(built_argv), claimed_freedom, claimed_network)
 
 
 @pytest.mark.parametrize(
@@ -252,7 +319,7 @@ def test_assert_safe_rejects_an_unknown_freedom_rather_than_a_key_error(backend)
     KeyError instead of the same UnsupportedCapability every other unknown-value path raises."""
     argv = start(backend)
     with pytest.raises(backends.UnsupportedCapability, match="unknown freedom"):
-        backend.assert_safe(argv, "bogus-freedom")  # type: ignore[arg-type]
+        backend.assert_safe(inv(argv), "bogus-freedom")  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("backend", ALL, ids=lambda b: b.name)
@@ -600,8 +667,8 @@ def test_check_network_refuses_an_unknown_freedom_with_the_shared_message() -> N
 def test_network_true_is_accepted_exactly_where_the_declared_tuple_says(backend, freedom: str) -> None:
     if freedom not in backend.capabilities.network_control.can_enable:
         pytest.skip(f"{backend.name} cannot enable at {freedom!r}; the raising tests cover it")
-    backend.assert_safe(start(backend, freedom=freedom, network=True), freedom, True)
-    backend.assert_safe(resume(backend, freedom=freedom, network=True), freedom, True)
+    backend.assert_safe(inv(start(backend, freedom=freedom, network=True)), freedom, True)
+    backend.assert_safe(inv(resume(backend, freedom=freedom, network=True)), freedom, True)
 
 
 @pytest.mark.parametrize("backend", ALL, ids=lambda b: b.name)
@@ -611,8 +678,8 @@ def test_network_false_is_accepted_exactly_where_the_declared_tuple_says(
 ) -> None:
     if freedom not in backend.capabilities.network_control.can_block:
         pytest.skip(f"{backend.name} cannot block at {freedom!r}; the raising tests cover it")
-    backend.assert_safe(start(backend, freedom=freedom, network=False), freedom, False)
-    backend.assert_safe(resume(backend, freedom=freedom, network=False), freedom, False)
+    backend.assert_safe(inv(start(backend, freedom=freedom, network=False)), freedom, False)
+    backend.assert_safe(inv(resume(backend, freedom=freedom, network=False)), freedom, False)
 
 
 @pytest.mark.parametrize("build", [start, resume], ids=["start", "resume"])
@@ -688,6 +755,7 @@ LEGACY_ARGV: dict[str, dict[str, dict[str, list[str]]]] = {
         "read_only": {
             "start": [
                 "claude", "-p", "--output-format", "stream-json", "--verbose",
+                "--include-partial-messages",
                 "--permission-mode", "plan",
                 "--disallowedTools", "Bash(git commit:*),Bash(git push:*)",
                 "--session-id", SESSION,
@@ -695,6 +763,7 @@ LEGACY_ARGV: dict[str, dict[str, dict[str, list[str]]]] = {
             ],
             "resume": [
                 "claude", "-p", "--output-format", "stream-json", "--verbose",
+                "--include-partial-messages",
                 "--permission-mode", "plan",
                 "--disallowedTools", "Bash(git commit:*),Bash(git push:*)",
                 "--resume", "abc-123",
@@ -704,6 +773,7 @@ LEGACY_ARGV: dict[str, dict[str, dict[str, list[str]]]] = {
         "write_in_repo": {
             "start": [
                 "claude", "-p", "--output-format", "stream-json", "--verbose",
+                "--include-partial-messages",
                 "--permission-mode", "acceptEdits",
                 "--disallowedTools", "Bash(git commit:*),Bash(git push:*)",
                 "--session-id", SESSION,
@@ -711,6 +781,7 @@ LEGACY_ARGV: dict[str, dict[str, dict[str, list[str]]]] = {
             ],
             "resume": [
                 "claude", "-p", "--output-format", "stream-json", "--verbose",
+                "--include-partial-messages",
                 "--permission-mode", "acceptEdits",
                 "--disallowedTools", "Bash(git commit:*),Bash(git push:*)",
                 "--resume", "abc-123",
@@ -720,6 +791,7 @@ LEGACY_ARGV: dict[str, dict[str, dict[str, list[str]]]] = {
         "publish": {
             "start": [
                 "claude", "-p", "--output-format", "stream-json", "--verbose",
+                "--include-partial-messages",
                 "--permission-mode", "acceptEdits",
                 "--allowedTools", "Bash(git commit:*),Bash(git push:*),Bash(gh pr create:*)",
                 "--session-id", SESSION,
@@ -727,6 +799,7 @@ LEGACY_ARGV: dict[str, dict[str, dict[str, list[str]]]] = {
             ],
             "resume": [
                 "claude", "-p", "--output-format", "stream-json", "--verbose",
+                "--include-partial-messages",
                 "--permission-mode", "acceptEdits",
                 "--allowedTools", "Bash(git commit:*),Bash(git push:*),Bash(gh pr create:*)",
                 "--resume", "abc-123",
@@ -736,12 +809,14 @@ LEGACY_ARGV: dict[str, dict[str, dict[str, list[str]]]] = {
         "unrestricted": {
             "start": [
                 "claude", "-p", "--output-format", "stream-json", "--verbose",
+                "--include-partial-messages",
                 "--permission-mode", "bypassPermissions",
                 "--session-id", SESSION,
                 "--", "do a thing",
             ],
             "resume": [
                 "claude", "-p", "--output-format", "stream-json", "--verbose",
+                "--include-partial-messages",
                 "--permission-mode", "bypassPermissions",
                 "--resume", "abc-123",
                 "--", "more",
@@ -905,6 +980,19 @@ LEGACY_ARGV: dict[str, dict[str, dict[str, list[str]]]] = {
 }
 
 
+def _expected_argv(backend, legacy: list[str]) -> list[str]:
+    """The pre-parameter argv as this backend builds it today. Unchanged for every backend but
+    claude, whose default became live input in stage A3: the same options, `--input-format
+    stream-json` just before the session flag, and no `--`/prompt (the prompt goes on stdin — see
+    the live-input section). The classic one-shot shape itself is still pinned, via `max_turns`,
+    by `test_claude_max_turns_keeps_the_classic_one_shot_shape`."""
+    if backend.name != "claude":
+        return legacy
+    options = legacy[: legacy.index("--")]
+    cut = len(options) - 2
+    return [*options[:cut], "--input-format", "stream-json", *options[cut:]]
+
+
 @pytest.mark.parametrize("backend", ALL, ids=lambda b: b.name)
 @pytest.mark.parametrize("freedom", FREEDOMS)
 def test_network_none_builds_the_pre_parameter_argv_byte_for_byte(backend, freedom: str) -> None:
@@ -913,19 +1001,21 @@ def test_network_none_builds_the_pre_parameter_argv_byte_for_byte(backend, freed
     against literals transcribed from that code, so a regression in any token fails here rather
     than being re-derived through the same builder it regressed."""
     expected = LEGACY_ARGV[backend.name][freedom]
-    assert start(backend, freedom=freedom, network=None) == expected["start"]
-    assert resume(backend, freedom=freedom, network=None) == expected["resume"]
+    assert start(backend, freedom=freedom, network=None) == _expected_argv(backend, expected["start"])
+    assert resume(backend, freedom=freedom, network=None) == _expected_argv(
+        backend, expected["resume"]
+    )
     # And the pre-change call shape itself — the builders invoked without the kwarg at all —
     # must still produce the same bytes.
     session_id = SESSION if backend.capabilities.chooses_session_id else None
     assert backend.build_start_argv(
         "do a thing", repo=REPO, freedom=freedom, session_id=session_id, model=None,
         max_turns=None, reasoning_effort=None,
-    ) == expected["start"]
+    ).argv == _expected_argv(backend, expected["start"])
     assert backend.build_resume_argv(
         "more", repo=REPO, freedom=freedom, session_id="abc-123", model=None, max_turns=None,
         reasoning_effort=None,
-    ) == expected["resume"]
+    ).argv == _expected_argv(backend, expected["resume"])
 
 
 def test_codex_network_crossings_collapse_onto_their_neighbours_argv() -> None:
@@ -958,7 +1048,7 @@ def test_codex_assert_safe_refuses_an_argv_whose_pair_contradicts_the_resolved_n
     through on the strength of its sandbox mode alone."""
     argv = start(CodexBackend(), freedom="write_in_repo", network=built_network)
     with pytest.raises(CodexUnsafe, match="network"):
-        CodexBackend().assert_safe(argv, "write_in_repo", claimed_network)
+        CodexBackend().assert_safe(inv(argv), "write_in_repo", claimed_network)
 
 
 # The full enforcement block for every valid (freedom, network) cell on codex — the whole
@@ -1062,6 +1152,41 @@ def test_claude_requires_verbose_because_the_cli_does() -> None:
     assert "--verbose" in start(ClaudeBackend())
 
 
+def test_claude_streams_partial_messages_in_every_shape() -> None:
+    """--include-partial-messages rides in the option region of all four argv shapes —
+    start/resume x live/classic — and each shape passes assert_safe exactly as built."""
+    shapes = (
+        start_invocation(ClaudeBackend()),
+        resume_invocation(ClaudeBackend()),
+        start_invocation(ClaudeBackend(), max_turns=4),
+        resume_invocation(ClaudeBackend(), max_turns=4),
+    )
+    for invocation in shapes:
+        assert invocation.argv.count("--include-partial-messages") == 1
+        ClaudeBackend().assert_safe(invocation, "write_in_repo")
+
+
+def test_claude_rejects_a_duplicate_partial_messages_flag() -> None:
+    argv = with_extra_options(start(ClaudeBackend()), "--include-partial-messages")
+    with pytest.raises(ClaudeUnsafe, match="--include-partial-messages appears 2 times"):
+        ClaudeBackend().assert_safe(inv(argv), "write_in_repo")
+
+
+def test_claude_rejects_an_argv_missing_partial_messages() -> None:
+    """Streaming off is not a shape this backend builds: it would silently lose deltas with no
+    error anywhere to notice."""
+    argv = [token for token in start(ClaudeBackend()) if token != "--include-partial-messages"]
+    with pytest.raises(ClaudeUnsafe, match="--include-partial-messages appears 0 times"):
+        ClaudeBackend().assert_safe(inv(argv), "write_in_repo")
+
+
+def test_claude_refuses_an_unrecognised_token_on_the_classic_shape_too() -> None:
+    """The strict option walk polices both shapes, not just the live one."""
+    argv = with_extra_options(start(ClaudeBackend(), max_turns=3), "--frobnicate")
+    with pytest.raises(ClaudeUnsafe, match="unrecognised option token"):
+        ClaudeBackend().assert_safe(inv(argv), "write_in_repo")
+
+
 def test_claude_start_and_resume_use_mutually_exclusive_session_flags() -> None:
     started, resumed = start(ClaudeBackend()), resume(ClaudeBackend())
     assert "--session-id" in started and "--resume" not in started
@@ -1074,14 +1199,14 @@ def test_claude_refuses_flags_that_would_isolate_the_agent(flag: str) -> None:
     argv = start(ClaudeBackend())
     assert flag not in argv
     with pytest.raises(ClaudeUnsafe, match="cut the dispatched agent off"):
-        ClaudeBackend().assert_safe(with_extra_options(argv, flag), "write_in_repo")
+        ClaudeBackend().assert_safe(inv(with_extra_options(argv, flag)), "write_in_repo")
 
 
 def test_claude_rejects_a_weakened_deny_list() -> None:
     argv = start(ClaudeBackend())
     argv[argv.index("--disallowedTools") + 1] = "Bash(git push:*)"
     with pytest.raises(ClaudeUnsafe):
-        ClaudeBackend().assert_safe(argv, "write_in_repo")
+        ClaudeBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 def test_a_claude_prompt_that_looks_like_a_flag_is_not_mistaken_for_one() -> None:
@@ -1089,7 +1214,7 @@ def test_a_claude_prompt_that_looks_like_a_flag_is_not_mistaken_for_one() -> Non
         "--disallowedTools", repo=REPO, freedom="write_in_repo", session_id=SESSION, model=None,
         max_turns=None, reasoning_effort=None,
     )
-    ClaudeBackend().assert_safe(argv, "write_in_repo")
+    ClaudeBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 @pytest.mark.parametrize(
@@ -1109,41 +1234,55 @@ def test_a_claude_prompt_equal_to_a_real_flag_name_still_passes_once_separated(
     separate declared positional, so without a `--` separator a prompt token that exactly matches a
     real claude option name is parsed by claude as that option, not as text (see the module
     docstring). Once the builder places `--` before the prompt, claude reads it as literal text
-    regardless of content — this is the case that must keep working."""
-    start_argv = ClaudeBackend().build_start_argv(
+    regardless of content — this is the case that must keep working. That is the classic shape,
+    which a turn cap selects; the live shape carries the prompt only on stdin, so it never reaches
+    the option region at all."""
+    classic = ClaudeBackend().build_start_argv(
+        prompt, repo=REPO, freedom="write_in_repo", session_id=SESSION, model=None,
+        max_turns=3, reasoning_effort=None,
+    )
+    assert classic.argv[-2:] == ["--", prompt]
+    ClaudeBackend().assert_safe(classic, "write_in_repo")
+
+    live = ClaudeBackend().build_start_argv(
         prompt, repo=REPO, freedom="write_in_repo", session_id=SESSION, model=None,
         max_turns=None, reasoning_effort=None,
     )
-    assert start_argv[-2:] == ["--", prompt]
-    ClaudeBackend().assert_safe(start_argv, "write_in_repo")
-
-    resume_argv = ClaudeBackend().build_resume_argv(
-        prompt, repo=REPO, freedom="write_in_repo", session_id="abc-123", model=None,
-        max_turns=None, reasoning_effort=None,
-    )
-    assert resume_argv[-2:] == ["--", prompt]
-    ClaudeBackend().assert_safe(resume_argv, "write_in_repo")
+    assert prompt not in live.argv
+    assert json.loads(live.initial_input)["message"]["content"][0]["text"] == prompt
+    ClaudeBackend().assert_safe(live, "write_in_repo")
 
 
 def test_claude_refuses_an_argv_without_a_separator_before_the_prompt() -> None:
     """The pre-`--` shape this backend used to build: prompt as a fixed positional right after
     `-p`. Measured to be unsafe (see module docstring), so assert_safe must refuse it outright even
-    though every flag in it is otherwise well-formed."""
+    though every flag in it is otherwise well-formed. With no `--` it reads as a live-input argv, and
+    is refused whichever way it is wired: DEVNULL is not a live wiring, and on a pipe the stray
+    token fails the strict option walk."""
     argv = [
         "claude", "-p", "--dangerously-skip-permissions", "--output-format", "stream-json",
         "--verbose", "--permission-mode", "acceptEdits", "--disallowedTools", DISALLOWED_TOOLS,
         "--session-id", SESSION,
     ]
-    with pytest.raises(ClaudeUnsafe, match="separator"):
-        ClaudeBackend().assert_safe(argv, "write_in_repo")
+    with pytest.raises(ClaudeUnsafe, match="stdin pipe"):
+        ClaudeBackend().assert_safe(Invocation(argv), "write_in_repo")
+    with pytest.raises(ClaudeUnsafe, match="dangerously-skip-permissions"):
+        ClaudeBackend().assert_safe(inv(argv), "write_in_repo")
+    plain = ["claude", "-p", "do a thing", *argv[3:]]
+    with pytest.raises(ClaudeUnsafe, match="unrecognised option token 'do a thing'"):
+        ClaudeBackend().assert_safe(inv(plain), "write_in_repo")
 
 
 def test_claude_refuses_extra_tokens_after_the_prompt_separator() -> None:
     """`with_extra_options` inserts before `--`; appending directly after simulates a stray
     positional riding along with the prompt, which claude only ever declares one of."""
-    argv = start(ClaudeBackend()) + ["extra positional"]
+    argv = start(ClaudeBackend(), max_turns=3) + ["extra positional"]
     with pytest.raises(ClaudeUnsafe, match="expected exactly one positional"):
-        ClaudeBackend().assert_safe(argv, "write_in_repo")
+        ClaudeBackend().assert_safe(inv(argv), "write_in_repo")
+    # The live shape declares no positional at all.
+    live = start(ClaudeBackend()) + ["extra positional"]
+    with pytest.raises(ClaudeUnsafe, match="unrecognised option token"):
+        ClaudeBackend().assert_safe(inv(live), "write_in_repo")
 
 
 def test_claude_turn_cap_is_emitted() -> None:
@@ -1154,13 +1293,13 @@ def test_claude_turn_cap_is_emitted() -> None:
 def test_claude_rejects_a_duplicate_effort_flag_whose_second_value_would_win() -> None:
     argv = with_extra_options(start(ClaudeBackend(), reasoning_effort="low"), "--effort", "high")
     with pytest.raises(ClaudeUnsafe, match="--effort appears"):
-        ClaudeBackend().assert_safe(argv, "write_in_repo")
+        ClaudeBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 def test_claude_rejects_an_unexpected_effort_value_reaching_assert_safe_directly() -> None:
     argv = with_extra_options(start(ClaudeBackend()), "--effort", "bogus")
     with pytest.raises(ClaudeUnsafe, match="unexpected --effort"):
-        ClaudeBackend().assert_safe(argv, "write_in_repo")
+        ClaudeBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 @pytest.mark.parametrize("freedom", ["read_only", "write_in_repo"])
@@ -1182,7 +1321,7 @@ def test_claude_publish_carries_the_allowlist_and_no_deny_patterns() -> None:
     assert "Bash(git commit:*)" in ALLOWED_TOOLS["publish"]
     assert "Bash(git push:*)" in ALLOWED_TOOLS["publish"]
     assert "Bash(gh pr create:*)" in ALLOWED_TOOLS["publish"]
-    ClaudeBackend().assert_safe(argv, "publish")
+    ClaudeBackend().assert_safe(inv(argv), "publish")
 
 
 @pytest.mark.parametrize("freedom", ["read_only", "write_in_repo", "unrestricted"])
@@ -1194,14 +1333,14 @@ def test_claude_unrestricted_has_neither_denies_nor_allowlist() -> None:
     argv = start(ClaudeBackend(), freedom="unrestricted")
     assert "--disallowedTools" not in argv
     assert "--allowedTools" not in argv
-    ClaudeBackend().assert_safe(argv, "unrestricted")
+    ClaudeBackend().assert_safe(inv(argv), "unrestricted")
 
 
 def test_claude_assert_safe_rejects_an_allowlist_present_outside_publish() -> None:
     argv = with_extra_options(start(ClaudeBackend(), freedom="write_in_repo"), "--allowedTools",
                                ALLOWED_TOOLS["publish"])
     with pytest.raises(ClaudeUnsafe, match="allowedTools"):
-        ClaudeBackend().assert_safe(argv, "write_in_repo")
+        ClaudeBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 def test_claude_assert_safe_rejects_publish_missing_its_allowlist() -> None:
@@ -1209,7 +1348,7 @@ def test_claude_assert_safe_rejects_publish_missing_its_allowlist() -> None:
     index = argv.index("--allowedTools")
     del argv[index : index + 2]
     with pytest.raises(ClaudeUnsafe, match="allowedTools"):
-        ClaudeBackend().assert_safe(argv, "publish")
+        ClaudeBackend().assert_safe(inv(argv), "publish")
 
 
 def test_claude_assert_safe_rejects_deny_patterns_present_at_publish() -> None:
@@ -1217,7 +1356,7 @@ def test_claude_assert_safe_rejects_deny_patterns_present_at_publish() -> None:
         start(ClaudeBackend(), freedom="publish"), "--disallowedTools", DISALLOWED_TOOLS
     )
     with pytest.raises(ClaudeUnsafe, match="disallowedTools"):
-        ClaudeBackend().assert_safe(argv, "publish")
+        ClaudeBackend().assert_safe(inv(argv), "publish")
 
 
 def test_claude_assert_safe_rejects_missing_deny_patterns_at_write_in_repo() -> None:
@@ -1225,7 +1364,7 @@ def test_claude_assert_safe_rejects_missing_deny_patterns_at_write_in_repo() -> 
     index = argv.index("--disallowedTools")
     del argv[index : index + 2]
     with pytest.raises(ClaudeUnsafe, match="disallowedTools"):
-        ClaudeBackend().assert_safe(argv, "write_in_repo")
+        ClaudeBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 # Three evasions measured directly against the real `claude` CLI — each honoured by claude while
@@ -1246,14 +1385,15 @@ CLAUDE_EVASIONS: dict[str, tuple[str, ...]] = {
 def test_claude_refuses_every_measured_non_canonical_option_form(evasion: str) -> None:
     argv = with_extra_options(start(ClaudeBackend()), *CLAUDE_EVASIONS[evasion])
     with pytest.raises(ClaudeUnsafe):
-        ClaudeBackend().assert_safe(argv, "write_in_repo")
+        ClaudeBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 CLAUDE_ATTACHED_FLAG_FORMS = [
     f"{flag}=x"
     for flag in (
-        "--output-format", "--permission-mode", "--disallowedTools", "--allowedTools",
-        "--max-turns", "--model", "--effort", "--session-id", "--resume",
+        "--verbose", "--include-partial-messages", "--output-format", "--permission-mode",
+        "--disallowedTools", "--allowedTools", "--max-turns", "--model", "--effort",
+        "--session-id", "--resume",
     )
 ]
 
@@ -1264,7 +1404,7 @@ def test_claude_refuses_the_attached_form_of_every_flag_it_writes(token: str) ->
     refused like any other non-canonical spelling — not just the three flags actually exploited."""
     argv = with_extra_options(start(ClaudeBackend()), token)
     with pytest.raises(ClaudeUnsafe, match="unrecognised option token"):
-        ClaudeBackend().assert_safe(argv, "write_in_repo")
+        ClaudeBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 @pytest.mark.parametrize("alias", ["--allowed-tools", "--disallowed-tools"])
@@ -1273,13 +1413,13 @@ def test_claude_refuses_documented_tool_flag_aliases(alias: str) -> None:
     backend never writes them, so they must be refused like any other unrecognised token."""
     argv = with_extra_options(start(ClaudeBackend()), alias, "Bash(git commit:*)")
     with pytest.raises(ClaudeUnsafe, match="unrecognised option token"):
-        ClaudeBackend().assert_safe(argv, "write_in_repo")
+        ClaudeBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 def test_claude_refuses_an_unrecognised_token() -> None:
     argv = with_extra_options(start(ClaudeBackend()), "--frobnicate")
     with pytest.raises(ClaudeUnsafe, match="unrecognised option token"):
-        ClaudeBackend().assert_safe(argv, "write_in_repo")
+        ClaudeBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 @pytest.mark.parametrize("freedom", ["read_only", "write_in_repo"])
@@ -1290,7 +1430,7 @@ def test_claude_deny_and_allow_can_never_coexist_whatever_the_spelling(freedom: 
         start(ClaudeBackend(), freedom=freedom), "--allowedTools", ALLOWED_TOOLS["publish"]
     )
     with pytest.raises(ClaudeUnsafe, match="both present"):
-        ClaudeBackend().assert_safe(argv, freedom)
+        ClaudeBackend().assert_safe(inv(argv), freedom)
 
 
 def test_claude_deny_and_allow_can_never_coexist_at_publish() -> None:
@@ -1298,7 +1438,7 @@ def test_claude_deny_and_allow_can_never_coexist_at_publish() -> None:
         start(ClaudeBackend(), freedom="publish"), "--disallowedTools", DISALLOWED_TOOLS
     )
     with pytest.raises(ClaudeUnsafe, match="both present"):
-        ClaudeBackend().assert_safe(argv, "publish")
+        ClaudeBackend().assert_safe(inv(argv), "publish")
 
 
 @pytest.mark.parametrize("model", ["--effort=high", "-sother", "--unknown-flag"])
@@ -1349,32 +1489,32 @@ def test_claude_refuses_a_session_flag_with_no_session_id() -> None:
     argv = start(ClaudeBackend())
     argv[argv.index("--session-id") + 1] = "  "
     with pytest.raises(ClaudeUnsafe, match="no session id"):
-        ClaudeBackend().assert_safe(argv, "write_in_repo")
+        ClaudeBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 def test_claude_rejects_output_format_other_than_stream_json() -> None:
     argv = start(ClaudeBackend())
     argv[argv.index("--output-format") + 1] = "text"
     with pytest.raises(ClaudeUnsafe, match="stream-json"):
-        ClaudeBackend().assert_safe(argv, "write_in_repo")
+        ClaudeBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 def test_claude_rejects_a_duplicate_output_format_whose_second_value_would_win() -> None:
     argv = with_extra_options(start(ClaudeBackend()), "--output-format", "text")
     with pytest.raises(ClaudeUnsafe, match="--output-format appears"):
-        ClaudeBackend().assert_safe(argv, "write_in_repo")
+        ClaudeBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 def test_claude_rejects_a_duplicate_max_turns_whose_second_value_would_win() -> None:
     argv = with_extra_options(start(ClaudeBackend(), max_turns=3), "--max-turns", "99")
     with pytest.raises(ClaudeUnsafe, match="--max-turns appears"):
-        ClaudeBackend().assert_safe(argv, "write_in_repo")
+        ClaudeBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 def test_claude_rejects_a_duplicate_model_whose_second_value_would_win() -> None:
     argv = with_extra_options(start(ClaudeBackend(), model="opus"), "--model", "sonnet")
     with pytest.raises(ClaudeUnsafe, match="--model appears"):
-        ClaudeBackend().assert_safe(argv, "write_in_repo")
+        ClaudeBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 @pytest.mark.parametrize("build", [start, resume], ids=["start", "resume"])
@@ -1382,7 +1522,7 @@ def test_claude_legitimate_argv_with_model_and_effort_still_passes_the_strict_wa
     """The allowlist must not be so strict it refuses what this backend itself writes, on either
     the start or resume argv shape."""
     argv = build(ClaudeBackend(), model="sonnet", reasoning_effort="medium")
-    ClaudeBackend().assert_safe(argv, "write_in_repo")
+    ClaudeBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 # --- codex specifics -----------------------------------------------------------------------
@@ -1402,7 +1542,7 @@ def test_codex_publish_carries_the_network_pair_on_top_of_workspace_write() -> N
     argv = start(CodexBackend(), freedom="publish")
     assert argv[argv.index("-s") + 1] == "workspace-write"
     assert NETWORK_ENABLE_PAIR in argv
-    CodexBackend().assert_safe(argv, "publish")
+    CodexBackend().assert_safe(inv(argv), "publish")
 
 
 @pytest.mark.parametrize("freedom", ["read_only", "write_in_repo", "unrestricted"])
@@ -1413,7 +1553,7 @@ def test_codex_network_pair_absent_outside_publish(freedom: str) -> None:
 def test_codex_assert_safe_refuses_the_network_pair_outside_publish() -> None:
     argv = with_extra_options(start(CodexBackend(), freedom="write_in_repo"), "-c", NETWORK_ENABLE_PAIR)
     with pytest.raises(CodexUnsafe, match="network"):
-        CodexBackend().assert_safe(argv, "write_in_repo")
+        CodexBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 def test_codex_assert_safe_refuses_publish_missing_the_network_pair() -> None:
@@ -1422,7 +1562,7 @@ def test_codex_assert_safe_refuses_publish_missing_the_network_pair() -> None:
     del argv[index - 1 : index + 1]  # the "-c" token and the pair value
     assert NETWORK_ENABLE_PAIR not in argv
     with pytest.raises(CodexUnsafe, match="network"):
-        CodexBackend().assert_safe(argv, "publish")
+        CodexBackend().assert_safe(inv(argv), "publish")
 
 
 def test_codex_asserts_network_blocked_rather_than_hoping_the_user_config_agrees() -> None:
@@ -1440,7 +1580,7 @@ def test_codex_asserts_network_blocked_rather_than_hoping_the_user_config_agrees
     index = argv.index(NETWORK_DISABLE_PAIR)
     del argv[index - 1 : index + 1]
     with pytest.raises(CodexUnsafe, match="network"):
-        CodexBackend().assert_safe(argv, "write_in_repo")
+        CodexBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 def test_codex_read_only_takes_no_network_override_because_the_key_does_not_apply() -> None:
@@ -1457,7 +1597,7 @@ def test_codex_refuses_both_network_overrides_at_once() -> None:
     argv = with_extra_options(start(CodexBackend(), freedom="publish"), "-c", NETWORK_DISABLE_PAIR)
 
     with pytest.raises(CodexUnsafe, match="both network overrides"):
-        CodexBackend().assert_safe(argv, "publish")
+        CodexBackend().assert_safe(inv(argv), "publish")
 
 
 def test_codex_pins_never_ask_or_it_could_hang() -> None:
@@ -1472,7 +1612,7 @@ def test_codex_pins_never_ask_or_it_could_hang() -> None:
     index = argv.index(NEVER_ASK[1])
     del argv[index - 1 : index + 1]
     with pytest.raises(CodexUnsafe, match="approval"):
-        CodexBackend().assert_safe(argv, "write_in_repo")
+        CodexBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 def test_codex_rejects_a_later_approval_override_that_would_win() -> None:
@@ -1481,7 +1621,7 @@ def test_codex_rejects_a_later_approval_override_that_would_win() -> None:
     override besides the exact one this backend writes is rejected outright."""
     argv = with_extra_options(start(CodexBackend()), "-c", 'approval_policy="on-request"')
     with pytest.raises(CodexUnsafe, match="unexpected -c pair"):
-        CodexBackend().assert_safe(argv, "write_in_repo")
+        CodexBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 def test_codex_rejects_a_duplicate_sandbox_under_its_long_alias() -> None:
@@ -1490,19 +1630,18 @@ def test_codex_rejects_a_duplicate_sandbox_under_its_long_alias() -> None:
     ever writes `-s` — rather than reaching a "two sandbox flags" count."""
     argv = with_extra_options(start(CodexBackend()), "--sandbox", "danger-full-access")
     with pytest.raises(CodexUnsafe, match="unrecognised option token"):
-        CodexBackend().assert_safe(argv, "write_in_repo")
+        CodexBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 def test_codex_separates_the_prompt_so_it_cannot_be_parsed_as_options() -> None:
     argv = CodexBackend().build_start_argv(
         "--sandbox", repo=REPO, freedom="read_only", session_id=None, model=None, max_turns=None,
         reasoning_effort=None,
-    )
+    ).argv
     assert argv[-2:] == ["--", "--sandbox"]
     # And prompt text must not be able to satisfy a safety check.
     with pytest.raises(CodexUnsafe, match="exactly one sandbox"):
-        CodexBackend().assert_safe(
-            [a for a in argv if a not in ("-s", "read-only")], "read_only"
+        CodexBackend().assert_safe(inv([a for a in argv if a not in ("-s", "read-only")]), "read_only"
         )
 
 
@@ -1523,7 +1662,7 @@ def test_a_top_level_codex_error_event_is_a_failure() -> None:
 def test_codex_refuses_to_discard_its_sandbox() -> None:
     argv = with_extra_options(start(CodexBackend()), "--dangerously-bypass-approvals-and-sandbox")
     with pytest.raises(CodexUnsafe, match="discards the sandbox"):
-        CodexBackend().assert_safe(argv, "write_in_repo")
+        CodexBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 def test_codex_prompt_mentioning_the_bypass_flag_is_not_treated_as_using_it() -> None:
@@ -1533,8 +1672,8 @@ def test_codex_prompt_mentioning_the_bypass_flag_is_not_treated_as_using_it() ->
         "please --dangerously-bypass-approvals-and-sandbox everything",
         repo=REPO, freedom="write_in_repo", session_id=None, model=None, max_turns=None,
         reasoning_effort=None,
-    )
-    CodexBackend().assert_safe(argv, "write_in_repo")
+    ).argv
+    CodexBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 def test_codex_prompt_is_last_so_no_option_swallows_it() -> None:
@@ -1576,7 +1715,7 @@ def test_codex_refuses_the_old_pre_fix_resume_shape() -> None:
         "-c", NEVER_ASK[1], "--", "abc-123", "more",
     ]
     with pytest.raises(CodexUnsafe, match="last token"):
-        CodexBackend().assert_safe(argv, "write_in_repo")
+        CodexBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 def test_codex_refuses_a_duplicated_resume_token() -> None:
@@ -1588,7 +1727,7 @@ def test_codex_refuses_a_duplicated_resume_token() -> None:
     assert argv[sep - 1] == "resume"
     argv = [*argv[: sep - 1], "resume", *argv[sep - 1 :]]
     with pytest.raises(CodexUnsafe, match="last token"):
-        CodexBackend().assert_safe(argv, "write_in_repo")
+        CodexBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 def test_codex_model_named_resume_is_not_read_as_the_subcommand_on_start() -> None:
@@ -1596,7 +1735,7 @@ def test_codex_model_named_resume_is_not_read_as_the_subcommand_on_start() -> No
     token — so this stays a 1-positional start argv, not a 2-positional resume one."""
     argv = start(CodexBackend(), model="resume")
     assert argv[argv.index("-m") + 1] == "resume"
-    CodexBackend().assert_safe(argv, "write_in_repo")
+    CodexBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 def test_codex_model_named_resume_still_passes_on_an_actual_resume() -> None:
@@ -1605,7 +1744,7 @@ def test_codex_model_named_resume_still_passes_on_an_actual_resume() -> None:
     argv = resume(CodexBackend(), model="resume")
     sep = argv.index("--")
     assert argv[sep - 2 : sep] == ["resume", "resume"]
-    CodexBackend().assert_safe(argv, "write_in_repo")
+    CodexBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 @pytest.mark.parametrize(
@@ -1649,17 +1788,16 @@ def test_codex_refuses_shapes_it_would_never_have_written(argv: list[str], why: 
     intended prompt as SESSION_ID and silently continues a different conversation.
     """
     with pytest.raises(CodexUnsafe):
-        CodexBackend().assert_safe(argv, "read_only")
+        CodexBackend().assert_safe(inv(argv), "read_only")
 
 
 def test_codex_positional_arity_allows_values_that_look_like_options() -> None:
     """Arity is counted, never matched: a real prompt or session id may look like a flag."""
     backend = CodexBackend()
-    backend.assert_safe(
-        backend.build_resume_argv(
+    backend.assert_safe(inv(backend.build_resume_argv(
             "--json", repo=REPO, freedom="read_only", session_id="resume",
             model=None, max_turns=None, reasoning_effort="xhigh",
-        ),
+        )),
         "read_only",
     )
 
@@ -1675,8 +1813,8 @@ def test_codex_positionals_may_be_the_separator_or_the_subcommand_itself() -> No
         "resume", repo=REPO, freedom="read_only", session_id="--",
         model=None, max_turns=None, reasoning_effort=None,
     )
-    assert argv[-3:] == ["--", "--", "resume"]
-    backend.assert_safe(argv, "read_only")
+    assert argv.argv[-3:] == ["--", "--", "resume"]
+    backend.assert_safe(inv(argv), "read_only")
 
 
 def test_codex_working_directory_is_explicit() -> None:
@@ -1694,7 +1832,7 @@ def test_codex_emits_exactly_one_effort_pair_and_still_pins_approval_policy() ->
     argv = start(CodexBackend(), reasoning_effort="high")
     assert argv.count(f'{CODEX_EFFORT_KEY}="high"') == 1
     assert NEVER_ASK[1] in argv
-    CodexBackend().assert_safe(argv, "write_in_repo")
+    CodexBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 def test_codex_rejects_a_duplicate_effort_override_whose_second_value_would_win() -> None:
@@ -1702,13 +1840,13 @@ def test_codex_rejects_a_duplicate_effort_override_whose_second_value_would_win(
         start(CodexBackend(), reasoning_effort="low"), "-c", f'{CODEX_EFFORT_KEY}="high"'
     )
     with pytest.raises(CodexUnsafe, match="at most one"):
-        CodexBackend().assert_safe(argv, "write_in_repo")
+        CodexBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 def test_codex_rejects_an_unexpected_effort_value_reaching_assert_safe_directly() -> None:
     argv = with_extra_options(start(CodexBackend()), "-c", f'{CODEX_EFFORT_KEY}="bogus"')
     with pytest.raises(CodexUnsafe, match="unexpected"):
-        CodexBackend().assert_safe(argv, "write_in_repo")
+        CodexBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 def test_codex_a_look_alike_key_does_not_satisfy_the_approval_policy_requirement() -> None:
@@ -1723,7 +1861,7 @@ def test_codex_a_look_alike_key_does_not_satisfy_the_approval_policy_requirement
         "--", "do a thing",
     ]
     with pytest.raises(CodexUnsafe, match="unexpected -c pair"):
-        CodexBackend().assert_safe(argv, "write_in_repo")
+        CodexBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 def test_codex_an_unrelated_key_sharing_a_prefix_is_still_refused() -> None:
@@ -1734,13 +1872,13 @@ def test_codex_an_unrelated_key_sharing_a_prefix_is_still_refused() -> None:
     to keep here; strict allowlisting subsumes the narrower prefix-matching fix."""
     argv = with_extra_options(start(CodexBackend()), "-c", 'approval_policy_extra="never"')
     with pytest.raises(CodexUnsafe, match="unexpected -c pair"):
-        CodexBackend().assert_safe(argv, "write_in_repo")
+        CodexBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 def test_codex_rejects_a_model_value_that_looks_like_an_option() -> None:
     argv = with_extra_options(start(CodexBackend()), "-m", "--something")
     with pytest.raises(CodexUnsafe, match="parse as an option"):
-        CodexBackend().assert_safe(argv, "write_in_repo")
+        CodexBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 def test_codex_refuses_a_space_padded_approval_policy_override() -> None:
@@ -1750,7 +1888,7 @@ def test_codex_refuses_a_space_padded_approval_policy_override() -> None:
     the one literal this backend writes, so it never reaches the approval-count check at all."""
     argv = with_extra_options(start(CodexBackend()), "-c", 'approval_policy ="on-request"')
     with pytest.raises(CodexUnsafe, match="unexpected -c pair"):
-        CodexBackend().assert_safe(argv, "write_in_repo")
+        CodexBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 def test_codex_refuses_a_space_padded_duplicate_effort_override() -> None:
@@ -1760,7 +1898,7 @@ def test_codex_refuses_a_space_padded_duplicate_effort_override() -> None:
         start(CodexBackend(), reasoning_effort="low"), "-c", f'{CODEX_EFFORT_KEY} ="high"'
     )
     with pytest.raises(CodexUnsafe, match="unexpected -c pair"):
-        CodexBackend().assert_safe(argv, "write_in_repo")
+        CodexBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 def test_codex_refuses_a_config_pair_with_no_equals() -> None:
@@ -1768,7 +1906,7 @@ def test_codex_refuses_a_config_pair_with_no_equals() -> None:
     something from it — refused outright instead."""
     argv = with_extra_options(start(CodexBackend()), "-c", "model_reasoning_effort")
     with pytest.raises(CodexUnsafe, match="no '='"):
-        CodexBackend().assert_safe(argv, "write_in_repo")
+        CodexBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 # Eight evasions measured directly against the real `codex` CLI — each honoured by codex while a
@@ -1799,7 +1937,7 @@ CODEX_EVASIONS: dict[str, tuple[str, ...]] = {
 def test_codex_refuses_every_measured_non_canonical_option_form(evasion: str) -> None:
     argv = with_extra_options(start(CodexBackend()), *CODEX_EVASIONS[evasion])
     with pytest.raises(CodexUnsafe):
-        CodexBackend().assert_safe(argv, "write_in_repo")
+        CodexBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 def with_extra_options_before_codex_resume(argv: list[str], *extra: str) -> list[str]:
@@ -1821,7 +1959,7 @@ def with_extra_options_before_codex_resume(argv: list[str], *extra: str) -> list
 def test_codex_refuses_every_measured_non_canonical_option_form_on_resume(evasion: str) -> None:
     argv = with_extra_options_before_codex_resume(resume(CodexBackend()), *CODEX_EVASIONS[evasion])
     with pytest.raises(CodexUnsafe):
-        CodexBackend().assert_safe(argv, "write_in_repo")
+        CodexBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 @pytest.mark.parametrize("build", [start, resume], ids=["start", "resume"])
@@ -1830,7 +1968,7 @@ def test_codex_legitimate_argv_with_model_and_effort_still_passes_the_strict_wal
     `resume` no longer differ in where the option region *begins* — both start right after `exec` —
     only in whether a trailing `resume` token follows it before `--`."""
     argv = build(CodexBackend(), model="gpt-5", reasoning_effort="medium")
-    CodexBackend().assert_safe(argv, "write_in_repo")
+    CodexBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 # --- opencode specifics --------------------------------------------------------------------
@@ -1851,7 +1989,7 @@ def test_opencode_freedom_maps_to_an_agent(freedom: str, agent: str, auto: bool)
 def test_opencode_read_only_never_carries_auto_approval() -> None:
     argv = with_extra_options(start(OpencodeBackend(), freedom="read_only"), "--auto")
     with pytest.raises(OpencodeUnsafe, match="contradicts"):
-        OpencodeBackend().assert_safe(argv, "read_only")
+        OpencodeBackend().assert_safe(inv(argv), "read_only")
 
 
 @pytest.mark.parametrize("flag", REJECTED_FLAGS)
@@ -1860,21 +1998,21 @@ def test_opencode_refuses_flags_that_break_its_session_or_permission_guarantees(
     argv = start(OpencodeBackend())
     assert flag not in argv
     with pytest.raises(OpencodeUnsafe, match="guarantees"):
-        OpencodeBackend().assert_safe(with_extra_options(argv, flag), "write_in_repo")
+        OpencodeBackend().assert_safe(inv(with_extra_options(argv, flag)), "write_in_repo")
 
 
 def test_opencode_rejects_a_non_json_format_it_could_not_parse() -> None:
     argv = start(OpencodeBackend())
     argv[argv.index("--format") + 1] = "default"
     with pytest.raises(OpencodeUnsafe, match="only json"):
-        OpencodeBackend().assert_safe(argv, "write_in_repo")
+        OpencodeBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 @pytest.mark.parametrize("flag", ["--format", "--dir", "--agent"])
 def test_opencode_rejects_a_duplicate_option_whose_second_value_would_win(flag: str) -> None:
     argv = with_extra_options(start(OpencodeBackend()), flag, "whatever")
     with pytest.raises(OpencodeUnsafe, match="appears 2 times"):
-        OpencodeBackend().assert_safe(argv, "write_in_repo")
+        OpencodeBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 @pytest.mark.parametrize(
@@ -1892,7 +2030,7 @@ def test_opencode_refuses_option_forms_that_would_override_a_guarantee_unnoticed
     argv = with_extra_options(start(OpencodeBackend()), token)
 
     with pytest.raises(OpencodeUnsafe, match="unrecognised option token"):
-        OpencodeBackend().assert_safe(argv, "write_in_repo")
+        OpencodeBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 def test_opencode_refuses_a_second_model_that_would_win() -> None:
@@ -1900,28 +2038,28 @@ def test_opencode_refuses_a_second_model_that_would_win() -> None:
     argv = with_extra_options(start(OpencodeBackend(), model="a/b"), "-m", "other/model")
 
     with pytest.raises(OpencodeUnsafe, match="-m appears 2 times"):
-        OpencodeBackend().assert_safe(argv, "write_in_repo")
+        OpencodeBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 def test_opencode_accepts_variant_in_canonical_form() -> None:
     argv = start(OpencodeBackend(), reasoning_effort="high")
 
     assert argv[argv.index("--variant") + 1] == "high"
-    OpencodeBackend().assert_safe(argv, "write_in_repo")
+    OpencodeBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 def test_opencode_rejects_a_duplicate_variant_whose_second_value_would_win() -> None:
     argv = with_extra_options(start(OpencodeBackend(), reasoning_effort="low"), "--variant", "high")
 
     with pytest.raises(OpencodeUnsafe, match="appears 2 times"):
-        OpencodeBackend().assert_safe(argv, "write_in_repo")
+        OpencodeBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 def test_opencode_rejects_an_unexpected_variant_value_reaching_assert_safe_directly() -> None:
     argv = with_extra_options(start(OpencodeBackend()), "--variant", "bogus")
 
     with pytest.raises(OpencodeUnsafe, match="unexpected --variant"):
-        OpencodeBackend().assert_safe(argv, "write_in_repo")
+        OpencodeBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 def test_opencode_start_carries_no_session_flag_and_resume_carries_one() -> None:
@@ -1936,7 +2074,7 @@ def test_opencode_start_carries_no_session_flag_and_resume_carries_one() -> None
 def test_opencode_refuses_a_session_flag_with_no_session_id() -> None:
     argv = with_extra_options(start(OpencodeBackend()), "-s", "  ")
     with pytest.raises(OpencodeUnsafe, match="no session id"):
-        OpencodeBackend().assert_safe(argv, "write_in_repo")
+        OpencodeBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 def test_opencode_resume_needs_a_session_id() -> None:
@@ -1949,10 +2087,10 @@ def test_an_opencode_prompt_that_looks_like_a_flag_is_not_mistaken_for_one() -> 
     argv = OpencodeBackend().build_start_argv(
         "--auto --format default", repo=REPO, freedom="read_only", session_id=None, model=None,
         max_turns=None, reasoning_effort=None,
-    )
+    ).argv
 
     assert argv[-2:] == ["--", "--auto --format default"]
-    OpencodeBackend().assert_safe(argv, "read_only")
+    OpencodeBackend().assert_safe(inv(argv), "read_only")
 
 
 def test_opencode_working_directory_is_explicit() -> None:
@@ -1988,7 +2126,7 @@ def test_opencode_refuses_a_flag_that_ate_the_next_flag_as_its_value() -> None:
     argv[argv.index("--dir") + 1] = "--agent"
 
     with pytest.raises(OpencodeUnsafe, match="parse as an option"):
-        OpencodeBackend().assert_safe(argv, "write_in_repo")
+        OpencodeBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 def test_opencode_read_only_is_described_as_restraint_not_prevention() -> None:
@@ -2033,7 +2171,7 @@ def test_vibe_turn_cap_is_emitted() -> None:
     """Unlike codex and opencode, vibe genuinely supports a turn cap — see its capabilities."""
     argv = start(VibeBackend(), max_turns=7)
     assert argv[argv.index("--max-turns") + 1] == "7"
-    VibeBackend().assert_safe(argv, "write_in_repo")
+    VibeBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 def test_vibe_resume_needs_a_session_id() -> None:
@@ -2046,9 +2184,9 @@ def test_a_vibe_prompt_that_looks_like_a_flag_is_not_mistaken_for_one() -> None:
     argv = VibeBackend().build_start_argv(
         "--max-turns 999 --agent auto-approve", repo=REPO, freedom="read_only", session_id=None,
         model=None, max_turns=None, reasoning_effort=None,
-    )
+    ).argv
     assert argv[-1] == "--prompt=--max-turns 999 --agent auto-approve"
-    VibeBackend().assert_safe(argv, "read_only")
+    VibeBackend().assert_safe(inv(argv), "read_only")
 
 
 def test_vibe_prompt_must_be_the_last_token() -> None:
@@ -2056,7 +2194,7 @@ def test_vibe_prompt_must_be_the_last_token() -> None:
     never reach the model — refused rather than silently dropped."""
     argv = [*start(VibeBackend()), "--trust"]
     with pytest.raises(VibeUnsafe, match="last token"):
-        VibeBackend().assert_safe(argv, "write_in_repo")
+        VibeBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 @pytest.mark.parametrize(
@@ -2070,7 +2208,7 @@ def test_vibe_refuses_an_empty_or_blank_prompt_value(token: str) -> None:
     argv = start(VibeBackend())
     argv[-1] = token
     with pytest.raises(VibeUnsafe, match="non-empty"):
-        VibeBackend().assert_safe(argv, "write_in_repo")
+        VibeBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 @pytest.mark.parametrize("flag", VIBE_REJECTED_FLAGS)
@@ -2078,7 +2216,7 @@ def test_vibe_refuses_flags_that_break_its_guarantees(flag: str) -> None:
     argv = start(VibeBackend())
     assert flag not in argv
     with pytest.raises(VibeUnsafe, match="guarantees"):
-        VibeBackend().assert_safe(with_extra_vibe_options(argv, flag), "write_in_repo")
+        VibeBackend().assert_safe(inv(with_extra_vibe_options(argv, flag)), "write_in_repo")
 
 
 @pytest.mark.parametrize(
@@ -2088,7 +2226,7 @@ def test_vibe_refuses_flags_that_break_its_guarantees(flag: str) -> None:
 def test_vibe_refuses_option_forms_that_would_override_a_guarantee_unnoticed(token: str) -> None:
     argv = with_extra_vibe_options(start(VibeBackend()), token)
     with pytest.raises(VibeUnsafe, match="unrecognised option token"):
-        VibeBackend().assert_safe(argv, "write_in_repo")
+        VibeBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 @pytest.mark.parametrize(
@@ -2101,26 +2239,26 @@ def test_vibe_rejects_a_duplicate_boolean_or_value_flag_whose_second_value_would
 ) -> None:
     argv = with_extra_vibe_options(start(VibeBackend()), flag, *extra)
     with pytest.raises(VibeUnsafe, match=why):
-        VibeBackend().assert_safe(argv, "write_in_repo")
+        VibeBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 def test_vibe_rejects_a_duplicate_max_turns_whose_second_value_would_win() -> None:
     argv = with_extra_vibe_options(start(VibeBackend(), max_turns=3), "--max-turns", "9")
     with pytest.raises(VibeUnsafe, match="--max-turns appears"):
-        VibeBackend().assert_safe(argv, "write_in_repo")
+        VibeBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 def test_vibe_rejects_a_duplicate_resume_whose_second_value_would_win() -> None:
     argv = with_extra_vibe_options(resume(VibeBackend()), "--resume", "other-session")
     with pytest.raises(VibeUnsafe, match="--resume appears"):
-        VibeBackend().assert_safe(argv, "write_in_repo")
+        VibeBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 def test_vibe_rejects_a_missing_trust() -> None:
     argv = start(VibeBackend())
     argv.remove("--trust")
     with pytest.raises(VibeUnsafe, match="--trust"):
-        VibeBackend().assert_safe(argv, "write_in_repo")
+        VibeBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 @pytest.mark.parametrize("value", ["0", "-1", "abc", "1.5", ""])
@@ -2128,7 +2266,7 @@ def test_vibe_rejects_a_non_canonical_max_turns_value(value: str) -> None:
     argv = start(VibeBackend(), max_turns=1)
     argv[argv.index("--max-turns") + 1] = value
     with pytest.raises(VibeUnsafe):
-        VibeBackend().assert_safe(argv, "write_in_repo")
+        VibeBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 def test_vibe_refuses_a_resume_flag_naming_no_session() -> None:
@@ -2138,7 +2276,7 @@ def test_vibe_refuses_a_resume_flag_naming_no_session() -> None:
     it can and does police is: at most one --resume, and never one naming no session at all."""
     argv = with_extra_vibe_options(start(VibeBackend()), "--resume", "  ")
     with pytest.raises(VibeUnsafe, match="names no session"):
-        VibeBackend().assert_safe(argv, "write_in_repo")
+        VibeBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 def test_vibe_start_carries_no_resume_and_resume_carries_one() -> None:
@@ -2151,7 +2289,7 @@ def test_vibe_refuses_a_workdir_value_that_looks_like_an_option() -> None:
     argv = start(VibeBackend())
     argv[argv.index("--workdir") + 1] = "--agent"
     with pytest.raises(VibeUnsafe, match="parse as an option"):
-        VibeBackend().assert_safe(argv, "write_in_repo")
+        VibeBackend().assert_safe(inv(argv), "write_in_repo")
 
 
 def test_vibe_plan_caveat_states_that_bash_is_still_governed_by_the_users_config() -> None:
@@ -2304,6 +2442,101 @@ def test_claude_with_no_terminal_event_is_a_failure() -> None:
     acc = ingest(ClaudeBackend(), CLAUDE_EVENTS[:1])
 
     assert ClaudeBackend().classify(acc, 0) == "failed"
+
+
+# --- claude partial-message streaming (--include-partial-messages, measured 2.1.283) ---------
+# Real captures, trimmed/redacted: a multi-block classic reply and a live-input --resume run.
+
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+
+def fixture_lines(name: str) -> list[dict]:
+    return [
+        json.loads(line)
+        for line in (FIXTURES / name).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def test_claude_stream_activity_keeps_a_turn_open_after_a_result() -> None:
+    """result -> background task completion -> message_start/deltas -> interruption (no second
+    result): the streamed follow-up turn is open, so the earlier success is stale evidence and the
+    run must not read as idle to the live-input pump."""
+    backend = ClaudeBackend()
+    events = [
+        {"type": "system", "subtype": "task_started", "task_id": "t1", "is_backgrounded": True},
+        {
+            "type": "result", "subtype": "success", "is_error": False, "session_id": SESSION,
+            "result": "first answer", "num_turns": 1, "total_cost_usd": 0.1,
+        },
+        {"type": "system", "subtype": "task_updated", "task_id": "t1",
+         "patch": {"status": "completed"}},
+    ]
+    acc = Accumulator()
+    for event in events:
+        backend.ingest(json.loads(json.dumps(event)), acc)
+
+    # The background close alone would idle the pump: last task done, a result seen, no turn.
+    assert acc.awaiting_input is True
+
+    follow_up = [
+        {"type": "stream_event", "session_id": SESSION, "parent_tool_use_id": None,
+         "event": {"type": "message_start", "message": {"id": "msg_1"}}},
+        {"type": "stream_event", "session_id": SESSION, "parent_tool_use_id": None,
+         "event": {"type": "content_block_start", "index": 0,
+                   "content_block": {"type": "text", "text": ""}}},
+        {"type": "stream_event", "session_id": SESSION, "parent_tool_use_id": None,
+         "event": {"type": "content_block_delta", "index": 0,
+                   "delta": {"type": "text_delta", "text": "half an answ"}}},
+    ]
+    for event in follow_up:
+        backend.ingest(json.loads(json.dumps(event)), acc)
+
+    assert acc.turn_open is True
+    assert acc.awaiting_input is False
+    # The interruption never emitted a second result, so the earlier success must not stand.
+    assert backend.classify(acc, 0) == "failed"
+
+
+def test_claude_subagent_stream_events_do_not_open_the_turn() -> None:
+    """A subagent's own stream (non-empty parent_tool_use_id) is not the main thread's turn — same
+    rule as its assistant/user events."""
+    acc = ingest(
+        ClaudeBackend(),
+        [
+            {"type": "result", "subtype": "success", "is_error": False, "session_id": SESSION,
+             "result": "done", "num_turns": 1, "total_cost_usd": 0.1},
+            {"type": "stream_event", "session_id": SESSION, "parent_tool_use_id": "toolu_sub",
+             "event": {"type": "message_start", "message": {"id": "msg_sub"}}},
+            {"type": "stream_event", "session_id": SESSION, "parent_tool_use_id": "toolu_sub",
+             "event": {"type": "content_block_delta", "index": 0,
+                       "delta": {"type": "text_delta", "text": "subagent prose"}}},
+        ],
+    )
+
+    assert acc.turn_open is False
+    assert acc.awaiting_input is True
+
+
+def test_claude_interleaved_stream_events_change_no_outcome() -> None:
+    """The real partial-stream capture through ingest must produce exactly the outcome the same
+    stream with every stream_event line removed produces: summary, cost, counts and
+    classification all still come from assistant/result alone."""
+    full = fixture_lines("claude_partial_multiblock.jsonl")
+    stripped = [event for event in full if event.get("type") != "stream_event"]
+    backend = ClaudeBackend()
+    acc_full = ingest(backend, full)
+    acc_stripped = ingest(backend, stripped)
+
+    assert acc_full.summary == acc_stripped.summary == "OMEGA"
+    assert acc_full.total_cost_usd == acc_stripped.total_cost_usd == pytest.approx(0.1767795)
+    assert acc_full.num_turns == acc_stripped.num_turns == 2
+    assert acc_full.result_count == acc_stripped.result_count == 1
+    assert acc_full.saw_final_message is acc_stripped.saw_final_message is True
+    assert acc_full.usage == acc_stripped.usage
+    assert acc_full.denials == acc_stripped.denials == []
+    assert acc_full.turn_open is acc_stripped.turn_open is False
+    assert backend.classify(acc_full, 0) == backend.classify(acc_stripped, 0) == "completed"
 
 
 def test_opencode_normalisation() -> None:
@@ -2477,14 +2710,22 @@ VIBE_DENIED_RUN = [
 
 
 def test_vibe_an_auto_denied_approval_is_reported_not_silently_lost() -> None:
-    """The run fails with no output at all, so the denial is the only thing that explains it."""
+    """The run ends with no assistant message at all, so the denial is the only thing that explains
+    how the turn ended. A clean exit is reported `completed` with the warning — not `failed` with
+    nothing (decided 2026-09-26): the refusal says the agent was stopped, not that the run failed."""
     acc = ingest(VibeBackend(), VIBE_DENIED_RUN)
 
     assert acc.saw_final_message is False
     assert acc.summary is None
-    assert VibeBackend().classify(acc, 0) == "failed"
+    assert VibeBackend().classify(acc, 0) == "completed"
     assert acc.denials == [
         {"tool": "bash", "command": "git commit -am wip", "title": "Allow bash?"}
+    ]
+    assert acc.stream_state.get("ended_on_refusal") is True
+    assert acc.notices == [
+        "An action was refused (`git commit -am wip`) and no assistant response followed it. "
+        "A clean exit is reported completed despite this; for an editing task, check the worktree — "
+        "the requested changes may not all have landed."
     ]
 
 
@@ -2517,6 +2758,12 @@ def test_vibe_a_replayed_callback_before_any_turn_start_is_not_reported_as_a_den
     )
 
     assert acc.denials == []
+    # The new refusal state must not leak either: no flag, no warning, and with nothing after it the
+    # run has no evidence of finishing at all.
+    assert acc.stream_state.get("ended_on_refusal") is None
+    assert acc.stream_state.get("refusal_warning") is None
+    assert acc.notices == []
+    assert VibeBackend().classify(acc, 0) == "failed"
 
 
 def test_vibe_a_callback_with_a_non_matching_turn_id_is_not_reported_as_a_denial() -> None:
@@ -2798,6 +3045,10 @@ def test_vibe_a_denied_first_turn_does_not_leak_into_a_later_successful_turn() -
     assert acc.summary == "done"
     assert acc.saw_final_message is True
     assert VibeBackend().classify(acc, 0) == "completed"
+    # Nor does its refusal flag or warning: turn 2 did not end on the refusal.
+    assert acc.stream_state.get("ended_on_refusal") is None
+    assert acc.stream_state.get("refusal_warning") is None
+    assert acc.notices == []
 
 
 def test_vibe_a_later_distinct_turn_start_is_the_one_that_decides_the_outcome() -> None:
@@ -2961,19 +3212,25 @@ VIBE_DENIED_AFTER_SPEAKING = [
 
 
 def test_vibe_a_denial_after_a_progress_line_is_not_a_finished_run() -> None:
-    """The narration was a mid-work progress line, not an answer — the denial ended the run.
-
-    Reporting `completed` here hands the caller a result where there was none, and the summary reads
-    like one. Measured on a real dispatch that changed zero files: the last assistant message came
-    at entry 30 and the denial at entry 33, with nothing spoken after it.
+    """The narration was a mid-work progress line, not an answer, so it must not become the
+    summary. But the denial itself no longer fails a clean exit (decided 2026-09-26): the run reads
+    `completed` with the warning. The accepted trade-off is exactly this case, measured on a real
+    dispatch that changed zero files — the last assistant message came at entry 30 and the denial at
+    entry 33, with nothing spoken after it — so the warning is then the only signal, and the
+    worktree is the check.
     """
     acc = ingest(VibeBackend(), VIBE_DENIED_AFTER_SPEAKING)
 
     assert acc.saw_final_message is False
     assert acc.summary is None
-    assert VibeBackend().classify(acc, 0) == "failed"
+    assert VibeBackend().classify(acc, 0) == "completed"
     assert acc.denials == [
         {"tool": "bash", "command": "git commit -am wip", "title": "Allow bash?"}
+    ]
+    assert acc.notices == [
+        "An action was refused (`git commit -am wip`) and no assistant response followed it. "
+        "A clean exit is reported completed despite this; for an editing task, check the worktree — "
+        "the requested changes may not all have landed."
     ]
 
 
@@ -2997,12 +3254,17 @@ def test_vibe_a_denial_the_agent_recovered_from_still_completes() -> None:
     assert VibeBackend().classify(acc, 0) == "completed"
     # Recovery does not erase the refusal — the caller still needs to know it happened.
     assert len(acc.denials) == 1
+    # But the turn no longer ended on it, so the flag and its warning are gone: the warning would
+    # otherwise misdescribe a clean close.
+    assert acc.stream_state.get("ended_on_refusal") is None
+    assert acc.notices == []
 
 
 def test_vibe_a_replayed_denial_does_not_withdraw_the_live_turns_answer() -> None:
     """A --resume run replays prior history, denials included. Those must not reach live-turn state
-    at all — and now that a denial *withdraws* the close, a leak would be worse than a spurious
-    entry on `denials`: it would turn a genuinely finished resumed run into `failed`."""
+    at all — a denial *withdraws* the close and raises the refusal warning, so a leak would be worse
+    than a spurious entry on `denials`: it would strip a genuinely finished resumed run of its
+    summary and attach a warning about a refusal that belonged to an earlier session."""
     acc = ingest(
         VibeBackend(),
         [
@@ -3024,6 +3286,10 @@ def test_vibe_a_replayed_denial_does_not_withdraw_the_live_turns_answer() -> Non
     assert acc.saw_final_message is True
     assert acc.denials == []
     assert VibeBackend().classify(acc, 0) == "completed"
+    # Replay sets neither the refusal flag nor its warning — only a live-turn refusal does.
+    assert acc.stream_state.get("ended_on_refusal") is None
+    assert acc.stream_state.get("refusal_warning") is None
+    assert acc.notices == []
 
 
 @pytest.mark.parametrize(
@@ -3094,13 +3360,19 @@ def test_vibe_a_denial_and_a_turn_cap_breach_in_either_order_end_failed(order: s
     assert acc.stream_state.get("stop_event_seen") is True
     assert VibeBackend().classify(acc, 0) == "failed"
     assert len(acc.denials) == 1
+    # The stop event must not clear the refusal flag or its warning (its branch returns before the
+    # assistant-message path that clears them), and the explicit latch in `classify` is what keeps
+    # the combination failed at a clean exit rather than completed-on-refusal.
+    assert acc.stream_state.get("ended_on_refusal") is True
+    assert any("An action was refused" in notice for notice in acc.notices)
 
 
 def test_vibe_an_approval_with_no_usable_metadata_is_still_reported() -> None:
     """`ingest` withdraws the close on the strength of `kind: "approval"` alone, so the denial has
-    to land even when every descriptive field is missing — otherwise the run reports `failed` with
-    an empty `permission_denials`, the payload contradicting the signal the status came from. The
-    fallback states only what was observed; it does not invent a tool or command."""
+    to land even when every descriptive field is missing — otherwise the payload contradicts the
+    signal the status came from. The fallback states only what was observed; it does not invent a
+    tool or command. The refusal still counts at a clean exit (the flag is a boolean, never derived
+    from the description), and the warning falls back to "an action"."""
     acc = ingest(
         VibeBackend(),
         [
@@ -3114,5 +3386,498 @@ def test_vibe_an_approval_with_no_usable_metadata_is_still_reported() -> None:
     )
 
     assert acc.saw_final_message is False
-    assert VibeBackend().classify(acc, 0) == "failed"
+    assert VibeBackend().classify(acc, 0) == "completed"
     assert acc.denials == [{"kind": "approval"}]
+    assert acc.notices == [
+        "An action was refused (`an action`) and no assistant response followed it. "
+        "A clean exit is reported completed despite this; for an editing task, check the worktree — "
+        "the requested changes may not all have landed."
+    ]
+
+
+def test_vibe_a_refusal_then_a_nonzero_exit_is_still_a_failure() -> None:
+    """The warning is written at refusal time, so it reaches runs that later fail too — which is
+    exactly why its wording is outcome-neutral."""
+    acc = ingest(VibeBackend(), VIBE_DENIED_RUN)
+
+    assert any("An action was refused" in notice for notice in acc.notices)
+    assert VibeBackend().classify(acc, 1) == "failed"
+
+
+def test_vibe_a_refusal_on_a_recovered_run_with_no_observed_exit_is_still_a_failure() -> None:
+    """`ended_on_refusal` is not terminal evidence: nothing observed a clean exit, so a recovered
+    record cannot read `completed` off the back of a refusal."""
+    acc = ingest(VibeBackend(), VIBE_DENIED_RUN)
+
+    assert VibeBackend().classify(acc, None) == "failed"
+
+
+def test_vibe_a_second_trailing_refusal_replaces_the_first_warning() -> None:
+    """The last refused action is the one that matters, so exactly one warning stands — replacing,
+    not accumulating."""
+    second_refusal = {
+        "type": "callback", "sessionId": VIBE_DENIED_SESSION, "turnId": VIBE_DENIED_TURN,
+        "title": "Allow bash?",
+        "detail": {"kind": "approval",
+                   "effect": {"toolName": "bash", "input": {"command": "swiftformat --lint macos"}}},
+    }
+    acc = ingest(VibeBackend(), [VIBE_DENIED_RUN[0], VIBE_DENIED_RUN[2], second_refusal])
+
+    refusals = [notice for notice in acc.notices if "An action was refused" in notice]
+    assert len(refusals) == 1
+    assert "swiftformat --lint macos" in refusals[0]
+    assert "git commit -am wip" not in refusals[0]
+    assert acc.stream_state["refusal_warning"] == refusals[0]
+    assert acc.stream_state.get("ended_on_refusal") is True
+    assert len(acc.denials) == 2
+
+
+def test_vibe_a_refusal_then_is_error_is_still_a_failure() -> None:
+    """`is_error` outranks the refusal-completion rule, like every other failure signal."""
+    acc = ingest(VibeBackend(), VIBE_DENIED_RUN)
+    acc.is_error = True
+
+    assert VibeBackend().classify(acc, 0) == "failed"
+
+
+def test_vibe_unrelated_notices_survive_the_warnings_replacement_and_removal_in_order() -> None:
+    """Replacement (a second refusal) and removal (recovery) touch only the tracked warning; other
+    notices stay, in order."""
+    backend = VibeBackend()
+    acc = Accumulator()
+    backend.ingest(VIBE_DENIED_RUN[0], acc)
+    acc.notices.append("an unrelated notice")
+    backend.ingest(VIBE_DENIED_RUN[2], acc)
+    backend.ingest(
+        {
+            "type": "callback", "sessionId": VIBE_DENIED_SESSION, "turnId": VIBE_DENIED_TURN,
+            "title": "Allow bash?",
+            "detail": {"kind": "approval",
+                       "effect": {"toolName": "bash", "input": {"command": "swiftformat macos"}}},
+        },
+        acc,
+    )
+
+    # Replacement: one warning, and the unrelated notice keeps its place and order.
+    refusals = [notice for notice in acc.notices if "An action was refused" in notice]
+    assert len(refusals) == 1
+    assert acc.notices[0] == "an unrelated notice"
+
+    backend.ingest(
+        {"type": "message", "role": "assistant", "sessionId": VIBE_DENIED_SESSION,
+         "turnId": VIBE_DENIED_TURN, "source": None,
+         "content": [{"type": "text", "text": "Worked around it; here is the answer."}]},
+        acc,
+    )
+
+    # Removal on recovery: only the warning goes.
+    assert acc.notices == ["an unrelated notice"]
+    assert acc.stream_state.get("ended_on_refusal") is None
+
+
+def test_vibe_a_new_turn_start_as_the_final_event_resets_the_refusal_flag_and_warning() -> None:
+    """The marker itself must clear both — no later answer can be allowed to mask a missing reset."""
+    acc = ingest(
+        VibeBackend(),
+        [
+            *VIBE_DENIED_RUN,
+            {"type": "message", "role": "user", "sessionId": VIBE_DENIED_SESSION,
+             "turnId": "a-fresh-turn", "source": "turn_start",
+             "content": [{"type": "text", "text": "now do something else"}]},
+        ],
+    )
+
+    assert acc.stream_state.get("ended_on_refusal") is None
+    assert acc.stream_state.get("refusal_warning") is None
+    assert acc.notices == []
+
+
+def test_vibe_task_payload_carries_the_warning_and_a_recovered_record_stays_failed(
+    tmp_path: Path,
+) -> None:
+    """The warning must reach the caller through the payload, not just `classify`: a live snapshot
+    of a finished run reports `completed` with the warning in `notices`, and a recovered record
+    whose exit was never observed stays `failed` — the refusal flag is not terminal evidence."""
+    from datetime import datetime, timezone
+
+    from polybridge import store
+    from polybridge.tasks import Task
+
+    backend = VibeBackend()
+
+    # Live: the shape `Task.snapshot` serves once `_monitor` has published a terminal status.
+    task = Task(
+        task_id="t",
+        backend="vibe",
+        session_id=VIBE_DENIED_SESSION,
+        repo_path=tmp_path,
+        prompt="x",
+        max_turns=None,
+        log_path=tmp_path / "t.jsonl",
+        started_at=datetime.now(timezone.utc),
+    )
+    task.acc = ingest(backend, VIBE_DENIED_RUN)
+    task.exit_code = 0
+    task.status = backend.classify(task.acc, 0)
+
+    snap = task.snapshot()
+
+    assert snap["status"] == "completed"
+    assert snap["summary"] is None
+    assert snap["permission_denials"] == [
+        {"tool": "bash", "command": "git commit -am wip", "title": "Allow bash?"}
+    ]
+    assert any("An action was refused (`git commit -am wip`)" in n for n in snap["notices"])
+
+    # Recovered: nothing observed the exit, so the same stream must not read `completed`.
+    record = store.TaskRecord(
+        task_id="t-rec",
+        backend="vibe",
+        session_id=VIBE_DENIED_SESSION,
+        markers=[VIBE_DENIED_SESSION],
+        repo_path=str(tmp_path),
+        started_at=datetime.now(timezone.utc).isoformat(),
+        pid=999_999_999,
+        prompt="x",
+        status="running",
+        exit_code=None,
+    )
+    store.log_path(tmp_path, record.task_id).write_text(
+        "".join(json.dumps(event) + "\n" for event in VIBE_DENIED_RUN), encoding="utf-8"
+    )
+
+    status, _note, state, _tail = store.resolve_status(tmp_path, record)
+    recovered = store.snapshot(tmp_path, record)
+
+    assert status == "failed"
+    # The replayed stream still carries the denial and the warning, so the caller can see why.
+    assert state.denials == [
+        {"tool": "bash", "command": "git commit -am wip", "title": "Allow bash?"}
+    ]
+    assert recovered["status"] == "failed"
+    assert any("An action was refused" in n for n in recovered["notices"])
+
+
+# --- live input (stage A3) --------------------------------------------------------------------
+
+
+def _live_line(text: str = "do a thing") -> bytes:
+    return ClaudeBackend().encode_live_message(text)
+
+
+def test_claude_defaults_to_the_live_input_shape() -> None:
+    for invocation in (start_invocation(ClaudeBackend()), resume_invocation(ClaudeBackend())):
+        assert invocation.live_input
+        assert invocation.stdin_mode == STDIN_PIPE
+        assert "--" not in invocation.argv
+        assert invocation.argv[invocation.argv.index("--input-format") + 1] == "stream-json"
+        ClaudeBackend().assert_safe(invocation, "write_in_repo")
+    started = start_invocation(ClaudeBackend())
+    assert json.loads(started.initial_input) == {
+        "type": "user",
+        "message": {"role": "user", "content": [{"type": "text", "text": "do a thing"}]},
+    }
+    assert started.argv[-2:] == ["--session-id", SESSION]
+    resumed = resume_invocation(ClaudeBackend())
+    assert resumed.argv[-2:] == ["--resume", "abc-123"]
+    assert json.loads(resumed.initial_input)["message"]["content"][0]["text"] == "more"
+
+
+def test_claude_max_turns_keeps_the_classic_one_shot_shape() -> None:
+    """--max-turns with live input is unmeasured, so a capped run is built exactly as before."""
+    for invocation, prompt in (
+        (start_invocation(ClaudeBackend(), max_turns=4), "do a thing"),
+        (resume_invocation(ClaudeBackend(), max_turns=4), "more"),
+    ):
+        assert not invocation.live_input
+        assert invocation.stdin_mode == "devnull"
+        assert invocation.initial_input is None
+        assert invocation.argv[-2:] == ["--", prompt]
+        assert "--input-format" not in invocation.argv
+        assert invocation.argv[invocation.argv.index("--max-turns") + 1] == "4"
+        ClaudeBackend().assert_safe(invocation, "write_in_repo")
+
+
+def test_claude_live_message_is_one_line_whatever_the_text() -> None:
+    line = ClaudeBackend().encode_live_message('two\nlines and a "quote" and ünïcode')
+    assert line.endswith(b"\n") and line.count(b"\n") == 1
+    assert json.loads(line)["message"]["content"][0]["text"] == 'two\nlines and a "quote" and ünïcode'
+
+
+@pytest.mark.parametrize("backend", ALL, ids=lambda b: b.name)
+def test_every_backend_declares_live_input_and_only_claude_has_it(backend) -> None:
+    assert backend.capabilities.supports_live_input is (backend.name == "claude")
+    assert backend.capabilities.as_dict()["supports_live_input"] is (backend.name == "claude")
+    if backend.name != "claude":
+        with pytest.raises(backends.UnsupportedCapability, match="resume_task"):
+            backend.encode_live_message("hi")
+        for invocation in (start_invocation(backend), resume_invocation(backend)):
+            assert invocation.stdin_mode == "devnull" and invocation.initial_input is None
+
+
+@pytest.mark.parametrize("backend", ALL, ids=lambda b: b.name)
+def test_assert_safe_refuses_a_bare_argv_list(backend) -> None:
+    """The whole Invocation or nothing: a list cannot say how the process's stdin is wired."""
+    argv = start(backend)
+    with pytest.raises(RuntimeError, match="expected an Invocation"):
+        backend.assert_safe(argv, "write_in_repo")
+
+
+@pytest.mark.parametrize("backend", [b for b in ALL if b.name != "claude"], ids=lambda b: b.name)
+def test_backends_without_live_input_refuse_a_pipe_or_initial_input(backend) -> None:
+    argv = start(backend)
+    with pytest.raises(RuntimeError, match="no live input"):
+        backend.assert_safe(Invocation(argv, stdin_mode=STDIN_PIPE), "write_in_repo")
+    with pytest.raises(RuntimeError, match="no live input"):
+        backend.assert_safe(Invocation(argv, initial_input=b"x\n"), "write_in_repo")
+
+
+def test_claude_refuses_a_live_argv_wired_to_devnull() -> None:
+    live = start_invocation(ClaudeBackend())
+    with pytest.raises(ClaudeUnsafe, match="stdin pipe"):
+        ClaudeBackend().assert_safe(Invocation(live.argv), "write_in_repo")
+
+
+def test_claude_refuses_a_classic_argv_wired_to_a_pipe() -> None:
+    classic = start_invocation(ClaudeBackend(), max_turns=2)
+    with pytest.raises(ClaudeUnsafe, match="DEVNULL"):
+        ClaudeBackend().assert_safe(
+            Invocation(classic.argv, stdin_mode=STDIN_PIPE, initial_input=_live_line()),
+            "write_in_repo",
+        )
+    with pytest.raises(ClaudeUnsafe, match="DEVNULL"):
+        ClaudeBackend().assert_safe(
+            Invocation(classic.argv, initial_input=_live_line()), "write_in_repo"
+        )
+
+
+def test_claude_refuses_input_format_on_a_classic_argv() -> None:
+    """Measured: next to --input-format stream-json the positional prompt is silently ignored."""
+    classic = start(ClaudeBackend(), max_turns=2)
+    argv = with_extra_options(classic, "--input-format", "stream-json")
+    with pytest.raises(ClaudeUnsafe, match="--input-format on a one-shot argv"):
+        ClaudeBackend().assert_safe(Invocation(argv), "write_in_repo")
+
+
+def test_claude_refuses_max_turns_on_a_live_argv() -> None:
+    argv = start(ClaudeBackend()) + ["--max-turns", "3"]
+    with pytest.raises(ClaudeUnsafe, match="--max-turns on a live-input run"):
+        ClaudeBackend().assert_safe(inv(argv), "write_in_repo")
+
+
+def test_claude_live_argv_refuses_any_other_input_format() -> None:
+    live = start(ClaudeBackend())
+    argv = list(live)
+    argv[argv.index("--input-format") + 1] = "text"
+    with pytest.raises(ClaudeUnsafe, match="--input-format was 'text'"):
+        ClaudeBackend().assert_safe(inv(argv), "write_in_repo")
+
+
+def test_claude_live_argv_refuses_a_second_input_format() -> None:
+    argv = start(ClaudeBackend()) + ["--input-format", "stream-json"]
+    with pytest.raises(ClaudeUnsafe, match="--input-format appears 2 times"):
+        ClaudeBackend().assert_safe(inv(argv), "write_in_repo")
+
+
+def test_claude_live_argv_without_input_format_is_refused() -> None:
+    live = start(ClaudeBackend())
+    index = live.index("--input-format")
+    argv = live[:index] + live[index + 2 :]
+    with pytest.raises(ClaudeUnsafe, match="--input-format appears 0 times"):
+        ClaudeBackend().assert_safe(inv(argv), "write_in_repo")
+
+
+@pytest.mark.parametrize(
+    "initial_input",
+    [
+        None,
+        "not bytes\n",
+        b"",
+        b'{"type":"user"}',
+        _live_line() + _live_line(),
+        b"not json\n",
+        b'["type","user"]\n',
+        b'{"type":"user","message":{"role":"user","content":[{"type":"text","text":"   "}]}}\n',
+        b'{"type":"user","message":{"role":"assistant","content":[{"type":"text","text":"x"}]}}\n',
+        b'{"type":"control","message":{"role":"user","content":[{"type":"text","text":"x"}]}}\n',
+        b'{"type":"user","message":{"role":"user","content":[{"type":"text","text":"x"},'
+        b'{"type":"text","text":"y"}]}}\n',
+        b'{"type":"user","message":{"role":"user","content":[{"type":"image","text":"x"}]}}\n',
+        b'{"type":"user","extra":1,"message":{"role":"user","content":[{"type":"text","text":"x"}]}}\n',
+        b'\xff\xfe\n',
+    ],
+    ids=[
+        "none", "str", "empty", "no-newline", "two-lines", "not-json", "not-object", "blank-text",
+        "wrong-role", "wrong-type", "two-blocks", "non-text-block", "extra-key", "not-utf8",
+    ],
+)
+def test_claude_refuses_a_malformed_initial_input(initial_input) -> None:
+    live = start_invocation(ClaudeBackend())
+    with pytest.raises(ClaudeUnsafe):
+        ClaudeBackend().assert_safe(
+            Invocation(live.argv, stdin_mode=STDIN_PIPE, initial_input=initial_input),
+            "write_in_repo",
+        )
+
+
+@pytest.mark.parametrize("freedom", FREEDOMS)
+def test_claude_live_and_classic_shapes_differ_only_in_the_input_wiring(freedom: str) -> None:
+    """Same options either way — freedom mapping, deny/allow lists, session flag — so the live
+    shape inherits every guarantee the classic one was measured to carry."""
+    live = start_invocation(ClaudeBackend(), freedom=freedom).argv
+    classic = start_invocation(ClaudeBackend(), freedom=freedom, max_turns=1).argv
+    index = live.index("--input-format")
+    live_options = live[:index] + live[index + 2 :]
+    classic_options = classic[: classic.index("--")]
+    index = classic_options.index("--max-turns")
+    assert live_options == classic_options[:index] + classic_options[index + 2 :]
+
+
+# --- interactive resume (takeover, A4.1) ----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("claude", ["claude", "--resume", "abc-123"]),
+        ("codex", ["codex", "-c", "check_for_update_on_startup=false", "resume", "abc-123"]),
+        ("opencode", ["opencode", "/work/repo", "-s", "abc-123"]),
+        ("vibe", ["vibe", "--trust", "--workdir", "/work/repo", "--resume", "abc-123"]),
+    ],
+)
+def test_interactive_resume_argv_is_the_measured_command(name: str, expected: list[str]) -> None:
+    backend = backends.get(name)
+
+    assert backend.interactive_resume_argv("abc-123", Path("/work/repo")) == expected
+
+
+@pytest.mark.parametrize("name", sorted(backends.BACKENDS))
+@pytest.mark.parametrize(
+    "session_id",
+    ["", "--dangerously-skip-permissions", "-s", "a b", "a\nb", "a;b", "x" * 257, None],
+)
+def test_interactive_resume_argv_refuses_ids_a_cli_could_parse_as_an_option(
+    name: str, session_id
+) -> None:
+    """Session ids come out of the agent's own stream; claude and vibe take them as an *optional*
+    option value and codex as a positional, so a `-`-prefixed id would become an option."""
+    assert backends.get(name).interactive_resume_argv(session_id, Path("/work/repo")) is None
+
+
+@pytest.mark.parametrize("name", sorted(backends.BACKENDS))
+def test_interactive_resume_argv_refuses_a_relative_repo(name: str) -> None:
+    assert backends.get(name).interactive_resume_argv("abc", Path("repo")) is None
+
+
+@pytest.mark.parametrize("name", sorted(backends.BACKENDS))
+def test_interactive_resume_argv_accepts_every_id_shape_the_clis_mint(name: str) -> None:
+    for session_id in (
+        "0199a3f2-7c1e-7b8a-9d0e-123456789abc",  # claude / codex / vibe uuid
+        "ses_3f1a9c0b2d7eFFabc",  # opencode
+    ):
+        argv = backends.get(name).interactive_resume_argv(session_id, Path("/work/repo"))
+        assert argv is not None and argv[-1] == session_id
+
+
+# --- resume_command (Monitor piece 3/3: copy the resume command) ---------------------------
+
+
+@pytest.mark.parametrize(
+    ("name", "expected_argv"),
+    [
+        ("claude", ["claude", "--resume", "abc-123"]),
+        ("codex", ["codex", "-c", "check_for_update_on_startup=false", "resume", "abc-123"]),
+        ("opencode", ["opencode", "/work/repo", "-s", "abc-123"]),
+        ("vibe", ["vibe", "--trust", "--workdir", "/work/repo", "--resume", "abc-123"]),
+    ],
+)
+def test_resume_command_matches_each_backends_measured_argv(
+    name: str, expected_argv: list[str]
+) -> None:
+    command = backends.resume_command(name, "abc-123", "/work/repo")
+
+    assert command == f"cd /work/repo && {shlex.join(expected_argv)}"
+
+
+@pytest.mark.parametrize("name", sorted(backends.BACKENDS))
+@pytest.mark.parametrize(
+    "repo",
+    [
+        "/work/has space",
+        "/work/it's mine",
+        "/work/$(echo pwned)",
+        "/work/`echo pwned`",
+        "/work/a;b",
+        "/work/a\nb",
+    ],
+    ids=["space", "apostrophe", "dollar-paren", "backticks", "semicolon", "newline"],
+)
+def test_resume_command_quotes_a_hostile_repo_path_safely(name: str, repo: str) -> None:
+    """Round-trip through `shlex.split`: whatever a shell would see must reconstruct to exactly
+    `["cd", repo, "&&", *argv]`, whatever the path contains — this is what makes the string safe
+    to paste into bash/zsh rather than merely readable."""
+    argv = backends.get(name).interactive_resume_argv("abc-123", Path(repo))
+    assert argv is not None  # sanity: every backend accepts this id/repo shape
+
+    command = backends.resume_command(name, "abc-123", repo)
+
+    assert command is not None
+    assert shlex.split(command) == ["cd", repo, "&&", *argv]
+
+
+@pytest.mark.parametrize("name", sorted(backends.BACKENDS))
+def test_resume_command_none_for_a_relative_repo(name: str) -> None:
+    assert backends.resume_command(name, "abc-123", "repo") is None
+
+
+@pytest.mark.parametrize("name", sorted(backends.BACKENDS))
+def test_resume_command_none_for_an_option_like_id(name: str) -> None:
+    assert backends.resume_command(name, "--dangerously-skip-permissions", "/work/repo") is None
+
+
+def test_resume_command_none_for_an_unknown_backend() -> None:
+    assert backends.resume_command("not-a-backend", "abc-123", "/work/repo") is None
+
+
+@pytest.mark.parametrize("name", sorted(backends.BACKENDS))
+def test_resume_command_none_when_interactive_resume_argv_returns_none(
+    name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Patched on the *class*, not the shared singleton instance `backends.get(name)` returns:
+    # `monkeypatch.setattr` on an instance whose attribute only exists via the class restores a
+    # bound method as a permanent instance attribute on teardown, which then shadows the class for
+    # every later test sharing that same module-level singleton.
+    monkeypatch.setattr(type(backends.get(name)), "interactive_resume_argv", lambda self, *_a: None)
+
+    assert backends.resume_command(name, "abc-123", "/work/repo") is None
+
+
+@pytest.mark.parametrize("name", sorted(backends.BACKENDS))
+def test_resume_command_none_for_a_nul_in_the_repo_path(name: str) -> None:
+    """claude and codex never carry the repo path in their interactive argv at all, so a NUL
+    there can only be caught by checking `repo_path` itself, not by trusting the returned argv."""
+    assert backends.resume_command(name, "abc-123", "/work/repo\0evil") is None
+
+
+@pytest.mark.parametrize("name", sorted(backends.BACKENDS))
+def test_resume_command_none_for_a_nul_in_the_session_id(name: str) -> None:
+    assert backends.resume_command(name, "abc\0123", "/work/repo") is None
+
+
+def test_resume_command_none_when_session_id_is_none() -> None:
+    assert backends.resume_command("claude", None, "/work/repo") is None
+
+
+def test_resume_command_swallows_any_unexpected_exception(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bookkeeping must never change an outcome (CLAUDE.md): whatever goes wrong inside this
+    formatter, a snapshot calling it must get `None` back, never an exception."""
+
+    def _boom(self: object, *_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("boom")
+
+    # Patched on the class — see the note in
+    # test_resume_command_none_when_interactive_resume_argv_returns_none for why the shared
+    # singleton instance must not be monkeypatched directly.
+    monkeypatch.setattr(type(backends.get("claude")), "interactive_resume_argv", _boom)
+
+    assert backends.resume_command("claude", "abc-123", "/work/repo") is None

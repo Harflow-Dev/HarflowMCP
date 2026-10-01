@@ -13,13 +13,15 @@ import pytest
 
 from polybridge import backends
 from polybridge.backends.base import FREEDOMS
+from polybridge.backends import Invocation
 from polybridge.backends.base import Enforcement
 from polybridge.backends.codex import CodexBackend
-from polybridge import store
+from polybridge import identity, store
 from polybridge import tasks as tasks_module
 from polybridge.tasks import (
     RepoUnavailableError,
     SessionBusyError,
+    SessionUnknownError,
     Task,
     TaskRegistry,
 )
@@ -137,11 +139,13 @@ async def test_resume_runs_at_the_parents_reasoning_effort(
     parent = make_task(tmp_path, "parent", session_id="s1", finished=True)
     parent.reasoning_effort = "high"
     registry._tasks[parent.task_id] = parent
+    registry.persist(parent)
 
     captured: dict = {}
 
-    async def fake_spawn(argv, **kwargs):
-        captured["argv"] = argv
+    async def fake_spawn(invocation, **kwargs):
+        captured["argv"] = invocation.argv
+        captured["invocation"] = invocation
         captured.update(kwargs)
         child = make_task(tmp_path, "child", session_id="s1")
         child.reasoning_effort = kwargs.get("reasoning_effort")
@@ -174,11 +178,13 @@ async def test_resume_record_runs_at_the_recorded_reasoning_effort(
         status="completed",
         reasoning_effort="xhigh",
     )
+    store.write(registry.log_dir, record)
 
     captured: dict = {}
 
-    async def fake_spawn(argv, **kwargs):
-        captured["argv"] = argv
+    async def fake_spawn(invocation, **kwargs):
+        captured["argv"] = invocation.argv
+        captured["invocation"] = invocation
         captured.update(kwargs)
         child = make_task(tmp_path, "child", session_id="s1")
         child.reasoning_effort = kwargs.get("reasoning_effort")
@@ -212,11 +218,13 @@ async def test_resume_record_with_no_stored_effort_can_still_resume(
         status="completed",
     )
     assert record.reasoning_effort is None
+    store.write(registry.log_dir, record)
 
     captured: dict = {}
 
-    async def fake_spawn(argv, **kwargs):
-        captured["argv"] = argv
+    async def fake_spawn(invocation, **kwargs):
+        captured["argv"] = invocation.argv
+        captured["invocation"] = invocation
         captured.update(kwargs)
         return make_task(tmp_path, "child", session_id="s1")
 
@@ -357,7 +365,12 @@ async def test_a_monitor_that_crashes_still_publishes_a_terminal_status(
 async def test_cancel_recovered_does_not_claim_success_it_cannot_deliver(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Marking it cancelled when the signal failed would have later calls contradict this one."""
+    """Marking it cancelled when nothing could be signalled would have later calls contradict this.
+
+    `cancel_recovered` now runs the same non-local case-2/case-3 gate `cancel_cascade` uses: with
+    no `pgid` recorded there is nothing to signal, regardless of what the leader identity check
+    says, so the record is left untouched.
+    """
     registry = TaskRegistry(log_dir=tmp_path)
     record = store.TaskRecord(
         task_id="orphan",
@@ -370,7 +383,8 @@ async def test_cancel_recovered_does_not_claim_success_it_cannot_deliver(
         pgid=None,  # nothing to signal
     )
     store.write(tmp_path, record)
-    monkeypatch.setattr(store, "process_alive", lambda pid, markers: True)
+    monkeypatch.setattr(identity, "check_detail", lambda ident: ("alive", "start_time_match"))
+    monkeypatch.setattr(identity, "may_signal", lambda ident: True)
 
     result = await registry.cancel_recovered(record)
 
@@ -383,10 +397,14 @@ async def test_cancel_recovered_waits_for_the_sigkill_to_land(
 ) -> None:
     """Returning while the group is still dying makes the response contradict itself.
 
-    `store.resolve_status` rechecks liveness for a `cancelled` record, so answering a cancellation
-    before the process is gone reports the task as still running.
+    A dead owner is required for `cancel_recovered` to reach case 3, which is the only path that
+    writes the record itself — with no real owning server to settle it, case 2 would just wait out
+    its bound and leave the record untouched. `store.resolve_status` rechecks liveness for a
+    `cancelled` record, so answering a cancellation before the process is gone reports the task as
+    still running.
     """
     monkeypatch.setattr(tasks_module, "SIGKILL_GRACE_SECONDS", 0.05)
+    monkeypatch.setattr(tasks_module, "CANCEL_VERDICT_POLL_SECONDS", 0.01)
     registry = TaskRegistry(log_dir=tmp_path)
     record = store.TaskRecord(
         task_id="orphan",
@@ -409,7 +427,15 @@ async def test_cancel_recovered_waits_for_the_sigkill_to_land(
         return True
 
     monkeypatch.setattr(tasks_module, "_signal_recorded_group", signal_group)
-    monkeypatch.setattr(store, "process_alive", lambda pid, markers: not killed)
+    monkeypatch.setattr(identity, "check_detail", lambda ident: ("alive", "start_time_match"))
+    monkeypatch.setattr(identity, "may_signal", lambda ident: not killed)
+    # The owner (no markers) is dead throughout: that is what routes `cancel_recovered` to case 3.
+    # The leader (markers ["s1"]) stays alive until the SIGKILL lands.
+    monkeypatch.setattr(
+        identity,
+        "identity_check",
+        lambda ident: "alive" if (ident or {}).get("markers") and not killed else "dead",
+    )
 
     result = await registry.cancel_recovered(record)
 
@@ -434,12 +460,45 @@ async def test_cancel_recovered_of_an_already_dead_task_changes_nothing(tmp_path
     assert (await registry.cancel_recovered(record)).status == "running"
 
 
+async def test_cancel_recovered_does_not_write_cancelled_for_a_live_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An alive (or undecidable) owner is left to settle its own task; `cancel_recovered` only
+    ever writes the record itself once the owner is confirmed dead (case 3)."""
+    monkeypatch.setattr(tasks_module, "SIGKILL_GRACE_SECONDS", 0.02)
+    monkeypatch.setattr(tasks_module, "DRAIN_GRACE_SECONDS", 0.02)
+    monkeypatch.setattr(tasks_module, "CANCEL_VERDICT_POLL_SECONDS", 0.01)
+    registry = TaskRegistry(log_dir=tmp_path)
+    record = store.TaskRecord(
+        task_id="orphan",
+        backend="claude",
+        session_id="s1",
+        markers=["s1"],
+        repo_path=str(tmp_path),
+        started_at=datetime.now(timezone.utc).isoformat(),
+        pid=1234,
+        pgid=1234,
+    )
+    store.write(tmp_path, record)
+
+    monkeypatch.setattr(tasks_module, "_signal_recorded_group", lambda record, sig: True)
+    monkeypatch.setattr(identity, "check_detail", lambda ident: ("alive", "start_time_match"))
+    monkeypatch.setattr(identity, "may_signal", lambda ident: True)
+    # Owner never resolves to dead: case 2 waits out its bound and hands nothing to case 3.
+    monkeypatch.setattr(identity, "identity_check", lambda ident: "alive")
+
+    result = await registry.cancel_recovered(record)
+
+    assert result.status == "running"
+    assert store.read(tmp_path, "orphan").status == "running"
+
+
 async def test_session_exclusivity_spans_server_processes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Another process's live run on this session must also block a resume."""
     registry = TaskRegistry(log_dir=tmp_path)
-    monkeypatch.setattr(store, "process_alive", lambda pid, markers: True)
+    monkeypatch.setattr(identity, "identity_check", lambda ident: "alive")
     store.write(
         tmp_path,
         store.TaskRecord(
@@ -471,6 +530,75 @@ async def test_resuming_a_task_whose_repo_is_gone_fails_clearly(tmp_path: Path) 
 
     with pytest.raises(RepoUnavailableError, match="no longer exists"):
         await registry.resume_record(record, "carry on")
+
+
+async def test_resume_record_refuses_when_the_parent_record_vanished_before_the_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The retention sweep deletes under the session lock; a record it removed between the
+    caller's read and the lock leaves nothing for the child to resume from."""
+
+    async def fake_spawn(argv, **kwargs):
+        raise AssertionError("must not reach spawn")
+
+    registry = TaskRegistry(log_dir=tmp_path)
+    record = store.TaskRecord(
+        task_id="old",
+        backend="claude",
+        session_id="s1",
+        markers=["s1"],
+        repo_path=str(tmp_path),
+        started_at=datetime.now(timezone.utc).isoformat(),
+        status="completed",
+    )
+    store.write(registry.log_dir, record)
+    store.record_path(registry.log_dir, record.task_id).unlink()
+    monkeypatch.setattr(registry, "_spawn", fake_spawn)
+
+    with pytest.raises(SessionUnknownError, match="no longer readable on disk"):
+        await registry.resume_record(record, "carry on")
+
+
+async def test_resume_refuses_when_the_parents_record_vanished_before_the_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same refusal on the live-parent path: a finished parent's record can age out between the
+    registry read and the session lock."""
+
+    async def fake_spawn(argv, **kwargs):
+        raise AssertionError("must not reach spawn")
+
+    registry = TaskRegistry(log_dir=tmp_path)
+    parent = make_task(tmp_path, "parent", session_id="s1", finished=True)
+    registry._tasks[parent.task_id] = parent
+    registry.persist(parent)
+    store.record_path(registry.log_dir, parent.task_id).unlink()
+    monkeypatch.setattr(registry, "_spawn", fake_spawn)
+
+    with pytest.raises(SessionUnknownError, match="no longer readable on disk"):
+        await registry.resume(parent, "carry on")
+
+
+async def test_resume_still_runs_for_a_live_parent_whose_record_never_landed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A record that was never written is not one retention deleted: `store.write` never fails a
+    dispatch, so a finished in-memory task can have no record at all and must stay resumable."""
+    registry = TaskRegistry(log_dir=tmp_path)
+    parent = make_task(tmp_path, "parent", session_id="s1", finished=True)
+    registry._tasks[parent.task_id] = parent
+    spawned: list[str] = []
+
+    async def fake_spawn(invocation, **kwargs):
+        spawned.append(kwargs["parent_task_id"])
+        return make_task(tmp_path, "child", session_id="s1")
+
+    monkeypatch.setattr(registry, "_spawn", fake_spawn)
+
+    await registry.resume(parent, "carry on")
+
+    assert not parent.record_landed
+    assert spawned == ["parent"]
 
 
 async def test_cancelling_a_finished_task_is_a_no_op(tmp_path: Path) -> None:
@@ -681,16 +809,23 @@ class _TrivialBackend:
 
     name = "trivial"
     binary = "/bin/echo"
-    capabilities = SimpleNamespace(chooses_session_id=False)
+    capabilities = SimpleNamespace(chooses_session_id=False, supports_live_input=False)
 
     def build_start_argv(self, prompt, **kwargs):
-        return [self.binary, "{}"]
+        return Invocation([self.binary, "{}"])
 
     def build_resume_argv(self, prompt, **kwargs):
-        return [self.binary, "{}"]
+        return Invocation([self.binary, "{}"])
 
-    def assert_safe(self, argv, freedom, network=None):
+    def assert_safe(self, invocation, freedom, network=None):
+        assert isinstance(invocation, Invocation)
         return None
+
+    def encode_live_message(self, text):
+        raise backends.UnsupportedCapability("no live input")
+
+    def interactive_resume_argv(self, session_id, repo_path):
+        return [self.binary, "--resume", session_id]
 
     def enforcement(self, freedom, network=None):
         return Enforcement(freedom=freedom, mechanism="none", os_enforced=False,
@@ -698,6 +833,9 @@ class _TrivialBackend:
 
     def ingest(self, event, acc):
         return None
+
+    def normalize(self, event, acc):
+        return []
 
     def classify(self, acc, exit_code):
         return "completed"
@@ -716,6 +854,7 @@ class _NetworkAwareBackend(_TrivialBackend):
     name = "netaware"
     capabilities = SimpleNamespace(
         chooses_session_id=False,
+        supports_live_input=False,
         network_control=SimpleNamespace(
             can_enable=("write_in_repo",), can_block=("write_in_repo",)
         ),
@@ -741,6 +880,7 @@ class _NoBarrierBackend(_TrivialBackend):
     name = "nobarrier"
     capabilities = SimpleNamespace(
         chooses_session_id=False,
+        supports_live_input=False,
         network_control=SimpleNamespace(can_enable=tuple(FREEDOMS), can_block=()),
     )
 
@@ -842,11 +982,13 @@ async def test_resume_inherits_the_parents_network_request(
     parent.freedom = "write_in_repo"
     parent.network = True
     registry._tasks[parent.task_id] = parent
+    registry.persist(parent)
 
     captured: dict = {}
 
-    async def fake_spawn(argv, **kwargs):
-        captured["argv"] = argv
+    async def fake_spawn(invocation, **kwargs):
+        captured["argv"] = invocation.argv
+        captured["invocation"] = invocation
         captured.update(kwargs)
         return make_task(tmp_path, "child", session_id="s1")
 
@@ -869,11 +1011,13 @@ async def test_an_explicit_network_on_resume_overrides_the_parents(
     parent.freedom = "write_in_repo"
     parent.network = True
     registry._tasks[parent.task_id] = parent
+    registry.persist(parent)
 
     captured: dict = {}
 
-    async def fake_spawn(argv, **kwargs):
-        captured["argv"] = argv
+    async def fake_spawn(invocation, **kwargs):
+        captured["argv"] = invocation.argv
+        captured["invocation"] = invocation
         captured.update(kwargs)
         return make_task(tmp_path, "child", session_id="s1")
 
@@ -901,11 +1045,13 @@ async def test_resume_record_inherits_the_recorded_network_request(
         freedom="write_in_repo",
         network=True,
     )
+    store.write(registry.log_dir, record)
 
     captured: dict = {}
 
-    async def fake_spawn(argv, **kwargs):
-        captured["argv"] = argv
+    async def fake_spawn(invocation, **kwargs):
+        captured["argv"] = invocation.argv
+        captured["invocation"] = invocation
         captured.update(kwargs)
         return make_task(tmp_path, "child", session_id="s1")
 
@@ -933,11 +1079,13 @@ async def test_a_pre_change_record_resumes_at_the_freedoms_historical_default(
         status="completed",
         freedom="write_in_repo",
     )
+    store.write(registry.log_dir, record)
 
     captured: dict = {}
 
-    async def fake_spawn(argv, **kwargs):
-        captured["argv"] = argv
+    async def fake_spawn(invocation, **kwargs):
+        captured["argv"] = invocation.argv
+        captured["invocation"] = invocation
         captured.update(kwargs)
         return make_task(tmp_path, "child", session_id="s1")
 
@@ -986,11 +1134,13 @@ async def test_resume_record_honours_an_explicit_network_override(
         freedom="write_in_repo",
         network=True,
     )
+    store.write(registry.log_dir, record)
 
     captured: dict = {}
 
-    async def fake_spawn(argv, **kwargs):
-        captured["argv"] = argv
+    async def fake_spawn(invocation, **kwargs):
+        captured["argv"] = invocation.argv
+        captured["invocation"] = invocation
         captured.update(kwargs)
         return make_task(tmp_path, "child", session_id="s1")
 
@@ -1082,3 +1232,31 @@ async def test_the_enforcement_reported_and_persisted_reflects_the_network_reque
     record = store.read(tmp_path, task.task_id)
     assert record is not None
     assert record.enforcement["network_access"] == "enabled"
+
+
+def test_the_git_probes_never_run_repository_configured_programs(tmp_path: Path) -> None:
+    """The baseline and branch probes run in the server process before any agent sandbox exists,
+    so neither a `core.fsmonitor` hook nor a clean filter on a tracked, modified file may run."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    run = lambda *a: subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True)
+    run("init", "-q")
+    run("config", "user.email", "t@t")
+    run("config", "user.name", "t")
+    (repo / ".gitattributes").write_text("*.txt filter=evil\n")
+    (repo / "file.txt").write_text("one")
+    run("add", ".")
+    run("commit", "-qm", "x")
+    marker = tmp_path / "ran"
+    hook = tmp_path / "hook.sh"
+    hook.write_text(f"#!/bin/sh\ntouch {marker}\ncat\n")
+    hook.chmod(0o755)
+    run("config", "core.fsmonitor", str(hook))
+    run("config", "filter.evil.clean", str(hook))
+    (repo / "file.txt").write_text("two")
+
+    base_commit, _ = tasks_module._git_baseline(repo)
+    tasks_module._publish_branch_notice("publish", repo, _codex_enforcement("publish"))
+
+    assert base_commit is not None
+    assert not marker.exists()

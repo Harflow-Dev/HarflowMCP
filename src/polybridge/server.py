@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -16,11 +17,14 @@ from mcp import MCPError
 from pydantic import StrictBool
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
-from mcp.types import INVALID_PARAMS
+from mcp.types import INTERNAL_ERROR, INVALID_PARAMS
 
-from . import backends, store
+from . import backends, control, identity, inbox, store
 from .backends import DEFAULT_BACKEND, DEFAULT_FREEDOM, FREEDOMS
+from .events import EVENT_KINDS, events_path, read_page, read_recent
 from .tasks import (
+    GIT_SAFE_CONFIG,
+    GIT_SAFE_ENV,
     TERMINAL_STATUSES,
     RepoUnavailableError,
     SessionBusyError,
@@ -42,6 +46,39 @@ DEFAULT_WAIT_SECONDS = 55
 # Emitted while waiting so the client can see the wait is alive; per the MCP spec a client may also
 # reset its request timeout on progress, which is what makes longer explicit waits viable.
 PROGRESS_INTERVAL_SECONDS = 5.0
+
+# Matches the Monitor's `TaskTitle.maxLength`.
+MAX_TITLE_LENGTH = 90
+
+# What an MCP status response carries in place of the full raw tail (see `_status_payload`).
+RECENT_ACTIVITY_LIMIT = 5
+SHORT_TAIL_LINES = 5
+SHORT_TAIL_LINE_CHARS = 500
+
+
+def _status_payload(
+    snapshot: dict[str, Any], *, include_tail: bool, log_dir: Path, task_id: str
+) -> dict[str, Any]:
+    """The MCP shape of a status snapshot: `recent_activity` always, the raw tail only on request.
+
+    The full `last_output_tail` is up to 20 raw stream lines of 2000 chars — about 10k tokens on
+    every poll, which an orchestrator rarely needs. `recent_activity` answers "what is it doing" in
+    a few one-liners instead; a failed run keeps a short raw tail, since that is when the raw lines
+    help. The snapshot itself is untouched, so `polybridge-ctl` (the Monitor's contract) still
+    carries the full tail. Blocking file I/O: callers run this off the event loop.
+    """
+    payload = dict(snapshot)
+    payload["recent_activity"] = read_recent(events_path(log_dir, task_id), limit=RECENT_ACTIVITY_LIMIT)
+    if include_tail:
+        return payload
+    tail = payload.pop("last_output_tail", None)
+    if snapshot.get("status") == "failed" and isinstance(tail, list):
+        payload["last_output_tail"] = [
+            line[:SHORT_TAIL_LINE_CHARS] if isinstance(line, str) else line
+            for line in tail[-SHORT_TAIL_LINES:]
+        ]
+    return payload
+
 
 mcp = MCPServer(
     "polybridge",
@@ -71,7 +108,12 @@ mcp = MCPServer(
         "network barrier only, never reachability.\n\n"
         "A wait_for_task that comes back still 'running' has not failed — the run is untouched, so "
         "call again or poll. Tasks outlive this server process: ones started by an earlier "
-        "polybridge server are still reported, marked 'recovered: true'."
+        "polybridge server are still reported, marked 'recovered: true'.\n\n"
+        "A claude task started without max_turns has live input (`live_input: true`): "
+        "send_message adds a message while it runs — folded into the running turn, or starting a "
+        "new one if the agent is idle. It returns 'queued', never 'delivered'. Once the agent is "
+        "idle with nothing queued the task closes its own input and settles as usual; a send after "
+        "that is refused with 'finished; continue with resume_task'."
     ),
 )
 
@@ -83,6 +125,7 @@ def _reg() -> TaskRegistry:
     global _registry
     if _registry is None:
         _registry = TaskRegistry()
+        _registry.start_maintenance()
     return _registry
 
 
@@ -92,10 +135,17 @@ def _backend(name: str):
     except backends.UnknownBackend as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
     if not backends.is_installed(backend):
+        # A client-launched server usually runs on the PATH it was registered with, frozen at install
+        # time — so a CLI installed afterwards, or moved (an nvm Node upgrade), is missing here even
+        # though a terminal finds it. Saying which PATH, and how to refresh it, makes that fixable.
         raise MCPError(
             INVALID_PARAMS,
-            f"the `{backend.binary}` CLI for backend {name!r} was not found on PATH; "
-            "install it, or call list_backends to see what is available",
+            f"the `{backend.binary}` CLI for backend {name!r} was not found on this server's PATH "
+            f"({os.pathsep.join(os.get_exec_path())}); install it, or call list_backends to see what "
+            f"is available. If `{backend.binary}` is installed, polybridge's registration may be out "
+            "of date: update it in Polybridge Monitor (Settings → Harnesses → Update), or run "
+            f"`polybridge-setup` from a terminal where `{backend.binary}` works, then restart "
+            "the client",
         )
     return backend
 
@@ -133,6 +183,42 @@ def _check_model(backend, model: str | None) -> None:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
 
 
+def _check_group(group: str | None) -> None:
+    if group is None:
+        return
+    if not group.strip():
+        raise MCPError(INVALID_PARAMS, "group must be non-empty if provided")
+    if len(group) > 128:
+        raise MCPError(
+            INVALID_PARAMS, f"group must be at most 128 characters, got {len(group)}"
+        )
+
+
+def _normalize_title(title: str | None) -> str | None:
+    if title is None:
+        return None
+    stripped = title.strip()
+    if not stripped:
+        return None
+    if len(stripped) > MAX_TITLE_LENGTH:
+        raise MCPError(
+            INVALID_PARAMS,
+            f"title must be at most {MAX_TITLE_LENGTH} characters, got {len(stripped)}; "
+            "shorten it or omit it",
+        )
+    if any(
+        # Zl/Zp: U+2028/U+2029 break a line as surely as "\n" does.
+        unicodedata.category(ch).startswith("C") or unicodedata.category(ch) in ("Zl", "Zp")
+        for ch in stripped
+    ):
+        raise MCPError(
+            INVALID_PARAMS,
+            "title must not contain control characters (including newlines); "
+            "use a single plain line of text",
+        )
+    return stripped
+
+
 def _check_network(backend, freedom: str, network: bool | None) -> None:
     # Strict on purpose: anything other than a real boolean or None is refused rather than
     # truthy-coerced — "yes"/1/0 must not silently become a network decision, and a coerced
@@ -167,7 +253,8 @@ def _resolve_repo_path(repo_path: str) -> Path:
         raise MCPError(INVALID_PARAMS, f"repo_path is not a directory: {path}")
 
     probe = subprocess.run(
-        ["git", "-C", str(path), "rev-parse", "--is-inside-work-tree"],
+        ["git", "-C", str(path), *GIT_SAFE_CONFIG, "rev-parse", "--is-inside-work-tree"],
+        env={**os.environ, **GIT_SAFE_ENV},
         capture_output=True,
         text=True,
         check=False,
@@ -202,6 +289,8 @@ async def start_task(
     max_turns: int | None = None,
     reasoning_effort: str | None = None,
     network: StrictBool | None = None,
+    group: str | None = None,
+    title: str | None = None,
 ) -> dict[str, Any]:
     """Dispatch a coding task to a headless agent and return immediately.
 
@@ -239,9 +328,26 @@ async def start_task(
             impose — and False is an error rather than silently dropped;
             enforcement.network_access stays "not_controlled" there. What actually applied is
             stated on the returned task's enforcement.network_access.
+        group: Optional label (1-128 chars), inherited by any nested dispatch this task's own
+            agent makes through polybridge (unless that dispatch gives its own). Purely
+            informational — polybridge does not act on it — useful for tagging a family of
+            dispatches you want to find together later via list_tasks.
+        title: Optional short human-readable label (at most 90 characters after trimming, no
+            control characters) shown for this task in the Monitor. Purely informational. It is
+            never inherited from a calling task: a dispatch without a title has none. A
+            resume_task continuation carries the resumed task's title.
 
     Returns the new task_id and its starting state. The run continues in the background; poll
     get_task_status or call wait_for_task to follow it.
+
+    If this task is itself dispatched from inside another polybridge task's agent (a nested MCP
+    call), that ancestry is recorded — `spawned_by`, `root_task_id`, `depth` — on a best-effort
+    basis (see `lineage_detected` on the returned task: which detection method found the caller,
+    or null if none was found and this is treated as a root task). When a caller *is* detected,
+    this dispatch is also checked against it: a nested dispatch weaker than its caller on depth or
+    on any enforcement field is refused outright (`NestedDispatchRefused`). This cap is
+    best-effort, not a sandbox boundary — nothing stops an agent from dispatching outside
+    polybridge entirely.
     """
     if not prompt or not prompt.strip():
         raise MCPError(INVALID_PARAMS, "prompt must be a non-empty string")
@@ -252,32 +358,50 @@ async def start_task(
     _check_reasoning_effort(chosen, reasoning_effort)
     _check_model(chosen, model)
     _check_network(chosen, freedom, network)
+    _check_group(group)
+    normalized_title = _normalize_title(title)
     path = await _validate_repo_path(repo_path)
 
-    task = await _reg().start(
-        prompt,
-        path,
-        backend=chosen,
-        freedom=freedom,
-        model=model,
-        max_turns=max_turns,
-        reasoning_effort=reasoning_effort,
-        network=network,
-    )
+    try:
+        task = await _reg().start(
+            prompt,
+            path,
+            backend=chosen,
+            freedom=freedom,
+            model=model,
+            max_turns=max_turns,
+            reasoning_effort=reasoning_effort,
+            network=network,
+            group=group,
+            title=normalized_title,
+        )
+    except backends.UnsupportedCapability as exc:
+        # Covers `NestedDispatchRefused` too — it subclasses `UnsupportedCapability`, and this cap
+        # is only ever checked once a caller was actually detected inside `_reg().start`.
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
     return task.brief() | {"enforcement": task.enforcement}
 
 
 @mcp.tool()
-async def get_task_status(task_id: str) -> dict[str, Any]:
+async def get_task_status(
+    task_id: str,
+    include_tail: bool = False,
+) -> dict[str, Any]:
     """Report a dispatched task's current state without blocking.
 
     Args:
         task_id: Identifier returned by start_task or resume_task.
+        include_tail: If True, include the full last_output_tail (20 lines × 2000 chars each);
+            if False (default), the tail is omitted for running/completed tasks and shortened
+            to 5 lines × 500 chars for failed tasks. The caller can request the full raw stream
+            log path from `raw_stream_log` for complete output, or use get_task_events for
+            normalized events.
 
-    Carries the agent's closing summary, turn count, token usage and any permission denials once the
-    run has finished, plus the tail of its event stream while it is still going. `total_cost_usd` is
-    null for backends that do not report cost — Codex reports tokens only, and vibe reports neither
-    cost nor tokens nor a turn count.
+    Returns the task's status, summary, enforcement, and `recent_activity` — a list of ≤ 5 one-line
+    strings describing the most recent meaningful events (tool calls, failed tool results, assistant
+    messages, notices). For running tasks this gives a live summary without the bulk of the
+    raw stream. `total_cost_usd` is null for backends that do not report cost — Codex reports
+    tokens only, and vibe reports neither cost nor tokens nor a turn count.
 
     `enforcement` states what the run's restrictions actually amounted to, and `mcp_servers` (where
     the backend reports them) shows what the agent loaded. Tasks started by an earlier polybridge
@@ -286,7 +410,10 @@ async def get_task_status(task_id: str) -> dict[str, Any]:
     """
     task = _reg().get(task_id)
     if task is not None:
-        return task.snapshot()
+        snapshot = task.snapshot()
+        return await asyncio.to_thread(
+            _status_payload, snapshot, include_tail=include_tail, log_dir=_reg().log_dir, task_id=task_id
+        )
 
     record = _reg().recover(task_id)
     if record is None:
@@ -295,7 +422,10 @@ async def get_task_status(task_id: str) -> dict[str, Any]:
             f"unknown task_id: {task_id}. No task with that id is running, and no record of one "
             f"exists under {_reg().log_dir}. Use list_tasks to see what is known.",
         )
-    return store.snapshot(_reg().log_dir, record)
+    snapshot = store.snapshot(_reg().log_dir, record)
+    return await asyncio.to_thread(
+        _status_payload, snapshot, include_tail=include_tail, log_dir=_reg().log_dir, task_id=task_id
+    )
 
 
 async def _await_with_progress(task: Task, timeout_seconds: int, ctx: Context | None) -> None:
@@ -352,7 +482,7 @@ async def _poll_recovered(
     for step in range(1, steps + 1):
         if loop.time() >= deadline:
             break
-        if store.resolve_status(_reg().log_dir, record)[0] in TERMINAL_STATUSES:
+        if store.resolve_status(_reg().log_dir, record, detail=False)[0] in TERMINAL_STATUSES:
             break
         await asyncio.sleep(min(PROGRESS_INTERVAL_SECONDS, max(0.0, deadline - loop.time())))
 
@@ -376,6 +506,7 @@ async def _poll_recovered(
 async def wait_for_task(
     task_id: str,
     timeout_seconds: int = DEFAULT_WAIT_SECONDS,
+    include_tail: bool = False,
     ctx: Context | None = None,
 ) -> dict[str, Any]:
     """Wait for a task to finish, giving up after a timeout without disturbing the run.
@@ -385,11 +516,16 @@ async def wait_for_task(
         timeout_seconds: How long to wait before returning early. Keep this modest — your MCP client
             applies its own request timeout (often 60s), and exceeding it fails the *call* with a
             timeout error even though the task keeps running.
+        include_tail: If True, include the full last_output_tail (20 lines × 2000 chars each);
+            if False (default), the tail is omitted for running/completed tasks and shortened
+            to 5 lines × 500 chars for failed tasks.
         ctx: Injected by the server; not a caller argument.
 
     If the task is still going when the wait ends, the result comes back with status "running" and a
     `next_step` hint: call this again, or poll get_task_status. The dispatched process is never
-    signalled here, so waiting is always safe and repeating it costs nothing.
+    signalled here, so waiting is always safe and repeating it costs nothing. Returns
+    `recent_activity` — a list of ≤ 5 one-line strings describing the most recent meaningful events
+    — for a live summary without the bulk of the raw stream.
 
     A coding task can easily run for many minutes. Expect several calls rather than one long one.
     """
@@ -418,7 +554,10 @@ async def wait_for_task(
             f"still running after {timeout_seconds}s and unaffected by this wait — "
             "call wait_for_task again, or poll get_task_status"
         )
-    return snapshot
+
+    return await asyncio.to_thread(
+        _status_payload, snapshot, include_tail=include_tail, log_dir=_reg().log_dir, task_id=task_id
+    )
 
 
 @mcp.tool()
@@ -478,7 +617,7 @@ async def resume_task(
             record = _reg().recover(task_id)
             if record is None:
                 raise MCPError(INVALID_PARAMS, f"unknown task_id: {task_id}")
-            if store.process_alive(record.pid, record.markers):
+            if store.record_process_alive(record):
                 raise MCPError(
                     INVALID_PARAMS,
                     f"task {task_id} is still running (started by an earlier polybridge server "
@@ -530,7 +669,8 @@ async def list_tasks(status: str | None = None, backend: str | None = None) -> l
 
 @mcp.tool()
 async def cancel_task(task_id: str) -> dict[str, Any]:
-    """Stop a running task, terminating the agent and any processes it spawned.
+    """Stop a running task, terminating the agent and any processes it spawned, and cascade the
+    same stop to any live descendants this bridge can find.
 
     Args:
         task_id: Identifier of the task to stop.
@@ -538,19 +678,165 @@ async def cancel_task(task_id: str) -> dict[str, Any]:
     Already-finished tasks are returned unchanged. Work the agent had already written to disk is
     left in place. Tasks started by an earlier polybridge server process can be stopped too, via
     their recorded process group.
-    """
-    task = _reg().get(task_id)
-    if task is not None:
-        await _reg().cancel(task)
-        return task.snapshot()
 
-    record = _reg().recover(task_id)
-    if record is None:
+    The cascade reaches nested dispatches that task's own agent made through polybridge —
+    `spawned_by`/`root_task_id` lineage, best-effort, not a sandboxed guarantee — and the response
+    carries the result as `cascade`: `cancelled_descendants` (ids now cancelled),
+    `sigkill_survivors` (ids that resisted even SIGKILL), `owner_still_settling` (ids belonging to
+    a still-alive bridge server that has not settled them yet), `not_signalled` (ids that
+    could not be signalled at all, with why), and `not_recorded` (ids that were signalled but
+    whose `cancelled` status could not be written, with why — their records are left untouched).
+    """
+    if _reg().get(task_id) is None and _reg().recover(task_id) is None:
         raise MCPError(INVALID_PARAMS, f"unknown task_id: {task_id}")
 
-    # Snapshot the record cancellation produced, not the one we started from, or the response would
+    try:
+        cascade = await _reg().cancel_cascade(task_id)
+    except control.PhaseWriteError as exc:
+        raise MCPError(
+            INTERNAL_ERROR,
+            f"the cancel for task {task_id} was not attempted because its phase file could not "
+            f"be written, so nothing was signalled: {exc}",
+        ) from None
+
+    # Snapshot the state the cascade produced, not what we started from, or the response would
     # report a status that later calls contradict.
-    return store.snapshot(_reg().log_dir, await _reg().cancel_recovered(record))
+    task = _reg().get(task_id)
+    if task is not None:
+        snapshot = task.snapshot()
+    else:
+        record = _reg().recover(task_id)
+        snapshot = store.snapshot(_reg().log_dir, record) if record is not None else {}
+    
+    response = await asyncio.to_thread(
+        _status_payload, snapshot, include_tail=False, log_dir=_reg().log_dir, task_id=task_id
+    )
+    response["cascade"] = cascade
+    return response
+
+
+@mcp.tool()
+async def get_task_events(
+    task_id: str,
+    limit: int = 50,
+    before_seq: int | None = None,
+    after_seq: int | None = None,
+    kinds: list[str] | None = None,
+) -> dict[str, Any]:
+    """Fetch normalized events from a task's event log.
+
+    Args:
+        task_id: Identifier of the task whose events to read.
+        limit: Maximum number of events to return, capped at 200. Default is 50.
+        before_seq: Exclusive upper bound — return events with seq < before_seq (older events).
+            Cannot be used with after_seq.
+        after_seq: Exclusive lower bound — return events with seq > after_seq (newer events).
+            Cannot be used with before_seq.
+        kinds: Optional filter by event kind. Must be a non-empty list of known kinds from
+            `task_started`, `assistant_text`, `assistant_delta`, `tool_call`, `tool_result`,
+            `user_message`, `usage`, `notice`, `task_finished`, `undelivered`.
+            `assistant_delta` is excluded by default unless explicitly listed. Pass `null`
+            to get all kinds except assistant_delta.
+
+    Returns events in oldest→newest order within the page, with:
+    - `events`: list of event objects with their `seq`, `kind`, and data fields
+    - `has_more`: true if there are more matching events in the requested direction
+    - `next_before_seq`: the `seq` of the oldest event in this page (for paging older)
+    - `next_after_seq`: the `seq` of the newest event in this page (for paging newer)
+    - `skipped_oversized`: count of lines > 1 MiB that were skipped (not parsed, not counted as events)
+
+    Each returned event has its long string fields truncated to 2000 chars, lists to 50 items,
+    and dict nesting to depth 4, with `"truncated": true` added if anything was cut. An event still
+    over 16 KiB after that (a very wide dict) is replaced by a stub carrying only `seq`, `kind`,
+    `observed_at`, `truncated: true`, `oversized: true` and its size in `bytes`. A page
+    stops early once its serialized size would pass 256 KiB (has_more remains true, cursors still
+    valid). A page is never empty while has_more is true.
+
+    Default (no before_seq/after_seq): newest page — the most recent events.
+    Both cursors cannot be used at once. kinds=[] or an unknown kind raises INVALID_PARAMS.
+    """
+    try:
+        store.validate_task_id(task_id)
+    except store.InvalidTaskId as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+    if limit < 1 or limit > 200:
+        raise MCPError(INVALID_PARAMS, f"limit must be between 1 and 200, got {limit}")
+
+    if before_seq is not None and after_seq is not None:
+        raise MCPError(
+            INVALID_PARAMS, "cannot specify both before_seq and after_seq; use one or the other"
+        )
+
+    if kinds is not None:
+        if not kinds:
+            raise MCPError(INVALID_PARAMS, "kinds must be a non-empty list")
+        for kind in kinds:
+            if kind not in EVENT_KINDS:
+                raise MCPError(
+                    INVALID_PARAMS,
+                    f"unknown kind {kind!r}; must be one of {sorted(EVENT_KINDS)}",
+                )
+
+    task = _reg().get(task_id)
+    record = _reg().recover(task_id) if task is None else None
+
+    if task is None and record is None:
+        raise MCPError(INVALID_PARAMS, f"unknown task_id: {task_id}")
+
+    page_result = await asyncio.to_thread(
+        read_page,
+        events_path(_reg().log_dir, task_id),
+        limit=limit,
+        before_seq=before_seq,
+        after_seq=after_seq,
+        kinds=kinds,
+    )
+
+    return {
+        "task_id": task_id,
+        "events": page_result.events,
+        "has_more": page_result.has_more,
+        "next_before_seq": page_result.next_before_seq,
+        "next_after_seq": page_result.next_after_seq,
+        "skipped_oversized": page_result.skipped_oversized,
+    }
+
+
+@mcp.tool()
+async def send_message(task_id: str, text: str) -> dict[str, Any]:
+    """Add a message to a running live-input task, as if the user had typed it mid-run.
+
+    Args:
+        task_id: A running task whose `live_input` is true (claude, started without `max_turns`).
+        text: The message.
+
+    Returns `status: "queued"` — never "delivered". The task's input pump writes the message to the
+    agent: while a turn is running it is folded into that turn; if the agent is idle it starts a new
+    one. The task's event log then records a `user_message` event (`source: "injected"`) when it is
+    written, or an `undelivered` event plus a notice if it never is (the run errored or exited first).
+
+    A live task closes its own input once it is idle with nothing queued, so it still settles
+    unattended. A send after that is refused with "finished; continue with resume_task" — which is
+    exactly what to do. Also refused: a task that was not started with live input, one that has
+    settled, and one whose owning polybridge server is not confirmed alive.
+    """
+    try:
+        store.validate_task_id(task_id)
+    except store.InvalidTaskId as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+    if not isinstance(text, str) or not text.strip():
+        raise MCPError(INVALID_PARAMS, "text must be a non-empty string")
+
+    try:
+        task = _reg().get(task_id)
+        if task is not None:
+            return await _reg().send_message(task, text)
+        if _reg().recover(task_id) is None:
+            raise MCPError(INVALID_PARAMS, f"unknown task_id: {task_id}")
+        return await _reg().send_to_record(task_id, text)
+    except inbox.SendRefused as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
 
 
 def main() -> None:
@@ -568,6 +854,9 @@ def main() -> None:
     log.info("polybridge starting (backends available: %s)", ", ".join(available) or "none")
     if missing:
         log.warning("backends unavailable, their CLI is not on PATH: %s", ", ".join(missing))
+    # Warmed here rather than left to the first dispatch, so every task's `owner` is computed
+    # once at startup instead of paying a `ps` call on the first `start_task`.
+    identity.own_identity()
     mcp.run()
 
 

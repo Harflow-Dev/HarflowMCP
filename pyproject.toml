@@ -13,6 +13,7 @@ dependencies = ["mcp>=2.0,<3"]
 [project.scripts]
 polybridge-server = "polybridge.server:main"
 polybridge-setup = "polybridge.setup_client:main"
+polybridge-ctl = "polybridge.ctl:main"
 
 [dependency-groups]
 dev = ["pytest>=8", "pytest-asyncio>=0.24"]
@@ -26,4 +27,5 @@ testpaths = ["tests"]
 markers = [
     "integration: spawns a real agent CLI; spends real tokens. Opt in with PB_INTEGRATION=1",
     "cli_integration: drives a real MCP client CLI, or a real agent CLI's own parser, against a sandboxed config or throwaway repo. No model calls in the measured cases, but depends on those binaries. Opt in with PB_CLI_INTEGRATION=1",
+    "allow_unknown_event_kinds: the test deliberately writes an event kind outside events.EVENT_KINDS (exempt from the conftest check)",
 ]

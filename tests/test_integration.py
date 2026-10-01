@@ -8,12 +8,14 @@ plain `uv run pytest` would happily spend money. The `skipif` below is what make
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from pathlib import Path
 
 import pytest
 
 from polybridge import backends
+from polybridge.events import events_path
 from polybridge.tasks import TaskRegistry
 
 pytestmark = [
@@ -66,3 +68,46 @@ async def test_a_trivial_read_only_run_completes(name: str, git_repo: Path, tmp_
         assert task.acc.total_cost_usd is not None and task.acc.total_cost_usd >= 0
     else:
         assert task.acc.total_cost_usd is None
+
+
+async def test_a_claude_run_streams_partial_messages(git_repo: Path, tmp_path: Path) -> None:
+    """claude is the one backend whose argv carries `--include-partial-messages`, so a real run
+    must emit `assistant_delta` events and a final `assistant_text` carrying the same
+    `(message_id, block_index)` — the identity the Monitor replaces in-progress text by."""
+    backend = backends.get("claude")
+    if not backends.is_installed(backend):
+        pytest.skip("the claude CLI is not on PATH")
+
+    registry = TaskRegistry(log_dir=tmp_path / "streams")
+    task = await registry.start(PROMPT, git_repo, backend=backend, freedom="read_only")
+
+    try:
+        await asyncio.wait_for(task.done.wait(), RUN_TIMEOUT_SECONDS)
+    except (asyncio.TimeoutError, TimeoutError):
+        # Never leave a live agent behind for the next test to trip over.
+        await registry.cancel(task)
+        pytest.fail(
+            f"claude did not finish within {RUN_TIMEOUT_SECONDS}s; "
+            f"last output: {list(task.tail)[-5:]}"
+        )
+
+    assert task.status == "completed", (
+        f"claude ended {task.status} (exit {task.exit_code}); "
+        f"stderr tail: {list(task.stderr_tail)[-5:]}"
+    )
+
+    entries = [
+        json.loads(line)
+        for line in events_path(tmp_path / "streams", task.task_id).read_text().splitlines()
+    ]
+    deltas = [entry for entry in entries if entry["kind"] == "assistant_delta"]
+    assert deltas, "no assistant_delta reached the events log; is --include-partial-messages set?"
+    texts = [entry for entry in entries if entry["kind"] == "assistant_text"]
+    assert texts, "the streamed answer never produced a final assistant_text"
+
+    first = deltas[0]
+    assert any(
+        text.get("message_id") == first.get("message_id")
+        and text.get("block_index") == first.get("block_index")
+        for text in texts
+    ), f"no final assistant_text carries the first delta's identity: {first!r}"
