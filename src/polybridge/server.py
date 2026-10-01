@@ -135,10 +135,17 @@ def _backend(name: str):
     except backends.UnknownBackend as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
     if not backends.is_installed(backend):
+        # A client-launched server usually runs on the PATH it was registered with, frozen at install
+        # time — so a CLI installed afterwards, or moved (an nvm Node upgrade), is missing here even
+        # though a terminal finds it. Saying which PATH, and how to refresh it, makes that fixable.
         raise MCPError(
             INVALID_PARAMS,
-            f"the `{backend.binary}` CLI for backend {name!r} was not found on PATH; "
-            "install it, or call list_backends to see what is available",
+            f"the `{backend.binary}` CLI for backend {name!r} was not found on this server's PATH "
+            f"({os.pathsep.join(os.get_exec_path())}); install it, or call list_backends to see what "
+            f"is available. If `{backend.binary}` is installed, polybridge's registration may be out "
+            "of date: update it in Polybridge Monitor (Settings → Harnesses → Update), or run "
+            f"`polybridge-setup` from a terminal where `{backend.binary}` works, then restart "
+            "the client",
         )
     return backend
 

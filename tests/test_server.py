@@ -94,6 +94,24 @@ async def test_unknown_backend_is_rejected(git_repo: Path) -> None:
         await call("start_task", prompt="x", repo_path=str(git_repo), backend="gemini")
 
 
+async def test_missing_backend_cli_names_the_path_and_how_to_re_register(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The server's PATH is frozen at registration, so a CLI a terminal finds can still be missing
+    here; the error must say which PATH was searched and how to refresh it, not just "install it"."""
+    monkeypatch.setattr(server.backends, "is_installed", lambda backend: False)
+    monkeypatch.setenv("PATH", "/frozen/at/install:/usr/bin")
+
+    with pytest.raises(MCPError) as excinfo:
+        await call("start_task", prompt="x", repo_path=str(git_repo), backend="codex")
+
+    message = str(excinfo.value)
+    assert "`codex`" in message
+    assert "(/frozen/at/install:/usr/bin)" in message
+    assert "Settings → Harnesses → Update" in message
+    assert "`polybridge-setup`" in message
+
+
 @pytest.mark.usefixtures("fake_backend_clis")
 async def test_unknown_freedom_is_rejected(git_repo: Path) -> None:
     with pytest.raises(MCPError, match="unknown freedom"):
