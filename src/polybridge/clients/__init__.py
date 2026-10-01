@@ -13,6 +13,7 @@ import dataclasses
 from collections.abc import Sequence
 from pathlib import Path
 
+from .antigravity import AntigravityClient
 from .base import (
     CLI_TIMEOUT_SECONDS,
     Availability,
@@ -43,6 +44,7 @@ CLIENTS: dict[str, Client] = {
         CodexClient(),
         OpencodeClient(),
         VibeClient(),
+        AntigravityClient(),
     )
 }
 
@@ -364,6 +366,7 @@ __all__ = [
     "CLIENTS",
     "CLI_TIMEOUT_SECONDS",
     "Availability",
+    "AntigravityClient",
     "ClaudeCodeClient",
     "Client",
     "CliClient",

@@ -1,9 +1,11 @@
 """The contract every coding agent must satisfy, and nothing beyond it.
 
-Backends differ in ways that cannot be papered over: only Claude has a turn cap, only Claude lets us
-choose the session id, only Codex has an OS sandbox, and Codex alone reports no dollar cost. Rather
-than pretending otherwise, each backend declares its `Capabilities` and reports the `Enforcement` its
-flags actually deliver. Everything outside this package works on the normalised view and never
+Backends differ in ways that cannot be papered over: only Claude has a turn cap, only Claude lets
+us choose the session id, only Codex has an OS sandbox, Codex, vibe and antigravity report no
+dollar cost, and only Claude and antigravity take live input — a mid-turn message folds into the
+running turn on claude, while every written line starts a turn of its own on antigravity. Rather
+than pretending otherwise, each backend declares its `Capabilities` and reports the `Enforcement`
+its flags actually deliver. Everything outside this package works on the normalised view and never
 branches on a backend's name.
 """
 
@@ -66,11 +68,13 @@ def classic_invocation_problem(invocation: Any) -> str | None:
 # model-dependent failure. It is not true of opencode: --variant support is per model there, e.g.
 # ling-3.0-flash-fin accepts only low/medium/high (no xhigh), and several models declare no
 # `variants` at all and silently ignore the flag — see OpencodeBackend's reasoning_effort caveat.
-# Each backend's own ceiling is therefore left unreachable on purpose — claude `max`, codex
-# `max`/`ultra` — so a caller cannot spend it by accident. The tiers below `low` (codex and opencode
-# `minimal`, codex `none`) are unreachable too, for no reason beyond keeping one vocabulary shared by
-# the three backends that accept an effort at all — vibe accepts none, so it is outside this
-# vocabulary rather than a fourth member of it.
+# antigravity refuses xhigh loudly before any model call (exit 1, `invalid --effort "xhigh"`,
+# measured), so it declares only low/medium/high and check_reasoning_effort turns the request
+# away up front. Each backend's own ceiling is therefore left unreachable on purpose — claude
+# `max`, codex `max`/`ultra`, antigravity `max` — so a caller cannot spend it by accident. The
+# tiers below `low` (codex and opencode `minimal`, codex `none`) are unreachable too, for no
+# reason beyond keeping one vocabulary shared by the four backends that accept an effort at all —
+# vibe accepts none, so it is outside this vocabulary rather than a fifth member of it.
 EFFORTS: tuple[str, ...] = ("low", "medium", "high", "xhigh")
 
 
@@ -180,6 +184,14 @@ class Capabilities(NamedTuple):
     of the backend, not a promise about every run: claude falls back to the classic one-shot shape
     when `max_turns` is set (that combination is unmeasured), so what a *task* got is its own
     `live_input` field, never this one."""
+
+    live_input_message_is_turn: bool = False
+    """Whether each message written on stdin starts a turn of its own, even mid-turn. agy does
+    (measured: two queued lines, EOF at the first result, three results), so a run that received N
+    messages is idle only after N further results — see `tasks._note_input_written`. claude does
+    not: it folds a mid-turn message into the running turn (measured, claude 2.1.281), so however
+    many messages landed, exactly one further result settles the run. Default False so the
+    folding semantics stay the behaviour of every backend that does not say otherwise."""
 
     def as_dict(self) -> dict[str, Any]:
         # `_asdict()` does not recurse into a nested NamedTuple — it would serialize as a bare
@@ -437,9 +449,10 @@ class Backend(Protocol):
 
 
 # Every measured interactive resume takes the session id as an *optional* option value (claude
-# `--resume [value]`, vibe `--resume [SESSION_ID]`) or a positional (codex `resume [SESSION_ID]`),
-# so an id beginning with `-` would be parsed as an option. Session ids come out of the agent's own
-# stream, which is untrusted, so anything outside the shapes the four CLIs actually mint is refused.
+# `--resume [value]`, vibe `--resume [SESSION_ID]`, agy `--conversation <id>`) or a positional
+# (codex `resume [SESSION_ID]`), so an id beginning with `-` would be parsed as an option. Session
+# ids come out of the agent's own stream, which is untrusted, so anything outside the shapes the
+# CLIs actually mint is refused.
 _INTERACTIVE_SESSION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}")
 
 

@@ -22,6 +22,9 @@ from polybridge.backends import (
     NetworkControl,
     ReasoningEffort,
 )
+from polybridge.backends.antigravity import REJECTED_FLAGS as AGY_REJECTED_FLAGS
+from polybridge.backends.antigravity import AntigravityBackend
+from polybridge.backends.antigravity import UnsafeInvocationError as AntigravityUnsafe
 from polybridge.backends.claude import ALLOWED_TOOLS, DISALLOWED_TOOLS, FORBIDDEN_FLAGS, ClaudeBackend
 from polybridge.backends.claude import UnsafeInvocationError as ClaudeUnsafe
 from polybridge.backends.codex import BINARY as CODEX_BINARY
@@ -44,7 +47,7 @@ from polybridge.backends.vibe import UnsafeInvocationError as VibeUnsafe
 REPO = Path("/tmp/repo")
 SESSION = "11111111-1111-1111-1111-111111111111"
 
-ALL = [ClaudeBackend(), CodexBackend(), OpencodeBackend(), VibeBackend()]
+ALL = [ClaudeBackend(), CodexBackend(), OpencodeBackend(), VibeBackend(), AntigravityBackend()]
 
 # network=None keeps each freedom's historical default; the doubles and helpers below carry it
 # explicitly so the default is pinned by tests rather than only implied.
@@ -151,8 +154,10 @@ def inv(argv):
     """Pair a (possibly hand-edited) argv with the stdin wiring a builder gives that shape, so the
     argv-policy tests below keep exercising argv policy. The wiring rules themselves are pinned
     separately, with explicit Invocations, in the live-input section. A claude argv with no `--` is
-    the live shape: a pipe with one canonical prompt line. Everything else runs with stdin DEVNULL.
-    An Invocation a builder returned is passed through untouched."""
+    the live shape: a pipe with one canonical prompt line. An antigravity argv is always live
+    (`--input-format stream-json`, no positional at all): a pipe with one canonical prompt line.
+    Everything else runs with stdin DEVNULL. An Invocation a builder returned is passed through
+    untouched."""
     if isinstance(argv, Invocation):
         return argv
     if argv[:2] == ["claude", "-p"] and "--" not in argv:
@@ -160,6 +165,12 @@ def inv(argv):
             list(argv),
             stdin_mode=STDIN_PIPE,
             initial_input=ClaudeBackend().encode_live_message("do a thing"),
+        )
+    if argv[:1] == ["agy"] and "--input-format" in argv:
+        return Invocation(
+            list(argv),
+            stdin_mode=STDIN_PIPE,
+            initial_input=AntigravityBackend().encode_live_message("do a thing"),
         )
     return Invocation(list(argv))
 
@@ -200,7 +211,7 @@ def resume_invocation(backend, **kwargs):
 
 
 def test_every_backend_is_registered() -> None:
-    assert sorted(backends.BACKENDS) == ["claude", "codex", "opencode", "vibe"]
+    assert sorted(backends.BACKENDS) == ["antigravity", "claude", "codex", "opencode", "vibe"]
 
 
 def test_unknown_backend_is_rejected() -> None:
@@ -297,8 +308,16 @@ def test_assert_safe_refuses_an_argv_built_for_a_different_authorization(
     [
         (OpencodeBackend(), "write_in_repo", "publish"),
         (VibeBackend(), "publish", "unrestricted"),
+        # agy maps publish and unrestricted to the same --dangerously-skip-permissions argv: it is
+        # the only thing that permits a publish (measured), and it removes every other
+        # restriction with it — like vibe, publish is a relabelling of unrestricted here.
+        (AntigravityBackend(), "publish", "unrestricted"),
     ],
-    ids=["opencode-write_in_repo-publish", "vibe-publish-unrestricted"],
+    ids=[
+        "opencode-write_in_repo-publish",
+        "vibe-publish-unrestricted",
+        "antigravity-publish-unrestricted",
+    ],
 )
 def test_known_freedom_collapses_produce_byte_identical_argv(backend, freedom_a, freedom_b) -> None:
     """Pins the collapse deliberately rather than leaving it an accident of the current mapping —
@@ -392,10 +411,11 @@ def test_publish_attempts_allowed_by_polybridge_matches_the_ladder(backend, free
     assert enforcement.publish_attempts_allowed_by_polybridge is expected
 
 
-# Exact measured table. claude/opencode/vibe impose no sandbox at all, so network reachability is
-# never something polybridge controls there — "not_controlled" at every freedom. codex alone has an
-# OS sandbox with a measured, freedom-dependent effect on network reachability.
+# Exact measured table. claude/opencode/vibe/antigravity impose no sandbox at all, so network
+# reachability is never something polybridge controls there — "not_controlled" at every freedom.
+# codex alone has an OS sandbox with a measured, freedom-dependent effect on network reachability.
 EXPECTED_NETWORK_ACCESS: dict[str, dict[str, str]] = {
+    "antigravity": dict.fromkeys(FREEDOMS, "not_controlled"),
     "claude": dict.fromkeys(FREEDOMS, "not_controlled"),
     "codex": {
         "read_only": "blocked",
@@ -481,8 +501,11 @@ def test_reject_model_is_fine_where_supported() -> None:
 
 def _effort_marker(backend_name: str, level: str) -> tuple[str, str] | str:
     """The token(s) that must appear in argv when `level` was requested, in that backend's own
-    spelling — claude and opencode take it as a flag/value pair, codex as a `-c key="value"` pair.
+    spelling — claude, opencode and antigravity take it as a flag/value pair, codex as a
+    `-c key="value"` pair.
     """
+    if backend_name == "antigravity":
+        return ("--effort", level)
     if backend_name == "claude":
         return ("--effort", level)
     if backend_name == "codex":
@@ -509,9 +532,17 @@ def test_reasoning_effort_reaches_argv_verbatim_under_the_backends_own_flag(
 
     Guarded on accepts_parameter: vibe declares it False and has no native flag at all, so there is
     no marker to look for — check_reasoning_effort_refuses_it_outright covers that backend instead.
+    A level outside the backend's own declared set is refused rather than forwarded: antigravity
+    accepts only low/medium/high (its CLI refuses xhigh before any model call, exit 1, measured), so
+    forwarding xhigh would hand the CLI a value it kills the run with.
     """
     if not backend.capabilities.reasoning_effort.accepts_parameter:
         pytest.skip(f"{backend.name} has no reasoning effort control at all")
+    if level not in backend.capabilities.reasoning_effort.levels:
+        for build in (start, resume):
+            with pytest.raises(backends.UnsupportedCapability, match="does not accept"):
+                build(backend, reasoning_effort=level)
+        return
     for argv in (start(backend, reasoning_effort=level), resume(backend, reasoning_effort=level)):
         marker = _effort_marker(backend.name, level)
         if isinstance(marker, tuple):
@@ -519,6 +550,14 @@ def test_reasoning_effort_reaches_argv_verbatim_under_the_backends_own_flag(
             assert argv[argv.index(flag) + 1] == value
         else:
             assert marker in argv
+
+
+def test_antigravity_refuses_xhigh_because_the_cli_refuses_it_first() -> None:
+    """Measured on agy 1.2.14: `--effort xhigh` exits 1 with `invalid --effort "xhigh"` before any
+    model call — so polybridge's own check must be the one that refuses it, with its own message."""
+    for build in (start, resume):
+        with pytest.raises(backends.UnsupportedCapability, match=r"it accepts \['low', 'medium', 'high'\]"):
+            build(AntigravityBackend(), reasoning_effort="xhigh")
 
 
 @pytest.mark.parametrize("backend", ALL, ids=lambda b: b.name)
@@ -557,11 +596,12 @@ def test_levels_change_behaviour_implies_accepted_in_a_real_run(backend) -> None
 
 
 # Exact expected values per backend, so a regression to `False`/`False` across the board — or to
-# an unrelated caveat standing in for the real claim — cannot pass silently. Only opencode has a
-# cross-level behavioural measurement (see its `_EFFORT_CAVEAT`); claude and codex have acceptance
-# without a behavioural comparison (codex's own stream reports zero reasoning output tokens at
-# every level, so no such comparison is even observable there).
+# an unrelated caveat standing in for the real claim — cannot pass silently. Only opencode and
+# antigravity have a cross-level behavioural measurement (see each backend's effort caveats);
+# claude and codex have acceptance without a behavioural comparison (codex's own stream reports
+# zero reasoning output tokens at every level, so no such comparison is even observable there).
 EXPECTED_REASONING_EFFORT_FLAGS: dict[str, tuple[bool, bool]] = {
+    "antigravity": (True, True),
     "claude": (True, False),
     "codex": (True, False),
     "opencode": (True, True),
@@ -623,6 +663,7 @@ EXPECTED_NETWORK_CONTROL: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "codex": (("write_in_repo", "publish", "unrestricted"), ("read_only", "write_in_repo", "publish")),
     # No sandbox and no network-controlling mechanism: True ("impose no barrier") is deliverable
     # by having nothing to impose at every freedom; False ("impose one") is not, anywhere.
+    "antigravity": (FREEDOMS, ()),
     "claude": (FREEDOMS, ()),
     "opencode": (FREEDOMS, ()),
     "vibe": (FREEDOMS, ()),
@@ -698,7 +739,7 @@ def test_codex_cannot_block_network_at_unrestricted(build) -> None:
 
 
 @pytest.mark.parametrize(
-    "backend", [ClaudeBackend(), OpencodeBackend(), VibeBackend()], ids=lambda b: b.name
+    "backend", [ClaudeBackend(), OpencodeBackend(), VibeBackend(), AntigravityBackend()], ids=lambda b: b.name
 )
 @pytest.mark.parametrize("freedom", FREEDOMS)
 @pytest.mark.parametrize("build", [start, resume], ids=["start", "resume"])
@@ -711,7 +752,7 @@ def test_a_backend_with_no_network_barrier_refuses_network_false(backend, freedo
 
 
 @pytest.mark.parametrize(
-    "backend", [ClaudeBackend(), OpencodeBackend(), VibeBackend()], ids=lambda b: b.name
+    "backend", [ClaudeBackend(), OpencodeBackend(), VibeBackend(), AntigravityBackend()], ids=lambda b: b.name
 )
 @pytest.mark.parametrize("freedom", FREEDOMS)
 def test_enforcement_refuses_network_false_on_a_backend_with_no_barrier(
@@ -977,6 +1018,56 @@ LEGACY_ARGV: dict[str, dict[str, dict[str, list[str]]]] = {
             ],
         },
     },
+    # Antigravity has no pre-network-parameter history: it ships live-only, so these literals are
+    # the argv it builds today, transcribed — the prompt rides as the first stdin line and never
+    # touches argv (a positional prompt is refused outright by the CLI, measured).
+    "antigravity": {
+        "read_only": {
+            "start": [
+                "agy", "--output-format", "stream-json", "--input-format", "stream-json",
+                "--add-dir", "/tmp/repo", "--mode", "plan",
+            ],
+            "resume": [
+                "agy", "--output-format", "stream-json", "--input-format", "stream-json",
+                "--add-dir", "/tmp/repo", "--mode", "plan", "--conversation", "abc-123",
+            ],
+        },
+        "write_in_repo": {
+            "start": [
+                "agy", "--output-format", "stream-json", "--input-format", "stream-json",
+                "--add-dir", "/tmp/repo", "--mode", "accept-edits",
+            ],
+            "resume": [
+                "agy", "--output-format", "stream-json", "--input-format", "stream-json",
+                "--add-dir", "/tmp/repo", "--mode", "accept-edits", "--conversation", "abc-123",
+            ],
+        },
+        # publish and unrestricted collapse onto --dangerously-skip-permissions — the collapse the
+        # identity test pins; both literals are spelled out anyway so a regression in either
+        # freedom's builder fails against its own row.
+        "publish": {
+            "start": [
+                "agy", "--output-format", "stream-json", "--input-format", "stream-json",
+                "--add-dir", "/tmp/repo", "--dangerously-skip-permissions",
+            ],
+            "resume": [
+                "agy", "--output-format", "stream-json", "--input-format", "stream-json",
+                "--add-dir", "/tmp/repo", "--dangerously-skip-permissions",
+                "--conversation", "abc-123",
+            ],
+        },
+        "unrestricted": {
+            "start": [
+                "agy", "--output-format", "stream-json", "--input-format", "stream-json",
+                "--add-dir", "/tmp/repo", "--dangerously-skip-permissions",
+            ],
+            "resume": [
+                "agy", "--output-format", "stream-json", "--input-format", "stream-json",
+                "--add-dir", "/tmp/repo", "--dangerously-skip-permissions",
+                "--conversation", "abc-123",
+            ],
+        },
+    },
 }
 
 
@@ -1120,7 +1211,7 @@ def test_codex_enforcement_reports_the_resolved_network_for_every_valid_cell(
 
 
 @pytest.mark.parametrize(
-    "backend", [ClaudeBackend(), OpencodeBackend(), VibeBackend()], ids=lambda b: b.name
+    "backend", [ClaudeBackend(), OpencodeBackend(), VibeBackend(), AntigravityBackend()], ids=lambda b: b.name
 )
 @pytest.mark.parametrize("freedom", FREEDOMS)
 @pytest.mark.parametrize("network", [None, True], ids=["default", "true"])
@@ -3558,6 +3649,563 @@ def test_vibe_task_payload_carries_the_warning_and_a_recovered_record_stays_fail
     assert any("An action was refused" in n for n in recovered["notices"])
 
 
+# --- antigravity (agy 1.2.14, measured 2026-10-01) ---------------------------------------------
+# Every stream test below is driven by the real captures in tests/fixtures/antigravity_*.jsonl.
+
+
+def _agy_fixture(name: str) -> list[dict]:
+    return fixture_lines(f"antigravity_{name}.jsonl")
+
+
+def _agy_ingest(name: str) -> Accumulator:
+    return ingest(AntigravityBackend(), _agy_fixture(name))
+
+
+def _agy_line(text: str = "do a thing") -> bytes:
+    return AntigravityBackend().encode_live_message(text)
+
+
+@pytest.mark.parametrize("freedom", FREEDOMS)
+def test_antigravity_builds_only_the_live_shape(freedom: str) -> None:
+    """agy refuses a positional prompt outright (exit 2, measured) and has no turn cap, so there is
+    no classic one-shot shape to fall back to: start and resume alike carry the prompt as the one
+    stdin line, and no argv token carries it."""
+    for invocation in (
+        start_invocation(AntigravityBackend(), freedom=freedom),
+        resume_invocation(AntigravityBackend(), freedom=freedom),
+    ):
+        assert invocation.live_input
+        assert invocation.stdin_mode == STDIN_PIPE
+        assert not any(token.startswith("--print") or token == "-p" for token in invocation.argv)
+        assert invocation.argv[invocation.argv.index("--input-format") + 1] == "stream-json"
+        AntigravityBackend().assert_safe(invocation, freedom)
+    started = start_invocation(AntigravityBackend(), freedom=freedom)
+    assert json.loads(started.initial_input) == {"event": "user", "message": {"content": "do a thing"}}
+    resumed = resume_invocation(AntigravityBackend(), freedom=freedom)
+    assert json.loads(resumed.initial_input)["message"]["content"] == "more"
+    assert resumed.argv[-2:] == ["--conversation", "abc-123"]
+
+
+def test_antigravity_freedom_flags_per_freedom() -> None:
+    read_only = start(AntigravityBackend(), freedom="read_only")
+    assert read_only[read_only.index("--mode") + 1] == "plan"
+    write_in_repo = start(AntigravityBackend(), freedom="write_in_repo")
+    assert write_in_repo[write_in_repo.index("--mode") + 1] == "accept-edits"
+    for freedom in ("publish", "unrestricted"):
+        argv = start(AntigravityBackend(), freedom=freedom)
+        assert "--mode" not in argv
+        assert "--dangerously-skip-permissions" in argv
+    for freedom in ("read_only", "write_in_repo"):
+        assert "--dangerously-skip-permissions" not in start(AntigravityBackend(), freedom=freedom)
+
+
+def test_antigravity_turn_cap_is_refused() -> None:
+    """No --max-turns on agy 1.2.14; a silently-dropped cap would be a lie."""
+    for build in (start, resume):
+        with pytest.raises(backends.UnsupportedCapability, match="no turn cap"):
+            build(AntigravityBackend(), max_turns=3)
+
+
+@pytest.mark.parametrize("flag", AGY_REJECTED_FLAGS)
+def test_antigravity_refuses_every_rejected_flag(flag: str) -> None:
+    """Each of these breaks a guarantee: the prompt-on-argv spellings (the CLI itself refuses
+    --print alongside --input-format, exit 2, measured), the wrong-conversation resumes, the
+    execution-changing flags, and --sandbox, which no freedom maps to."""
+    argv = start(AntigravityBackend()) + [flag]
+    with pytest.raises(AntigravityUnsafe):
+        AntigravityBackend().assert_safe(inv(argv), "write_in_repo")
+
+
+@pytest.mark.parametrize(
+    "token",
+    ["--mode=plan", "--output-format=stream-json", "--add-dir=/tmp/repo", "--print=do a thing"],
+    ids=["mode-attached", "output-format-attached", "add-dir-attached", "print-prompt"],
+)
+def test_antigravity_refuses_the_attached_form_of_every_flag_it_writes(token: str) -> None:
+    """agy's parser is strict, but the reason is ours: this backend writes only canonical
+    space-separated options, and `--flag=value` is a shape whose meaning it did not choose. The
+    `--print=` case is the classic shape this backend never builds — the CLI refuses it alongside
+    --input-format (exit 2, measured)."""
+    argv = start(AntigravityBackend()) + [token]
+    with pytest.raises(AntigravityUnsafe, match="unrecognised option token"):
+        AntigravityBackend().assert_safe(inv(argv), "write_in_repo")
+
+
+@pytest.mark.parametrize("model", ["--effort=high", "-sother", "--dangerously-skip-permissions"])
+def test_antigravity_refuses_a_model_that_would_smuggle_in_an_option(model: str) -> None:
+    """`model` is caller-supplied and lands in the option region, so its shape is not trusted."""
+    with pytest.raises(AntigravityUnsafe, match="parse as an option"):
+        AntigravityBackend().build_start_argv(
+            "do a thing", repo=REPO, freedom="write_in_repo", session_id=None, model=model,
+            max_turns=None, reasoning_effort=None,
+        )
+
+
+@pytest.mark.parametrize(
+    ("freedom", "extra"),
+    [
+        ("write_in_repo", ("--output-format", "stream-json")),
+        ("write_in_repo", ("--input-format", "stream-json")),
+        ("write_in_repo", ("--add-dir", "/tmp/repo")),
+        ("write_in_repo", ("--mode", "accept-edits")),
+        ("write_in_repo", ("--model", "m", "--model", "m2")),
+        ("write_in_repo", ("--effort", "low", "--effort", "high")),
+        ("write_in_repo", ("--conversation", "abc", "--conversation", "def")),
+        ("publish", ("--dangerously-skip-permissions",)),
+    ],
+    ids=[
+        "output-format", "input-format", "add-dir", "mode", "model", "effort",
+        "conversation", "skip-permissions",
+    ],
+)
+def test_antigravity_rejects_a_duplicate_flag_whose_second_value_would_win(
+    freedom: str, extra: tuple[str, ...]
+) -> None:
+    argv = start(AntigravityBackend(), freedom=freedom) + list(extra)
+    with pytest.raises(AntigravityUnsafe, match="appears 2 times"):
+        AntigravityBackend().assert_safe(inv(argv), freedom)
+
+
+@pytest.mark.parametrize(
+    ("built_freedom", "claimed_freedom"),
+    [
+        ("read_only", "write_in_repo"),
+        ("write_in_repo", "read_only"),
+        ("publish", "read_only"),
+        ("read_only", "publish"),
+    ],
+)
+def test_antigravity_refuses_a_mode_built_for_a_different_freedom(
+    built_freedom: str, claimed_freedom: str
+) -> None:
+    """--mode must equal the *claimed* freedom's mode exactly — never merely be one of the known
+    values. publish built vs read_only claimed is also refused: a skip-permissions argv at a mode
+    freedom contradicts it, and a mode argv at a skip freedom is missing its mechanism."""
+    argv = start(AntigravityBackend(), freedom=built_freedom)
+    with pytest.raises(AntigravityUnsafe):
+        AntigravityBackend().assert_safe(inv(argv), claimed_freedom)
+
+
+def test_antigravity_refuses_skip_permissions_at_a_mode_freedom() -> None:
+    argv = start(AntigravityBackend()) + ["--dangerously-skip-permissions"]
+    with pytest.raises(AntigravityUnsafe, match="contradicts freedom"):
+        AntigravityBackend().assert_safe(inv(argv), "write_in_repo")
+
+
+def test_antigravity_refuses_a_skip_freedom_missing_its_skip() -> None:
+    argv = [token for token in start(AntigravityBackend(), freedom="publish")
+            if token != "--dangerously-skip-permissions"]
+    with pytest.raises(AntigravityUnsafe, match="is missing but freedom"):
+        AntigravityBackend().assert_safe(inv(argv), "publish")
+
+
+def test_antigravity_refuses_a_live_argv_wired_to_devnull() -> None:
+    live = start_invocation(AntigravityBackend())
+    with pytest.raises(AntigravityUnsafe, match="stdin pipe"):
+        AntigravityBackend().assert_safe(Invocation(live.argv), "write_in_repo")
+
+
+def test_antigravity_refuses_a_print_argv_even_wired_to_a_pipe() -> None:
+    """The CLI itself refuses a --print alongside --input-format (exit 2, measured), and this
+    backend never builds that shape — so the pipe wiring must not make it acceptable."""
+    live = start_invocation(AntigravityBackend())
+    argv = [*live.argv, "--print=do a thing"]
+    with pytest.raises(AntigravityUnsafe):
+        AntigravityBackend().assert_safe(
+            Invocation(argv, stdin_mode=STDIN_PIPE, initial_input=_agy_line()), "write_in_repo"
+        )
+
+
+def test_antigravity_live_argv_refuses_any_other_input_format() -> None:
+    argv = start(AntigravityBackend())
+    argv[argv.index("--input-format") + 1] = "text"
+    with pytest.raises(AntigravityUnsafe, match="--input-format was 'text'"):
+        AntigravityBackend().assert_safe(inv(argv), "write_in_repo")
+
+
+def test_antigravity_live_argv_without_input_format_is_refused() -> None:
+    live = start(AntigravityBackend())
+    index = live.index("--input-format")
+    argv = live[:index] + live[index + 2 :]
+    # Wired explicitly: with the token gone, `inv` would pair the argv with DEVNULL and refuse it
+    # on the wiring instead — the option-region refusal is what this test exists to pin.
+    with pytest.raises(AntigravityUnsafe, match="--input-format appears 0 times"):
+        AntigravityBackend().assert_safe(
+            Invocation(argv, stdin_mode=STDIN_PIPE, initial_input=_agy_line()), "write_in_repo"
+        )
+
+
+def test_antigravity_refuses_an_add_dir_that_names_no_directory() -> None:
+    argv = start(AntigravityBackend())
+    argv[argv.index("--add-dir") + 1] = "  "
+    with pytest.raises(AntigravityUnsafe, match="--add-dir names no directory"):
+        AntigravityBackend().assert_safe(inv(argv), "write_in_repo")
+
+
+def test_antigravity_refuses_an_unrecognised_token() -> None:
+    argv = start(AntigravityBackend()) + ["--frobnicate"]
+    with pytest.raises(AntigravityUnsafe, match="unrecognised option token"):
+        AntigravityBackend().assert_safe(inv(argv), "write_in_repo")
+
+
+@pytest.mark.parametrize(
+    "initial_input",
+    [
+        None,
+        "not bytes\n",
+        b"",
+        b'{"event":"user"}',
+        _agy_line() + _agy_line(),
+        b"not json\n",
+        b'["event","user"]\n',
+        b'{"event":"user","message":{"content":"   "}}\n',
+        b'{"event":"assistant","message":{"content":"x"}}\n',
+        b'{"event":"control","message":{"content":"x"}}\n',
+        b'{"event":"user","message":{"content":"x"},"extra":1}\n',
+        b'{"event":"user","message":{"content":["x"]}}\n',
+        # claude's line shape — agy refuses it (`missing the "event" field`, measured).
+        b'{"type":"user","message":{"role":"user","content":[{"type":"text","text":"x"}]}}\n',
+        b"\xff\xfe\n",
+    ],
+    ids=[
+        "none", "str", "empty", "no-newline", "two-lines", "not-json", "not-object", "blank-text",
+        "wrong-event", "control-event", "extra-key", "non-str-content", "claude-shaped", "not-utf8",
+    ],
+)
+def test_antigravity_refuses_a_malformed_initial_input(initial_input) -> None:
+    live = start_invocation(AntigravityBackend())
+    with pytest.raises(AntigravityUnsafe):
+        AntigravityBackend().assert_safe(
+            Invocation(live.argv, stdin_mode=STDIN_PIPE, initial_input=initial_input),
+            "write_in_repo",
+        )
+
+
+def test_antigravity_live_message_is_one_line_whatever_the_text() -> None:
+    line = AntigravityBackend().encode_live_message('two\nlines and a "quote" and ünïcode')
+    assert line.endswith(b"\n") and line.count(b"\n") == 1
+    assert json.loads(line)["message"]["content"] == 'two\nlines and a "quote" and ünïcode'
+    for empty in ("", "   "):
+        with pytest.raises(ValueError):
+            AntigravityBackend().encode_live_message(empty)
+
+
+@pytest.mark.parametrize("freedom", FREEDOMS)
+def test_antigravity_enforcement_reports_the_measured_mechanism(freedom: str) -> None:
+    enforcement = AntigravityBackend().enforcement(freedom)
+    assert enforcement.mechanism == {
+        "read_only": "agy --mode plan",
+        "write_in_repo": "agy --mode accept-edits",
+        "publish": "agy --dangerously-skip-permissions",
+        "unrestricted": "agy --dangerously-skip-permissions",
+    }[freedom]
+    # agy's own permission layer plus the user's settings.json allow-rules — nothing OS-enforced.
+    assert enforcement.os_enforced is False
+    assert enforcement.writes_confined is False
+    assert enforcement.commit_push_blocked is False
+    assert enforcement.direct_commit_commands_denied is False
+    assert enforcement.network_access == "not_controlled"
+
+
+def test_antigravity_caveats_state_what_was_measured() -> None:
+    caveats = " ".join(AntigravityBackend().enforcement("write_in_repo").caveats)
+    # The user's own allow-rules can widen everything, and the one OS-level thing agy has is
+    # deliberately unused — both measured facts, both stated.
+    assert "settings.json" in caveats
+    assert "--sandbox" in caveats
+    publish_caveats = " ".join(AntigravityBackend().enforcement("publish").caveats)
+    assert "git push" in publish_caveats
+    assert "cannot tell these two freedoms apart" in publish_caveats
+
+
+def test_antigravity_basic_success() -> None:
+    acc = _agy_ingest("basic")
+
+    assert acc.session_id == "3ed1929d-fb23-4bea-b8ab-89e056d26d3f"
+    assert acc.summary == "PONG\n"
+    assert acc.num_turns == 1
+    assert acc.result_count == 1
+    assert acc.usage == {
+        "input_tokens": 12395, "output_tokens": 2, "thinking_tokens": 0,
+        "cache_read_tokens": 0, "total_tokens": 12397,
+    }
+    assert acc.awaiting_input is True and acc.turn_open is False
+    backend = AntigravityBackend()
+    assert backend.classify(acc, 0) == "completed"
+    # The result event is real terminal evidence, like claude's — no observed exit needed.
+    assert backend.classify(acc, None) == "completed"
+    assert backend.classify(acc, 1) == "failed"
+
+
+def test_antigravity_reports_no_dollar_cost() -> None:
+    """Only token counts, no dollar cost (measured) — inventing a number would be a lie."""
+    acc = _agy_ingest("basic")
+
+    assert acc.total_cost_usd is None
+    assert AntigravityBackend().capabilities.reports_cost_usd is False
+
+
+def test_antigravity_denied_command_completes_with_a_warning() -> None:
+    """Measured: a headless denial ends the run as status SUCCESS, exit 0, empty response. The
+    tool step itself read ERROR ('permission check failed'), and result.denied_actions carries
+    the denial — completed with a warning is vibe's policy, decided by the owner."""
+    acc = _agy_ingest("denied_command")
+
+    assert acc.denials == [{"action": "command", "display_name": "RunCommand"}]
+    assert acc.notices == [
+        "agy auto-denied command (RunCommand): headless mode cannot prompt for it"
+    ]
+    assert acc.summary is None  # the response was empty
+    assert AntigravityBackend().classify(acc, 0) == "completed"
+
+
+def test_antigravity_plan_denied_write_completes_with_a_warning() -> None:
+    """The tool step read DONE though no file was written — only denied_actions says so, which is
+    exactly why the warning naming the denied action is load-bearing."""
+    acc = _agy_ingest("plan_denied_write")
+
+    assert acc.denials == [{"action": "write_file", "display_name": "WriteToFile"}]
+    assert acc.notices == [
+        "agy auto-denied write_file (WriteToFile): headless mode cannot prompt for it"
+    ]
+    assert AntigravityBackend().classify(acc, 0) == "completed"
+
+
+def test_antigravity_tool_steps_pair_into_one_call_and_one_result_each() -> None:
+    """Six tool steps in the capture (two writes, four commands), each emitted twice by agy —
+    ACTIVE then its terminal state — so the call must fire once per step and the result only on
+    the terminal state, exactly like vibe's re-emitted effects."""
+    backend = AntigravityBackend()
+    acc = Accumulator()
+    produced: list[dict] = []
+    for event in _agy_fixture("tools"):
+        event = json.loads(json.dumps(event))
+        backend.ingest(event, acc)
+        produced.extend(backend.normalize(event, acc))
+
+    calls = [e for e in produced if e["kind"] == "tool_call"]
+    results = [e for e in produced if e["kind"] == "tool_result"]
+    assert len(calls) == len(results) == 6
+    assert sorted(c["call_id"] for c in calls) == sorted(r["call_id"] for r in results)
+    assert [c["category"] for c in calls] == ["write", "shell", "shell", "shell", "shell", "write"]
+    assert [c["command"] for c in calls if c["category"] == "shell"] == [
+        "git add probe.txt",
+        "git -c user.email=t@t -c user.name=t commit -m probe",
+        "git push origin HEAD:main",
+        "curl -sS -o /dev/null -w %{http_code} https://example.com",
+    ]
+    assert [c["path"] for c in calls if c["category"] == "write"] == [
+        "/tmp/agy-probe/work/probe.txt",
+        "/tmp/pb_outside_test.txt",
+    ]
+    # Every tool in this capture succeeded — including the push to the bare remote and the
+    # write outside the repo, which is what pins this fixture as the skip-permissions capture.
+    assert all(r["ok"] for r in results)
+    assert any("HEAD -> main" in r["output_tail"] for r in results)
+    assert any("200" == r["output_tail"] for r in results)
+
+
+def test_antigravity_streams_deltas_then_the_final_text_and_usage() -> None:
+    backend = AntigravityBackend()
+    acc = Accumulator()
+    produced: list[dict] = []
+    for event in _agy_fixture("live_midturn"):
+        event = json.loads(json.dumps(event))
+        backend.ingest(event, acc)
+        produced.extend(backend.normalize(event, acc))
+
+    deltas = [e for e in produced if e["kind"] == "assistant_delta"]
+    # Every agent_response chunk while ACTIVE streams as its own delta, keyed by its step.
+    assert deltas and all(e["block_index"] == 0 for e in deltas)
+    assert {e["message_id"] for e in deltas} == {
+        "218324e6-9b3a-4ba6-8215-a4af1b78d08e:1",
+        "218324e6-9b3a-4ba6-8215-a4af1b78d08e:3",
+    }
+    assert "".join(e["text"] for e in deltas).startswith("1\n2\n")
+    texts = [e for e in produced if e["kind"] == "assistant_text"]
+    assert len(texts) == 2
+    assert texts[0]["text"].startswith("1\n2\n3\n") and texts[0]["text"].endswith("30\n")
+    assert texts[1]["text"] == "MID\n"
+    # One usage event per result, each carrying the accumulator's cumulative usage.
+    assert len([e for e in produced if e["kind"] == "usage"]) == 2
+    assert produced[-1]["kind"] == "usage"
+
+
+def _agy_produced(name: str) -> list[dict]:
+    backend = AntigravityBackend()
+    acc = Accumulator()
+    produced: list[dict] = []
+    for event in _agy_fixture(name):
+        event = json.loads(json.dumps(event))
+        backend.ingest(event, acc)
+        produced.extend(backend.normalize(event, acc))
+    return produced
+
+
+def test_antigravity_final_text_carries_the_identity_of_its_deltas() -> None:
+    """A streamed block's final text must share `(message_id, block_index)` with its deltas, or a
+    consumer appends a second answer beside a streaming entry that never finalizes — and the
+    DONE update's own chunk (the tail) must reach both."""
+    produced = _agy_produced("live_midturn")
+    delta_ids = {e["message_id"] for e in produced if e["kind"] == "assistant_delta"}
+    texts = [e for e in produced if e["kind"] == "assistant_text"]
+    assert {t["message_id"] for t in texts} == delta_ids
+    assert all(t["block_index"] == 0 for t in texts)
+    for text in texts:
+        streamed = "".join(
+            e["text"]
+            for e in produced
+            if e["kind"] == "assistant_delta" and e["message_id"] == text["message_id"]
+        )
+        assert streamed == text["text"]
+
+
+def test_antigravity_basic_answer_includes_the_done_chunk() -> None:
+    texts = [e for e in _agy_produced("basic") if e["kind"] == "assistant_text"]
+    assert [t["text"] for t in texts] == ["PONG\n"]
+
+
+def test_antigravity_a_denied_write_is_never_reported_as_done() -> None:
+    """plan mode: the write step reads DONE, yet `denied_actions` says the write was refused and
+    no file exists (measured). Its result waits for the turn's result and reports failure."""
+    produced = _agy_produced("plan_denied_write")
+    results = [e for e in produced if e["kind"] == "tool_result"]
+    assert len(results) == 1 and results[0]["ok"] is False
+    index = {id(e): i for i, e in enumerate(produced)}
+    assert index[id(results[0])] > max(
+        index[id(e)] for e in produced if e["kind"] == "tool_call"
+    )
+
+
+def test_antigravity_an_allowed_write_is_confirmed_when_only_a_command_was_denied() -> None:
+    """accept-edits: the write landed (measured, probe.txt existed) and only the command was
+    denied, so the write confirms and the command fails."""
+    produced = _agy_produced("denied_command")
+    calls = {e["call_id"]: e for e in produced if e["kind"] == "tool_call"}
+    by_category = {
+        calls[r["call_id"]]["category"]: r["ok"] for r in produced if r["kind"] == "tool_result"
+    }
+    assert by_category == {"write": True, "shell": False}
+
+
+def test_antigravity_an_unrelated_turn_error_leaves_a_pending_write_unconfirmed() -> None:
+    """A write reaching DONE, then an ERROR result with no denied_actions (an API failure): the
+    write may have landed, and nothing says it was denied — so no result is claimed either way."""
+    backend = AntigravityBackend()
+    acc = Accumulator()
+    write = next(
+        e for e in _agy_fixture("plan_denied_write")
+        if e.get("event") == "step_update"
+        and e["step_update"].get("step_type") == "tool"
+        and e["step_update"].get("state") == "DONE"
+    )
+    produced: list[dict] = []
+    for event in (
+        write,
+        {"event": "result", "result": {"status": "ERROR", "response": "", "error": "API error"}},
+    ):
+        event = json.loads(json.dumps(event))
+        backend.ingest(event, acc)
+        produced.extend(backend.normalize(event, acc))
+    assert [e for e in produced if e["kind"] == "tool_result"] == []
+    assert [e["kind"] for e in produced if e["kind"] == "tool_call"] == ["tool_call"]
+
+
+def test_antigravity_an_error_result_fails_the_run() -> None:
+    """An unknown --model: agy exits 1 with an ERROR result whose conversation_id is empty, before
+    any conversation starts."""
+    acc = _agy_ingest("error")
+
+    assert acc.is_error is True and acc.error_result_seen
+    assert acc.result_count == 1
+    assert acc.session_id is None
+    assert acc.notices and "no-such-model" in acc.notices[0]
+    backend = AntigravityBackend()
+    assert backend.classify(acc, 1) == "failed"
+    # The error result wins even under an impossible-looking clean exit.
+    assert backend.classify(acc, 0) == "failed"
+    assert backend.classify(acc, None) == "failed"
+
+
+def test_antigravity_resume_replays_into_the_same_conversation() -> None:
+    acc = _agy_ingest("resume")
+
+    assert acc.session_id == "3ed1929d-fb23-4bea-b8ab-89e056d26d3f"
+    assert acc.num_turns == 2  # cumulative per process, assigned
+    assert acc.summary == "PONG\n"
+    assert AntigravityBackend().classify(acc, 0) == "completed"
+
+
+def test_antigravity_live_two_turns_result_count_and_assigned_usage() -> None:
+    """`result.usage` is cumulative per process (measured: the second result's usage is roughly
+    twice the first's), so it is assigned — summing per result would double-count."""
+    acc = _agy_ingest("live_two_turns")
+
+    assert acc.result_count == 2
+    assert acc.num_turns == 2
+    assert acc.usage == {
+        "input_tokens": 24861, "output_tokens": 2, "thinking_tokens": 0,
+        "cache_read_tokens": 0, "total_tokens": 24863,
+    }
+    # Not the per-result sum: 12395 + 24861 would be 37256.
+    assert acc.usage["input_tokens"] != 12395 + 24861
+    assert acc.awaiting_input is True and acc.turn_open is False
+    assert AntigravityBackend().classify(acc, 0) == "completed"
+
+
+def test_antigravity_a_midturn_message_is_its_own_turn() -> None:
+    """Measured: each written line runs as its own turn, even mid-turn — two messages, two
+    results, where claude's fold would have produced one result for both."""
+    acc = _agy_ingest("live_midturn")
+
+    assert acc.result_count == 2
+    assert acc.num_turns == 2
+    assert acc.usage["input_tokens"] == 25057  # assigned, not summed
+    assert acc.awaiting_input is True and acc.turn_open is False
+    assert AntigravityBackend().classify(acc, 0) == "completed"
+
+
+def test_antigravity_step_updates_open_the_turn_and_results_await_input() -> None:
+    """The live pump's clock, from the real two-turn capture: idle after a result, working again
+    on the next step_update, and idle again after the second result."""
+    backend = AntigravityBackend()
+    events = _agy_fixture("live_two_turns")
+    acc = Accumulator()
+    states: list[tuple[bool, bool]] = []
+    for event in events:
+        backend.ingest(json.loads(json.dumps(event)), acc)
+        states.append((acc.turn_open, acc.awaiting_input))
+
+    # init | user_input | agent ACTIVE | agent DONE | result | user_input | agent ACTIVE | ...
+    assert states[4] == (False, True)  # the first result: idle
+    assert states[5] == (True, False)  # the second message's user_input re-opens the turn
+    assert states[6] == (True, False)  # and it stays open while the agent streams
+    assert states[-1] == (False, True)  # until the second result closes it
+    assert backend.classify(acc, 0) == "completed"
+
+
+def test_antigravity_a_result_followed_by_turn_activity_is_not_a_completion() -> None:
+    """The mid-turn interruption shape: a result, then a second message whose turn never produced
+    its own result — the earlier success is stale evidence, whatever the exit code."""
+    backend = AntigravityBackend()
+    events = _agy_fixture("live_midturn")
+    acc = Accumulator()
+    for event in events[:-1]:  # through the second turn's agent_response, dropping its result
+        backend.ingest(json.loads(json.dumps(event)), acc)
+
+    assert acc.result_count == 1
+    assert acc.turn_open is True
+    assert backend.classify(acc, 0) == "failed"
+
+
+def test_antigravity_live_resume_usage_is_cumulative_across_resumes() -> None:
+    acc = _agy_ingest("live_live_resume")
+
+    assert acc.num_turns == 3
+    assert acc.usage["total_tokens"] == 37546
+    assert AntigravityBackend().classify(acc, 0) == "completed"
+
+
 # --- live input (stage A3) --------------------------------------------------------------------
 
 
@@ -3604,11 +4252,17 @@ def test_claude_live_message_is_one_line_whatever_the_text() -> None:
     assert json.loads(line)["message"]["content"][0]["text"] == 'two\nlines and a "quote" and ünïcode'
 
 
+LIVE_INPUT_BACKENDS = ("claude", "antigravity")
+
+
 @pytest.mark.parametrize("backend", ALL, ids=lambda b: b.name)
-def test_every_backend_declares_live_input_and_only_claude_has_it(backend) -> None:
-    assert backend.capabilities.supports_live_input is (backend.name == "claude")
-    assert backend.capabilities.as_dict()["supports_live_input"] is (backend.name == "claude")
-    if backend.name != "claude":
+def test_live_input_is_declared_by_exactly_the_backends_that_have_it(backend) -> None:
+    """Measured: claude (without a turn cap) and antigravity (always — it has no turn cap at all,
+    and its CLI refuses a positional prompt) run live; the other three are one-shot DEVNULL."""
+    live = backend.name in LIVE_INPUT_BACKENDS
+    assert backend.capabilities.supports_live_input is live
+    assert backend.capabilities.as_dict()["supports_live_input"] is live
+    if not live:
         with pytest.raises(backends.UnsupportedCapability, match="resume_task"):
             backend.encode_live_message("hi")
         for invocation in (start_invocation(backend), resume_invocation(backend)):
@@ -3623,7 +4277,9 @@ def test_assert_safe_refuses_a_bare_argv_list(backend) -> None:
         backend.assert_safe(argv, "write_in_repo")
 
 
-@pytest.mark.parametrize("backend", [b for b in ALL if b.name != "claude"], ids=lambda b: b.name)
+@pytest.mark.parametrize(
+    "backend", [b for b in ALL if b.name not in LIVE_INPUT_BACKENDS], ids=lambda b: b.name
+)
 def test_backends_without_live_input_refuse_a_pipe_or_initial_input(backend) -> None:
     argv = start(backend)
     with pytest.raises(RuntimeError, match="no live input"):
@@ -3743,6 +4399,7 @@ def test_claude_live_and_classic_shapes_differ_only_in_the_input_wiring(freedom:
         ("codex", ["codex", "-c", "check_for_update_on_startup=false", "resume", "abc-123"]),
         ("opencode", ["opencode", "/work/repo", "-s", "abc-123"]),
         ("vibe", ["vibe", "--trust", "--workdir", "/work/repo", "--resume", "abc-123"]),
+        ("antigravity", ["agy", "--conversation", "abc-123"]),
     ],
 )
 def test_interactive_resume_argv_is_the_measured_command(name: str, expected: list[str]) -> None:
@@ -3789,6 +4446,7 @@ def test_interactive_resume_argv_accepts_every_id_shape_the_clis_mint(name: str)
         ("codex", ["codex", "-c", "check_for_update_on_startup=false", "resume", "abc-123"]),
         ("opencode", ["opencode", "/work/repo", "-s", "abc-123"]),
         ("vibe", ["vibe", "--trust", "--workdir", "/work/repo", "--resume", "abc-123"]),
+        ("antigravity", ["agy", "--conversation", "abc-123"]),
     ],
 )
 def test_resume_command_matches_each_backends_measured_argv(

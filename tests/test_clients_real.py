@@ -22,6 +22,7 @@ import pytest
 
 from polybridge import setup_client
 from polybridge.clients import Registration, run_cli
+from polybridge.clients.antigravity import AntigravityClient
 from polybridge.clients.claude_code import ClaudeCodeClient
 from polybridge.clients.codex import CodexClient
 from polybridge.clients.opencode import OpencodeClient
@@ -57,6 +58,8 @@ def sandbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("CODEX_HOME", str(home / "codex"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / "config"))
     monkeypatch.setenv("VIBE_HOME", str(home / "vibe"))
+    # agy honours no config override of its own (measured), so its ~/.gemini/config lives under the
+    # redirected HOME like everything else; nothing is pre-created for it.
     # So the spawned CLIs do not inherit a parent Claude Code session's markers.
     for name in [name for name in os.environ if name.startswith("CLAUDE") and name != "CLAUDE_CONFIG_DIR"]:
         monkeypatch.delenv(name)
@@ -276,11 +279,51 @@ def test_vibe_inspect_and_remove_round_trip_keeps_a_backup_with_the_comments(san
     assert client.remove("polybridge", run_cli).status == "not_installed"
 
 
+def test_antigravity_writes_the_entry_and_overwrites_on_a_second_run(sandbox: Path) -> None:
+    """Measured: re-adding replaces the stored entry, identical or not — like codex, so one apply
+    per run is enough and the second must not leave a duplicate behind."""
+    needs("agy")
+    client = AntigravityClient()
+    config = sandbox / ".gemini" / "config" / "mcp_config.json"
+
+    assert client.apply(REGISTRATION, run_cli).status == "applied"
+    servers = json.loads(config.read_text())["mcpServers"]
+    assert servers["polybridge"]["command"] == SERVER
+    assert servers["polybridge"]["env"]["PATH"] == REGISTRATION.path_env
+
+    result = client.apply(
+        Registration(key="polybridge", command=SERVER, path_env="/moved"), run_cli
+    )
+
+    assert result.status == "applied", result
+    servers = json.loads(config.read_text())["mcpServers"]
+    assert servers["polybridge"]["env"]["PATH"] == "/moved"
+    assert len([name for name in servers if name == "polybridge"]) == 1
+
+
+def test_antigravity_inspect_and_remove_round_trip(sandbox: Path) -> None:
+    needs("agy")
+    client = AntigravityClient()
+    assert client.inspect("polybridge", run_cli).installed is False
+    assert client.apply(REGISTRATION, run_cli).status == "applied"
+
+    inspection = client.inspect("polybridge", run_cli)
+    assert (inspection.installed, inspection.command, inspection.path_env) == (
+        True,
+        SERVER,
+        REGISTRATION.path_env,
+    )
+
+    assert client.remove("polybridge", run_cli).status == "removed"
+    assert client.inspect("polybridge", run_cli).installed is False
+    assert client.remove("polybridge", run_cli).status == "not_installed", "measured: exit 1"
+
+
 def test_setup_install_status_uninstall_end_to_end(
     sandbox: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
     """The whole command line against real CLIs, every config inside the sandbox."""
-    for binary in ("claude", "codex", "opencode", "vibe"):
+    for binary in ("claude", "codex", "opencode", "vibe", "agy"):
         needs(binary)
     server = tmp_path / "bin" / "polybridge-server"
     server.parent.mkdir()
@@ -306,10 +349,10 @@ def test_setup_install_status_uninstall_end_to_end(
     assert code == 0, rows
     assert rows["opencode"]["action"] == "skipped"
     assert rows["opencode"]["installed"] is True
-    for key in ("claude-desktop", "claude-code", "codex", "vibe"):
+    for key in ("claude-desktop", "claude-code", "codex", "vibe", "antigravity"):
         assert (rows[key]["action"], rows[key]["installed"]) == ("removed", False), rows[key]
 
     code, rows = invoke("--uninstall")
     assert code == 0
-    for key in ("claude-desktop", "claude-code", "codex", "vibe"):
+    for key in ("claude-desktop", "claude-code", "codex", "vibe", "antigravity"):
         assert rows[key]["action"] == "not_installed", rows[key]

@@ -20,6 +20,7 @@ import pytest
 from polybridge import clients
 from polybridge.clients import Registration, Result, RunResult, SetupError, run_cli
 from polybridge.clients.base import CliClient
+from polybridge.clients.antigravity import AntigravityClient
 from polybridge.clients.claude_code import ClaudeCodeClient
 from polybridge.clients.codex import CodexClient
 from polybridge.clients.desktop import DesktopClient
@@ -50,11 +51,20 @@ VIBE_NAME_CONFLICT = (
     "vibe mcp: error: MCP server name `polybridge` is already configured."
 )
 
+# agy's measured wordings. Its `add` overwrites (measured), so the default judge needs no message
+# at all — these record what a real run prints, and the remove signatures are what the whole-line
+# checks turn on.
+AGY_ADDED = 'Added MCP server "polybridge" (stdio)'
+AGY_REMOVED = 'Removed MCP server "polybridge"'
+AGY_NOT_FOUND = 'Error: MCP server "polybridge" not found'
+
 CLI_CLIENTS = [ClaudeCodeClient(), CodexClient(), OpencodeClient()]
 # Everything the shared timeout test also holds for — vibe's `apply` starts with its own `add` call,
 # same as every other client — but see `test_cli_argv_puts_the_command_after_a_separator` below,
-# which vibe is deliberately kept out of: it has no `--` separator at all.
-ALL_CLI_CLIENTS = [*CLI_CLIENTS, VibeClient()]
+# which vibe is deliberately kept out of: it has no `--` separator at all. Antigravity is kept out
+# for its own measured reason: its flags must precede the name, so the name does not sit at
+# argv[3] the way that test requires.
+ALL_CLI_CLIENTS = [*CLI_CLIENTS, VibeClient(), AntigravityClient()]
 
 
 def ok(output: str = "") -> tuple[int | None, str, bool]:
@@ -90,6 +100,7 @@ class FakeRunner:
 
 def test_every_client_is_registered() -> None:
     assert sorted(clients.CLIENTS) == [
+        "antigravity",
         "claude-code",
         "claude-desktop",
         "codex",
@@ -1791,6 +1802,149 @@ def test_vibe_remove_does_not_run_vibe_when_the_backup_fails(
 
     assert result.status == "failed"
     assert "no room" in result.detail
+
+
+# --- Antigravity (agy): flags before the name, JSON-file inspect, exit-1 absence -------------------
+
+
+def test_antigravity_argv_puts_the_env_flag_before_the_name() -> None:
+    """agy's own help requires flags before the name (measured), so the name cannot sit where the
+    default `CliClient` shape puts it — and the `--` separator still guards the command."""
+    argv = AntigravityClient().add_argv(REGISTRATION)
+
+    assert argv == [
+        "agy",
+        "mcp",
+        "add",
+        "--env",
+        "PATH=/a:/b",
+        "polybridge",
+        "--",
+        "/opt/bin/polybridge-server",
+    ]
+    assert argv.index("polybridge") > argv.index("PATH=/a:/b")
+
+
+def test_antigravity_add_overwrites_so_one_measured_success_line_is_enough() -> None:
+    """The default judge is right: re-adding replaces the entry (measured), so no collision
+    handling is needed and the measured success wording exits 0 as `applied`."""
+    runner = FakeRunner(ok(AGY_ADDED))
+
+    result = AntigravityClient().apply(REGISTRATION, runner)
+
+    assert result.status == "applied"
+    assert len(runner.calls) == 1
+    assert "add command succeeded" in result.detail
+
+
+@pytest.fixture
+def agy_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """agy honours no config-directory override (measured), so the sandbox is HOME itself."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    return tmp_path / ".gemini" / "config" / "mcp_config.json"
+
+
+def test_antigravity_inspect_with_no_config_is_not_installed(agy_config: Path) -> None:
+    inspection = AntigravityClient().inspect("polybridge", FakeRunner())
+
+    assert inspection.installed is False
+    assert inspection.error is None
+
+
+@pytest.mark.parametrize(
+    "raw", ["{not json", "[]", '{"mcpServers": []}'], ids=["syntax", "array", "servers"]
+)
+def test_antigravity_inspect_of_a_config_it_cannot_read_is_an_error(agy_config: Path, raw: str) -> None:
+    agy_config.parent.mkdir(parents=True)
+    agy_config.write_text(raw)
+
+    inspection = AntigravityClient().inspect("polybridge", FakeRunner())
+
+    assert inspection.installed is None
+    assert inspection.error
+
+
+def test_antigravity_inspect_reads_the_stored_command_and_path(agy_config: Path) -> None:
+    agy_config.parent.mkdir(parents=True)
+    agy_config.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "not-polybridge": {"command": "/other/server"},
+                    "polybridge": {
+                        "command": "/x/polybridge-server",
+                        "args": [],
+                        "env": {"PATH": "/a:/b"},
+                    },
+                }
+            }
+        )
+    )
+
+    inspection = AntigravityClient().inspect("polybridge", FakeRunner())
+
+    assert inspection.installed is True
+    assert inspection.command == "/x/polybridge-server"
+    assert inspection.path_env == "/a:/b"
+    assert any(str(agy_config) in note for note in inspection.notes)
+
+
+def test_antigravity_inspect_ignores_other_servers(agy_config: Path) -> None:
+    agy_config.parent.mkdir(parents=True)
+    agy_config.write_text(json.dumps({"mcpServers": {"not-polybridge": {"command": "/x"}}}))
+
+    assert AntigravityClient().inspect("polybridge", FakeRunner()).installed is False
+
+
+def test_antigravity_remove_reports_removed_on_the_measured_message() -> None:
+    runner = FakeRunner(ok(AGY_REMOVED))
+
+    result = AntigravityClient().remove("polybridge", runner)
+
+    assert runner.calls == [["agy", "mcp", "remove", "polybridge"]]
+    assert result.status == "removed"
+
+
+def test_antigravity_remove_of_an_absent_entry_is_not_installed_despite_exit_one() -> None:
+    result = AntigravityClient().remove("polybridge", FakeRunner(fails(1, AGY_NOT_FOUND)))
+
+    assert result.status == "not_installed"
+
+
+@pytest.mark.parametrize(
+    ("response", "status"),
+    [
+        (times_out(), "unknown"),
+        (fails(1, "EACCES: permission denied"), "failed"),
+        (fails(2, "flags provided but not defined"), "failed"),
+        (ok("something unexpected"), "unknown"),
+        # Not the measured sentence: a longer line that merely contains it must not read as a
+        # removal any more than a different server's name may read as ours.
+        (ok('Removed MCP server "polybridge" (and kept a backup)'), "unknown"),
+        (fails(1, 'Error: MCP server "polybridge" not found in some other scope'), "failed"),
+        # The different-name collisions: whole-line, name-delimited matching must refuse both.
+        (ok('Removed MCP server "not-polybridge"'), "unknown"),
+        (ok('Removed MCP server "polybridge-old"'), "unknown"),
+        (fails(1, 'Error: MCP server "not-polybridge" not found'), "failed"),
+        (fails(1, 'Error: MCP server "polybridge-old" not found'), "failed"),
+    ],
+    ids=[
+        "timeout",
+        "exit-1-failure",
+        "exit-2-failure",
+        "unrecognised-exit-0",
+        "removed-with-trailing-caveat",
+        "not-found-with-trailing-caveat",
+        "removed-name-prefix",
+        "removed-name-suffix",
+        "not-found-name-prefix",
+        "not-found-name-suffix",
+    ],
+)
+def test_antigravity_remove_never_claims_more_than_it_saw(response, status: str) -> None:
+    result = AntigravityClient().remove("polybridge", FakeRunner(response))
+
+    assert result.status == status
 
 
 # --- the Protocol, on every client and every test double ----------------------------------------

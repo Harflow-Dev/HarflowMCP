@@ -78,9 +78,10 @@ def queued_response(task_id: str, message: dict[str, Any]) -> dict[str, Any]:
         "message_id": message["id"],
         "status": "queued",
         "note": (
-            "queued, not yet delivered: the run's input pump writes it to the agent — folded into "
-            "the running turn if one is in progress. Its event log records a user_message event "
-            "once written, or an undelivered event if it never is."
+            "queued, not yet delivered: the run's input pump writes it to the agent — on claude "
+            "it is folded into the running turn if one is in progress, on antigravity it is its "
+            "own turn. Its event log records a user_message event once written, or an "
+            "undelivered event if it never is."
         ),
     }
 

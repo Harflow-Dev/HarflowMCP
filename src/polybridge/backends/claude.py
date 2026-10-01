@@ -333,6 +333,10 @@ class ClaudeBackend:
             caveats=(_NETWORK_CONTROL_CAVEAT,),
         ),
         supports_live_input=True,
+        # Explicit, not just the default: claude folds a mid-turn message into the running turn
+        # (measured, 2.1.281 — one result however many messages landed), so one further result
+        # settles the run regardless of how many messages were queued. agy is the contrast case.
+        live_input_message_is_turn=False,
     )
 
     def build_start_argv(

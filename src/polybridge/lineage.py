@@ -1,7 +1,8 @@
 """Best-effort detection of the caller that dispatched this task, for lineage recording.
 
 A polybridge server can itself be dispatched *by* an agent running under an earlier polybridge
-task — an MCP client nested inside a `claude`/`codex`/`opencode`/`vibe` run this server started.
+task — an MCP client nested inside a `claude`/`codex`/`opencode`/`vibe`/`agy` run this server
+started.
 Recording that relationship (`spawned_by`, `root_task_id`, `depth`, …) lets cancellation cascade
 and the caps in `backends.base` compare a nested dispatch against its parent. None of this is
 authoritative: it is inference from process state, and every method below can miss.

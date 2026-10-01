@@ -14,7 +14,7 @@ import pytest
 from polybridge import setup_client
 from polybridge.clients import Result, SetupError
 
-EVERYTHING = {"polybridge-server", "claude", "codex", "opencode", "vibe", "git"}
+EVERYTHING = {"polybridge-server", "claude", "codex", "opencode", "vibe", "agy", "git"}
 
 
 class FakeCli:
@@ -55,6 +55,8 @@ def fake_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeCli:
     monkeypatch.setenv("CODEX_HOME", str(home / "codex"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(home / "config"))
     monkeypatch.setenv("VIBE_HOME", str(home / "vibe"))
+    # Antigravity honours no config-directory override of its own (measured), so its
+    # ~/.gemini/config/mcp_config.json lands under this HOME and needs no separate variable.
     return fake
 
 
@@ -140,6 +142,8 @@ def test_a_dry_run_changes_nothing_and_previews_every_client(
     assert "would write" in out
     for binary in ("claude", "codex", "opencode", "vibe"):
         assert f"{binary} mcp add polybridge" in out
+    # agy takes its flags before the name (measured), so its preview is matched by its prefix.
+    assert "agy mcp add --env" in out
 
 
 def test_clients_that_are_not_installed_are_skipped_not_failed(
@@ -152,7 +156,7 @@ def test_clients_that_are_not_installed_are_skipped_not_failed(
     out = capsys.readouterr().out
     assert code == 0
     assert json.loads((tmp_path / "claude_desktop_config.json").read_text())["mcpServers"]
-    assert out.count("skipped") == 4
+    assert out.count("skipped") == 5
 
 
 def test_asking_for_a_client_that_is_not_installed_is_an_error(
@@ -252,6 +256,7 @@ def nothing_registered(fake_cli: FakeCli) -> None:
     fake_cli.reply(
         ("vibe", "mcp", "remove"), 0, "MCP server `polybridge` is not configured in the user config."
     )
+    fake_cli.reply(("agy", "mcp", "remove"), 1, 'Error: MCP server "polybridge" not found')
 
 
 def rows(document: dict) -> dict[str, dict]:
@@ -286,7 +291,7 @@ def test_dry_run_rejection_says_what_it_applies_to(tmp_path: Path, which, capsys
 
 
 def test_status_does_not_need_the_server_binary(tmp_path: Path, which, capsys) -> None:
-    which("claude", "codex", "opencode", "vibe")
+    which("claude", "codex", "opencode", "vibe", "agy")
 
     code, document = run_json(tmp_path, capsys, "--status")
 
@@ -298,7 +303,7 @@ def test_status_does_not_need_the_server_binary(tmp_path: Path, which, capsys) -
 def test_uninstall_does_not_need_the_server_binary(
     tmp_path: Path, which, fake_cli, capsys
 ) -> None:
-    which("claude", "codex", "opencode", "vibe")
+    which("claude", "codex", "opencode", "vibe", "agy")
     nothing_registered(fake_cli)
 
     code = run(tmp_path, "--uninstall")
@@ -332,6 +337,7 @@ def test_status_json_is_version_one_with_exactly_the_documented_fields(
         "codex",
         "opencode",
         "vibe",
+        "antigravity",
     ]
     for row in document["clients"]:
         assert set(row) == ROW_KEYS
@@ -442,6 +448,7 @@ def test_uninstall_treats_nothing_to_remove_as_success(
         "codex": "not_installed",
         "opencode": "not_installed",
         "vibe": "not_installed",
+        "antigravity": "not_installed",
     }
     assert document["server_path"] is None
 

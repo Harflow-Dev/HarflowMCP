@@ -875,10 +875,12 @@ async def test_concurrent_senders_never_lose_an_acknowledged_message(tmp_path: P
     pump = asyncio.create_task(registry._pump(task))
 
     async def close_soon() -> None:
-        # Each forward clears awaiting_input (a turn is owed); with no agent to answer, keep
-        # re-asserting it the way each turn's result would, until the pump closes.
+        # Each forward clears awaiting_input and owes a turn; with no agent to answer, keep
+        # simulating what each owed turn's result would do — re-assert awaiting_input and raise
+        # result_count to results_owed — until the pump closes.
         await asyncio.sleep(0.05)
         while not pump.done():
+            task.acc.result_count = task.results_owed
             task.acc.awaiting_input = True
             task.pump_wake.set()
             await asyncio.sleep(0.01)
@@ -1488,3 +1490,299 @@ async def test_a_sealed_close_needs_no_final_read(tmp_path: Path, monkeypatch: p
     task.proc.returncode = 0
     await registry._finish_pump(task)
     assert calls == []
+
+
+# --- queued-turn live input (antigravity) -----------------------------------------------------
+# `live_input_message_is_turn` is what splits the two live-input backends: claude folds a mid-turn
+# message into the running turn (one result settles the run however many messages landed), agy
+# runs each written line as its own turn (one result per message). The pump must wait for every
+# owed result before it closes stdin, and recovery must read the same fact off the record.
+
+
+async def test_a_queued_turn_backend_waits_for_every_owed_result_before_closing(
+    tmp_path: Path,
+) -> None:
+    """agy semantics: two messages written mid-run are two turns owed on top of the prompt's own.
+    The pump must NOT close stdin after the first result — the queued messages were written, so
+    their turns have not been answered — and must close the moment result_count reaches
+    results_owed."""
+    registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
+    stdin = _Stdin()
+    task = _stub_task(tmp_path, stdin)
+    task.backend = "antigravity"
+    task.results_owed = 1  # what _spawn gives a live run: the initial prompt's own turn
+    pump = asyncio.create_task(registry._pump(task))
+
+    task.inbox_queue.extend([inbox.make_message("one", None), inbox.make_message("two", None)])
+    await _until(lambda: len(stdin.written) == 2)
+    assert task.results_owed == 3
+    assert task.input_after_result == 2  # owed - 1: what recovery replays against
+
+    # First of three owed results: idle per the stream, but two turns are still owed.
+    task.acc.result_count, task.acc.awaiting_input, task.acc.turn_open = 1, True, False
+    task.pump_wake.set()
+    await asyncio.sleep(0.1)
+    assert not stdin.closed
+
+    # Second result: one turn still owed.
+    task.acc.result_count = 2
+    task.pump_wake.set()
+    await asyncio.sleep(0.1)
+    assert not stdin.closed
+
+    # Third result: every owed turn answered — now it closes, and the pump finishes.
+    task.acc.result_count = 3
+    task.pump_wake.set()
+    await asyncio.wait_for(pump, 5)
+    assert stdin.closed and task.inbox_closed
+
+
+async def test_claude_still_folds_queued_messages_into_one_owed_result(tmp_path: Path) -> None:
+    """claude is unchanged by the owed-count change, byte for byte: however many messages are
+    written, the run owes result_count + 1 — one further result settles it — and
+    input_after_result keeps its old meaning, the result_count at the time of the write."""
+    registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
+    stdin = _Stdin()
+    task = _stub_task(tmp_path, stdin)  # backend="claude"
+    pump = asyncio.create_task(registry._pump(task))
+
+    task.inbox_queue.extend([inbox.make_message("one", None), inbox.make_message("two", None)])
+    await _until(lambda: len(stdin.written) == 2)
+    assert task.results_owed == 1  # result_count (0) + 1, not one per message
+    assert task.input_after_result == 0  # the pre-change semantics
+
+    # The single result the folded turn produces is enough to settle the run.
+    task.acc.result_count, task.acc.awaiting_input, task.acc.turn_open = 1, True, False
+    task.pump_wake.set()
+    await asyncio.wait_for(pump, 5)
+    assert stdin.closed and task.inbox_closed
+
+
+AGY_RESULT_LINE = json.dumps(
+    {
+        "event": "result",
+        "result": {
+            "conversation_id": "agy-fake",
+            "status": "SUCCESS",
+            "response": "ok",
+            "num_turns": 1,
+            "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+        },
+    }
+)
+
+
+class _PerTurnDouble:
+    """Spawns a shell that answers one agy-shaped result per stdin line read, appending each line
+    to a sink so the test sees exactly what reached the process. The sleep before the first result
+    makes the two queued messages land while the first turn is still running — agy's measured
+    semantics, and claude's opposite. Ingest and classify are antigravity's own, so the input pump
+    sees agy's pump fields."""
+
+    name = "agy-per-turn-double"
+    binary = "/bin/sh"
+    capabilities = backends.AntigravityBackend.capabilities
+
+    def __init__(self, sink: Path) -> None:
+        self.sink = sink
+        self._agy = backends.AntigravityBackend()
+
+    def _script(self) -> str:
+        return (
+            f"IFS= read -r line; printf '%s\\n' \"$line\" >> {self.sink}; sleep 0.5; "
+            f"printf '%s\\n' '{AGY_RESULT_LINE}'; "
+            f"while IFS= read -r line; do printf '%s\\n' \"$line\" >> {self.sink}; "
+            f"printf '%s\\n' '{AGY_RESULT_LINE}'; done"
+        )
+
+    def build_start_argv(self, prompt, **kwargs):
+        return Invocation(
+            [self.binary, "-c", self._script()],
+            stdin_mode=STDIN_PIPE,
+            initial_input=self.encode_live_message(prompt),
+        )
+
+    build_resume_argv = build_start_argv
+
+    def assert_safe(self, invocation, freedom, network=None):
+        assert isinstance(invocation, Invocation) and invocation.live_input
+
+    def enforcement(self, freedom, network=None):
+        return self._agy.enforcement(freedom, network)
+
+    def ingest(self, event, acc):
+        self._agy.ingest(event, acc)
+
+    def normalize(self, event, acc):
+        return []
+
+    def classify(self, acc, exit_code):
+        return self._agy.classify(acc, exit_code)
+
+    def encode_live_message(self, text):
+        return self._agy.encode_live_message(text)
+
+    def interactive_resume_argv(self, session_id, repo_path):
+        return [self.binary, "--conversation", session_id]
+
+
+async def test_a_queued_turn_run_delivers_every_message_and_settles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end through a real process: the initial prompt plus two queued messages are three
+    turns owed, so stdin must still be open after the first result — all three lines reach the
+    agent, all three results come back, and only then does the pump close and the run settle."""
+    sink = tmp_path / "lines.jsonl"
+    backend = _PerTurnDouble(sink)
+    monkeypatch.setitem(backends.BACKENDS, backend.name, backend)
+    registry = TaskRegistry(log_dir=tmp_path / "streams", owner=OWNER)
+
+    task = await registry.start("one", tmp_path, backend=backend)
+    # Written while the first turn is still running (the double sleeps before its first result).
+    await registry.send_message(task, "two")
+    await registry.send_message(task, "three")
+    await _settle(task)
+
+    received = [json.loads(line)["message"]["content"] for line in sink.read_text().splitlines()]
+    assert received == ["one", "two", "three"]
+    assert task.acc.result_count == 3
+    assert task.results_owed == 3
+    assert task.status == "completed"
+    assert task.input_closed and task.inbox_closed
+    record = store.read(registry.log_dir, task.task_id)
+    assert record is not None and record.input_after_result == 2
+
+
+def test_recovery_knows_a_queued_turn_run_was_still_owed_results(tmp_path: Path) -> None:
+    """`input_after_result = owed - 1` is what makes store._resolve's
+    `result_count <= input_after_result` mean "a turn is still owed" under both shapes. For a
+    queued-turn run with two written messages on top of the prompt (owed 3, recorded 2): a replay
+    with only two results still owes a turn and must not read completed; the third settles it."""
+    import subprocess
+
+    def agy_result(turns: int) -> dict:
+        return {
+            "event": "result",
+            "result": {
+                "conversation_id": "c1", "status": "SUCCESS", "response": "ok",
+                "num_turns": turns, "usage": {"input_tokens": 1},
+            },
+        }
+
+    def replay(results: int) -> None:
+        lines = [json.dumps({"event": "init", "conversation_id": "c1", "init": {}})]
+        lines += [json.dumps(agy_result(turns + 1)) for turns in range(results)]
+        store.log_path(tmp_path, "t1").write_text(
+            "".join(line + "\n" for line in lines), encoding="utf-8"
+        )
+
+    gone = subprocess.Popen(["/usr/bin/true"])
+    gone.wait()  # its process is gone, so the record resolves from the replay
+    dead = {"pid": gone.pid, "start_time": "Mon Jan  1 00:00:00 2001", "markers": ["true"]}
+    _record(tmp_path, **dead, backend="antigravity", input_after_result=2)
+
+    replay(2)
+    record = store.read(tmp_path, "t1")
+    status, _note, state, _tail = store.resolve_status(tmp_path, record)
+    assert status == "failed"
+    assert state.turn_open
+
+    replay(3)
+    record = store.read(tmp_path, "t1")
+    status, *_ = store.resolve_status(tmp_path, record)
+    assert status == "completed"
+
+
+# --- a resume that lands on a different session -----------------------------------------------
+
+
+class _SwappedSessionFake(_FakeClaude):
+    """The fake agent told to report a conversation the caller did not ask for — agy's behaviour
+    with an unknown --conversation id (measured: no refusal, a new conversation, exit 0)."""
+
+    name = "fake-claude"  # the resume looks the parent's backend up by name
+
+    def build_resume_argv(self, prompt, **kwargs):
+        kwargs["session_id"] = "other-conversation"
+        return _FakeClaude.build_start_argv(self, prompt, **kwargs)
+
+
+async def test_a_resume_landing_on_a_different_session_gets_exactly_one_notice(
+    fake, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = await fake.registry.start("reply hi", fake.repo, backend=fake.backend)
+    await _settle(task)
+    assert task.session_id is not None
+    resumed_id = task.session_id
+
+    swapped = _SwappedSessionFake()
+    monkeypatch.setitem(backends.BACKENDS, swapped.name, swapped)
+    resumed = await fake.registry.resume(task, "reply again")
+    await _settle(resumed)
+
+    # Exactly one bridge notice however many events carry the different id (the fake agent stamps
+    # every one of them), and it names both ids and says what happened.
+    notices = [n for n in resumed.bridge_notices if "instead of the requested" in n]
+    assert notices == [
+        f"the agent reported session other-conversation instead of the requested {resumed_id}: "
+        "the CLI did not continue that conversation, so this run is not a continuation of it"
+    ]
+    notice_events = [
+        e for e in _events(fake.registry.log_dir, resumed.task_id) if e["kind"] == "notice"
+    ]
+    assert [e["text"] for e in notice_events] == notices
+    # The stream is still trusted: the task is re-pointed at the id the agent actually used.
+    assert resumed.session_id == "other-conversation"
+    assert resumed.status == "completed"
+
+
+async def test_a_swapped_resume_persists_its_session_before_the_process_finishes(
+    fake, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    task = await fake.registry.start("reply hi", fake.repo, backend=fake.backend)
+    await _settle(task)
+
+    swapped = _SwappedSessionFake()
+    monkeypatch.setitem(backends.BACKENDS, swapped.name, swapped)
+    # This background task never finishes on its own, so the persistence observation cannot
+    # accidentally pass because the normal process-completion write already happened.
+    resumed = await fake.registry.resume(task, "silentbg held")
+    try:
+        await _until(lambda: resumed.acc.result_count == 1)
+        record = store.read(fake.registry.log_dir, resumed.task_id)
+        assert record is not None and record.session_id == "other-conversation"
+        assert resumed.proc.returncode is None
+        assert not resumed.done.is_set()
+        assert resumed.acc.background_open == {"held"}
+    finally:
+        await fake.registry.cancel(resumed)
+        await _settle(resumed)
+
+
+async def test_a_resume_landing_on_the_same_session_gets_no_notice(fake) -> None:
+    task = await fake.registry.start("reply hi", fake.repo, backend=fake.backend)
+    await _settle(task)
+
+    resumed = await fake.registry.resume(task, "reply again")
+    await _settle(resumed)
+
+    assert resumed.session_id == task.session_id
+    assert not any("instead of the requested" in n for n in resumed.bridge_notices)
+    assert resumed.status == "completed"
+
+
+def test_a_run_that_exits_with_owed_turns_unanswered_is_not_completed(tmp_path: Path) -> None:
+    """Two messages written, the first result arrives, then the process exits 0: two turns were
+    never answered. The live verdict must agree with recovery's (`store._resolve`), which already
+    reads that as a turn still owed."""
+    task = _stub_task(tmp_path, _Stdin())
+    task.backend = "antigravity"
+    task.results_owed = 3
+    task.acc.result_count = 1
+    task.acc.saw_final_message = True
+    task.acc.awaiting_input = True
+    assert tasks_module._classify(task, 0) == "failed"
+
+    task.acc.result_count = 3
+    task.acc.turn_open = False
+    assert tasks_module._classify(task, 0) == "completed"
