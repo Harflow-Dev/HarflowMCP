@@ -746,9 +746,11 @@ class TaskRegistry:
         owner: dict[str, Any] | None = None,
         *,
         open_monitor: bool = True,
+        caller_override: lineage.Caller | None = None,
         monitor_launcher: Callable[[str], Awaitable[int]] | None = None,
     ) -> None:
         self._tasks: dict[str, Task] = {}
+        self._caller_override = caller_override
         # Whether a root task this registry starts opens the Monitor app (A4.3). False for
         # `polybridge-ctl run`/`resume`, which the app itself drives.
         self._open_monitor = open_monitor
@@ -781,6 +783,8 @@ class TaskRegistry:
         monkeypatch) cannot become an exception either — per CLAUDE.md, bookkeeping must never
         change an outcome.
         """
+        if self._caller_override is not None:
+            return self._caller_override
         try:
             return await asyncio.to_thread(lineage.detect_caller, self._log_dir)
         except Exception:
@@ -805,6 +809,9 @@ class TaskRegistry:
         """
         if caller is None:
             return None, None, 0, lineage.max_depth_default(), None
+
+        from .workflow_hooks import refuse_managed
+        refuse_managed(self._log_dir, caller.record.task_id)
 
         parent_max_depth = (
             caller.record.max_depth
@@ -834,6 +841,7 @@ class TaskRegistry:
         model: str | None = None,
         reasoning_effort: str | None = None,
         network: bool | None = None,
+        task_id: str | None = None,
         group: str | None = None,
         title: str | None = None,
     ) -> Task:
@@ -881,6 +889,7 @@ class TaskRegistry:
             group=resolved_group,
             title=title,
             lineage_detected=lineage_detected,
+            task_id=task_id,
         )
 
     async def resume(
@@ -890,6 +899,7 @@ class TaskRegistry:
         *,
         max_turns: int | None = None,
         network: bool | None = None,
+        task_id: str | None = None,
     ) -> Task:
         """Continue `parent`'s session as a new task sharing its session id."""
         if parent.session_id is None:
@@ -916,6 +926,10 @@ class TaskRegistry:
             child_repo=parent.repo_path,
         )
         resolved_group = caller.record.group if caller is not None else parent.group
+
+        if task_id is None:
+            from .workflow_hooks import pause_for_task
+            pause_for_task(self._log_dir, parent.task_id, "Task resumed outside the workflow supervisor")
 
         try:
             async with control.session_lock(
@@ -970,6 +984,7 @@ class TaskRegistry:
                     # The resumed task's own title, whoever the caller is — unlike `group`.
                     title=parent.title,
                     lineage_detected=lineage_detected,
+                    task_id=task_id,
                 )
         except control.LockTimeout:
             raise SessionBusyError(
@@ -998,6 +1013,7 @@ class TaskRegistry:
         group: str | None = None,
         title: str | None = None,
         lineage_detected: str | None = None,
+        task_id: str | None = None,
     ) -> Task:
         # Re-checked at the point of execution, not only where the argv was built, so no future
         # caller of this method can launch an agent without its backend's guarantees — and, now
@@ -1014,7 +1030,9 @@ class TaskRegistry:
         # forever reading an open stdin).
         backend.assert_safe(invocation, freedom, network)  # type: ignore[arg-type]
 
-        task_id = str(uuid.uuid4())
+        task_id = store.validate_task_id(task_id) if task_id else str(uuid.uuid4())
+        if self.get(task_id) is not None or store.read(self._log_dir, task_id) is not None:
+            raise ValueError(f"task_id already exists: {task_id}")
         # A root task (no detected caller) is the root of its own dispatch chain.
         root_task_id = root_task_id if root_task_id is not None else task_id
         if max_depth is None:
@@ -2332,12 +2350,18 @@ class TaskRegistry:
 
         return outcomes
 
-    async def cancel_cascade(self, task_id: str) -> dict[str, Any]:
+    async def cancel_cascade(self, task_id: str, *, workflow_control: bool = False) -> dict[str, Any]:
         """Run `_cancel_cascade` as a registry-held task, shielded from the caller.
 
         Same reason `cancel` shields `_escalate`: the SIGKILL escalation for tasks this server does
         not own lives inside the cascade, and a client disconnecting mid-call must not abandon it.
         """
+        if not workflow_control:
+            from .workflow_hooks import pause_for_task, refuse_managed
+            caller = await self._detect_caller()
+            if caller is not None:
+                refuse_managed(self._log_dir, caller.record.task_id)
+            pause_for_task(self._log_dir, task_id, "Task cancelled outside the workflow supervisor")
         return await self._shielded(self._cancel_cascade(task_id), f"pb-cascade-{task_id}")
 
     async def _shielded(self, coro: Any, name: str) -> Any:
@@ -2517,6 +2541,7 @@ class TaskRegistry:
         *,
         max_turns: int | None = None,
         network: bool | None = None,
+        task_id: str | None = None,
     ) -> Task:
         """Continue the session of a task recovered from disk."""
         if not record.session_id:
@@ -2548,6 +2573,10 @@ class TaskRegistry:
             child_repo=repo_path,
         )
         resolved_group = caller.record.group if caller is not None else record.group
+
+        if task_id is None:
+            from .workflow_hooks import pause_for_task
+            pause_for_task(self._log_dir, record.task_id, "Task resumed outside the workflow supervisor")
 
         try:
             async with control.session_lock(
@@ -2596,6 +2625,7 @@ class TaskRegistry:
                     group=resolved_group,
                     title=record.title,
                     lineage_detected=lineage_detected,
+                    task_id=task_id,
                 )
         except control.LockTimeout:
             raise SessionBusyError(

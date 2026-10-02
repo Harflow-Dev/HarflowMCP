@@ -119,6 +119,8 @@ def sweep(log_dir: Path, days: int, now: datetime) -> dict[str, int]:
         "deleted_temp_files": 0,
     }
 
+    from .workflows import WorkflowStore
+    pinned = WorkflowStore(root=log_dir.parent).pinned_tasks()
     records = store.read_all(log_dir)
     by_id = {r.task_id: r for r in records}
     statuses = {r.task_id: store.resolve_status(log_dir, r, detail=False)[0] for r in records}
@@ -148,6 +150,8 @@ def sweep(log_dir: Path, days: int, now: datetime) -> dict[str, int]:
     _sweep_temp_files(log_dir, by_id, statuses, now, stats)
 
     for record in records:
+        if record.task_id in pinned:
+            continue
         if statuses.get(record.task_id) not in store.TERMINAL_RECORD_STATUSES:
             continue
         if not _older_than(record, days, now):

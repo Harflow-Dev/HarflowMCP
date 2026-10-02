@@ -48,21 +48,11 @@ def fake_task(tmp_path: Path) -> Task:
     return task
 
 
-async def test_all_nine_tools_are_exposed() -> None:
+async def test_task_and_workflow_tools_are_exposed() -> None:
     async with Client(server.mcp) as client:
         names = sorted(tool.name for tool in (await client.list_tools()).tools)
 
-    assert names == [
-        "cancel_task",
-        "get_task_events",
-        "get_task_status",
-        "list_backends",
-        "list_tasks",
-        "resume_task",
-        "send_message",
-        "start_task",
-        "wait_for_task",
-    ]
+    assert names == ['cancel_task', 'cancel_workflow', 'delete_workflow', 'get_task_events', 'get_task_status', 'get_workflow', 'get_workflow_status', 'list_backends', 'list_tasks', 'list_workflow_runs', 'list_workflows', 'pause_workflow', 'resume_task', 'resume_workflow', 'save_workflow', 'send_message', 'start_task', 'start_workflow', 'wait_for_task', 'wait_for_workflow', 'workflow_builder']
 
 
 async def test_list_backends_describes_every_one() -> None:

@@ -1,0 +1,52 @@
+{
+  "name": "implement-review",
+  "description": "Plan a task, implement it, review the result, and run tests.",
+  "orchestrator": {
+    "backend": "codex",
+    "reasoning_effort": "high",
+    "fallbacks": []
+  },
+  "max_parallel": 4,
+  "max_transitions": 100,
+  "nodes": [
+    {"id": "start", "type": "start", "position": {"x": 60, "y": 120}},
+    {
+      "id": "plan", "type": "agent", "role": "planning", "title": "Plan",
+      "instructions": "Inspect the requested task and produce a concrete task list. Do not modify the repository.",
+      "agent": {"backend": "codex", "fallbacks": []},
+      "freedom": "read_only", "session_mode": "resume",
+      "max_attempts": 3, "position": {"x": 280, "y": 120}
+    },
+    {
+      "id": "implement", "type": "agent", "role": "implementation", "title": "Implement",
+      "instructions": "Implement the planned work. Report completed task IDs with evidence, changed files, and validation. Do not commit or publish.",
+      "agent": {"backend": "codex", "fallbacks": []},
+      "freedom": "write_in_repo", "session_mode": "resume",
+      "max_attempts": 3, "position": {"x": 500, "y": 120}
+    },
+    {
+      "id": "review", "type": "agent", "role": "review", "title": "Review",
+      "instructions": "Review the implementation against the task list. Report approval or concrete changes needed. Do not modify files.",
+      "agent": {"backend": "codex", "fallbacks": []},
+      "freedom": "read_only", "session_mode": "resume",
+      "max_attempts": 3, "position": {"x": 720, "y": 120}
+    },
+    {
+      "id": "tests", "type": "agent", "role": "task", "title": "Run tests",
+      "instructions": "Run the relevant tests and report their observed results. Do not change repository sources, commit, or publish.",
+      "agent": {"backend": "codex", "fallbacks": []},
+      "freedom": "write_in_repo", "session_mode": "fresh",
+      "max_attempts": 3, "position": {"x": 940, "y": 120}
+    },
+    {"id": "end", "type": "end", "position": {"x": 1160, "y": 120}}
+  ],
+  "connections": [
+    {"id": "start-plan", "source": "start", "target": "plan", "default": true},
+    {"id": "plan-implement", "source": "plan", "target": "implement", "default": true},
+    {"id": "implement-review", "source": "implement", "target": "review", "default": true},
+    {"id": "review-tests", "source": "review", "target": "tests", "condition": "The review approves the implementation."},
+    {"id": "review-fix", "source": "review", "target": "implement", "condition": "The review requests changes."},
+    {"id": "tests-end", "source": "tests", "target": "end", "condition": "The required tests passed and the task checklist is complete."},
+    {"id": "tests-fix", "source": "tests", "target": "implement", "condition": "The tests failed and an implementation change is needed."}
+  ]
+}

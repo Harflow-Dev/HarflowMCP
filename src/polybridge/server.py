@@ -286,7 +286,7 @@ async def list_backends() -> list[dict[str, Any]]:
 async def start_task(
     prompt: str,
     repo_path: str,
-    backend: str = DEFAULT_BACKEND,
+    backend: str | None = None,
     freedom: str = DEFAULT_FREEDOM,
     model: str | None = None,
     max_turns: int | None = None,
@@ -294,6 +294,7 @@ async def start_task(
     network: StrictBool | None = None,
     group: str | None = None,
     title: str | None = None,
+    workflow: str | None = None,
 ) -> dict[str, Any]:
     """Dispatch a coding task to a headless agent and return immediately.
 
@@ -358,7 +359,17 @@ async def start_task(
     if not prompt or not prompt.strip():
         raise MCPError(INVALID_PARAMS, "prompt must be a non-empty string")
 
-    chosen = _backend(backend)
+    if workflow is not None:
+        if group is not None or title is not None:
+            raise MCPError(INVALID_PARAMS, "workflow runs do not accept task group or title")
+        return await _workflow_call(
+            "start", name=workflow, prompt=prompt, repo_path=repo_path,
+            overrides={k: v for k, v in {"backend": backend, "model": model, "max_turns": max_turns,
+                       "reasoning_effort": reasoning_effort}.items() if v is not None},
+            freedom=freedom, network=network,
+        )
+
+    chosen = _backend(backend or DEFAULT_BACKEND)
     _check_freedom(freedom)
     _check_turn_cap(chosen, max_turns)
     _check_reasoning_effort(chosen, reasoning_effort)
@@ -699,6 +710,8 @@ async def cancel_task(task_id: str) -> dict[str, Any]:
 
     try:
         cascade = await _reg().cancel_cascade(task_id)
+    except backends.UnsupportedCapability as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
     except control.PhaseWriteError as exc:
         raise MCPError(
             INTERNAL_ERROR,
@@ -847,6 +860,136 @@ async def send_message(task_id: str, text: str) -> dict[str, Any]:
         return await _reg().send_to_record(task_id, text)
     except inbox.SendRefused as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+
+async def _workflow_call(action: str, **kwargs: Any) -> Any:
+    from . import workflows
+    try:
+        if action not in {"list", "list_runs", "get", "status"}:
+            from .workflow_hooks import refuse_managed
+            caller = await _reg()._detect_caller()
+            if caller is not None:
+                refuse_managed(_reg().log_dir, caller.record.task_id)
+        if action in {"start", "build"}:
+            if not kwargs["prompt"] or not kwargs["prompt"].strip():
+                raise ValueError("prompt must be a non-empty string")
+            caller = await _reg()._detect_caller()
+            if caller is not None:
+                configs = []
+                if action == "start":
+                    definition = workflows.WorkflowStore().get(kwargs["name"])
+                    orchestrator = {**definition["orchestrator"], **(kwargs.get("overrides") or {})}
+                    configs.append((orchestrator, "read_only", kwargs.get("network")))
+                    configs.extend((n["agent"], workflows.effective_freedom(n, kwargs["freedom"]), False if kwargs.get("network") is False else n.get("network", kwargs.get("network"))) for n in definition["nodes"] if n["type"] == "agent")
+                else:
+                    configs.append(({**kwargs["agent"], "fallbacks": kwargs.get("fallbacks") or []}, "read_only", None))
+                path = await _validate_repo_path(kwargs["repo_path"])
+                for config, freedom, network in configs:
+                    for candidate in [config, *config.get("fallbacks", [])]:
+                        backend_ = backends.get(candidate["backend"])
+                        _reg()._resolve_lineage(caller, child_enforcement=backend_.enforcement(freedom, network), child_backend=backend_.name, child_repo=path)
+        if action == "start":
+            kwargs["repo_path"] = await _validate_repo_path(kwargs["repo_path"])
+            _check_freedom(kwargs["freedom"])
+            return await workflows.start_workflow(**kwargs)
+        if action == "build":
+            kwargs["repo_path"] = await _validate_repo_path(kwargs["repo_path"])
+            return await workflows.build_workflow(**kwargs)
+        store_ = workflows.WorkflowStore()
+        if action == "list":
+            return await asyncio.to_thread(store_.list)
+        if action == "list_runs":
+            return await asyncio.to_thread(store_.list_runs)
+        if action == "get":
+            return await asyncio.to_thread(store_.get, kwargs["name"])
+        if action == "save":
+            return await asyncio.to_thread(store_.save, **kwargs)
+        if action == "delete":
+            return await asyncio.to_thread(store_.delete, kwargs["name"])
+        if action == "status":
+            return await asyncio.to_thread(store_.get_run, kwargs["run_id"])
+        return await asyncio.to_thread(store_.control, action=action, **kwargs)
+    except (ValueError, KeyError, OSError, backends.UnsupportedCapability) as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+
+@mcp.tool()
+async def list_workflows() -> list[dict[str, Any]]:
+    """List saved workflow definitions."""
+    return await _workflow_call("list")
+
+
+@mcp.tool()
+async def get_workflow(name: str) -> dict[str, Any]:
+    """Read a saved workflow definition and revision."""
+    return await _workflow_call("get", name=name)
+
+
+@mcp.tool()
+async def save_workflow(name: str, definition: dict[str, Any], expected_revision: int | None = None) -> dict[str, Any]:
+    """Validate and save a workflow; expected_revision protects concurrent edits."""
+    return await _workflow_call("save", name=name, definition=definition, expected_revision=expected_revision)
+
+
+@mcp.tool()
+async def delete_workflow(name: str) -> dict[str, Any]:
+    """Delete a definition; historical run snapshots remain available."""
+    return await _workflow_call("delete", name=name)
+
+
+@mcp.tool()
+async def workflow_builder(name: str, prompt: str, repo_path: str, agent: dict[str, Any], fallbacks: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Generate a validated workflow draft using an agent and ordered fallbacks."""
+    return await _workflow_call("build", name=name, prompt=prompt, repo_path=repo_path, agent=agent, fallbacks=fallbacks)
+
+
+@mcp.tool()
+async def start_workflow(name: str, prompt: str, repo_path: str, overrides: dict[str, Any] | None = None, freedom: str = DEFAULT_FREEDOM, network: StrictBool | None = None) -> dict[str, Any]:
+    """Start a durable workflow run; returns workflow_run_id rather than task_id."""
+    return await _workflow_call("start", name=name, prompt=prompt, repo_path=repo_path, overrides=overrides, freedom=freedom, network=network)
+
+
+@mcp.tool()
+async def list_workflow_runs() -> list[dict[str, Any]]:
+    """List recorded workflow runs."""
+    return await _workflow_call("list_runs")
+
+
+@mcp.tool()
+async def get_workflow_status(workflow_run_id: str) -> dict[str, Any]:
+    """Read a workflow run's execution state and task associations."""
+    return await _workflow_call("status", run_id=workflow_run_id)
+
+
+@mcp.tool()
+async def wait_for_workflow(workflow_run_id: str, timeout_seconds: int = 30) -> dict[str, Any]:
+    """Wait up to 300 seconds for completion, pause, or attention."""
+    if not 0 <= timeout_seconds <= 300:
+        raise MCPError(INVALID_PARAMS, "timeout_seconds must be between 0 and 300")
+    deadline = asyncio.get_running_loop().time() + timeout_seconds
+    while True:
+        result = await get_workflow_status(workflow_run_id)
+        if result.get("status") not in {"running", "pending", "building", "pausing", "starting", "cancelling"} or asyncio.get_running_loop().time() >= deadline:
+            return result
+        await asyncio.sleep(min(0.25, max(0, deadline - asyncio.get_running_loop().time())))
+
+
+@mcp.tool()
+async def pause_workflow(workflow_run_id: str) -> dict[str, Any]:
+    """Stop scheduling while active steps settle."""
+    return await _workflow_call("pause", run_id=workflow_run_id)
+
+
+@mcp.tool()
+async def resume_workflow(workflow_run_id: str, instructions: str | None = None, additional_attempts: int = 0) -> dict[str, Any]:
+    """Resume with explicit instructions and optional additional attempt budget."""
+    return await _workflow_call("resume", run_id=workflow_run_id, instructions=instructions, additional_attempts=additional_attempts)
+
+
+@mcp.tool()
+async def cancel_workflow(workflow_run_id: str) -> dict[str, Any]:
+    """Stop scheduling and cancel the workflow's associated tasks."""
+    return await _workflow_call("cancel", run_id=workflow_run_id)
 
 
 def main() -> None:

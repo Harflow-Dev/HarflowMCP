@@ -89,6 +89,25 @@ Tasks are stored under `~/.polybridge/tasks/` and survive server restarts.
 `macos/` contains a SwiftUI menu-bar app that shows tasks live and lets you start, message, cancel
 and take over sessions. Build it with `macos/build-app.sh`.
 
+### Workflows
+
+Workflows combine a saved visual graph with an agent orchestrator. Add Planning, Implementation,
+Review, and Task steps, connect them with conditions, and configure parallel branches, bounded
+loops, Resume/Fresh sessions, and ordered fallback agents. Polybridge owns the saved definition
+and execution state; the agents do not install or manage workflow files.
+
+The Monitor's Workflow screen switches between a live graph and the existing Parallel activity
+columns. Planning produces a task checklist; only the orchestrator can mark its items complete.
+The menu bar shows workflow status and opens individual runs alongside existing agent activity.
+
+Use `workflow_builder` to generate an editable draft, or save a definition with `save_workflow`.
+Start it with `start_workflow`, or add `workflow="name"` to `start_task`. Workflow dispatch returns
+a `workflow_run_id`; use `get_workflow_status` / `wait_for_workflow` to follow it rather than the
+ordinary task-status tools. Existing task calls without `workflow` are unchanged.
+
+See [workflow definitions, execution, and recovery](docs/workflows.md) for the CLI, graph format,
+and fallback behavior.
+
 ## Development
 
 ```bash

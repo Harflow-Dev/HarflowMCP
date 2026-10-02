@@ -115,7 +115,8 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     attach_p.add_argument("--json", action="store_true")
 
     run_p = sub.add_parser("run", help="start a task, owned by a detached process until it settles")
-    run_p.add_argument("--backend", required=True)
+    run_p.add_argument("--backend", default=None)
+    run_p.add_argument("--workflow", default=None)
     run_p.add_argument("--repo", required=True)
     run_p.add_argument("--freedom", default=None)
     run_p.add_argument("--prompt", required=True)
@@ -136,6 +137,37 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     resume_p.add_argument("--network", choices=("true", "false"), default=None)
     resume_p.add_argument("--json", action="store_true")
 
+    workflow_parsers = []
+    for action in ("validate", "list", "get", "save", "delete", "build", "start", "list-runs", "status", "wait", "pause", "resume", "cancel"):
+        wp = sub.add_parser("workflow-" + action, help=action + " workflows")
+        wp.add_argument("--json", action="store_true")
+        if action in {"get", "save", "delete", "build", "start"}:
+            wp.add_argument("name")
+        if action in {"status", "wait", "pause", "resume", "cancel"}:
+            wp.add_argument("workflow_run_id")
+        if action in {"save", "validate"}:
+            wp.add_argument("--definition", required=True, help="JSON file, or - for stdin")
+            if action == "save":
+                wp.add_argument("--expected-revision", type=int)
+        if action in {"start", "build"}:
+            wp.add_argument("--repo", required=True)
+            wp.add_argument("--prompt", required=True)
+            wp.add_argument("--backend", required=action == "build")
+            wp.add_argument("--model")
+            wp.add_argument("--reasoning-effort")
+            wp.add_argument("--max-turns", type=int)
+            if action == "build":
+                wp.add_argument("--fallbacks", default="[]", help="JSON array of ordered agent candidates")
+            else:
+                wp.add_argument("--freedom", default="write_in_repo", choices=("read_only", "write_in_repo", "publish", "unrestricted"))
+                wp.add_argument("--network", choices=("true", "false"))
+        if action == "wait":
+            wp.add_argument("--timeout-seconds", type=int, default=30)
+        if action == "resume":
+            wp.add_argument("--instructions")
+            wp.add_argument("--additional-attempts", type=int, default=0)
+        workflow_parsers.append(wp)
+
     return (
         parser,
         list_p,
@@ -147,6 +179,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
         attach_p,
         run_p,
         resume_p,
+        *workflow_parsers,
     )
 
 
@@ -309,6 +342,8 @@ def _cmd_cancel(args: argparse.Namespace) -> int:
 
     try:
         cascade, unrecorded = asyncio.run(cancel_and_settle())
+    except (backends.UnsupportedCapability, ValueError) as exc:
+        return _fail(args, "invalid_params", str(exc))
     except control.PhaseWriteError as exc:
         return _fail(
             args,
@@ -474,6 +509,49 @@ def _cmd_detached(args: argparse.Namespace, action: Any) -> int:
     return 3
 
 
+def _cmd_workflow(args: argparse.Namespace) -> int:
+    action = args.command.removeprefix("workflow-")
+    async def invoke() -> Any:
+        if action == "validate":
+            from .workflows import WorkflowError, validate_definition
+            raw = sys.stdin.read() if args.definition == "-" else Path(args.definition).read_text()
+            value = json.loads(raw)
+            try:
+                validate_definition(value)
+            except WorkflowError as exc:
+                return {"valid": False, "error": str(exc)}
+            return {"valid": True}
+        from . import server
+        if action in {"list", "list-runs"}:
+            entries = await server._workflow_call(action.replace("-", "_"))
+            return {"workflows" if action == "list" else "runs": entries}
+        if action in {"get", "delete"}:
+            return await server._workflow_call(action, name=args.name)
+        if action == "save":
+            raw = sys.stdin.read() if args.definition == "-" else Path(args.definition).read_text()
+            return await server.save_workflow(args.name, json.loads(raw), args.expected_revision)
+        if action in {"start", "build"}:
+            candidate = {k: v for k, v in {"backend": args.backend, "model": args.model,
+                         "reasoning_effort": args.reasoning_effort, "max_turns": args.max_turns}.items() if v is not None}
+            if action == "build":
+                return await server.workflow_builder(args.name, args.prompt, args.repo, candidate, json.loads(args.fallbacks))
+            return await server.start_workflow(args.name, args.prompt, args.repo, candidate or None, args.freedom, _network(args.network))
+        if action == "wait":
+            return await server.wait_for_workflow(args.workflow_run_id, args.timeout_seconds)
+        if action == "resume":
+            return await server.resume_workflow(args.workflow_run_id, args.instructions, args.additional_attempts)
+        return await server._workflow_call(action, run_id=args.workflow_run_id)
+    try:
+        result = asyncio.run(invoke())
+    except Exception as exc:
+        return _fail(args, "workflow_error", str(exc))
+    if args.json:
+        print(json.dumps({"v": CTL_JSON_VERSION, "result": result}))
+    else:
+        print(json.dumps(result, indent=2))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     """Entry point for the `polybridge-ctl` console script, which calls `sys.exit(main())`."""
     argv = sys.argv[1:] if argv is None else list(argv)
@@ -486,6 +564,8 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
 
+    if args.command.startswith("workflow-"):
+        return _cmd_workflow(args)
     if args.command == "list":
         return _cmd_list(args, list_p)
     if args.command == "backends":
@@ -499,6 +579,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "takeover-attach":
         return _cmd_takeover_attach(args)
     if args.command == "run":
+        if args.workflow:
+            if args.group is not None or args.title is not None:
+                return _fail(args, "invalid_params", "workflow runs do not accept task group or title")
+            args.name = args.workflow
+            args.command = "workflow-start"
+            args.freedom = args.freedom or "write_in_repo"
+            return _cmd_workflow(args)
+        if not args.backend:
+            return _fail(args, "invalid_params", "--backend is required without --workflow")
         return _cmd_detached(args, _run_action(args))
     if args.command == "resume":
         return _cmd_detached(args, _resume_action(args))

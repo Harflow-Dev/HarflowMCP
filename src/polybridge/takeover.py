@@ -333,6 +333,8 @@ async def take_over(
     record = await asyncio.to_thread(store.read, log_dir, task_id)
     if record is None:
         raise control.TakeoverRefused("unknown_task", f"unknown task_id: {task_id}")
+    from .workflow_hooks import pause_for_task
+    await asyncio.to_thread(pause_for_task, log_dir, task_id, "Human takeover requested")
     controller = await asyncio.to_thread(identity.own_identity)
 
     n: int | None = None
