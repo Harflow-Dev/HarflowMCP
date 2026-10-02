@@ -196,7 +196,7 @@ _MODE_CAVEATS: dict[str, tuple[str, ...]] = {
 # /etc`. Long aliases (`--cd`, `--sandbox`, `--config`, `--model`) are deliberately absent even though
 # codex accepts them: this backend never writes them, so admitting them here would reopen the same
 # hole under a different spelling.
-BOOLEAN_FLAGS = ("--json",)
+BOOLEAN_FLAGS = ("--json", "--skip-git-repo-check")
 VALUE_FLAGS = ("-C", "-s", "-c", "-m")
 
 # The only `-c key=value` literals this backend ever writes, matched byte-for-byte rather than
@@ -354,7 +354,10 @@ class CodexBackend:
     ) -> list[str]:
         check_reasoning_effort(self, reasoning_effort)
         resolved = self._resolve_network(freedom, network)
-        options = ["--json", "-C", str(repo), "-s", SANDBOX_MODES[freedom], *NEVER_ASK]
+        # Polybridge explicitly chooses the working directory; a Git checkout is not
+        # required for read-only builders. This skips only Codex's Git-directory guard,
+        # while sandbox and approval overrides below remain mandatory.
+        options = ["--json", "--skip-git-repo-check", "-C", str(repo), "-s", SANDBOX_MODES[freedom], *NEVER_ASK]
         if SANDBOX_MODES[freedom] == "workspace-write":
             # Only meaningful for workspace-write: the key is scoped to that sandbox, and
             # `read-only` was measured immune to it even when the user's config sets it true.
@@ -457,6 +460,9 @@ class CodexBackend:
         # the allowlist's promise is that nothing else wrote here either.
         if len(seen.get("--json", [])) != 1:
             raise UnsafeInvocationError(f"refusing to run codex without exactly one --json: {argv!r}")
+
+        if len(seen.get("--skip-git-repo-check", [])) > 1:
+            raise UnsafeInvocationError("expected at most one --skip-git-repo-check")
 
         cds = seen.get("-C", [])
         if len(cds) != 1:

@@ -873,6 +873,8 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
         if action in {"start", "build"}:
             if not kwargs["prompt"] or not kwargs["prompt"].strip():
                 raise ValueError("prompt must be a non-empty string")
+            if action == "build":
+                workflows._candidate({**kwargs["agent"], "fallbacks": kwargs.get("fallbacks") or kwargs["agent"].get("fallbacks", [])})
             caller = await _reg()._detect_caller()
             if caller is not None:
                 configs = []
@@ -883,7 +885,7 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
                     configs.extend((n["agent"], workflows.effective_freedom(n, kwargs["freedom"]), False if kwargs.get("network") is False else n.get("network", kwargs.get("network"))) for n in definition["nodes"] if n["type"] == "agent")
                 else:
                     configs.append(({**kwargs["agent"], "fallbacks": kwargs.get("fallbacks") or []}, "read_only", None))
-                path = await _validate_repo_path(kwargs["repo_path"])
+                path = await _validate_repo_path(kwargs["repo_path"]) if kwargs.get("repo_path") is not None else workflows.builder_workspace(workflows.WorkflowStore())
                 for config, freedom, network in configs:
                     for candidate in [config, *config.get("fallbacks", [])]:
                         backend_ = backends.get(candidate["backend"])
@@ -893,8 +895,11 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
             _check_freedom(kwargs["freedom"])
             return await workflows.start_workflow(**kwargs)
         if action == "build":
-            kwargs["repo_path"] = await _validate_repo_path(kwargs["repo_path"])
+            if kwargs.get("repo_path") is not None:
+                kwargs["repo_path"] = await _validate_repo_path(kwargs["repo_path"])
             return await workflows.build_workflow(**kwargs)
+        if action == "builder_followup":
+            return await workflows.followup_workflow_builder(**kwargs)
         store_ = workflows.WorkflowStore()
         if action == "list":
             return await asyncio.to_thread(store_.list)
@@ -938,9 +943,28 @@ async def delete_workflow(name: str) -> dict[str, Any]:
 
 
 @mcp.tool()
-async def workflow_builder(name: str, prompt: str, repo_path: str, agent: dict[str, Any], fallbacks: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    """Generate a validated workflow draft using an agent and ordered fallbacks."""
-    return await _workflow_call("build", name=name, prompt=prompt, repo_path=repo_path, agent=agent, fallbacks=fallbacks)
+async def workflow_builder(name: str, prompt: str, repo_path: str | None = None, agent: dict[str, Any] | None = None, fallbacks: list[dict[str, Any]] | None = None, definition: dict[str, Any] | None = None, source: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Generate a workflow, or refine the current canvas into an unsaved validated proposal."""
+    if agent is None:
+        raise MCPError(INVALID_PARAMS, "Builder agent is required")
+    return await _workflow_call("build", name=name, prompt=prompt, repo_path=repo_path, agent=agent, fallbacks=fallbacks, definition=definition, source=source)
+
+
+@mcp.tool()
+async def followup_workflow_builder(run_id: str, prompt: str) -> dict[str, Any]:
+    """Queue a message in the same workflow-builder conversation without saving its draft."""
+    return await _workflow_call("builder_followup", run_id=run_id, prompt=prompt)
+
+
+@mcp.tool()
+async def apply_workflow_draft(definition: dict[str, Any], expected_draft_revision: int) -> dict[str, Any]:
+    """Publish a preview from the verified active builder task; never write a saved workflow."""
+    from . import workflows
+    try:
+        caller = await _reg()._detect_caller()
+        return await workflows.apply_workflow_draft(definition, expected_draft_revision, caller=caller)
+    except (ValueError, KeyError, OSError) as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
 
 
 @mcp.tool()

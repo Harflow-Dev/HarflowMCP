@@ -1215,3 +1215,10 @@ def test_owned_by_live_server_is_null_once_the_task_has_settled(tmp_path: Path) 
 
     assert snap["owned_by_live_server"] is None
     assert brief["owned_by_live_server"] is None
+
+
+def test_recovered_builder_marker_is_retained_in_listing(tmp_path, monkeypatch):
+    from dataclasses import replace
+    monkeypatch.setattr(store, "process_alive", lambda pid, markers: False)
+    record = replace(make_record(status="failed", exit_code=None), workflow_builder=True)
+    assert store.brief(tmp_path, record)["workflow_builder"] is True

@@ -6,7 +6,7 @@ and records the run. Conditions are instructions to an agent, not code executed 
 
 ## Build and run
 
-The macOS Monitor provides a Workflows library, a canvas editor, and a run screen. Its Graph view
+The macOS Monitor lists workflows in the sidebar, with a canvas editor and a run screen. Its Graph view
 shows the canvas above the same agent activity columns used by Parallel. Parallel view expands
 those columns. Highlighting comes from recorded task state. Agent names and colored dots identify
 backends; vendor logos are unnecessary.
@@ -98,6 +98,9 @@ one or more legal connections. A default connection is available when the condit
 the orchestrator can also request attention rather than guess. When parallel
 branches share a next node, that node waits for the selected branches of its own
 activation and then executes once. Conditional branches that were not selected do not block it.
+Conditional bypasses may share downstream steps with longer routes. Polybridge checks the
+paths actually selected: mutually exclusive alternatives are allowed, while parallel choices
+that duplicate work before their shared convergence are refused.
 Nested splits may converge at the same node. Paths without a common forward convergence and
 loops crossing an open parallel region are rejected. A retry arrow may share a step with
 forward arrows, but selecting a retry is exclusive: it cannot also launch a forward path.
@@ -162,3 +165,90 @@ The orchestrator recommends decisions; it cannot grant additional node permissio
 orchestrator agents run read-only, and workers retain the run's permission limits. Existing backend
 enforcement caveats still apply: a workflow does not create an OS sandbox for a backend that lacks
 one. Inspect each task's enforcement report.
+
+## Edit the current canvas with an agent
+
+Choose **Edit with agent** in the editor to refine the currently placed steps, including unsaved
+changes. Describe the changes and select a repository for read-only context. The builder can read
+repository instructions and available skills. Its activity uses the existing workflow run screen.
+Choose **Apply proposal** after completion, then explicitly **Save** to persist the result. **Return
+to canvas** keeps the original draft; failed refinement does not replace it. If the source canvas
+changed, applying is refused so newer edits remain intact. Historical proposals retain the original
+saved baseline and revision, so Save still detects concurrent updates.
+
+CLI callers can pass a current canvas file (it may be incomplete) and optional saved metadata:
+
+```sh
+polybridge-ctl workflow-build my-workflow --repo /absolute/path/to/repo \
+  --prompt "Add a review step" --backend codex --definition canvas.json \
+  --source '{"name":"my-workflow","revision":3,"saved_definition":{}}' --json
+```
+
+`workflow_builder` accepts the equivalent optional `definition` object and `source` object.
+Refinement returns a run ID; its validated `generated_definition` is an unsaved proposal in the run
+record. It never overwrites the stored workflow. Existing generation without `definition` retains
+its create-draft behavior.
+
+Builder activity appears as a regular agent conversation beside the canvas. Each accepted
+`apply_workflow_draft` update previews the placed steps while the agent works; these revisions
+are separate from saved workflow revisions and never write the saved definition. The builder
+receives its current draft revision and publishes updates with `expected_draft_revision`.
+Only the verified active builder task can publish a preview.
+
+Chat uses the same task composer. Messages join the current turn when supported, or queue for
+the next builder turn in the same run and conversation. CLI callers use:
+
+```sh
+polybridge-ctl workflow-builder-followup RUN_ID --prompt "Add tests after implementation" --json
+```
+
+The builder can publish a preview through MCP `apply_workflow_draft(definition,
+expected_draft_revision)` or `workflow-builder-apply --definition draft.json
+--expected-draft-revision N --json`. This action derives the run from the verified caller;
+it accepts no caller-supplied run or task identity. Final proposals still require explicit Apply
+and Save in the editor.
+
+## Limit an inferred retry arrow
+
+Select an arrow returning to an earlier step, enable **Limit retries**, and choose **Max retries**.
+The optional connection field `max_retries` counts committed traversals of that arrow across the
+entire run; zero disables the retry. Omitting it keeps existing behavior. Node attempt and workflow
+limits still apply. A configured limit remains on the connection during topology edits and applies
+only when the connection is inferred as a retry.
+
+When a run exhausts an arrow's limit, inspect the result and choose **Continue with one more retry**
+to grant one additional traversal to the exhausted path. This explicit continuation preserves your
+instructions and does not change the saved workflow's limit. The workflow validator returns its
+canonical definition so the inspector uses engine-inferred retry metadata rather than stale flags.
+
+Creating or editing a workflow does not require a repository. Omit `--repo` from
+`workflow-build` (or omit `repo_path` from `workflow_builder`) to use Polybridge's
+private `~/.polybridge/builder-workspace`. The builder remains read-only, and
+followups reuse that workspace. Supply a repository when the builder needs its
+instructions or skills; supplied paths still receive the normal repository
+validation. Running a workflow still requires a repository.
+
+Workflow task prompt previews and initial chat messages show the user's request.
+Polybridge sends role guidance, graph context and result instructions to the
+backend separately from that display projection. Raw diagnostic backend logs may
+contain the complete execution payload.
+
+### Harness-global MCP approvals
+
+Settings → Harnesses → MCP approvals lists native global approval rules for each harness.
+Use `server/tool` for an individual MCP tool or `server/*` for a server-wide rule.
+Vibe requires individual tool entries. Adding or removing a rule requires explicit confirmation;
+Polybridge does not approve tools automatically after an agent error. The recovery action offers
+approval for Polybridge tools and does not restart or resume the agent automatically.
+
+The CLI equivalent is `polybridge-ctl mcp-allowlist --backend codex --json`, with
+`--allow polybridge/apply_workflow_draft` or `--remove polybridge/apply_workflow_draft`.
+Rules are written to the harness's native global configuration, with a private backup of the
+previous file. Harness deny/ask rules, agent profiles and project configuration may still take
+precedence. New sessions load updated configuration. Removing an approval restores the harness's
+fallback policy rather than restoring a previous explicit per-tool policy.
+
+Start steps may contain an optional `prompt` describing the workflow's purpose.
+Polybridge includes that purpose in orchestrator decision context alongside the
+request supplied when running the workflow. It complements the runtime request;
+task prompt previews and chat continue to show the actual user request.

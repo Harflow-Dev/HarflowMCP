@@ -528,6 +528,8 @@ class Task:
     max_turns: int
     log_path: Path
     started_at: datetime
+    display_prompt: str | None = None
+    workflow_builder: bool = False
     model: str | None = None
     reasoning_effort: str | None = None
     parent_task_id: str | None = None
@@ -682,6 +684,7 @@ class Task:
         """
         return {
             "task_id": self.task_id,
+            "workflow_builder": self.workflow_builder,
             "backend": self.backend,
             "session_id": self.session_id,
             "repo_path": str(self.repo_path),
@@ -842,6 +845,8 @@ class TaskRegistry:
         reasoning_effort: str | None = None,
         network: bool | None = None,
         task_id: str | None = None,
+        display_prompt: str | None = None,
+        workflow_builder: bool = False,
         group: str | None = None,
         title: str | None = None,
     ) -> Task:
@@ -875,6 +880,8 @@ class TaskRegistry:
             invocation,
             backend=backend,
             prompt=prompt,
+            display_prompt=display_prompt,
+            workflow_builder=workflow_builder,
             repo_path=repo_path,
             session_id=session_id,
             freedom=freedom,
@@ -900,6 +907,8 @@ class TaskRegistry:
         max_turns: int | None = None,
         network: bool | None = None,
         task_id: str | None = None,
+        display_prompt: str | None = None,
+        workflow_builder: bool = False,
     ) -> Task:
         """Continue `parent`'s session as a new task sharing its session id."""
         if parent.session_id is None:
@@ -968,6 +977,8 @@ class TaskRegistry:
                     invocation,
                     backend=backend,
                     prompt=followup_prompt,
+                    display_prompt=display_prompt,
+                    workflow_builder=workflow_builder,
                     repo_path=parent.repo_path,
                     session_id=parent.session_id,
                     freedom=parent.freedom,
@@ -1014,6 +1025,8 @@ class TaskRegistry:
         title: str | None = None,
         lineage_detected: str | None = None,
         task_id: str | None = None,
+        display_prompt: str | None = None,
+        workflow_builder: bool = False,
     ) -> Task:
         # Re-checked at the point of execution, not only where the argv was built, so no future
         # caller of this method can launch an agent without its backend's guarantees — and, now
@@ -1125,6 +1138,8 @@ class TaskRegistry:
             session_id=session_id,
             repo_path=repo_path,
             prompt=prompt,
+            display_prompt=display_prompt,
+            workflow_builder=workflow_builder,
             max_turns=max_turns,
             log_path=log_path,
             started_at=_now(),
@@ -1182,7 +1197,7 @@ class TaskRegistry:
                     "freedom": task.freedom,
                     "network": task.network,
                     "repo_path": str(task.repo_path),
-                    "prompt": task.prompt,
+                    "prompt": task.display_prompt if task.display_prompt is not None else task.prompt,
                     "model": task.model,
                     "reasoning_effort": task.reasoning_effort,
                     "parent_task_id": task.parent_task_id,
@@ -1297,7 +1312,7 @@ class TaskRegistry:
         """Queue a live-input run's prompt on its stdin — synchronous, so nothing can be written
         ahead of it — and log it as the run's first `user_message`."""
         if _write_stdin(task, data):
-            _write_event(task, "user_message", {"text": task.prompt, "source": "initial"})
+            _write_event(task, "user_message", {"text": task.display_prompt if task.display_prompt is not None else task.prompt, "source": "initial"})
         else:
             log.warning("task %s: stdin was already gone before the prompt could be written", task.task_id)
 
@@ -1766,7 +1781,9 @@ class TaskRegistry:
                 max_turns=task.max_turns,
                 network=task.network,
                 parent_task_id=task.parent_task_id,
-                prompt=task.prompt[: store.PROMPT_PREVIEW_CHARS],
+                stderr_tail=list(task.stderr_tail),
+                workflow_builder=task.workflow_builder,
+                prompt=(task.display_prompt if task.display_prompt is not None else task.prompt)[: store.PROMPT_PREVIEW_CHARS],
                 status=task.status,
                 exit_code=task.exit_code,
                 finished_at=task.finished_at.isoformat() if task.finished_at else None,
@@ -2542,6 +2559,8 @@ class TaskRegistry:
         max_turns: int | None = None,
         network: bool | None = None,
         task_id: str | None = None,
+        display_prompt: str | None = None,
+        workflow_builder: bool = False,
     ) -> Task:
         """Continue the session of a task recovered from disk."""
         if not record.session_id:
@@ -2610,6 +2629,8 @@ class TaskRegistry:
                     invocation,
                     backend=backend,
                     prompt=followup_prompt,
+                    display_prompt=display_prompt,
+                    workflow_builder=workflow_builder,
                     repo_path=repo_path,
                     session_id=record.session_id,
                     freedom=record.freedom,
@@ -2955,6 +2976,8 @@ def _record_events(task: Task, backend: Backend, event: dict[str, Any], raw_offs
         if kind is None:
             task.acc.normalize_errors += 1
             continue
+        if kind == "user_message" and task.display_prompt is not None and fields.get("text") == task.prompt:
+            fields["text"] = task.display_prompt
         source_ts = fields.pop("source_ts", None)
         try:
             task.events.write(kind, fields, raw_offset=raw_offset, source_ts=source_ts)

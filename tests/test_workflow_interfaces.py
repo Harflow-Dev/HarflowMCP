@@ -165,7 +165,7 @@ async def test_public_mcp_has_no_checklist_completion_mutation():
         "list_workflows", "get_workflow", "save_workflow", "delete_workflow",
         "workflow_builder", "start_workflow", "list_workflow_runs",
         "get_workflow_status", "wait_for_workflow", "pause_workflow",
-        "resume_workflow", "cancel_workflow",
+        "resume_workflow", "cancel_workflow", "followup_workflow_builder", "apply_workflow_draft",
     }
     for name in ("pause_workflow", "resume_workflow", "cancel_workflow"):
         assert not {"task_updates", "tasks", "completed_task_ids", "status", "completed"} & set(tools[name].input_schema["properties"])
@@ -189,7 +189,10 @@ def test_cli_validation_is_authoritative_and_creates_no_workflow_state(tmp_path,
     value = {"name": "draft", "nodes": [{"id": "start", "type": "start"}, {"id": "end", "type": "end"}], "connections": [{"id": "finish", "source": "start", "target": "end"}]}
     definition.write_text(json.dumps(value))
     assert ctl.main(["workflow-validate", "--definition", str(definition), "--json"]) == 0
-    assert json.loads(capsys.readouterr().out) == {"v": 2, "result": {"valid": True}}
+    result = json.loads(capsys.readouterr().out)["result"]
+    assert result["valid"] is True
+    assert result["definition"]["connections"][0]["backward"] is False
+    assert result["definition"]["nodes"][0]["branch_mode"] == "auto"
     value["nodes"].append({"id": "orphan", "type": "agent"})
     definition.write_text(json.dumps(value))
     assert ctl.main(["workflow-validate", "--definition", str(definition), "--json"]) == 0
@@ -215,3 +218,79 @@ def test_cli_workflow_launch_accepts_all_access_ceilings(freedom, monkeypatch, c
     monkeypatch.setattr(server, "start_workflow", start)
     assert ctl.main(["workflow-start", "example", "--repo", "/tmp/repo", "--prompt", "task", "--freedom", freedom, "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["result"]["workflow_run_id"] == "run-1"
+
+
+async def test_builder_refinement_forwards_current_unsaved_canvas_and_saved_baseline(monkeypatch):
+    observed = {}
+    async def invoke(action, **kwargs):
+        observed.update(action=action, **kwargs)
+        return {"workflow_run_id": "proposal-1"}
+    monkeypatch.setattr(server, "_workflow_call", invoke)
+    definition = {"nodes": [{"id": "placed", "type": "agent"}], "connections": []}
+    source = {"name": "saved", "revision": 3, "saved_definition": {"nodes": []}}
+    await server.workflow_builder("saved", "add review", "/tmp/repo", {"backend": "codex"}, [], definition, source)
+    assert observed["definition"] == definition
+    assert observed["source"] == source
+    assert observed["action"] == "build"
+
+
+def test_cli_builder_refinement_reads_current_canvas_json(monkeypatch, capsys):
+    observed = {}
+    async def build(name, prompt, repo, agent, fallbacks, definition, source):
+        observed.update(definition=definition, source=source)
+        return {"workflow_run_id": "proposal-1"}
+    monkeypatch.setattr(server, "workflow_builder", build)
+    definition = {"nodes": [{"id": "placed"}], "connections": []}
+    source = {"name": "saved", "revision": 3, "saved_definition": {}}
+    assert ctl.main(["workflow-build", "saved", "--repo", "/tmp/repo", "--prompt", "add review", "--backend", "codex",
+                     "--definition-json", json.dumps(definition), "--source", json.dumps(source), "--json"]) == 0
+    assert observed == {"definition": definition, "source": source}
+    assert json.loads(capsys.readouterr().out)["result"]["workflow_run_id"] == "proposal-1"
+
+
+def test_cli_builder_followup_preserves_run_and_message(monkeypatch, capsys):
+    async def followup(run_id, prompt):
+        assert (run_id, prompt) == ("builder-1", "add tests")
+        return {"workflow_run_id": run_id, "status": "queued_next_turn"}
+    monkeypatch.setattr(server, "followup_workflow_builder", followup)
+    assert ctl.main(["workflow-builder-followup", "builder-1", "--prompt", "add tests", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["result"]["status"] == "queued_next_turn"
+
+
+async def test_builder_apply_uses_verified_caller_and_revision(monkeypatch):
+    from polybridge import workflows
+    marker = object()
+    async def detect():
+        return marker
+    async def apply(definition, expected_draft_revision, *, caller):
+        assert definition == {"nodes": []}
+        assert expected_draft_revision == 2
+        assert caller is marker
+        return {"draft_revision": 3}
+    monkeypatch.setattr(server._reg(), "_detect_caller", detect)
+    monkeypatch.setattr(workflows, "apply_workflow_draft", apply)
+    assert await server.apply_workflow_draft({"nodes": []}, 2) == {"draft_revision": 3}
+
+
+async def test_builder_mcp_omits_repository_and_keeps_agent_required(monkeypatch):
+    captured = {}
+    async def call(action, **kwargs):
+        captured.update(kwargs)
+        return {}
+    monkeypatch.setattr(server, "_workflow_call", call)
+    await server.workflow_builder("example", "Create", agent={"backend": "codex"})
+    assert captured["repo_path"] is None
+    with pytest.raises(Exception, match="agent is required"):
+        await server.workflow_builder("example", "Create")
+
+
+def test_builder_cli_omits_repo_but_workflow_execution_requires_it(monkeypatch, capsys):
+    captured = {}
+    async def build(name, prompt, repo, *args):
+        captured["repo"] = repo
+        return {}
+    monkeypatch.setattr(server, "workflow_builder", build)
+    assert ctl.main(["workflow-build", "example", "--prompt", "Create", "--backend", "codex", "--json"]) == 0
+    assert captured["repo"] is None
+    with pytest.raises(SystemExit):
+        ctl.main(["workflow-start", "example", "--prompt", "Run"])

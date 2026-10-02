@@ -35,6 +35,12 @@ class WorkflowError(ValueError):
     """Invalid definition, state transition, or execution decision."""
 
 
+class RetryLimitReached(WorkflowError):
+    def __init__(self, edge_id: str, used: int, limit: int):
+        self.edge_id = edge_id
+        super().__init__(f"Retry limit reached for connection {edge_id}: {used} of {limit} retries used")
+
+
 class DispatchNotStarted(WorkflowError):
     """Scheduling stopped while waiting for a checkout lease; no agent was spawned."""
 
@@ -158,6 +164,10 @@ def validate_definition(raw: dict[str, Any]) -> dict[str, Any]:
         by_id[node_id] = node
         if node.get("type") not in {"start", "agent", "join", "end"}:
             raise WorkflowError(f"Invalid node type: {node_id}")
+        if node["type"] == "start":
+            node.setdefault("prompt", "")
+            if not isinstance(node["prompt"], str):
+                raise WorkflowError("Start prompt must be a string")
         node.setdefault("title", node_id)
         node.setdefault("position", {"x": 80 + 260 * index, "y": 80})
         if not isinstance(node["title"], str) or not isinstance(node["position"], dict) or any(not isinstance(node["position"].get(k), (int, float)) or isinstance(node["position"].get(k), bool) or not math.isfinite(node["position"][k]) for k in ("x", "y")):
@@ -200,6 +210,8 @@ def validate_definition(raw: dict[str, Any]) -> dict[str, Any]:
             raise WorkflowError(f"Connection {eid} references an unknown node")
         if by_id[edge["source"]]["type"] == "end" or by_id[edge["target"]]["type"] == "start":
             raise WorkflowError("End cannot have outputs and Start cannot have inputs")
+        if "max_retries" in edge and (not isinstance(edge["max_retries"], int) or isinstance(edge["max_retries"], bool) or edge["max_retries"] < 0):
+            raise WorkflowError(f"max_retries must be a nonnegative integer: {eid}")
         edge.setdefault("condition", "")
         edge.setdefault("default", False)
         edge.setdefault("backward", False)
@@ -289,50 +301,102 @@ def validate_definition(raw: dict[str, Any]) -> dict[str, Any]:
         if legacy in by_id and by_id[legacy]["type"] == "join" and legacy != closest[0]:
             raise WorkflowError(f"Cross-branch connection at split {nid}: its legacy Join follows an earlier convergence; connect branches directly to their first shared node")
         node["join_id"] = closest[0]
-    # Propagate structural stacks; different stacks at a node are cross-branch edges.
-    stacks: dict[str, tuple[tuple[str, str], ...]] = {}
-    def region(nid: str, stack: tuple[tuple[str, str], ...]) -> None:
-        node = by_id[nid]
-        matched = False
-        while stack and stack[-1][0] == nid:
-            matched = True
-            stack = stack[:-1]
-        if node["type"] == "join" and not matched:
-            raise WorkflowError(f"Join {nid} is outside its matching split")
-        if nid in stacks:
-            if stacks[nid] != stack:
-                raise WorkflowError(f"Cross-branch connection at {nid}")
-            return
-        stacks[nid] = stack
-        if node["type"] == "end" and stack:
-            raise WorkflowError("Every branch must reach its matching Join before End")
-        next_stack = stack
-        if node.get("join_id"):
-            join = node.get("join_id")
-            if join not in by_id:
-                raise WorkflowError(f"Split {nid} requires a convergence node")
-            next_stack = stack
-        for edge in outgoing[nid]:
-            if not edge["backward"]:
-                branch_stack = next_stack + ((node["join_id"], edge["id"]),) if node.get("join_id") else next_stack
-                region(edge["target"], branch_stack)
-    region(starts[0], ())
-    for edge in edges:
-        if edge["backward"] and stacks.get(edge["source"]) != stacks.get(edge["target"]):
-            raise WorkflowError("Loops cannot cross an open split/join boundary")
-        if edge["backward"]:
-            reachable: set[str] = set()
-            def descendants(nid: str) -> None:
-                if nid in reachable:
-                    return
-                reachable.add(nid)
-                for e in outgoing[nid]:
-                    if not e["backward"]:
-                        descendants(e["target"])
-            descendants(edge["target"])
-            if edge["source"] not in reachable:
-                raise WorkflowError("Backward connections must target an ancestor")
+    # Conditional alternatives may overlap in the *potential* graph. Safety is
+    # checked against actual selections and live fork generations at dispatch.
+    inferred_joins = {node.get("join_id") for node in nodes}
+    for node in nodes:
+        if node["type"] == "join" and node["id"] not in inferred_joins:
+            raise WorkflowError(f"Join {node['id']} is outside its matching split")
     return d
+
+
+def _forward_reachable(definition: dict[str, Any], start: str, stop: str | None = None) -> set[str]:
+    """Reachability before a barrier; a direct edge to it has an empty region."""
+    outgoing: dict[str, list[str]] = {}
+    for edge in definition["connections"]:
+        if not edge.get("backward"):
+            outgoing.setdefault(edge["source"], []).append(edge["target"])
+    reachable: set[str] = set()
+    pending = [start]
+    while pending:
+        nid = pending.pop()
+        if nid == stop or nid in reachable:
+            continue
+        reachable.add(nid)
+        pending.extend(outgoing.get(nid, []))
+    return reachable
+
+
+def _selection_join(definition: dict[str, Any], targets: list[str]) -> str:
+    outgoing: dict[str, list[str]] = {}
+    for edge in definition["connections"]:
+        if not edge.get("backward"):
+            outgoing.setdefault(edge["source"], []).append(edge["target"])
+    cache: dict[str, set[str]] = {}
+    def postdom(nid: str) -> set[str]:
+        if nid not in cache:
+            successors = outgoing.get(nid, [])
+            cache[nid] = {nid} | (set.intersection(*(postdom(n) for n in successors)) if successors else set())
+        return cache[nid]
+    common = set.intersection(*(postdom(target) for target in targets))
+    closest = [candidate for candidate in common if common <= postdom(candidate)]
+    if len(closest) != 1:
+        raise WorkflowError("Selected parallel paths must converge at one common node")
+    return closest[0]
+
+
+def retry_budget(run: dict[str, Any], edge: dict[str, Any]) -> dict[str, Any]:
+    used = run.get("retry_counts", {}).get(edge["id"], 0)
+    limit = edge.get("max_retries")
+    effective = limit + run.get("retry_grants", {}).get(edge["id"], 0) if limit is not None else None
+    return {"retry_used": used, "retry_limit": effective, "retry_remaining": max(0, effective - used) if effective is not None else None}
+
+
+def validate_retry_budget(run: dict[str, Any], selected: list[dict[str, Any]]) -> None:
+    for edge in selected:
+        if edge.get("backward"):
+            budget = retry_budget(run, edge)
+            if budget["retry_limit"] is not None and budget["retry_used"] >= budget["retry_limit"]:
+                raise RetryLimitReached(edge["id"], budget["retry_used"], budget["retry_limit"])
+
+
+def validate_selection(definition: dict[str, Any], node: dict[str, Any], selected: list[dict[str, Any]], token: dict[str, Any], joins: dict[str, Any]) -> str | None:
+    """Validate actual paths before publishing decisions and again before advancing."""
+    if not selected:
+        raise WorkflowError("No continuation selected")
+    legal = {edge["id"] for edge in definition["connections"] if edge["source"] == node["id"]}
+    if any(edge["id"] not in legal for edge in selected):
+        raise WorkflowError("Continuation selected an illegal outgoing connection")
+    if node.get("branch_mode") == "choose_one" and len(selected) != 1:
+        raise WorkflowError("Historical run permits exactly one connection")
+    retry = [edge for edge in selected if edge.get("backward")]
+    if retry:
+        if len(selected) != 1:
+            raise WorkflowError("A retry connection must be selected exclusively")
+        reachable = _forward_reachable(definition, retry[0]["target"])
+        for generation in token.get("stack", []):
+            group = joins.get(generation)
+            if group is None:
+                raise WorkflowError("Active parallel generation is unavailable")
+            split_id = group.get("split_id")
+            if split_id is None:
+                historical = [n["id"] for n in definition["nodes"] if n.get("join_id") == group["join_id"]]
+                if len(historical) != 1:
+                    raise WorkflowError("Cannot identify the historical parallel split safely")
+                split_id = historical[0]
+            if split_id in reachable:
+                raise WorkflowError(f"Retry cannot escape active parallel split {split_id}")
+        return None
+    if len(selected) == 1:
+        return None
+    join_id = _selection_join(definition, [edge["target"] for edge in selected])
+    regions = [_forward_reachable(definition, edge["target"], join_id) for edge in selected]
+    for index, region in enumerate(regions):
+        for other in regions[:index]:
+            overlap = region & other
+            if overlap:
+                raise WorkflowError("Selected parallel paths overlap before convergence: " + ", ".join(sorted(overlap)))
+    return join_id
 
 
 def _write(path: Path, value: Any) -> None:
@@ -426,6 +490,7 @@ class WorkflowStore:
         rid = uuid.uuid4().hex
         run = {"workflow_run_id": rid, "kind": kind, "name": definition["name"], "definition": copy.deepcopy(definition), "revision": definition.get("revision", 0), "prompt": prompt, "repo_path": str(Path(repo_path).resolve()), "freedom": freedom, "network": network, "status": "starting", "created_at": time.time(), "updated_at": time.time(), "sequence": 0, "transitions": 0, "activations": [], "decisions": [], "sessions": {}, "suppressed_candidates": [], "pending": [], "joins": {}, "instructions": "", "attempt_grants": {}, "supervisor_pid": None}
         run["tasks"] = []
+        run.update(retry_counts={}, retry_grants={})
         _write(self.runs / f"{rid}.json", run)
         return run
 
@@ -436,6 +501,7 @@ class WorkflowStore:
             raise WorkflowError("additional_attempts must be a nonnegative integer")
         if action == "resume" and not _supervisor_present(self.get_run(run_id)):
             self.reconcile_run(run_id)
+        control_detail: dict[str, Any] = {"instructions": instructions, "additional_attempts": additional_attempts, "retry_grants": {}}
         def change(r: dict[str, Any]) -> None:
             if r["status"] in TERMINAL:
                 raise WorkflowError("Workflow is terminal")
@@ -447,16 +513,21 @@ class WorkflowStore:
                 r["status"] = "running"
                 r["instructions"] = instructions or ""
                 r["suppressed_candidates"] = []
+                exhausted_edges = r.pop("exhausted_retry_edges", [])
                 if additional_attempts:
                     _positive(additional_attempts, "additional_attempts")
                     for n in r["definition"]["nodes"]:
                         r["attempt_grants"][n["id"]] = r["attempt_grants"].get(n["id"], 0) + additional_attempts
                     r["transition_grant"] = r.get("transition_grant", 0) + additional_attempts
+                    for edge_id in exhausted_edges:
+                        prior = r.get("retry_grants", {}).get(edge_id, 0)
+                        r.setdefault("retry_grants", {})[edge_id] = prior + additional_attempts
+                        control_detail["retry_grants"][edge_id] = {"additional": additional_attempts, "previous": prior, "total": prior + additional_attempts}
             else:
                 r["status"] = "paused" if action == "pause" else "cancelling"
                 if instructions:
                     r["instructions"] = instructions
-        result = self.update_run(run_id, change, f"control:{action}", {"instructions": instructions, "additional_attempts": additional_attempts})
+        result = self.update_run(run_id, change, f"control:{action}", control_detail)
         if action in {"resume", "cancel"} and not _supervisor_present(result):
             _launch(self, run_id)
         return result
@@ -539,13 +610,183 @@ async def start_workflow(name: str, prompt: str, repo_path: Path, *, overrides: 
     return run
 
 
-async def build_workflow(name: str, prompt: str, repo_path: Path, *, agent: dict[str, Any], fallbacks: list[dict[str, Any]] | None = None, root: Path | None = None) -> dict[str, Any]:
+def _editing_context(value: Any, field: str) -> dict[str, Any]:
+    """Accept an incomplete canvas as bounded JSON context, not a runnable graph."""
+    if not isinstance(value, dict):
+        raise WorkflowError(f"{field} must be a JSON object")
+    try:
+        encoded = json.dumps(value, allow_nan=False)
+    except (ValueError, TypeError) as exc:
+        raise WorkflowError(f"{field} must contain JSON-safe values") from exc
+    if len(encoded.encode("utf-8")) > 1024 * 1024:
+        raise WorkflowError(f"{field} exceeds the one-megabyte context limit")
+    sanitized = json.loads(encoded)
+    for key in ("nodes", "connections"):
+        if key in sanitized and (not isinstance(sanitized[key], list) or any(not isinstance(item, dict) for item in sanitized[key])):
+            raise WorkflowError(f"{field}.{key} must be an array of objects")
+    return sanitized
+
+
+def validate_builder_preview(value: Any, name: str) -> dict[str, Any]:
+    """Render-safe incomplete graph; runnable topology is validated at finalization."""
+    draft = _editing_context(value, "definition")
+    draft["name"] = name
+    draft.pop("revision", None)
+    draft.pop("updated_at", None)
+    nodes, edges = draft.setdefault("nodes", []), draft.setdefault("connections", [])
+    if len(nodes) > 256 or len(edges) > 1024:
+        raise WorkflowError("Builder preview exceeds canvas node or connection limit")
+    ids: set[str] = set()
+    for index, node in enumerate(nodes):
+        nid = _identifier(node.get("id"))
+        if nid in ids:
+            raise WorkflowError(f"Duplicate node {nid}")
+        ids.add(nid)
+        if not isinstance(node.get("type"), str) or node.get("type") not in {"start", "agent", "join", "end"}:
+            raise WorkflowError(f"Invalid node type: {nid}")
+        if node["type"] == "start":
+            node.setdefault("prompt", "")
+            if not isinstance(node["prompt"], str):
+                raise WorkflowError("Start prompt must be a string")
+        node.setdefault("title", nid)
+        node.setdefault("position", {"x": 80 + 260 * index, "y": 80})
+        position = node["position"]
+        if not isinstance(node["title"], str) or not isinstance(position, dict) or any(not isinstance(position.get(k), (float, int)) or isinstance(position.get(k), bool) or not math.isfinite(position[k]) or abs(position[k]) > 1000000 for k in ("x", "y")):
+            raise WorkflowError(f"Invalid title or canvas position: {nid}")
+        if node["type"] == "agent":
+            node.setdefault("role", "task")
+            if not isinstance(node["role"], str) or node["role"] not in {"planning", "implementation", "review", "task"}:
+                raise WorkflowError(f"Invalid agent role: {nid}")
+            node["agent"] = _candidate(node.get("agent", {"backend": "codex"}))
+            node.setdefault("instructions", "")
+            if not isinstance(node["instructions"], str):
+                raise WorkflowError(f"Invalid instructions: {nid}")
+            if "freedom" in node and (not isinstance(node["freedom"], str) or node["freedom"] not in FREEDOMS):
+                raise WorkflowError(f"Invalid freedom: {nid}")
+            if "session_mode" in node and (not isinstance(node["session_mode"], str) or node["session_mode"] not in {"resume", "fresh"}):
+                raise WorkflowError(f"Invalid session mode: {nid}")
+            if "max_attempts" in node:
+                _positive(node["max_attempts"], "max_attempts")
+            if "network" in node and node["network"] not in (None, True, False):
+                raise WorkflowError(f"Invalid network: {nid}")
+    if "orchestrator" in draft:
+        draft["orchestrator"] = _candidate(draft["orchestrator"])
+    for field in ("description",):
+        if field in draft and not isinstance(draft[field], str):
+            raise WorkflowError(f"Invalid {field}")
+    for field in ("max_parallel", "max_transitions"):
+        if field in draft:
+            _positive(draft[field], field)
+    edge_ids: set[str] = set()
+    for edge in edges:
+        eid = _identifier(edge.get("id"))
+        if eid in edge_ids:
+            raise WorkflowError(f"Duplicate connection {eid}")
+        edge_ids.add(eid)
+        if not isinstance(edge.get("source"), str) or not isinstance(edge.get("target"), str) or edge["source"] not in ids or edge["target"] not in ids:
+            raise WorkflowError(f"Connection {eid} references an unknown node")
+        if "max_retries" in edge and (not isinstance(edge["max_retries"], int) or isinstance(edge["max_retries"], bool) or edge["max_retries"] < 0):
+            raise WorkflowError(f"max_retries must be a nonnegative integer: {eid}")
+        edge.setdefault("condition", "")
+        if not isinstance(edge["condition"], str) or any(key in edge and not isinstance(edge[key], bool) for key in ("default", "backward")):
+            raise WorkflowError(f"Invalid condition or flags: {eid}")
+    return draft
+
+
+async def apply_workflow_draft(definition: dict[str, Any], expected_draft_revision: int, *, caller: Any, root: Path | None = None) -> dict[str, Any]:
+    """The verified caller can publish only its own active builder's preview."""
+    if caller is None or not isinstance(expected_draft_revision, int) or isinstance(expected_draft_revision, bool) or expected_draft_revision < 0:
+        raise WorkflowError("A verified builder caller and nonnegative draft revision are required")
+    storage = WorkflowStore(root)
+    owner = storage.task_owner(caller.record.task_id)
+    if not owner or owner["role"] != "builder":
+        raise WorkflowError("Only the active workflow builder may apply a draft")
+    run_id = owner["workflow_run_id"]
+    draft = validate_builder_preview(definition, storage.get_run(run_id)["name"])
+    def apply(r: dict[str, Any]) -> None:
+        current = r["activations"][-1] if r["activations"] else None
+        record = task_store.read(storage.root / "tasks", caller.record.task_id)
+        if r["kind"] != "builder" or r["status"] != "running" or not current or current["id"] != owner["activation_id"] or current["role"] != "builder" or current["status"] != "running" or not current["tasks"] or current["tasks"][-1]["task_id"] != caller.record.task_id or current["tasks"][-1]["status"] not in {"reserved", "running"} or record is None or record.status != "running":
+            raise WorkflowError("Builder dispatch is no longer active")
+        if r.get("draft_revision", 0) != expected_draft_revision:
+            raise WorkflowError("Builder draft revision conflict; read the current draft before applying")
+        r.update(builder_draft=draft, draft_revision=expected_draft_revision + 1)
+        current["draft_applied"] = True
+    run = storage.update_run(run_id, apply, "builder_draft_applied", {"task_id": caller.record.task_id, "expected_draft_revision": expected_draft_revision, "definition": draft})
+    return {"workflow_run_id": run_id, "draft_revision": run["draft_revision"], "builder_draft": run["builder_draft"]}
+
+
+async def followup_workflow_builder(run_id: str, prompt: str, *, root: Path | None = None) -> dict[str, Any]:
+    if not isinstance(prompt, str) or not prompt.strip() or len(prompt.encode("utf-8")) > 1024 * 1024:
+        raise WorkflowError("Builder feedback must be nonempty and at most one megabyte")
+    storage = WorkflowStore(root)
+    message = {"id": uuid.uuid4().hex, "prompt": prompt, "status": "pending", "created_at": time.time()}
+    launch = False
+    def queue(r: dict[str, Any]) -> None:
+        nonlocal launch
+        if r["kind"] != "builder" or r["status"] in {"cancelled", "cancelling", "paused"}:
+            raise WorkflowError("This builder cannot accept feedback")
+        if any(t["status"] in {"reserved", "running", "uncertain"} for a in r["activations"] for t in a["tasks"]) and not _supervisor_present(r):
+            raise WorkflowError("Builder dispatch requires reconciliation before followup")
+        if not _supervisor_present(r):
+            launch = True
+            r.update(status="starting", builder_followup=True)
+        if "editing_definition" not in r and r.get("generated_definition"):
+            baseline = copy.deepcopy(r["generated_definition"])
+            r.update(editing_definition=copy.deepcopy(r.get("builder_draft", baseline)), editing_source={"name": r["name"], "revision": baseline.get("revision", 0), "saved_definition": baseline}, source_name=r["name"], source_revision=baseline.get("revision", 0), source_saved_definition=baseline)
+        r.setdefault("builder_messages", []).append(message)
+    run = storage.update_run(run_id, queue, "builder_feedback_queued", message)
+    if launch:
+        _launch(storage, run_id)
+    tasks = [t for a in run["activations"] for t in a["tasks"]]
+    record = task_store.read(storage.root / "tasks", tasks[-1]["task_id"]) if tasks else None
+    status = "queued" if record is not None and record.status == "running" and record.live_input and _supervisor_present(run) else "queued_next_turn"
+    return {"workflow_run_id": run_id, "status": status, **({"task_id": tasks[-1]["task_id"]} if tasks else {})}
+
+
+def builder_workspace(storage: WorkflowStore) -> Path:
+    workspace = storage.root / "builder-workspace"
+    if workspace.is_symlink():
+        raise WorkflowError("Builder workspace must not be a symbolic link")
+    workspace.mkdir(mode=0o700, exist_ok=True)
+    if not workspace.is_dir():
+        raise WorkflowError("Builder workspace is not a directory")
+    return workspace.resolve()
+
+
+async def build_workflow(name: str, prompt: str, repo_path: Path | None = None, *, agent: dict[str, Any], fallbacks: list[dict[str, Any]] | None = None, definition: dict[str, Any] | None = None, source: dict[str, Any] | None = None, root: Path | None = None) -> dict[str, Any]:
     if not isinstance(prompt, str) or not prompt.strip():
         raise WorkflowError("Builder prompt must be nonempty")
     storage = WorkflowStore(root)
     config = _candidate({**agent, "fallbacks": fallbacks or agent.get("fallbacks", [])})
-    definition = {"name": _identifier(name), "orchestrator": config, "nodes": [], "connections": []}
-    run = storage.create_run(definition, prompt, repo_path, freedom="read_only", kind="builder")
+    editing = _editing_context(definition, "definition") if definition is not None else None
+    if source is not None and editing is None:
+        raise WorkflowError("source requires an editing definition")
+    metadata = None
+    if editing is not None:
+        raw_source = source if source is not None else {"name": editing.get("name", ""), "revision": editing.get("revision", 0), "saved_definition": None}
+        if not isinstance(raw_source, dict) or set(raw_source) - {"name", "revision", "saved_definition"}:
+            raise WorkflowError("source must contain only name, revision and saved_definition")
+        source_name = raw_source.get("name", "")
+        if source_name != "":
+            _identifier(source_name)
+        revision = raw_source.get("revision", 0)
+        if not isinstance(revision, int) or isinstance(revision, bool) or revision < 0:
+            raise WorkflowError("source.revision must be a nonnegative integer")
+        baseline = raw_source.get("saved_definition")
+        metadata = {"name": source_name, "revision": revision, "saved_definition": _editing_context(baseline, "source.saved_definition") if baseline is not None else None}
+    descriptor = {"name": _identifier(name), "orchestrator": config, "nodes": [], "connections": []}
+    supplied_repo = repo_path is not None
+    repo_path = repo_path if supplied_repo else builder_workspace(storage)
+    run = storage.create_run(descriptor, prompt, repo_path, freedom="read_only", kind="builder")
+    if editing is not None:
+        run = storage.update_run(run["workflow_run_id"], lambda r: r.update(editing_definition=editing, editing_source=metadata, source_name=metadata["name"], source_revision=metadata["revision"], source_saved_definition=metadata["saved_definition"]), "builder_edit_requested")
+    try:
+        initial_preview = validate_builder_preview(editing or {"nodes": [], "connections": []}, name)
+    except WorkflowError:
+        # Repair input remains available to the agent, but cannot crash the canvas.
+        initial_preview = {"name": name, "nodes": [], "connections": []}
+    run = storage.update_run(run["workflow_run_id"], lambda r: r.update(builder_draft=initial_preview, draft_revision=0, builder_messages=[], builder_has_repo_context=supplied_repo), "builder_draft_initialized")
     await _capture_caller(storage, run["workflow_run_id"])
     _launch(storage, run["workflow_run_id"])
     return run
@@ -567,6 +808,55 @@ def parse_json(text: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise WorkflowError("Agent response must be one JSON object")
     return value
+
+
+def failure_diagnostic(snapshot: dict[str, Any], prompt: str) -> str:
+    """A bounded startup diagnostic without exposing injected dispatch context."""
+    lines = list(snapshot.get("stderr_tail", []))
+    stream = snapshot.get("raw_stream_log")
+    if stream and snapshot.get("backend") in {"opencode", "codex"}:
+        try:
+            with Path(stream).open(encoding="utf-8") as f:
+                for line in f:
+                    if len(line) > 8 * 1024 * 1024:
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except ValueError:
+                        continue
+                    if not isinstance(event, dict):
+                        continue
+                    error = event.get("error")
+                    if not isinstance(error, dict):
+                        continue
+                    if snapshot["backend"] == "opencode" and event.get("type") == "error" and isinstance(error.get("name"), str):
+                        data = error.get("data")
+                        if isinstance(data, dict):
+                            if data.get("statusCode") in {401, 403}:
+                                lines.append(f"OpenCode authentication failed (HTTP {data['statusCode']}); check the configured provider credentials.")
+                            elif isinstance(data.get("message"), str):
+                                lines.append(data["message"])
+                    elif snapshot["backend"] == "codex" and event.get("type") == "turn.failed" and isinstance(error.get("message"), str):
+                        lines.append(error["message"])
+        except OSError:
+            pass
+    text = "\n".join(line for line in lines if isinstance(line, str))
+    for value in (prompt, json.dumps(prompt)[1:-1], repr(prompt)[1:-1]):
+        if value:
+            text = text.replace(value, "[workflow context omitted]")
+    ignored = ("reading additional input from stdin", "reading additional instructions from stdin", "reading prompt from stdin", "warning:")
+    for line in text.splitlines():
+        diagnostic = line.strip()
+        if not diagnostic or diagnostic.lower().startswith(ignored):
+            continue
+        # Prompt fragments from multiline diagnostics are unsafe to display. Only
+        # diagnostics independent of a line of the dispatched prompt are eligible.
+        if any(part.strip() and (diagnostic in part or part in diagnostic) for part in prompt.splitlines() if len(part.strip()) >= 16):
+            continue
+        if re.search(r"(?i)(authorization|cookie|headers|bearer\s|api[_-]?key\s*[:=])", diagnostic):
+            return "Runtime error details contain sensitive request information; inspect the raw diagnostics."
+        return diagnostic[:500]
+    return ""
 
 
 def availability_failure(snapshot: dict[str, Any]) -> str | None:
@@ -704,6 +994,7 @@ class WorkflowSupervisor:
                 return None
             network = False if run["network"] is False else node.get("network", run["network"])
             task_id = uuid.uuid4().hex
+            display_prompt = run.get("builder_turn_prompt", run["prompt"]) if role == "builder" else run["prompt"]
             reservation = {"task_id": task_id, "candidate": candidate, "status": "reserved", "reserved_at": time.time(), "freedom": freedom}
             self.update(lambda r: next(a for a in r["activations"] if a["id"] == activation["id"])["tasks"].append(reservation), "dispatch_reserved", reservation)
             try:
@@ -711,19 +1002,39 @@ class WorkflowSupervisor:
                     if self.run()["status"] != "running":
                         self._task_update(activation["id"], task_id, {"status": "not_started"})
                         return None
-                    if role == "node" and node.get("session_mode") == "resume" and previous.get("candidate") == identity:
+                    if (role == "node" and node.get("session_mode") == "resume" or role == "builder" and run.get("builder_followup")) and previous.get("candidate") == identity:
                         parent = self.registry.get(previous["task_id"])
                         if parent:
-                            task = await self.registry.resume(parent, prompt, max_turns=candidate.get("max_turns"), network=network, task_id=task_id)
+                            task = await self.registry.resume(parent, prompt, max_turns=candidate.get("max_turns"), network=network, task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder")
                         else:
                             record = task_store.read(self.registry._log_dir, previous["task_id"])
                             if record is None:
                                 raise WorkflowError("Previous resume session is unavailable")
-                            task = await self.registry.resume_record(record, prompt, max_turns=candidate.get("max_turns"), network=network, task_id=task_id)
+                            task = await self.registry.resume_record(record, prompt, max_turns=candidate.get("max_turns"), network=network, task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder")
                     else:
-                        task = await self.registry.start(prompt, Path(run["repo_path"]), backend=backend, freedom=freedom, network=network, model=candidate.get("model"), reasoning_effort=candidate.get("reasoning_effort"), max_turns=candidate.get("max_turns"), task_id=task_id, title=f"{run['name']} · {node.get('title', key)}")
+                        if role == "builder":
+                            latest = self.run()
+                            prompt += "\nLatest authoritative builder preview, revision " + str(latest.get("draft_revision", 0)) + ":\n" + json.dumps(latest.get("builder_draft", {}))
+                        task = await self.registry.start(prompt, Path(run["repo_path"]), backend=backend, freedom=freedom, network=network, model=candidate.get("model"), reasoning_effort=candidate.get("reasoning_effort"), max_turns=candidate.get("max_turns"), task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder", title=f"{run['name']} · {node.get('title', key)}")
                     self._task_update(activation["id"], task_id, {"status": "running"})
                     while not task.done.is_set():
+                        if role == "builder" and getattr(task, "live_input", False):
+                            messages: list[dict[str, Any]] = []
+                            def claim_live(r: dict[str, Any]) -> None:
+                                for m in r.get("builder_messages", []):
+                                    if m["status"] == "pending":
+                                        m["status"] = "forwarding"
+                                        messages.append(copy.deepcopy(m))
+                            self.update(claim_live, "builder_feedback_forwarding")
+                            for message in messages:
+                                try:
+                                    await self.registry.send_message(task, message["prompt"])
+                                    status = "queued_to_agent"
+                                except Exception as exc:
+                                    from . import inbox
+                                    # SendRefused guarantees that no message entered the inbox.
+                                    status = "deferred" if isinstance(exc, inbox.SendRefused) else "forwarding_uncertain"
+                                self.update(lambda r, mid=message["id"], state=status: next(m for m in r["builder_messages"] if m["id"] == mid).update(status=state), "builder_feedback_forwarded", {"message_id": message["id"], "status": status})
                         if self.run()["status"] == "cancelling":
                             await self.registry.cancel_cascade(task.task_id, workflow_control=True)
                         try:
@@ -751,7 +1062,8 @@ class WorkflowSupervisor:
                 previous = {}
                 continue
             if snapshot["status"] != "completed" or snapshot.get("is_error"):
-                self.attention(f"{role} task {task_id} ended {snapshot['status']}")
+                diagnostic = failure_diagnostic(snapshot, prompt)
+                self.attention(f"{role} task {task_id} ended {snapshot['status']}" + (f": {diagnostic}" if diagnostic else ""))
                 return None
             self.update(lambda r: r["sessions"].__setitem__(key, {"candidate": identity, "task_id": task_id, "session_id": snapshot.get("session_id")}), "session_recorded", key)
             return snapshot
@@ -775,9 +1087,10 @@ class WorkflowSupervisor:
             graph_nodes = [{"id": n["id"], "title": n["title"], "type": n["type"], "role": n.get("role"), "instructions": n.get("instructions", "")[:2000]} for n in r["definition"]["nodes"]]
             graph = {"name": r["name"], "nodes": graph_nodes, "connections": r["definition"]["connections"]}
             targets = {n["id"]: n for n in graph_nodes}
-            legal = [{**edge, "target_node": targets[edge["target"]]} for edge in edges]
-            context = {"task": r["prompt"], "instructions": r["instructions"], "node": node, "result": _bounded(result), "tasks": r.get("tasks", []), "workflow_graph": graph, "legal_connections": legal, "recent_decisions": r["decisions"][-10:], "branch": token, "transitions_remaining": r["definition"]["max_transitions"] + r.get("transition_grant", 0) - r["transitions"]}
+            legal = [{**edge, "target_node": targets[edge["target"]], **(retry_budget(r, edge) if edge.get("backward") else {})} for edge in edges]
+            context = {"task": r["prompt"], "workflow_purpose": next((n.get("prompt", "") for n in r["definition"]["nodes"] if n["type"] == "start"), ""), "instructions": r["instructions"], "node": node, "result": _bounded(result), "tasks": r.get("tasks", []), "workflow_graph": graph, "legal_connections": legal, "recent_decisions": r["decisions"][-10:], "branch": token, "transitions_remaining": r["definition"]["max_transitions"] + r.get("transition_grant", 0) - r["transitions"]}
             routing = "Choose one or multiple legal forward connections according to the conditions, result evidence and workflow guide. Blank conditions are available unconditional paths, not a requirement to select every path. A retry/backward connection must be the only selected connection."
+            routing += " Never select a retry whose retry_remaining is zero; choose a justified alternative or needs_attention. Retry limits count traversals across the entire run. Selected parallel paths must not overlap before their shared convergence. A retry must stay within every active parallel branch."
             if node.get("branch_mode") == "choose_one":
                 routing += " This historical run permits exactly one connection."
             prompt = 'You are a workflow decision agent, not an executor. Do not dispatch agents or modify files. Evaluate the connection conditions from evidence. Return ONLY JSON {"action":"continue|complete|failed|needs_attention","connections":["connection-id"],"reason":"...","task_updates":[{"task_id":"id","status":"pending|completed","reason":"evidence"}]}. Only you may update checklist statuses. Complete a task only after successful implementation reporting that completed_task_id; review can reopen tasks as pending. ' + routing + ' If the evidence or continuation is unclear, return needs_attention; use a default path only when justified by its instructions. Never invent nodes or edges. Context:\n' + json.dumps(context)
@@ -803,6 +1116,9 @@ class WorkflowSupervisor:
                         raise WorkflowError("Stopping decisions cannot select connections")
                     if action == "complete" and (not selected or not all(next(e for e in edges if e["id"] == i)["target"] in {n["id"] for n in r["definition"]["nodes"] if n["type"] == "end"} for i in selected)):
                         raise WorkflowError("Completion must follow End connections")
+                    selected_join = validate_selection(r["definition"], node, [edge for edge in edges if edge["id"] in selected], token, r["joins"]) if action in {"continue", "complete"} else None
+                    if action in {"continue", "complete"}:
+                        validate_retry_budget(self.run(), [edge for edge in edges if edge["id"] in selected])
                     updates = decision.get("task_updates", [])
                     if not isinstance(updates, list):
                         raise WorkflowError("task_updates must be an array")
@@ -817,15 +1133,16 @@ class WorkflowSupervisor:
                             if node.get("role") != "implementation" or update["task_id"] not in token.get("completed_task_ids", []):
                                 raise WorkflowError("Task completion requires implementation evidence")
                     def record_decision(rr: dict[str, Any]) -> None:
-                        rr["decisions"].append({**decision, "node_id": node["id"], "activation_id": a["id"]})
+                        rr["decisions"].append({**decision, "node_id": node["id"], "activation_id": a["id"], "selected_join_id": selected_join})
                         next(x for x in rr["activations"] if x["id"] == a["id"]).update(status="completed")
                         if action in {"continue", "complete"}:
                             current = next(t for t in rr["pending"] if t["id"] == token["id"])
                             current["selected_connections"] = selected
+                            current["selected_join_id"] = selected_join
                         for update in updates:
                             checklist_task = next(t for t in rr["tasks"] if t["id"] == update["task_id"])
                             checklist_task.update(status=update["status"], reason=update["reason"], completed_by_activation_id=token.get("execution_activation_id") if update["status"] == "completed" else None, status_decision_activation_id=a["id"], status_changed_at=time.time())
-                    self.update(record_decision, "decision", decision)
+                    self.update(record_decision, "decision", {**decision, "selected_join_id": selected_join})
                     if action in {"failed", "needs_attention"}:
                         if action == "failed":
                             self.update(lambda rr: rr.update(status="failed", failure_reason=decision["reason"]), "failed", decision["reason"])
@@ -833,6 +1150,9 @@ class WorkflowSupervisor:
                             self.attention(decision["reason"])
                         return None
                     return [e for e in edges if e["id"] in selected]
+                except RetryLimitReached as exc:
+                    self.update(lambda rr: (rr.update(status="needs_attention", attention_reason=str(exc), exhausted_retry_edges=[exc.edge_id]), next(x for x in rr["activations"] if x["id"] == a["id"]).update(status="failed")), "retry_limit_reached", {"edge_id": exc.edge_id, "reason": str(exc)})
+                    return None
                 except (ValueError, TypeError) as exc:
                     self.update(lambda rr: next(x for x in rr["activations"] if x["id"] == a["id"]).update(status="failed"), "invalid_decision", str(exc))
                     prompt += f"\nYour prior response was invalid: {exc}. Return the required JSON."
@@ -861,6 +1181,8 @@ class WorkflowSupervisor:
             selected = await self._decision(node, result or token.get("context", {}), token)
         if selected is None:
             return
+        current = self.run()
+        selected_join = validate_selection(current["definition"], node, selected, token, current["joins"])
         def advance(rr: dict[str, Any]) -> None:
             if rr["status"] != "running":
                 return
@@ -868,6 +1190,15 @@ class WorkflowSupervisor:
                 rr["status"] = "needs_attention"
                 rr["attention_reason"] = "Transition limit reached"
                 return
+            try:
+                validate_retry_budget(rr, selected)
+            except RetryLimitReached as exc:
+                rr.update(status="needs_attention", attention_reason=str(exc), exhausted_retry_edges=[exc.edge_id])
+                return
+            for edge in selected:
+                if edge.get("backward"):
+                    counts = rr.setdefault("retry_counts", {})
+                    counts[edge["id"]] = counts.get(edge["id"], 0) + 1
             rr["transitions"] += len(selected)
             rr["pending"] = [t for t in rr["pending"] if t["id"] != token["id"]]
             stack = copy.deepcopy(token.get("stack", []))
@@ -875,7 +1206,8 @@ class WorkflowSupervisor:
             automatic_fork = node.get("branch_mode") == "auto" and len(selected) > 1 and not any(e["backward"] for e in selected)
             if legacy_fork or automatic_fork:
                 gid = uuid.uuid4().hex
-                rr["joins"][gid] = {"join_id": node["join_id"], "expected": len(selected), "arrived": [], "stack": stack}
+                join_id = selected_join if automatic_fork else node["join_id"]
+                rr["joins"][gid] = {"join_id": join_id, "split_id": node["id"], "expected": len(selected), "arrived": [], "stack": stack}
                 stack = stack + [gid]
             for edge in selected:
                 rr["pending"].append({"id": uuid.uuid4().hex, "node_id": edge["target"], "stack": stack, "context": _bounded(result or token.get("context", {})), "via": edge["id"]})
@@ -1021,23 +1353,76 @@ class WorkflowSupervisor:
 
     async def build(self, run_id: str) -> None:
         self.run_id = run_id
+        recovered_forwarding = False
+        def recover_feedback(r: dict[str, Any]) -> None:
+            nonlocal recovered_forwarding
+            for message in r.get("builder_messages", []):
+                if message["status"] in {"forwarding", "forwarding_uncertain"}:
+                    message["status"] = "forwarding_uncertain"
+                    recovered_forwarding = True
+            if recovered_forwarding:
+                r.update(status="needs_attention", attention_reason="Builder feedback forwarding is uncertain; inspect the conversation before submitting it again", supervisor_pid=None, supervisor_identity=None)
+        self.update(recover_feedback, "builder_feedback_reconciled")
+        if recovered_forwarding:
+            return
+        while True:
+            feedback: list[dict[str, Any]] = []
+            def claim(r: dict[str, Any]) -> None:
+                feedback.extend(m for m in r.get("builder_messages", []) if m["status"] in {"pending", "deferred"})
+                for message in feedback:
+                    message["status"] = "claimed"
+                if feedback:
+                    if "editing_definition" not in r and r.get("generated_definition"):
+                        baseline = copy.deepcopy(r["generated_definition"])
+                        r.update(editing_definition=copy.deepcopy(r.get("builder_draft", baseline)), editing_source={"name": r["name"], "revision": baseline.get("revision", 0), "saved_definition": baseline}, source_name=r["name"], source_revision=baseline.get("revision", 0), source_saved_definition=baseline)
+                    r.update(builder_followup=True, builder_turn_prompt="\n".join(m["prompt"] for m in feedback))
+            self.update(claim, "builder_feedback_claimed")
+            await self._build_turn(run_id)
+            continue_turn = False
+            def settle(r: dict[str, Any]) -> None:
+                nonlocal continue_turn
+                if any(m["status"] == "forwarding_uncertain" for m in r.get("builder_messages", [])):
+                    r.update(status="needs_attention", attention_reason="Builder feedback forwarding is uncertain; inspect the conversation before submitting it again")
+                continue_turn = not any(m["status"] == "forwarding_uncertain" for m in r.get("builder_messages", [])) and r["status"] in {"completed", "needs_attention"} and any(m["status"] in {"pending", "deferred"} for m in r.get("builder_messages", [])) and not any(t["status"] in {"reserved", "running", "uncertain"} for a in r["activations"] for t in a["tasks"])
+                if continue_turn:
+                    r["status"] = "running"
+                else:
+                    r.update(supervisor_pid=None, supervisor_identity=None)
+            self.update(settle, "builder_turn_settled")
+            if not continue_turn:
+                return
+
+    async def _build_turn(self, run_id: str) -> None:
+        self.run_id = run_id
         if not await self.reconcile():
             return
         from . import identity
         self.update(lambda r: r.update(status="running", supervisor_pid=os.getpid(), supervisor_identity=identity.own_identity()), "builder_started")
         a = self._activation("builder", "builder")
-        prompt = "Create a Polybridge workflow definition. Do not write files or dispatch agents. Return ONLY a JSON object. Schema: " + json.dumps({"name": self.run()["name"], "orchestrator": {"backend": "codex", "fallbacks": []}, "nodes": [{"id": "start", "type": "start", "branch_mode": "auto"}, {"id": "work", "type": "agent", "instructions": "...", "agent": {"backend": "codex"}, "session_mode": "resume", "branch_mode": "auto", "max_attempts": 3}, {"id": "end", "type": "end", "branch_mode": "auto"}], "connections": [{"id": "begin", "source": "start", "target": "work"}, {"id": "finish", "source": "work", "target": "end"}], "max_parallel": 4, "max_transitions": 100}) + "\nThe orchestrator chooses one or multiple outgoing paths from their condition prompts and the evidence. Parallel paths connect to a shared agent or End node; Polybridge infers convergence automatically. Do not create Join nodes or configurable branching modes. Retry arrows return to an earlier ancestor step; Polybridge infers loops from topology, so do not set a backward flag. Put explicit failure/retry and success/continue conditions on arrows. A retry is selected exclusively and must stay inside its parallel region. Agent roles are planning, implementation, review and task; supply custom step instructions, while Polybridge adds the role guidance and result protocol. Request: " + self.run()["prompt"]
+        prompt = "Create a Polybridge workflow definition. Do not write files or dispatch agents. Return ONLY a JSON object. Schema: " + json.dumps({"name": self.run()["name"], "orchestrator": {"backend": "codex", "fallbacks": []}, "nodes": [{"id": "start", "type": "start", "branch_mode": "auto", "prompt": "Optional workflow purpose for the orchestrator"}, {"id": "work", "type": "agent", "instructions": "...", "agent": {"backend": "codex"}, "session_mode": "resume", "branch_mode": "auto", "max_attempts": 3}, {"id": "end", "type": "end", "branch_mode": "auto"}], "connections": [{"id": "begin", "source": "start", "target": "work"}, {"id": "finish", "source": "work", "target": "end"}], "max_parallel": 4, "max_transitions": 100}) + "\nStart may contain an optional prompt string describing the workflow purpose; Polybridge supplies it to orchestrator decisions alongside the runtime user request. The orchestrator chooses one or multiple outgoing paths from their condition prompts and the evidence. Parallel paths connect to a shared agent or End node; Polybridge infers convergence automatically. Do not create Join nodes or configurable branching modes. Retry arrows return to an earlier ancestor step; Polybridge infers loops from topology, so do not set a backward flag. Put explicit failure/retry and success/continue conditions on arrows. A retry connection may set max_retries to a nonnegative integer: this caps actual traversals of that arrow across the entire run; 0 disables retry, and an absent value adds no edge cap. Node max_attempts and max_transitions still apply and may stop earlier. A retry is selected exclusively and must stay inside its parallel region. Agent roles are planning, implementation, review and task; supply custom step instructions, while Polybridge adds the role guidance and result protocol. Request: " + self.run().get("builder_turn_prompt", self.run()["prompt"])
+        if "editing_definition" in self.run():
+            prompt += "\nRefine the current unsaved canvas below according to the request; it may be incomplete. Return the complete corrected workflow. Preserve existing node and connection IDs, agent settings, permissions, instructions and positions unless the requested edit requires changing them. Do not assign a revision or overwrite any saved definition. Read applicable repository AGENTS.md and skill files, especially skills specified in the request, and use their relevant guidance when refining the graph. You may read repository guidance and skills for context; only inspect files, do not implement the task or run the workflow. Current canvas:\n" + json.dumps(self.run()["editing_definition"])
+        prompt += "\nPublish canvas progress after each logical edit using polybridge.apply_workflow_draft (or polybridge-ctl workflow-builder-apply), with definition and expected_draft_revision. This updates only your builder preview, never saved workflows. Read get_workflow_status(workflow_run_id=" + self.run()["workflow_run_id"] + ") to resolve a revision conflict. Incomplete but render-safe graphs are allowed while building. If you applied any preview, the latest applied preview is authoritative and you may return a final summary; otherwise return the complete JSON definition. Current draft revision: " + str(self.run().get("draft_revision", 0)) + "\nCurrent draft:\n" + json.dumps(self.run().get("builder_draft", {}))
+        if self.run().get("builder_has_repo_context") is False:
+            prompt += "\nNo user repository was supplied. Your working directory is an isolated Polybridge builder workspace; do not infer a project or search elsewhere for repository context. Refine the supplied canvas and request without repository-specific skills or files."
         result = await self._dispatch({"id": "builder", "title": "Workflow builder"}, prompt, "builder", a)
-        if result:
+        if result and self.run()["status"] == "running":
             try:
-                d = validate_definition({**parse_json(result.get("summary") or ""), "name": self.run()["name"]})
+                current = self.run()
+                applied = next(x for x in current["activations"] if x["id"] == a["id"]).get("draft_applied", False)
+                d = validate_definition({**(current["builder_draft"] if applied else parse_json(result.get("summary") or "")), "name": current["name"]})
                 d["draft"] = True
-                saved = self.store.save(d["name"], d)
-                self.update(lambda r: (r.update(status="completed", generated_definition=saved), next(x for x in r["activations"] if x["id"] == a["id"]).update(status="completed")), "builder_saved")
+                if "editing_definition" in self.run() or self.run().get("builder_followup"):
+                    metadata = self.run().get("editing_source", {"name": self.run()["name"], "revision": self.run().get("generated_definition", {}).get("revision", 0)})
+                    d["revision"] = metadata["revision"] if metadata["name"] == d["name"] else 0
+                    d.pop("updated_at", None)
+                    self.update(lambda r: (r.update(status="completed", generated_definition=d, builder_draft=d, draft_revision=r.get("draft_revision", 0) + 1), next(x for x in r["activations"] if x["id"] == a["id"]).update(status="completed")), "builder_edit_proposed")
+                else:
+                    saved = self.store.save(d["name"], d)
+                    self.update(lambda r: (r.update(status="completed", generated_definition=saved, builder_draft=saved, draft_revision=r.get("draft_revision", 0) + 1), next(x for x in r["activations"] if x["id"] == a["id"]).update(status="completed")), "builder_saved")
             except (ValueError, FileExistsError) as exc:
-                self.attention(f"Generated workflow was not saved: {exc}")
+                self.attention(f"Workflow proposal was invalid: {exc}" if "editing_definition" in self.run() else f"Generated workflow was not saved: {exc}")
         def stop(r: dict[str, Any]) -> None:
-            r.update(supervisor_pid=None, supervisor_identity=None)
             next(x for x in r["activations"] if x["id"] == a["id"]).update(status="completed" if r["status"] == "completed" else "failed")
             if r["status"] == "cancelling":
                 if any(t["status"] in {"reserved", "running", "uncertain"} for activation in r["activations"] for t in activation["tasks"]):
@@ -1069,6 +1454,8 @@ async def _main(args: Any) -> None:
         except BlockingIOError:
             return
         run = storage.get_run(args.run_id)
+        if run["kind"] == "builder" and run["status"] in TERMINAL and not any(m["status"] in {"pending", "deferred"} for m in run.get("builder_messages", [])):
+            return
         from . import lineage
         caller = lineage.Caller(task_store.TaskRecord(**run["caller_record"]), run.get("caller_method", "ancestry")) if run.get("caller_record") else None
         supervisor = WorkflowSupervisor(TaskRegistry(log_dir=storage.root / "tasks", open_monitor=False, caller_override=caller), storage)
@@ -1080,6 +1467,11 @@ async def _main(args: Any) -> None:
         except Exception as exc:
             supervisor.run_id = args.run_id
             supervisor.attention(f"Supervisor failure: {exc}")
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+            final = storage.get_run(args.run_id)
+            if final["kind"] == "builder" and final["status"] == "starting" and any(m["status"] == "pending" for m in final.get("builder_messages", [])):
+                _launch(storage, args.run_id)
 
 
 if __name__ == "__main__":

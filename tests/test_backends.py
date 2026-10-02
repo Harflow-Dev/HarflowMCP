@@ -867,25 +867,25 @@ LEGACY_ARGV: dict[str, dict[str, dict[str, list[str]]]] = {
     "codex": {
         "read_only": {
             "start": [
-                "codex", "exec", "--json", "-C", "/tmp/repo", "-s", "read-only",
+                "codex", "exec", "--json", "--skip-git-repo-check", "-C", "/tmp/repo", "-s", "read-only",
                 "-c", 'approval_policy="never"',
                 "--", "do a thing",
             ],
             "resume": [
-                "codex", "exec", "--json", "-C", "/tmp/repo", "-s", "read-only",
+                "codex", "exec", "--json", "--skip-git-repo-check", "-C", "/tmp/repo", "-s", "read-only",
                 "-c", 'approval_policy="never"', "resume",
                 "--", "abc-123", "more",
             ],
         },
         "write_in_repo": {
             "start": [
-                "codex", "exec", "--json", "-C", "/tmp/repo", "-s", "workspace-write",
+                "codex", "exec", "--json", "--skip-git-repo-check", "-C", "/tmp/repo", "-s", "workspace-write",
                 "-c", 'approval_policy="never"',
                 "-c", "sandbox_workspace_write.network_access=false",
                 "--", "do a thing",
             ],
             "resume": [
-                "codex", "exec", "--json", "-C", "/tmp/repo", "-s", "workspace-write",
+                "codex", "exec", "--json", "--skip-git-repo-check", "-C", "/tmp/repo", "-s", "workspace-write",
                 "-c", 'approval_policy="never"',
                 "-c", "sandbox_workspace_write.network_access=false", "resume",
                 "--", "abc-123", "more",
@@ -893,13 +893,13 @@ LEGACY_ARGV: dict[str, dict[str, dict[str, list[str]]]] = {
         },
         "publish": {
             "start": [
-                "codex", "exec", "--json", "-C", "/tmp/repo", "-s", "workspace-write",
+                "codex", "exec", "--json", "--skip-git-repo-check", "-C", "/tmp/repo", "-s", "workspace-write",
                 "-c", 'approval_policy="never"',
                 "-c", "sandbox_workspace_write.network_access=true",
                 "--", "do a thing",
             ],
             "resume": [
-                "codex", "exec", "--json", "-C", "/tmp/repo", "-s", "workspace-write",
+                "codex", "exec", "--json", "--skip-git-repo-check", "-C", "/tmp/repo", "-s", "workspace-write",
                 "-c", 'approval_policy="never"',
                 "-c", "sandbox_workspace_write.network_access=true", "resume",
                 "--", "abc-123", "more",
@@ -907,12 +907,12 @@ LEGACY_ARGV: dict[str, dict[str, dict[str, list[str]]]] = {
         },
         "unrestricted": {
             "start": [
-                "codex", "exec", "--json", "-C", "/tmp/repo", "-s", "danger-full-access",
+                "codex", "exec", "--json", "--skip-git-repo-check", "-C", "/tmp/repo", "-s", "danger-full-access",
                 "-c", 'approval_policy="never"',
                 "--", "do a thing",
             ],
             "resume": [
-                "codex", "exec", "--json", "-C", "/tmp/repo", "-s", "danger-full-access",
+                "codex", "exec", "--json", "--skip-git-repo-check", "-C", "/tmp/repo", "-s", "danger-full-access",
                 "-c", 'approval_policy="never"', "resume",
                 "--", "abc-123", "more",
             ],

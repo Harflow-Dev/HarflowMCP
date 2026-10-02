@@ -137,20 +137,32 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     resume_p.add_argument("--network", choices=("true", "false"), default=None)
     resume_p.add_argument("--json", action="store_true")
 
+    allowlist_p = sub.add_parser("mcp-allowlist", help="inspect or explicitly edit harness-global MCP approval rules")
+    allowlist_p.add_argument("--backend", required=True, choices=("codex", "claude", "vibe", "opencode", "antigravity"))
+    allowlist_p.add_argument("--json", action="store_true")
+    edits = allowlist_p.add_mutually_exclusive_group()
+    edits.add_argument("--allow")
+    edits.add_argument("--remove")
+
     workflow_parsers = []
-    for action in ("validate", "list", "get", "save", "delete", "build", "start", "list-runs", "status", "wait", "pause", "resume", "cancel"):
+    for action in ("validate", "list", "get", "save", "delete", "build", "start", "list-runs", "status", "wait", "pause", "resume", "cancel", "builder-followup", "builder-apply"):
         wp = sub.add_parser("workflow-" + action, help=action + " workflows")
         wp.add_argument("--json", action="store_true")
         if action in {"get", "save", "delete", "build", "start"}:
             wp.add_argument("name")
-        if action in {"status", "wait", "pause", "resume", "cancel"}:
+        if action in {"status", "wait", "pause", "resume", "cancel", "builder-followup"}:
             wp.add_argument("workflow_run_id")
+        if action == "builder-followup":
+            wp.add_argument("--prompt", required=True)
+        if action == "builder-apply":
+            wp.add_argument("--definition", required=True, help="Current draft JSON file, or - for stdin")
+            wp.add_argument("--expected-draft-revision", type=int, required=True)
         if action in {"save", "validate"}:
             wp.add_argument("--definition", required=True, help="JSON file, or - for stdin")
             if action == "save":
                 wp.add_argument("--expected-revision", type=int)
         if action in {"start", "build"}:
-            wp.add_argument("--repo", required=True)
+            wp.add_argument("--repo", required=action == "start")
             wp.add_argument("--prompt", required=True)
             wp.add_argument("--backend", required=action == "build")
             wp.add_argument("--model")
@@ -158,6 +170,10 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
             wp.add_argument("--max-turns", type=int)
             if action == "build":
                 wp.add_argument("--fallbacks", default="[]", help="JSON array of ordered agent candidates")
+                input_group = wp.add_mutually_exclusive_group()
+                input_group.add_argument("--definition", help="Current canvas JSON file, or - for stdin")
+                input_group.add_argument("--definition-json", help="Current canvas JSON object")
+                wp.add_argument("--source", help="JSON saved name/revision/baseline metadata")
             else:
                 wp.add_argument("--freedom", default="write_in_repo", choices=("read_only", "write_in_repo", "publish", "unrestricted"))
                 wp.add_argument("--network", choices=("true", "false"))
@@ -179,6 +195,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
         attach_p,
         run_p,
         resume_p,
+        allowlist_p,
         *workflow_parsers,
     )
 
@@ -517,11 +534,16 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
             raw = sys.stdin.read() if args.definition == "-" else Path(args.definition).read_text()
             value = json.loads(raw)
             try:
-                validate_definition(value)
+                canonical = validate_definition(value)
             except WorkflowError as exc:
                 return {"valid": False, "error": str(exc)}
-            return {"valid": True}
+            return {"valid": True, "definition": canonical}
         from . import server
+        if action == "builder-followup":
+            return await server.followup_workflow_builder(args.workflow_run_id, args.prompt)
+        if action == "builder-apply":
+            raw = sys.stdin.read() if args.definition == "-" else Path(args.definition).read_text()
+            return await server.apply_workflow_draft(json.loads(raw), args.expected_draft_revision)
         if action in {"list", "list-runs"}:
             entries = await server._workflow_call(action.replace("-", "_"))
             return {"workflows" if action == "list" else "runs": entries}
@@ -534,7 +556,11 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
             candidate = {k: v for k, v in {"backend": args.backend, "model": args.model,
                          "reasoning_effort": args.reasoning_effort, "max_turns": args.max_turns}.items() if v is not None}
             if action == "build":
-                return await server.workflow_builder(args.name, args.prompt, args.repo, candidate, json.loads(args.fallbacks))
+                definition = json.loads(args.definition_json) if args.definition_json else None
+                if args.definition:
+                    definition = json.loads(sys.stdin.read() if args.definition == "-" else Path(args.definition).read_text())
+                source = json.loads(args.source) if args.source else None
+                return await server.workflow_builder(args.name, args.prompt, args.repo, candidate, json.loads(args.fallbacks), definition, source)
             return await server.start_workflow(args.name, args.prompt, args.repo, candidate or None, args.freedom, _network(args.network))
         if action == "wait":
             return await server.wait_for_workflow(args.workflow_run_id, args.timeout_seconds)
@@ -564,6 +590,17 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
 
+    if args.command == "mcp-allowlist":
+        from . import mcp_allowlist, server
+        try:
+            if args.allow is not None or args.remove is not None:
+                if asyncio.run(server._reg()._detect_caller()) is not None:
+                    return _fail(args, "human_only", "Only a human may change global MCP approval rules")
+            result = mcp_allowlist.edit(args.backend, allow=args.allow, remove=args.remove)
+            print(json.dumps({"v": CTL_JSON_VERSION, "result": result}) if args.json else result["detail"])
+            return 0
+        except (ValueError, OSError, TypeError, AttributeError) as exc:
+            return _fail(args, "allowlist_error", str(exc))
     if args.command.startswith("workflow-"):
         return _cmd_workflow(args)
     if args.command == "list":
