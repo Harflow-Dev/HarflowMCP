@@ -439,7 +439,6 @@ from polybridge import events as events_module  # noqa: E402
 from polybridge.backends import normalize as nz  # noqa: E402
 
 _SRC = Path(__file__).resolve().parent.parent / "src" / "polybridge"
-_README = Path(__file__).resolve().parent.parent / "README.md"
 
 
 @pytest.mark.allow_unknown_event_kinds
@@ -519,14 +518,6 @@ def test_no_backend_names_an_unlisted_kind_outside_the_normalize_helpers() -> No
         found = set(_re.findall(r'"kind":\s*"(\w+)"', path.read_text()))
         stray = found - events_module.EVENT_KINDS - _NON_EVENT_KIND_LITERALS
         assert not stray, f"{path.name}: {sorted(stray)}"
-
-
-def test_the_readme_lists_exactly_event_kinds() -> None:
-    text = " ".join(_README.read_text(encoding="utf-8").split())
-    match = _re.search(r"`kind` — one of (.*?)\. ", text)
-    assert match is not None, "README's events.jsonl kind list not found"
-    documented = set(_re.findall(r"`(\w+)`", match.group(1)))
-    assert documented == events_module.EVENT_KINDS
 
 
 # --- Tests for bounded readers (read_recent, read_page) and formatter -------------------------

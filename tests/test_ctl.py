@@ -353,7 +353,9 @@ def test_backends_json_reports_the_registry_in_order(
 
     doc = _one_doc(capsys)
     assert doc["v"] == 2
-    assert [b["backend"] for b in doc["backends"]] == ["claude", "codex", "opencode", "vibe"]
+    assert [b["backend"] for b in doc["backends"]] == [
+        "claude", "codex", "opencode", "vibe", "antigravity"
+    ]
     assert doc["backends"] == [
         {"backend": name, "binary": backend.binary, "installed": name != "claude"}
         for name, backend in backends_module.BACKENDS.items()
@@ -379,6 +381,7 @@ def test_backends_plain_text_is_one_line_per_backend(
         "codex  not found on PATH",
         "opencode  not found on PATH",
         "vibe  installed",
+        "antigravity  not found on PATH",
     ]
 
 

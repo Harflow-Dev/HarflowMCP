@@ -161,7 +161,7 @@ def test_codex_read_only_parent_refuses_codex_write_in_repo_child_on_writable_ro
 
 
 @pytest.mark.parametrize("parent_freedom", ["read_only", "write_in_repo", "publish"])
-@pytest.mark.parametrize("child_name", ["claude", "opencode", "vibe"])
+@pytest.mark.parametrize("child_name", ["claude", "opencode", "vibe", "antigravity"])
 def test_cross_backend_child_under_confined_codex_parent_refused_on_backend(
     parent_freedom: str, child_name: str
 ) -> None:

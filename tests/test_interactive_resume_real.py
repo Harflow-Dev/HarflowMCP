@@ -47,6 +47,11 @@ HELP_CHECKS: dict[str, list[tuple[list[str], list[str], set[str]]]] = {
     "vibe": [
         (["--help"], [r"--trust\b", r"--workdir DIR", r"--resume \[SESSION_ID\]"], {"--trust", "--workdir", "--resume"}),
     ],
+    # Measured on agy 1.2.14: `agy --conversation <id>` resumes the same conversation (an unknown
+    # id is not refused — it silently starts a new one — which the drainer reports).
+    "antigravity": [
+        (["--help"], [r"--conversation"], {"--conversation"}),
+    ],
 }
 
 

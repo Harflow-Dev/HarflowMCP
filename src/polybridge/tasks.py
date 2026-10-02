@@ -632,6 +632,15 @@ class Task:
     """`acc.result_count` when polybridge last wrote a message to the run. A turn is owed for it, so
     until a later result arrives an earlier success is not the run's outcome — persisted, so a
     recovered run's replay knows it too (`store._resolve`)."""
+    results_owed: int = 0
+    """How many turn results this live run owes before it may be considered idle: 1 for the initial
+    prompt, plus one per message written — but only for a backend where each written line starts a
+    turn of its own (`live_input_message_is_turn`, agy, measured). claude folds a mid-turn message
+    into the running turn, so however many messages were written it is only ever owed
+    `result_count + 1`. Not persisted: recovery derives the same fact from `input_after_result`,
+    which both shapes set to "results still owed" (see `store._resolve` and
+    `_note_input_written`). 0 for a run that never took live input, and for a directly-constructed
+    Task whose idle behaviour is driven by `acc.awaiting_input` alone."""
     last_output_at: float = field(default_factory=time.monotonic)
     """`time.monotonic()` of the last stdout line — the idle bound's clock."""
 
@@ -1000,8 +1009,9 @@ class TaskRegistry:
         #
         # The whole Invocation is checked, not just its argv, and the stdin wiring below comes from
         # it — never from the backend's name or its static capability — so a live-input argv can
-        # only ever run with the pipe it was built for, and every other run keeps stdin DEVNULL
-        # (codex and vibe block forever reading an open stdin).
+        # only ever run with the pipe it was built for (claude without a turn cap, and every
+        # antigravity run, is live), and every other run keeps stdin DEVNULL (codex and vibe block
+        # forever reading an open stdin).
         backend.assert_safe(invocation, freedom, network)  # type: ignore[arg-type]
 
         task_id = str(uuid.uuid4())
@@ -1121,6 +1131,10 @@ class TaskRegistry:
             title=title,
             lineage_detected=lineage_detected,
             live_input=invocation.live_input,
+            # A live run owes one result for its initial prompt — plus, on a backend where each
+            # written line is its own turn, one more per message the pump writes (see
+            # `_note_input_written`). Non-live runs owe nothing: no pump ever runs for them.
+            results_owed=1 if invocation.live_input else 0,
         )
 
         # Written before anything can go wrong, so even a task whose server dies immediately is
@@ -1384,12 +1398,27 @@ class TaskRegistry:
             return "the run's stdin had closed"
         return None
 
-    def _note_input_written(self, task: Task) -> None:
-        """A message reached the run: a turn is owed for it. Not idle until its result arrives,
-        and an earlier success is not the outcome until then — recorded durably for recovery."""
+    def _note_input_written(self, task: Task, written: int) -> None:
+        """Messages reached the run: turns are owed for them. Not idle until their results arrive,
+        and an earlier success is not the outcome until then — recorded durably for recovery.
+
+        How many turns the writes opened is the backend's own semantics, read from its
+        `live_input_message_is_turn` capability rather than its name. claude folds every message
+        written mid-turn into the running turn (measured, 2.1.281), so exactly one turn is owed
+        however many landed — owed is `result_count + 1`, and a result that already arrived
+        covers it. agy runs each written line as its own turn, even mid-turn (measured: two
+        queued lines, EOF at the first result, three results), so every message adds one turn to
+        wait for, and `input_after_result` records that count of still-owed turns — which is what
+        makes `store._resolve`'s `result_count <= input_after_result` mean "a turn is still owed"
+        under both shapes."""
         task.acc.awaiting_input = False
         task.acc.turn_open = True
-        task.input_after_result = task.acc.result_count
+        if get_backend(task.backend).capabilities.live_input_message_is_turn:
+            task.results_owed += written
+            task.input_after_result = task.results_owed - 1
+        else:
+            task.input_after_result = task.acc.result_count
+            task.results_owed = task.acc.result_count + 1
         try:
             self.persist(task)
         except Exception:
@@ -1422,7 +1451,7 @@ class TaskRegistry:
         finally:
             inbox.unlock(fd)
         if written:
-            self._note_input_written(task)
+            self._note_input_written(task, written)
             await _drain_stdin(task)
         return bool(pending)
 
@@ -1430,8 +1459,17 @@ class TaskRegistry:
         """Re-made under the inbox lock: the idle state the pump saw before waiting for the lock
         may be gone by now (a follow-up turn, a new background task)."""
         if kind == CLOSE_IDLE:
-            return task.acc.awaiting_input
+            # Every owed result must have arrived, not merely the latest one: on a backend where
+            # each written message is its own turn (agy), awaiting_input after the first of
+            # several owed results is not idle — closing stdin there would kill the turns the
+            # queued messages were owed. On claude owed is result_count + 1 at the last write, so
+            # this condition is exactly the old `awaiting_input` one for it.
+            return task.acc.awaiting_input and task.acc.result_count >= task.results_owed
         if kind == CLOSE_IDLE_BOUND:
+            # No owed-result check here, deliberately: the bound only fires when no turn is
+            # running and nothing but background work holds the run open, and a turn owed for a
+            # written message has already set turn_open (via `_note_input_written`) and turned
+            # this branch off.
             return background_idle_bound_reached(
                 task.acc, time.monotonic() - task.last_output_at, bound
             )
@@ -1486,7 +1524,7 @@ class TaskRegistry:
             if reason is None:
                 wrote = self._write_messages(task, pending)
                 if wrote:
-                    self._note_input_written(task)  # a turn is owed for those, EOF or not
+                    self._note_input_written(task, wrote)  # turns are owed for those, EOF or not
             else:
                 self._report_undelivered(task, pending, reason)
             try:
@@ -1604,7 +1642,10 @@ class TaskRegistry:
                 kind: str | None = CLOSE_STOP if reason is not None else None
                 if kind is None and await self._forward_pending(task):
                     continue
-                if kind is None and acc.awaiting_input:
+                if kind is None and acc.awaiting_input and acc.result_count >= task.results_owed:
+                    # Idle means every owed result has arrived — on a backend where each written
+                    # message is its own turn, that is several results, not one (see
+                    # `_close_still_warranted` for the same rule made under the lock).
                     kind = CLOSE_IDLE
                 if kind is None and background_idle_bound_reached(
                     acc, time.monotonic() - task.last_output_at, bound
@@ -2768,6 +2809,10 @@ async def _drain_stdout(task: Task, registry: TaskRegistry) -> None:
         log.warning("task %s: cannot open %s; continuing without a raw log", task.task_id, task.log_path)
 
     try:
+        # Set once this drain sees the stream report a session other than the one a resume asked
+        # for, so the bridge notice below is appended exactly once per run however many events
+        # carry the different id.
+        session_swap_noticed = False
         while True:
             try:
                 raw = await reader.readline()
@@ -2817,6 +2862,34 @@ async def _drain_stdout(task: Task, registry: TaskRegistry) -> None:
             if task.session_id is None and task.acc.session_id:
                 task.session_id = task.acc.session_id
                 log.info("task %s: session id is %s", task.task_id, task.session_id)
+                registry.persist(task)
+            elif (
+                not session_swap_noticed
+                and task.session_id is not None
+                and task.acc.session_id
+                and task.acc.session_id != task.session_id
+            ):
+                # A resume that lands on a different session: some CLIs do not refuse an unknown
+                # id, they silently start a new conversation (agy does — measured, exit 0, a
+                # different conversation_id). The monitor below still trusts the stream and
+                # re-points the task at the id the agent actually used, but the caller must be
+                # told the run is not a continuation of the conversation they asked for.
+                session_swap_noticed = True
+                task.bridge_notices.append(
+                    f"the agent reported session {task.acc.session_id} instead of the requested "
+                    f"{task.session_id}: the CLI did not continue that conversation, so this run "
+                    "is not a continuation of it"
+                )
+                _write_event(
+                    task,
+                    "notice",
+                    {"text": task.bridge_notices[-1]},
+                )
+                # Re-pointed now, not only at exit: a server restart before then would otherwise
+                # leave the record naming a conversation that was never continued, and the next
+                # resume would ask for it again. The identity markers were fixed at spawn and do
+                # not move with it.
+                task.session_id = task.acc.session_id
                 registry.persist(task)
     except asyncio.CancelledError:
         raise
@@ -3051,4 +3124,10 @@ def _classify(task: Task, exit_code: int) -> Status:
     if task.drain_failed:
         # We stopped reading its output, so whatever the agent reported cannot be trusted.
         return "failed"
+    if task.live_input and task.acc.result_count < task.results_owed:
+        # Messages were written that the stream never answered: on a backend where each one is
+        # its own turn, the run exiting after the first of several owed results leaves turns
+        # unanswered. The same rule `store._resolve` applies on recovery, so a live verdict and a
+        # recovered one cannot disagree about the same stream.
+        task.acc.turn_open = True
     return get_backend(task.backend).classify(task.acc, exit_code)

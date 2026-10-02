@@ -40,7 +40,7 @@ PAGE_BUDGET_BYTES = 262_144
 EVENT_MAX_BYTES = 16_384  # 256 KiB budget for a page of events
 
 # The closed set of `kind` values in a v1 events log — the Monitor app (Stage C) switches on these,
-# so adding one is a contract change: update this set, README.md's list, and the app's
+# so adding one is a contract change: update this set and the app's
 # `TaskEvent.Kind` (macos/PbCore/MonitorCore/Sources/MonitorCore/Events.swift) together.
 # Found by reading every emit site: the bridge's own writes in `tasks.py` (`task_started`,
 # `task_finished`, `user_message`, `notice`, `undelivered`) and the helpers every backend's

@@ -69,7 +69,7 @@ async def test_list_backends_describes_every_one() -> None:
     listed = (await call("list_backends")).structured_content["result"]
 
     by_name = {entry["backend"]: entry for entry in listed}
-    assert sorted(by_name) == ["claude", "codex", "opencode", "vibe"]
+    assert sorted(by_name) == ["antigravity", "claude", "codex", "opencode", "vibe"]
     # The differences a caller has to plan around.
     assert by_name["claude"]["capabilities"]["supports_turn_cap"] is True
     assert by_name["codex"]["capabilities"]["supports_turn_cap"] is False
@@ -87,6 +87,16 @@ async def test_list_backends_describes_every_one() -> None:
     assert by_name["vibe"]["capabilities"]["reasoning_effort"]["accepts_parameter"] is False
     # But vibe genuinely does support a turn cap — unlike codex and opencode.
     assert by_name["vibe"]["capabilities"]["supports_turn_cap"] is True
+    # antigravity: no turn cap, no dollar cost, live input where every written line is its own
+    # turn, and an effort ladder the CLI itself polices (xhigh refused before the run starts).
+    agy = by_name["antigravity"]["capabilities"]
+    assert agy["supports_turn_cap"] is False
+    assert agy["os_sandbox"] is False
+    assert agy["reports_cost_usd"] is False
+    assert agy["supports_model_selection"] is True
+    assert agy["supports_live_input"] is True
+    assert agy["live_input_message_is_turn"] is True
+    assert agy["reasoning_effort"]["levels"] == ["low", "medium", "high"]
 
 
 async def test_unknown_backend_is_rejected(git_repo: Path) -> None:

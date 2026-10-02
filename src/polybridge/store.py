@@ -462,9 +462,9 @@ def _resolve(
         # `record.exit_code` is passed through as-is, None included. Substituting 0 here used to
         # make every backend look as though it had exited cleanly, so a recovered run carrying a
         # closing message was published as `completed` on no evidence at all. What that None is
-        # worth is each backend's own business: claude's `result` event and opencode's
-        # `reason: "stop"` are real terminal evidence, while codex and vibe have no terminal event
-        # and so require an observed zero exit.
+        # worth is each backend's own business: claude's `result` event, opencode's
+        # `reason: "stop"` and antigravity's `result` event are real terminal evidence, while
+        # codex and vibe have no terminal event and so require an observed zero exit.
         status = get_backend(record.backend).classify(state, record.exit_code)
         return (
             status,

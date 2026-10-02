@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Install polybridge and register it with the Claude desktop app plus each agent CLI found —
-# Claude Code, Codex, opencode, vibe.
+# Claude Code, Codex, opencode, vibe, Antigravity (agy).
 #
 # Deliberately short: you should be able to read an install script before running it.
 # Everything fiddly (merging your config, driving each client's own `mcp add`, resolving

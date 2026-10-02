@@ -179,7 +179,8 @@ class DesktopClient:
         There is no reliable way to detect the desktop app: it can live outside /Applications, and its
         config directory does not exist until it has run once. Requiring the directory would skip a
         freshly installed app, which is the common case an installer exists for. So the entry is
-        written on any supported platform, and the README says as much rather than implying detection.
+        written on any supported platform, and the README and setup report say as much rather than
+        implying detection.
         """
         try:
             return Availability(True, where=str(self.resolve_path()))

@@ -39,6 +39,7 @@ from .base import (
     reject_model,
     reject_turn_cap,
 )
+from .antigravity import AntigravityBackend
 from .claude import ClaudeBackend
 from .codex import CodexBackend
 from .opencode import OpencodeBackend
@@ -51,6 +52,7 @@ BACKENDS: dict[str, Backend] = {
     CodexBackend.name: CodexBackend(),
     OpencodeBackend.name: OpencodeBackend(),
     VibeBackend.name: VibeBackend(),
+    AntigravityBackend.name: AntigravityBackend(),
 }
 
 DEFAULT_BACKEND = ClaudeBackend.name

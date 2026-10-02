@@ -84,16 +84,17 @@ mcp = MCPServer(
     "polybridge",
     instructions=(
         "Dispatch coding tasks to headless coding agents on this machine — currently Claude Code, "
-        "Codex, opencode and vibe. start_task returns immediately with a task_id; poll it with "
-        "get_task_status or await it with wait_for_task, then continue the same session with "
-        "resume_task.\n\n"
+        "Codex, opencode, vibe and Antigravity (binary `agy`). start_task returns immediately with "
+        "a task_id; poll it with get_task_status or await it with wait_for_task, then continue the "
+        "same session with resume_task.\n\n"
         "Call list_backends first if you are unsure which to use: it reports what is installed and "
         "what each one can actually do. Backends differ in ways that matter — Claude and vibe "
         "support a turn cap (though a breach on vibe reads as a plain failure, not a distinct "
         "status), only Claude and opencode report a dollar cost, only Codex enforces restrictions "
-        "with a real OS sandbox, and only vibe has no model-selection flag at all. Every task "
-        "reports an `enforcement` block describing what was actually enforced, which is the honest "
-        "answer rather than what `freedom` implies.\n\n"
+        "with a real OS sandbox, only vibe has no model-selection flag at all, and Antigravity "
+        "accepts reasoning_effort only at low/medium/high (its CLI refuses xhigh before the run "
+        "starts). Every task reports an `enforcement` block describing what was actually "
+        "enforced, which is the honest answer rather than what `freedom` implies.\n\n"
         "A `publish` freedom level sits between `write_in_repo` and `unrestricted`: it authorizes "
         "the agent to attempt to commit, push or open a PR. It is NOT a promise that publishing "
         "succeeds — credentials, remote permissions, branch protection, repo hooks, or an "
@@ -109,11 +110,13 @@ mcp = MCPServer(
         "A wait_for_task that comes back still 'running' has not failed — the run is untouched, so "
         "call again or poll. Tasks outlive this server process: ones started by an earlier "
         "polybridge server are still reported, marked 'recovered: true'.\n\n"
-        "A claude task started without max_turns has live input (`live_input: true`): "
-        "send_message adds a message while it runs — folded into the running turn, or starting a "
-        "new one if the agent is idle. It returns 'queued', never 'delivered'. Once the agent is "
-        "idle with nothing queued the task closes its own input and settles as usual; a send after "
-        "that is refused with 'finished; continue with resume_task'."
+        "A claude task started without max_turns, and every antigravity task, has live input "
+        "(`live_input: true`): send_message adds a message while it runs — folded into the "
+        "running turn on claude, or starting a new one if the agent is idle; on antigravity each "
+        "written message is its own turn, even mid-turn. It returns 'queued', never 'delivered'. "
+        "Once every turn the run owes has been answered and nothing is queued the task closes its "
+        "own input and settles as usual; a send after that is refused with 'finished; continue "
+        "with resume_task'."
     ),
 )
 
@@ -297,7 +300,8 @@ async def start_task(
     Args:
         prompt: Instructions for the agent. Be specific about the desired end state.
         repo_path: Absolute path to a git repository; the agent's working directory.
-        backend: Which agent to use — "claude", "codex", "opencode" or "vibe". See list_backends.
+        backend: Which agent to use — "claude", "codex", "opencode", "vibe" or "antigravity". See
+            list_backends.
         freedom: "read_only", "write_in_repo" (default), "publish", or "unrestricted". "publish"
             sits between "write_in_repo" and "unrestricted": it authorizes an attempt to
             commit/push/open a PR, but that is not a promise the attempt succeeds — credentials,
@@ -306,17 +310,19 @@ async def start_task(
             returned `enforcement` says what actually applies, via
             `publish_attempts_allowed_by_polybridge` and `network_access` among other fields.
         model: Model for this run, in the backend's own naming. Rejected outright, rather than
-            silently ignored, on a backend with no model-selection flag at all — vibe is the first
+            silently ignored, on a backend with no model-selection flag at all — vibe is the one
             such case; see list_backends' capabilities.supports_model_selection.
         max_turns: Cap on agent turns. Only some backends support this; asking for it on one that
             does not is an error rather than being silently ignored.
         reasoning_effort: "low", "medium", "high" or "xhigh", passed to the backend verbatim.
-            Rejected up front only when the chosen *backend* has no effort control at all (vibe is
+            Rejected up front when the chosen *backend* has no effort control at all (vibe is
             config-only and has none), or is asked for a level outside the ones it declares (see
-            list_backends); polybridge cannot tell whether the chosen *model* honours it — on
-            opencode in particular, a model with no declared variants silently ignores an
-            unsupported level rather than erroring. See list_backends' per-backend reasoning_effort
-            caveats for what is and is not known there.
+            list_backends — antigravity accepts only low/medium/high, and its CLI would refuse
+            xhigh before the run starts, exit 1); polybridge cannot tell whether the chosen
+            *model* honours it — on opencode in particular, a model with no declared variants
+            silently ignores an unsupported level rather than erroring, and on antigravity a model
+            id that encodes its own level makes the CLI refuse --effort at startup. See
+            list_backends' per-backend reasoning_effort caveats for what is and is not known there.
         network: Optional boolean asking for network access independently of `freedom`: True
             asks polybridge to impose no network barrier of its own, False asks it to impose one,
             and None (the default) keeps each freedom's historical behaviour exactly. The
@@ -324,8 +330,8 @@ async def start_task(
             corporate firewall or proxy defeats it too. Only codex has a barrier polybridge can
             actually raise or lower, and its support is non-rectangular (see
             capabilities.network_control): enabling is refused at read_only and blocking at
-            unrestricted. On claude, opencode and vibe, True is accepted — there is nothing to
-            impose — and False is an error rather than silently dropped;
+            unrestricted. On claude, opencode, vibe and antigravity, True is accepted — there is
+            nothing to impose — and False is an error rather than silently dropped;
             enforcement.network_access stays "not_controlled" there. What actually applied is
             stated on the returned task's enforcement.network_access.
         group: Optional label (1-128 chars), inherited by any nested dispatch this task's own
@@ -400,8 +406,9 @@ async def get_task_status(
     Returns the task's status, summary, enforcement, and `recent_activity` — a list of ≤ 5 one-line
     strings describing the most recent meaningful events (tool calls, failed tool results, assistant
     messages, notices). For running tasks this gives a live summary without the bulk of the
-    raw stream. `total_cost_usd` is null for backends that do not report cost — Codex reports
-    tokens only, and vibe reports neither cost nor tokens nor a turn count.
+    raw stream. `total_cost_usd` is null for backends that do not report cost — Codex, vibe and
+    Antigravity report tokens only or nothing (vibe reports neither cost nor tokens nor a turn
+    count).
 
     `enforcement` states what the run's restrictions actually amounted to, and `mcp_servers` (where
     the backend reports them) shows what the agent loaded. Tasks started by an earlier polybridge
@@ -808,13 +815,16 @@ async def send_message(task_id: str, text: str) -> dict[str, Any]:
     """Add a message to a running live-input task, as if the user had typed it mid-run.
 
     Args:
-        task_id: A running task whose `live_input` is true (claude, started without `max_turns`).
+        task_id: A running task whose `live_input` is true (claude started without `max_turns`,
+            or any antigravity task).
         text: The message.
 
     Returns `status: "queued"` — never "delivered". The task's input pump writes the message to the
-    agent: while a turn is running it is folded into that turn; if the agent is idle it starts a new
-    one. The task's event log then records a `user_message` event (`source: "injected"`) when it is
-    written, or an `undelivered` event plus a notice if it never is (the run errored or exited first).
+    agent: on claude, a message arriving while a turn is running is folded into that turn, and one
+    arriving while the agent is idle starts a new turn; on antigravity every written message is its
+    own turn, even mid-turn. The task's event log then records a `user_message` event
+    (`source: "injected"`) when it is written, or an `undelivered` event plus a notice if it never
+    is (the run errored or exited first).
 
     A live task closes its own input once it is idle with nothing queued, so it still settles
     unattended. A send after that is refused with "finished; continue with resume_task" — which is

@@ -91,7 +91,7 @@ def _launch(entry: Any) -> tuple[tuple[str, ...] | None, str | None]:
 @dataclass(frozen=True)
 class OpencodeClient(CliClient):
     key: str = "opencode"
-    label: str = "opencode"
+    label: str = "Opencode"
     binary: str = "opencode"
     config_hint: str = "~/.config/opencode/opencode.jsonc"
 
