@@ -1685,3 +1685,253 @@ def test_provider_stderr_client_status_never_outage_from_later_numbers(diagnosti
 @pytest.mark.parametrize("diagnostic", ["API Error: HTTP 503 unavailable", "HTTP Error: status code: 502 bad gateway", "Provider Error: status=504 timeout"])
 def test_provider_stderr_status_position_recognized(diagnostic):
     assert w.availability_failure({"status": "failed", "backend": "claude", "stderr_tail": [diagnostic]})
+
+
+@pytest.mark.parametrize("axis", ["x", "y"])
+@pytest.mark.parametrize("coordinate", [-1, -0.01])
+@pytest.mark.parametrize("preview", [False, True])
+def test_negative_canvas_positions_are_rejected(axis, coordinate, preview):
+    graph = definition()
+    graph["nodes"][1]["position"] = {"x": 0, "y": 0, axis: coordinate}
+    with pytest.raises(w.WorkflowError, match="nonnegative"):
+        if preview:
+            w.validate_builder_preview(graph, "example")
+        else:
+            w.validate_definition(graph)
+
+
+@pytest.mark.parametrize("preview", [False, True])
+def test_nonnegative_canvas_positions_preserve_zero_and_large_expandable_layout(preview):
+    graph = definition()
+    graph["nodes"][0]["position"] = {"x": 0, "y": 0}
+    graph["nodes"][1]["position"] = {"x": 20000, "y": 30000}
+    actual = w.validate_builder_preview(graph, "example") if preview else w.validate_definition(graph)
+    assert actual["nodes"][0]["position"] == {"x": 0, "y": 0}
+    assert actual["nodes"][1]["position"] == {"x": 20000, "y": 30000}
+
+
+async def test_builder_receives_canvas_geometry_and_spacing_guidance(storage, tmp_path, monkeypatch):
+    monkeypatch.setattr(w, "_launch", lambda *args: None)
+    run = await w.build_workflow("example", "Refine step instructions", agent={"backend": "codex"}, definition=definition(), root=storage.root)
+    registry = FakeRegistry(storage.root, [json.dumps(definition())])
+    await w.WorkflowSupervisor(registry, storage).build(run["workflow_run_id"])
+    prompt = registry.calls[0][0]
+    assert w.BUILDER_LAYOUT_GUIDANCE in prompt
+    assert "200 x 92" in prompt and "72 x 72" in prompt
+    assert "40 points" in prompt and "nonnegative" in prompt
+    assert "Adding nodes or refining instructions is not permission to move existing nodes" in prompt
+
+
+def optional_parallel_definition():
+    graph = parallel_definition()
+    next(n for n in graph["nodes"] if n["id"] == "left")["optional"] = True
+    return graph
+
+
+@pytest.mark.parametrize("value", [1, "true", None])
+def test_optional_node_requires_strict_boolean(value):
+    graph = optional_parallel_definition()
+    next(n for n in graph["nodes"] if n["id"] == "left")["optional"] = value
+    with pytest.raises(w.WorkflowError, match="boolean"):
+        w.validate_definition(graph)
+
+
+def test_optional_sequential_and_all_optional_forks_rejected():
+    graph = definition()
+    graph["nodes"][1]["optional"] = True
+    with pytest.raises(w.WorkflowError, match="safe parallel"):
+        w.validate_definition(graph)
+    graph = optional_parallel_definition()
+    next(n for n in graph["nodes"] if n["id"] == "right")["optional"] = True
+    with pytest.raises(w.WorkflowError, match="safe parallel"):
+        w.validate_definition(graph)
+
+
+def test_optional_cannot_bypass_required_successor():
+    graph = optional_parallel_definition()
+    graph["nodes"].append({"id": "must", "type": "agent", "agent": {"backend": "codex"}})
+    next(e for e in graph["connections"] if e["id"] == "left-join")["target"] = "must"
+    graph["connections"].append({"id": "must-join", "source": "must", "target": "join"})
+    with pytest.raises(w.WorkflowError, match="required successor"):
+        w.validate_definition(graph)
+
+
+async def test_optional_parallel_failure_arrives_join_with_failed_evidence(storage, tmp_path):
+    decision = json.dumps({"action": "continue", "connections": ["left-edge", "right-edge"], "reason": "Both"})
+    run, registry = await execute(storage, tmp_path, optional_parallel_definition(), ["split", decision, {"summary": "failed check", "status": "failed"}, "required success"])
+    assert run["status"] == "completed"
+    assert len(registry.calls) == 4
+    assert run["joins"] == {}
+    failed = next(a for a in run["activations"] if a["node_id"] == "left")
+    assert failed["status"] == "failed"
+    assert failed["optional_failure"] is True
+    assert failed["result"]["failure_evidence"]["summary"] == "failed check"
+
+
+async def test_required_parallel_failure_still_needs_attention(storage, tmp_path):
+    decision = json.dumps({"action": "continue", "connections": ["left-edge", "right-edge"], "reason": "Both"})
+    run, registry = await execute(storage, tmp_path, parallel_definition(), ["split", decision, {"summary": "failed", "status": "failed"}, "required success"])
+    assert run["status"] == "needs_attention"
+
+
+async def test_single_selected_optional_failure_has_no_tolerance(storage, tmp_path):
+    decision = json.dumps({"action": "continue", "connections": ["left-edge"], "reason": "Only optional"})
+    run, registry = await execute(storage, tmp_path, optional_parallel_definition(), ["split", decision, {"summary": "failed", "status": "failed"}])
+    assert run["status"] == "needs_attention"
+    assert not any(a.get("optional_failure") for a in run["activations"])
+
+
+async def test_optional_fallback_exhaustion_continues_required_branch(storage, tmp_path):
+    graph = optional_parallel_definition()
+    next(n for n in graph["nodes"] if n["id"] == "left")["agent"]["fallbacks"] = [{"backend": "claude"}]
+    decision = json.dumps({"action": "continue", "connections": ["left-edge", "right-edge"], "reason": "Both"})
+    run, registry = await execute(storage, tmp_path, graph, ["split", decision, {"summary": "", "status": "failed", "backend": "codex", "stderr": ["API Error: 503 unavailable"]}, {"summary": "", "status": "failed", "backend": "claude", "stderr": ["API Error: 529 overloaded_error"]}, "required success"])
+    assert run["status"] == "completed"
+    assert any(a.get("optional_failure") for a in run["activations"])
+
+
+async def test_optional_invalid_planning_json_does_not_create_or_complete_tasks(storage, tmp_path):
+    graph = optional_parallel_definition()
+    next(n for n in graph["nodes"] if n["id"] == "left")["role"] = "planning"
+    decision = json.dumps({"action": "continue", "connections": ["left-edge", "right-edge"], "reason": "Both"})
+    run, registry = await execute(storage, tmp_path, graph, ["split", decision, "not JSON", "required done"])
+    assert run["status"] == "completed"
+    assert run["tasks"] == []
+    assert next(a for a in run["activations"] if a["node_id"] == "left")["status"] == "failed"
+
+
+def test_optional_failure_never_escapes_unsafe_inner_group():
+    graph = w.validate_definition(optional_parallel_definition())
+    left = next(n for n in graph["nodes"] if n["id"] == "left")
+    run = {"definition": graph, "status": "running", "joins": {
+        "outer": {"join_id": "join", "selected_targets": ["left", "right"]},
+        "inner": {"join_id": "join", "selected_targets": ["left"]},
+    }}
+    assert w.optional_failure_join(run, left, {"stack": ["outer"]}) == "join"
+    assert w.optional_failure_join(run, left, {"stack": ["outer", "inner"]}) is None
+
+
+async def test_optional_unsupported_settings_then_missing_fallback_can_continue(storage, tmp_path, monkeypatch):
+    graph = optional_parallel_definition()
+    next(n for n in graph["nodes"] if n["id"] == "left")["agent"] = {"backend": "codex", "max_turns": 5, "fallbacks": [{"backend": "claude"}]}
+    monkeypatch.setattr(w.backends, "is_installed", lambda backend: backend.name != "claude")
+    decision = json.dumps({"action": "continue", "connections": ["left-edge", "right-edge"], "reason": "Both"})
+    run, registry = await execute(storage, tmp_path, graph, ["split", decision, "required done"])
+    assert run["status"] == "completed"
+    failed = next(a for a in run["activations"] if a["node_id"] == "left")
+    assert failed["optional_failure"] is True
+    assert failed["tasks"][0]["status"] == "not_started"
+
+
+async def test_optional_enforcement_refusal_does_not_bypass_limits(storage, tmp_path):
+    graph = optional_parallel_definition()
+    left = next(n for n in graph["nodes"] if n["id"] == "left")
+    left.update(freedom="read_only", network=True)
+    decision = json.dumps({"action": "continue", "connections": ["left-edge", "right-edge"], "reason": "Both"})
+    run, registry = await execute(storage, tmp_path, graph, ["split", decision, "required done"])
+    assert run["status"] == "needs_attention"
+    assert not any(a.get("optional_failure") for a in run["activations"])
+
+
+def test_selected_all_optional_subset_requires_actual_required_sibling():
+    graph = optional_parallel_definition()
+    graph["nodes"].append({"id": "third", "type": "agent", "optional": True, "agent": {"backend": "codex"}})
+    graph["connections"].extend([{"id": "third-edge", "source": "work", "target": "third"}, {"id": "third-join", "source": "third", "target": "join"}])
+    graph = w.validate_definition(graph)
+    work = next(n for n in graph["nodes"] if n["id"] == "work")
+    edges = [e for e in graph["connections"] if e["id"] in {"left-edge", "third-edge"}]
+    with pytest.raises(w.WorkflowError, match="actually selected required"):
+        w.validate_selection(graph, work, edges, {"stack": []}, {})
+
+
+async def test_recovered_optional_failure_result_does_not_repeat_worker(storage, tmp_path):
+    graph = w.validate_definition(optional_parallel_definition())
+    run = storage.create_run(graph, "task", tmp_path)
+    token = {"id": "optional-token", "node_id": "left", "stack": ["group"], "execution_complete": True, "optional_failure_join": "join", "result": {"optional_failure": "observed failed", "failure_evidence": {"status": "failed"}}}
+    arrived = {"id": "required-token", "node_id": "join", "stack": ["group"], "context": {"summary": "required done"}}
+    storage.update_run(run["workflow_run_id"], lambda r: r.update(status="running", pending=[token], joins={"group": {"join_id": "join", "split_id": "work", "selected_targets": ["left", "right"], "expected": 2, "arrived": [arrived], "stack": []}}), "recovered_fixture")
+    registry = FakeRegistry(storage.root, [])
+    await w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"])
+    result = storage.get_run(run["workflow_run_id"])
+    assert result["status"] == "completed"
+    assert result["joins"] == {}
+    assert registry.calls == []
+
+
+@pytest.mark.parametrize("availability", [False, True])
+async def test_reconcile_optional_failure_at_task_snapshot_boundary_no_repeat(storage, tmp_path, availability):
+    graph = w.validate_definition(optional_parallel_definition())
+    left = next(n for n in graph["nodes"] if n["id"] == "left")
+    left["max_attempts"] = 1
+    if availability:
+        left["agent"]["fallbacks"] = [{"backend": "claude", "max_turns": 100}]
+    run = storage.create_run(graph, "task", tmp_path)
+    token = {"id": "optional-token", "node_id": "left", "stack": ["group"]}
+    arrived = {"id": "required-token", "node_id": "join", "stack": ["group"], "context": {"summary": "required done"}}
+    failed = {"status": "failed", "backend": "codex", "summary": "observed failure", "stderr_tail": ["API Error: 503 unavailable"] if availability else []}
+    activation = {"id": "activation", "node_id": "left", "role": "node", "status": "running", "token": token, "tasks": [{"task_id": "observed-task", "status": "failed", "candidate": left["agent"], "result": failed}]}
+    storage.update_run(run["workflow_run_id"], lambda r: r.update(status="needs_attention", pending=[token], activations=[activation], joins={"group": {"join_id": "join", "split_id": "work", "selected_targets": ["left", "right"], "expected": 2, "arrived": [arrived], "stack": []}}), "task_snapshot_boundary")
+    reconciled = storage.reconcile_run(run["workflow_run_id"])
+    assert reconciled["pending"][0]["recovered_failed_result"] == failed
+    storage.update_run(run["workflow_run_id"], lambda r: r.update(status="running"), "explicit_resume")
+    registry = FakeRegistry(storage.root, ["fallback success"] if availability else [])
+    await w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"])
+    result = storage.get_run(run["workflow_run_id"])
+    assert result["status"] == "completed"
+    assert len(registry.calls) == (1 if availability else 0)
+    if availability:
+        assert registry.calls[0][1]["backend"].name == "claude"
+        assert len(result["activations"]) == 1
+    else:
+        assert result["activations"][0]["status"] == "failed"
+
+
+def test_reconcile_single_selected_optional_preserves_explicit_retry(storage, tmp_path):
+    graph = w.validate_definition(optional_parallel_definition())
+    run = storage.create_run(graph, "task", tmp_path)
+    token = {"id": "single-token", "node_id": "left", "stack": []}
+    failed = {"status": "failed", "backend": "codex", "summary": "observed failure"}
+    activation = {"id": "activation", "node_id": "left", "role": "node", "status": "running", "token": token, "tasks": [{"task_id": "failed-task", "status": "failed", "result": failed}]}
+    storage.update_run(run["workflow_run_id"], lambda r: r.update(status="needs_attention", pending=[token], activations=[activation]), "single_failure_boundary")
+    recovered = storage.reconcile_run(run["workflow_run_id"])
+    assert "recovered_failed_result" not in recovered["pending"][0]
+    assert recovered["status"] == "needs_attention"
+
+
+async def test_recovered_optional_fallback_completed_snapshot_survives_second_interruption(storage, tmp_path):
+    graph = w.validate_definition(optional_parallel_definition())
+    left = next(n for n in graph["nodes"] if n["id"] == "left")
+    left["max_attempts"] = 1
+    left["agent"]["fallbacks"] = [{"backend": "claude", "max_turns": 100}]
+    run = storage.create_run(graph, "task", tmp_path)
+    token = {"id": "token", "node_id": "left", "stack": ["group"]}
+    failed = {"status": "failed", "backend": "codex", "summary": "", "stderr_tail": ["API Error: 503 unavailable"]}
+    activation = {"id": "activation", "node_id": "left", "role": "node", "status": "running", "token": token, "tasks": [{"task_id": "first", "status": "failed", "candidate": left["agent"], "result": failed}]}
+    arrived = {"id": "required", "node_id": "join", "stack": ["group"], "context": {"summary": "required done"}}
+    storage.update_run(run["workflow_run_id"], lambda r: r.update(status="running", pending=[token], activations=[activation], joins={"group": {"join_id": "join", "split_id": "work", "selected_targets": ["left", "right"], "expected": 2, "arrived": [arrived], "stack": []}}), "first_interruption")
+    first = storage.reconcile_run(run["workflow_run_id"])
+    registry = FakeRegistry(storage.root, ["fallback done"])
+    supervisor = w.WorkflowSupervisor(registry, storage)
+    supervisor.run_id = run["workflow_run_id"]
+    from polybridge import identity
+    import os
+    storage.update_run(run["workflow_run_id"], lambda r: r.update(supervisor_pid=os.getpid(), supervisor_identity=identity.own_identity()), "supervisor_restored")
+    original = supervisor._task_update
+    class Interrupted(BaseException):
+        pass
+    def task_update(aid, tid, values):
+        original(aid, tid, values)
+        if values.get("status") == "completed":
+            raise Interrupted()
+    supervisor._task_update = task_update
+    with pytest.raises(Interrupted):
+        await supervisor._execute_node(left, first["pending"][0])
+    second = storage.reconcile_run(run["workflow_run_id"])
+    assert second["activations"][0]["status"] == "completed"
+    assert "recovered_failed_result" not in second["pending"][0]
+    assert second["pending"][0]["recovered_result"]["summary"] == "fallback done"
+    fresh = FakeRegistry(storage.root, [])
+    await w.WorkflowSupervisor(fresh, storage).execute(run["workflow_run_id"])
+    assert storage.get_run(run["workflow_run_id"])["status"] == "completed"
+    assert fresh.calls == []
+    assert len(registry.calls) == 1

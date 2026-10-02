@@ -88,7 +88,7 @@ is `resume` or `fresh`. Connections specify `source`, `target`, `condition`, and
 `default` fallback. Polybridge derives routing metadata (`branch_mode: auto`, `join_id`, and
 `backward`) from the graph; callers do not configure it. Legacy routing fields are accepted
 and normalized for new runs; existing run snapshots retain their original behavior. Legacy
-`join` nodes remain readable. Nodes store canvas coordinates in `position: {x, y}`.
+`join` nodes remain readable. Nodes store top-left canvas coordinates in `position: {x, y}`. Coordinates must be finite and nonnegative; the canvas expands automatically. The dot grid is 10 points. Agent nodes are 200 × 92 points (reserve 20 × 10 cells); Start and End are 72 × 72 points (reserve 8 × 8 cells). Builder agents are guided to leave at least 40 points between node edges and preserve existing positions exactly unless the user explicitly asks to move or rearrange nodes.
 
 Each role receives a short built-in instruction alongside the task, custom step instructions,
 checklist, and prior results. Planning creates pending tasks, implementation reports task IDs
@@ -170,6 +170,16 @@ The orchestrator recommends decisions; it cannot grant additional node permissio
 orchestrator agents run read-only, and workers retain the run's permission limits. Existing backend
 enforcement caveats still apply: a workflow does not create an OS sandbox for a backend that lacks
 one. Inspect each task's enforcement report.
+
+## Unsaved editor drafts
+
+The Monitor automatically keeps unsaved canvas edits as local drafts, including incomplete graphs and applied agent proposals. Navigating away or reopening the app restores the draft. Drafts retain the original saved revision, so Save still detects another update to the saved workflow. Only an explicit successful Save changes the runnable definition. Save is disabled when the canvas matches the saved workflow.
+
+A workflow editor draft also remembers its builder conversation. Navigating to another task and back reconnects to the same running agent or completed proposal. Applying the proposal or explicitly returning to the canvas dismisses that conversation from the editor. Workflow-builder activity has no terminal takeover button.
+
+New canvases start with Start → Plan → Implementation → Review → End in an evenly spaced row. Review also has a retry path back to Implementation when changes are needed.
+
+With the canvas focused, use ⌘C and ⌘V to copy and paste selected nodes. Pasted nodes get new IDs and an offset; connections within the selected group are copied. Existing Start/End nodes are skipped so terminal nodes stay unique. Text fields retain their normal copy/paste behavior.
 
 ## Edit the current canvas with an agent
 
@@ -267,3 +277,12 @@ ordinary permission denials, and failed checks require attention rather than byp
 Ordered fallbacks also cover authoritative provider outages: failed harness API/transport
 diagnostics or typed provider errors identifying server failures, overload, or connection failures.
 Silence, assistant/tool claims, and ordinary test failures do not trigger fallback.
+
+Agent nodes may set `optional: true` (default `false`) to tolerate a definitive failure inside an
+active parallel branch. The step still runs and tries its configured fallbacks. If it fails, its
+branch arrives at the current convergence with explicit failure evidence; a required sibling must
+have been selected. An optional step cannot bypass required steps before that convergence.
+Sequential optional nodes and forks containing only optional branches are rejected. Selecting an
+optional path alone does not grant failure tolerance. Unknown outcomes, cancellation, security or
+enforcement refusals, repository/session problems, and workflow limits still require attention.
+Unsupported model, turn, or reasoning settings count as unavailable candidates after fallbacks.

@@ -31,6 +31,21 @@ ACTIVE = {"running", "paused", "needs_attention", "starting"}
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$")
 
 
+BUILDER_LAYOUT_GUIDANCE = (
+    "Canvas layout: position.x and position.y are the node's top-left corner in logical points, "
+    "not its center and not grid-cell indices. Both coordinates must be finite and nonnegative. "
+    "The dot grid spacing is 10 points; place newly created or repositioned nodes on multiples of 10. "
+    "Agent nodes measure 200 x 92 points (20 x 9.2 grid cells; reserve 20 x 10 cells). "
+    "Start and End measure 72 x 72 points (7.2 x 7.2 grid cells; reserve 8 x 8 cells). "
+    "Leave at least 40 points (4 grid cells) of clear space between node edges; do not overlap nodes. "
+    "Arrange forward steps from left to right, with parallel branches on separate rows. "
+    "The canvas expands automatically, so there is no fixed right or bottom boundary. "
+    "Preserve every existing node position exactly unless the user explicitly asks to move or rearrange "
+    "existing nodes. Adding nodes or refining instructions is not permission to move existing nodes. "
+    "Apply the grid and spacing guidance to new nodes; if existing layout needs repair, report the issue."
+)
+
+
 class WorkflowError(ValueError):
     """Invalid definition, state transition, or execution decision."""
 
@@ -182,14 +197,17 @@ def validate_definition(raw: dict[str, Any]) -> dict[str, Any]:
                 raise WorkflowError("Start prompt must be a string")
         node.setdefault("title", node_id)
         node.setdefault("position", {"x": 80 + 260 * index, "y": 80})
-        if not isinstance(node["title"], str) or not isinstance(node["position"], dict) or any(not isinstance(node["position"].get(k), (int, float)) or isinstance(node["position"].get(k), bool) or not math.isfinite(node["position"][k]) for k in ("x", "y")):
-            raise WorkflowError(f"Invalid title or canvas position: {node_id}")
+        if not isinstance(node["title"], str) or not isinstance(node["position"], dict) or any(not isinstance(node["position"].get(k), (int, float)) or isinstance(node["position"].get(k), bool) or not math.isfinite(node["position"][k]) or node["position"][k] < 0 for k in ("x", "y")):
+            raise WorkflowError(f"Invalid title or canvas position (x and y must be finite and nonnegative): {node_id}")
         if node.get("branch_mode", "auto") not in {"auto", "choose_one", "all_matching"}:
             raise WorkflowError(f"Invalid branching mode: {node_id}")
         # Saved definitions/new launches adopt automatic routing. Existing run
         # snapshots are never revalidated, so their historical modes stay intact.
         node["branch_mode"] = "auto"
         if node["type"] == "agent":
+            node.setdefault("optional", False)
+            if not isinstance(node["optional"], bool):
+                raise WorkflowError("Agent optional must be a boolean")
             node.setdefault("role", "task")
             if node["role"] not in {"planning", "review", "implementation", "task"}:
                 raise WorkflowError(f"Invalid agent role: {node_id}")
@@ -319,6 +337,7 @@ def validate_definition(raw: dict[str, Any]) -> dict[str, Any]:
     for node in nodes:
         if node["type"] == "join" and node["id"] not in inferred_joins:
             raise WorkflowError(f"Join {node['id']} is outside its matching split")
+    validate_optional_nodes(d)
     return d
 
 
@@ -356,6 +375,54 @@ def _selection_join(definition: dict[str, Any], targets: list[str]) -> str:
         raise WorkflowError("Selected parallel paths must converge at one common node")
     return closest[0]
 
+
+
+def _required_region(definition: dict[str, Any], region: set[str]) -> bool:
+    agents = [n for n in definition["nodes"] if n["id"] in region and n["type"] == "agent"]
+    return bool(agents) and not any(n.get("optional", False) for n in agents)
+
+
+def _optional_suffix(definition: dict[str, Any], node_id: str, join_id: str) -> bool:
+    region = _forward_reachable(definition, node_id, join_id)
+    return node_id in region and not any(n["type"] == "agent" and not n.get("optional", False) for n in definition["nodes"] if n["id"] in region)
+
+
+def validate_optional_nodes(definition: dict[str, Any]) -> None:
+    optional = {n["id"] for n in definition["nodes"] if n.get("optional", False) and n["type"] == "agent"}
+    if not optional:
+        return
+    valid: set[str] = set()
+    for split in definition["nodes"]:
+        edges = [e for e in definition["connections"] if e["source"] == split["id"] and not e.get("backward")]
+        for i, edge in enumerate(edges):
+            for other in edges[:i]:
+                join = _selection_join(definition, [edge["target"], other["target"]])
+                left = _forward_reachable(definition, edge["target"], join)
+                right = _forward_reachable(definition, other["target"], join)
+                if left & right:
+                    continue
+                for region, sibling in ((left, right), (right, left)):
+                    if _required_region(definition, sibling):
+                        valid.update(nid for nid in optional & region if _optional_suffix(definition, nid, join))
+    invalid = optional - valid
+    if invalid:
+        raise WorkflowError("Optional nodes need a safe parallel branch with a required sibling and no required successor before convergence: " + ", ".join(sorted(invalid)))
+
+
+def optional_failure_join(run: dict[str, Any], node: dict[str, Any], token: dict[str, Any]) -> str | None:
+    if not node.get("optional", False) or run["status"] != "running" or not token.get("stack"):
+        return None
+    group = run["joins"].get(token["stack"][-1])
+    if not group or not group.get("selected_targets"):
+        return None  # Historical generations cannot establish a safe selected required sibling.
+    join = group["join_id"]
+    regions = [_forward_reachable(run["definition"], target, join) for target in group["selected_targets"]]
+    own = next((region for region in regions if node["id"] in region), None)
+    if own is None or not _optional_suffix(run["definition"], node["id"], join):
+        return None
+    if any(region is not own and _required_region(run["definition"], region) for region in regions):
+        return join
+    return None
 
 def retry_budget(run: dict[str, Any], edge: dict[str, Any]) -> dict[str, Any]:
     used = run.get("retry_counts", {}).get(edge["id"], 0)
@@ -408,6 +475,9 @@ def validate_selection(definition: dict[str, Any], node: dict[str, Any], selecte
             overlap = region & other
             if overlap:
                 raise WorkflowError("Selected parallel paths overlap before convergence: " + ", ".join(sorted(overlap)))
+    optional_ids = {n["id"] for n in definition["nodes"] if n["type"] == "agent" and n.get("optional", False)}
+    if any(region & optional_ids for region in regions) and not any(_required_region(definition, region) for region in regions):
+        raise WorkflowError("Selected optional parallel branches need an actually selected required sibling")
     return join_id
 
 
@@ -576,6 +646,13 @@ class WorkflowStore:
                     token = next((t for t in r["pending"] if t["id"] == (activation.get("token") or {}).get("id")), None)
                     if token and not token.get("execution_complete"):
                         token.update(recovered_result=activation["tasks"][-1]["result"], execution_activation_id=activation["id"])
+                        token.pop("recovered_failed_result", None)
+                if activation["role"] == "node" and activation["status"] == "failed" and activation["tasks"]:
+                    node = next(n for n in r["definition"]["nodes"] if n["id"] == activation["node_id"])
+                    observed = activation["tasks"][-1].get("result", {})
+                    token = next((t for t in r["pending"] if t["id"] == (activation.get("token") or {}).get("id")), None)
+                    if node.get("optional", False) and observed.get("status") == "failed" and token and not token.get("execution_complete") and optional_failure_join({**r, "status": "running"}, node, token):
+                        token.update(recovered_failed_result=observed, execution_activation_id=activation["id"])
         return self.update_run(run_id, reconcile, "reconciled")
 
 
@@ -663,8 +740,8 @@ def validate_builder_preview(value: Any, name: str) -> dict[str, Any]:
         node.setdefault("title", nid)
         node.setdefault("position", {"x": 80 + 260 * index, "y": 80})
         position = node["position"]
-        if not isinstance(node["title"], str) or not isinstance(position, dict) or any(not isinstance(position.get(k), (float, int)) or isinstance(position.get(k), bool) or not math.isfinite(position[k]) or abs(position[k]) > 1000000 for k in ("x", "y")):
-            raise WorkflowError(f"Invalid title or canvas position: {nid}")
+        if not isinstance(node["title"], str) or not isinstance(position, dict) or any(not isinstance(position.get(k), (float, int)) or isinstance(position.get(k), bool) or not math.isfinite(position[k]) or position[k] < 0 or position[k] > 1000000 for k in ("x", "y")):
+            raise WorkflowError(f"Invalid title or canvas position (x and y must be finite and nonnegative): {nid}")
         if node["type"] == "agent":
             node.setdefault("role", "task")
             if not isinstance(node["role"], str) or node["role"] not in {"planning", "implementation", "review", "task"}:
@@ -677,6 +754,8 @@ def validate_builder_preview(value: Any, name: str) -> dict[str, Any]:
                 raise WorkflowError(f"Invalid freedom: {nid}")
             if "session_mode" in node and (not isinstance(node["session_mode"], str) or node["session_mode"] not in {"resume", "fresh"}):
                 raise WorkflowError(f"Invalid session mode: {nid}")
+            if "optional" in node and not isinstance(node["optional"], bool):
+                raise WorkflowError("Agent optional must be a boolean")
             if "max_attempts" in node:
                 _positive(node["max_attempts"], "max_attempts")
             if "network" in node and node["network"] not in (None, True, False):
@@ -1015,9 +1094,16 @@ class WorkflowSupervisor:
         preferred = previous.get("candidate")
         if preferred:
             candidates.sort(key=lambda c: key + ":" + _candidate_key(c) != preferred)
+        capability_refused = False
         for candidate in candidates:
             identity = key + ":" + _candidate_key(candidate)
             if identity in self.run()["suppressed_candidates"]:
+                capability_refused = capability_refused or identity in self.run().get("suppressed_capability_candidates", [])
+                continue
+            observed = next((t.get("result") for t in reversed(activation["tasks"]) if _candidate_key(t.get("candidate", {})) == _candidate_key(candidate) and t.get("result")), None)
+            if observed and availability_failure(observed):
+                self.update(lambda r: r["suppressed_candidates"].append(identity), "recovered_fallback", {"candidate": candidate, "reason": availability_failure(observed)})
+                previous = {}
                 continue
             backend = backends.get(candidate["backend"])
             if not backends.is_installed(backend):
@@ -1036,15 +1122,18 @@ class WorkflowSupervisor:
             display_prompt = run.get("builder_turn_prompt", run["prompt"]) if role == "builder" else run["prompt"]
             reservation = {"task_id": task_id, "candidate": candidate, "status": "reserved", "reserved_at": time.time(), "freedom": freedom}
             self.update(lambda r: next(a for a in r["activations"] if a["id"] == activation["id"])["tasks"].append(reservation), "dispatch_reserved", reservation)
+            capability_stage = "settings"
             try:
                 backends.reject_model(backend, candidate.get("model"))
                 backends.reject_turn_cap(backend, candidate.get("max_turns"))
                 backends.check_reasoning_effort(backend, candidate.get("reasoning_effort"))
+                capability_stage = "enforcement"
                 backend.enforcement(freedom, network)
                 async with CheckoutLease(self.store, run["repo_path"], freedom != "read_only", lambda: self.run()["status"] == "running"):
                     if self.run()["status"] != "running":
                         self._task_update(activation["id"], task_id, {"status": "not_started"})
                         return None
+                    capability_stage = "spawn"
                     if (role == "node" and node.get("session_mode") == "resume" or role == "builder" and run.get("builder_followup")) and previous.get("candidate") == identity:
                         parent = self.registry.get(previous["task_id"])
                         if parent:
@@ -1096,8 +1185,9 @@ class WorkflowSupervisor:
                 self.attention(f"Dispatch configuration refused: {exc}")
                 return None
             except backends.UnsupportedCapability as exc:
+                capability_refused = capability_refused or capability_stage != "settings"
                 self._task_update(activation["id"], task_id, {"status": "not_started", "error": str(exc)})
-                self.update(lambda r: r["suppressed_candidates"].append(identity), "candidate_capability_rejected", {"task_id": task_id, "candidate": candidate, "reason": str(exc)})
+                self.update(lambda r: (r["suppressed_candidates"].append(identity), r.setdefault("suppressed_capability_candidates", []).append(identity) if capability_stage != "settings" else None), "candidate_capability_rejected", {"task_id": task_id, "candidate": candidate, "reason": str(exc)})
                 previous = {}
                 continue
             except (SessionUnknownError, SessionBusyError, RepoUnavailableError) as exc:
@@ -1117,11 +1207,17 @@ class WorkflowSupervisor:
                 continue
             if snapshot["status"] != "completed" or snapshot.get("is_error"):
                 diagnostic = failure_diagnostic(snapshot, prompt)
-                self.attention(f"{role} task {task_id} ended {snapshot['status']}" + (f": {diagnostic}" if diagnostic else ""))
+                reason = f"{role} task {task_id} ended {snapshot['status']}" + (f": {diagnostic}" if diagnostic else "")
+                if role == "node" and snapshot["status"] == "failed" and not snapshot.get("permission_denials") and optional_failure_join(self.run(), node, activation.get("token") or {}):
+                    return {"optional_failure": reason, "failure_evidence": _bounded(snapshot)}
+                self.attention(reason)
                 return None
             self.update(lambda r: r["sessions"].__setitem__(key, {"candidate": identity, "task_id": task_id, "session_id": snapshot.get("session_id")}), "session_recorded", key)
             return snapshot
-        self.attention(f"All agents unavailable for {key}")
+        reason = f"All agents unavailable for {key}"
+        if role == "node" and not capability_refused and optional_failure_join(self.run(), node, activation.get("token") or {}):
+            return {"optional_failure": reason, "failure_evidence": {"candidates": _bounded(candidates)}}
+        self.attention(reason)
         return None
 
     def _task_update(self, aid: str, tid: str, values: dict[str, Any]) -> None:
@@ -1226,6 +1322,21 @@ class WorkflowSupervisor:
                 result = token.get("result", {})
             if not result:
                 return
+        if token.get("optional_failure_join"):
+            def bypass(rr: dict[str, Any]) -> None:
+                current = next(t for t in rr["pending"] if t["id"] == token["id"])
+                join = optional_failure_join(rr, node, current)
+                if join != current["optional_failure_join"]:
+                    raise WorkflowError("Optional failure convergence changed")
+                if rr["transitions"] >= rr["definition"]["max_transitions"] + rr.get("transition_grant", 0):
+                    rr.update(status="needs_attention", attention_reason="Transition limit reached")
+                    return
+                rr["transitions"] += 1
+                current.update(node_id=join, context={"optional_failure": result, "node_id": node["id"]})
+                for key in ("execution_complete", "execution_activation_id", "result", "optional_failure_join", "selected_connections", "recovered_result", "recovered_failed_result"):
+                    current.pop(key, None)
+            self.update(bypass, "optional_branch_bypassed", {"node_id": node["id"], "join_id": token["optional_failure_join"]})
+            return
         if node["type"] == "end":
             self.update(lambda rr: rr["pending"].remove(token), "end_reached", node["id"])
             return
@@ -1261,7 +1372,7 @@ class WorkflowSupervisor:
             if legacy_fork or automatic_fork:
                 gid = uuid.uuid4().hex
                 join_id = selected_join if automatic_fork else node["join_id"]
-                rr["joins"][gid] = {"join_id": join_id, "split_id": node["id"], "expected": len(selected), "arrived": [], "stack": stack}
+                rr["joins"][gid] = {"join_id": join_id, "split_id": node["id"], "expected": len(selected), "arrived": [], "stack": stack, "selected_targets": [e["target"] for e in selected]}
                 stack = stack + [gid]
             for edge in selected:
                 rr["pending"].append({"id": uuid.uuid4().hex, "node_id": edge["target"], "stack": stack, "context": _bounded(result or token.get("context", {})), "via": edge["id"]})
@@ -1270,14 +1381,27 @@ class WorkflowSupervisor:
     async def _execute_node(self, node: dict[str, Any], token: dict[str, Any]) -> None:
         r = self.run()
         count = sum(a["role"] == "node" and a["node_id"] == node["id"] and any(t["status"] != "not_started" for t in a["tasks"]) for a in r["activations"])
-        if not token.get("recovered_result") and count >= node["max_attempts"] + r["attempt_grants"].get(node["id"], 0):
+        if not token.get("recovered_result") and not token.get("recovered_failed_result") and count >= node["max_attempts"] + r["attempt_grants"].get(node["id"], 0):
             self.attention(f"Attempt limit reached for {node['id']}")
             return
-        a = next(a for a in r["activations"] if a["id"] == token["execution_activation_id"]) if token.get("recovered_result") else self._activation(node["id"], "node", token)
+        a = next(a for a in r["activations"] if a["id"] == token["execution_activation_id"]) if token.get("recovered_result") or token.get("recovered_failed_result") else self._activation(node["id"], "node", token)
         prompt = f"Workflow: {r['name']}\nTask: {r['prompt']}\nStep instructions: {node['instructions']}\nRole: {node['role']}\nChecklist: {json.dumps(r.get('tasks', []))}\nHuman recovery instructions: {r['instructions']}\nPrior context: {json.dumps(_bounded(token.get('context', {})))}\nRole defaults: {role_prompt(node['role'])}"
+        failed = token.get("recovered_failed_result")
+        if failed and (failed.get("permission_denials") or not availability_failure(failed)):
+            reason = f"Recovered {node['id']} task failed"
+            if failed.get("status") == "failed" and not failed.get("permission_denials") and optional_failure_join(self.run(), node, token):
+                self._optional_failure(node, token, a, {"optional_failure": reason, "failure_evidence": _bounded(failed)})
+            else:
+                self.attention(reason)
+            return
+        if failed:
+            self.update(lambda rr: next(x for x in rr["activations"] if x["id"] == a["id"]).update(status="running"), "fallback_activation_resumed", a["id"])
         result = token.get("recovered_result") or await self._dispatch(node, prompt, "node", a) or {}
         if not result:
             self.update(lambda rr: next(x for x in rr["activations"] if x["id"] == a["id"]).update(status="failed"), "activation_finished", a["id"])
+            return
+        if result.get("optional_failure"):
+            self._optional_failure(node, token, a, result)
             return
         completed_ids: list[str] = []
         if node["role"] in {"planning", "implementation"}:
@@ -1311,6 +1435,9 @@ class WorkflowSupervisor:
                     current = next(t for t in rr["pending"] if t["id"] == token["id"])
                     current.pop("recovered_result", None)
                     current.pop("execution_activation_id", None)
+                if optional_failure_join(self.run(), node, token):
+                    self._optional_failure(node, token, a, {"optional_failure": f"Invalid {node['role']} result: {exc}", "failure_evidence": _bounded(result)})
+                    return
                 self.update(invalid, "invalid_node_result", str(exc))
                 self.attention(f"Invalid {node['role']} result: {exc}")
                 return
@@ -1318,6 +1445,17 @@ class WorkflowSupervisor:
             next(x for x in rr["activations"] if x["id"] == a["id"]).update(status="completed", result=_bounded(result))
             next(t for t in rr["pending"] if t["id"] == token["id"]).update(execution_complete=True, execution_activation_id=a["id"], result=_bounded(result), completed_task_ids=completed_ids)
         self.update(finish, "node_result_ready", a["id"])
+
+    def _optional_failure(self, node: dict[str, Any], token: dict[str, Any], activation: dict[str, Any], evidence: dict[str, Any]) -> None:
+        def record(rr: dict[str, Any]) -> None:
+            current = next(t for t in rr["pending"] if t["id"] == token["id"])
+            join = optional_failure_join(rr, node, current)
+            if join is None:
+                rr.update(status="needs_attention", attention_reason="Optional failure has no active safe parallel convergence")
+                return
+            next(a for a in rr["activations"] if a["id"] == activation["id"]).update(status="failed", result=_bounded(evidence), optional_failure=True)
+            current.update(execution_complete=True, execution_activation_id=activation["id"], result=_bounded(evidence), optional_failure_join=join, completed_task_ids=[])
+        self.update(record, "optional_node_failed", {"node_id": node["id"], "activation_id": activation["id"], "evidence": _bounded(evidence)})
 
     def _arrive_join(self, token: dict[str, Any]) -> bool:
         r = self.run()
@@ -1454,9 +1592,10 @@ class WorkflowSupervisor:
         self.update(lambda r: r.update(status="running", supervisor_pid=os.getpid(), supervisor_identity=identity.own_identity()), "builder_started")
         a = self._activation("builder", "builder")
         self.update(lambda r: next(x for x in r["activations"] if x["id"] == a["id"]).update(feedback_ids=r.get("builder_turn_feedback_ids", [])), "builder_feedback_associated")
-        prompt = "Create a Polybridge workflow definition. Do not write files or dispatch agents. Return ONLY a JSON object. Schema: " + json.dumps({"name": self.run()["name"], "orchestrator": {"backend": "codex", "fallbacks": []}, "nodes": [{"id": "start", "type": "start", "branch_mode": "auto", "prompt": "Optional workflow purpose for the orchestrator"}, {"id": "work", "type": "agent", "instructions": "...", "agent": {"backend": "codex"}, "session_mode": "resume", "branch_mode": "auto", "max_attempts": 3}, {"id": "end", "type": "end", "branch_mode": "auto"}], "connections": [{"id": "begin", "source": "start", "target": "work"}, {"id": "finish", "source": "work", "target": "end"}], "max_parallel": 4, "max_transitions": 100}) + "\nStart may contain an optional prompt string describing the workflow purpose; Polybridge supplies it to orchestrator decisions alongside the runtime user request. The orchestrator chooses one or multiple outgoing paths from their condition prompts and the evidence. Parallel paths connect to a shared agent or End node; Polybridge infers convergence automatically. Do not create Join nodes or configurable branching modes. Retry arrows return to an earlier ancestor step; Polybridge infers loops from topology, so do not set a backward flag. Put explicit failure/retry and success/continue conditions on arrows. A retry connection may set max_retries to a nonnegative integer: this caps actual traversals of that arrow across the entire run; 0 disables retry, and an absent value adds no edge cap. Node max_attempts and max_transitions still apply and may stop earlier. A retry is selected exclusively and must stay inside its parallel region. Agent roles are planning, implementation, review and task; supply custom step instructions, while Polybridge adds the role guidance and result protocol. Request: " + self.run().get("builder_turn_prompt", self.run()["prompt"])
+        prompt = "Create a Polybridge workflow definition. Do not write files or dispatch agents. Return ONLY a JSON object. Schema: " + json.dumps({"name": self.run()["name"], "orchestrator": {"backend": "codex", "fallbacks": []}, "nodes": [{"id": "start", "type": "start", "position": {"x": 80, "y": 80}, "branch_mode": "auto", "prompt": "Optional workflow purpose for the orchestrator"}, {"id": "work", "type": "agent", "position": {"x": 220, "y": 80}, "instructions": "...", "agent": {"backend": "codex"}, "session_mode": "resume", "branch_mode": "auto", "max_attempts": 3}, {"id": "end", "type": "end", "position": {"x": 480, "y": 80}, "branch_mode": "auto"}], "connections": [{"id": "begin", "source": "start", "target": "work"}, {"id": "finish", "source": "work", "target": "end"}], "max_parallel": 4, "max_transitions": 100}) + "\nStart may contain an optional prompt string describing the workflow purpose; Polybridge supplies it to orchestrator decisions alongside the runtime user request. The orchestrator chooses one or multiple outgoing paths from their condition prompts and the evidence. Parallel paths connect to a shared agent or End node; Polybridge infers convergence automatically. Do not create Join nodes or configurable branching modes. Retry arrows return to an earlier ancestor step; Polybridge infers loops from topology, so do not set a backward flag. Put explicit failure/retry and success/continue conditions on arrows. A retry connection may set max_retries to a nonnegative integer: this caps actual traversals of that arrow across the entire run; 0 disables retry, and an absent value adds no edge cap. Node max_attempts and max_transitions still apply and may stop earlier. A retry is selected exclusively and must stay inside its parallel region. Agent nodes may set optional:true only inside a safe parallel branch with an actually selected required sibling and no required successor before convergence. Optional steps still execute; only definitive failures or exhausted available candidates bypass to that convergence with failure evidence. Do not make sequential steps or all branches optional. Agent roles are planning, implementation, review and task; supply custom step instructions, while Polybridge adds the role guidance and result protocol. Request: " + self.run().get("builder_turn_prompt", self.run()["prompt"])
+        prompt += "\n" + BUILDER_LAYOUT_GUIDANCE
         if "editing_definition" in self.run():
-            prompt += "\nRefine the current unsaved canvas below according to the request; it may be incomplete. Return the complete corrected workflow. Preserve existing node and connection IDs, agent settings, permissions, instructions and positions unless the requested edit requires changing them. Do not assign a revision or overwrite any saved definition. Read applicable repository AGENTS.md and skill files, especially skills specified in the request, and use their relevant guidance when refining the graph. You may read repository guidance and skills for context; only inspect files, do not implement the task or run the workflow. Current canvas:\n" + json.dumps(self.run()["editing_definition"])
+            prompt += "\nRefine the current unsaved canvas below according to the request; it may be incomplete. Return the complete corrected workflow. Preserve existing node and connection IDs, agent settings, permissions and instructions unless the requested edit requires changing them. Preserve existing node positions exactly unless the user explicitly asks to move or rearrange existing nodes. Do not assign a revision or overwrite any saved definition. Read applicable repository AGENTS.md and skill files, especially skills specified in the request, and use their relevant guidance when refining the graph. You may read repository guidance and skills for context; only inspect files, do not implement the task or run the workflow. Current canvas:\n" + json.dumps(self.run()["editing_definition"])
         prompt += "\nPublish canvas progress after each logical edit using polybridge.apply_workflow_draft (or polybridge-ctl workflow-builder-apply), with definition and expected_draft_revision. This updates only your builder preview, never saved workflows. Read get_workflow_status(workflow_run_id=" + self.run()["workflow_run_id"] + ") to resolve a revision conflict. Incomplete but render-safe graphs are allowed while building. If you applied any preview, the latest applied preview is authoritative and you may return a final summary; otherwise return the complete JSON definition. Current draft revision: " + str(self.run().get("draft_revision", 0)) + "\nCurrent draft:\n" + json.dumps(self.run().get("builder_draft", {}))
         if self.run().get("builder_has_repo_context") is False:
             prompt += "\nNo user repository was supplied. Your working directory is an isolated Polybridge builder workspace; do not infer a project or search elsewhere for repository context. Refine the supplied canvas and request without repository-specific skills or files."

@@ -951,7 +951,15 @@ async def delete_workflow(name: str) -> dict[str, Any]:
 
 @mcp.tool()
 async def workflow_builder(name: str, prompt: str, repo_path: str | None = None, agent: dict[str, Any] | None = None, fallbacks: list[dict[str, Any]] | None = None, definition: dict[str, Any] | None = None, source: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Generate a workflow, or refine the current canvas into an unsaved validated proposal."""
+    """Generate a workflow, or refine the current canvas into an unsaved validated proposal.
+
+    Layout uses top-left logical point coordinates with x/y >= 0 and a 10-point dot grid.
+    Agent nodes are 200 x 92 points (reserve 20 x 10 grid cells); Start/End are 72 x 72
+    (reserve 8 x 8 cells). Leave at least 40 points (4 cells) between node edges and avoid
+    overlaps. Arrange forward steps left to right and parallel branches on separate rows.
+    Preserve existing node positions exactly unless the user explicitly asks to move or rearrange them.
+    The canvas expands automatically; there is no fixed right or bottom boundary.
+    """
     if agent is None:
         raise MCPError(INVALID_PARAMS, "Builder agent is required")
     return await _workflow_call("build", name=name, prompt=prompt, repo_path=repo_path, agent=agent, fallbacks=fallbacks, definition=definition, source=source)
@@ -965,7 +973,14 @@ async def followup_workflow_builder(run_id: str, prompt: str) -> dict[str, Any]:
 
 @mcp.tool()
 async def apply_workflow_draft(definition: dict[str, Any], expected_draft_revision: int) -> dict[str, Any]:
-    """Publish a preview from the verified active builder task; never write a saved workflow."""
+    """Publish a preview from the verified active builder task; never write a saved workflow.
+
+    Positions are top-left logical points, with finite x/y >= 0, on a 10-point dot grid.
+    Agent nodes are 200 x 92 points (reserve 20 x 10 grid cells); Start/End are 72 x 72
+    (reserve 8 x 8 cells). Leave at least 40 points (4 cells) between node edges; no overlaps.
+    Preserve existing node positions exactly unless the user explicitly asks to move or rearrange them.
+    The canvas expands automatically; do not constrain nodes to a fixed viewport.
+    """
     from . import workflows
     try:
         caller = await _reg()._detect_caller()
