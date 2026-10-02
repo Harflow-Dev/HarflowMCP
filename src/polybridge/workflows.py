@@ -104,6 +104,13 @@ def _identifier(value: Any) -> str:
     return value
 
 
+def _workflow_name(value: Any) -> str:
+    """Keep names exact and path-safe without weakening graph/run identifiers."""
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_. -]{0,99}", value) or value.endswith(" "):
+        raise WorkflowError("Workflow names must contain 1–100 letters, digits, spaces, dots, dashes or underscores, start with a letter or digit, and have no trailing spaces")
+    return value
+
+
 def _positive(value: Any, field: str, maximum: int = 10000) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= maximum:
         raise WorkflowError(f"{field} must be an integer between 1 and {maximum}")
@@ -124,13 +131,18 @@ def _candidate(raw: Any) -> dict[str, Any]:
         candidate["max_turns"] = 100
     if candidate.get("model") is not None and (not isinstance(candidate["model"], str) or not candidate["model"].strip()):
         raise WorkflowError("Model must be a nonempty string")
-    if candidate.get("model") is not None and not backend.capabilities.supports_model_selection:
-        raise WorkflowError(f"{backend.name} does not support model selection")
     if candidate.get("max_turns") is not None:
         _positive(candidate["max_turns"], "max_turns")
-        if not backend.capabilities.supports_turn_cap:
-            raise WorkflowError(f"{backend.name} does not support max_turns")
-    backends.check_reasoning_effort(backend, candidate.get("reasoning_effort"))
+    effort = candidate.get("reasoning_effort")
+    if effort is not None and (not isinstance(effort, str) or effort not in backends.EFFORTS):
+        raise WorkflowError("Invalid reasoning_effort")
+    try:
+        backends.reject_model(backend, candidate.get("model"))
+        backends.reject_turn_cap(backend, candidate.get("max_turns"))
+        backends.check_reasoning_effort(backend, effort)
+    except backends.UnsupportedCapability as exc:
+        if not candidate.get("fallbacks"):
+            raise WorkflowError(str(exc)) from exc
     candidate["fallbacks"] = [_candidate(c) for c in candidate.get("fallbacks", [])]
     if any(c.get("fallbacks") for c in candidate["fallbacks"]):
         raise WorkflowError("Fallbacks must be an ordered flat list")
@@ -142,7 +154,7 @@ def validate_definition(raw: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise WorkflowError("Workflow definition must be an object")
     d = copy.deepcopy(raw)
-    d["name"] = _identifier(d.get("name"))
+    d["name"] = _workflow_name(d.get("name"))
     d["schema_version"] = SCHEMA_VERSION
     d.setdefault("description", "")
     if not isinstance(d["description"], str):
@@ -437,13 +449,13 @@ class WorkflowStore:
                 fcntl.flock(handle, fcntl.LOCK_UN)
 
     def get(self, name: str) -> dict[str, Any]:
-        return json.loads((self.definitions / f"{_identifier(name)}.json").read_text())
+        return json.loads((self.definitions / f"{_workflow_name(name)}.json").read_text())
 
     def list(self) -> list[dict[str, Any]]:
         return [json.loads(p.read_text()) for p in sorted(self.definitions.glob("*.json"))]
 
     def save(self, name: str, definition: dict[str, Any], expected_revision: int | None = None) -> dict[str, Any]:
-        d = validate_definition({**definition, "name": _identifier(name)})
+        d = validate_definition({**definition, "name": _workflow_name(name)})
         with self.lock(f"definition:{name}"):
             path = self.definitions / f"{name}.json"
             old = json.loads(path.read_text()) if path.exists() else None
@@ -457,7 +469,7 @@ class WorkflowStore:
 
     def delete(self, name: str) -> dict[str, Any]:
         with self.lock(f"definition:{name}"):
-            (self.definitions / f"{_identifier(name)}.json").unlink()
+            (self.definitions / f"{_workflow_name(name)}.json").unlink()
         return {"deleted": name}
 
     def get_run(self, run_id: str) -> dict[str, Any]:
@@ -769,13 +781,13 @@ async def build_workflow(name: str, prompt: str, repo_path: Path | None = None, 
             raise WorkflowError("source must contain only name, revision and saved_definition")
         source_name = raw_source.get("name", "")
         if source_name != "":
-            _identifier(source_name)
+            _workflow_name(source_name)
         revision = raw_source.get("revision", 0)
         if not isinstance(revision, int) or isinstance(revision, bool) or revision < 0:
             raise WorkflowError("source.revision must be a nonnegative integer")
         baseline = raw_source.get("saved_definition")
         metadata = {"name": source_name, "revision": revision, "saved_definition": _editing_context(baseline, "source.saved_definition") if baseline is not None else None}
-    descriptor = {"name": _identifier(name), "orchestrator": config, "nodes": [], "connections": []}
+    descriptor = {"name": _workflow_name(name), "orchestrator": config, "nodes": [], "connections": []}
     supplied_repo = repo_path is not None
     repo_path = repo_path if supplied_repo else builder_workspace(storage)
     run = storage.create_run(descriptor, prompt, repo_path, freedom="read_only", kind="builder")
@@ -873,6 +885,20 @@ def availability_failure(snapshot: dict[str, Any]) -> str | None:
     }
     if any(re.search(p, diagnostic) for p in patterns.get(backend, [])):
         return "backend availability rejected"
+    if backend in {"claude", "codex", "opencode", "vibe", "antigravity"}:
+        for line in diagnostic.splitlines():
+            match = re.match(r"(?i)^(?:API[ _]Error|Provider[ _]Error|HTTP[ _]Error|APIConnectionError|APITimeoutError|ConnectError|ConnectionError)\s*:?\s*(.*)$", line)
+            if not match:
+                continue
+            body = match.group(1)
+            status = re.match(r"(?i)^(?:(?:HTTP(?:\s+status)?|status(?:\s*code)?)\s*[:=]?\s*)?([1-5][0-9]{2})\b", body)
+            if status:
+                if int(status.group(1)) in {500, 502, 503, 504, 529}:
+                    return "provider server unavailable"
+                # A known client/security status cannot become an outage from later prose.
+                continue
+            if re.search(r"(?i)\b(?:overloaded_error|api_connection_error|service unavailable|connection (?:reset|refused)|provider timeout|timed out)\b", body):
+                return "provider transport unavailable"
     # Inspect only authoritative top-level protocol envelopes. Assistant messages,
     # tool payloads and summaries can contain arbitrary text and are never evidence.
     stream = snapshot.get("raw_stream_log")
@@ -888,6 +914,19 @@ def availability_failure(snapshot: dict[str, Any]) -> str | None:
                         continue
                     if not isinstance(event, dict):
                         continue
+                    if backend in {"claude", "codex", "opencode", "vibe", "antigravity"} and event.get("type") in ({"turn.failed"} if backend == "codex" else {"error"}):
+                        error = event.get("error")
+                        if isinstance(error, dict):
+                            data = error.get("data") if isinstance(error.get("data"), dict) else {}
+                            statuses = [error.get("status"), error.get("status_code"), error.get("statusCode"), data.get("statusCode")]
+                            if any(type(status) is int and status in {500, 502, 503, 504, 529} for status in statuses):
+                                return "provider server unavailable"
+                            codes = [error.get("type"), error.get("code"), error.get("name")]
+                            recognized = {"overloaded_error", "api_connection_error", "APITimeoutError", "APIConnectionError", "service_unavailable"}
+                            if backend == "claude":
+                                recognized.add("api_error")
+                            if any(isinstance(code, str) and code in recognized for code in codes):
+                                return "provider transport unavailable"
                     if backend == "codex" and event.get("type") == "turn.failed":
                         error = event.get("error", {})
                         if isinstance(error, dict) and error.get("code") in {"usage_limit_reached", "insufficient_quota", "model_not_found", "rate_limit_exceeded"}:
@@ -998,6 +1037,10 @@ class WorkflowSupervisor:
             reservation = {"task_id": task_id, "candidate": candidate, "status": "reserved", "reserved_at": time.time(), "freedom": freedom}
             self.update(lambda r: next(a for a in r["activations"] if a["id"] == activation["id"])["tasks"].append(reservation), "dispatch_reserved", reservation)
             try:
+                backends.reject_model(backend, candidate.get("model"))
+                backends.reject_turn_cap(backend, candidate.get("max_turns"))
+                backends.check_reasoning_effort(backend, candidate.get("reasoning_effort"))
+                backend.enforcement(freedom, network)
                 async with CheckoutLease(self.store, run["repo_path"], freedom != "read_only", lambda: self.run()["status"] == "running"):
                     if self.run()["status"] != "running":
                         self._task_update(activation["id"], task_id, {"status": "not_started"})
@@ -1028,13 +1071,15 @@ class WorkflowSupervisor:
                             self.update(claim_live, "builder_feedback_forwarding")
                             for message in messages:
                                 try:
-                                    await self.registry.send_message(task, message["prompt"])
+                                    response = await self.registry.send_message(task, message["prompt"])
+                                    delivery_id = response.get("message_id") if isinstance(response, dict) else None
                                     status = "queued_to_agent"
                                 except Exception as exc:
                                     from . import inbox
                                     # SendRefused guarantees that no message entered the inbox.
+                                    delivery_id = None
                                     status = "deferred" if isinstance(exc, inbox.SendRefused) else "forwarding_uncertain"
-                                self.update(lambda r, mid=message["id"], state=status: next(m for m in r["builder_messages"] if m["id"] == mid).update(status=state), "builder_feedback_forwarded", {"message_id": message["id"], "status": status})
+                                self.update(lambda r, mid=message["id"], state=status, did=delivery_id: next(m for m in r["builder_messages"] if m["id"] == mid).update(status=state, inbox_message_id=did, task_id=task.task_id), "builder_feedback_forwarded", {"message_id": message["id"], "status": status})
                         if self.run()["status"] == "cancelling":
                             await self.registry.cancel_cascade(task.task_id, workflow_control=True)
                         try:
@@ -1046,7 +1091,16 @@ class WorkflowSupervisor:
             except DispatchNotStarted:
                 self._task_update(activation["id"], task_id, {"status": "not_started"})
                 return None
-            except (backends.UnsupportedCapability, backends.NestedDispatchRefused, SessionUnknownError, SessionBusyError, RepoUnavailableError) as exc:
+            except backends.NestedDispatchRefused as exc:
+                self._task_update(activation["id"], task_id, {"status": "not_started", "error": str(exc)})
+                self.attention(f"Dispatch configuration refused: {exc}")
+                return None
+            except backends.UnsupportedCapability as exc:
+                self._task_update(activation["id"], task_id, {"status": "not_started", "error": str(exc)})
+                self.update(lambda r: r["suppressed_candidates"].append(identity), "candidate_capability_rejected", {"task_id": task_id, "candidate": candidate, "reason": str(exc)})
+                previous = {}
+                continue
+            except (SessionUnknownError, SessionBusyError, RepoUnavailableError) as exc:
                 self._task_update(activation["id"], task_id, {"status": "not_started", "error": str(exc)})
                 self.attention(f"Dispatch configuration refused: {exc}")
                 return None
@@ -1375,7 +1429,7 @@ class WorkflowSupervisor:
                     if "editing_definition" not in r and r.get("generated_definition"):
                         baseline = copy.deepcopy(r["generated_definition"])
                         r.update(editing_definition=copy.deepcopy(r.get("builder_draft", baseline)), editing_source={"name": r["name"], "revision": baseline.get("revision", 0), "saved_definition": baseline}, source_name=r["name"], source_revision=baseline.get("revision", 0), source_saved_definition=baseline)
-                    r.update(builder_followup=True, builder_turn_prompt="\n".join(m["prompt"] for m in feedback))
+                    r.update(builder_followup=True, builder_turn_prompt="\n".join(m["prompt"] for m in feedback), builder_turn_feedback_ids=[m["id"] for m in feedback])
             self.update(claim, "builder_feedback_claimed")
             await self._build_turn(run_id)
             continue_turn = False
@@ -1399,6 +1453,7 @@ class WorkflowSupervisor:
         from . import identity
         self.update(lambda r: r.update(status="running", supervisor_pid=os.getpid(), supervisor_identity=identity.own_identity()), "builder_started")
         a = self._activation("builder", "builder")
+        self.update(lambda r: next(x for x in r["activations"] if x["id"] == a["id"]).update(feedback_ids=r.get("builder_turn_feedback_ids", [])), "builder_feedback_associated")
         prompt = "Create a Polybridge workflow definition. Do not write files or dispatch agents. Return ONLY a JSON object. Schema: " + json.dumps({"name": self.run()["name"], "orchestrator": {"backend": "codex", "fallbacks": []}, "nodes": [{"id": "start", "type": "start", "branch_mode": "auto", "prompt": "Optional workflow purpose for the orchestrator"}, {"id": "work", "type": "agent", "instructions": "...", "agent": {"backend": "codex"}, "session_mode": "resume", "branch_mode": "auto", "max_attempts": 3}, {"id": "end", "type": "end", "branch_mode": "auto"}], "connections": [{"id": "begin", "source": "start", "target": "work"}, {"id": "finish", "source": "work", "target": "end"}], "max_parallel": 4, "max_transitions": 100}) + "\nStart may contain an optional prompt string describing the workflow purpose; Polybridge supplies it to orchestrator decisions alongside the runtime user request. The orchestrator chooses one or multiple outgoing paths from their condition prompts and the evidence. Parallel paths connect to a shared agent or End node; Polybridge infers convergence automatically. Do not create Join nodes or configurable branching modes. Retry arrows return to an earlier ancestor step; Polybridge infers loops from topology, so do not set a backward flag. Put explicit failure/retry and success/continue conditions on arrows. A retry connection may set max_retries to a nonnegative integer: this caps actual traversals of that arrow across the entire run; 0 disables retry, and an absent value adds no edge cap. Node max_attempts and max_transitions still apply and may stop earlier. A retry is selected exclusively and must stay inside its parallel region. Agent roles are planning, implementation, review and task; supply custom step instructions, while Polybridge adds the role guidance and result protocol. Request: " + self.run().get("builder_turn_prompt", self.run()["prompt"])
         if "editing_definition" in self.run():
             prompt += "\nRefine the current unsaved canvas below according to the request; it may be incomplete. Return the complete corrected workflow. Preserve existing node and connection IDs, agent settings, permissions, instructions and positions unless the requested edit requires changing them. Do not assign a revision or overwrite any saved definition. Read applicable repository AGENTS.md and skill files, especially skills specified in the request, and use their relevant guidance when refining the graph. You may read repository guidance and skills for context; only inspect files, do not implement the task or run the workflow. Current canvas:\n" + json.dumps(self.run()["editing_definition"])
@@ -1480,3 +1535,42 @@ if __name__ == "__main__":
     parser.add_argument("run_id")
     parser.add_argument("--root", required=True)
     asyncio.run(_main(parser.parse_args()))
+
+
+def builder_feedback_ids(log_dir: Path, task_id: str) -> list[str]:
+    storage = WorkflowStore(log_dir.parent)
+    owner = storage.task_owner(task_id)
+    if not owner or owner.get("role") != "builder":
+        return []
+    run = storage.get_run(owner["workflow_run_id"])
+    return next((a.get("feedback_ids", []) for a in run["activations"] if any(t["task_id"] == task_id for t in a["tasks"])), [])
+
+
+def builder_pending_messages(log_dir: Path, task_id: str, regular: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    from . import inbox
+    storage = WorkflowStore(log_dir.parent)
+    owner = storage.task_owner(task_id)
+    if not owner or owner.get("role") != "builder":
+        return regular
+    run = storage.get_run(owner["workflow_run_id"])
+    owned = [t["task_id"] for a in run["activations"] if a["role"] == "builder" for t in a["tasks"]]
+    if not owned or owned[-1] != task_id:
+        return regular
+    terminal: set[str] = set()
+    for tid in owned:
+        delivered = inbox.delivered_ids(log_dir, tid)
+        if delivered is None:
+            return []
+        terminal.update(delivered)
+    pending = []
+    aliases = set()
+    for message in run.get("builder_messages", []):
+        mid = message["id"]
+        delivery = message.get("inbox_message_id")
+        if delivery:
+            aliases.add(delivery)
+        if mid in terminal or delivery in terminal:
+            continue
+        if message["status"] in {"pending", "deferred", "claimed", "forwarding", "queued_to_agent"}:
+            pending.append({"id": mid, "text": message["prompt"], "status": "pending", "queued_at": message.get("created_at"), "delivery_id": delivery})
+    return [m for m in regular if m["id"] not in aliases] + pending

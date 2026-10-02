@@ -4,6 +4,11 @@ A workflow is a saved graph of agent steps. An orchestrator agent interprets its
 reports a structured next-step decision. Polybridge validates that decision, launches the steps,
 and records the run. Conditions are instructions to an agent, not code executed by Polybridge.
 
+Workflow names can include spaces, such as `Feature Implementation`. Names are stored exactly;
+quote names with spaces when using the CLI. Names must start with a letter or digit and contain
+1–100 letters, digits, spaces, dots, dashes, or underscores, without trailing spaces. Graph and
+run identifiers retain their stricter format.
+
 ## Build and run
 
 The macOS Monitor lists workflows in the sidebar, with a canvas editor and a run screen. Its Graph view
@@ -252,3 +257,13 @@ Start steps may contain an optional `prompt` describing the workflow's purpose.
 Polybridge includes that purpose in orchestrator decision context alongside the
 request supplied when running the workflow. It complements the runtime request;
 task prompt previews and chat continue to show the actual user request.
+
+A candidate can also fall back when Polybridge positively refuses a harness capability before
+starting its process, such as an unsupported turn cap or reasoning control. An unsupported primary
+configuration is accepted only when an ordered fallback exists. Each fallback keeps the same
+effective access and network limits. Security lineage refusals, repository/session problems,
+ordinary permission denials, and failed checks require attention rather than bypassing restrictions.
+
+Ordered fallbacks also cover authoritative provider outages: failed harness API/transport
+diagnostics or typed provider errors identifying server failures, overload, or connection failures.
+Silence, assistant/tool claims, and ordinary test failures do not trigger fallback.

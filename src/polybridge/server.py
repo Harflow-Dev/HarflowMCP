@@ -889,7 +889,14 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
                 for config, freedom, network in configs:
                     for candidate in [config, *config.get("fallbacks", [])]:
                         backend_ = backends.get(candidate["backend"])
-                        _reg()._resolve_lineage(caller, child_enforcement=backend_.enforcement(freedom, network), child_backend=backend_.name, child_repo=path)
+                        try:
+                            enforcement = backend_.enforcement(freedom, network)
+                        except backends.NestedDispatchRefused:
+                            raise
+                        except backends.UnsupportedCapability:
+                            # The supervisor journals this candidate refusal and tries its fallback.
+                            continue
+                        _reg()._resolve_lineage(caller, child_enforcement=enforcement, child_backend=backend_.name, child_repo=path)
         if action == "start":
             kwargs["repo_path"] = await _validate_repo_path(kwargs["repo_path"])
             _check_freedom(kwargs["freedom"])

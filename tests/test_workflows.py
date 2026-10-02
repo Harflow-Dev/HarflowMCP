@@ -77,7 +77,7 @@ def test_definition_revisions_and_immutable_run(storage, tmp_path):
     assert storage.get_run(run["workflow_run_id"])["definition"]["name"] == "example"
 
 
-@pytest.mark.parametrize("name", ["../bad", "", "/absolute", "x/y"])
+@pytest.mark.parametrize("name", ["../bad", "", "/absolute", "x/y", "x\\y", " leading", "trailing ", "tab\tname", "line\nname", "nul\0name", ".", "..", "a" * 101])
 def test_bad_names_rejected(storage, name):
     with pytest.raises(w.WorkflowError):
         storage.save(name, definition())
@@ -530,6 +530,13 @@ async def test_actual_dispatch_access_and_network_are_independent(storage, tmp_p
     run = storage.create_run(w.validate_definition(graph), "external task", tmp_path, freedom="unrestricted")
     registry = FakeRegistry(storage.root, ["done"])
     await w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"])
+    if freedom == "read_only":
+        # Codex cannot provide network-enabled read-only; never weaken its sandbox.
+        assert registry.calls == []
+        outcome = storage.get_run(run["workflow_run_id"])
+        assert outcome["status"] == "needs_attention"
+        assert outcome["activations"][0]["tasks"][0]["status"] == "not_started"
+        return
     assert registry.calls[0][1]["freedom"] == freedom
     assert registry.calls[0][1]["network"] is True
     reservation = storage.get_run(run["workflow_run_id"])["activations"][0]["tasks"][0]
@@ -859,7 +866,7 @@ def test_workflow_turn_defaults_supported_candidates_only_and_explicit_limit_pre
 def test_explicit_unsupported_turn_cap_still_rejected():
     graph = definition()
     graph["orchestrator"] = {"backend": "codex", "max_turns": 100}
-    with pytest.raises(w.WorkflowError, match="does not support max_turns"):
+    with pytest.raises(w.WorkflowError, match="no turn cap"):
         w.validate_definition(graph)
 
 
@@ -1547,3 +1554,134 @@ def test_protocol_failure_reason_does_not_use_nested_tool_error_or_assistant_pro
     log = tmp_path / "tool.jsonl"
     log.write_text(json.dumps({"type": "tool_use", "part": {"error": {"name": "APIError", "data": {"message": "Imaginary failure"}}}}) + "\n")
     assert w.failure_diagnostic({"backend": "opencode", "raw_stream_log": str(log)}, "Request") == ""
+
+
+def test_natural_workflow_names_keep_exact_storage_identity(storage):
+    natural = "Feature Implementation v2"
+    saved = storage.save(natural, definition(), 0)
+    assert saved["name"] == natural
+    assert (storage.definitions / f"{natural}.json").exists()
+    assert storage.get(natural) == saved
+    storage.save("Feature_Implementation_v2", definition(), 0)
+    changed = storage.save(natural, {**saved, "description": "changed"}, 1)
+    assert changed["revision"] == 2
+    assert storage.get("Feature_Implementation_v2")["revision"] == 1
+    assert {d["name"] for d in storage.list()} == {natural, "Feature_Implementation_v2"}
+    storage.delete(natural)
+    assert storage.get("Feature_Implementation_v2")["revision"] == 1
+
+
+def test_workflow_spaces_do_not_relax_node_identifiers():
+    graph = definition()
+    graph["name"] = "Natural Workflow Name"
+    assert w.validate_definition(graph)["name"] == graph["name"]
+    graph["nodes"][1]["id"] = "work item"
+    with pytest.raises(w.WorkflowError, match="Identifiers"):
+        w.validate_definition(graph)
+
+
+@pytest.mark.parametrize("backend,setting", [("codex", {"max_turns": 5}), ("vibe", {"reasoning_effort": "xhigh"})])
+async def test_unsupported_primary_settings_use_ordered_fallback(storage, tmp_path, backend, setting):
+    graph = definition()
+    graph["nodes"][1]["agent"] = {"backend": backend, **setting, "fallbacks": [{"backend": "claude"}]}
+    run, registry = await execute(storage, tmp_path, graph, ["done"])
+    assert run["status"] == "completed"
+    assert len(registry.calls) == 1
+    assert registry.calls[0][1]["backend"].name == "claude"
+    attempts = run["activations"][0]["tasks"]
+    assert attempts[0]["status"] == "not_started"
+    assert attempts[1]["freedom"] == attempts[0]["freedom"]
+
+
+@pytest.mark.parametrize("refusal,expected", [(w.backends.UnsupportedCapability, "completed"), (w.backends.NestedDispatchRefused, "needs_attention")])
+async def test_capability_refusal_fallback_never_bypasses_lineage(storage, tmp_path, refusal, expected):
+    graph = definition()
+    graph["nodes"][1]["agent"]["fallbacks"] = [{"backend": "claude"}]
+    run = storage.create_run(w.validate_definition(graph), "task", tmp_path)
+    registry = FakeRegistry(storage.root, ["done"])
+    original = registry.start
+    calls = []
+    async def start(prompt, repo, **kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise refusal("authoritative pre-spawn refusal", rule="backend") if refusal is w.backends.NestedDispatchRefused else refusal("authoritative pre-spawn refusal")
+        return await original(prompt, repo, **kwargs)
+    registry.start = start
+    await w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"])
+    result = storage.get_run(run["workflow_run_id"])
+    assert result["status"] == expected
+    assert len(calls) == (2 if expected == "completed" else 1)
+    assert result["activations"][0]["tasks"][0]["status"] == "not_started"
+
+
+def test_malformed_primary_settings_rejected_even_with_fallback():
+    for setting in [{"max_turns": True}, {"reasoning_effort": "made-up"}, {"model": 7}]:
+        with pytest.raises(w.WorkflowError):
+            w._candidate({"backend": "codex", **setting, "fallbacks": [{"backend": "claude"}]})
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex", "opencode", "vibe", "antigravity"])
+@pytest.mark.parametrize("status", [500, 502, 503, 504, 529])
+def test_authoritative_provider_http_outage_fallback(tmp_path, backend, status):
+    path = tmp_path / "stream.jsonl"
+    event = {"type": "turn.failed" if backend == "codex" else "error", "error": {"status": status}}
+    path.write_text(json.dumps(event) + "\n")
+    assert w.availability_failure({"status": "failed", "backend": backend, "raw_stream_log": str(path)})
+
+
+@pytest.mark.parametrize("code", ["overloaded_error", "api_error", "api_connection_error"])
+def test_claude_authoritative_provider_error_codes(tmp_path, code):
+    path = tmp_path / "stream.jsonl"
+    path.write_text(json.dumps({"type": "error", "error": {"type": code, "message": "provider unavailable"}}))
+    assert w.availability_failure({"status": "failed", "backend": "claude", "raw_stream_log": str(path)})
+
+
+@pytest.mark.parametrize("event", [
+    {"type": "assistant", "error": {"type": "overloaded_error", "status": 503}},
+    {"type": "tool_result", "error": {"status": 503}},
+    {"type": "result", "result": "API Error: 503 service unavailable", "is_error": True},
+    {"type": "error", "error": {"status": 403, "type": "permission_error"}},
+])
+def test_provider_fallback_ignores_claims_tools_and_security_refusals(tmp_path, event):
+    path = tmp_path / "stream.jsonl"
+    path.write_text(json.dumps(event))
+    assert w.availability_failure({"status": "failed", "backend": "claude", "raw_stream_log": str(path), "summary": "API Error: 503"}) is None
+
+
+@pytest.mark.parametrize("diagnostic", ["API Error: 503 Service unavailable", "APIConnectionError: connection refused", "Provider Error: provider timeout"])
+def test_provider_transport_stderr_fallback(diagnostic):
+    assert w.availability_failure({"status": "failed", "backend": "claude", "stderr_tail": [diagnostic]})
+
+
+def test_provider_domain_failure_diagnostic_not_transport():
+    assert w.availability_failure({"status": "failed", "backend": "claude", "stderr_tail": ["Test failed: expected HTTP 503", "Review says provider timeout"], "summary": "overloaded_error"}) is None
+
+
+async def test_provider_outage_exhausts_chain_without_permission_change(storage, tmp_path):
+    graph = definition()
+    graph["nodes"][1]["agent"]["fallbacks"] = [{"backend": "claude"}]
+    run, registry = await execute(storage, tmp_path, graph, [
+        {"summary": "", "status": "failed", "backend": "codex", "stderr": ["API Error: 503 Service unavailable"]},
+        {"summary": "", "status": "failed", "backend": "claude", "stderr": ["API Error: 529 overloaded_error"]},
+    ])
+    assert run["status"] == "needs_attention"
+    assert "All agents unavailable" in run["attention_reason"]
+    assert len(registry.calls) == 2
+    assert len({call[1]["freedom"] for call in registry.calls}) == 1
+    assert len({call[1]["network"] for call in registry.calls}) == 1
+
+
+@pytest.mark.parametrize("diagnostic", [
+    "HTTP Error: 403 Forbidden (request failed after 500 ms)",
+    "APIError: 400 Bad Request request ID 500",
+    "API Error: 401 Unauthorized; service unavailable",
+    "Provider Error: HTTP status 403 connection refused",
+    "HTTP Error: 404 missing request 503",
+])
+def test_provider_stderr_client_status_never_outage_from_later_numbers(diagnostic):
+    assert w.availability_failure({"status": "failed", "backend": "claude", "stderr_tail": [diagnostic]}) is None
+
+
+@pytest.mark.parametrize("diagnostic", ["API Error: HTTP 503 unavailable", "HTTP Error: status code: 502 bad gateway", "Provider Error: status=504 timeout"])
+def test_provider_stderr_status_position_recognized(diagnostic):
+    assert w.availability_failure({"status": "failed", "backend": "claude", "stderr_tail": [diagnostic]})

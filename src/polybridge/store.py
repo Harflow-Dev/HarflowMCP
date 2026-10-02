@@ -551,8 +551,14 @@ def _notices(record: TaskRecord, state: Accumulator) -> list[str]:
 def snapshot(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
     """A recovered task's state, shaped like a live snapshot so callers need no special casing."""
     status, note, state, tail, owned = _resolve(log_dir, record, detail=True)
+    from . import inbox
+    pending = inbox.pending_messages(log_dir, record.task_id)
+    if record.workflow_builder:
+        from .workflows import builder_pending_messages
+        pending = builder_pending_messages(log_dir, record.task_id, pending)
 
     return {
+        "pending_messages": pending,
         "task_id": record.task_id,
         "workflow_builder": record.workflow_builder,
         "backend": record.backend,

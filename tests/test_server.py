@@ -666,7 +666,10 @@ async def test_send_message_queues_for_a_live_task_the_server_owns(fake_task: Ta
     fake_task.live_input = True
     result = (await call("send_message", task_id="task-1", text="also this")).structured_content
     assert result["status"] == "queued"
-    assert [m["text"] for m in fake_task.inbox_queue] == ["also this"]
+    from polybridge import inbox
+    queued, _ = inbox.read_new(server._reg().log_dir, fake_task.task_id, 0)
+    assert [(m["id"], m["text"]) for m in queued] == [(result["message_id"], "also this")]
+    assert not fake_task.inbox_queue  # The durable inbox is the single source for the pump.
     assert fake_task.pump_wake.is_set()
 
 

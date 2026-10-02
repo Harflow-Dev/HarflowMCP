@@ -736,6 +736,10 @@ class Task:
         # Only meaningful when something went wrong, and usually empty otherwise.
         if self.status == "failed" and self.stderr_tail:
             snap["stderr_tail"] = list(self.stderr_tail)
+        snap["pending_messages"] = inbox.pending_messages(self.log_path.parent, self.task_id)
+        if self.workflow_builder:
+            from .workflows import builder_pending_messages
+            snap["pending_messages"] = builder_pending_messages(self.log_path.parent, self.task_id, snap["pending_messages"])
         return snap
 
 
@@ -1190,7 +1194,8 @@ class TaskRegistry:
         # always seq 0. Guarded on its own: a broken event log must not cost the dispatch itself.
         try:
             task.events = EventLog(events_path(self._log_dir, task_id), task_id)
-            task.events.write(
+            _write_event(
+                task,
                 "task_started",
                 {
                     "backend": task.backend,
@@ -1354,7 +1359,7 @@ class TaskRegistry:
                     code="settled",
                 )
             message = inbox.make_message(text, self._owner)
-            task.inbox_queue.append(message)
+            inbox.append_locked(self._log_dir, task.task_id, message)
         finally:
             inbox.unlock(fd)
         task.pump_wake.set()
@@ -2781,6 +2786,12 @@ def _write_event(task: Task, kind: str, fields: dict[str, Any]) -> None:
     if task.events is None:
         return
     try:
+        if task.workflow_builder and ((kind == "user_message" and fields.get("source") == "initial") or (kind == "task_started" and not task.live_input)):
+            from .workflows import builder_feedback_ids
+            try:
+                fields = {**fields, "message_ids": builder_feedback_ids(task.log_path.parent, task.task_id)}
+            except Exception:
+                log.debug("task %s: builder feedback association unavailable", task.task_id, exc_info=True)
         task.events.write(kind, fields)
     except Exception:
         log.debug("task %s: could not write a %s event", task.task_id, kind, exc_info=True)
