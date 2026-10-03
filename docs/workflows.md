@@ -24,7 +24,7 @@ sequenceDiagram
         Runner->>Orchestrator: Request, workflow context, plan, checklist, results, valid choices
         Orchestrator-->>Runner: Final JSON decision
         alt Invalid decision
-            Runner->>Runner: Dispatch nothing; count decision attempt
+            Runner->>Runner: Dispatch nothing and count decision attempt
             Runner->>Orchestrator: Correction and valid choices
             Note over Runner,Orchestrator: Exhausted decision attempts fail the run
         else Inspect a settled execution
@@ -39,13 +39,13 @@ sequenceDiagram
             opt Worker asks for context
                 Runner->>Orchestrator: Question and current execution context
                 Orchestrator-->>Runner: Answer decision
-                Runner->>Worker: Answer; continue the same node execution
+                Runner->>Worker: Answer and continue the same node execution
                 Worker-->>Runner: Final JSON result or another question
                 Note over Runner,Orchestrator: Parallel questions are handled one at a time
             end
             Note over Runner,Worker: Shared convergence waits for all selected branches to settle
         else Needs caller input
-            Runner->>Runner: Suspend scheduling; running siblings settle
+            Runner->>Runner: Suspend scheduling while running siblings settle
             Runner-->>Caller: Question and input decision ID
             Caller->>Runner: Resume with answer and matching decision ID
             Runner->>Orchestrator: Answer at the suspended checkpoint
