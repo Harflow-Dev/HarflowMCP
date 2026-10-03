@@ -51,7 +51,24 @@ class FakeRegistry:
 @pytest.fixture
 def storage(tmp_path, monkeypatch):
     monkeypatch.setattr(w.backends, "is_installed", lambda b: True)
-    return w.WorkflowStore(tmp_path)
+    storage = w.WorkflowStore(tmp_path)
+    # This suite preserves the historical routing engine and builder regression
+    # fixtures. Public delegation control eligibility is tested separately; these
+    # snapshots represent the pre-cutover supervisor, not newly launched runs.
+    create_run = storage.create_run
+    def create_historical(*args, **kwargs):
+        run = create_run(*args, **kwargs)
+        if run.get("kind") != "builder":
+            def legacy(r):
+                r.pop("execution_contract", None)
+                for node in r["definition"]["nodes"]:
+                    if node["type"] == "agent":
+                        node["session_mode"] = "resume"
+            run = storage.update_run(run["workflow_run_id"], legacy, "historical_test_fixture")
+        return run
+    monkeypatch.setattr(storage, "create_run", create_historical)
+    monkeypatch.setattr(w, "_require_delegation_control", lambda run: None)
+    return storage
 
 
 async def execute(storage, tmp_path, definition_, responses):

@@ -117,6 +117,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     run_p = sub.add_parser("run", help="start a task, owned by a detached process until it settles")
     run_p.add_argument("--backend", default=None)
     run_p.add_argument("--workflow", default=None)
+    run_p.add_argument("--monitor", action="store_true", help="Human Monitor-owned workflow interaction")
     run_p.add_argument("--repo", required=True)
     run_p.add_argument("--freedom", default=None)
     run_p.add_argument("--prompt", required=True)
@@ -145,13 +146,28 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     edits.add_argument("--remove")
 
     workflow_parsers = []
-    for action in ("validate", "list", "get", "save", "delete", "build", "start", "list-runs", "status", "wait", "pause", "resume", "cancel", "builder-followup", "builder-apply"):
+    for action in ("validate", "list", "get", "save", "delete", "build", "start", "list-runs", "status", "wait", "pause", "resume", "cancel", "builder-followup", "builder-apply", "inspect", "recover", "migrate"):
         wp = sub.add_parser("workflow-" + action, help=action + " workflows")
         wp.add_argument("--json", action="store_true")
         if action in {"get", "save", "delete", "build", "start"}:
             wp.add_argument("name")
-        if action in {"status", "wait", "pause", "resume", "cancel", "builder-followup"}:
+        if action in {"status", "wait", "pause", "resume", "cancel", "builder-followup", "inspect", "recover"}:
             wp.add_argument("workflow_run_id")
+        if action == "inspect":
+            wp.add_argument("execution_id")
+            wp.add_argument("--task-id")
+            wp.add_argument("--view", choices=("result", "activity"), default="result")
+            wp.add_argument("--cursor")
+            wp.add_argument("--limit", type=int)
+            wp.add_argument("--before-seq", type=int)
+            wp.add_argument("--after-seq", type=int)
+        if action == "recover":
+            wp.add_argument("--reason", required=True)
+            wp.add_argument("--additional-attempts", type=int, default=0)
+        if action in {"start", "pause", "resume", "recover", "cancel"}:
+            wp.add_argument("--monitor", action="store_true", help="Human Monitor-owned workflow interaction")
+        if action == "resume":
+            wp.add_argument("--decision-id")
         if action == "builder-followup":
             wp.add_argument("--prompt", required=True)
         if action == "builder-apply":
@@ -251,7 +267,13 @@ def _cmd_list(args: argparse.Namespace, parser: _ArgumentParser) -> int:
                 kept.append(record)
         records = kept
 
-    entries = [store.brief(log_dir, record) for record in records]
+    from .workflow_inspection import decorate_tasks
+    entries = decorate_tasks([store.brief(log_dir, record) for record in records], log_dir)
+    from .workflow_inspection import filter_task_reads, managed_reader
+    try:
+        entries = filter_task_reads(entries, managed_reader(log_dir))
+    except Exception as exc:
+        return _fail(args, "workflow_read_refused", str(exc))
     if args.json:
         print(json.dumps({"v": CTL_JSON_VERSION, "tasks": entries}))
     else:
@@ -288,6 +310,12 @@ def _cmd_status(args: argparse.Namespace) -> int:
             print(json.dumps({"v": CTL_JSON_VERSION, "error": {"code": "invalid_task_id", "message": message}}))
         return 1
 
+    from .workflow_inspection import guard_task_read, managed_reader
+    try:
+        guard_task_read(task_id, managed_reader(log_dir))
+    except Exception as exc:
+        return _fail(args, "workflow_read_refused", str(exc))
+
     record = store.read(log_dir, task_id)
     if record is None:
         message = f"unknown task_id: {task_id}"
@@ -296,7 +324,8 @@ def _cmd_status(args: argparse.Namespace) -> int:
             print(json.dumps({"v": CTL_JSON_VERSION, "error": {"code": "unknown_task", "message": message}}))
         return 1
 
-    snapshot = store.snapshot(log_dir, record)
+    from .workflow_inspection import decorate_tasks
+    snapshot = decorate_tasks([store.snapshot(log_dir, record)], log_dir)[0]
     if args.json:
         print(json.dumps({"v": CTL_JSON_VERSION, "task": snapshot}))
     else:
@@ -539,6 +568,21 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
                 return {"valid": False, "error": str(exc)}
             return {"valid": True, "definition": canonical}
         from . import server
+        if action == "inspect":
+            return await server.inspect_workflow_node(args.workflow_run_id, args.execution_id, args.task_id, args.view, args.cursor, args.limit, args.before_seq, args.after_seq)
+        if action == "recover":
+            if args.monitor:
+                if not args.reason.strip():
+                    raise ValueError("Recovery reason must be nonempty")
+                return await server._workflow_call("recover", run_id=args.workflow_run_id, instructions=args.reason, additional_attempts=args.additional_attempts, interaction_owner="monitor")
+            return await server.recover_workflow(args.workflow_run_id, args.reason, args.additional_attempts)
+        if action == "migrate":
+            from .workflows import migrate_workflows
+            from .workflow_hooks import refuse_managed
+            caller = await server._reg()._detect_caller()
+            if caller is not None:
+                refuse_managed(server._reg().log_dir, caller.record.task_id)
+            return migrate_workflows()
         if action == "builder-followup":
             return await server.followup_workflow_builder(args.workflow_run_id, args.prompt)
         if action == "builder-apply":
@@ -561,12 +605,16 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
                     definition = json.loads(sys.stdin.read() if args.definition == "-" else Path(args.definition).read_text())
                 source = json.loads(args.source) if args.source else None
                 return await server.workflow_builder(args.name, args.prompt, args.repo, candidate, json.loads(args.fallbacks), definition, source)
+            if args.monitor:
+                return await server._workflow_call("start", name=args.name, prompt=args.prompt, repo_path=args.repo, overrides=candidate or None, freedom=args.freedom, network=_network(args.network), interaction_owner="monitor")
             return await server.start_workflow(args.name, args.prompt, args.repo, candidate or None, args.freedom, _network(args.network))
         if action == "wait":
             return await server.wait_for_workflow(args.workflow_run_id, args.timeout_seconds)
         if action == "resume":
-            return await server.resume_workflow(args.workflow_run_id, args.instructions, args.additional_attempts)
-        return await server._workflow_call(action, run_id=args.workflow_run_id)
+            if args.monitor:
+                return await server._workflow_call("resume", run_id=args.workflow_run_id, instructions=args.instructions, additional_attempts=args.additional_attempts, decision_id=args.decision_id, interaction_owner="monitor")
+            return await server.resume_workflow(args.workflow_run_id, args.instructions, args.additional_attempts, args.decision_id)
+        return await server._workflow_call(action, run_id=args.workflow_run_id, **({"interaction_owner": "monitor"} if getattr(args, "monitor", False) and action != "cancel" else {}))
     try:
         result = asyncio.run(invoke())
     except Exception as exc:

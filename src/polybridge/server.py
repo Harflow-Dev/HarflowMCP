@@ -67,7 +67,8 @@ def _status_payload(
     help. The snapshot itself is untouched, so `polybridge-ctl` (the Monitor's contract) still
     carries the full tail. Blocking file I/O: callers run this off the event loop.
     """
-    payload = dict(snapshot)
+    from .workflow_inspection import decorate_tasks
+    payload = decorate_tasks([dict(snapshot)], log_dir)[0]
     payload["recent_activity"] = read_recent(events_path(log_dir, task_id), limit=RECENT_ACTIVITY_LIMIT)
     if include_tail:
         return payload
@@ -116,7 +117,18 @@ mcp = MCPServer(
         "written message is its own turn, even mid-turn. It returns 'queued', never 'delivered'. "
         "Once every turn the run owes has been answered and nothing is queued the task closes its "
         "own input and settles as usual; a send after that is refused with 'finished; continue "
-        "with resume_task'."
+        "with resume_task'.\n\n"
+        "Workflows are durable graphs owned by Polybridge. start_workflow gives the caller's "
+        "original prompt and workflow context to an orchestrator harness. The orchestrator "
+        "chooses valid next nodes and writes focused assignments; Polybridge validates those "
+        "decisions, runs node harnesses, coordinates parallel branches, and persists results. "
+        "Nodes receive their instructions, assignment, and relevant prior results, not the full "
+        "request or global checklist. They return structured results and can ask the orchestrator "
+        "for missing context. Only the orchestrator updates the checklist. Decisions and results "
+        "come from harness final messages; harnesses may still use their own tools. Poll or wait "
+        "using the workflow_run_id. For needs_input, the MCP caller answers through resume_workflow "
+        "with instructions and the current input_decision_id; recover_workflow explicitly retries "
+        "a settled failed run with a reason while preserving completed work."
     ),
 )
 
@@ -426,6 +438,7 @@ async def get_task_status(
     server process are still reported, marked `recovered: true` with a `note` explaining what is and
     is not known about them.
     """
+    await _guard_task_read(task_id)
     task = _reg().get(task_id)
     if task is not None:
         snapshot = task.snapshot()
@@ -547,6 +560,7 @@ async def wait_for_task(
 
     A coding task can easily run for many minutes. Expect several calls rather than one long one.
     """
+    await _guard_task_read(task_id)
     if timeout_seconds <= 0:
         raise MCPError(INVALID_PARAMS, f"timeout_seconds must be > 0, got {timeout_seconds}")
 
@@ -676,13 +690,15 @@ async def list_tasks(status: str | None = None, backend: str | None = None) -> l
     live = _reg().list()
     entries = [task.brief() for task in live]
     entries.extend(_reg().recovered_briefs(exclude={task.task_id for task in live}))
+    entries = await _filter_task_reads(entries)
     entries.sort(key=lambda entry: entry["started_at"])
 
     if status is not None:
         entries = [entry for entry in entries if entry["status"] == status]
     if backend is not None:
         entries = [entry for entry in entries if entry.get("backend") == backend]
-    return entries
+    from .workflow_inspection import decorate_tasks
+    return await asyncio.to_thread(decorate_tasks, entries, _reg().log_dir)
 
 
 @mcp.tool()
@@ -775,6 +791,7 @@ async def get_task_events(
     Default (no before_seq/after_seq): newest page — the most recent events.
     Both cursors cannot be used at once. kinds=[] or an unknown kind raises INVALID_PARAMS.
     """
+    await _guard_task_read(task_id)
     try:
         store.validate_task_id(task_id)
     except store.InvalidTaskId as exc:
@@ -862,10 +879,52 @@ async def send_message(task_id: str, text: str) -> dict[str, Any]:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
 
 
+async def _filter_task_reads(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    from .workflow_inspection import filter_task_reads
+    return filter_task_reads(entries, await _managed_workflow_reader())
+
+
+async def _managed_workflow_reader() -> tuple[dict[str, Any], dict[str, Any]] | None:
+    from . import workflow_hooks, workflows
+    caller = await _reg()._detect_caller()
+    if caller is None:
+        return None
+    association = workflow_hooks.owner(_reg().log_dir, caller.record.task_id)
+    if association is None or association.get("role") == "builder":
+        return None
+    run = workflows.WorkflowStore(root=_reg().log_dir.parent).get_run(association["workflow_run_id"])
+    if run.get("execution_contract") != "delegation":
+        return None
+    return association, run
+
+
+def _managed_run_summary(run: dict[str, Any]) -> dict[str, Any]:
+    """Expose routing state without bypassing settled-only result inspection."""
+    keys = ("workflow_run_id", "name", "kind", "status", "definition", "revision", "prompt", "execution_contract", "tasks", "decisions", "transitions", "settling", "input_question", "input_decision_id", "interaction_owner", "reason", "instructions", "created_at", "updated_at")
+    summary = {key: run[key] for key in keys if key in run}
+    if isinstance(run.get("technical_plan"), str):
+        summary.update(technical_plan=run["technical_plan"][:16000], technical_plan_truncated=len(run["technical_plan"]) > 16000, technical_plan_execution_id=run.get("technical_plan_execution_id"))
+    summary["activations"] = [{key: activation[key] for key in ("id", "node_id", "role", "status", "created_at", "finished_at") if key in activation} | {"tasks": [{"task_id": task["task_id"], "status": task["status"]} for task in activation.get("tasks", [])]} for activation in run.get("activations", [])]
+    return summary
+
+
+async def _guard_task_read(task_id: str) -> None:
+    from .workflow_inspection import guard_task_read
+    try:
+        guard_task_read(task_id, await _managed_workflow_reader())
+    except ValueError as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+
 async def _workflow_call(action: str, **kwargs: Any) -> Any:
     from . import workflows
     try:
-        if action not in {"list", "list_runs", "get", "status"}:
+        if kwargs.get("interaction_owner") == "monitor":
+            if await _reg()._detect_caller() is not None:
+                raise ValueError("Only a human Monitor caller can claim monitor interaction ownership")
+        if action in {"pause", "resume", "recover"}:
+            kwargs.setdefault("interaction_owner", "caller")
+        if action not in {"list", "list_runs", "get", "status", "inspect"}:
             from .workflow_hooks import refuse_managed
             caller = await _reg()._detect_caller()
             if caller is not None:
@@ -907,6 +966,23 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
             return await workflows.build_workflow(**kwargs)
         if action == "builder_followup":
             return await workflows.followup_workflow_builder(**kwargs)
+        managed = await _managed_workflow_reader()
+        if managed is not None:
+            association, owned_run = managed
+            if association["role"] != "orchestrator":
+                raise ValueError("Worker nodes cannot inspect workflow context")
+            if action in {"status", "inspect"} and kwargs["run_id"] != owned_run["workflow_run_id"]:
+                raise ValueError("Orchestrators may only inspect their own workflow run")
+            if action == "get":
+                if kwargs["name"] != owned_run["name"]:
+                    raise ValueError("Orchestrators may only inspect their current workflow graph")
+                return owned_run["definition"]
+            if action == "list":
+                return [owned_run["definition"]]
+            if action == "list_runs":
+                return [_managed_run_summary(owned_run)]
+            if action == "status":
+                return _managed_run_summary(owned_run)
         store_ = workflows.WorkflowStore()
         if action == "list":
             return await asyncio.to_thread(store_.list)
@@ -918,6 +994,11 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
             return await asyncio.to_thread(store_.save, **kwargs)
         if action == "delete":
             return await asyncio.to_thread(store_.delete, kwargs["name"])
+        if action == "inspect":
+            from .workflow_inspection import inspect_request
+            run = await asyncio.to_thread(store_.get_run, kwargs["run_id"])
+            request = {key: value for key, value in kwargs.items() if key != "run_id"}
+            return await asyncio.to_thread(inspect_request, run, store_.root, request)
         if action == "status":
             return await asyncio.to_thread(store_.get_run, kwargs["run_id"])
         return await asyncio.to_thread(store_.control, action=action, **kwargs)
@@ -1027,9 +1108,37 @@ async def pause_workflow(workflow_run_id: str) -> dict[str, Any]:
 
 
 @mcp.tool()
-async def resume_workflow(workflow_run_id: str, instructions: str | None = None, additional_attempts: int = 0) -> dict[str, Any]:
-    """Resume with explicit instructions and optional additional attempt budget."""
-    return await _workflow_call("resume", run_id=workflow_run_id, instructions=instructions, additional_attempts=additional_attempts)
+async def resume_workflow(workflow_run_id: str, instructions: str | None = None, additional_attempts: int = 0, decision_id: str | None = None) -> dict[str, Any]:
+    """Resume a caller-owned run with instructions and optional explicit attempt grants.
+
+    For needs_input, supply its current input_decision_id as decision_id and a nonempty answer
+    in instructions. Stale answers and live/uncertain dispatches are refused.
+    """
+    return await _workflow_call("resume", run_id=workflow_run_id, instructions=instructions, additional_attempts=additional_attempts, decision_id=decision_id)
+
+
+@mcp.tool()
+async def inspect_workflow_node(workflow_run_id: str, execution_id: str, task_id: str | None = None, view: str = "result", cursor: str | None = None, limit: int | None = None, before_seq: int | None = None, after_seq: int | None = None) -> dict[str, Any]:
+    """Inspect any fully settled node execution in your workflow, including older executions.
+
+    Result view returns lossless JSON text chunks: concatenate chunk fields until next_cursor
+    is null, then decode JSON. Pass next_cursor back as cursor. Default payload contains the
+    normalized node_result and full raw_output. Selecting task_id reads a specific fallback
+    attempt. Activity uses normalized events with before_seq/after_seq. Result limit is
+    characters (default 16000, max 32000); activity limit is events (default 50, max 200).
+    No live or uncertain execution can be inspected.
+    """
+    if view == "result" and (before_seq is not None or after_seq is not None):
+        raise MCPError(INVALID_PARAMS, "Result view uses cursor, not event sequence cursors")
+    return await _workflow_call("inspect", run_id=workflow_run_id, execution_id=execution_id, task_id=task_id, view=view, cursor=cursor, limit=limit if limit is not None else (50 if view == "activity" else 16000), before_seq=before_seq, after_seq=after_seq)
+
+
+@mcp.tool()
+async def recover_workflow(workflow_run_id: str, reason: str, additional_attempts: int = 0) -> dict[str, Any]:
+    """Explicitly recover a failed settled run; retain completed work and supply a reason."""
+    if not reason or not reason.strip():
+        raise MCPError(INVALID_PARAMS, "Recovery reason must be nonempty")
+    return await _workflow_call("recover", run_id=workflow_run_id, instructions=reason, additional_attempts=additional_attempts)
 
 
 @mcp.tool()

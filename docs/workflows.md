@@ -1,8 +1,71 @@
 # Workflows
 
-A workflow is a saved graph of agent steps. An orchestrator agent interprets its conditions and
-reports a structured next-step decision. Polybridge validates that decision, launches the steps,
-and records the run. Conditions are instructions to an agent, not code executed by Polybridge.
+A workflow is a saved graph of independent agent steps. The orchestrator owns the original request,
+workflow context, and checklist. At each stage it selects a valid continuation and writes a focused
+assignment for the next agent. Polybridge validates, dispatches, and durably records the decision.
+Conditions are instructions to the orchestrator, not code executed by Polybridge.
+
+## How the runner works
+
+Polybridge runs the control loop. The orchestrator decides what to do; worker harnesses execute
+focused assignments and return structured results. The arrows below represent harness prompts
+and final JSON messages—not MCP calls between agents.
+
+```mermaid
+sequenceDiagram
+    participant Caller as Caller (MCP tool or Monitor)
+    participant Runner as Polybridge runner
+    participant Orchestrator as Orchestrator harness
+    participant Worker as Worker harnesses
+
+    Caller->>Runner: Start workflow with original request
+    Runner->>Runner: Snapshot workflow and persist run
+    loop Each decision checkpoint
+        Runner->>Orchestrator: Request, workflow context, plan, checklist, results, valid choices
+        Orchestrator-->>Runner: Final JSON decision
+        alt Invalid decision
+            Runner->>Runner: Dispatch nothing; count decision attempt
+            Runner->>Orchestrator: Correction and valid choices
+            Note over Runner,Orchestrator: Exhausted decision attempts fail the run
+        else Inspect a settled execution
+            Runner->>Orchestrator: Stored result or activity page
+            Note over Runner,Orchestrator: Stay at the same decision checkpoint
+        else Continue with valid assignments
+            Runner->>Runner: Validate and persist decision and dispatch reservations
+            Runner->>Worker: Assignment, node instructions, selected results and task descriptors
+            Note over Runner,Worker: Selected branches may run in parallel
+            Worker-->>Runner: Final JSON: succeeded, failed, blocked, or asking
+            Runner->>Runner: Persist output and execution state
+            opt Worker asks for context
+                Runner->>Orchestrator: Question and current execution context
+                Orchestrator-->>Runner: Answer decision
+                Runner->>Worker: Answer; continue the same node execution
+                Worker-->>Runner: Final JSON result or another question
+                Note over Runner,Orchestrator: Parallel questions are handled one at a time
+            end
+            Note over Runner,Worker: Shared convergence waits for all selected branches to settle
+        else Needs caller input
+            Runner->>Runner: Suspend scheduling; running siblings settle
+            Runner-->>Caller: Question and input decision ID
+            Caller->>Runner: Resume with answer and matching decision ID
+            Runner->>Orchestrator: Answer at the suspended checkpoint
+        else Complete or fail
+            Runner->>Runner: Validate stopping action and persist outcome
+            Runner-->>Caller: Workflow status and available results
+            Note over Caller,Runner: Completion requires valid End traversal and settled branches
+            Note over Caller,Runner: Failure may still have settling siblings
+        end
+    end
+```
+
+Only the orchestrator owns the original request and global checklist. Planning returns two
+separate outputs: task descriptors and a technical plan. Polybridge stores both, shows them in the
+Monitor, and includes them in later orchestrator context. A worker receives only its assignment,
+local guidance, and selected inputs. Harnesses can still use their own tools during execution.
+
+The diagram shows the usual loop; fallbacks, retry budgets, optional branches, and failed-run
+recovery follow the rules below. External callers answer their own input requests; Monitor-started
+runs expose those questions to the user in the app.
 
 Workflow names can include spaces, such as `Feature Implementation`. Names are stored exactly;
 quote names with spaces when using the CLI. Names must start with a letter or digit and contain
@@ -29,6 +92,8 @@ it waits for all active branches automatically. Agent steps have four roles:
 | Review | Examine results and report issues or approval. | `read_only` | All four levels |
 | Task | Perform a specific action, such as updating Jira. | `publish` | All four levels |
 
+Successful Planning returns both a nonempty `tasks` checklist and a nonempty Markdown
+`technical_plan`. The Monitor right sidebar shows the technical plan alongside the live checklist.
 Planning creates pending checklist entries. Workers can report progress, but **only validated
 orchestrator decisions complete or reopen checklist items**. The Monitor shows that status without
 a manual completion toggle.
@@ -51,7 +116,7 @@ session mode, and attempt budget. The orchestrator has its own candidate list, s
 workflow and overrideable when launching. Workflow generation has a separate candidate list.
 
 MCP tools expose definition list/get/save/delete, `workflow_builder`, run list/start/status/wait,
-and pause/resume/cancel. The Monitor acts through matching `polybridge-ctl workflow-*` commands;
+inspection, recovery, and pause/resume/cancel. The Monitor acts through matching `polybridge-ctl workflow-*` commands;
 it never writes Polybridge state directly. Definition saves use an expected revision to reject
 concurrent edits. Editing or deleting a definition does not change existing run snapshots.
 
@@ -84,14 +149,17 @@ polybridge-ctl workflow-build my-workflow --repo /absolute/path/to/repo \
 
 Definition JSON uses `nodes` and `connections`. An agent node's `role` is `planning`,
 `implementation`, `review`, or `task`; its `agent.fallbacks` is an ordered array. `session_mode`
-is `resume` or `fresh`. Connections specify `source`, `target`, `condition`, and an optional
+is `agent_decides`, `resume`, or `fresh` (default `agent_decides`). Connections specify `source`, `target`, `condition`, and an optional
 `default` fallback. Polybridge derives routing metadata (`branch_mode: auto`, `join_id`, and
 `backward`) from the graph; callers do not configure it. Legacy routing fields are accepted
 and normalized for new runs; existing run snapshots retain their original behavior. Legacy
-`join` nodes remain readable. Nodes store top-left canvas coordinates in `position: {x, y}`. Coordinates must be finite and nonnegative; the canvas expands automatically. The dot grid is 10 points. Agent nodes are 200 × 92 points (reserve 20 × 10 cells); Start and End are 72 × 72 points (reserve 8 × 8 cells). Builder agents are guided to leave at least 40 points between node edges and preserve existing positions exactly unless the user explicitly asks to move or rearrange nodes.
+`join` nodes remain readable. Nodes store top-left canvas coordinates in `position: {x, y}`. Coordinates must be finite and nonnegative; the canvas expands automatically. Snapping uses a 10-point grid. Background dots are visual guides: their spacing adapts to zoom in multiples of that grid, keeping at least 20 points between dots on screen. Only visible dots are rendered, and their screen size stays constant. Agent nodes are 200 × 92 points (reserve 20 × 10 cells); Start and End are 72 × 72 points (reserve 8 × 8 cells). Builder agents are guided to leave at least 40 points between node edges and preserve existing positions exactly unless the user explicitly asks to move or rearrange nodes.
 
-Each role receives a short built-in instruction alongside the task, custom step instructions,
-checklist, and prior results. Planning creates pending tasks, implementation reports task IDs
+Each role receives built-in role guidance, custom step instructions, the orchestrator assignment,
+and explicitly labeled input results. Workers do not receive the original request, full graph, or
+global checklist. The immediate predecessor result is attached automatically; converging parallel
+branches supply all incoming results. The orchestrator can reference older settled results and
+assign specific checklist tasks without exposing global checklist status. Planning creates pending tasks, implementation reports task IDs
 and evidence, review gives a verdict and concrete findings, and task steps report observed
 results. Only the orchestrator changes checklist statuses. Select Start to edit workflow
 settings, including the orchestrator, fallback agents, and limits.
@@ -100,7 +168,7 @@ settings, including the orchestrator, fallback agents, and limits.
 
 Outgoing connections carry condition prompts. The orchestrator evaluates evidence and chooses
 one or more legal connections. A default connection is available when the conditions are unclear;
-the orchestrator can also request attention rather than guess. When parallel
+the orchestrator can also request input rather than guess. When parallel
 branches share a next node, that node waits for the selected branches of its own
 activation and then executes once. Conditional branches that were not selected do not block it.
 Conditional bypasses may share downstream steps with longer routes. Polybridge checks the
@@ -122,10 +190,24 @@ run, and four concurrently active node tasks. Read-only workflow steps share a c
 writing workflow steps require exclusive access. These leases coordinate workflow runs, not
 manual edits or unrelated tools.
 
-**Resume** retains the same candidate's usable conversation between activations. **Fresh** starts
-a new session and supplies previous results as context. A different fallback candidate always
-starts fresh. A missing or busy resume session requires attention rather than silently discarding
-the chosen session policy.
+**Agent decides** lets the orchestrator choose Fresh or Resume for each assignment. Polybridge
+issues compatible available session references in decision context. A Resume assignment names the
+issued `resume_task_id`; arbitrary, busy, or incompatible sessions are rejected. **Fresh** starts
+an independent conversation with only the assignment and selected input results. **Resume** keeps
+an eligible candidate's prior conversation. Explicit node policies remain available. A different
+fallback candidate starts fresh for a Fresh execution. When a selected Resume attempt encounters a
+confirmed availability failure, Polybridge asks the orchestrator for an explicit Fresh decision
+within the same node execution or clarification question. This happens automatically without asking
+the caller for routine provider outages; Polybridge never silently replaces Resume with Fresh.
+Unknown execution outcomes require reconciliation, and the orchestrator can still choose
+`needs_input` when caller guidance is necessary.
+
+For example, after a confirmed outage while resuming an asking worker, the orchestrator may answer
+the same question with `session_mode: fresh`. Polybridge reconstructs the original assignment,
+observed progress, and clarification history in the new session. For an ordinary node continuation,
+the orchestrator selects the issued Fresh execution continuation with a new focused prompt. These
+choices retain the activation identity and attempt history; they do not replay completed graph
+steps.
 
 ## Fallbacks
 
@@ -160,6 +242,143 @@ records and does not automatically replay uncertain dispatches. Active and Needs
 protect their referenced task records from ordinary retention. Finished run history retains compact
 outcomes; expired activity logs are shown as unavailable.
 
+## Delegation contracts and inspection
+
+The orchestrator receives a durable decision ID, current stage, node responsibilities and access,
+settled input results, checklist, recent decisions, and Polybridge-issued valid continuations.
+Its JSON decision contains `decision_id`, `action`, and `reason`. Actions are `continue`,
+`complete`, `failed`, `needs_input`, `inspect`, or `answer`. Continuing selects `continuation_id` entries and supplies
+an assignment `prompt` for each agent execution, optional additional result references, and
+optional assigned task IDs. Under Agent decides, each agent assignment also chooses
+`session_mode: fresh|resume`; Resume identifies an issued `resume_task_id`. Structural traversal needs no assignment; convergence waits for every
+selected branch before requesting one assignment for its shared agent. Start always asks the
+orchestrator for the first assignment.
+
+An agent continuation decision looks like this (IDs are issued by Polybridge):
+
+```json
+{
+  "decision_id": "issued-decision-id",
+  "action": "continue",
+  "reason": "The plan is ready for review",
+  "next": [{
+    "continuation_id": "issued-continuation-id",
+    "prompt": "Review the attached plan for missing cases and report concrete findings",
+    "session_mode": "fresh"
+  }]
+}
+```
+
+Workers return `{status, result, evidence}`. Status is `succeeded`, `failed`, `blocked`, or `asking`;
+role-specific results retain plans, completed task IDs, review verdicts, and observed test outcomes.
+A successful planning result contains a human-readable technical plan as well as task descriptors:
+
+```json
+{
+  "status": "succeeded",
+  "result": {
+    "tasks": [{"id": "parser-validation", "title": "Validate empty input", "description": "Preserve the existing public behavior"}],
+    "technical_plan": "## Approach\nValidate input before parsing.\n\n## Verification\nRun the existing parser tests and add an empty-input case."
+  },
+  "evidence": ["Inspected the parser and its tests"]
+}
+```
+
+Polybridge preserves the complete technical plan and its source execution. The immediate successor
+receives both the plan and checklist descriptors in the planning result; the orchestrator owns
+checklist completion. The right sidebar shows the plan and live checklist for each workflow run.
+
+A reviewer finding issues or a test step reporting failing tests can still execute successfully.
+Malformed output is a settled protocol failure, not an automatic formatting retry. An `asking`
+result contains `result.question` and optional `result.context`. The worker yields; the runner
+persists the question and marks its execution `waiting_for_answer`, without treating it as a final
+result. The orchestrator returns `answer` with the issued question ID and a focused answer prompt.
+Polybridge resumes that same execution's conversation; repeated questions remain recorded until a
+final result. Each node defaults to ten clarification questions (`max_context_questions`),
+so repeated questioning cannot run indefinitely. Answering does not create an extra graph activation. Parallel workers may ask
+independently; questions are serialized through the orchestrator while already-running siblings
+settle. No shared convergence advances until its selected branches produce final outcomes.
+
+For example, a worker can ask for missing context:
+
+```json
+{
+  "status": "asking",
+  "result": {"question": "Which API behavior should remain compatible?", "context": "Two existing clients differ"},
+  "evidence": ["Inspected both client implementations"]
+}
+```
+
+The clarification decision uses the issued decision and question IDs:
+
+```json
+{
+  "decision_id": "issued-clarification-decision-id",
+  "action": "answer",
+  "question_id": "issued-question-id",
+  "answer": "Preserve the existing public API; change only the internal implementation",
+  "reason": "The caller requested a compatible refactor"
+}
+```
+
+Invalid decisions dispatch nothing. Polybridge returns the error and valid choices, with three
+total decision attempts by default (Start setting, range 1–10). This allowance resets after a valid
+decision and is separate from node retries. Exhaustion fails the run. Inspection does not consume
+a decision attempt. Each decision checkpoint has a bounded inspection allowance (default 20,
+configurable 1–1000); repeated inspection cannot indefinitely postpone a decision. `needs_input` includes a question and suspends scheduling; running siblings settle,
+and status reports whether settling remains. Resume rejects live or uncertain dispatches.
+
+The orchestrator controls the runner through its final JSON response, not by calling Polybridge
+control tools. For inspection it returns `action: inspect`, its `decision_id`, a `reason`, and a
+`requests` array of `{execution_id, task_id?, view?, cursor?, limit?, before_seq?, after_seq?}`.
+The runner validates and serves those requests, then gives their bounded results back to the same
+decision point. Harness tools remain available for other authorized work; no Polybridge MCP call
+is required for workflow routing, answering questions, or inspection.
+
+The public `inspect_workflow_node(workflow_run_id, execution_id, ...)` tool remains available to
+ordinary callers and can inspect any fully settled node
+execution in that run, including older executions and fallback attempts. `execution_id` is the
+activation ID in run state. Optional `task_id` selects a particular candidate attempt. The result
+view returns JSON text chunks with `chunk`, `next_cursor`, and `has_more`; concatenate the chunks
+and decode JSON to read full `node_result` and `raw_output`. Pass `next_cursor` as `cursor` until it
+is null. Result pages default to 16,000 characters and cap at 32,000. Cursors are bound to the run,
+execution, selected attempt, and immutable content. The activity view uses normalized task events
+with `before_seq`/`after_seq` pagination (50 events by default, maximum 200).
+
+Managed orchestrators can read only their own run and settled node executions. Workers can read
+only tasks from their own execution; workflow context reads are refused. Ordinary callers keep
+existing read access. These are API boundaries, not filesystem isolation.
+
+```bash
+polybridge-ctl workflow-inspect RUN_ID EXECUTION_ID --view result --json
+polybridge-ctl workflow-inspect RUN_ID EXECUTION_ID --task-id TASK_ID --view activity --json
+polybridge-ctl workflow-recover RUN_ID --reason "Inspected and resolved the outage" --json
+polybridge-ctl workflow-migrate --json
+```
+
+Interaction ownership is recorded when the run starts. MCP and ordinary CLI starts belong to the
+**caller**: `needs_input` returns the question to that caller, and the Monitor shows the question
+without offering an answer/control composer. Human Monitor starts use CLI `--monitor`; their
+questions are answered through the Monitor. Caller-owned controls cannot impersonate Monitor
+controls, and Monitor controls cannot resume, recover, or pause caller-owned runs. Explicit cancel
+remains available independently. Monitor terminal continuation is offered only after the workflow
+has completed its valid End traversal, never while a node is still participating in execution.
+
+Resume of `needs_input` includes the exact published `input_decision_id` as `decision_id` (CLI
+`--decision-id`) and the answer in `instructions`, preventing stale answers from being applied to a
+later question. Monitor CLI controls also include `--monitor`. The caller's original request
+remains the workflow prompt; answer prompts are stored separately for their individual task attempts.
+
+Explicit `recover_workflow` requires a nonempty reason and a failed, settled run. It returns the
+failed decision to the orchestrator with a fresh decision allowance and preserves completed work.
+Extra execution/retry grants require `additional_attempts`; completed and cancelled runs cannot
+recover. Caller answers and override reasons are passed back into orchestrator context.
+
+This feature is unreleased. Migration backs up and revision-checks saved definitions, switches
+nodes to Agent decides, and preserves graph IDs, conditions, layout, instructions, and agent settings.
+Historical records retain their execution snapshots. Active runs must settle or be explicitly
+cancelled before cutover; migration does not cancel them automatically.
+
 ## Storage and permissions
 
 Definitions live under `~/.polybridge/workflows/`. Immutable run snapshots, task associations,
@@ -180,6 +399,8 @@ A workflow editor draft also remembers its builder conversation. Navigating to a
 New canvases start with Start → Plan → Implementation → Review → End in an evenly spaced row. Review also has a retry path back to Implementation when changes are needed.
 
 With the canvas focused, use ⌘C and ⌘V to copy and paste selected nodes. Pasted nodes get new IDs and an offset; connections within the selected group are copied. Existing Start/End nodes are skipped so terminal nodes stay unique. Text fields retain their normal copy/paste behavior.
+
+With the canvas focused, press ⌘Z repeatedly to undo earlier edits. A full node drag is one undo step. Text fields retain their normal text undo. **Discard Changes**, beside Save, restores the saved workflow (or the starter for a new workflow) and clears its unsaved draft. Discard and canvas undo are unavailable while an agent is editing.
 
 ## Edit the current canvas with an agent
 
@@ -243,9 +464,10 @@ followups reuse that workspace. Supply a repository when the builder needs its
 instructions or skills; supplied paths still receive the normal repository
 validation. Running a workflow still requires a repository.
 
-Workflow task prompt previews and initial chat messages show the user's request.
-Polybridge sends role guidance, graph context and result instructions to the
-backend separately from that display projection. Raw diagnostic backend logs may
+Node prompt descriptions, initial activity bubbles, and Prompt tabs show the exact orchestrator
+assignment for that execution, including distinct assignments on retries. The overall workflow
+continues to show the caller's original request. Internal role guidance, input payloads, and protocol
+instructions are stored separately from that display projection. Raw diagnostic backend logs may
 contain the complete execution payload.
 
 ### Harness-global MCP approvals
@@ -266,7 +488,7 @@ fallback policy rather than restoring a previous explicit per-tool policy.
 Start steps may contain an optional `prompt` describing the workflow's purpose.
 Polybridge includes that purpose in orchestrator decision context alongside the
 request supplied when running the workflow. It complements the runtime request;
-task prompt previews and chat continue to show the actual user request.
+the overall workflow shows that request, while each node shows its orchestrator assignment.
 
 A candidate can also fall back when Polybridge positively refuses a harness capability before
 starting its process, such as an unsupported turn cap or reasoning control. An unsupported primary

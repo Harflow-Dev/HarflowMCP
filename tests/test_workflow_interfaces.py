@@ -166,6 +166,7 @@ async def test_public_mcp_has_no_checklist_completion_mutation():
         "workflow_builder", "start_workflow", "list_workflow_runs",
         "get_workflow_status", "wait_for_workflow", "pause_workflow",
         "resume_workflow", "cancel_workflow", "followup_workflow_builder", "apply_workflow_draft",
+        "recover_workflow", "inspect_workflow_node",
     }
     for name in ("pause_workflow", "resume_workflow", "cancel_workflow"):
         assert not {"task_updates", "tasks", "completed_task_ids", "status", "completed"} & set(tools[name].input_schema["properties"])

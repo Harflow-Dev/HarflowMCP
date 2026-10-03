@@ -52,7 +52,7 @@ async def test_task_and_workflow_tools_are_exposed() -> None:
     async with Client(server.mcp) as client:
         names = sorted(tool.name for tool in (await client.list_tools()).tools)
 
-    assert names == ['apply_workflow_draft', 'cancel_task', 'cancel_workflow', 'delete_workflow', 'followup_workflow_builder', 'get_task_events', 'get_task_status', 'get_workflow', 'get_workflow_status', 'list_backends', 'list_tasks', 'list_workflow_runs', 'list_workflows', 'pause_workflow', 'resume_task', 'resume_workflow', 'save_workflow', 'send_message', 'start_task', 'start_workflow', 'wait_for_task', 'wait_for_workflow', 'workflow_builder']
+    assert names == ['apply_workflow_draft', 'cancel_task', 'cancel_workflow', 'delete_workflow', 'followup_workflow_builder', 'get_task_events', 'get_task_status', 'get_workflow', 'get_workflow_status', 'inspect_workflow_node', 'list_backends', 'list_tasks', 'list_workflow_runs', 'list_workflows', 'pause_workflow', 'recover_workflow', 'resume_task', 'resume_workflow', 'save_workflow', 'send_message', 'start_task', 'start_workflow', 'wait_for_task', 'wait_for_workflow', 'workflow_builder']
 
 
 async def test_list_backends_describes_every_one() -> None:

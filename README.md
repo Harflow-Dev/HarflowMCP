@@ -93,7 +93,7 @@ and take over sessions. Build it with `macos/build-app.sh`.
 
 Workflows combine a saved visual graph with an agent orchestrator. Add Planning, Implementation,
 Review, and Task steps, connect them with conditions, and configure parallel branches, bounded
-loops, Resume/Fresh sessions, and ordered fallback agents. Polybridge owns the saved definition
+loops, Agent decides/Resume/Fresh sessions, and ordered fallback agents. Polybridge owns the saved definition
 and execution state; the agents do not install or manage workflow files.
 
 The Monitor's Workflow screen switches between a live graph and the existing Parallel activity
@@ -104,6 +104,10 @@ Use `workflow_builder` to generate an editable draft, or save a definition with 
 Start it with `start_workflow`, or add `workflow="name"` to `start_task`. Workflow dispatch returns
 a `workflow_run_id`; use `get_workflow_status` / `wait_for_workflow` to follow it rather than the
 ordinary task-status tools. Existing task calls without `workflow` are unchanged.
+
+Planning produces both a live task checklist and a Markdown technical plan in the run sidebar.
+Workers receive focused orchestrator assignments and can ask it for context. Routing, answers,
+and on-demand inspection use validated JSON contracts handled by Polybridge.
 
 See [workflow definitions, execution, and recovery](docs/workflows.md) for the CLI, graph format,
 and fallback behavior.

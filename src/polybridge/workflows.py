@@ -177,6 +177,8 @@ def validate_definition(raw: dict[str, Any]) -> dict[str, Any]:
     d["orchestrator"] = _candidate(d.get("orchestrator", {"backend": "codex"}))
     d["max_parallel"] = _positive(d.get("max_parallel", 4), "max_parallel", 64)
     d["max_transitions"] = _positive(d.get("max_transitions", 100), "max_transitions")
+    d["max_decision_attempts"] = _positive(d.get("max_decision_attempts", 3), "max_decision_attempts", 10)
+    d["max_inspections"] = _positive(d.get("max_inspections", 20), "max_inspections", 1000)
     nodes = d.get("nodes", [])
     edges = d.get("connections", [])
     if not isinstance(nodes, list) or not isinstance(edges, list) or not nodes:
@@ -220,10 +222,11 @@ def validate_definition(raw: dict[str, Any]) -> dict[str, Any]:
                 raise WorkflowError("Workflow nodes support read_only, write_in_repo, publish or unrestricted")
             if node["role"] == "implementation" and node["freedom"] == "read_only":
                 raise WorkflowError("Implementation nodes cannot use read_only")
-            node.setdefault("session_mode", "resume")
-            if node["session_mode"] not in {"resume", "fresh"}:
+            node.setdefault("session_mode", "agent_decides")
+            if node["session_mode"] not in {"resume", "fresh", "agent_decides"}:
                 raise WorkflowError(f"Invalid session mode: {node_id}")
             node["max_attempts"] = _positive(node.get("max_attempts", 3), "max_attempts")
+            node["max_context_questions"] = _positive(node.get("max_context_questions", 10), "max_context_questions", 100)
     starts = [n["id"] for n in nodes if n["type"] == "start"]
     if len(starts) != 1 or not any(n["type"] == "end" for n in nodes):
         raise WorkflowError("Workflow needs exactly one Start and at least one End")
@@ -526,6 +529,7 @@ class WorkflowStore:
 
     def save(self, name: str, definition: dict[str, Any], expected_revision: int | None = None) -> dict[str, Any]:
         d = validate_definition({**definition, "name": _workflow_name(name)})
+        d["execution_contract"] = "delegation"
         with self.lock(f"definition:{name}"):
             path = self.definitions / f"{name}.json"
             old = json.loads(path.read_text()) if path.exists() else None
@@ -543,10 +547,12 @@ class WorkflowStore:
         return {"deleted": name}
 
     def get_run(self, run_id: str) -> dict[str, Any]:
-        return json.loads((self.runs / f"{_identifier(run_id)}.json").read_text())
+        run = json.loads((self.runs / f"{_identifier(run_id)}.json").read_text())
+        run["settling"] = any(t.get("status") in {"reserved", "running", "uncertain"} for a in run["activations"] for t in a["tasks"])
+        return run
 
     def list_runs(self) -> list[dict[str, Any]]:
-        return sorted((json.loads(p.read_text()) for p in self.runs.glob("*.json")), key=lambda r: r["created_at"], reverse=True)
+        return sorted((self.get_run(p.stem) for p in self.runs.glob("*.json")), key=lambda r: r["created_at"], reverse=True)
 
     def update_run(self, run_id: str, mutator: Any, event: str, detail: Any = None) -> dict[str, Any]:
         with self.lock(f"run:{run_id}"):
@@ -554,11 +560,13 @@ class WorkflowStore:
             mutator(run)
             run["updated_at"] = time.time()
             run["sequence"] = run.get("sequence", 0) + 1
+            run.pop("settling", None)
             _write(self.runs / f"{run_id}.json", run)
             with (self.runs / f"{run_id}.jsonl").open("a", encoding="utf-8") as f:
                 f.write(json.dumps({"sequence": run["sequence"], "time": run["updated_at"], "event": event, "detail": detail}) + "\n")
                 f.flush()
                 os.fsync(f.fileno())
+            run["settling"] = any(t.get("status") in {"reserved", "running", "uncertain"} for a in run["activations"] for t in a["tasks"])
             return run
 
     def create_run(self, definition: dict[str, Any], prompt: str, repo_path: Path, *, freedom: str = "write_in_repo", network: bool | None = None, kind: str = "workflow") -> dict[str, Any]:
@@ -572,28 +580,55 @@ class WorkflowStore:
         rid = uuid.uuid4().hex
         run = {"workflow_run_id": rid, "kind": kind, "name": definition["name"], "definition": copy.deepcopy(definition), "revision": definition.get("revision", 0), "prompt": prompt, "repo_path": str(Path(repo_path).resolve()), "freedom": freedom, "network": network, "status": "starting", "created_at": time.time(), "updated_at": time.time(), "sequence": 0, "transitions": 0, "activations": [], "decisions": [], "sessions": {}, "suppressed_candidates": [], "pending": [], "joins": {}, "instructions": "", "attempt_grants": {}, "supervisor_pid": None}
         run["tasks"] = []
+        if kind == "workflow":
+            run["execution_contract"] = "delegation"
         run.update(retry_counts={}, retry_grants={})
         _write(self.runs / f"{rid}.json", run)
         return run
 
-    def control(self, run_id: str, action: str, instructions: str | None = None, additional_attempts: int = 0) -> dict[str, Any]:
-        if action not in {"pause", "resume", "cancel"}:
+    def control(self, run_id: str, action: str, instructions: str | None = None, additional_attempts: int = 0, *, decision_id: str | None = None, interaction_owner: str | None = None) -> dict[str, Any]:
+        if action not in {"pause", "resume", "cancel", "recover"}:
             raise WorkflowError("Unknown workflow action")
         if not isinstance(additional_attempts, int) or isinstance(additional_attempts, bool) or additional_attempts < 0:
             raise WorkflowError("additional_attempts must be a nonnegative integer")
-        if action == "resume" and not _supervisor_present(self.get_run(run_id)):
+        if action in {"resume", "recover"} and not _supervisor_present(self.get_run(run_id)):
             self.reconcile_run(run_id)
         control_detail: dict[str, Any] = {"instructions": instructions, "additional_attempts": additional_attempts, "retry_grants": {}}
         def change(r: dict[str, Any]) -> None:
-            if r["status"] in TERMINAL:
+            if r.get("execution_contract") == "delegation" and r.get("interaction_owner") and interaction_owner is not None and interaction_owner != r["interaction_owner"]:
+                raise WorkflowError("Workflow interaction belongs to its original caller")
+            if action in {"resume", "recover"}:
+                _require_delegation_control(r)
+            if action == "recover":
+                if r.get("kind") == "builder" or r["status"] != "failed":
+                    raise WorkflowError("Only failed delegation workflows can recover")
+                if not isinstance(instructions, str) or not instructions.strip():
+                    raise WorkflowError("Recovery requires a nonempty reason")
+            elif r["status"] in TERMINAL:
                 raise WorkflowError("Workflow is terminal")
-            if action == "resume":
-                if r["status"] not in {"paused", "needs_attention"}:
-                    raise WorkflowError("Only paused/attention workflows can resume")
+            if action in {"resume", "recover"}:
+                if action == "resume" and r["status"] not in {"paused", "needs_attention", "needs_input"}:
+                    raise WorkflowError("Only paused/attention/input workflows can resume")
                 if any(a["status"] in {"reserved", "uncertain", "running"} or any(t["status"] in {"reserved", "uncertain", "running"} for t in a["tasks"]) for a in r["activations"]):
                     raise WorkflowError("Unresolved dispatches must be reconciled before resume")
+                if r["status"] == "needs_input":
+                    if not isinstance(instructions, str) or not instructions.strip():
+                        raise WorkflowError("Resuming needs_input requires an answer or reason")
+                    if decision_id != r.get("input_decision_id"):
+                        raise WorkflowError("Resuming needs_input requires the current input decision_id")
                 r["status"] = "running"
                 r["instructions"] = instructions or ""
+                for token in r.get("pending", []):
+                    token["decision_attempts"] = 0
+                    token.pop("decision_error", None)
+                for activation in r["activations"]:
+                    for question in activation.get("questions", []):
+                        if question["status"] == "waiting" or question.get("answer_delivery_state") == "not_started":
+                            question["decision_attempts"] = 0
+                            question.pop("decision_error", None)
+                r.pop("input_question", None)
+                r.pop("input_decision_id", None)
+                r.pop("failure_reason", None)
                 r["suppressed_candidates"] = []
                 exhausted_edges = r.pop("exhausted_retry_edges", [])
                 if additional_attempts:
@@ -610,7 +645,7 @@ class WorkflowStore:
                 if instructions:
                     r["instructions"] = instructions
         result = self.update_run(run_id, change, f"control:{action}", control_detail)
-        if action in {"resume", "cancel"} and not _supervisor_present(result):
+        if action in {"resume", "recover", "cancel"} and not _supervisor_present(result):
             _launch(self, run_id)
         return result
 
@@ -622,7 +657,7 @@ class WorkflowStore:
             for a in r["activations"]:
                 for t in a["tasks"]:
                     if t["task_id"] == task_id:
-                        return {"workflow_run_id": r["workflow_run_id"], "node_id": a["node_id"], "role": a["role"], "activation_id": a["id"], "status": r["status"]}
+                        return {"workflow_run_id": r["workflow_run_id"], "workflow_node_id": a["node_id"], "workflow_role": a["role"], "execution_contract": r.get("execution_contract"), "node_id": a["node_id"], "role": a["role"], "activation_id": a["id"], "status": r["status"]}
         return None
 
     def task_owner(self, task_id: str) -> dict[str, Any] | None:
@@ -653,7 +688,21 @@ class WorkflowStore:
                     token = next((t for t in r["pending"] if t["id"] == (activation.get("token") or {}).get("id")), None)
                     if node.get("optional", False) and observed.get("status") == "failed" and token and not token.get("execution_complete") and optional_failure_join({**r, "status": "running"}, node, token):
                         token.update(recovered_failed_result=observed, execution_activation_id=activation["id"])
-        return self.update_run(run_id, reconcile, "reconciled")
+        result = self.update_run(run_id, reconcile, "reconciled")
+        if result.get("execution_contract") == "delegation":
+            from .workflow_delegation import reconcile_delegation
+            return self.update_run(run_id, reconcile_delegation, "delegation_reconciled")
+        return result
+
+
+def _require_delegation_control(run: dict[str, Any]) -> None:
+    if run.get("kind") != "builder" and run.get("execution_contract") != "delegation":
+        raise WorkflowError("Historical workflow runs cannot resume under the delegation contract; start a new run")
+
+
+def migrate_workflows(root: Path | None = None) -> dict[str, Any]:
+    from .workflow_delegation import migrate
+    return migrate(WorkflowStore(root))
 
 
 def _alive(pid: int | None) -> bool:
@@ -682,10 +731,14 @@ def _launch(storage: WorkflowStore, run_id: str) -> None:
         subprocess.Popen([sys.executable, "-m", "polybridge.workflows", "supervise", run_id, "--root", str(storage.root)], stdin=subprocess.DEVNULL, stdout=output, stderr=output, start_new_session=True, close_fds=True)
 
 
-async def start_workflow(name: str, prompt: str, repo_path: Path, *, overrides: dict[str, Any] | None = None, freedom: str = "write_in_repo", network: bool | None = None, root: Path | None = None) -> dict[str, Any]:
+async def start_workflow(name: str, prompt: str, repo_path: Path, *, overrides: dict[str, Any] | None = None, freedom: str = "write_in_repo", network: bool | None = None, root: Path | None = None, interaction_owner: str = "caller") -> dict[str, Any]:
+    if interaction_owner not in {"caller", "monitor"}:
+        raise WorkflowError("Invalid interaction owner")
     if not isinstance(prompt, str) or not prompt.strip():
         raise WorkflowError("Workflow prompt must be nonempty")
     storage = WorkflowStore(root)
+    if any(r.get("kind") != "builder" and r.get("execution_contract") != "delegation" and r["status"] not in TERMINAL for r in storage.list_runs()):
+        raise WorkflowError("Active historical runs must settle or be cancelled before delegation execution")
     definition = storage.get(name)
     if overrides:
         if overrides.get("backend", definition["orchestrator"]["backend"]) != definition["orchestrator"]["backend"]:
@@ -694,6 +747,7 @@ async def start_workflow(name: str, prompt: str, repo_path: Path, *, overrides: 
         definition["orchestrator"] = {**definition["orchestrator"], **overrides}
     definition = validate_definition(definition)
     run = storage.create_run(definition, prompt, repo_path, freedom=freedom, network=network)
+    storage.update_run(run["workflow_run_id"], lambda r: r.update(interaction_owner=interaction_owner), "interaction_owner")
     await _capture_caller(storage, run["workflow_run_id"])
     _launch(storage, run["workflow_run_id"])
     return run
@@ -1091,9 +1145,20 @@ class WorkflowSupervisor:
         candidates = [config] + config.get("fallbacks", [])
         key = node["id"] if role == "node" else role
         previous = run["sessions"].get(key, {})
+        if role == "node" and activation.get("resume_task_id"):
+            source = next((t for a in run["activations"] if a["node_id"] == node["id"] and a["role"] == "node" for t in a["tasks"] if t["task_id"] == activation["resume_task_id"]), None)
+            if source:
+                previous = {"task_id": source["task_id"], "candidate": key + ":" + _candidate_key(source["candidate"]), "session_id": source.get("result", {}).get("session_id")}
         preferred = previous.get("candidate")
-        if preferred:
+        if preferred and (role == "node" and node.get("session_mode") == "resume" or role == "builder" and run.get("builder_followup")):
             candidates.sort(key=lambda c: key + ":" + _candidate_key(c) != preferred)
+        if role == "node" and run.get("execution_contract") == "delegation" and node.get("session_mode") == "resume":
+            from .workflow_delegation import recovered_resume_outage, require_fresh_checkpoint
+            current_activation = next(a for a in run["activations"] if a["id"] == activation["id"])
+            outage = recovered_resume_outage(run, current_activation)
+            if outage:
+                self.update(lambda r: require_fresh_checkpoint(r, activation["id"], *outage), "recovered_resume_requires_fresh")
+                return None
         capability_refused = False
         for candidate in candidates:
             identity = key + ":" + _candidate_key(candidate)
@@ -1119,9 +1184,16 @@ class WorkflowSupervisor:
                 return None
             network = False if run["network"] is False else node.get("network", run["network"])
             task_id = uuid.uuid4().hex
-            display_prompt = run.get("builder_turn_prompt", run["prompt"]) if role == "builder" else run["prompt"]
-            reservation = {"task_id": task_id, "candidate": candidate, "status": "reserved", "reserved_at": time.time(), "freedom": freedom}
-            self.update(lambda r: next(a for a in r["activations"] if a["id"] == activation["id"])["tasks"].append(reservation), "dispatch_reserved", reservation)
+            display_prompt = run.get("builder_turn_prompt", run["prompt"]) if role == "builder" else activation.get("turn_prompt", activation.get("assignment_prompt", run["prompt"]))
+            reservation = {"task_id": task_id, "candidate": candidate, "status": "reserved", "reserved_at": time.time(), "freedom": freedom, "assignment_prompt": display_prompt, "repo_path": run["repo_path"], "network": network, "session_mode": "resume" if role == "node" and node.get("session_mode") == "resume" and previous.get("candidate") == identity else "fresh", "resume_task_id": previous.get("task_id") if role == "node" and node.get("session_mode") == "resume" and previous.get("candidate") == identity else None}
+            def reserve(r: dict[str, Any]) -> None:
+                a = next(a for a in r["activations"] if a["id"] == activation["id"])
+                a["tasks"].append(reservation)
+                q = next((q for q in a.get("questions", []) if q["question_id"] == a.get("resume_question_id")), None)
+                if q:
+                    q.update(reply_task_id=task_id, answer_delivery_state="reserved")
+                    reservation["question_id"] = q["question_id"]
+            self.update(reserve, "dispatch_reserved", reservation)
             capability_stage = "settings"
             try:
                 backends.reject_model(backend, candidate.get("model"))
@@ -1188,6 +1260,10 @@ class WorkflowSupervisor:
                 capability_refused = capability_refused or capability_stage != "settings"
                 self._task_update(activation["id"], task_id, {"status": "not_started", "error": str(exc)})
                 self.update(lambda r: (r["suppressed_candidates"].append(identity), r.setdefault("suppressed_capability_candidates", []).append(identity) if capability_stage != "settings" else None), "candidate_capability_rejected", {"task_id": task_id, "candidate": candidate, "reason": str(exc)})
+                if activation.get("resume_question_id") and node.get("session_mode") == "resume" and capability_stage == "spawn":
+                    self.update(lambda r: next(q for a in r["activations"] if a["id"] == activation["id"] for q in a.get("questions", []) if q["question_id"] == activation["resume_question_id"]).update(answer_delivery_state="not_started"), "answer_resume_unsupported")
+                    self.attention("Answer session cannot resume; orchestrator must explicitly choose Fresh")
+                    return None
                 previous = {}
                 continue
             except (SessionUnknownError, SessionBusyError, RepoUnavailableError) as exc:
@@ -1202,12 +1278,21 @@ class WorkflowSupervisor:
                 return None
             reason = availability_failure(snapshot)
             if reason:
+                if role == "node" and run.get("execution_contract") == "delegation" and node.get("session_mode") == "resume" and previous.get("candidate") == identity:
+                    from .workflow_delegation import require_fresh_checkpoint
+                    self.update(lambda r: require_fresh_checkpoint(r, activation["id"], reason, identity), "resume_requires_fresh", {"task_id": task_id, "reason": reason})
+                    return None
                 self.update(lambda r: r["suppressed_candidates"].append(identity), "fallback", {"task_id": task_id, "reason": reason})
                 previous = {}
                 continue
             if snapshot["status"] != "completed" or snapshot.get("is_error"):
                 diagnostic = failure_diagnostic(snapshot, prompt)
                 reason = f"{role} task {task_id} ended {snapshot['status']}" + (f": {diagnostic}" if diagnostic else "")
+                if role == "node" and run.get("execution_contract") == "delegation":
+                    unsafe = snapshot.get("permission_denials") or snapshot["status"] != "failed"
+                    if unsafe:
+                        self.attention(reason)
+                    return {**snapshot, "execution_failure": reason, "blocked_failure": bool(unsafe), "optional_failure_eligible": not unsafe}
                 if role == "node" and snapshot["status"] == "failed" and not snapshot.get("permission_denials") and optional_failure_join(self.run(), node, activation.get("token") or {}):
                     return {"optional_failure": reason, "failure_evidence": _bounded(snapshot)}
                 self.attention(reason)
@@ -1215,13 +1300,25 @@ class WorkflowSupervisor:
             self.update(lambda r: r["sessions"].__setitem__(key, {"candidate": identity, "task_id": task_id, "session_id": snapshot.get("session_id")}), "session_recorded", key)
             return snapshot
         reason = f"All agents unavailable for {key}"
+        if role == "node" and run.get("execution_contract") == "delegation":
+            if capability_refused:
+                self.attention(reason)
+            return {"status": "failed", "summary": "", "execution_failure": reason, "candidates": candidates, "blocked_failure": capability_refused, "optional_failure_eligible": not capability_refused}
         if role == "node" and not capability_refused and optional_failure_join(self.run(), node, activation.get("token") or {}):
             return {"optional_failure": reason, "failure_evidence": {"candidates": _bounded(candidates)}}
         self.attention(reason)
         return None
 
     def _task_update(self, aid: str, tid: str, values: dict[str, Any]) -> None:
-        self.update(lambda r: next(t for a in r["activations"] if a["id"] == aid for t in a["tasks"] if t["task_id"] == tid).update(values), "task_state", {"task_id": tid, **values})
+        def update(r: dict[str, Any]) -> None:
+            a = next(a for a in r["activations"] if a["id"] == aid)
+            task = next(t for t in a["tasks"] if t["task_id"] == tid)
+            task.update(values)
+            q = next((q for q in a.get("questions", []) if q.get("reply_task_id") == tid), None)
+            if q and values.get("status"):
+                state = values["status"]
+                q["answer_delivery_state"] = "settled" if state in {"completed", "failed", "cancelled", "timed_out"} else state
+        self.update(update, "task_state", {"task_id": tid, **values})
 
     def _activation(self, node_id: str, role: str, token: dict[str, Any] | None = None) -> dict[str, Any]:
         a = {"id": uuid.uuid4().hex, "node_id": node_id, "role": role, "status": "running", "tasks": [], "created_at": time.time(), "token": token}
@@ -1229,6 +1326,24 @@ class WorkflowSupervisor:
         return a
 
     async def _decision(self, node: dict[str, Any], result: dict[str, Any], token: dict[str, Any]) -> list[dict[str, Any]] | None:
+        if self.run().get("execution_contract") == "delegation":
+            from .workflow_delegation import decide
+            return await decide(self, node, token)
+        return await self._legacy_decision(node, result, token)
+
+    async def _node(self, token: dict[str, Any]) -> None:
+        if self.run().get("execution_contract") == "delegation":
+            from .workflow_delegation import process_node
+            return await process_node(self, token)
+        return await self._legacy_node(token)
+
+    async def _execute_node(self, node: dict[str, Any], token: dict[str, Any]) -> None:
+        if self.run().get("execution_contract") == "delegation":
+            from .workflow_delegation import execute_node
+            return await execute_node(self, node, token)
+        return await self._legacy_execute_node(node, token)
+
+    async def _legacy_decision(self, node: dict[str, Any], result: dict[str, Any], token: dict[str, Any]) -> list[dict[str, Any]] | None:
         async with self.decision_lock:
             r = self.run()
             edges = [e for e in r["definition"]["connections"] if e["source"] == node["id"]]
@@ -1309,7 +1424,7 @@ class WorkflowSupervisor:
             self.attention("Orchestrator returned invalid decisions twice")
             return None
 
-    async def _node(self, token: dict[str, Any]) -> None:
+    async def _legacy_node(self, token: dict[str, Any]) -> None:
         r = self.run()
         node = next(n for n in r["definition"]["nodes"] if n["id"] == token["node_id"])
         result: dict[str, Any] = {}
@@ -1333,6 +1448,10 @@ class WorkflowSupervisor:
                     return
                 rr["transitions"] += 1
                 current.update(node_id=join, context={"optional_failure": result, "node_id": node["id"]})
+                if rr.get("execution_contract") == "delegation":
+                    current["input_result_refs"] = [current["execution_activation_id"]]
+                    for key in ("assignment_prompt", "assigned_task_ids", "additional_result_refs", "decision_id", "decision_attempts", "decision_error", "assignments"):
+                        current.pop(key, None)
                 for key in ("execution_complete", "execution_activation_id", "result", "optional_failure_join", "selected_connections", "recovered_result", "recovered_failed_result"):
                     current.pop(key, None)
             self.update(bypass, "optional_branch_bypassed", {"node_id": node["id"], "join_id": token["optional_failure_join"]})
@@ -1347,6 +1466,7 @@ class WorkflowSupervisor:
         if selected is None:
             return
         current = self.run()
+        token = next((t for t in current["pending"] if t["id"] == token["id"]), token)
         selected_join = validate_selection(current["definition"], node, selected, token, current["joins"])
         def advance(rr: dict[str, Any]) -> None:
             if rr["status"] != "running":
@@ -1375,10 +1495,16 @@ class WorkflowSupervisor:
                 rr["joins"][gid] = {"join_id": join_id, "split_id": node["id"], "expected": len(selected), "arrived": [], "stack": stack, "selected_targets": [e["target"] for e in selected]}
                 stack = stack + [gid]
             for edge in selected:
-                rr["pending"].append({"id": uuid.uuid4().hex, "node_id": edge["target"], "stack": stack, "context": _bounded(result or token.get("context", {})), "via": edge["id"]})
+                child = {"id": uuid.uuid4().hex, "node_id": edge["target"], "stack": stack, "context": _bounded(result or token.get("context", {})), "via": edge["id"]}
+                if rr.get("execution_contract") == "delegation":
+                    refs = ([token["execution_activation_id"]] if token.get("execution_activation_id") else token.get("input_result_refs", []))
+                    child["input_result_refs"] = refs
+                    dispatch = token.get("assignments", {}).get(edge["id"], {})
+                    child.update({k: copy.deepcopy(dispatch[k]) for k in ("assignment_prompt", "assigned_task_ids", "additional_result_refs", "execution_session_mode", "resume_task_id", "resume_source_execution_id") if k in dispatch})
+                rr["pending"].append(child)
         self.update(advance, "transition", [e["id"] for e in selected])
 
-    async def _execute_node(self, node: dict[str, Any], token: dict[str, Any]) -> None:
+    async def _legacy_execute_node(self, node: dict[str, Any], token: dict[str, Any]) -> None:
         r = self.run()
         count = sum(a["role"] == "node" and a["node_id"] == node["id"] and any(t["status"] != "not_started" for t in a["tasks"]) for a in r["activations"])
         if not token.get("recovered_result") and not token.get("recovered_failed_result") and count >= node["max_attempts"] + r["attempt_grants"].get(node["id"], 0):
@@ -1473,7 +1599,10 @@ class WorkflowSupervisor:
             group["arrived"].append(token)
             rr["pending"].remove(token)
             if len(group["arrived"]) == group["expected"]:
-                rr["pending"].append({"id": uuid.uuid4().hex, "node_id": node["id"], "stack": group["stack"], "joined": True, "context": {"branches": [t["context"] for t in group["arrived"]]}})
+                merged = {"id": uuid.uuid4().hex, "node_id": node["id"], "stack": group["stack"], "joined": True, "context": {"branches": [t["context"] for t in group["arrived"]]}}
+                if rr.get("execution_contract") == "delegation":
+                    merged["input_result_refs"] = list(dict.fromkeys(ref for t in group["arrived"] for ref in t.get("input_result_refs", [])))
+                rr["pending"].append(merged)
                 del rr["joins"][stack[-1]]
         self.update(arrive, "join_arrival", token["id"])
         return True
@@ -1512,7 +1641,12 @@ class WorkflowSupervisor:
                         if any(t["status"] in {"reserved", "running", "uncertain"} for a in settled["activations"] for t in a["tasks"]):
                             self.update(lambda r: r.update(status="needs_attention", attention_reason="Cancellation could not prove all dispatches settled"), "cancel_unresolved")
                         else:
-                            self.update(lambda r: r.update(status="cancelled"), "cancelled")
+                            def cancelled(r: dict[str, Any]) -> None:
+                                r["status"] = "cancelled"
+                                for activation in r["activations"]:
+                                    if activation["role"] == "node" and activation.get("pending_question_id") and not activation.get("node_result"):
+                                        activation["status"] = "cancelled"
+                            self.update(cancelled, "cancelled")
                         break
                 if run["status"] == "running":
                     for token in run["pending"]:
@@ -1526,9 +1660,9 @@ class WorkflowSupervisor:
                         else:
                             self.update(lambda r: r.update(status="completed"), "completed")
                         break
-                if run["status"] in TERMINAL:
+                if run["status"] in TERMINAL and not active:
                     break
-                if not active and run["status"] in {"paused", "needs_attention"}:
+                if not active and run["status"] in {"paused", "needs_attention", "needs_input"}:
                     break
                 await asyncio.sleep(0.05)
                 for tid, task in list(active.items()):
@@ -1592,7 +1726,7 @@ class WorkflowSupervisor:
         self.update(lambda r: r.update(status="running", supervisor_pid=os.getpid(), supervisor_identity=identity.own_identity()), "builder_started")
         a = self._activation("builder", "builder")
         self.update(lambda r: next(x for x in r["activations"] if x["id"] == a["id"]).update(feedback_ids=r.get("builder_turn_feedback_ids", [])), "builder_feedback_associated")
-        prompt = "Create a Polybridge workflow definition. Do not write files or dispatch agents. Return ONLY a JSON object. Schema: " + json.dumps({"name": self.run()["name"], "orchestrator": {"backend": "codex", "fallbacks": []}, "nodes": [{"id": "start", "type": "start", "position": {"x": 80, "y": 80}, "branch_mode": "auto", "prompt": "Optional workflow purpose for the orchestrator"}, {"id": "work", "type": "agent", "position": {"x": 220, "y": 80}, "instructions": "...", "agent": {"backend": "codex"}, "session_mode": "resume", "branch_mode": "auto", "max_attempts": 3}, {"id": "end", "type": "end", "position": {"x": 480, "y": 80}, "branch_mode": "auto"}], "connections": [{"id": "begin", "source": "start", "target": "work"}, {"id": "finish", "source": "work", "target": "end"}], "max_parallel": 4, "max_transitions": 100}) + "\nStart may contain an optional prompt string describing the workflow purpose; Polybridge supplies it to orchestrator decisions alongside the runtime user request. The orchestrator chooses one or multiple outgoing paths from their condition prompts and the evidence. Parallel paths connect to a shared agent or End node; Polybridge infers convergence automatically. Do not create Join nodes or configurable branching modes. Retry arrows return to an earlier ancestor step; Polybridge infers loops from topology, so do not set a backward flag. Put explicit failure/retry and success/continue conditions on arrows. A retry connection may set max_retries to a nonnegative integer: this caps actual traversals of that arrow across the entire run; 0 disables retry, and an absent value adds no edge cap. Node max_attempts and max_transitions still apply and may stop earlier. A retry is selected exclusively and must stay inside its parallel region. Agent nodes may set optional:true only inside a safe parallel branch with an actually selected required sibling and no required successor before convergence. Optional steps still execute; only definitive failures or exhausted available candidates bypass to that convergence with failure evidence. Do not make sequential steps or all branches optional. Agent roles are planning, implementation, review and task; supply custom step instructions, while Polybridge adds the role guidance and result protocol. Request: " + self.run().get("builder_turn_prompt", self.run()["prompt"])
+        prompt = "Create a Polybridge workflow definition. Do not write files or dispatch agents. Return ONLY a JSON object. Schema: " + json.dumps({"name": self.run()["name"], "orchestrator": {"backend": "codex", "fallbacks": []}, "nodes": [{"id": "start", "type": "start", "position": {"x": 80, "y": 80}, "branch_mode": "auto", "prompt": "Optional workflow purpose for the orchestrator"}, {"id": "work", "type": "agent", "position": {"x": 220, "y": 80}, "instructions": "...", "agent": {"backend": "codex"}, "session_mode": "agent_decides", "branch_mode": "auto", "max_attempts": 3, "max_context_questions": 10}, {"id": "end", "type": "end", "position": {"x": 480, "y": 80}, "branch_mode": "auto"}], "connections": [{"id": "begin", "source": "start", "target": "work"}, {"id": "finish", "source": "work", "target": "end"}], "max_parallel": 4, "max_transitions": 100}) + "\nStart may contain an optional prompt string describing the workflow purpose; Polybridge supplies it to orchestrator decisions alongside the runtime user request. The orchestrator chooses one or multiple outgoing paths from their condition prompts and the evidence. Parallel paths connect to a shared agent or End node; Polybridge infers convergence automatically. Do not create Join nodes or configurable branching modes. Retry arrows return to an earlier ancestor step; Polybridge infers loops from topology, so do not set a backward flag. Put explicit failure/retry and success/continue conditions on arrows. A retry connection may set max_retries to a nonnegative integer: this caps actual traversals of that arrow across the entire run; 0 disables retry, and an absent value adds no edge cap. Node max_attempts and max_transitions still apply and may stop earlier. A retry is selected exclusively and must stay inside its parallel region. Agent nodes may set optional:true only inside a safe parallel branch with an actually selected required sibling and no required successor before convergence. Optional steps still execute; only definitive failures or exhausted available candidates bypass to that convergence with failure evidence. Do not make sequential steps or all branches optional. Agent roles are planning, implementation, review and task; supply custom step instructions, while Polybridge adds the role guidance and result protocol. Request: " + self.run().get("builder_turn_prompt", self.run()["prompt"])
         prompt += "\n" + BUILDER_LAYOUT_GUIDANCE
         if "editing_definition" in self.run():
             prompt += "\nRefine the current unsaved canvas below according to the request; it may be incomplete. Return the complete corrected workflow. Preserve existing node and connection IDs, agent settings, permissions and instructions unless the requested edit requires changing them. Preserve existing node positions exactly unless the user explicitly asks to move or rearrange existing nodes. Do not assign a revision or overwrite any saved definition. Read applicable repository AGENTS.md and skill files, especially skills specified in the request, and use their relevant guidance when refining the graph. You may read repository guidance and skills for context; only inspect files, do not implement the task or run the workflow. Current canvas:\n" + json.dumps(self.run()["editing_definition"])
