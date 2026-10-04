@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, NamedTuple, Protocol, runtime_checkable
 
+from .mcp_approval import MCPApprovalPolicy
+
 Freedom = Literal["read_only", "write_in_repo", "publish", "unrestricted"]
 
 FREEDOMS: tuple[Freedom, ...] = ("read_only", "write_in_repo", "publish", "unrestricted")
@@ -356,6 +358,7 @@ class Backend(Protocol):
     name: str
     binary: str
     capabilities: Capabilities
+    mcp_approval: MCPApprovalPolicy
 
     def build_start_argv(
         self,

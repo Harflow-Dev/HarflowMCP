@@ -51,6 +51,7 @@ from pathlib import Path
 from typing import Any
 
 from . import normalize as nz
+from .mcp_approval import OpencodeApproval
 from .base import (
     EFFORTS,
     FREEDOMS,
@@ -206,6 +207,7 @@ class OpencodeBackend:
         return data.get("message") if isinstance(data.get("message"), str) else None
 
     name = "opencode"
+    mcp_approval = OpencodeApproval()
     binary = BINARY
     capabilities = Capabilities(
         # opencode mints `ses_…` itself and reports it on the first event.

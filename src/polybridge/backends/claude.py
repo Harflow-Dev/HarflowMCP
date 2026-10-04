@@ -64,6 +64,7 @@ from pathlib import Path
 from typing import Any
 
 from . import normalize as nz
+from .mcp_approval import ClaudeApproval
 from .base import (
     EFFORTS,
     FREEDOMS,
@@ -350,6 +351,7 @@ class ClaudeBackend:
         return None
 
     name = "claude"
+    mcp_approval = ClaudeApproval()
     binary = BINARY
     capabilities = Capabilities(
         chooses_session_id=True,

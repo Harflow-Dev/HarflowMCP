@@ -125,6 +125,7 @@ from pathlib import Path
 from typing import Any
 
 from . import normalize as nz
+from .mcp_approval import VibeApproval
 from .base import (
     FREEDOMS,
     Accumulator,
@@ -338,6 +339,7 @@ class VibeBackend:
         return provider_error(event, event_type="error")
 
     name = "vibe"
+    mcp_approval = VibeApproval()
     binary = BINARY
     # Programmatic Vibe replaces argv with this title after startup. Caller
     # verification still requires the captured process start time and ancestry.

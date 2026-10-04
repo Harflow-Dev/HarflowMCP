@@ -85,3 +85,49 @@ async def test_builder_cannot_use_own_run_details_as_unrelated_inspection(monkey
     monkeypatch.setattr(server,'_managed_workflow_reader',managed)
     with pytest.raises(Exception,match='own draft'):
         await server._workflow_call('detail',run_id='owned',view=view)
+
+
+async def test_verified_builder_caller_survives_transient_redetection(tmp_path, monkeypatch):
+    from polybridge import lineage, store, workflow_hooks
+    from datetime import datetime, timezone
+    record=store.TaskRecord(task_id='caller',backend='codex',session_id='s',repo_path=str(tmp_path),prompt='create',started_at=datetime.now(timezone.utc).isoformat(),status='completed',freedom='read_only',network=False,enforcement=backends.get('codex').enforcement('read_only',False).as_dict())
+    source=lineage.Caller(record,'ancestry')
+    async def verified():return source
+    async def path(value):return tmp_path
+    monkeypatch.setattr(server,'_verified_workflow_caller',verified)
+    monkeypatch.setattr(server,'_reg',lambda:SimpleNamespace(log_dir=tmp_path/'tasks',_resolve_lineage=lambda *a,**k:None))
+    monkeypatch.setattr(workflow_hooks,'refuse_managed',lambda *a:None)
+    monkeypatch.setattr(server,'_validate_repo_path',path)
+    storage=w.WorkflowStore(tmp_path)
+    monkeypatch.setattr(w,'WorkflowStore',lambda root=None:storage)
+    monkeypatch.setattr(w,'_launch',lambda *a:None)
+    monkeypatch.setattr(backends,'is_installed',lambda _:True)
+    monkeypatch.setattr(lineage,'detect_caller',lambda *a:None)
+    monkeypatch.setattr(lineage,'detect_caller_detail',lambda *a:lineage.Detection(None,'transient process lookup failure'))
+    initial_runs=[]
+    original_write=w._write
+    def observed_write(path,value):
+        if Path(path).parent==storage.runs and value.get('sequence')==0:
+            initial_runs.append(dict(value))
+        return original_write(path,value)
+    from pathlib import Path
+    monkeypatch.setattr(w,'_write',observed_write)
+    result=await server._workflow_call('build',name='example',prompt='Create',repo_path=str(tmp_path),agent={'backend':'codex'})
+    assert initial_runs[0]['caller_record']['task_id']=='caller'
+    assert result['caller_record']['task_id']=='caller'
+    assert result['caller_record']['freedom']=='read_only'
+    assert result['caller_method']=='ancestry'
+    assert storage.get_run(result['workflow_run_id'])['caller_record']==result['caller_record']
+
+
+@pytest.mark.parametrize('entry',['build','start'])
+async def test_direct_workflow_entry_refuses_uncertain_caller_before_persistence(tmp_path,monkeypatch,entry):
+    from polybridge import lineage
+    monkeypatch.setattr(lineage,'detect_caller',lambda *a:None)
+    monkeypatch.setattr(lineage,'detect_caller_detail',lambda *a:lineage.Detection(None,'unreadable ancestry'))
+    monkeypatch.setattr(w,'_launch',lambda *a:(_ for _ in ()).throw(AssertionError('must not launch')))
+    monkeypatch.setattr(backends,'is_installed',lambda _:True)
+    with pytest.raises(ValueError,match='undecidable'):
+        if entry=='build':await w.build_workflow('example','Create',repo_path=tmp_path,agent={'backend':'codex'},root=tmp_path)
+        else:await w.start_workflow('example','Run',tmp_path,definition_snapshot=definition(),root=tmp_path)
+    assert not list((tmp_path/'workflow-runs').glob('*.json'))

@@ -48,6 +48,9 @@ BUILDER_LAYOUT_GUIDANCE = (
 )
 
 
+_CALLER_UNSET = object()
+
+
 class WorkflowError(ValueError):
     """Invalid definition, state transition, or execution decision."""
 
@@ -663,7 +666,7 @@ class WorkflowStore:
             run["settling"] = any(t.get("status") in {"reserved", "running", "uncertain"} for a in run["activations"] for t in a["tasks"])
             return run
 
-    def create_run(self, definition: dict[str, Any], prompt: str, repo_path: Path, *, freedom: str = "write_in_repo", network: bool | None = None, kind: str = "workflow", permission_policy: str = "legacy_ceiling") -> dict[str, Any]:
+    def create_run(self, definition: dict[str, Any], prompt: str, repo_path: Path, *, freedom: str = "write_in_repo", network: bool | None = None, kind: str = "workflow", permission_policy: str = "legacy_ceiling", caller: Any = None) -> dict[str, Any]:
         if permission_policy not in {"saved_node", "legacy_ceiling"}:
             raise WorkflowError("Unknown workflow permission policy")
         if freedom not in FREEDOMS:
@@ -675,6 +678,8 @@ class WorkflowStore:
             raise WorkflowError("Repository directory does not exist")
         rid = uuid.uuid4().hex
         run = {"workflow_run_id": rid, "kind": kind, "name": definition["name"], "definition": copy.deepcopy(definition), "revision": definition.get("revision", 0), "prompt": prompt, "repo_path": str(Path(repo_path).resolve()), "freedom": freedom, "network": network, "status": "starting", "created_at": time.time(), "updated_at": time.time(), "sequence": 0, "transitions": 0, "activations": [], "decisions": [], "sessions": {}, "suppressed_candidates": [], "pending": [], "joins": {}, "instructions": "", "attempt_grants": {}, "supervisor_pid": None}
+        if caller is not None:
+            run.update(caller_record=asdict(caller.record), caller_method=caller.method)
         run["permission_policy"] = permission_policy
         run["definition_hash"] = hashlib.sha256(json.dumps(definition, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         run["tasks"] = []
@@ -917,7 +922,7 @@ def _launch(storage: WorkflowStore, run_id: str) -> None:
         subprocess.Popen([sys.executable, "-m", "polybridge.workflows", "supervise", run_id, "--root", str(storage.root)], stdin=subprocess.DEVNULL, stdout=output, stderr=output, start_new_session=True, close_fds=True)
 
 
-async def start_workflow(name: str, prompt: str, repo_path: Path, *, overrides: dict[str, Any] | None = None, freedom: str | None = None, network: bool | None = None, root: Path | None = None, interaction_owner: str = "caller", definition_snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
+async def start_workflow(name: str, prompt: str, repo_path: Path, *, overrides: dict[str, Any] | None = None, freedom: str | None = None, network: bool | None = None, root: Path | None = None, interaction_owner: str = "caller", definition_snapshot: dict[str, Any] | None = None, _verified_caller: Any = _CALLER_UNSET) -> dict[str, Any]:
     if interaction_owner not in {"caller", "monitor"}:
         raise WorkflowError("Invalid interaction owner")
     if not isinstance(prompt, str) or not prompt.strip():
@@ -936,9 +941,9 @@ async def start_workflow(name: str, prompt: str, repo_path: Path, *, overrides: 
                 definition["orchestrator"].pop(setting, None)
         definition["orchestrator"] = {**definition["orchestrator"], **overrides}
     definition = validate_definition(definition)
-    run = storage.create_run(definition, prompt, repo_path, freedom="unrestricted", network=network, permission_policy="saved_node")
+    caller = await _capture_caller(storage, None, _verified_caller)
+    run = storage.create_run(definition, prompt, repo_path, freedom="unrestricted", network=network, permission_policy="saved_node", caller=caller)
     storage.update_run(run["workflow_run_id"], lambda r: r.update(interaction_owner=interaction_owner), "interaction_owner")
-    await _capture_caller(storage, run["workflow_run_id"])
     _launch(storage, run["workflow_run_id"])
     return run
 
@@ -1098,7 +1103,7 @@ def builder_workspace(storage: WorkflowStore) -> Path:
     return workspace.resolve()
 
 
-async def build_workflow(name: str, prompt: str, repo_path: Path | None = None, *, agent: dict[str, Any], fallbacks: list[dict[str, Any]] | None = None, definition: dict[str, Any] | None = None, source: dict[str, Any] | None = None, root: Path | None = None) -> dict[str, Any]:
+async def build_workflow(name: str, prompt: str, repo_path: Path | None = None, *, agent: dict[str, Any], fallbacks: list[dict[str, Any]] | None = None, definition: dict[str, Any] | None = None, source: dict[str, Any] | None = None, root: Path | None = None, _verified_caller: Any = _CALLER_UNSET) -> dict[str, Any]:
     if not isinstance(prompt, str) or not prompt.strip():
         raise WorkflowError("Builder prompt must be nonempty")
     storage = WorkflowStore(root)
@@ -1120,9 +1125,10 @@ async def build_workflow(name: str, prompt: str, repo_path: Path | None = None, 
         baseline = raw_source.get("saved_definition")
         metadata = {"name": source_name, "revision": revision, "saved_definition": _editing_context(baseline, "source.saved_definition") if baseline is not None else None}
     descriptor = {"name": _workflow_name(name), "orchestrator": config, "nodes": [], "connections": []}
+    caller = await _capture_caller(storage, None, _verified_caller)
     supplied_repo = repo_path is not None
     repo_path = repo_path if supplied_repo else builder_workspace(storage)
-    run = storage.create_run(descriptor, prompt, repo_path, freedom="read_only", kind="builder")
+    run = storage.create_run(descriptor, prompt, repo_path, freedom="read_only", kind="builder", caller=caller)
     if editing is not None:
         run = storage.update_run(run["workflow_run_id"], lambda r: r.update(editing_definition=editing, editing_source=metadata, source_name=metadata["name"], source_revision=metadata["revision"], source_saved_definition=metadata["saved_definition"]), "builder_edit_requested")
     try:
@@ -1131,17 +1137,25 @@ async def build_workflow(name: str, prompt: str, repo_path: Path | None = None, 
         # Repair input remains available to the agent, but cannot crash the canvas.
         initial_preview = {"name": name, "nodes": [], "connections": []}
     run = storage.update_run(run["workflow_run_id"], lambda r: r.update(builder_draft=initial_preview, draft_revision=0, builder_messages=[], builder_has_repo_context=supplied_repo), "builder_draft_initialized")
-    await _capture_caller(storage, run["workflow_run_id"])
     _launch(storage, run["workflow_run_id"])
     return run
 
 
-async def _capture_caller(storage: WorkflowStore, run_id: str) -> None:
+async def _capture_caller(storage: WorkflowStore, run_id: str | None = None, verified_caller: Any = _CALLER_UNSET) -> Any:
+    """Resolve authority before persistence; verified MCP identity must never be redetected."""
+    if verified_caller is not _CALLER_UNSET:
+        return verified_caller
     from . import lineage
-    from .tasks import default_log_dir
-    caller = await asyncio.to_thread(lineage.detect_caller, default_log_dir())
+    log_dir = storage.root / "tasks"
+    caller = await asyncio.to_thread(lineage.detect_caller, log_dir)
     if caller is not None:
-        storage.update_run(run_id, lambda r: r.update(caller_record=asdict(caller.record), caller_method=caller.method), "caller_recorded")
+        return caller
+    detection = await asyncio.to_thread(lineage.detect_caller_detail, log_dir)
+    if detection.undecidable is not None:
+        raise WorkflowError("Workflow caller authority is undecidable: " + str(detection.undecidable))
+    if detection.caller is None and os.environ.get(lineage.ENV_TASK_ID):
+        raise WorkflowError("Workflow caller task identity cannot be verified")
+    return detection.caller
 
 
 def parse_json(text: str) -> dict[str, Any]:
@@ -1161,21 +1175,11 @@ def failure_diagnostic(snapshot: dict[str, Any], prompt: str) -> str:
     adapter = backends.BACKENDS.get(snapshot.get("backend"))
     diagnostic_hook = getattr(adapter, "workflow_failure_diagnostic", None)
     if stream and diagnostic_hook:
-        try:
-            with Path(stream).open(encoding="utf-8") as f:
-                for line in f:
-                    if len(line) > 8 * 1024 * 1024:
-                        continue
-                    try:
-                        event = json.loads(line)
-                    except ValueError:
-                        continue
-                    if isinstance(event, dict):
-                        diagnostic = diagnostic_hook(event)
-                        if diagnostic:
-                            lines.append(diagnostic)
-        except OSError:
-            pass
+        from .backends.workflow_diagnostics import stream_events
+        for event in stream_events(stream):
+            diagnostic = diagnostic_hook(event)
+            if diagnostic:
+                lines.append(diagnostic)
     text = "\n".join(line for line in lines if isinstance(line, str))
     for value in (prompt, json.dumps(prompt)[1:-1], repr(prompt)[1:-1]):
         if value:
@@ -1209,25 +1213,13 @@ def availability_failure(snapshot: dict[str, Any]) -> str | None:
     # Inspect only authoritative top-level protocol envelopes. Assistant messages,
     # tool payloads and summaries can contain arbitrary text and are never evidence.
     stream = snapshot.get("raw_stream_log")
-    if stream:
-        try:
-            with Path(stream).open(encoding="utf-8") as f:
-                for line in f:
-                    if len(line) > 8 * 1024 * 1024:
-                        continue
-                    try:
-                        event = json.loads(line)
-                    except ValueError:
-                        continue
-                    if not isinstance(event, dict):
-                        continue
-                    classify = getattr(adapter, "workflow_availability_failure", None)
-                    if classify:
-                        reason = classify(event)
-                        if reason:
-                            return reason
-        except OSError:
-            pass
+    classify = getattr(adapter, "workflow_availability_failure", None)
+    if stream and classify:
+        from .backends.workflow_diagnostics import stream_events
+        for event in stream_events(stream):
+            reason = classify(event)
+            if reason:
+                return reason
     return None
 
 

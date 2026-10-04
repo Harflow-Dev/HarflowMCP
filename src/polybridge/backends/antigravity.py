@@ -54,6 +54,7 @@ from pathlib import Path
 from typing import Any
 
 from . import normalize as nz
+from .mcp_approval import AntigravityApproval
 from .base import (
     FREEDOMS,
     Accumulator,
@@ -326,6 +327,7 @@ class AntigravityBackend:
         return None
 
     name = "antigravity"
+    mcp_approval = AntigravityApproval()
     binary = BINARY
     capabilities = Capabilities(
         # agy mints its conversation id itself and only discloses it on the first stream line;

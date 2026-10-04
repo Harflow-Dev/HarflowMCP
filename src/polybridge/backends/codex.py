@@ -71,6 +71,7 @@ from pathlib import Path
 from typing import Any
 
 from . import normalize as nz
+from .mcp_approval import CodexApproval
 from .base import (
     EFFORTS,
     Accumulator,
@@ -277,6 +278,7 @@ class CodexBackend:
         return None
 
     name = "codex"
+    mcp_approval = CodexApproval()
     binary = BINARY
     capabilities = Capabilities(
         # Codex mints its own thread id and reports it in the stream.

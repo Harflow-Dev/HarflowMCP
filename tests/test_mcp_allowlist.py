@@ -5,14 +5,15 @@ from pathlib import Path
 import pytest
 import tomlkit
 from polybridge import mcp_allowlist as rules
+from polybridge.backends import mcp_approval as native_rules
 
 
 @pytest.fixture
 def home(tmp_path, monkeypatch):
     monkeypatch.setenv('HOME', str(tmp_path))
     from types import SimpleNamespace
-    monkeypatch.setattr(rules.shutil, 'which', lambda _: '/fake/opencode')
-    monkeypatch.setattr(rules.subprocess, 'run', lambda *a, **k: SimpleNamespace(stdout='1.18.34', returncode=0))
+    monkeypatch.setattr(native_rules.shutil, 'which', lambda _: '/fake/opencode')
+    monkeypatch.setattr(native_rules.subprocess, 'run', lambda *a, **k: SimpleNamespace(stdout='1.18.34', returncode=0))
     for key in ('CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'XDG_CONFIG_HOME', 'VIBE_HOME'):
         monkeypatch.delenv(key, raising=False)
     return tmp_path
@@ -112,8 +113,8 @@ def test_cli_read_and_write_human_guard(home, monkeypatch, capsys):
 
 def test_opencode_v2_refuses_mutation(home, monkeypatch):
     from types import SimpleNamespace
-    monkeypatch.setattr(rules.shutil, 'which', lambda _: '/fake/opencode')
-    monkeypatch.setattr(rules.subprocess, 'run', lambda *a, **k: SimpleNamespace(stdout='2.0.1', returncode=0))
+    monkeypatch.setattr(native_rules.shutil, 'which', lambda _: '/fake/opencode')
+    monkeypatch.setattr(native_rules.subprocess, 'run', lambda *a, **k: SimpleNamespace(stdout='2.0.1', returncode=0))
     assert rules.edit('opencode', allow='polybridge/*')['supported'] is False
     assert not rules.config_path('opencode').exists()
 
@@ -121,7 +122,7 @@ def test_opencode_v2_refuses_mutation(home, monkeypatch):
 @pytest.mark.parametrize('stdout,code',[('',0),('unknown',0),('1.2.0',1)])
 def test_unknown_opencode_version_refuses_mutation(home, monkeypatch, stdout, code):
     from types import SimpleNamespace
-    monkeypatch.setattr(rules.subprocess,'run',lambda *a,**k:SimpleNamespace(stdout=stdout,returncode=code))
+    monkeypatch.setattr(native_rules.subprocess,'run',lambda *a,**k:SimpleNamespace(stdout=stdout,returncode=code))
     assert not rules.edit('opencode',allow='polybridge/*')['supported']
     assert not rules.config_path('opencode').exists()
 
@@ -147,3 +148,31 @@ def test_codex_registered_http_server_preserves_transport(home):
     path.write_text('[mcp_servers.polybridge]\nurl="https://example.org/mcp"\n')
     rules.edit('codex', allow='polybridge/*')
     assert tomlkit.parse(path.read_text())['mcp_servers']['polybridge']['url'] == 'https://example.org/mcp'
+
+
+def test_generic_allowlist_has_no_backend_specific_branching():
+    import ast
+    tree = ast.parse(Path(rules.__file__).read_text())
+    names = {"claude", "codex", "vibe", "opencode", "antigravity"}
+    native_literals = [node.value for node in ast.walk(tree) if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value in names]
+    assert native_literals == [], "Native approval paths and formats belong to Backend adapter hooks"
+
+
+def test_new_backend_approval_adapter_needs_no_generic_editor_changes(home, monkeypatch):
+    from types import SimpleNamespace
+    from polybridge.backends import BACKENDS
+
+    class CustomApproval:
+        detail_prefix = ""
+        def config_path(self): return home / "custom-harness.json"
+        def unsupported_reason(self): return None
+        def parse(self, raw): return json.loads(raw or "{}")
+        def entries(self, data): return data.get("allow", [])
+        def update(self, raw, data, entry, *, allow):
+            data["allow"] = [entry] if allow else []
+            return json.dumps(data)
+
+    monkeypatch.setitem(BACKENDS, "custom-harness", SimpleNamespace(mcp_approval=CustomApproval()))
+    assert rules.edit("custom-harness", allow="polybridge/tool")["entries"] == ["polybridge/tool"]
+    assert rules.edit("custom-harness")["entries"] == ["polybridge/tool"]
+    assert rules.edit("custom-harness", remove="polybridge/tool")["entries"] == []

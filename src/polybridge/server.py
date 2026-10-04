@@ -993,11 +993,11 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
                         _reg()._resolve_lineage(caller, child_enforcement=enforcement, child_backend=backend_.name, child_repo=path)
         if action == "start":
             kwargs["repo_path"] = await _validate_repo_path(kwargs["repo_path"])
-            return await workflows.start_workflow(**kwargs)
+            return await workflows.start_workflow(**kwargs, _verified_caller=caller)
         if action == "build":
             if kwargs.get("repo_path") is not None:
                 kwargs["repo_path"] = await _validate_repo_path(kwargs["repo_path"])
-            return await workflows.build_workflow(**kwargs)
+            return await workflows.build_workflow(**kwargs, _verified_caller=caller)
         if action == "builder_followup":
             return await workflows.followup_workflow_builder(**kwargs)
         managed = await _managed_workflow_reader()
