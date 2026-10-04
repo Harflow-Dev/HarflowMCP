@@ -60,71 +60,63 @@ def result_page(run: dict[str, Any], execution_id: str, *, task_id: str | None =
 
 
 def decorate_tasks(entries: list[dict[str, Any]], log_dir: Any) -> list[dict[str, Any]]:
-    """Build one association index per listing; avoid scanning every run for every task."""
-    from .workflows import WorkflowStore
-    index = {}
+    """Resolve requested task receipts and ancestors; never scan run history."""
+    import logging
+    from . import store as task_store
+    from .workflows import WorkflowStore, _identifier
     storage = WorkflowStore(root=log_dir.parent)
-    for run in storage.list_runs():
+    by_id = {entry["task_id"]: entry for entry in entries if entry.get("task_id")}
+    run_cache: dict[str, dict[str, dict[str, Any]]] = {}
+    resolved: dict[str, dict[str, Any] | None] = {}
+    inherited = ("workflow_run_id", "workflow_name", "workflow_status", "workflow_settling", "interaction_owner", "execution_contract")
+
+    def run_index(run_id: str) -> dict[str, dict[str, Any]]:
+        if run_id in run_cache:
+            return run_cache[run_id]
+        index: dict[str, dict[str, Any]] = {}
+        run_cache[run_id] = index
+        run = storage.get_run(_identifier(run_id))
         for activation in run.get("activations", []):
             for task in activation.get("tasks", []):
-                index[task["task_id"]] = {"workflow_run_id": run["workflow_run_id"], "workflow_node_id": activation["node_id"], "workflow_execution_id": activation["id"], "workflow_role": activation["role"], "execution_contract": run.get("execution_contract"), "interaction_owner": run.get("interaction_owner", "caller"), "workflow_status": run["status"] if "status" in run else None, "workflow_settling": run.get("settling", False), "workflow_name": run.get("name")}
+                association = {"workflow_run_id": run["workflow_run_id"], "workflow_node_id": activation["node_id"], "workflow_execution_id": activation["id"], "workflow_role": activation["role"], "execution_contract": run.get("execution_contract"), "interaction_owner": run.get("interaction_owner", "caller"), "workflow_status": run.get("status"), "workflow_settling": run.get("settling", False), "workflow_name": run.get("name")}
                 if run.get("execution_contract") == "delegation" and activation.get("role") == "node" and isinstance(activation.get("assignment_prompt"), str):
                     assignment = task.get("assignment_prompt", activation["assignment_prompt"])
-                    index[task["task_id"]].update(display_prompt=assignment, prompt=assignment)
-    # Follow-up and spawned task records inherit ownership without inheriting the
-    # ancestor's assignment prompt or pretending to be that execution.
-    changed = True
-    inherited = ("workflow_run_id", "workflow_name", "workflow_status", "workflow_settling", "interaction_owner", "execution_contract")
-    while changed:
-        changed = False
-        for entry in entries:
-            task_id = entry.get("task_id")
-            if task_id in index:
-                continue
-            ancestor = next((index.get(entry.get(key)) for key in ("parent_task_id", "spawned_by") if entry.get(key) in index), None)
-            if ancestor is not None:
-                index[task_id] = {key: ancestor[key] for key in inherited if key in ancestor}
-                changed = True
-    from . import store as task_store
-    import logging
-    resolved: dict[str, dict[str, Any] | None] = {}
+                    association.update(display_prompt=assignment, prompt=assignment)
+                index[task["task_id"]] = association
+        return index
 
-    def ancestor_owner(task_id: str, visited: set[str]) -> dict[str, Any] | None:
-        if task_id in index:
-            return index[task_id]
+    def owner(task_id: str, visited: set[str]) -> dict[str, Any] | None:
         if task_id in resolved:
             return resolved[task_id]
-        if task_id in visited:
+        if task_id in visited or len(visited) >= 64:
             return None
         visited = visited | {task_id}
         association = None
         try:
-            # Only use the ownership lookup when its receipt prevents a full
-            # run scan. Hidden ordinary ancestors are resolved from records.
-            from .workflows import _identifier
-            if (storage.owners / f"{_identifier(task_id)}.json").exists():
-                association = storage.task_owner(task_id)
+            receipt = storage.owners / f"{_identifier(task_id)}.json"
+            if receipt.exists():
+                run_id = json.loads(receipt.read_text())["workflow_run_id"]
+                association = run_index(run_id).get(task_id)
+                if association is None:
+                    raise ValueError("Task receipt does not match its workflow run")
             else:
-                record = task_store.read(log_dir, task_id)
-                if record is not None:
-                    for ancestor in dict.fromkeys((record.parent_task_id, record.spawned_by)):
-                        if ancestor:
-                            association = ancestor_owner(ancestor, visited)
-                            if association is not None:
-                                break
+                entry = by_id.get(task_id)
+                ancestors = (entry.get("parent_task_id"), entry.get("spawned_by")) if entry is not None else ()
+                if not any(ancestors):
+                    record = task_store.read(log_dir, task_id)
+                    ancestors = (record.parent_task_id, record.spawned_by) if record is not None else ()
+                for ancestor in dict.fromkeys(ancestors):
+                    if ancestor:
+                        parent = owner(ancestor, visited)
+                        if parent is not None:
+                            association = {key: parent[key] for key in inherited if key in parent}
+                            break
         except (OSError, ValueError, KeyError, TypeError):
             logging.getLogger(__name__).warning("Workflow decoration unavailable for %s", task_id, exc_info=True)
         resolved[task_id] = association
         return association
 
-    for entry in entries:
-        task_id = entry.get("task_id")
-        if task_id not in index:
-            association = next((owner for key in ("parent_task_id", "spawned_by")
-                                if entry.get(key) and (owner := ancestor_owner(entry[key], {task_id})) is not None), None)
-            if association is not None:
-                index[task_id] = {key: association[key] for key in inherited if key in association}
-    return [{**entry, **index.get(entry.get("task_id"), {})} for entry in entries]
+    return [{**entry, **(owner(entry["task_id"], set()) or {})} if entry.get("task_id") else entry for entry in entries]
 
 
 def managed_reader(log_dir: Any) -> tuple[dict[str, Any], dict[str, Any]] | None:

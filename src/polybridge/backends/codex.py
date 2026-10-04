@@ -254,6 +254,23 @@ class UnsafeInvocationError(RuntimeError):
 
 
 class CodexBackend:
+    @staticmethod
+    def workflow_stderr_availability_failure(diagnostic: str) -> str | None:
+        from .workflow_diagnostics import stderr_availability
+        return stderr_availability(diagnostic, quota_patterns=('(?im)^.*(?:usage_limit_reached|insufficient_quota|model_not_found|rate_limit_exceeded).*$',))
+
+    @staticmethod
+    def workflow_availability_failure(event: dict[str, Any]) -> str | None:
+        from .workflow_diagnostics import provider_error
+        return provider_error(event, event_type="turn.failed", quota_reason="codex availability rejected")
+
+    @staticmethod
+    def workflow_failure_diagnostic(event: dict[str, Any]) -> str | None:
+        error = event.get("error")
+        if event.get("type") == "turn.failed" and isinstance(error, dict) and isinstance(error.get("message"), str):
+            return error["message"]
+        return None
+
     name = "codex"
     binary = BINARY
     capabilities = Capabilities(

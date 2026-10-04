@@ -183,6 +183,28 @@ class UnsafeInvocationError(RuntimeError):
 
 
 class OpencodeBackend:
+    @staticmethod
+    def workflow_stderr_availability_failure(diagnostic: str) -> str | None:
+        from .workflow_diagnostics import stderr_availability
+        return stderr_availability(diagnostic, quota_patterns=('(?im)^.*(?:insufficient_quota|model_not_found|rate_limit_exceeded).*$',))
+
+    @staticmethod
+    def workflow_availability_failure(event: dict[str, Any]) -> str | None:
+        from .workflow_diagnostics import provider_error
+        return provider_error(event, event_type="error")
+
+    @staticmethod
+    def workflow_failure_diagnostic(event: dict[str, Any]) -> str | None:
+        error = event.get("error")
+        if event.get("type") != "error" or not isinstance(error, dict) or not isinstance(error.get("name"), str):
+            return None
+        data = error.get("data")
+        if not isinstance(data, dict):
+            return None
+        if data.get("statusCode") in {401, 403}:
+            return f"OpenCode authentication failed (HTTP {data['statusCode']}); check the configured provider credentials."
+        return data.get("message") if isinstance(data.get("message"), str) else None
+
     name = "opencode"
     binary = BINARY
     capabilities = Capabilities(

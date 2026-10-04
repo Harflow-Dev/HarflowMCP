@@ -83,7 +83,7 @@ def test_run_returns_the_task_id_and_the_child_owns_the_task_to_the_end(git_repo
 
     assert code == 0, err
     doc = _one(out)
-    assert doc["v"] == 2 and set(doc["result"]) == {"task_id"}
+    assert doc["v"] == 3 and set(doc["result"]) == {"task_id"}
     record = _settled(doc["result"]["task_id"])
     assert record.status == "completed" and record.exit_code == 0
     # Owned by the forked child, which exits once the task settles — not by the process that
@@ -111,7 +111,7 @@ def test_run_reports_validation_errors_from_the_child(git_repo: Path, argv_tail)
 
     assert code == 1
     doc = _one(out)
-    assert doc["v"] == 2 and doc["error"]["code"] == "invalid_params" and doc["error"]["message"]
+    assert doc["v"] == 3 and doc["error"]["code"] == "invalid_params" and doc["error"]["message"]
     assert store.read_all(default_log_dir()) == []
 
 
@@ -263,7 +263,7 @@ def test_the_unknown_document_is_versioned_and_exits_3(
     )
 
     assert ctl.main(["run", "--backend", "x", "--repo", "/", "--prompt", "p", "--json"]) == 3
-    assert _doc(capsys) == {"v": 2, "unknown": {"message": "no word"}}
+    assert _doc(capsys) == {"v": 3, "unknown": {"message": "no word"}}
 
 
 def _dead_owner() -> dict:
@@ -312,7 +312,7 @@ def test_cancel_stops_a_task_whose_owner_is_gone(
 
         assert ctl.main(["cancel", "t1", "--json"]) == 0
         doc = _doc(capsys)
-        assert doc["v"] == 2
+        assert doc["v"] == 3
         assert doc["result"]["status"] == "cancelled"
         assert set(doc["result"]["cascade"]) >= {"cancelled_descendants", "sigkill_survivors"}
     finally:
@@ -360,7 +360,7 @@ def test_takeover_json_for_a_finished_task(
 
     assert ctl.main(["takeover", "t1", "--json"]) == 0
     doc = _doc(capsys)
-    assert doc["v"] == 2
+    assert doc["v"] == 3
     assert doc["result"]["argv"] == ["/opt/bin/claude", "--resume", SESSION]
     assert doc["result"]["cwd"] == str(tmp_path)
 

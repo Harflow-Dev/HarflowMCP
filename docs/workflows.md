@@ -110,6 +110,26 @@ on each dispatch. Network access is a separate optional boolean (`--network true
 selecting Publish or Unrestricted does not independently request network access. Backend
 capability restrictions still apply.
 
+Publish mechanisms differ by harness. Claude uses `acceptEdits` plus narrow command rules for
+`git commit`, `git push`, `gh pr create`, and `gh pr review`. Polybridge does not
+auto-approve `gh pr merge`, `gh pr close`, repository edit/delete, `gh pr comment`, or a broad
+`gh api` command. The comment command also permits editing/deleting prior comments, so its entire
+prefix cannot be approved as comment creation alone. Inline reviews requiring raw API POST requests may still require a specific user approval;
+command-prefix rules cannot independently validate the endpoint and HTTP method. Existing user
+permission rules continue to apply. These are harness permissions, not an OS sandbox.
+Codex Publish enables its workspace sandbox's network access; Write in repo keeps network off
+by default unless explicitly requested. Vibe and Antigravity provide no narrower publishing mode:
+Publish currently uses their unrestricted approval mechanism, as reported in access caveats.
+Polybridge does not claim identical confinement across harnesses. See the harness's
+[permission rules](https://code.claude.com/docs/en/permissions) and GitHub CLI's
+[review](https://cli.github.com/manual/gh_pr_review) and [API](https://cli.github.com/manual/gh_api)
+contracts for the distinctions. For headless review publication, prefer
+`gh pr review --comment --body-file /path/to/review.md` as a standalone command. A shell pipe
+or chain has additional command segments that may each require approval. For explicitly
+approved inline API publication, prepare JSON in a file and use `gh api … --method POST
+--input /path/to/review.json`; a file avoids approving an extra `printf` pipeline and does
+not itself grant the API request permission.
+
 For example, a Task step that updates a Jira issue can request `"freedom": "publish"`.
 The saved node access is authoritative for new runs. Callers cannot override it with
 `--freedom` or assignment fields. A parent harness that cannot delegate the configured
@@ -304,7 +324,9 @@ attention**. Resume can include additional instructions and explicitly granted a
 Those grants belong to that run, not the saved definition.
 
 Task associations are reserved before launch. Supervisor-crash recovery reconciles existing
-records and does not automatically replay uncertain dispatches. Active and Needs attention runs
+records and does not automatically replay uncertain dispatches. Checkout leases recheck live or
+uncertain orphan task associations after acquiring the OS lock, closing the gap where a supervisor
+can die between the initial scan and lock acquisition. Active and Needs attention runs
 protect their referenced task records from ordinary retention. Finished run history retains compact
 outcomes; expired activity logs are shown as unavailable.
 
@@ -318,7 +340,11 @@ an assignment `prompt` for each agent execution, optional additional result refe
 optional assigned task IDs. Under Agent decides, each agent assignment also chooses
 `session_mode: fresh|resume`; Resume identifies an issued `resume_task_id`. Structural traversal needs no assignment; convergence waits for every
 branch before requesting one assignment for its next agent. Start always asks the
-orchestrator for the first assignment.
+orchestrator for the first assignment. New runs retain one compatible native orchestrator session
+across decisions, inspections, and worker questions. Each checkpoint still has its own durable
+execution record and current authoritative context. A candidate change or a definitively missing
+retained session boots Fresh; uncertain dispatch outcomes require reconciliation rather than
+restarting the conversation or repeating work.
 
 New runs avoid structural-only routing decisions. A continuation entering **Parallel start**
 includes `branch_continuations`; the orchestrator returns a `branch_assignments` array containing
@@ -349,6 +375,13 @@ An agent continuation decision looks like this (IDs are issued by Polybridge):
   }]
 }
 ```
+
+Launch metadata and runtime evidence come through each backend adapter. Claude initialization
+reports its native model. Vibe's matching native session metadata can report `active_model`, the
+resolved model name, and configured thinking level, with `harness_session_configuration`
+provenance and `observed_configuration` status. This proves the session configuration, not the
+provider's actual served identity. Missing native metadata remains unknown; assistant self-reports
+never establish model identity.
 
 Workers return `{status, result, evidence}`. Status is `succeeded`, `failed`, `blocked`, or `asking`;
 role-specific results retain plans, completed task IDs, review verdicts, and observed test outcomes.
@@ -649,3 +682,22 @@ when they belong to the same harness session; fresh sessions stay separate, incl
 orchestrator sessions. The overview focuses on live
 activity; full decoded results remain in individual task details. Workflow tasks cannot
 be taken over while their parent run is active, suspended or still settling.
+
+### Recordless dispatch reconciliation
+
+Reservations record whether Polybridge is still preparing or has requested a spawn. A restart
+can settle a recordless preparing reservation as not started. Once spawning was requested,
+missing records remain uncertain: they never expire automatically or permit redispatch.
+Known exec failures before a process exists are recorded as not started.
+
+After independently confirming that no process survived, a human can release a named
+recordless reservation with:
+
+```sh
+polybridge-ctl workflow-abandon-dispatch RUN_ID EXECUTION_ID TASK_ID \
+  --reason "Confirmed the process is stopped" --confirm-no-process
+```
+
+The command refuses agent callers, live or uncertain supervisors, recorded tasks and unrelated
+reservations. It persists the confirmation and reason without scheduling work or granting
+attempts. Resume or recovery remains a separate explicit action.

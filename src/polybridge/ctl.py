@@ -11,7 +11,7 @@ this process owns; `takeover` / `takeover-attach` are the human-only takeover (`
 and `resume` fork a process that owns the new task until it settles (`detached.py`). `backends`
 reports the registered backends and whether each binary is on PATH (`backends.is_installed`) — no
 `--version` probe, no subprocess. Every command prints one versioned JSON document
-(`"v": 2`, `CTL_JSON_VERSION`) with `--json`.
+(`"v": 3`, `CTL_JSON_VERSION`) with `--json`.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ from .tasks import default_log_dir
 # Bumped to 2 when `status`/`list`'s snapshot/brief documents gained `resume_command` (Monitor
 # piece 3/3). `setup` and the event log are separate contracts and stay at v1 — see CLAUDE.md's
 # "The Monitor app is a consumer of three frozen contracts".
-CTL_JSON_VERSION = 2
+CTL_JSON_VERSION = 3
 
 # How long `cancel`/`takeover` stay alive for a failing `.sig` write to be retried before exiting —
 # the lease (60 s) is what a later recovery waits for anyway.
@@ -146,13 +146,18 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     edits.add_argument("--remove")
 
     workflow_parsers = []
-    for action in ("validate", "list", "get", "save", "delete", "build", "start", "list-runs", "status", "wait", "pause", "resume", "cancel", "builder-followup", "builder-apply", "inspect", "recover", "migrate"):
+    for action in ("validate", "list", "get", "save", "delete", "build", "start", "list-runs", "status", "wait", "pause", "resume", "cancel", "builder-followup", "builder-apply", "inspect", "recover", "migrate", "abandon-dispatch"):
         wp = sub.add_parser("workflow-" + action, help=action + " workflows")
         wp.add_argument("--json", action="store_true")
         if action in {"get", "save", "delete", "build", "start"}:
             wp.add_argument("name")
-        if action in {"status", "wait", "pause", "resume", "cancel", "builder-followup", "inspect", "recover"}:
+        if action in {"status", "wait", "pause", "resume", "cancel", "builder-followup", "inspect", "recover", "abandon-dispatch"}:
             wp.add_argument("workflow_run_id")
+        if action == "abandon-dispatch":
+            wp.add_argument("execution_id")
+            wp.add_argument("task_id")
+            wp.add_argument("--reason", required=True)
+            wp.add_argument("--confirm-no-process", action="store_true", required=True)
         if action == "inspect":
             wp.add_argument("execution_id")
             wp.add_argument("--task-id")
@@ -571,6 +576,13 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
                 return {"valid": False, "error": str(exc)}
             return {"valid": True, "definition": canonical}
         from . import server
+        if action == "abandon-dispatch":
+            from .workflows import WorkflowStore
+            from .takeover import caller_refusal
+            refusal = await asyncio.to_thread(caller_refusal, server._reg().log_dir)
+            if refusal is not None:
+                raise ValueError("Only a verified human may abandon an uncertain dispatch: " + refusal[1])
+            return await asyncio.to_thread(WorkflowStore().abandon_dispatch, args.workflow_run_id, args.execution_id, args.task_id, args.reason, args.confirm_no_process)
         if action == "inspect":
             return await server.inspect_workflow_node(args.workflow_run_id, args.execution_id, args.task_id, args.view, args.cursor, args.limit, args.before_seq, args.after_seq)
         if action == "recover":

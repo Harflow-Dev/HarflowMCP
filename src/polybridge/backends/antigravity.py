@@ -290,8 +290,17 @@ def _tool_command(parameters: dict[str, Any]) -> str | None:
 
 class AntigravityBackend:
     @staticmethod
+    def workflow_stderr_availability_failure(diagnostic: str) -> str | None:
+        from .workflow_diagnostics import stderr_availability
+        return stderr_availability(diagnostic)
+
+    @staticmethod
     def workflow_availability_failure(event: dict[str, Any]) -> str | None:
         """Interpret only agy's terminal provider error, never response/tool prose."""
+        from .workflow_diagnostics import provider_error
+        generic = provider_error(event, event_type="error")
+        if generic:
+            return generic
         result = event.get("result")
         if event.get("event") != "result" or not isinstance(result, dict) or result.get("status") != "ERROR" or result.get("denied_actions"):
             return None

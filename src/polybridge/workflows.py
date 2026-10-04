@@ -796,6 +796,26 @@ class WorkflowStore:
     def task_owner(self, task_id: str, *, strict: bool = False) -> dict[str, Any] | None:
         return self.task_association(task_id, strict=strict)
 
+    def abandon_dispatch(self, run_id: str, execution_id: str, task_id: str, reason: str, confirm_no_process: bool) -> dict[str, Any]:
+        """Human CLI reconciliation after independently confirming a recordless dispatch is stopped."""
+        if confirm_no_process is not True or not isinstance(reason, str) or not reason.strip():
+            raise WorkflowError("Explicit no-process confirmation and a nonempty reason are required")
+        def abandon(r: dict[str, Any]) -> None:
+            if _supervisor_present(r):
+                raise WorkflowError("Supervisor is live or uncertain; cannot abandon dispatch")
+            activation = next((a for a in r["activations"] if a["id"] == execution_id), None)
+            task = next((t for t in activation["tasks"] if t["task_id"] == task_id), None) if activation else None
+            if task is None or task.get("status") not in {"reserved", "uncertain"}:
+                raise WorkflowError("Only a named unresolved recordless dispatch can be abandoned")
+            if task_store.read(self.root / "tasks", task_id) is not None:
+                raise WorkflowError("Recorded tasks require process reconciliation, not abandonment")
+            task.update(status="not_started", reconciliation={"source": "human_confirmation", "reason": reason.strip(), "confirmed_no_process": True, "time": time.time()})
+            if all(t["status"] == "not_started" for t in activation["tasks"]):
+                activation["status"] = "not_started"
+            if r["status"] not in TERMINAL:
+                r.update(status="needs_attention", attention_reason="Dispatch abandoned after human confirmation; explicit resume is required")
+        return self.update_run(run_id, abandon, "dispatch_abandoned", {"execution_id": execution_id, "task_id": task_id, "reason": reason.strip()})
+
     def reconcile_run(self, run_id: str) -> dict[str, Any]:
         """Recover only outcomes positively recorded by their original task owner."""
         def reconcile(r: dict[str, Any]) -> None:
@@ -810,6 +830,8 @@ class WorkflowStore:
                         if not liveness["outcome_known"]:
                             snapshot.update(status="failed", outcome_unknown=True, recovery_reason="Managed process is dead but its owner did not record an authoritative outcome")
                         task.update(status=snapshot["status"], result=snapshot, liveness=liveness)
+                    elif record is None and task.get("dispatch_stage") == "preparing":
+                        task.update(status="not_started", recovery_reason="Supervisor stopped before requesting spawn")
                     else:
                         task["status"] = "uncertain"
                 if activation["status"] in {"running", "reserved", "uncertain"} and all(t["status"] not in {"reserved", "running", "uncertain"} for t in activation["tasks"]):
@@ -1110,7 +1132,9 @@ def failure_diagnostic(snapshot: dict[str, Any], prompt: str) -> str:
     """A bounded startup diagnostic without exposing injected dispatch context."""
     lines = list(snapshot.get("stderr_tail", []))
     stream = snapshot.get("raw_stream_log")
-    if stream and snapshot.get("backend") in {"opencode", "codex"}:
+    adapter = backends.BACKENDS.get(snapshot.get("backend"))
+    diagnostic_hook = getattr(adapter, "workflow_failure_diagnostic", None)
+    if stream and diagnostic_hook:
         try:
             with Path(stream).open(encoding="utf-8") as f:
                 for line in f:
@@ -1120,20 +1144,10 @@ def failure_diagnostic(snapshot: dict[str, Any], prompt: str) -> str:
                         event = json.loads(line)
                     except ValueError:
                         continue
-                    if not isinstance(event, dict):
-                        continue
-                    error = event.get("error")
-                    if not isinstance(error, dict):
-                        continue
-                    if snapshot["backend"] == "opencode" and event.get("type") == "error" and isinstance(error.get("name"), str):
-                        data = error.get("data")
-                        if isinstance(data, dict):
-                            if data.get("statusCode") in {401, 403}:
-                                lines.append(f"OpenCode authentication failed (HTTP {data['statusCode']}); check the configured provider credentials.")
-                            elif isinstance(data.get("message"), str):
-                                lines.append(data["message"])
-                    elif snapshot["backend"] == "codex" and event.get("type") == "turn.failed" and isinstance(error.get("message"), str):
-                        lines.append(error["message"])
+                    if isinstance(event, dict):
+                        diagnostic = diagnostic_hook(event)
+                        if diagnostic:
+                            lines.append(diagnostic)
         except OSError:
             pass
     text = "\n".join(line for line in lines if isinstance(line, str))
@@ -1160,29 +1174,12 @@ def availability_failure(snapshot: dict[str, Any]) -> str | None:
     if snapshot.get("status") != "failed" or snapshot.get("outcome_unknown") or snapshot.get("permission_denials"):
         return None
     diagnostic = "\n".join(snapshot.get("stderr_tail", []))
-    backend = snapshot.get("backend")
-    patterns = {
-        "claude": [r"(?im)^.*(?:You've hit your limit|Credit balance is too low|rate_limit_error|model_not_found).*$"],
-        "codex": [r"(?im)^.*(?:usage_limit_reached|insufficient_quota|model_not_found|rate_limit_exceeded).*$"],
-        "opencode": [r"(?im)^.*(?:insufficient_quota|model_not_found|rate_limit_exceeded).*$"],
-        "vibe": [r"(?im)^.*(?:insufficient_quota|model_not_found|rate_limit_exceeded).*$"],
-    }
-    if any(re.search(p, diagnostic) for p in patterns.get(backend, [])):
-        return "backend availability rejected"
-    if backend in {"claude", "codex", "opencode", "vibe", "antigravity"}:
-        for line in diagnostic.splitlines():
-            match = re.match(r"(?i)^(?:API[ _]Error|Provider[ _]Error|HTTP[ _]Error|APIConnectionError|APITimeoutError|ConnectError|ConnectionError)\s*:?\s*(.*)$", line)
-            if not match:
-                continue
-            body = match.group(1)
-            status = re.match(r"(?i)^(?:(?:HTTP(?:\s+status)?|status(?:\s*code)?)\s*[:=]?\s*)?([1-5][0-9]{2})\b", body)
-            if status:
-                if int(status.group(1)) in {500, 502, 503, 504, 529}:
-                    return "provider server unavailable"
-                # A known client/security status cannot become an outage from later prose.
-                continue
-            if re.search(r"(?i)\b(?:overloaded_error|api_connection_error|service unavailable|connection (?:reset|refused)|provider timeout|timed out)\b", body):
-                return "provider transport unavailable"
+    adapter = backends.BACKENDS.get(snapshot.get("backend"))
+    stderr_hook = getattr(adapter, "workflow_stderr_availability_failure", None)
+    if stderr_hook:
+        reason = stderr_hook(diagnostic)
+        if reason:
+            return reason
     # Inspect only authoritative top-level protocol envelopes. Assistant messages,
     # tool payloads and summaries can contain arbitrary text and are never evidence.
     stream = snapshot.get("raw_stream_log")
@@ -1198,33 +1195,11 @@ def availability_failure(snapshot: dict[str, Any]) -> str | None:
                         continue
                     if not isinstance(event, dict):
                         continue
-                    adapter = backends.BACKENDS.get(backend)
                     classify = getattr(adapter, "workflow_availability_failure", None)
                     if classify:
                         reason = classify(event)
                         if reason:
                             return reason
-                    if backend in {"claude", "codex", "opencode", "vibe", "antigravity"} and event.get("type") in ({"turn.failed"} if backend == "codex" else {"error"}):
-                        error = event.get("error")
-                        if isinstance(error, dict):
-                            data = error.get("data") if isinstance(error.get("data"), dict) else {}
-                            statuses = [error.get("status"), error.get("status_code"), error.get("statusCode"), data.get("statusCode")]
-                            if any(type(status) is int and status in {500, 502, 503, 504, 529} for status in statuses):
-                                return "provider server unavailable"
-                            codes = [error.get("type"), error.get("code"), error.get("name")]
-                            recognized = {"overloaded_error", "api_connection_error", "APITimeoutError", "APIConnectionError", "service_unavailable"}
-                            if backend == "claude":
-                                recognized.add("api_error")
-                            if any(isinstance(code, str) and code in recognized for code in codes):
-                                return "provider transport unavailable"
-                    if backend == "codex" and event.get("type") == "turn.failed":
-                        error = event.get("error", {})
-                        if isinstance(error, dict) and error.get("code") in {"usage_limit_reached", "insufficient_quota", "model_not_found", "rate_limit_exceeded"}:
-                            return "codex availability rejected"
-                    if backend == "claude" and event.get("type") == "rate_limit_event":
-                        info = event.get("rate_limit_info", {})
-                        if isinstance(info, dict) and info.get("status") == "rejected":
-                            return "claude quota rejected"
         except OSError:
             pass
     return None
@@ -1242,26 +1217,14 @@ def task_liveness(log_dir: Path, record: Any) -> dict[str, Any]:
 
 
 def observed_harness_metadata(snapshot: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
-    """Only native initialization envelopes count as runtime identity evidence."""
+    """Backend adapters select native runtime identity evidence and its provenance."""
     result = copy.deepcopy(metadata)
-    path = snapshot.get("raw_stream_log")
-    if not path:
-        return result
-    try:
-        with Path(path).open(encoding="utf-8") as stream:
-            for number, line in enumerate(stream):
-                if number >= 1000:
-                    break
-                try:
-                    event = json.loads(line)
-                except (ValueError, TypeError):
-                    continue
-                native_init = snapshot.get("backend") == "claude" and event.get("type") == "system" and event.get("subtype") == "init"
-                if native_init and isinstance(event.get("model"), str) and event["model"]:
-                    result.update(observed={"model": event["model"]}, provenance="harness_initialization_event", verification_status="observed")
-                    break
-    except (OSError, UnicodeError):
-        pass
+    adapter = backends.BACKENDS.get(snapshot.get("backend"))
+    observe = getattr(adapter, "workflow_observed_metadata", None)
+    if observe:
+        observed = observe(snapshot)
+        if observed:
+            result.update(observed)
     return result
 
 
@@ -1300,6 +1263,21 @@ class CheckoutLease:
             entry["users"] += 1
         return self
 
+    def _orphan_owner(self) -> dict[str, str] | None:
+        """Durable live dispatches remain a barrier when their supervisor dies."""
+        for run in self.store.list_runs():
+            if run["repo_path"] != self.repo or _supervisor_present(run):
+                continue
+            for activation in run["activations"]:
+                for task in activation["tasks"]:
+                    if task["status"] not in {"running", "reserved", "uncertain"}:
+                        continue
+                    record = task_store.read(self.store.root / "tasks", task["task_id"])
+                    unresolved = record is None or task_liveness(self.store.root / "tasks", record)["process_alive"] is not False
+                    if unresolved and (self.write or task.get("freedom", "write_in_repo") != "read_only"):
+                        return {"workflow_run_id": run["workflow_run_id"], "task_id": task["task_id"]}
+        return None
+
     async def _acquire(self):
         self.handle = self.path.open("a")
         deadline = time.monotonic() + self.wait_seconds
@@ -1310,20 +1288,8 @@ class CheckoutLease:
                 raise DispatchNotStarted("Scheduling stopped before dispatch")
             # After a supervisor crash its agent processes may outlive the OS lease.
             # Their durable associations still block conflicting checkout activity.
-            orphan_conflict = False
-            conflict_owner = None
-            for run in self.store.list_runs():
-                if run["repo_path"] != self.repo or _supervisor_present(run):
-                    continue
-                for activation in run["activations"]:
-                    for task in activation["tasks"]:
-                        if task["status"] not in {"running", "reserved", "uncertain"}:
-                            continue
-                        record = task_store.read(self.store.root / "tasks", task["task_id"])
-                        unresolved = record is None or task_liveness(self.store.root / "tasks", record)["process_alive"] is not False
-                        if unresolved and (self.write or task.get("freedom", "write_in_repo") != "read_only"):
-                            orphan_conflict = True
-                            conflict_owner = {"workflow_run_id": run["workflow_run_id"], "task_id": task["task_id"]}
+            conflict_owner = self._orphan_owner()
+            orphan_conflict = conflict_owner is not None
             if orphan_conflict:
                 if not notified and self.on_wait:
                     self.on_wait({"reason": "Checkout held by a live or uncertain orphan task", "repo_path": self.repo, "owner": conflict_owner})
@@ -1339,6 +1305,32 @@ class CheckoutLease:
                 continue
             try:
                 fcntl.flock(self.handle, (fcntl.LOCK_EX if self.write else fcntl.LOCK_SH) | fcntl.LOCK_NB)
+                # The prior owner may die between the scan and flock acquisition.
+                # Recheck durable associations while holding the descriptor.
+                try:
+                    conflict_owner = self._orphan_owner()
+                except BaseException:
+                    fcntl.flock(self.handle, fcntl.LOCK_UN)
+                    self.handle.close()
+                    raise
+                if conflict_owner is not None:
+                    fcntl.flock(self.handle, fcntl.LOCK_UN)
+                    if not notified and self.on_wait:
+                        self.on_wait({"reason": "Checkout held by a live or uncertain orphan task", "repo_path": self.repo, "owner": conflict_owner})
+                        notified = True
+                    if time.monotonic() >= deadline:
+                        self.handle.close()
+                        raise DispatchNotStarted("Checkout wait exhausted; reconciliation is required")
+                    try:
+                        await asyncio.sleep(0.1)
+                    except BaseException:
+                        self.handle.close()
+                        raise
+                    continue
+                if self.should_continue is not None and not self.should_continue():
+                    fcntl.flock(self.handle, fcntl.LOCK_UN)
+                    self.handle.close()
+                    raise DispatchNotStarted("Scheduling stopped before dispatch")
                 return self
             except BlockingIOError:
                 if not notified and self.on_wait:
@@ -1398,8 +1390,16 @@ class WorkflowSupervisor:
             source = next((t for a in run["activations"] if a["node_id"] == node["id"] and a["role"] == "node" for t in a["tasks"] if t["task_id"] == activation["resume_task_id"]), None)
             if source:
                 previous = {"task_id": source["task_id"], "candidate": key + ":" + _candidate_key(source["candidate"]), "session_id": source.get("result", {}).get("session_id")}
+        persistent_orchestrator = role == "orchestrator" and run.get("runner_policy") == "guided"
+        if persistent_orchestrator and previous.get("task_id"):
+            parent = self.registry.get(previous["task_id"])
+            record = task_store.read(self.registry._log_dir, previous["task_id"])
+            retained = parent.snapshot() if parent is not None else None
+            compatible = (retained is not None and retained.get("status") == "completed" and retained.get("session_id")) or (record is not None and record.status == "completed" and record.session_id and record.freedom == "read_only" and record.repo_path == run["repo_path"])
+            if not compatible:
+                previous = {}  # Fresh bootstrap is safe before any reservation or spawn.
         preferred = previous.get("candidate")
-        if preferred and (role == "node" and node.get("session_mode") == "resume" or role == "builder" and run.get("builder_followup")):
+        if preferred and (persistent_orchestrator or role == "node" and node.get("session_mode") == "resume" or role == "builder" and run.get("builder_followup")):
             candidates.sort(key=lambda c: key + ":" + _candidate_key(c) != preferred)
         if role == "node" and run.get("execution_contract") == "delegation" and node.get("session_mode") == "resume":
             from .workflow_delegation import recovered_resume_outage, require_fresh_checkpoint
@@ -1434,7 +1434,8 @@ class WorkflowSupervisor:
             network = False if run["network"] is False else node.get("network", run["network"])
             task_id = uuid.uuid4().hex
             display_prompt = run.get("builder_turn_prompt", run["prompt"]) if role == "builder" else activation.get("turn_prompt", activation.get("assignment_prompt", run["prompt"]))
-            reservation = {"task_id": task_id, "candidate": candidate, "status": "reserved", "reserved_at": time.time(), "freedom": freedom, "assignment_prompt": display_prompt, "repo_path": run["repo_path"], "network": network, "session_mode": "resume" if role == "node" and node.get("session_mode") == "resume" and previous.get("candidate") == identity else "fresh", "resume_task_id": previous.get("task_id") if role == "node" and node.get("session_mode") == "resume" and previous.get("candidate") == identity else None}
+            use_resume = (persistent_orchestrator or role == "node" and node.get("session_mode") == "resume" or role == "builder" and run.get("builder_followup")) and previous.get("candidate") == identity
+            reservation = {"task_id": task_id, "candidate": candidate, "status": "reserved", "dispatch_stage": "preparing", "reserved_at": time.time(), "freedom": freedom, "assignment_prompt": display_prompt, "repo_path": run["repo_path"], "network": network, "session_mode": "resume" if use_resume else "fresh", "resume_task_id": previous.get("task_id") if use_resume else None}
             reservation["harness_metadata"] = {"requested": copy.deepcopy(candidate), "effective": {"backend": candidate["backend"], "model": candidate.get("model"), "reasoning_effort": candidate.get("reasoning_effort"), "freedom": freedom, "settings_source": "explicit_launch_arguments", "default_model": "unknown" if not candidate.get("model") else None, "provider_identity": "unknown"}, "observed": None, "provenance": "validated_launch_configuration", "verification_status": "configured_not_observed"}
             def reserve(r: dict[str, Any]) -> None:
                 a = next(a for a in r["activations"] if a["id"] == activation["id"])
@@ -1456,7 +1457,8 @@ class WorkflowSupervisor:
                         self._task_update(activation["id"], task_id, {"status": "not_started"})
                         return None
                     capability_stage = "spawn"
-                    if (role == "node" and node.get("session_mode") == "resume" or role == "builder" and run.get("builder_followup")) and previous.get("candidate") == identity:
+                    self._task_update(activation["id"], task_id, {"dispatch_stage": "spawn_requested"})
+                    if use_resume:
                         parent = self.registry.get(previous["task_id"])
                         if parent:
                             task = await self.registry.resume(parent, prompt, max_turns=candidate.get("max_turns"), network=network, task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder")
@@ -1531,8 +1533,11 @@ class WorkflowSupervisor:
             except Exception as exc:
                 # Once a dispatch was reserved, only positive evidence that no spawn happened
                 # permits reconciliation. Unknown exceptions remain uncertain.
-                self._task_update(activation["id"], task_id, {"status": "uncertain", "error": str(exc)})
-                self.attention(f"Dispatch {task_id} requires reconciliation: {exc}")
+                not_started = capability_stage != "spawn" or getattr(exc, "polybridge_not_started", False) is True
+                self._task_update(activation["id"], task_id, {"status": "not_started" if not_started else "uncertain", "error": str(exc)})
+                if not_started:
+                    self.update(lambda r: next(a for a in r["activations"] if a["id"] == activation["id"]).update(status="not_started"), "dispatch_not_started")
+                self.attention(f"Dispatch {task_id} did not start: {exc}" if not_started else f"Dispatch {task_id} requires reconciliation: {exc}")
                 return None
             reason = availability_failure(snapshot)
             if reason:
@@ -1692,6 +1697,8 @@ class WorkflowSupervisor:
             else:
                 await self._execute_node(node, token)
                 token = next((t for t in self.run()["pending"] if t["id"] == token["id"]), token)
+                if token["node_id"] != node["id"]:
+                    return  # An isolated recovery returned to its saved checkpoint.
                 result = token.get("result", {})
             if not result:
                 return

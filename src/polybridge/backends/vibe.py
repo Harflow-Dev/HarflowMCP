@@ -118,6 +118,9 @@ xhigh->max` — vibe's own OpenAI-responses backend maps its `max` to `xhigh`.
 from __future__ import annotations
 
 import re
+import json
+import os
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -261,6 +264,60 @@ class UnsafeInvocationError(RuntimeError):
 
 
 class VibeBackend:
+    @staticmethod
+    def workflow_observed_metadata(snapshot: dict[str, Any]) -> dict[str, Any] | None:
+        """Read Vibe's own session config snapshot, never worker self-report text."""
+        session_id = snapshot.get("session_id")
+        if not isinstance(session_id, str) or not session_id:
+            return None
+        home = Path(os.environ.get("VIBE_HOME", str(Path.home() / ".vibe"))).expanduser()
+        directory = home / "logs" / "session"
+        try:
+            config_path = home / "config.toml"
+            if config_path.is_file():
+                config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+                logging = config.get("session_logging")
+                if isinstance(logging, dict) and isinstance(logging.get("save_dir"), str) and logging["save_dir"]:
+                    directory = Path(logging["save_dir"]).expanduser()
+            # Session folder names include the first eight characters of their ID.
+            # Still verify the complete native ID before accepting metadata.
+            paths = sorted(directory.glob("*" + session_id[:8] + "*/meta.json"), reverse=True)[:20]
+            for path in paths:
+                if path.stat().st_size > 1024 * 1024:
+                    continue
+                metadata = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(metadata, dict) or metadata.get("session_id") != session_id:
+                    continue
+                config = metadata.get("config")
+                active = config.get("active_model") if isinstance(config, dict) else None
+                if not isinstance(active, str) or not active:
+                    continue
+                observed = {"active_model": active, "model": active}
+                models = config.get("models", [])
+                if isinstance(models, list):
+                    model = next((m for m in models if isinstance(m, dict) and m.get("alias") == active), None)
+                    if model:
+                        if isinstance(model.get("name"), str) and model["name"]:
+                            observed["model"] = model["name"]
+                        if isinstance(model.get("thinking"), str):
+                            observed["reasoning_effort"] = model["thinking"]
+                        if isinstance(model.get("provider"), str):
+                            observed["provider"] = model["provider"]
+                return {"observed": observed, "provenance": "harness_session_configuration", "verification_status": "observed_configuration", "metadata_source": str(path)}
+        except (OSError, ValueError, UnicodeError):
+            pass
+        return None
+
+    @staticmethod
+    def workflow_stderr_availability_failure(diagnostic: str) -> str | None:
+        from .workflow_diagnostics import stderr_availability
+        return stderr_availability(diagnostic, quota_patterns=('(?im)^.*(?:insufficient_quota|model_not_found|rate_limit_exceeded).*$',))
+
+    @staticmethod
+    def workflow_availability_failure(event: dict[str, Any]) -> str | None:
+        from .workflow_diagnostics import provider_error
+        return provider_error(event, event_type="error")
+
     name = "vibe"
     binary = BINARY
     # Programmatic Vibe replaces argv with this title after startup. Caller

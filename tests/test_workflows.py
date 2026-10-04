@@ -2128,3 +2128,20 @@ async def test_idle_live_builder_does_not_write_feedback_events(storage, tmp_pat
     await supervisor.build(run["workflow_run_id"])
     assert storage.get_run(run["workflow_run_id"])["status"] == "completed"
     assert "builder_feedback_forwarding" not in events
+
+
+async def test_checkout_rechecks_orphan_under_acquired_lock(storage, tmp_path, monkeypatch):
+    import fcntl
+    lease = w.CheckoutLease(storage, str(tmp_path.resolve()), True, wait_seconds=0)
+    scans = []
+    def orphan():
+        scans.append(True)
+        return None if len(scans) == 1 else {"workflow_run_id": "crashed", "task_id": "orphan"}
+    monkeypatch.setattr(lease, "_orphan_owner", orphan)
+    with pytest.raises(w.DispatchNotStarted, match="reconciliation"):
+        await lease.__aenter__()
+    assert len(scans) == 2
+    assert lease.handle.closed
+    with lease.path.open("a") as descriptor:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(descriptor, fcntl.LOCK_UN)

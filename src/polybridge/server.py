@@ -917,7 +917,7 @@ async def _managed_workflow_reader() -> tuple[dict[str, Any], dict[str, Any]] | 
 
 def _managed_run_summary(run: dict[str, Any]) -> dict[str, Any]:
     """Expose routing state without bypassing settled-only result inspection."""
-    keys = ("workflow_run_id", "name", "kind", "status", "definition", "revision", "prompt", "execution_contract", "tasks", "decisions", "transitions", "settling", "input_question", "input_decision_id", "interaction_owner", "reason", "instructions", "created_at", "updated_at")
+    keys = ("workflow_run_id", "name", "kind", "status", "definition", "revision", "prompt", "execution_contract", "tasks", "checklist_disposition", "decisions", "transitions", "settling", "input_question", "input_decision_id", "interaction_owner", "reason", "instructions", "created_at", "updated_at")
     summary = {key: run[key] for key in keys if key in run}
     if isinstance(run.get("technical_plan"), str):
         summary.update(technical_plan=run["technical_plan"][:16000], technical_plan_truncated=len(run["technical_plan"]) > 16000, technical_plan_execution_id=run.get("technical_plan_execution_id"))
@@ -931,6 +931,26 @@ async def _guard_task_read(task_id: str) -> None:
         guard_task_read(task_id, await _managed_workflow_reader())
     except ValueError as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+
+def _guard_saved_workflow_authority(caller: Any, definition: dict[str, Any]) -> None:
+    """An ordinary agent may save only capabilities inside its recorded envelope."""
+    from . import workflows
+    from .backends.base import check_nested_enforcement
+    record = caller.record
+    if record.freedom not in FREEDOMS:
+        raise ValueError("Saving a workflow requires known caller freedom")
+    configs = [(definition["orchestrator"], "read_only", None)]
+    configs.extend((node["agent"], workflows.effective_freedom(node, "unrestricted", permission_policy="saved_node"), node.get("network")) for node in definition["nodes"] if node["type"] == "agent")
+    for config, freedom, network in configs:
+        if FREEDOMS.index(freedom) > FREEDOMS.index(record.freedom):
+            raise ValueError("Saved workflow access cannot exceed the caller's freedom")
+        if network is True and record.network is False:
+            raise ValueError("Saved workflow network cannot exceed the caller's network restriction")
+        for candidate in [config, *config.get("fallbacks", [])]:
+            backend_ = backends.get(candidate["backend"])
+            enforcement = backend_.enforcement(freedom, network)
+            check_nested_enforcement(record.enforcement or {}, enforcement, parent_backend=record.backend, child_backend=backend_.name, parent_repo=record.repo_path, child_repo=record.repo_path)
 
 
 async def _workflow_call(action: str, **kwargs: Any) -> Any:
@@ -948,6 +968,9 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
             caller = await _verified_workflow_caller()
             if caller is not None:
                 refuse_managed(_reg().log_dir, caller.record.task_id)
+        if action == "save" and caller is not None:
+            definition = workflows.validate_definition({**kwargs["definition"], "name": kwargs["name"]})
+            _guard_saved_workflow_authority(caller, definition)
         if action == "start":
             if kwargs.get("freedom") is not None:
                 raise ValueError("Workflow access is defined by saved nodes; caller freedom overrides are not supported")
@@ -1056,6 +1079,8 @@ async def save_workflow(name: str, definition: dict[str, Any], expected_revision
     Set routing_mode="explicit". Ordinary nodes choose exactly one outgoing path.
     Parallel execution uses paired parallel_start/parallel_end nodes with shared
     parallel_group_id. Every branch reaches its matching end; nesting is supported.
+    Agent callers may save only access and network settings within their recorded
+    capability envelope; verified human callers can author workflow permissions.
     """
     return await _workflow_call("save", name=name, definition=definition, expected_revision=expected_revision)
 

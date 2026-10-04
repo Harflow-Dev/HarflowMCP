@@ -14,6 +14,16 @@ def run():
     return {"workflow_run_id": "run-1", "name": "feature", "definition": {}, "execution_contract": "delegation", "activations": [{"id": "old", "node_id": "review", "role": "node", "status": "completed", "node_result": {"status": "succeeded", "result": {"verdict": "changes_needed", "text": "世界" * 40000}, "evidence": []}, "raw_output": "raw" * 20000, "tasks": [{"task_id": "first", "status": "failed", "result": {"summary": "outage"}}, {"task_id": "second", "status": "completed", "result": {"summary": "success"}}]}, {"id": "live", "node_id": "implement", "role": "node", "status": "running", "tasks": [{"task_id": "third", "status": "running"}]}]}
 
 
+def indexed_run(monkeypatch, tmp_path, value):
+    from polybridge import workflows
+    storage = workflows.WorkflowStore(root=tmp_path)
+    for activation in value.get("activations", []):
+        for task in activation.get("tasks", []):
+            (storage.owners / (task["task_id"] + ".json")).write_text(json.dumps({"workflow_run_id": value["workflow_run_id"]}))
+    monkeypatch.setattr(workflows.WorkflowStore, "get_run", lambda self, run_id: value)
+    monkeypatch.setattr(workflows.WorkflowStore, "list_runs", lambda self: pytest.fail("Decoration must not scan workflow history"))
+
+
 def test_full_result_chunks_are_lossless(run):
     cursor = None
     chunks = []
@@ -141,7 +151,7 @@ async def test_wait_returns_suspension_and_settling_without_waiting(monkeypatch)
 def test_task_listing_metadata_preserves_assignment_and_original_entry(run, monkeypatch, tmp_path):
     from polybridge import workflows
     from polybridge.workflow_inspection import decorate_tasks
-    monkeypatch.setattr(workflows.WorkflowStore, "list_runs", lambda self: [run])
+    indexed_run(monkeypatch, tmp_path, run)
     entry = {"task_id": "second", "prompt": "Review this focused assignment"}
     decorated = decorate_tasks([entry], tmp_path / "tasks")[0]
     assert decorated["workflow_node_id"] == "review"
@@ -198,7 +208,7 @@ def test_worker_display_prompt_uses_full_assignment_for_each_execution(run, monk
     assignment = "Focused assignment " + "A" * 6000
     run["activations"][0]["assignment_prompt"] = assignment
     run["prompt"] = "Caller original request"
-    monkeypatch.setattr(workflows.WorkflowStore, "list_runs", lambda self: [run])
+    indexed_run(monkeypatch, tmp_path, run)
     entries = decorate_tasks([{"task_id": "second", "prompt": assignment[:2000]}, {"task_id": "outside", "prompt": "Regular task"}], tmp_path / "tasks")
     assert entries[0]["display_prompt"] == assignment
     assert entries[0]["prompt"] == assignment
@@ -233,7 +243,7 @@ def test_task_prompt_history_prefers_each_answer_attempt(run, monkeypatch, tmp_p
     run["activations"][0]["assignment_prompt"] = "Original assignment"
     run["activations"][0]["tasks"][0]["assignment_prompt"] = "Original assignment"
     run["activations"][0]["tasks"][1]["assignment_prompt"] = "Answer to worker clarification"
-    monkeypatch.setattr(workflows.WorkflowStore, "list_runs", lambda self: [run])
+    indexed_run(monkeypatch, tmp_path, run)
     entries = decorate_tasks([{"task_id": "first"}, {"task_id": "second"}], tmp_path / "tasks")
     assert entries[0]["display_prompt"] == "Original assignment"
     assert entries[1]["display_prompt"] == "Answer to worker clarification"
@@ -312,7 +322,7 @@ def test_descendant_projection_inherits_owner_but_not_assignment(monkeypatch, tm
     from polybridge import workflows
     from polybridge.workflow_inspection import decorate_tasks
     owner = {'workflow_run_id': 'run', 'status': 'running', 'settling': True, 'name': 'Review', 'execution_contract': 'delegation', 'activations': [{'id': 'execution', 'node_id': 'work', 'role': 'node', 'assignment_prompt': 'private ancestor assignment', 'tasks': [{'task_id': 'root'}]}]}
-    monkeypatch.setattr(workflows.WorkflowStore, 'list_runs', lambda self: [owner])
+    indexed_run(monkeypatch, tmp_path, owner)
     entries = [{'task_id': 'grandchild', 'parent_task_id': 'child', 'prompt': 'own prompt'}, {'task_id': 'child', 'spawned_by': 'root', 'prompt': 'own child prompt'}]
     projected = decorate_tasks(entries, tmp_path / 'tasks')
     assert all(t['workflow_run_id'] == 'run' and t['workflow_settling'] is True for t in projected)
@@ -328,8 +338,7 @@ def test_single_descendant_detail_retains_workflow_takeover_gate(monkeypatch, tm
         return TaskRecord(backend="claude", session_id=None, repo_path=str(tmp_path), started_at="2026-10-04T00:00:00Z", prompt="test", **kwargs)
     monkeypatch.setattr(workflows.WorkflowStore, 'list_runs', lambda self: [])
     storage = workflows.WorkflowStore(root=tmp_path)
-    (storage.owners / 'root.json').write_text('{}')
-    monkeypatch.setattr(workflows.WorkflowStore, 'task_owner', lambda self, task_id: {'workflow_run_id': 'run', 'workflow_status': 'running', 'workflow_settling': True})
+    indexed_run(monkeypatch, tmp_path, {'workflow_run_id': 'run', 'status': 'running', 'settling': True, 'activations': [{'id': 'execution', 'node_id': 'work', 'role': 'node', 'tasks': [{'task_id': 'root'}]}]})
     store.write(tmp_path / 'tasks', make_record(task_id='child', parent_task_id='root'))
     detail = decorate_tasks([{'task_id': 'grandchild', 'parent_task_id': 'child', 'prompt': 'own assignment'}], tmp_path / 'tasks')[0]
     assert detail['workflow_run_id'] == 'run'
@@ -337,7 +346,7 @@ def test_single_descendant_detail_retains_workflow_takeover_gate(monkeypatch, tm
     assert detail['prompt'] == 'own assignment'
 
 
-def test_ordinary_descendants_use_one_run_scan_per_listing(monkeypatch, tmp_path):
+def test_ordinary_descendants_do_not_scan_run_history(monkeypatch, tmp_path):
     from polybridge import workflows, store
     from polybridge.workflow_inspection import decorate_tasks
     from polybridge.store import TaskRecord
@@ -354,7 +363,7 @@ def test_ordinary_descendants_use_one_run_scan_per_listing(monkeypatch, tmp_path
     store.write(tmp_path / 'tasks', make_record(task_id='root'))
     entries = [{'task_id': f'child-{i}', 'parent_task_id': 'root'} for i in range(40)]
     assert decorate_tasks(entries, tmp_path / 'tasks') == entries
-    assert calls == [1]
+    assert calls == []
 
 
 def test_decorating_hidden_cyclic_lineage_terminates(monkeypatch, tmp_path):
@@ -368,3 +377,46 @@ def test_decorating_hidden_cyclic_lineage_terminates(monkeypatch, tmp_path):
     store.write(tmp_path / 'tasks', make_record(task_id='two', parent_task_id='one'))
     entries = [{'task_id': 'child', 'parent_task_id': 'one'}]
     assert decorate_tasks(entries, tmp_path / 'tasks') == entries
+
+
+def test_decoration_loads_only_receipt_runs_once_and_ignores_unrelated_history(monkeypatch, tmp_path):
+    from polybridge import workflows
+    from polybridge.workflow_inspection import decorate_tasks
+    storage = workflows.WorkflowStore(root=tmp_path)
+    for number in range(200):
+        (storage.runs / f'unrelated-{number}.json').write_text('invalid unrelated history')
+    for task in ('one', 'two'):
+        (storage.owners / f'{task}.json').write_text(json.dumps({'workflow_run_id': 'requested'}))
+    loaded = []
+    def get_run(self, run_id):
+        loaded.append(run_id)
+        return {'workflow_run_id': run_id, 'name': 'Requested', 'status': 'running', 'activations': [{'id': 'execution', 'node_id': 'work', 'role': 'node', 'tasks': [{'task_id': 'one'}, {'task_id': 'two'}]}]}
+    monkeypatch.setattr(workflows.WorkflowStore, 'get_run', get_run)
+    monkeypatch.setattr(workflows.WorkflowStore, 'list_runs', lambda self: pytest.fail('Full history scan'))
+    entries = [{'task_id': 'one'}, {'task_id': 'two'}, {'task_id': 'ordinary'}]
+    result = decorate_tasks(entries, tmp_path / 'tasks')
+    assert loaded == ['requested']
+    assert result[0]['workflow_run_id'] == result[1]['workflow_run_id'] == 'requested'
+    assert result[2] == entries[2]
+
+
+def test_bad_receipt_does_not_break_unrelated_task_decoration(monkeypatch, tmp_path):
+    from polybridge import workflows
+    from polybridge.workflow_inspection import decorate_tasks
+    storage = workflows.WorkflowStore(root=tmp_path)
+    (storage.owners / 'broken.json').write_text('invalid')
+    entries = [{'task_id': 'broken'}, {'task_id': 'ordinary'}]
+    monkeypatch.setattr(workflows.WorkflowStore, 'list_runs', lambda self: pytest.fail('Full history scan'))
+    assert decorate_tasks(entries, tmp_path / 'tasks') == entries
+
+
+def test_compact_checklist_disposition_exposes_authority_with_bounded_reason():
+    from polybridge.workflow_responses import compact, detail
+    disposition = {'status': 'not_needed', 'reason': 'No implementation checklist is needed. ' * 200, 'execution_id': 'execution', 'decision_id': 'decision'}
+    run = {'workflow_run_id': 'run', 'status': 'completed', 'checklist_disposition': disposition}
+    result = compact(run)
+    assert result['checklist_disposition']['status'] == 'not_needed'
+    assert result['checklist_disposition']['reason_truncated']
+    assert len(result['checklist_disposition']['reason']) == 256
+    page = detail(run, 'checklist_disposition', limit=8000)
+    assert disposition['reason'] in page['chunk']

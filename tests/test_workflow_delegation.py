@@ -760,8 +760,9 @@ async def test_answer_persisted_before_resume_survives_supervisor_restart(storag
     storage.control(run["workflow_run_id"], "resume", instructions="Continue the saved answer")
     class Restored(Registry):
         async def resume_record(self, record, prompt, **kwargs):
-            assert "Use JSON" in prompt and "Inspected parser" in prompt
-            assert "Private original" not in prompt
+            if "Context:\n" not in prompt:  # Workers keep isolated assignments; orchestrators retain their own session.
+                assert "Use JSON" in prompt and "Inspected parser" in prompt
+                assert "Private original" not in prompt
             return await self.start(prompt, Path(record.repo_path), **{**kwargs, "backend": w.backends.get(record.backend), "title": "delegation · work"})
     restored = Restored(storage.root)
     await w.WorkflowSupervisor(restored, storage).execute(run["workflow_run_id"])
@@ -1180,3 +1181,142 @@ async def test_guided_orchestrator_can_reject_no_checklist_proposal_and_request_
     assert run['status'] == 'completed'
     assert count == 2
     assert run['tasks'][0]['id'] == 'verify'
+
+
+async def test_end_required_context_failure_pauses_then_retries_only_failed_node(storage, tmp_path):
+    definition = graph()
+    definition['nodes'][1]['id'] = 'source'
+    definition['nodes'].insert(2, {'id': 'publish', 'type': 'agent', 'role': 'task', 'instructions': 'Use exact complete draft', 'agent': {'backend': 'codex'}})
+    definition['connections'] = [{'id': 'begin', 'source': 'start', 'target': 'source'}, {'id': 'publish', 'source': 'source', 'target': 'publish'}, {'id': 'end', 'source': 'publish', 'target': 'end', 'condition': 'Inspect completion or blocked publication at End'}]
+    draft = 'approved full draft ' * 3000 + 'COMPLETE DRAFT SENTINEL'
+    counts = {'source': 0, 'publish': 0}
+    def source(prompt, kwargs):
+        counts['source'] += 1
+        return {'status': 'succeeded', 'result': {'draft': draft}, 'evidence': []}
+    def publish(prompt, kwargs):
+        counts['publish'] += 1
+        assert draft in prompt
+        if counts['publish'] == 1:
+            blocked = {'status': 'blocked', 'result': {'blocker_category': 'missing_context', 'posted': False, 'reason': 'Need original full context'}, 'evidence': []}
+            return {'summary': json.dumps(blocked), 'status': 'completed', 'permission_denials': [{'tool_name': 'Bash', 'tool_input': {'command': 'echo "$CLAUDE_SESSION_ID"'}}]}
+        assert 'Retry only the blocked publication' in prompt
+        return {'status': 'succeeded', 'result': {'posted': True}, 'evidence': []}
+    def policy(context, registry):
+        if context['current_stage']['node_id'] == 'publish' and context['current_stage']['phase'] == 'routing':
+            return {'decision_id': context['decision_id'], 'action': 'continue', 'reason': 'Inspect blocked completion at End', 'next': [{'continuation_id': 'end'}]}
+        if context['current_stage']['node_id'] == 'end':
+            retry = next((c for c in context['valid_continuations'] if c.get('recovery_from_checkpoint')), None)
+            if retry:
+                return {'decision_id': context['decision_id'], 'action': 'continue', 'reason': 'Caller authorized full-context retry', 'next': [{'continuation_id': retry['continuation_id'], 'prompt': 'Retry only the blocked publication', 'session_mode': 'fresh'}]}
+            if any(i['status'] == 'blocked' for i in context['input_results']):
+                return {'decision_id': context['decision_id'], 'action': 'failed', 'reason': 'Publication remains blocked and needs caller recovery'}
+        return default_decision(context, registry)
+    run, registry = await run_flow(storage, tmp_path, definition, Registry(storage.root, policy, {'source': source, 'publish': publish}), guided=True)
+    assert run['status'] == 'needs_attention'
+    assert counts == {'source': 1, 'publish': 1}
+    storage.control(run['workflow_run_id'], 'resume', instructions='Retry with the complete supplied context; prior publication authorization remains valid')
+    await w.WorkflowSupervisor(registry, storage).execute(run['workflow_run_id'])
+    final = storage.get_run(run['workflow_run_id'])
+    assert final['status'] == 'completed'
+    assert counts == {'source': 1, 'publish': 2}
+    assert final['transitions'] == 3
+    failed = next(a for a in final['activations'] if a.get('node_result', {}).get('status') == 'blocked')
+    assert failed['resolved_by_execution_id']
+
+
+async def test_orchestrator_accepts_no_checklist_proposal_with_durable_disposition(storage, tmp_path):
+    definition = graph('planning')
+    definition['nodes'][1]['require_technical_plan'] = False
+    value = {'status': 'succeeded', 'result': {'no_checklist_needed': True, 'checklist_reason': 'This is a scoped reviewer brief'}, 'evidence': []}
+    def policy(context, registry):
+        result = default_decision(context, registry)
+        if context['current_stage']['node_id'] == 'work':
+            result['next'] = [{'continuation_id': 'finish'}]
+        return result
+    run, _ = await run_flow(storage, tmp_path, definition, Registry(storage.root, policy, outputs={'work': value}), guided=True)
+    assert run['status'] == 'completed'
+    disposition = run['checklist_disposition']
+    assert disposition['status'] == 'not_needed'
+    assert disposition['reason'] == value['result']['checklist_reason']
+    assert disposition['execution_id'] in {a['id'] for a in run['activations'] if a['role'] == 'node'}
+    assert disposition['decision_id'] in {d['decision_id'] for d in run['decisions']}
+
+
+async def test_guided_orchestrator_uses_one_compatible_native_session(storage, tmp_path):
+    class SessionRegistry(Registry):
+        def __init__(self, root):
+            super().__init__(root)
+            self.resumed = []
+        async def resume(self, previous, prompt, **kwargs):
+            self.resumed.append(previous.task_id)
+            result = await super().resume(previous, prompt, **kwargs)
+            result.result["session_id"] = previous.result["session_id"]
+            return result
+    registry = SessionRegistry(storage.root)
+    run, _ = await run_flow(storage, tmp_path, registry=registry, guided=True)
+    assert run["status"] == "completed"
+    decisions = [a for a in run["activations"] if a["role"] == "orchestrator"]
+    assert len(decisions) == 2
+    assert len(registry.resumed) == 1
+    first, last = (a["tasks"][0] for a in decisions)
+    assert first["session_mode"] == "fresh"
+    assert last["session_mode"] == "resume"
+    assert last["resume_task_id"] == first["task_id"]
+    assert first["result"]["session_id"] == last["result"]["session_id"]
+
+
+async def test_guided_orchestrator_missing_retained_session_bootstraps_fresh(storage, tmp_path):
+    class RetentionRegistry(Registry):
+        async def start(self, prompt, repo, **kwargs):
+            task = await super().start(prompt, repo, **kwargs)
+            if "Assignment:\n" in prompt:
+                # Retention removed the earlier orchestrator's record and in-memory owner.
+                for prior in list(self.tasks):
+                    if prior != task.task_id:
+                        self.tasks.pop(prior)
+                        w.task_store.record_path(self._log_dir, prior).unlink()
+            return task
+        async def resume(self, *args, **kwargs):
+            pytest.fail("A missing retained session must bootstrap before dispatch")
+    run, _ = await run_flow(storage, tmp_path, registry=RetentionRegistry(storage.root), guided=True)
+    assert run["status"] == "completed"
+    decisions = [a for a in run["activations"] if a["role"] == "orchestrator"]
+    assert all(a["tasks"][0]["session_mode"] == "fresh" for a in decisions)
+
+
+async def test_required_terminal_snapshot_at_single_attempt_recovers_ordered_fallback_in_same_activation(storage, tmp_path):
+    rid = recovered_fixture(storage, tmp_path, status='failed', candidate='claude', fallback=True)
+    def terminal_snapshot(run):
+        run['definition']['nodes'][1]['max_attempts'] = 1
+        run['activations'][0]['status'] = 'failed'
+    storage.update_run(rid, terminal_snapshot, 'terminal_snapshot_before_dispatch_return')
+    recovered = storage.reconcile_run(rid)
+    assert recovered['pending'][0]['recovered_failed_result']['status'] == 'failed'
+    assert recovered['pending'][0]['execution_activation_id'] == 'execution'
+    registry = Registry(storage.root)
+    await w.WorkflowSupervisor(registry, storage).execute(rid)
+    final = storage.get_run(rid)
+    assert final['status'] == 'completed'
+    nodes = [a for a in final['activations'] if a['role'] == 'node']
+    assert len(nodes) == 1 and nodes[0]['id'] == 'execution'
+    assert [task['candidate']['backend'] for task in nodes[0]['tasks']] == ['claude', 'codex']
+    workers = [kwargs for prompt, kwargs in registry.calls if 'Assignment:\n' in prompt]
+    assert len(workers) == 1 and workers[0]['backend'].name == 'codex'
+
+
+async def test_required_terminal_nonavailability_snapshot_does_not_redispatch_or_create_activation(storage, tmp_path):
+    rid = recovered_fixture(storage, tmp_path, status='failed')
+    def terminal_snapshot(run):
+        run['definition']['nodes'][1]['max_attempts'] = 1
+        run['activations'][0]['status'] = 'failed'
+        run['activations'][0]['tasks'][0]['result']['stderr_tail'] = ['Application crashed']
+    storage.update_run(rid, terminal_snapshot, 'terminal_snapshot_before_dispatch_return')
+    def policy(context, registry):
+        assert not any(c['kind'] == 'retry_execution' for c in context['valid_continuations'])
+        return {'decision_id': context['decision_id'], 'action': 'needs_input', 'reason': 'Required attempt exhausted without qualifying fallback', 'question': 'Inspect and grant another attempt?'}
+    registry = Registry(storage.root, policy)
+    await w.WorkflowSupervisor(registry, storage).execute(rid)
+    final = storage.get_run(rid)
+    assert final['status'] == 'needs_input'
+    assert not any('Assignment:\n' in prompt for prompt, _ in registry.calls)
+    assert len([a for a in final['activations'] if a['role'] == 'node']) == 1

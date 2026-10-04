@@ -7,7 +7,7 @@ import json
 from typing import Any
 
 BUDGET = 24 * 1024
-VIEWS = {"executions": "activations", "decisions": "decisions", "checklist": "tasks", "technical_plan": "technical_plan", "definition": "definition", "question": "input_question", "reason": "reason", "wait_reason": "wait_reason", "checkout_wait": "checkout_wait", "summary": "summary", "failure_reason": "failure_reason", "attention_reason": "attention_reason", "builder_draft": "builder_draft", "generated_definition": "generated_definition"}
+VIEWS = {"executions": "activations", "decisions": "decisions", "checklist": "tasks", "checklist_disposition": "checklist_disposition", "technical_plan": "technical_plan", "definition": "definition", "question": "input_question", "reason": "reason", "wait_reason": "wait_reason", "checkout_wait": "checkout_wait", "summary": "summary", "failure_reason": "failure_reason", "attention_reason": "attention_reason", "builder_draft": "builder_draft", "generated_definition": "generated_definition"}
 
 
 def history_page(runs: list[dict[str, Any]], offset: int = 0, limit: int = 100) -> dict[str, Any]:
@@ -42,6 +42,11 @@ def history_page(runs: list[dict[str, Any]], offset: int = 0, limit: int = 100) 
 def compact(run: dict[str, Any]) -> dict[str, Any]:
     keys = ("workflow_run_id", "name", "revision", "kind", "status", "created_at", "updated_at", "interaction_owner", "settling", "input_decision_id", "execution_contract", "draft_revision")
     result = {key: run[key] for key in keys if key in run and isinstance(run[key], (str, int, float, bool, type(None)))}
+    disposition = run.get("checklist_disposition")
+    if isinstance(disposition, dict):
+        result["checklist_disposition"] = {key: str(disposition[key])[:100] for key in ("status", "execution_id", "decision_id") if key in disposition}
+        reason = str(disposition.get("reason", ""))
+        result["checklist_disposition"].update(reason=reason[:256], reason_truncated=len(reason) > 256)
     result["response_version"] = 1
     result["details"] = {"tool": "get_workflow_run_detail", "views": list(VIEWS)}
     activations = run.get("activations", [])

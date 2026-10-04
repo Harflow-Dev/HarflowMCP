@@ -1073,7 +1073,9 @@ class TaskRegistry:
 
         task_id = store.validate_task_id(task_id) if task_id else str(uuid.uuid4())
         if self.get(task_id) is not None or store.read(self._log_dir, task_id) is not None:
-            raise ValueError(f"task_id already exists: {task_id}")
+            exc = ValueError(f"task_id already exists: {task_id}")
+            exc.polybridge_not_started = True  # type: ignore[attr-defined]
+            raise exc
         # A root task (no detected caller) is the root of its own dispatch chain.
         root_task_id = root_task_id if root_task_id is not None else task_id
         if max_depth is None:
@@ -1147,18 +1149,23 @@ class TaskRegistry:
             lineage.ENV_DEPTH: str(depth),
         }
 
-        proc = await asyncio.create_subprocess_exec(
-            *invocation.argv,
-            cwd=str(repo_path),
-            stdin=asyncio.subprocess.PIPE if invocation.live_input else asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            limit=STREAM_LINE_LIMIT,
-            env=spawn_env,
-            # Own process group, so cancellation reaches the shell children an agent spawns instead
-            # of orphaning them.
-            start_new_session=True,
-        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *invocation.argv,
+                cwd=str(repo_path),
+                stdin=asyncio.subprocess.PIPE if invocation.live_input else asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                limit=STREAM_LINE_LIMIT,
+                env=spawn_env,
+                # Own process group, so cancellation reaches the shell children an agent spawns instead
+                # of orphaning them.
+                start_new_session=True,
+            )
+        except OSError as exc:
+            # exec failed before returning a process; later failures remain ambiguous.
+            exc.polybridge_not_started = True  # type: ignore[attr-defined]
+            raise
 
         task = Task(
             task_id=task_id,

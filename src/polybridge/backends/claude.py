@@ -94,8 +94,11 @@ DENY_FREEDOMS: frozenset[str] = frozenset({"read_only", "write_in_repo"})
 
 # One comma-separated value, same reason as DISALLOWED_TOOLS. Measured as the mechanism that
 # actually lets `publish` commit/push/open-a-PR headlessly — see the module docstring.
+# Review uses the same narrow command-prefix mechanism; validated locally,
+# without a paid harness run. Raw gh api remains unapproved: method/endpoint combinations
+# cannot be safely represented as one command-prefix rule.
 ALLOWED_TOOLS: dict[str, str] = {
-    "publish": "Bash(git commit:*),Bash(git push:*),Bash(gh pr create:*)",
+    "publish": "Bash(git commit:*),Bash(git push:*),Bash(gh pr create:*),Bash(gh pr review:*)",
 }
 
 # Flags that would cut a dispatched agent off from the user's own MCP servers, settings, hooks and
@@ -175,7 +178,10 @@ _PUBLISH_ALLOWLIST_CAVEAT = (
     "acceptEdits and no denies, git commit was still refused with \"This command requires "
     "approval\"; the allow-list is the mechanism that actually works). Everything not allow-listed "
     "still needs approval, which a headless run cannot give, so it is still refused — this is a "
-    "genuine middle tier, not a fallback to bypassPermissions"
+    "genuine middle tier, not a fallback to bypassPermissions. Narrow gh pr review "
+    "prefix is also configured; gh pr comment, raw gh api requests, merges, closes and repository mutations "
+    "are not auto-approved by Polybridge. Inherited user rules can grant additional commands, "
+    "and command-prefix approval is not an OS sandbox"
 )
 _CHAINED_COMMAND_CAVEAT = (
     "claude's approval layer refuses a chained command citing each part separately (measured: "
@@ -310,6 +316,43 @@ class UnsafeInvocationError(RuntimeError):
 
 
 class ClaudeBackend:
+    @staticmethod
+    def workflow_observed_metadata(snapshot: dict[str, Any]) -> dict[str, Any] | None:
+        path = snapshot.get("raw_stream_log")
+        if not path:
+            return None
+        try:
+            with Path(path).open(encoding="utf-8") as stream:
+                for number, line in enumerate(stream):
+                    if number >= 1000:
+                        break
+                    try:
+                        event = json.loads(line)
+                    except (ValueError, TypeError):
+                        continue
+                    if isinstance(event, dict) and event.get("type") == "system" and event.get("subtype") == "init" and isinstance(event.get("model"), str) and event["model"]:
+                        return {"observed": {"model": event["model"]}, "provenance": "harness_initialization_event", "verification_status": "observed"}
+        except (OSError, UnicodeError):
+            pass
+        return None
+
+    @staticmethod
+    def workflow_stderr_availability_failure(diagnostic: str) -> str | None:
+        from .workflow_diagnostics import stderr_availability
+        return stderr_availability(diagnostic, quota_patterns=("(?im)^.*(?:You've hit your limit|Credit balance is too low|rate_limit_error|model_not_found).*$",))
+
+    @staticmethod
+    def workflow_availability_failure(event: dict[str, Any]) -> str | None:
+        from .workflow_diagnostics import provider_error
+        info = event.get("rate_limit_info")
+        if event.get("type") == "rate_limit_event" and isinstance(info, dict) and info.get("status") == "rejected":
+            return "claude quota rejected"
+        return provider_error(event, event_type="error", extra_transport_codes=("api_error",))
+
+    @staticmethod
+    def workflow_failure_diagnostic(event: dict[str, Any]) -> str | None:
+        return None
+
     name = "claude"
     binary = BINARY
     capabilities = Capabilities(

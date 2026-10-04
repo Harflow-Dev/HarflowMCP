@@ -243,3 +243,44 @@ def test_no_checklist_replan_is_guided_and_bounded_by_existing_node_attempt_budg
     assert not any(choice['kind'] == 'retry_execution' for choice in d.continuations(run, node, token, False))
     run['attempt_grants'] = {'plan': 1}
     assert next(choice for choice in d.continuations(run, node, token, False) if choice['kind'] == 'retry_execution')['attempts_remaining'] == 1
+
+
+def test_missing_context_retry_requires_caller_reason_and_read_only_context_denials():
+    node = {'id': 'publish', 'role': 'task'}
+    result = {'status': 'blocked', 'result': {'blocker_category': 'missing_context'}, 'evidence': []}
+    activation = {'id': 'blocked', 'role': 'node', 'node_id': 'publish', 'status': 'failed', 'node_result': result, 'tasks': [{'task_id': 'publisher', 'status': 'completed', 'result': {'status': 'completed', 'permission_denials': [{'tool_name': 'mcp__polybridge__get_task_status', 'tool_input': {'task_id': 'source'}}]}}]}
+    run = {'workflow_run_id': 'run', 'activations': [activation, {'id': 'input', 'tasks': [{'task_id': 'source'}]}]}
+    assert not d.retry_eligible(activation, guided=True, node=node, run=run)
+    run['instructions'] = 'Retry publishing with the full supplied context'
+    assert d.retry_eligible(activation, guided=True, node=node, run=run)
+    activation['tasks'][0]['result']['permission_denials'] = [{'tool_name': 'Bash', 'tool_input': {'command': 'gh pr review --approve'}}]
+    assert not d.retry_eligible(activation, guided=True, node=node, run=run)
+    activation['tasks'][0]['result']['permission_denials'] = [{'tool_name': 'mcp__polybridge__get_task_status', 'tool_input': {'task_id': 'foreign'}}]
+    assert not d.retry_eligible(activation, guided=True, node=node, run=run)
+    activation['tasks'][0]['result']['permission_denials'] = []
+    activation['node_result']['result']['failure_kind'] = 'permission'
+    assert not d.retry_eligible(activation, guided=True, node=node, run=run)
+
+
+def test_worker_receives_complete_authoritative_results_while_orchestrator_preview_stays_bounded():
+    payload = 'full draft text ' * 4000 + 'FINAL SENTINEL'
+    node = {'id': 'worker', 'role': 'task', 'instructions': 'Use the supplied result'}
+    activation = {'id': 'source', 'role': 'node', 'node_id': 'source', 'status': 'completed', 'tasks': [], 'node_result': {'status': 'succeeded', 'result': {'draft': payload}, 'evidence': []}}
+    run = {'definition': {'nodes': [node, {'id': 'source', 'role': 'task'}]}, 'activations': [activation], 'tasks': []}
+    prompt = d.worker_prompt(run, node, {'assignment_prompt': 'Publish exact draft', 'input_result_refs': ['source']})
+    assert payload in prompt
+    preview = d.result_inputs(run, ['source'])[0]
+    assert preview['truncated'] and 'FINAL SENTINEL' not in preview['result_preview']
+
+
+def test_first_agent_decides_assignment_can_default_fresh_but_existing_session_requires_choice(tmp_path, monkeypatch):
+    monkeypatch.setattr(w.backends, 'is_installed', lambda backend: True)
+    definition = w.validate_definition({'name': 'initial-session', 'orchestrator': {'backend': 'codex'}, 'nodes': [{'id': 'start', 'type': 'start'}, {'id': 'work', 'type': 'agent', 'agent': {'backend': 'codex'}}, {'id': 'end', 'type': 'end'}], 'connections': [{'id': 'begin', 'source': 'start', 'target': 'work'}, {'id': 'finish', 'source': 'work', 'target': 'end'}]})
+    run = w.WorkflowStore(tmp_path).create_run(definition, 'request', tmp_path)
+    token = {'id': 'token', 'decision_id': 'decision'}
+    decision = {'decision_id': 'decision', 'action': 'continue', 'reason': 'Delegate first assignment', 'next': [{'continuation_id': 'begin', 'prompt': 'Scoped work'}]}
+    _, assignments, _ = d.validate_decision(run, definition['nodes'][0], token, decision, False)
+    assert assignments['begin']['execution_session_mode'] == 'fresh'
+    monkeypatch.setattr(d, 'available_sessions', lambda *args, **kwargs: [{'task_id': 'prior', 'execution_id': 'old', 'session_id': 'session'}])
+    with pytest.raises(w.WorkflowError, match='explicit session_mode'):
+        d.validate_decision(run, definition['nodes'][0], token, decision, False)
