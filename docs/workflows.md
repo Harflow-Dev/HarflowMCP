@@ -138,9 +138,12 @@ repository. Claude and Codex receive that exact directory as an additional writa
 read-only tasks receive no scratch grant. Each worker's internal preamble also names its exact
 absolute scratch path so it need not discover the environment variable. This context is hidden
 from the assignment display. Artifacts stay with the task record for inspection and
-recovery, and task retention deletes them without following symlinks. The full display assignment
-is stored in task metadata. Large Codex prompts use stdin with immediate EOF rather than argv,
-so complete input results do not exceed operating-system argument limits.
+recovery, and task retention deletes them without following symlinks. Large display assignments
+are stored once in private full-prompt files; task metadata contains a bounded preview and an
+explicit source reference. Detail reads verify and retrieve the complete assignment.
+Large Codex and Vibe prompts use stdin with immediate EOF rather than argv, so complete input
+results do not exceed operating-system argument limits. Vibe trims outer whitespace on stdin;
+Polybridge explicitly refuses large Vibe assignments with outer whitespace rather than altering them.
 
 For example, a Task step that updates a Jira issue can request `"freedom": "publish"`.
 The saved node access is authoritative for new runs. Callers cannot override it with

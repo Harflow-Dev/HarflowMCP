@@ -5,8 +5,10 @@ introduced this module and CLAUDE.md's per-CLI section.
 
 **Invocation and stdin**
 * `get_prompt_from_stdin()` runs unconditionally before mode dispatch and reads `sys.stdin` whenever
-  it is not a tty, blocking forever on a pipe that never closes. `stdin=DEVNULL` is mandatory, same
-  reason as codex.
+  it is not a tty, blocking forever on a pipe that never closes. Small prompts use DEVNULL;
+  prompts over 32 KiB use one-shot UTF-8 stdin followed immediately by EOF and trailing `--prompt=`
+  to select programmatic mode. Native stdin ingestion strips outer whitespace: large prompts with
+  outer whitespace fail explicitly rather than being altered. Start and resume use this transport.
 * Programmatic mode is `-p/--prompt TEXT` with `--output streaming`. **The `PROMPT` positional is
   ignored in programmatic mode** — the CLI reads `args.prompt or stdin_prompt` — so there is no
   working `--` separator of the kind codex and opencode rely on. `-p` is `nargs="?", const=""`, so a
@@ -145,7 +147,12 @@ from .base import (
     reject_model,
 )
 
+# Large prompts use the native EOF stdin path with --prompt= selecting programmatic mode.
+# Installed Vibe get_prompt_from_stdin strips outer whitespace, so oversized inputs with
+# such whitespace are refused rather than silently changed. Both start and resume use
+# the same pipe_once transport; its stdin closes immediately after the full UTF-8 payload.
 BINARY = "vibe"
+ARGV_PROMPT_BYTES = 32 * 1024
 
 AGENTS: dict[str, str] = {
     "read_only": "plan",
@@ -390,8 +397,7 @@ class VibeBackend:
         ]
         # The single canonical token, last: no `--` separator works here (see module docstring), so
         # this is the only thing standing between prompt text and being parsed as an option.
-        argv.append(f"--prompt={self._check_prompt(prompt)}")
-        invocation = Invocation(argv)
+        invocation = self._prompt_invocation(argv, prompt)
         self.assert_safe(invocation, freedom, network)
         return invocation
 
@@ -414,8 +420,7 @@ class VibeBackend:
             *self._options(repo, freedom, model, max_turns, reasoning_effort, network),
         ]
         argv += ["--resume", session_id]
-        argv.append(f"--prompt={self._check_prompt(prompt)}")
-        invocation = Invocation(argv)
+        invocation = self._prompt_invocation(argv, prompt)
         self.assert_safe(invocation, freedom, network)
         return invocation
 
@@ -447,6 +452,14 @@ class VibeBackend:
             options += ["--max-turns", str(max_turns)]
         return options
 
+    def _prompt_invocation(self, argv: list[str], prompt: str) -> Invocation:
+        prompt = self._check_prompt(prompt)
+        if len(prompt.encode("utf-8")) > ARGV_PROMPT_BYTES:
+            if prompt != prompt.strip():
+                raise UnsupportedCapability("Vibe trims outer whitespace from stdin prompts. Remove outer whitespace or choose another harness for this large assignment.")
+            return Invocation([*argv, "--prompt="], stdin_mode="pipe_once", initial_input=prompt.encode("utf-8"))
+        return Invocation([*argv, f"--prompt={prompt}"])
+
     @staticmethod
     def _check_prompt(prompt: str) -> str:
         if not prompt or not prompt.strip():
@@ -456,8 +469,18 @@ class VibeBackend:
     def assert_safe(
         self, invocation: Invocation, freedom: Freedom, network: bool | None = None
     ) -> None:
-        # No live input here: only a devnull-stdin Invocation is a shape this backend ever builds.
-        problem = classic_invocation_problem(invocation)
+        # One-shot stdin is closed after delivery, never a live conversation pipe.
+        one_shot = isinstance(invocation, Invocation) and invocation.stdin_mode == "pipe_once"
+        if one_shot:
+            try:
+                prompt = invocation.initial_input.decode("utf-8") if isinstance(invocation.initial_input, bytes) else ""
+            except UnicodeError:
+                prompt = ""
+            if not prompt or prompt != prompt.strip() or invocation.argv[-1:] != ["--prompt="]:
+                raise UnsafeInvocationError("Vibe one-shot stdin requires exact nonempty UTF-8 input, no outer whitespace, and an empty trailing --prompt=")
+            problem = None
+        else:
+            problem = classic_invocation_problem(invocation)
         if problem is not None:
             raise UnsafeInvocationError(problem)
         argv = invocation.argv
@@ -480,11 +503,13 @@ class VibeBackend:
         prompt_value = (
             prompt_token[len("--prompt=") :] if prompt_token.startswith("--prompt=") else None
         )
-        if len(argv) < 2 or prompt_value is None or not prompt_value.strip():
+        if len(argv) < 2 or prompt_value is None or (not one_shot and not prompt_value.strip()):
             raise UnsafeInvocationError(
                 f"refusing to run vibe without a non-empty --prompt=<text> as the very last token: "
                 f"{argv!r}"
             )
+        if not one_shot and len(prompt_value.encode("utf-8")) > ARGV_PROMPT_BYTES:
+            raise UnsafeInvocationError("Vibe large assignments require one-shot stdin transport")
         options = argv[1:-1]
         seen = self._parse_options(options, argv)
 

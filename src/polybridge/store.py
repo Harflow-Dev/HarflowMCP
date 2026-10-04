@@ -11,13 +11,14 @@ back, replay the log for the outcome, and check whether the process is still ali
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 import re
 import subprocess
 import tempfile
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -71,6 +72,9 @@ class TaskRecord:
     stderr_tail: list[str] = field(default_factory=list)
     workflow_builder: bool = False
     prompt: str = ""
+    prompt_source: str | None = None
+    prompt_truncated: bool = False
+    prompt_error: str | None = None
     status: str = "running"
     exit_code: int | None = None
     finished_at: str | None = None
@@ -173,7 +177,7 @@ def write_landed(log_dir: Path, record: TaskRecord) -> bool:
         log.warning("refusing to persist a record for an invalid task id")
         return False
 
-    existing = read(log_dir, record.task_id)
+    existing = read(log_dir, record.task_id, include_prompt=False)
     if (
         existing is not None
         and existing.status in TERMINAL_RECORD_STATUSES
@@ -189,12 +193,29 @@ def write_landed(log_dir: Path, record: TaskRecord) -> bool:
 
     try:
         log_dir.mkdir(parents=True, exist_ok=True)
+        payload = asdict(record)
+        if len(record.prompt) > PROMPT_PREVIEW_CHARS:
+            digest = hashlib.sha256(record.prompt.encode("utf-8")).hexdigest()
+            source = log_dir / f"{record.task_id}.prompt.{digest}.txt"
+            if not source.exists():
+                prompt_handle = tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=log_dir, prefix=f".{record.task_id}.prompt.", delete=False)
+                try:
+                    with prompt_handle:
+                        os.fchmod(prompt_handle.fileno(), 0o600)
+                        prompt_handle.write(record.prompt)
+                        prompt_handle.flush()
+                        os.fsync(prompt_handle.fileno())
+                    os.replace(prompt_handle.name, source)
+                except BaseException:
+                    Path(prompt_handle.name).unlink(missing_ok=True)
+                    raise
+            payload.update(prompt=record.prompt[:PROMPT_PREVIEW_CHARS], prompt_source=source.name, prompt_truncated=True)
         handle = tempfile.NamedTemporaryFile(
             "w", encoding="utf-8", dir=log_dir, prefix=f".{record.task_id}.", delete=False
         )
         try:
             with handle:
-                json.dump(asdict(record), handle, indent=2)
+                json.dump(payload, handle, indent=2)
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(handle.name, target)
@@ -207,7 +228,7 @@ def write_landed(log_dir: Path, record: TaskRecord) -> bool:
     return True
 
 
-def read(log_dir: Path, task_id: str) -> TaskRecord | None:
+def read(log_dir: Path, task_id: str, *, include_prompt: bool = True) -> TaskRecord | None:
     path = record_path(log_dir, task_id)
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -222,9 +243,27 @@ def read(log_dir: Path, task_id: str) -> TaskRecord | None:
     fields = {f for f in TaskRecord.__dataclass_fields__}
     try:
         # Unknown keys are dropped so a record written by a newer version still loads.
-        return TaskRecord(**{k: v for k, v in raw.items() if k in fields})
-    except TypeError:
-        log.warning("ignoring malformed task record %s", path)
+        record = TaskRecord(**{k: v for k, v in raw.items() if k in fields})
+        if include_prompt and record.prompt_truncated:
+            try:
+                source = record.prompt_source
+                match = re.fullmatch(re.escape(task_id) + r"\.prompt\.([0-9a-f]{64})\.txt", source) if isinstance(source, str) else None
+                if match is None:
+                    raise ValueError("Invalid full prompt source")
+                source_path = log_dir / source
+                if source_path.is_symlink():
+                    raise ValueError("Symlinked full prompt source")
+                prompt = source_path.read_bytes().decode("utf-8")
+                if hashlib.sha256(prompt.encode("utf-8")).hexdigest() != match[1]:
+                    raise ValueError("Full prompt source integrity check failed")
+                record = replace(record, prompt=prompt, prompt_truncated=False, prompt_error=None)
+            except (ValueError, OSError) as exc:
+                reason = "Full task assignment is unavailable; prompt preview is not authoritative: " + str(exc)
+                log.warning("task %s: %s", task_id, reason)
+                record = replace(record, prompt="", prompt_error=reason)
+        return record
+    except (TypeError, ValueError, OSError):
+        log.warning("ignoring malformed task record or unavailable full prompt %s", path)
         return None
 
 
@@ -233,7 +272,7 @@ def read_all(log_dir: Path) -> list[TaskRecord]:
         paths = sorted(log_dir.glob(f"*{RECORD_SUFFIX}"))
     except OSError:
         return []
-    records = [read(log_dir, path.name[: -len(RECORD_SUFFIX)]) for path in paths]
+    records = [read(log_dir, path.name[: -len(RECORD_SUFFIX)], include_prompt=False) for path in paths]
     return sorted((r for r in records if r is not None), key=lambda r: r.started_at)
 
 
@@ -545,11 +584,16 @@ def _enforcement(record: TaskRecord) -> dict[str, Any]:
 def _notices(record: TaskRecord, state: Accumulator) -> list[str]:
     """Bridge notices merged with the backend's own, bridge first since they describe the dispatch
     rather than the run — mirrors `Task._notices`. Neither source list is mutated."""
-    return [*record.bridge_notices, *state.notices]
+    return [*record.bridge_notices, *([record.prompt_error] if record.prompt_error else []), *state.notices]
 
 
 def snapshot(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
     """A recovered task's state, shaped like a live snapshot so callers need no special casing."""
+    if record.prompt_truncated:
+        authoritative = read(log_dir, record.task_id)
+        if authoritative is None:
+            raise ValueError("Full task assignment is unavailable; prompt preview is not authoritative")
+        record = authoritative
     status, note, state, tail, owned = _resolve(log_dir, record, detail=True)
     from . import inbox
     pending = inbox.pending_messages(log_dir, record.task_id)
@@ -562,6 +606,7 @@ def snapshot(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
 
     return {
         "pending_messages": pending,
+        **({"prompt_source": record.prompt_source, "prompt_truncated": record.prompt_truncated, **({"prompt_error": record.prompt_error} if record.prompt_error else {})} if record.prompt_source or record.prompt_error else {}),
         "task_id": record.task_id,
         "workflow_builder": record.workflow_builder,
         "backend": record.backend,

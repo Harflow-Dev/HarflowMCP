@@ -1239,3 +1239,97 @@ def test_recovered_builder_snapshot_survives_pending_bookkeeping_failure(tmp_pat
     assert snap["status"] == "completed"
     assert snap["summary"] == "Created hello.txt."
     assert snap["pending_messages"] == []
+
+
+def test_large_assignment_sidecar_written_once_and_metadata_updates_stay_small(tmp_path,monkeypatch):
+    from dataclasses import replace
+    prompt='worker assignment\n'+'x'*1_000_000+'\nexact final SHA'
+    record=make_record(prompt=prompt)
+    replaced=[]
+    original=store.os.replace
+    def observe(source,target):
+        replaced.append(Path(target).name)
+        return original(source,target)
+    monkeypatch.setattr(store.os,'replace',observe)
+    for turn in range(4):
+        assert store.write_landed(tmp_path,replace(record,pid=100+turn))
+    raw=json.loads(store.record_path(tmp_path,record.task_id).read_text())
+    assert raw['prompt']==prompt[:store.PROMPT_PREVIEW_CHARS]
+    assert raw['prompt_truncated'] is True
+    source=tmp_path/raw['prompt_source']
+    assert source.read_text()==prompt
+    assert source.stat().st_mode & 0o777 == 0o600
+    assert replaced.count(source.name)==1
+    assert store.record_path(tmp_path,record.task_id).stat().st_size<10000
+    assert store.read(tmp_path,record.task_id).prompt==prompt
+    assert store.read(tmp_path,record.task_id).pid==103
+
+
+def test_listing_does_not_hydrate_assignment_but_detail_recovers_it(tmp_path,monkeypatch):
+    prompt='full assignment '+'x'*50000
+    record=make_record(prompt=prompt)
+    store.write(tmp_path,record)
+    original=Path.read_bytes
+    read_sources=[]
+    def observe(path,*args,**kwargs):
+        if '.prompt.' in path.name:read_sources.append(path)
+        return original(path,*args,**kwargs)
+    monkeypatch.setattr(Path,'read_bytes',observe)
+    entries=store.read_all(tmp_path)
+    assert read_sources==[]
+    assert entries[0].prompt_truncated is True
+    assert entries[0].prompt_source
+    assert store.read(tmp_path,record.task_id).prompt==prompt
+    assert len(read_sources)==1
+
+
+@pytest.mark.parametrize('damage',['missing','corrupt','foreign'])
+def test_missing_or_corrupt_assignment_never_silently_returns_preview(tmp_path,damage):
+    record=make_record(prompt='x'*50000)
+    store.write(tmp_path,record)
+    path=store.record_path(tmp_path,record.task_id)
+    raw=json.loads(path.read_text())
+    source=tmp_path/raw['prompt_source']
+    if damage=='missing':source.unlink()
+    elif damage=='corrupt':source.write_text('wrong complete prompt')
+    else:
+        raw['prompt_source']='../private.txt'
+        path.write_text(json.dumps(raw))
+    damaged=store.read(tmp_path,record.task_id)
+    assert damaged.task_id==record.task_id
+    assert damaged.status==record.status
+    assert damaged.prompt==''
+    assert damaged.prompt_truncated is True
+    assert 'not authoritative' in damaged.prompt_error
+    snapshot=store.snapshot(tmp_path,damaged)
+    assert snapshot['prompt_truncated'] is True
+    assert snapshot['prompt_error'] in snapshot['notices']
+    assert store.read_all(tmp_path)[0].task_id==record.task_id
+
+
+def test_full_assignment_sidecar_preserves_crlf_unicode_and_retention(tmp_path):
+    from polybridge import retention
+    prompt=('line\r\n雪🚀\n'*3000)+'final\r'
+    record=make_record(prompt=prompt)
+    assert store.write_landed(tmp_path,record)
+    assert store.read(tmp_path,record.task_id).prompt==prompt
+    sidecars=list(tmp_path.glob(record.task_id+'.prompt.*.txt'))
+    assert len(sidecars)==1
+    assert retention._delete_task_files(tmp_path,record.task_id)
+    assert not sidecars[0].exists()
+    assert store.read(tmp_path,record.task_id) is None
+
+
+def test_snapshot_hydrates_metadata_only_record_before_detail_resolution(tmp_path,monkeypatch):
+    prompt='assignment '+'x'*50000
+    record=make_record(prompt=prompt,status='completed',exit_code=0)
+    store.write(tmp_path,record)
+    listed=store.read_all(tmp_path)[0]
+    observed=[]
+    original=store._resolve
+    def inspect(log_dir,value,**kwargs):
+        observed.append(value.prompt)
+        return original(log_dir,value,**kwargs)
+    monkeypatch.setattr(store,'_resolve',inspect)
+    store.snapshot(tmp_path,listed)
+    assert observed==[prompt]
