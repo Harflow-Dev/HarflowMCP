@@ -111,24 +111,48 @@ selecting Publish or Unrestricted does not independently request network access.
 capability restrictions still apply.
 
 Publish mechanisms differ by harness. Claude uses `acceptEdits` plus narrow command rules for
-`git commit`, `git push`, `gh pr create`, and `gh pr review`. Polybridge does not
-auto-approve `gh pr merge`, `gh pr close`, repository edit/delete, `gh pr comment`, or a broad
-`gh api` command. The comment command also permits editing/deleting prior comments, so its entire
-prefix cannot be approved as comment creation alone. Inline reviews requiring raw API POST requests may still require a specific user approval;
-command-prefix rules cannot independently validate the endpoint and HTTP method. Existing user
-permission rules continue to apply. These are harness permissions, not an OS sandbox.
+`git commit`, `git push`, `gh pr create`, and Polybridge's guarded review publisher. It does not
+auto-approve broad `gh pr review` or `gh api` prefixes: those could approve changes, target other
+repositories, or perform destructive operations. Existing user permission rules still apply.
+For a headless COMMENT review with inline comments, write the complete JSON payload into
+`$PB_TASK_SCRATCH/review.json`, then run:
+
+```bash
+polybridge-ctl publish-review --pr 3 --input "$PB_TASK_SCRATCH/review.json" --json
+```
+
+The helper requires a verified running publish-capable task, binds the repository to its
+`github.com` origin, accepts only `event: COMMENT`, validates comment fields, and sends those
+validated bytes to the fixed review-creation endpoint without a shell pipeline. It cannot approve,
+request changes, merge, close, edit, or delete. Raw API commands retain their harness permissions.
+Claude safety-check refusals are recorded with the command and exact reason. Read-only GitHub
+commands (`gh pr view`, `gh pr list`, `gh pr diff`) and the guarded read helper are approved
+at Read only, Write in repo, and Publish without depending on repository-local settings:
+
+```bash
+polybridge-ctl github-read --resource reviews --pr 3 --json
+polybridge-ctl github-read --resource comments --pr 3 --json
+polybridge-ctl github-read --resource pr --pr 3 --json
+polybridge-ctl github-read --resource user --json
+```
+
+The helper fixes the method to GET, binds PR reads to the repository origin, paginates complete
+results, and accepts no arbitrary endpoint or write flags. Network restrictions still apply.
+
+Codex reports additional workspace writable roots inherited from its user configuration and
+selected profile, with the configuration source. These are observed settings, not an OS receipt;
+relative paths stay as configured and a subsequent config change can affect launch.
 Codex Publish enables its workspace sandbox's network access; Write in repo keeps network off
 by default unless explicitly requested. Vibe and Antigravity provide no narrower publishing mode:
 Publish currently uses their unrestricted approval mechanism, as reported in access caveats.
-Polybridge does not claim identical confinement across harnesses. See the harness's
-[permission rules](https://code.claude.com/docs/en/permissions) and GitHub CLI's
-[review](https://cli.github.com/manual/gh_pr_review) and [API](https://cli.github.com/manual/gh_api)
-contracts for the distinctions. For headless review publication, prefer
-`gh pr review --comment --body-file /path/to/review.md` as a standalone command. A shell pipe
-or chain has additional command segments that may each require approval. For explicitly
-approved inline API publication, prepare JSON in a file and use `gh api … --method POST
---input /path/to/review.json`; a file avoids approving an extra `printf` pipeline and does
-not itself grant the API request permission.
+Polybridge does not claim identical confinement across harnesses.
+
+Write-capable tasks receive a private scratch directory through `PB_TASK_SCRATCH`, outside the
+repository. Claude and Codex receive that exact directory as an additional writable root;
+read-only tasks receive no scratch grant. Artifacts stay with the task record for inspection and
+recovery, and task retention deletes them without following symlinks. The full display assignment
+is stored in task metadata. Large Codex prompts use stdin with immediate EOF rather than argv,
+so complete input results do not exceed operating-system argument limits.
 
 For example, a Task step that updates a Jira issue can request `"freedom": "publish"`.
 The saved node access is authoritative for new runs. Callers cannot override it with
@@ -195,7 +219,7 @@ polybridge-ctl workflow-build my-workflow --repo /absolute/path/to/repo \
 
 Definition JSON uses `nodes` and `connections`. An agent node's `role` is `planning`,
 `implementation`, `review`, or `task`; its `agent.fallbacks` is an ordered array. `session_mode`
-is `agent_decides`, `resume`, or `fresh` (default `agent_decides`). Connections specify `source`, `target`, `condition`, and an optional
+is `agent_decides`, `resume`, `fresh`, or `continue_previous` (default `agent_decides`). Connections specify `source`, `target`, `condition`, and an optional
 `default` fallback. Definitions use `routing_mode: explicit`. A `parallel_start` and its
 `parallel_end` share a stable `parallel_group_id`. Polybridge derives retry direction from
 topology; callers do not configure a backward flag. Historical snapshots retain their original
@@ -271,12 +295,14 @@ Explicit limits are preserved; backends without turn-cap support, including Code
 receive an unsupported cap.
 
 Three attempts means the initial activation plus two repeats,
-not three additional retries. Defaults are three activations per agent node, 100 transitions per
-run, and four concurrently active node tasks. Read-only workflow steps share a checkout lease;
+not three additional retries. New runs count this budget per graph visit: retries and malformed-output
+corrections share a visit, while a later loop traversal starts a new visit. Loop limits remain
+run-wide. Historical snapshots retain their original run-wide node budget. Defaults are three
+activations per visit, 100 transitions per run, and four concurrently active node tasks. Read-only workflow steps share a checkout lease;
 writing workflow steps require exclusive access. These leases coordinate workflow runs, not
 manual edits or unrelated tools.
 
-**Agent decides** lets the orchestrator choose Fresh or Resume for each assignment. Polybridge
+**Agent decides** lets the orchestrator choose Fresh, Resume, or Continue previous node for each assignment. Polybridge
 issues compatible available session references in decision context. A Resume assignment names the
 issued `resume_task_id`; arbitrary, busy, or incompatible sessions are rejected. **Fresh** starts
 an independent conversation with only the assignment and selected input results. **Resume** keeps
@@ -295,13 +321,38 @@ the orchestrator selects the issued Fresh execution continuation with a new focu
 choices retain the activation identity and attempt history; they do not replay completed graph
 steps.
 
+**Continue previous node** (`continue_previous`) tries the session of the immediately preceding
+serial agent execution, including its actual fallback candidate. Reuse requires one unambiguous
+predecessor and compatible harness, model, effort, access, repository, and network settings.
+A historical session from another visit is never substituted. Convergence does not inherit a
+branch session. Incompatible or definitively unavailable predecessor sessions start Fresh; a
+fallback candidate also starts Fresh. Retries retain their own execution session. The inspector
+shows the actual mode and reason. Unknown or busy session outcomes require attention.
+
+The inspector provides keyboard duration entry and a Seconds / Minutes / Hours selector.
+Changing units preserves the limit; typed fractional durations round to the nearest whole second.
+
+Agent nodes may set `timeout_seconds` to a positive integer; omitted, null, or zero disables it.
+The deadline applies to each candidate execution. Expiry counts against the current visit's
+attempt allowance. Polybridge cancels the task and its descendants, confirms settlement, and
+records a timeout notice before using an ordered fallback. Unconfirmed cancellation pauses for
+attention instead of starting overlapping work.
+
+Planning nodes publish the latest complete technical-plan revision. Earlier versions remain in
+immutable execution results for orchestrator inspection; a planning adjudicator that revises the
+plan must return the full revised plan. Use a Task node for an arbitrary scoping/adjudication gate.
+Review workers report `approved` or `changes_needed` when the review ran successfully; an inability
+to perform the review uses worker `status: blocked` and does not require a review verdict. A custom
+`pass`/`retry` gate may put that outcome in a Task result; the orchestrator still judges routing.
+
 ## Fallbacks
 
 Fallback candidates are ordered and may include different backends or different models on the
 same backend. Polybridge advances only after a confirmed availability failure: missing binary,
 unavailable model, or a recognized quota/rate-limit rejection. Unsupported configuration is a
-validation error. Failed tests, generic crashes, timeouts, or an agent saying it is unavailable do
-not automatically authorize a switch.
+validation error. Failed tests, generic crashes, or an agent saying it is unavailable do
+not automatically authorize a switch. An explicitly configured timeout permits a fallback only
+after cancellation has confirmed settlement.
 
 Each candidate is tried at most once within an activation. Switching candidate does not consume
 an extra graph activation. The last working candidate remains selected for later activations;
@@ -338,7 +389,7 @@ Its JSON decision contains `decision_id`, `action`, and `reason`. Actions are `c
 `complete`, `failed`, `needs_input`, `inspect`, or `answer`. Continuing selects `continuation_id` entries and supplies
 an assignment `prompt` for each agent execution, optional additional result references, and
 optional assigned task IDs. Under Agent decides, each agent assignment also chooses
-`session_mode: fresh|resume`; Resume identifies an issued `resume_task_id`. Structural traversal needs no assignment; convergence waits for every
+`session_mode: fresh|resume|continue_previous`; Resume identifies an issued `resume_task_id`. Structural traversal needs no assignment; convergence waits for every
 branch before requesting one assignment for its next agent. Start always asks the
 orchestrator for the first assignment. New runs retain one compatible native orchestrator session
 across decisions, inspections, and worker questions. Each checkpoint still has its own durable
@@ -519,6 +570,9 @@ failed decision to the orchestrator with a fresh decision allowance and preserve
 Decision exhaustion in new runs uses `needs_attention`, so use `resume_workflow` rather than
 failed-run recovery. The last contract correction remains visible. Resuming renews the decision
 allowance; `additional_attempts` grants execution/retry capacity only when explicitly requested.
+A caller answer with an explicit attempt grant can reopen a settled blocked worker, including
+missing-context blocks at End, within the granted budget. Its assignment includes the answer;
+completed nodes are not replayed and saved access cannot be raised.
 Already-running siblings finish and persist their results while scheduling is suspended. The
 Monitor shows **Settling** until they finish and refuses premature resume or session takeover.
 Extra execution/retry grants require `additional_attempts`; completed and cancelled runs cannot

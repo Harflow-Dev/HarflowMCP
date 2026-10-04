@@ -870,6 +870,10 @@ async def send_message(task_id: str, text: str) -> dict[str, Any]:
         raise MCPError(INVALID_PARAMS, "text must be a non-empty string")
 
     try:
+        caller = await _verified_workflow_caller()
+        if caller is not None:
+            from .workflow_hooks import refuse_message_caller
+            refuse_message_caller(_reg().log_dir, caller.record.task_id)
         task = _reg().get(task_id)
         if task is not None:
             return await _reg().send_message(task, text)

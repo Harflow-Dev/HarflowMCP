@@ -483,8 +483,11 @@ def test_brief_reports_liveness(tmp_path: Path) -> None:
     assert entry["session_id"] == SESSION
 
 
-def test_long_prompts_are_truncated_in_the_record() -> None:
-    assert store.PROMPT_PREVIEW_CHARS < 10_000
+def test_long_prompt_record_preserves_authoritative_assignment(tmp_path: Path) -> None:
+    prompt = "assignment " + "x" * 42000 + " final payload"
+    record = make_record(prompt=prompt)
+    store.write(tmp_path, record)
+    assert store.read(tmp_path, record.task_id).prompt == prompt
 
 
 @pytest.mark.parametrize(

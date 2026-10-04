@@ -445,6 +445,11 @@ def _delete_task_files(log_dir: Path, task_id: str) -> bool:
             complete = False
     if not complete:
         return False
+    try:
+        from . import scratch
+        scratch.remove(log_dir, task_id)
+    except OSError:
+        return False  # Retain the record so cleanup can be retried safely.
     if record_path is not None:
         try:
             record_path.unlink()

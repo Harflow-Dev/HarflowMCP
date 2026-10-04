@@ -1090,6 +1090,16 @@ class TaskRegistry:
         # below guards. One computation serves the notice, the Task, and the record, so all
         # three describe the same (freedom, network) pair.
         enforcement = backend.enforcement(freedom, network)  # type: ignore[arg-type]
+        task_scratch = None
+        if freedom != "read_only":
+            from . import scratch
+            from dataclasses import replace
+            task_scratch = scratch.create(self._log_dir, task_id)
+            writable = getattr(backend, "with_writable_directory", None)
+            if writable is not None:
+                invocation = writable(invocation, task_scratch, freedom)
+                backend.assert_safe(invocation, freedom, network)
+                enforcement = replace(enforcement, writable_roots=(*enforcement.writable_roots, str(task_scratch)))
 
         # Before the spawn, deliberately. Between `create_subprocess_exec` and the registration
         # below there must be no await at all: one there could be cancelled — a client
@@ -1149,11 +1159,15 @@ class TaskRegistry:
             lineage.ENV_DEPTH: str(depth),
         }
 
+        spawn_env.pop("PB_TASK_SCRATCH", None)
+        if task_scratch is not None:
+            spawn_env["PB_TASK_SCRATCH"] = str(task_scratch)
+
         try:
             proc = await asyncio.create_subprocess_exec(
                 *invocation.argv,
                 cwd=str(repo_path),
-                stdin=asyncio.subprocess.PIPE if invocation.live_input else asyncio.subprocess.DEVNULL,
+                stdin=asyncio.subprocess.PIPE if invocation.stdin_mode in ("pipe", "pipe_once") else asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 limit=STREAM_LINE_LIMIT,
@@ -1165,6 +1179,11 @@ class TaskRegistry:
         except OSError as exc:
             # exec failed before returning a process; later failures remain ambiguous.
             exc.polybridge_not_started = True  # type: ignore[attr-defined]
+            if task_scratch is not None:
+                try:
+                    scratch.remove(self._log_dir, task_id)
+                except OSError:
+                    log.exception("task %s: could not clean scratch after failed exec", task_id)
             raise
 
         task = Task(
@@ -1253,7 +1272,13 @@ class TaskRegistry:
         # Outside the no-await window, and still before any await: the prompt is the first stdin
         # line of a live-input run (a positional would be ignored), written synchronously so it is
         # queued ahead of anything else, then flushed below.
-        if invocation.live_input:
+        if invocation.stdin_mode == "pipe_once":
+            self._write_initial_input(task, invocation.initial_input or b"")
+            try:
+                await self._flush_stdin(task)
+            finally:
+                _close_stdin(task)
+        elif invocation.live_input:
             self._write_initial_input(task, invocation.initial_input or b"")
             task.pump = asyncio.create_task(self._pump(task), name=f"pb-pump-{task_id}")
             await self._flush_stdin(task)
@@ -1358,6 +1383,15 @@ class TaskRegistry:
         await _drain_stdin(task)
 
     # --- live input: send, pump, close protocol ------------------------------------------------
+
+    def workflow_notice(self, task_id: str, text: str) -> None:
+        """Supervisor-owned presentation event; never changes the observed task outcome."""
+        task = self.get(task_id)
+        if task is not None:
+            try:
+                _write_event(task, "notice", {"text": text})
+            except (OSError, ValueError):
+                log.warning("Workflow notice unavailable for %s", task_id, exc_info=True)
 
     async def send_message(self, task: Task, text: str) -> dict[str, Any]:
         """Queue `text` for a live-input task this server owns. Returns "queued", never
@@ -1821,7 +1855,7 @@ class TaskRegistry:
                 parent_task_id=task.parent_task_id,
                 stderr_tail=list(task.stderr_tail),
                 workflow_builder=task.workflow_builder,
-                prompt=(task.display_prompt if task.display_prompt is not None else task.prompt)[: store.PROMPT_PREVIEW_CHARS],
+                prompt=(task.display_prompt if task.display_prompt is not None else task.prompt),
                 status=task.status,
                 exit_code=task.exit_code,
                 finished_at=task.finished_at.isoformat() if task.finished_at else None,

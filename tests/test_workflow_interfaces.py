@@ -294,3 +294,45 @@ def test_builder_cli_omits_repo_but_workflow_execution_requires_it(monkeypatch, 
     assert captured["repo"] is None
     with pytest.raises(SystemExit):
         ctl.main(["workflow-start", "example", "--prompt", "Run"])
+
+
+@pytest.mark.parametrize('role', ['node', 'orchestrator', 'builder'])
+async def test_managed_caller_cannot_send_to_ordinary_task(monkeypatch,tmp_path,role):
+    from types import SimpleNamespace
+    from polybridge import workflow_hooks
+    async def caller():return SimpleNamespace(record=SimpleNamespace(task_id='managed'))
+    monkeypatch.setattr(server,'_verified_workflow_caller',caller)
+    monkeypatch.setattr(workflow_hooks,'owner',lambda *a,**k:{'role':role})
+    registry=SimpleNamespace(log_dir=tmp_path/'tasks',get=lambda _: (_ for _ in ()).throw(AssertionError('dispatch must not occur')))
+    monkeypatch.setattr(server,'_reg',lambda:registry)
+    with pytest.raises(Exception,match='managed'):
+        await server.send_message('ordinary','Alter other task')
+
+
+def test_migration_refuses_undecidable_caller(monkeypatch,capsys):
+    async def caller():raise ValueError('authority undecidable')
+    monkeypatch.setattr(server,'_verified_workflow_caller',caller)
+    from polybridge import workflows
+    monkeypatch.setattr(workflows,'migrate_workflows',lambda: (_ for _ in ()).throw(AssertionError('migration must not occur')))
+    assert ctl.main(['workflow-migrate','--json'])==1
+    assert 'authority undecidable' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize('role', ['node', 'orchestrator', 'builder'])
+def test_cli_managed_caller_cannot_send_to_ordinary_task(monkeypatch, capsys, role):
+    from types import SimpleNamespace
+    from polybridge import lineage, workflow_hooks, inbox
+    detection = SimpleNamespace(undecidable=None, caller=SimpleNamespace(record=SimpleNamespace(task_id='managed')))
+    monkeypatch.setattr(lineage, 'detect_caller_detail', lambda _: detection)
+    monkeypatch.setattr(workflow_hooks, 'owner', lambda *a, **k: {'role': role})
+    monkeypatch.setattr(inbox, 'send_to_record', lambda *a, **k: (_ for _ in ()).throw(AssertionError('message must not be queued')))
+    assert ctl.main(['send', 'ordinary', 'Change assignment', '--json']) == 1
+    assert json.loads(capsys.readouterr().out)['error']['code'] == 'workflow_managed'
+
+
+def test_github_read_cli_requires_verified_running_caller(monkeypatch, capsys):
+    async def caller():
+        return None
+    monkeypatch.setattr(server, '_verified_workflow_caller', caller)
+    assert ctl.main(['github-read', '--resource', 'user', '--json']) == 1
+    assert json.loads(capsys.readouterr().out)['error']['code'] == 'github_read_refused'

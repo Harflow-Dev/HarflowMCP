@@ -63,3 +63,15 @@ def refuse_direct_message(log_dir: Path, task_id: str) -> None:
         raise
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise SendRefused("Cannot establish workflow ownership safely", code="workflow_ownership_unknown") from exc
+
+
+def refuse_message_caller(log_dir: Path, task_id: str) -> None:
+    """Public message entry points cannot let managed agents change assignments."""
+    from .inbox import SendRefused
+    try:
+        if owner(log_dir, task_id, strict=True) is not None:
+            raise SendRefused("Workflow-managed agents cannot send direct task messages", code="workflow_managed")
+    except SendRefused:
+        raise
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise SendRefused("Cannot establish caller workflow ownership safely", code="workflow_ownership_unknown") from exc

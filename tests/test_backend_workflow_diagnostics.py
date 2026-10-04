@@ -8,7 +8,8 @@ from polybridge.backends.vibe import VibeBackend
 
 def test_publish_adds_narrow_review_comment_commands_only():
     rules = ALLOWED_TOOLS["publish"].split(",")
-    assert "Bash(gh pr review:*)" in rules
+    assert "Bash(polybridge-ctl publish-review:*)" in rules
+    assert "Bash(gh pr review:*)" not in rules
     assert "Bash(gh pr comment:*)" not in rules
     for blocked in ("Bash(gh api:*)", "Bash(gh pr merge:*)", "Bash(gh pr close:*)", "Bash(gh repo edit:*)", "Bash(gh repo delete:*)"):
         assert blocked not in rules

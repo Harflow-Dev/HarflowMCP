@@ -279,6 +279,25 @@ class VibeBackend:
                 logging = config.get("session_logging")
                 if isinstance(logging, dict) and isinstance(logging.get("save_dir"), str) and logging["save_dir"]:
                     directory = Path(logging["save_dir"]).expanduser()
+            # Current Vibe writes a unified store. Resolve only its committed generation,
+            # and verify the full native session identity before trusting model metadata.
+            if re.fullmatch(r"[A-Za-z0-9_-]+", session_id):
+                unified = directory / "unified" / session_id
+                current_path = unified / "CURRENT"
+                if current_path.is_file() and current_path.stat().st_size <= 1024 * 1024:
+                    current = json.loads(current_path.read_text(encoding="utf-8"))
+                    generation = current.get("generation") if isinstance(current, dict) else None
+                    if isinstance(current, dict) and current.get("session_id") == session_id and isinstance(generation, str) and re.fullmatch(r"[0-9]{16}", generation):
+                        state_path = unified / "generations" / generation / "runtime-state.json"
+                        if state_path.stat().st_size <= 8 * 1024 * 1024:
+                            state = json.loads(state_path.read_text(encoding="utf-8"))
+                            metadata = state.get("session_metadata", {})
+                            active = metadata.get("active_model") if isinstance(metadata, dict) else None
+                            if state.get("session_id") == session_id and isinstance(active, str) and active:
+                                observed = {"active_model": active, "model": active}
+                                if isinstance(metadata.get("reasoning_effort"), str):
+                                    observed["reasoning_effort"] = metadata["reasoning_effort"]
+                                return {"observed": observed, "provenance": "harness_session_configuration", "verification_status": "observed_configuration", "metadata_source": str(state_path)}
             # Session folder names include the first eight characters of their ID.
             # Still verify the complete native ID before accepting metadata.
             paths = sorted(directory.glob("*" + session_id[:8] + "*/meta.json"), reverse=True)[:20]

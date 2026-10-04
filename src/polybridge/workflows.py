@@ -240,9 +240,12 @@ def validate_definition(raw: dict[str, Any]) -> dict[str, Any]:
             if node["role"] == "implementation" and node["freedom"] == "read_only":
                 raise WorkflowError("Implementation nodes cannot use read_only")
             node.setdefault("session_mode", "agent_decides")
-            if node["session_mode"] not in {"resume", "fresh", "agent_decides"}:
+            if node["session_mode"] not in {"resume", "fresh", "agent_decides", "continue_previous"}:
                 raise WorkflowError(f"Invalid session mode: {node_id}")
             node["max_attempts"] = _positive(node.get("max_attempts", 3), "max_attempts")
+            timeout = node.get("timeout_seconds")
+            if timeout is not None and (isinstance(timeout, bool) or not isinstance(timeout, int) or timeout < 0):
+                raise WorkflowError("timeout_seconds must be a nonnegative integer")
             node["max_context_questions"] = _positive(node.get("max_context_questions", 10), "max_context_questions", 100)
     starts = [n["id"] for n in nodes if n["type"] == "start"]
     if len(starts) != 1 or not any(n["type"] == "end" for n in nodes):
@@ -678,6 +681,7 @@ class WorkflowStore:
         if kind == "workflow":
             run["execution_contract"] = "delegation"
             run["runner_policy"] = "guided"
+            run["execution_policy"] = "visit"
         run.update(retry_counts={}, retry_grants={})
         _write(self.runs / f"{rid}.json", run)
         return run
@@ -746,6 +750,8 @@ class WorkflowStore:
                     if isinstance(instructions, str) and instructions.strip():
                         from .workflow_delegation import settled
                         for execution in r["activations"]:
+                            if execution["role"] == "node" and settled(execution) and execution.get("node_result", {}).get("status") == "blocked":
+                                r.setdefault("blocker_retry_authorizations", {})[execution["id"]] = {"node_id": execution["node_id"], "reason": instructions.strip(), "granted_at": time.time()}
                             if execution["role"] == "node" and settled(execution) and execution.get("node_result", {}).get("result", {}).get("failure_kind") == "protocol":
                                 r.setdefault("protocol_retry_authorizations", {})[execution["id"]] = {"node_id": execution["node_id"], "reason": instructions.strip(), "granted_at": time.time()}
                     for n in r["definition"]["nodes"]:
@@ -993,10 +999,13 @@ def validate_builder_preview(value: Any, name: str) -> dict[str, Any]:
                 raise WorkflowError(f"Invalid instructions: {nid}")
             if "freedom" in node and (not isinstance(node["freedom"], str) or node["freedom"] not in FREEDOMS):
                 raise WorkflowError(f"Invalid freedom: {nid}")
-            if "session_mode" in node and (not isinstance(node["session_mode"], str) or node["session_mode"] not in {"resume", "fresh", "agent_decides"}):
+            if "session_mode" in node and (not isinstance(node["session_mode"], str) or node["session_mode"] not in {"resume", "fresh", "agent_decides", "continue_previous"}):
                 raise WorkflowError(f"Invalid session mode: {nid}")
             if "optional" in node and not isinstance(node["optional"], bool):
                 raise WorkflowError("Agent optional must be a boolean")
+            timeout = node.get("timeout_seconds")
+            if timeout is not None and (isinstance(timeout, bool) or not isinstance(timeout, int) or timeout < 0):
+                raise WorkflowError("timeout_seconds must be a nonnegative integer")
             if "max_attempts" in node:
                 _positive(node["max_attempts"], "max_attempts")
             if "network" in node and node["network"] not in (None, True, False):
@@ -1401,7 +1410,7 @@ class WorkflowSupervisor:
         key = node["id"] if role == "node" else role
         previous = run["sessions"].get(key, {})
         if role == "node" and activation.get("resume_task_id"):
-            source = next((t for a in run["activations"] if a["node_id"] == node["id"] and a["role"] == "node" for t in a["tasks"] if t["task_id"] == activation["resume_task_id"]), None)
+            source = next((t for a in run["activations"] if (a["node_id"] == node["id"] or activation.get("continue_previous")) and a["role"] == "node" for t in a["tasks"] if t["task_id"] == activation["resume_task_id"]), None)
             if source:
                 previous = {"task_id": source["task_id"], "candidate": key + ":" + _candidate_key(source["candidate"]), "session_id": source.get("result", {}).get("session_id")}
         persistent_orchestrator = role == "orchestrator" and run.get("runner_policy") == "guided"
@@ -1415,7 +1424,7 @@ class WorkflowSupervisor:
         preferred = previous.get("candidate")
         if preferred and (persistent_orchestrator or role == "node" and node.get("session_mode") == "resume" or role == "builder" and run.get("builder_followup")):
             candidates.sort(key=lambda c: key + ":" + _candidate_key(c) != preferred)
-        if role == "node" and run.get("execution_contract") == "delegation" and node.get("session_mode") == "resume":
+        if role == "node" and run.get("execution_contract") == "delegation" and node.get("session_mode") == "resume" and not activation.get("continue_previous"):
             from .workflow_delegation import recovered_resume_outage, require_fresh_checkpoint
             current_activation = next(a for a in run["activations"] if a["id"] == activation["id"])
             outage = recovered_resume_outage(run, current_activation)
@@ -1460,6 +1469,10 @@ class WorkflowSupervisor:
             def reserve(r: dict[str, Any]) -> None:
                 a = next(a for a in r["activations"] if a["id"] == activation["id"])
                 a["tasks"].append(reservation)
+                if role == "node" and a.get("continue_previous"):
+                    a["execution_session_mode"] = reservation["session_mode"]
+                    a["session_reason"] = "Resumed previous node" if use_resume else "Started Fresh: compatible previous session unavailable or fallback selected"
+                    reservation["session_reason"] = a["session_reason"]
                 q = next((q for q in a.get("questions", []) if q["question_id"] == a.get("resume_question_id")), None)
                 if q:
                     q.update(reply_task_id=task_id, answer_delivery_state="reserved")
@@ -1494,7 +1507,21 @@ class WorkflowSupervisor:
                         task = await self.registry.start(prompt, Path(run["repo_path"]), backend=backend, freedom=freedom, network=network, model=candidate.get("model"), reasoning_effort=candidate.get("reasoning_effort"), max_turns=candidate.get("max_turns"), task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder", title=f"{run['name']} · {node.get('title', key)}")
                     self.update(lambda r: r.pop("checkout_wait", None), "checkout_acquired")
                     self._task_update(activation["id"], task_id, {"status": "running", "dispatch_stage": "spawn_confirmed"})
+                    timeout_at = time.monotonic() + node["timeout_seconds"] if role == "node" and node.get("timeout_seconds") else None
+                    timed_out = False
                     while not task.done.is_set():
+                        if timeout_at is not None and time.monotonic() >= timeout_at:
+                            try:
+                                cancellation = await asyncio.wait_for(self.registry.cancel_cascade(task.task_id, workflow_control=True), timeout=5)
+                                if not isinstance(cancellation, dict) or any(cancellation.get(key) for key in ("sigkill_survivors", "survivors", "not_signalled", "owner_still_settling", "cascade_incomplete", "unconverged", "not_recorded")):
+                                    raise RuntimeError("Task cancellation cascade has unsettled or unverifiable descendants")
+                                await asyncio.wait_for(task.done.wait(), timeout=5)
+                            except Exception as exc:
+                                self._task_update(activation["id"], task_id, {"status": "uncertain", "error": "Timeout cancellation requires reconciliation: " + str(exc)})
+                                self.attention("Timed out node could not be confirmed settled; no fallback dispatched")
+                                return None
+                            timed_out = True
+                            break
                         if role == "builder" and getattr(task, "live_input", False) and any(m.get("status") == "pending" for m in self.run().get("builder_messages", [])):
                             messages: list[dict[str, Any]] = []
                             def claim_live(r: dict[str, Any]) -> None:
@@ -1521,6 +1548,15 @@ class WorkflowSupervisor:
                         except TimeoutError:
                             pass
                     snapshot = task.snapshot()
+                    if timed_out and snapshot.get("status") not in {"completed", "failed", "cancelled"}:
+                        self._task_update(activation["id"], task_id, {"status": "uncertain", "error": "Timeout cancellation did not produce a settled task snapshot"})
+                        self.attention("Timed out task requires reconciliation before fallback")
+                        return None
+                    if timed_out and snapshot.get("status") != "completed":
+                        notice = getattr(self.registry, "workflow_notice", None)
+                        if callable(notice):
+                            notice(task.task_id, "Node timed out after " + str(node["timeout_seconds"]) + " seconds; attempt stopped before fallback")
+                        snapshot = {**snapshot, "status": "failed", "failure_kind": "timeout", "timeout_seconds": node["timeout_seconds"], "summary": "Node timed out after " + str(node["timeout_seconds"]) + " seconds", "timed_out": True}
                 self._task_update(activation["id"], task_id, {"status": snapshot["status"], "result": snapshot, "finished_at": time.time(), "harness_metadata": observed_harness_metadata(snapshot, reservation["harness_metadata"])})
             except DispatchNotStarted as exc:
                 self._task_update(activation["id"], task_id, {"status": "not_started"})
@@ -1548,6 +1584,9 @@ class WorkflowSupervisor:
                 continue
             except (SessionUnknownError, SessionBusyError, RepoUnavailableError) as exc:
                 self._task_update(activation["id"], task_id, {"status": "not_started", "error": str(exc)})
+                if isinstance(exc, SessionUnknownError) and activation.get("continue_previous") and node.get("session_mode") == "resume" and not activation.get("resume_question_id"):
+                    # Positive no-spawn refusal permits a Fresh bootstrap on the same candidate.
+                    return await self._dispatch({**node, "session_mode": "fresh"}, prompt, role, next(a for a in self.run()["activations"] if a["id"] == activation["id"]))
                 self.attention(f"Dispatch configuration refused: {exc}")
                 return None
             except Exception as exc:
@@ -1556,12 +1595,17 @@ class WorkflowSupervisor:
                 not_started = capability_stage != "spawn" or getattr(exc, "polybridge_not_started", False) is True
                 self._task_update(activation["id"], task_id, {"status": "not_started" if not_started else "uncertain", "error": str(exc)})
                 if not_started:
-                    self.update(lambda r: next(a for a in r["activations"] if a["id"] == activation["id"]).update(status="not_started"), "dispatch_not_started")
+                    self.update(lambda r: next(a for a in r["activations"] if a["id"] == activation["id"]).update(status="not_started") if all(t["status"] == "not_started" for a in r["activations"] if a["id"] == activation["id"] for t in a["tasks"]) else None, "dispatch_not_started")
                 self.attention(f"Dispatch {task_id} did not start: {exc}" if not_started else f"Dispatch {task_id} requires reconciliation: {exc}")
                 return None
+            if snapshot.get("timed_out"):
+                previous = {}
+                if candidate != candidates[-1]:
+                    continue  # Cancellation settled before a Fresh fallback is dispatched.
+                return {**snapshot, "execution_failure": snapshot["summary"], "optional_failure_eligible": True}
             reason = availability_failure(snapshot)
             if reason:
-                if role == "node" and run.get("execution_contract") == "delegation" and node.get("session_mode") == "resume" and previous.get("candidate") == identity:
+                if role == "node" and run.get("execution_contract") == "delegation" and node.get("session_mode") == "resume" and previous.get("candidate") == identity and not activation.get("continue_previous"):
                     from .workflow_delegation import require_fresh_checkpoint
                     self.update(lambda r: require_fresh_checkpoint(r, activation["id"], reason, identity), "resume_requires_fresh", {"task_id": task_id, "reason": reason})
                     return None
@@ -1792,7 +1836,7 @@ class WorkflowSupervisor:
                         child["execution_activation_id"] = token["execution_activation_id"]
                         child["completion_source_node_id"] = node["id"]
                     dispatch = token.get("assignments", {}).get(edge["id"], {})
-                    child.update({k: copy.deepcopy(dispatch[k]) for k in ("assignment_prompt", "assigned_task_ids", "additional_result_refs", "execution_session_mode", "resume_task_id", "resume_source_execution_id") if k in dispatch})
+                    child.update({k: copy.deepcopy(dispatch[k]) for k in ("assignment_prompt", "assigned_task_ids", "additional_result_refs", "execution_session_mode", "resume_task_id", "resume_source_execution_id", "continue_previous") if k in dispatch})
                     if "structural_dispatch" in dispatch:
                         child.update(copy.deepcopy(dispatch["structural_dispatch"]))
                 rr["pending"].append(child)

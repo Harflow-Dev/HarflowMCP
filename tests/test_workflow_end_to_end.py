@@ -37,6 +37,8 @@ if "workflow orchestrator" in prompt:
         answer = {"decision_id": context["decision_id"], "action": "answer", "question_id": context["worker_question"]["question_id"], "answer": "Use the established repository conventions", "reason": "The workflow objective supplies the answer"}
     elif stage["node_id"] == "end":
         answer = {"decision_id": context["decision_id"], "action": "complete", "reason": "Fixture complete"}
+    elif picked and picked[0].get("retry_remaining") == 0:
+        answer = {"decision_id": context["decision_id"], "action": "needs_input", "reason": "Loop retry limit reached", "question": "Grant more retries?"}
     elif picked and picked[0].get("attempts_remaining") == 0:
         answer = {"decision_id": context["decision_id"], "action": "needs_input", "reason": "Attempt limit reached", "question": "Grant more attempts?"}
     else:
@@ -152,13 +154,17 @@ def test_cli_supervisor_creates_plan_and_orchestrator_completes_checklist(workfl
 
 def test_cli_loop_limit_stops_after_three_implementation_activations(workflow_cli, tmp_path, git_repo):
     cli, _ = workflow_cli
-    _save(cli, tmp_path, _definition("e2e-loop", loop=True))
+    definition = _definition("e2e-loop", loop=True)
+    next(n for n in definition["nodes"] if n["id"] == "implement")["max_attempts"] = 1
+    next(e for e in definition["connections"] if e["id"] == "fix")["max_retries"] = 2
+    _save(cli, tmp_path, definition)
     started = cli("run", "--workflow", "e2e-loop", "--repo", str(git_repo), "--prompt", "E2E_LOOP")
     run = _settled(cli, started["workflow_run_id"])
     assert run["status"] == "needs_input"
     attempts = [a for a in run["activations"] if a["node_id"] == "implement" and a["role"] == "node"]
     assert len(attempts) == 3
-    assert "Grant more attempts" in run["input_question"]
+    assert "Grant more retries" in run["input_question"]
+    assert [a["attempt_in_visit"] for a in attempts] == [1, 1, 1]
 
 
 def test_cli_availability_fallback_keeps_one_activation(workflow_cli, tmp_path, git_repo):

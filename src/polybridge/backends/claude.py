@@ -58,6 +58,8 @@ the commit landed in both the working repo and the remote.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import json
 from pathlib import Path
 from typing import Any
@@ -97,8 +99,11 @@ DENY_FREEDOMS: frozenset[str] = frozenset({"read_only", "write_in_repo"})
 # Review uses the same narrow command-prefix mechanism; validated locally,
 # without a paid harness run. Raw gh api remains unapproved: method/endpoint combinations
 # cannot be safely represented as one command-prefix rule.
+GITHUB_READ_TOOLS = "Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh pr diff:*),Bash(polybridge-ctl github-read:*)"
 ALLOWED_TOOLS: dict[str, str] = {
-    "publish": "Bash(git commit:*),Bash(git push:*),Bash(gh pr create:*),Bash(gh pr review:*)",
+    "read_only": GITHUB_READ_TOOLS,
+    "write_in_repo": GITHUB_READ_TOOLS,
+    "publish": "Bash(git commit:*),Bash(git push:*),Bash(gh pr create:*),Bash(polybridge-ctl publish-review:*)," + GITHUB_READ_TOOLS,
 }
 
 # Flags that would cut a dispatched agent off from the user's own MCP servers, settings, hooks and
@@ -116,6 +121,7 @@ FORBIDDEN_FLAGS = ("--strict-mcp-config", "--setting-sources", "--safe-mode", "-
 # writes them, so admitting them here would reopen the same hole under a different spelling.
 BOOLEAN_FLAGS = ("--verbose", "--include-partial-messages")
 VALUE_FLAGS = (
+    "--add-dir",
     "--output-format",
     "--input-format",
     "--permission-mode",
@@ -178,8 +184,8 @@ _PUBLISH_ALLOWLIST_CAVEAT = (
     "acceptEdits and no denies, git commit was still refused with \"This command requires "
     "approval\"; the allow-list is the mechanism that actually works). Everything not allow-listed "
     "still needs approval, which a headless run cannot give, so it is still refused — this is a "
-    "genuine middle tier, not a fallback to bypassPermissions. Narrow gh pr review "
-    "prefix is also configured; gh pr comment, raw gh api requests, merges, closes and repository mutations "
+    "genuine middle tier, not a fallback to bypassPermissions. The guarded polybridge-ctl publish-review "
+    "helper is also configured for COMMENT reviews; direct gh pr review, gh pr comment, raw gh api requests, merges, closes and repository mutations "
     "are not auto-approved by Polybridge. Inherited user rules can grant additional commands, "
     "and command-prefix approval is not an OS sandbox"
 )
@@ -381,6 +387,20 @@ class ClaudeBackend:
         # settles the run regardless of how many messages were queued. agy is the contrast case.
         live_input_message_is_turn=False,
     )
+
+    def with_writable_directory(self, invocation: Invocation, path: Path, freedom: Freedom) -> Invocation:
+        if freedom == "read_only":
+            raise ValueError("read-only tasks cannot receive a writable scratch directory")
+        directory = str(path.resolve())
+        if invocation.scratch_directory is not None:
+            raise ValueError("invocation already has a scratch directory")
+        argv = list(invocation.argv)
+        # Both start and resume accept this global option before their positional region.
+        index = argv.index("--") if "--" in argv else len(argv)
+        if index and argv[index - 1] == "resume":
+            index -= 1
+        argv[index:index] = ["--add-dir", directory]
+        return replace(invocation, argv=argv, scratch_directory=directory)
 
     def build_start_argv(
         self,
@@ -610,6 +630,10 @@ class ClaudeBackend:
                 )
 
         seen = self._parse_options(options, argv)
+        expected_directories = [invocation.scratch_directory] if invocation.scratch_directory else []
+        if seen.get("--add-dir", []) != expected_directories or (expected_directories and freedom == "read_only"):
+            raise UnsafeInvocationError("additional directory must match this invocation's writable scratch directory")
+
 
         self._exactly_one(seen, "--verbose", argv)
         # Exactly once, like --verbose: a second copy would be a shape this backend never writes,
@@ -647,17 +671,8 @@ class ClaudeBackend:
         deny_values = seen.get("--disallowedTools", [])
         allow_values = seen.get("--allowedTools", [])
 
-        # Structurally impossible for both to survive the walk, whatever spelling arrived and
-        # whatever freedom is in play: deny beats allow, so both present would silently neuter an
-        # allow-list freedom rather than error loudly. Checked before either per-freedom branch
-        # below, so this is the invariant itself — not merely a consequence of DENY_FREEDOMS and
-        # ALLOWED_TOOLS happening not to share a freedom today.
-        if deny_values and allow_values:
-            raise UnsafeInvocationError(
-                f"--disallowedTools and --allowedTools both present: deny beats allow, which "
-                f"would silently neuter this freedom's allow-list: {argv!r}"
-            )
-
+        # Read-only GitHub commands coexist with git publication denies. Exact
+        # per-freedom validation below rejects broader or conflicting allow rules.
         if freedom in DENY_FREEDOMS:
             denied = self._exactly_one(seen, "--disallowedTools", argv)
             if denied != DISALLOWED_TOOLS:
@@ -864,6 +879,23 @@ class ClaudeBackend:
             acc.session_id = session_id
 
         event_type = event.get("type")
+        if event_type in ("assistant", "user"):
+            message = event.get("message")
+            content = message.get("content", []) if isinstance(message, dict) else []
+            tools = acc.stream_state.setdefault("denial_tool_inputs", {})
+            for block in content if isinstance(content, list) else []:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "tool_use" and isinstance(block.get("id"), str):
+                    tools[block["id"]] = {"tool_name": block.get("name"), "tool_input": block.get("input")}
+                elif block.get("type") == "tool_result" and block.get("is_error"):
+                    reason = _tool_result_text(block.get("content"))
+                    if isinstance(reason, str) and any(marker in reason.lower() for marker in (
+                        "requires approval", "permission denied", "permission to use", "contains brace with quote character",
+                    )):
+                        denial = {**tools.get(block.get("tool_use_id"), {}), "tool_use_id": block.get("tool_use_id"),
+                                  "reason": reason, "source": "harness_tool_refusal"}
+                        acc.denials = self._union_denials(acc.denials, [denial])
         if event_type == "system":
             self._ingest_system(event, acc)
         elif event_type in ("assistant", "user"):

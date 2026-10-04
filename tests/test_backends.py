@@ -11,6 +11,12 @@ from pathlib import Path
 
 import pytest
 
+
+@pytest.fixture(autouse=True)
+def isolated_codex_configuration(tmp_path, monkeypatch):
+    # Enforcement reads inherited writable roots; these unit cases use a clean config.
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-config"))
+
 from polybridge import backends
 from polybridge.backends import (
     STDIN_PIPE,
@@ -799,6 +805,7 @@ LEGACY_ARGV: dict[str, dict[str, dict[str, list[str]]]] = {
                 "--include-partial-messages",
                 "--permission-mode", "plan",
                 "--disallowedTools", "Bash(git commit:*),Bash(git push:*)",
+                "--allowedTools", "Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh pr diff:*),Bash(polybridge-ctl github-read:*)",
                 "--session-id", SESSION,
                 "--", "do a thing",
             ],
@@ -807,6 +814,7 @@ LEGACY_ARGV: dict[str, dict[str, dict[str, list[str]]]] = {
                 "--include-partial-messages",
                 "--permission-mode", "plan",
                 "--disallowedTools", "Bash(git commit:*),Bash(git push:*)",
+                "--allowedTools", "Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh pr diff:*),Bash(polybridge-ctl github-read:*)",
                 "--resume", "abc-123",
                 "--", "more",
             ],
@@ -817,6 +825,7 @@ LEGACY_ARGV: dict[str, dict[str, dict[str, list[str]]]] = {
                 "--include-partial-messages",
                 "--permission-mode", "acceptEdits",
                 "--disallowedTools", "Bash(git commit:*),Bash(git push:*)",
+                "--allowedTools", "Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh pr diff:*),Bash(polybridge-ctl github-read:*)",
                 "--session-id", SESSION,
                 "--", "do a thing",
             ],
@@ -825,6 +834,7 @@ LEGACY_ARGV: dict[str, dict[str, dict[str, list[str]]]] = {
                 "--include-partial-messages",
                 "--permission-mode", "acceptEdits",
                 "--disallowedTools", "Bash(git commit:*),Bash(git push:*)",
+                "--allowedTools", "Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh pr diff:*),Bash(polybridge-ctl github-read:*)",
                 "--resume", "abc-123",
                 "--", "more",
             ],
@@ -834,7 +844,7 @@ LEGACY_ARGV: dict[str, dict[str, dict[str, list[str]]]] = {
                 "claude", "-p", "--output-format", "stream-json", "--verbose",
                 "--include-partial-messages",
                 "--permission-mode", "acceptEdits",
-                "--allowedTools", "Bash(git commit:*),Bash(git push:*),Bash(gh pr create:*),Bash(gh pr review:*)",
+                "--allowedTools", "Bash(git commit:*),Bash(git push:*),Bash(gh pr create:*),Bash(polybridge-ctl publish-review:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh pr diff:*),Bash(polybridge-ctl github-read:*)",
                 "--session-id", SESSION,
                 "--", "do a thing",
             ],
@@ -842,7 +852,7 @@ LEGACY_ARGV: dict[str, dict[str, dict[str, list[str]]]] = {
                 "claude", "-p", "--output-format", "stream-json", "--verbose",
                 "--include-partial-messages",
                 "--permission-mode", "acceptEdits",
-                "--allowedTools", "Bash(git commit:*),Bash(git push:*),Bash(gh pr create:*),Bash(gh pr review:*)",
+                "--allowedTools", "Bash(git commit:*),Bash(git push:*),Bash(gh pr create:*),Bash(polybridge-ctl publish-review:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh pr diff:*),Bash(polybridge-ctl github-read:*)",
                 "--resume", "abc-123",
                 "--", "more",
             ],
@@ -1397,7 +1407,7 @@ def test_claude_rejects_an_unexpected_effort_value_reaching_assert_safe_directly
 def test_claude_deny_patterns_present_at_read_only_and_write_in_repo(freedom: str) -> None:
     argv = start(ClaudeBackend(), freedom=freedom)
     assert argv[argv.index("--disallowedTools") + 1] == DISALLOWED_TOOLS
-    assert "--allowedTools" not in argv
+    assert argv[argv.index("--allowedTools") + 1] == ALLOWED_TOOLS[freedom]
 
 
 @pytest.mark.parametrize("freedom", ["publish", "unrestricted"])
@@ -1415,8 +1425,8 @@ def test_claude_publish_carries_the_allowlist_and_no_deny_patterns() -> None:
     ClaudeBackend().assert_safe(inv(argv), "publish")
 
 
-@pytest.mark.parametrize("freedom", ["read_only", "write_in_repo", "unrestricted"])
-def test_claude_allowlist_absent_outside_publish(freedom: str) -> None:
+@pytest.mark.parametrize("freedom", ["unrestricted"])
+def test_claude_allowlist_absent_outside_managed_freedoms(freedom: str) -> None:
     assert "--allowedTools" not in start(ClaudeBackend(), freedom=freedom)
 
 
@@ -1514,13 +1524,12 @@ def test_claude_refuses_an_unrecognised_token() -> None:
 
 
 @pytest.mark.parametrize("freedom", ["read_only", "write_in_repo"])
-def test_claude_deny_and_allow_can_never_coexist_whatever_the_spelling(freedom: str) -> None:
-    """Structural, not incidental: forcing an --allowedTools onto a deny freedom must be refused
-    even though today's DENY_FREEDOMS/ALLOWED_TOOLS mapping never asks for both at once."""
+def test_claude_rejects_conflicting_publish_allowlist_at_read_freedoms(freedom: str) -> None:
+    """GitHub reads may coexist with git denies; publishing allow rules may not."""
     argv = with_extra_options(
         start(ClaudeBackend(), freedom=freedom), "--allowedTools", ALLOWED_TOOLS["publish"]
     )
-    with pytest.raises(ClaudeUnsafe, match="both present"):
+    with pytest.raises(ClaudeUnsafe, match="allowedTools|disallowedTools"):
         ClaudeBackend().assert_safe(inv(argv), freedom)
 
 
@@ -1528,7 +1537,7 @@ def test_claude_deny_and_allow_can_never_coexist_at_publish() -> None:
     argv = with_extra_options(
         start(ClaudeBackend(), freedom="publish"), "--disallowedTools", DISALLOWED_TOOLS
     )
-    with pytest.raises(ClaudeUnsafe, match="both present"):
+    with pytest.raises(ClaudeUnsafe, match="allowedTools|disallowedTools"):
         ClaudeBackend().assert_safe(inv(argv), "publish")
 
 
