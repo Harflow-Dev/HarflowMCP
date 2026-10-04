@@ -291,9 +291,9 @@ class VibeBackend:
                         state_path = unified / "generations" / generation / "runtime-state.json"
                         if state_path.stat().st_size <= 8 * 1024 * 1024:
                             state = json.loads(state_path.read_text(encoding="utf-8"))
-                            metadata = state.get("session_metadata", {})
+                            metadata = state.get("session_metadata", {}) if isinstance(state, dict) else {}
                             active = metadata.get("active_model") if isinstance(metadata, dict) else None
-                            if state.get("session_id") == session_id and isinstance(active, str) and active:
+                            if isinstance(state, dict) and state.get("session_id") == session_id and isinstance(active, str) and active:
                                 observed = {"active_model": active, "model": active}
                                 if isinstance(metadata.get("reasoning_effort"), str):
                                     observed["reasoning_effort"] = metadata["reasoning_effort"]

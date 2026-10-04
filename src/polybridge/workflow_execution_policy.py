@@ -19,7 +19,7 @@ def attempts_used(run: dict[str, Any], node: dict[str, Any], token: dict[str, An
 def previous_session(run: dict[str, Any], node: dict[str, Any], token: dict[str, Any], *, root=None) -> list[dict[str, Any]]:
     from . import workflow_delegation as d, workflows as w
     # A retained execution's own session wins for retries; predecessors are only for first entry.
-    if token.get('retry_of_execution_id'):
+    if token.get('retry_of_execution_id') or any(e['id'] == token.get('via') and e.get('backward') and e['target'] == node['id'] for e in run['definition']['connections']):
         return d.available_sessions(run, node, root=root)
     incoming = [e for e in run['definition']['connections'] if e['target'] == node['id'] and not e.get('backward')]
     refs = [token['execution_activation_id']] if token.get('execution_complete') and token.get('execution_activation_id') and token.get('node_id') != node['id'] else token.get('input_result_refs', [])
@@ -35,3 +35,23 @@ def previous_session(run: dict[str, Any], node: dict[str, Any], token: dict[str,
     key = w._candidate_key(node['agent'])
     primary = {**node, 'id': predecessor['id'], 'agent': {**node['agent'], 'fallbacks': []}}
     return [s for s in d.available_sessions({**run, 'activations': [{**source, 'tasks': source.get('tasks', [])[-1:]}]}, primary, root=root) if w._candidate_key(s['candidate']) == key]
+
+
+def previous_session_reason(run, node, token, *, root=None):
+    """Explain best-effort reuse using the actual settled source, never guessed defaults."""
+    from . import workflows as w
+    if previous_session(run, node, token, root=root):
+        own = token.get('retry_of_execution_id') or any(e['id'] == token.get('via') and e.get('backward') for e in run['definition']['connections'])
+        return 'Resumed last node session' if own else 'Resumed previous node'
+    refs = [token['execution_activation_id']] if token.get('execution_complete') and token.get('execution_activation_id') else token.get('input_result_refs', [])
+    if token.get('retry_of_execution_id'):
+        refs = [token['retry_of_execution_id']]
+    source = next((a for a in reversed(run['activations']) if a['id'] in refs and a['role'] == 'node'), None) if len(refs) == 1 else None
+    if source and source.get('tasks'):
+        task = source['tasks'][-1]
+        differences = [key + ' differs' for key in ('backend', 'model', 'reasoning_effort', 'max_turns') if task.get('candidate', {}).get(key) != node['agent'].get(key)]
+        network = False if run.get('network') is False else node.get('network', run.get('network'))
+        differences += [label + ' differs' for label, actual, expected in [('freedom', task.get('freedom'), w.run_effective_freedom(run, node)), ('network', task.get('network'), network), ('repository', task.get('repo_path'), run['repo_path'])] if actual != expected]
+        if differences:
+            return 'Started Fresh: ' + ', '.join(differences)
+    return 'Started Fresh: compatible previous session unavailable'

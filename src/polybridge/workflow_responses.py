@@ -10,6 +10,56 @@ BUDGET = 24 * 1024
 VIEWS = {"executions": "activations", "decisions": "decisions", "checklist": "tasks", "checklist_disposition": "checklist_disposition", "technical_plan": "technical_plan", "definition": "definition", "question": "input_question", "reason": "reason", "wait_reason": "wait_reason", "checkout_wait": "checkout_wait", "summary": "summary", "failure_reason": "failure_reason", "attention_reason": "attention_reason", "builder_draft": "builder_draft", "generated_definition": "generated_definition"}
 
 
+PUBLIC_VIEWS = frozenset(VIEWS)
+
+# These lossless views are fetched only when their digest changes. Executions have
+# individual identities so a new checkpoint does not resend old worker results.
+MONITOR_FIELDS = ("definition", "tasks", "checklist_disposition", "technical_plan", "decisions", "pending", "joins", "released_parallel_groups", "exhausted_retry_edges", "input_question", "reason", "wait_reason", "checkout_wait", "summary", "failure_reason", "attention_reason", "builder_draft", "generated_definition", "editing_definition", "source_saved_definition", "prompt")
+VIEWS.update({field: field for field in MONITOR_FIELDS})
+VIEWS["execution_index"] = "execution_index"
+
+
+def _serialize(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+
+
+def _digest(value: Any) -> str:
+    return hashlib.sha256(_serialize(value).encode()).hexdigest()
+
+
+def _view_value(run: dict[str, Any], view: str) -> Any:
+    if view == "execution_index":
+        return [{"id": a["id"], "digest": _digest(a)} for a in run.get("activations", [])]
+    if view.startswith("execution:"):
+        execution_id = view.removeprefix("execution:")
+        for activation in run.get("activations", []):
+            if activation.get("id") == execution_id:
+                return activation
+        raise ValueError("Unknown workflow execution")
+    if view not in VIEWS:
+        raise ValueError("Unknown workflow detail view")
+    return run.get(VIEWS[view])
+
+
+def monitor(run: dict[str, Any]) -> dict[str, Any]:
+    """Bound selected-run polling; authoritative content lives in paged views."""
+    result = compact(run)
+    for key in ("workflow_name", "source_name", "source_revision", "builder_followup"):
+        if key in run:
+            result[key] = run[key][:2000] if isinstance(run[key], str) else run[key]
+    result["monitor_digests"] = {field: _digest(run.get(field)) for field in MONITOR_FIELDS}
+    result["monitor_digests"]["execution_index"] = _digest(_view_value(run, "execution_index"))
+    # Digest references must fit the same transport budget as status metadata.
+    if len(json.dumps(result, ensure_ascii=True).encode()) > BUDGET:
+        for key in ("decision_errors", "checkout_wait", "current_stage"):
+            result.pop(key, None)
+        for key, value in list(result.items()):
+            if isinstance(value, str) and len(value) > 64:
+                result[key] = value[:64]
+                result[key + "_truncated"] = True
+    return result
+
+
 def history_page(runs: list[dict[str, Any]], offset: int = 0, limit: int = 100) -> dict[str, Any]:
     """Bound Monitor history polling independently of full run and worker outputs."""
     if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 100:
@@ -86,11 +136,9 @@ def compact(run: dict[str, Any]) -> dict[str, Any]:
 
 def detail(run: dict[str, Any], view: str, cursor: str | None = None, limit: int = 8000) -> dict[str, Any]:
     """Lossless JSON chunks bound to run, view and immutable content digest."""
-    if view not in VIEWS:
-        raise ValueError("Unknown workflow detail view")
     if type(limit) is not int or not 1 <= limit <= 8000:
         raise ValueError("Detail limit must be between 1 and 8000 characters")
-    serialized = json.dumps(run.get(VIEWS[view]), ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    serialized = _serialize(_view_value(run, view))
     digest = hashlib.sha256(serialized.encode()).hexdigest()
     identity = [run["workflow_run_id"], view, digest]
     offset = 0

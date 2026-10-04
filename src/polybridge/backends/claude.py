@@ -38,8 +38,7 @@ command requires approval", because `acceptEdits` auto-approves *edits*, not arb
 headless `-p` mode has nobody to give that approval. The lever that actually works is an allow-list:
 `--permission-mode acceptEdits --allowedTools "Bash(git commit:*),Bash(git push:*)"` let both commands
 succeed with an empty `permission_denials`, and the commit landed in a bare remote. So at `publish`
-the deny patterns are dropped and `--allowedTools "Bash(git commit:*),Bash(git push:*),Bash(gh pr
-create:*)"` is added instead — deny and allow are never combined, since deny beats allow and would be
+the deny patterns are dropped and `--allowedTools "Bash(git commit:*),Bash(git push:*)"` is added instead — deny and allow are never combined, since deny beats allow and would be
 self-defeating. Everything else still needs approval, which a headless run cannot give, so it is
 still refused — `publish` is a genuine middle tier here, not a fallback to `bypassPermissions`. Also
 measured: the approval layer refuses a *chained* command citing each part separately (e.g.
@@ -94,16 +93,9 @@ DISALLOWED_TOOLS = "Bash(git commit:*),Bash(git push:*)"
 # allow-list, and `unrestricted` drops them as the (documented) compatibility break above.
 DENY_FREEDOMS: frozenset[str] = frozenset({"read_only", "write_in_repo"})
 
-# One comma-separated value, same reason as DISALLOWED_TOOLS. Measured as the mechanism that
-# actually lets `publish` commit/push/open-a-PR headlessly — see the module docstring.
-# Review uses the same narrow command-prefix mechanism; validated locally,
-# without a paid harness run. Raw gh api remains unapproved: method/endpoint combinations
-# cannot be safely represented as one command-prefix rule.
-GITHUB_READ_TOOLS = "Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh pr diff:*),Bash(polybridge-ctl github-read:*)"
+# Publish grants generic VCS publishing only. Harness settings own other commands.
 ALLOWED_TOOLS: dict[str, str] = {
-    "read_only": GITHUB_READ_TOOLS,
-    "write_in_repo": GITHUB_READ_TOOLS,
-    "publish": "Bash(git commit:*),Bash(git push:*),Bash(gh pr create:*),Bash(polybridge-ctl publish-review:*)," + GITHUB_READ_TOOLS,
+    "publish": "Bash(git commit:*),Bash(git push:*)",
 }
 
 # Flags that would cut a dispatched agent off from the user's own MCP servers, settings, hooks and
@@ -184,9 +176,7 @@ _PUBLISH_ALLOWLIST_CAVEAT = (
     "acceptEdits and no denies, git commit was still refused with \"This command requires "
     "approval\"; the allow-list is the mechanism that actually works). Everything not allow-listed "
     "still needs approval, which a headless run cannot give, so it is still refused — this is a "
-    "genuine middle tier, not a fallback to bypassPermissions. The guarded polybridge-ctl publish-review "
-    "helper is also configured for COMMENT reviews; direct gh pr review, gh pr comment, raw gh api requests, merges, closes and repository mutations "
-    "are not auto-approved by Polybridge. Inherited user rules can grant additional commands, "
+    "genuine middle tier, not a fallback to bypassPermissions. Inherited user rules can grant additional commands, "
     "and command-prefix approval is not an OS sandbox"
 )
 _CHAINED_COMMAND_CAVEAT = (
@@ -671,8 +661,7 @@ class ClaudeBackend:
         deny_values = seen.get("--disallowedTools", [])
         allow_values = seen.get("--allowedTools", [])
 
-        # Read-only GitHub commands coexist with git publication denies. Exact
-        # per-freedom validation below rejects broader or conflicting allow rules.
+        # Exact per-freedom validation rejects broader or conflicting allow rules.
         if freedom in DENY_FREEDOMS:
             denied = self._exactly_one(seen, "--disallowedTools", argv)
             if denied != DISALLOWED_TOOLS:
@@ -891,7 +880,7 @@ class ClaudeBackend:
                 elif block.get("type") == "tool_result" and block.get("is_error"):
                     reason = _tool_result_text(block.get("content"))
                     if isinstance(reason, str) and any(marker in reason.lower() for marker in (
-                        "requires approval", "permission denied", "permission to use", "contains brace with quote character",
+                        "this command requires approval", "permission to use", "contains brace with quote character",
                     )):
                         denial = {**tools.get(block.get("tool_use_id"), {}), "tool_use_id": block.get("tool_use_id"),
                                   "reason": reason, "source": "harness_tool_refusal"}
@@ -1018,12 +1007,17 @@ class ClaudeBackend:
         previous: list[dict[str, Any]], denials: list[Any]
     ) -> list[dict[str, Any]]:
         """Every distinct denial across results, in first-seen order."""
-        union = list(previous)
-        seen = {json.dumps(entry, sort_keys=True, default=str) for entry in union}
-        for entry in denials:
-            key = json.dumps(entry, sort_keys=True, default=str)
-            if key not in seen:
-                seen.add(key)
+        union: list[dict[str, Any]] = []
+        positions: dict[str, int] = {}
+        for entry in [*previous, *denials]:
+            tool_id = entry.get("tool_use_id") if isinstance(entry, dict) else None
+            key = ("tool:" + tool_id) if isinstance(tool_id, str) and tool_id else json.dumps(entry, sort_keys=True, default=str)
+            if key in positions:
+                index = positions[key]
+                if isinstance(union[index], dict) and isinstance(entry, dict):
+                    union[index] = {**union[index], **entry}
+            else:
+                positions[key] = len(union)
                 union.append(entry)
         return union
 

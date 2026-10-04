@@ -420,3 +420,12 @@ def test_compact_checklist_disposition_exposes_authority_with_bounded_reason():
     assert len(result['checklist_disposition']['reason']) == 256
     page = detail(run, 'checklist_disposition', limit=8000)
     assert disposition['reason'] in page['chunk']
+
+
+@pytest.mark.parametrize('view', ['executions', 'execution_index', 'execution:old', 'pending', 'source_saved_definition'])
+async def test_managed_orchestrator_cannot_use_monitor_execution_views(run, monkeypatch, view):
+    async def reader():
+        return {'role': 'orchestrator'}, run
+    monkeypatch.setattr(server, '_managed_workflow_reader', reader)
+    with pytest.raises(Exception, match='Use inspect_workflow_node'):
+        await server.get_workflow_run_detail('run-1', view)

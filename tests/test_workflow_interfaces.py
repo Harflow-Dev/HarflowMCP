@@ -330,9 +330,9 @@ def test_cli_managed_caller_cannot_send_to_ordinary_task(monkeypatch, capsys, ro
     assert json.loads(capsys.readouterr().out)['error']['code'] == 'workflow_managed'
 
 
-def test_github_read_cli_requires_verified_running_caller(monkeypatch, capsys):
-    async def caller():
-        return None
-    monkeypatch.setattr(server, '_verified_workflow_caller', caller)
-    assert ctl.main(['github-read', '--resource', 'user', '--json']) == 1
-    assert json.loads(capsys.readouterr().out)['error']['code'] == 'github_read_refused'
+def test_removed_github_helpers_are_unknown_commands(capsys):
+    for command in ('github-read', 'publish-review'):
+        with pytest.raises(SystemExit) as exc:
+            ctl.main([command, '--json'])
+        assert exc.value.code == 2
+        assert json.loads(capsys.readouterr().out)['error']

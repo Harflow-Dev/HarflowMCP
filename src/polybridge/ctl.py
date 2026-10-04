@@ -87,16 +87,6 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     status_p.add_argument("task_id")
     status_p.add_argument("--json", action="store_true")
 
-    publish_p = sub.add_parser("publish-review", help="publish a COMMENT review to this task's repository")
-    publish_p.add_argument("--pr", required=True, type=int)
-    publish_p.add_argument("--input", required=True)
-    publish_p.add_argument("--json", action="store_true")
-
-    github_p = sub.add_parser("github-read", help="read fixed GitHub resources without write operations")
-    github_p.add_argument("--resource", required=True, choices=("user", "pr", "reviews", "comments"))
-    github_p.add_argument("--pr", type=int)
-    github_p.add_argument("--json", action="store_true")
-
     send_p = sub.add_parser(
         "send", help="queue a message for a running live-input task (reports queued, not delivered)"
     )
@@ -157,13 +147,18 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     edits.add_argument("--remove")
 
     workflow_parsers = []
-    for action in ("validate", "list", "get", "save", "delete", "build", "start", "list-runs", "status", "wait", "pause", "resume", "cancel", "builder-followup", "builder-apply", "inspect", "recover", "migrate", "abandon-dispatch"):
+    for action in ("validate", "list", "get", "save", "delete", "build", "start", "list-runs", "status", "detail", "wait", "pause", "resume", "cancel", "builder-followup", "builder-apply", "inspect", "recover", "migrate", "abandon-dispatch"):
         wp = sub.add_parser("workflow-" + action, help=action + " workflows")
         wp.add_argument("--json", action="store_true")
         if action in {"get", "save", "delete", "build", "start"}:
             wp.add_argument("name")
-        if action in {"status", "wait", "pause", "resume", "cancel", "builder-followup", "inspect", "recover", "abandon-dispatch"}:
+        if action in {"status", "detail", "wait", "pause", "resume", "cancel", "builder-followup", "inspect", "recover", "abandon-dispatch"}:
             wp.add_argument("workflow_run_id")
+        if action == "status":
+            wp.add_argument("--monitor-view", action="store_true")
+        if action == "detail":
+            wp.add_argument("--view", required=True)
+            wp.add_argument("--cursor")
         if action == "abandon-dispatch":
             wp.add_argument("execution_id")
             wp.add_argument("task_id")
@@ -644,6 +639,11 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
             if args.monitor:
                 return await server._workflow_call("start", name=args.name, prompt=args.prompt, repo_path=args.repo, overrides=candidate or None, freedom=args.freedom, network=_network(args.network), interaction_owner="monitor")
             return await server._workflow_call("start", name=args.name, prompt=args.prompt, repo_path=args.repo, overrides=candidate or None, freedom=args.freedom, network=_network(args.network))
+        if action == "detail":
+            return await server.get_workflow_run_detail(args.workflow_run_id, args.view, args.cursor)
+        if action == "status" and args.monitor_view:
+            from .workflow_responses import monitor
+            return monitor(await server._workflow_call("status", run_id=args.workflow_run_id))
         if action == "wait":
             return await server._wait_workflow_full(args.workflow_run_id, args.timeout_seconds)
         if action == "resume":
@@ -659,36 +659,6 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
         print(json.dumps({"v": CTL_JSON_VERSION, "result": result}))
     else:
         print(json.dumps(result, indent=2))
-    return 0
-
-
-def _cmd_publish_review(args: argparse.Namespace) -> int:
-    from . import server, publication
-    async def invoke():
-        caller = await server._verified_workflow_caller()
-        if caller is None:
-            raise ValueError("Publishing helper requires a verified running task")
-        return await asyncio.to_thread(publication.publish_review, server._reg().log_dir, caller.record, args.pr, args.input)
-    try:
-        result = asyncio.run(invoke())
-    except Exception as exc:
-        return _fail(args, "publication_refused", str(exc))
-    print(json.dumps({"v": CTL_JSON_VERSION, "result": result}) if args.json else result)
-    return 0
-
-
-def _cmd_github_read(args: argparse.Namespace) -> int:
-    from . import server, publication
-    async def invoke():
-        caller = await server._verified_workflow_caller()
-        if caller is None:
-            raise ValueError("GitHub helper requires a verified running task")
-        return await asyncio.to_thread(publication.github_read, caller.record, args.resource, args.pr)
-    try:
-        result = asyncio.run(invoke())
-    except Exception as exc:
-        return _fail(args, "github_read_refused", str(exc))
-    print(json.dumps({"v": CTL_JSON_VERSION, "result": result}) if args.json else json.dumps(result))
     return 0
 
 
@@ -723,10 +693,6 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_list(args, list_p)
     if args.command == "backends":
         return _cmd_backends(args)
-    if args.command == "publish-review":
-        return _cmd_publish_review(args)
-    if args.command == "github-read":
-        return _cmd_github_read(args)
     if args.command == "send":
         return _cmd_send(args)
     if args.command == "cancel":

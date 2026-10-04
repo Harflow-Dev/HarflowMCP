@@ -188,12 +188,10 @@ async def test_uncertain_spawn_retains_scratch(tmp_path, monkeypatch):
     assert (tmp_path/'scratch/uncertain-spawn').is_dir()
 
 
-def test_safe_github_read_rules_available_without_publish():
+def test_no_github_rules_injected_without_publish():
     for freedom in ('read_only', 'write_in_repo'):
         rules = ALLOWED_TOOLS.get(freedom, '')
-        assert 'Bash(gh pr view:*)' in rules
-        assert 'Bash(gh pr diff:*)' in rules
-        assert 'Bash(gh api' not in rules
+        assert rules == ''
 
 
 def test_codex_reports_inherited_configured_writable_roots(tmp_path, monkeypatch):
@@ -217,3 +215,31 @@ def test_codex_profile_writable_roots_override_global(tmp_path, monkeypatch):
     report = CodexBackend().enforcement('publish')
     assert '/profile' in report.writable_roots
     assert '/global' not in report.writable_roots
+
+
+def test_filesystem_permission_error_is_not_harness_denial():
+    backend, acc = ClaudeBackend(), Accumulator()
+    backend.ingest({'type':'user','message':{'content':[{'type':'tool_result','tool_use_id':'tool-1','is_error':True,'content':'cat: /private/file: Permission denied'}]}}, acc)
+    assert acc.denials == []
+
+
+def test_native_result_denial_merges_stream_reason_by_tool_identity():
+    backend, acc = ClaudeBackend(), Accumulator()
+    backend.ingest({'type':'user','message':{'content':[{'type':'tool_result','tool_use_id':'tool-1','is_error':True,'content':'This command requires approval.'}]}}, acc)
+    backend.ingest({'type':'result','permission_denials':[{'tool_use_id':'tool-1','tool_name':'Bash','tool_input':{'command':'cat private'}}]}, acc)
+    assert len(acc.denials) == 1
+    assert acc.denials[0]['reason'] == 'This command requires approval.'
+
+
+import pytest
+@pytest.mark.parametrize('state', [[], None, 'invalid', 42, True])
+def test_vibe_nonobject_runtime_state_is_ignored(tmp_path, monkeypatch, state):
+    import json
+    from polybridge.backends.vibe import VibeBackend
+    monkeypatch.setenv('VIBE_HOME', str(tmp_path))
+    directory = tmp_path/'logs/session/unified/native-session'
+    generation = directory/'generations/0000000000000001'
+    generation.mkdir(parents=True)
+    (directory/'CURRENT').write_text(json.dumps({'generation':'0000000000000001','session_id':'native-session'}))
+    (generation/'runtime-state.json').write_text(json.dumps(state))
+    assert VibeBackend.workflow_observed_metadata({'session_id':'native-session'}) is None

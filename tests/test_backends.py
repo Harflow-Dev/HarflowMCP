@@ -805,7 +805,6 @@ LEGACY_ARGV: dict[str, dict[str, dict[str, list[str]]]] = {
                 "--include-partial-messages",
                 "--permission-mode", "plan",
                 "--disallowedTools", "Bash(git commit:*),Bash(git push:*)",
-                "--allowedTools", "Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh pr diff:*),Bash(polybridge-ctl github-read:*)",
                 "--session-id", SESSION,
                 "--", "do a thing",
             ],
@@ -814,7 +813,6 @@ LEGACY_ARGV: dict[str, dict[str, dict[str, list[str]]]] = {
                 "--include-partial-messages",
                 "--permission-mode", "plan",
                 "--disallowedTools", "Bash(git commit:*),Bash(git push:*)",
-                "--allowedTools", "Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh pr diff:*),Bash(polybridge-ctl github-read:*)",
                 "--resume", "abc-123",
                 "--", "more",
             ],
@@ -825,7 +823,6 @@ LEGACY_ARGV: dict[str, dict[str, dict[str, list[str]]]] = {
                 "--include-partial-messages",
                 "--permission-mode", "acceptEdits",
                 "--disallowedTools", "Bash(git commit:*),Bash(git push:*)",
-                "--allowedTools", "Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh pr diff:*),Bash(polybridge-ctl github-read:*)",
                 "--session-id", SESSION,
                 "--", "do a thing",
             ],
@@ -834,7 +831,6 @@ LEGACY_ARGV: dict[str, dict[str, dict[str, list[str]]]] = {
                 "--include-partial-messages",
                 "--permission-mode", "acceptEdits",
                 "--disallowedTools", "Bash(git commit:*),Bash(git push:*)",
-                "--allowedTools", "Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh pr diff:*),Bash(polybridge-ctl github-read:*)",
                 "--resume", "abc-123",
                 "--", "more",
             ],
@@ -844,7 +840,7 @@ LEGACY_ARGV: dict[str, dict[str, dict[str, list[str]]]] = {
                 "claude", "-p", "--output-format", "stream-json", "--verbose",
                 "--include-partial-messages",
                 "--permission-mode", "acceptEdits",
-                "--allowedTools", "Bash(git commit:*),Bash(git push:*),Bash(gh pr create:*),Bash(polybridge-ctl publish-review:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh pr diff:*),Bash(polybridge-ctl github-read:*)",
+                "--allowedTools", "Bash(git commit:*),Bash(git push:*)",
                 "--session-id", SESSION,
                 "--", "do a thing",
             ],
@@ -852,7 +848,7 @@ LEGACY_ARGV: dict[str, dict[str, dict[str, list[str]]]] = {
                 "claude", "-p", "--output-format", "stream-json", "--verbose",
                 "--include-partial-messages",
                 "--permission-mode", "acceptEdits",
-                "--allowedTools", "Bash(git commit:*),Bash(git push:*),Bash(gh pr create:*),Bash(polybridge-ctl publish-review:*),Bash(gh pr view:*),Bash(gh pr list:*),Bash(gh pr diff:*),Bash(polybridge-ctl github-read:*)",
+                "--allowedTools", "Bash(git commit:*),Bash(git push:*)",
                 "--resume", "abc-123",
                 "--", "more",
             ],
@@ -1407,7 +1403,7 @@ def test_claude_rejects_an_unexpected_effort_value_reaching_assert_safe_directly
 def test_claude_deny_patterns_present_at_read_only_and_write_in_repo(freedom: str) -> None:
     argv = start(ClaudeBackend(), freedom=freedom)
     assert argv[argv.index("--disallowedTools") + 1] == DISALLOWED_TOOLS
-    assert argv[argv.index("--allowedTools") + 1] == ALLOWED_TOOLS[freedom]
+    assert "--allowedTools" not in argv
 
 
 @pytest.mark.parametrize("freedom", ["publish", "unrestricted"])
@@ -1421,7 +1417,7 @@ def test_claude_publish_carries_the_allowlist_and_no_deny_patterns() -> None:
     assert argv[argv.index("--allowedTools") + 1] == ALLOWED_TOOLS["publish"]
     assert "Bash(git commit:*)" in ALLOWED_TOOLS["publish"]
     assert "Bash(git push:*)" in ALLOWED_TOOLS["publish"]
-    assert "Bash(gh pr create:*)" in ALLOWED_TOOLS["publish"]
+    assert "gh " not in ALLOWED_TOOLS["publish"]
     ClaudeBackend().assert_safe(inv(argv), "publish")
 
 

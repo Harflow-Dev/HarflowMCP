@@ -97,7 +97,7 @@ mcp = MCPServer(
         "starts). Every task reports an `enforcement` block describing what was actually "
         "enforced, which is the honest answer rather than what `freedom` implies.\n\n"
         "A `publish` freedom level sits between `write_in_repo` and `unrestricted`: it authorizes "
-        "the agent to attempt to commit, push or open a PR. It is NOT a promise that publishing "
+        "remote publishing attempts, including commits, pushes, PRs and reviews; command approvals stay in harness settings. It is NOT a promise that publishing "
         "succeeds — credentials, remote permissions, branch protection, repo hooks, or an "
         "unauthenticated `gh` can all still stop it, and the agent may not even try — and it is "
         "authorization only: with network=True a lower freedom can mechanically reach a remote "
@@ -317,8 +317,8 @@ async def start_task(
             list_backends.
         freedom: "read_only", "write_in_repo" (default), "publish", or "unrestricted". "publish"
             sits between "write_in_repo" and "unrestricted": it authorizes an attempt to
-            commit/push/open a PR, but that is not a promise the attempt succeeds — credentials,
-            remote permissions, branch protection, hooks and an unauthenticated `gh` are all
+            remote publishing, including commit/push/PR creation/reviews, but that is not a promise the attempt succeeds — credentials,
+            remote permissions, branch protection and hooks are all
             outside polybridge's control. How each level is enforced depends on the backend; the
             returned `enforcement` says what actually applies, via
             `publish_attempts_allowed_by_polybridge` and `network_access` among other fields.
@@ -1031,7 +1031,8 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
             if action == "list_runs":
                 return [_managed_run_summary(owned_run)]
             if action == "detail":
-                if kwargs["view"] == "executions":
+                from .workflow_responses import PUBLIC_VIEWS
+                if kwargs["view"] == "executions" or kwargs["view"] not in PUBLIC_VIEWS:
                     raise ValueError("Use inspect_workflow_node for settled execution details")
                 from .workflow_responses import detail
                 return detail(owned_run, kwargs["view"], kwargs.get("cursor"), kwargs.get("limit", 8000))

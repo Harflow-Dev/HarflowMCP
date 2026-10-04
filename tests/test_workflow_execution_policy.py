@@ -283,3 +283,153 @@ async def test_revised_technical_plan_preserves_original_execution_result(storag
     assert run['technical_plan'] == '# Revised approach'
     assert run['technical_plan_execution_id'] == executions[1]['id']
     assert executions[0]['node_result']['result']['technical_plan'] == '# Original approach'
+
+async def test_serial_fresh_reason_names_permission_mismatch(storage, tmp_path):
+    definition = serial()
+    definition['nodes'][2]['freedom'] = 'read_only'
+    run, registry = await run_flow(storage, tmp_path, definition, guided=True)
+    execution = next(a for a in run['activations'] if a['role'] == 'node' and a['node_id'] == 'second')
+    assert 'freedom differs' in execution['session_reason']
+    assert any('freedom differs' in str(c['valid_continuations']) for c in registry.contexts)
+
+async def test_loop_continue_previous_reuses_target_session(storage, tmp_path):
+    definition = serial()
+    definition['connections'].append({'id': 'loop', 'source': 'second', 'target': 'work', 'condition': 'Repeat once', 'max_retries': 1})
+    definition['nodes'][1]['session_mode'] = 'continue_previous'
+    def route(context, registry):
+        decision = default_decision(context, registry)
+        if context['current_stage']['node_id'] == 'second':
+            looped = any(c['current_stage']['node_id'] == 'second' for c in registry.contexts[:-1])
+            chosen = 'end' if looped else 'loop'
+            decision['next'] = [e for e in decision['next'] if e['continuation_id'] == chosen]
+        return decision
+    run, _ = await run_flow(storage, tmp_path, definition, Registry(storage.root, route), guided=True)
+    assert run['status'] == 'completed'
+    executions = [a for a in run['activations'] if a['role'] == 'node' and a['node_id'] == 'work']
+    assert len(executions) == 2
+    assert executions[1]['tasks'][0]['resume_task_id'] == executions[0]['tasks'][0]['task_id']
+
+async def test_builder_cancel_before_activation_has_no_start_lookup(storage, tmp_path):
+    from polybridge import workflows as w
+    run = storage.create_run({'name': 'builder', 'orchestrator': {'backend': 'codex'}}, 'Generate', tmp_path, kind='builder', freedom='read_only')
+    storage.control(run['workflow_run_id'], 'cancel')
+    registry = Registry(storage.root)
+    await w.WorkflowSupervisor(registry, storage).execute(run['workflow_run_id'])
+    assert storage.get_run(run['workflow_run_id'])['status'] == 'cancelled'
+    assert registry.calls == []
+
+async def test_worker_scratch_path_is_literal_and_internal(storage, tmp_path):
+    from polybridge import scratch
+    run, registry = await run_flow(storage, tmp_path, guided=True)
+    prompt, kwargs = next((p, k) for p, k in registry.calls if 'Assignment:\n' in p)
+    path = str(scratch.directory(registry._log_dir, kwargs['task_id']).resolve())
+    assert 'Task scratch directory (absolute): ' + path in prompt
+    assert path not in kwargs['display_prompt']
+    assert 'publish-review' not in prompt and 'GitHub' not in prompt
+
+async def test_recovered_timeout_uses_unused_fallback_without_repeat(storage, tmp_path):
+    from polybridge import workflows as w
+    definition = graph()
+    definition['nodes'][1].update(timeout_seconds=1, agent={'backend': 'codex', 'fallbacks': [{'backend': 'claude'}]})
+    run = storage.create_run(w.validate_definition(definition), 'Request', tmp_path)
+    def seed(r):
+        token = {'id': 'visit', 'node_id': 'work', 'stack': [], 'assignment_prompt': 'Original assignment', 'execution_session_mode': 'fresh', 'execution_activation_id': 'execution'}
+        r.update(status='running', pending=[token], execution_initialized=True)
+        r['activations'] = [{'id': 'execution', 'role': 'node', 'node_id': 'work', 'status': 'running', 'token': copy.deepcopy(token), 'assignment_prompt': 'Original assignment', 'tasks': [{'task_id': 'old', 'candidate': {'backend': 'codex'}, 'status': 'failed', 'result': {'status': 'failed', 'timed_out': True, 'timeout_seconds': 1, 'summary': 'Node timed out after 1 seconds'}}]}]
+    storage.update_run(run['workflow_run_id'], seed, 'crash_fixture')
+    registry = Registry(storage.root)
+    await w.WorkflowSupervisor(registry, storage).execute(run['workflow_run_id'])
+    restored = storage.get_run(run['workflow_run_id'])
+    assert restored['status'] == 'completed'
+    workers = [k for prompt, k in registry.calls if 'Assignment:\n' in prompt]
+    assert len(workers) == 1 and workers[0]['backend'].name == 'claude'
+    assert len([a for a in restored['activations'] if a['role'] == 'node']) == 1
+
+async def test_continue_previous_retry_uses_own_session_not_predecessor(storage, tmp_path):
+    from polybridge import workflow_delegation as d
+    definition = serial()
+    run, _ = await run_flow(storage, tmp_path, definition, guided=True)
+    node = run['definition']['nodes'][2]
+    execution = next(a for a in run['activations'] if a['role'] == 'node' and a['node_id'] == 'second')
+    execution['node_result'] = {'status': 'blocked', 'result': {'blocker_category': 'missing_context'}, 'evidence': []}
+    token = {'id': 'retry-choice', 'node_id': 'second', 'execution_complete': True, 'execution_activation_id': execution['id'], 'result': execution['node_result'], 'input_result_refs': [run['activations'][1]['id']]}
+    choices = d.continuations(run, node, token, False, root=storage.root)
+    retry = next(c for c in choices if c['kind'] == 'retry_execution')
+    execution = next(a for a in run['activations'] if a['role'] == 'node' and a['node_id'] == 'second')
+    assert retry['available_sessions'][0]['task_id'] == execution['tasks'][-1]['task_id']
+
+async def test_timeout_persists_deadline_before_cancellation(storage, tmp_path):
+    definition = graph()
+    definition['nodes'][1]['timeout_seconds'] = 1
+    class ObservedRegistry(Registry):
+        async def start(self, prompt, repo, **kwargs):
+            task = await super().start(prompt, repo, **kwargs)
+            if 'Assignment:\n' in prompt:
+                task.done.clear()
+                task.result['status'] = 'running'
+            return task
+        async def cancel_cascade(self, task_id, **kwargs):
+            run = storage.list_runs()[0]
+            task_record = next(t for a in run['activations'] for t in a['tasks'] if t['task_id'] == task_id)
+            assert task_record['timeout_deadline'] <= task_record['timeout_requested_at']
+            task = self.tasks[task_id]
+            task.result['status'] = 'cancelled'
+            task.done.set()
+            return {}
+    run, _ = await run_flow(storage, tmp_path, definition, ObservedRegistry(storage.root), guided=True)
+    assert next(a for a in run['activations'] if a['role'] == 'node')['tasks'][0]['result']['timed_out']
+
+async def test_restart_of_timed_live_task_requires_attention(storage, tmp_path, monkeypatch):
+    from polybridge import workflows as w
+    run = storage.create_run(w.validate_definition(graph()), 'Request', tmp_path)
+    def seed(r):
+        r.update(status='running', pending=[{'id': 'visit', 'node_id': 'work', 'stack': []}], execution_initialized=True)
+        r['activations'] = [{'id': 'execution', 'role': 'node', 'node_id': 'work', 'status': 'running', 'token': {'id': 'visit'}, 'tasks': [{'task_id': 'lost-owner', 'candidate': {'backend': 'codex'}, 'status': 'running', 'dispatch_stage': 'spawn_confirmed', 'timeout_deadline': 1}]}]
+    storage.update_run(run['workflow_run_id'], seed, 'crash_fixture')
+    registry = Registry(storage.root)
+    await w.WorkflowSupervisor(registry, storage).execute(run['workflow_run_id'])
+    restored = storage.get_run(run['workflow_run_id'])
+    assert restored['status'] == 'needs_attention'
+    assert 'persisted timeout deadline' in restored['attention_reason']
+    assert registry.calls == []
+
+async def test_timeout_allows_sigkill_grace_before_fallback(storage, tmp_path):
+    import asyncio
+    from polybridge import workflows as w
+    definition = graph()
+    definition['nodes'][1].update(timeout_seconds=1, agent={'backend': 'codex', 'fallbacks': [{'backend': 'claude'}]})
+    class GraceRegistry(Registry):
+        async def start(self, prompt, repo, **kwargs):
+            task = await super().start(prompt, repo, **kwargs)
+            if 'Assignment:\n' in prompt and kwargs['backend'].name == 'codex':
+                task.done.clear()
+                task.result['status'] = 'running'
+            return task
+        async def cancel_cascade(self, task_id, **kwargs):
+            await asyncio.sleep(5.1)  # A process ignoring SIGTERM needs the full SIGKILL grace.
+            self.tasks[task_id].result['status'] = 'cancelled'
+            self.tasks[task_id].done.set()
+            return {}
+    run = storage.create_run(w.validate_definition(definition), 'Request', tmp_path)
+    registry = GraceRegistry(storage.root)
+    await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run['workflow_run_id']), 12)
+    restored = storage.get_run(run['workflow_run_id'])
+    assert restored['status'] == 'completed'
+    execution = next(a for a in restored['activations'] if a['role'] == 'node')
+    assert execution['tasks'][0]['result']['timed_out']
+    assert execution['tasks'][1]['candidate']['backend'] == 'claude'
+
+def test_timeout_intent_restores_only_authoritative_settled_cancellation(storage, tmp_path, monkeypatch):
+    from polybridge import workflows as w, store
+    definition = w.validate_definition(graph())
+    definition['nodes'][1]['timeout_seconds'] = 1
+    run = storage.create_run(definition, 'Request', tmp_path)
+    store.write(storage.root / 'tasks', store.TaskRecord(task_id='cancelled-task', backend='codex', session_id='session', repo_path=str(tmp_path), started_at='2026-10-05T00:00:00Z', freedom='write_in_repo', status='cancelled'))
+    def seed(r):
+        r['pending'] = [{'id': 'visit', 'node_id': 'work', 'stack': [], 'execution_activation_id': 'execution'}]
+        r['activations'] = [{'id': 'execution', 'role': 'node', 'node_id': 'work', 'status': 'running', 'token': {'id': 'visit'}, 'tasks': [{'task_id': 'cancelled-task', 'candidate': {'backend': 'codex'}, 'status': 'uncertain', 'timeout_deadline': 1, 'timeout_requested_at': 2}]}]
+    storage.update_run(run['workflow_run_id'], seed, 'crash_fixture')
+    monkeypatch.setattr(w, 'task_liveness', lambda *a: {'process_alive': False, 'outcome_known': True})
+    restored = storage.reconcile_run(run['workflow_run_id'])
+    assert restored['activations'][0]['tasks'][0]['result']['timed_out']
+    assert restored['pending'][0]['recovered_failed_result']['timed_out']

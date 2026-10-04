@@ -133,12 +133,13 @@ its own installation, authentication, and model access; Polybridge does not prov
 |---|---|
 | `read_only` | Inspect without editing |
 | `write_in_repo` (task default) | Edit the repository |
-| `publish` | Also permit publishing actions such as commits, pushes, and PR creation |
+| `publish` | Authorize remote publishing (commits, pushes, PRs, reviews); harness rules still apply |
 | `unrestricted` | No restrictions added by Polybridge |
 
 Enforcement differs by harness. Codex uses an OS sandbox; other harnesses use their own permission
 systems. Inspect each task's `enforcement` report rather than assuming the level's name guarantees
-isolation. Workflow node permissions also remain subject to the run's access settings.
+isolation. Saved workflow node permissions are authoritative. GitHub operations use each harness's own tools
+and user permission settings; Polybridge adds no GitHub-specific command approvals.
 
 Definitions, drafts, tasks, and execution history live under `~/.polybridge/` and persist across
 server restarts. Workflow and task data stay on your machine; harnesses send prompts to their

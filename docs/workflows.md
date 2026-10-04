@@ -102,42 +102,28 @@ orchestrator decisions complete or reopen checklist items**. The Monitor shows t
 a manual completion toggle.
 
 Access levels are `read_only`, `write_in_repo`, `publish`, and `unrestricted`.
-The launch access is a ceiling: each worker uses the lower of its configured access and that
-ceiling, and fallback agents use the same effective access. The default launch ceiling is
-`write_in_repo`, so a Task configured for `publish` is capped until the caller raises it.
-A read-only launch containing an Implementation step is rejected. Actual access is recorded
-on each dispatch. Network access is a separate optional boolean (`--network true|false`);
-selecting Publish or Unrestricted does not independently request network access. Backend
-capability restrictions still apply.
+Saved node access is authoritative for new runs; callers and assignment prompts cannot raise it.
+Fallback candidates use that node's effective access. Historical runs retain their original launch
+ceilings. Network is a separate optional setting, subject to backend capabilities.
+Publish authorizes remote publishing when the assignment requests it, including PR creation,
+reviews and comments. It does not itself grant credentials or bypass harness approval rules.
+Polybridge owns runtime execution, not GitHub operations. Agents use their own tools under the
+user's harness settings. Polybridge injects no GitHub command approvals or publishing guidance.
 
-Publish mechanisms differ by harness. Claude uses `acceptEdits` plus narrow command rules for
-`git commit`, `git push`, `gh pr create`, and Polybridge's guarded review publisher. It does not
-auto-approve broad `gh pr review` or `gh api` prefixes: those could approve changes, target other
-repositories, or perform destructive operations. Existing user permission rules still apply.
-For a headless COMMENT review with inline comments, write the complete JSON payload into
-`$PB_TASK_SCRATCH/review.json`, then run:
+| Freedom | Claude | Codex | Vibe |
+| --- | --- | --- | --- |
+| Read only | Plan mode; explicit git commit/push denies; no command allowlist added | Read-only OS sandbox; network blocked; no per-command allowlist | Plan profile; no command allowlist added |
+| Write in repo | Accept-edits mode; explicit git commit/push denies; no command allowlist added | Workspace-write sandbox; no per-command deny list; network off by default | Accept-edits profile; harness/user Bash rules control commands |
+| Publish | Accept-edits mode plus git commit/push allow rules only | Workspace-write sandbox; network on by default; no per-command allowlist | Auto-approve profile, equivalent to Unrestricted |
+| Unrestricted | Bypass-permissions mode; no command allowlist or denies added | Full-access mode; no command allowlist; network cannot be blocked by this sandbox | Auto-approve profile |
 
-```bash
-polybridge-ctl publish-review --pr 3 --input "$PB_TASK_SCRATCH/review.json" --json
-```
-
-The helper requires a verified running publish-capable task, binds the repository to its
-`github.com` origin, accepts only `event: COMMENT`, validates comment fields, and sends those
-validated bytes to the fixed review-creation endpoint without a shell pipeline. It cannot approve,
-request changes, merge, close, edit, or delete. Raw API commands retain their harness permissions.
-Claude safety-check refusals are recorded with the command and exact reason. Read-only GitHub
-commands (`gh pr view`, `gh pr list`, `gh pr diff`) and the guarded read helper are approved
-at Read only, Write in repo, and Publish without depending on repository-local settings:
-
-```bash
-polybridge-ctl github-read --resource reviews --pr 3 --json
-polybridge-ctl github-read --resource comments --pr 3 --json
-polybridge-ctl github-read --resource pr --pr 3 --json
-polybridge-ctl github-read --resource user --json
-```
-
-The helper fixes the method to GET, binds PR reads to the repository origin, paginates complete
-results, and accepts no arbitrary endpoint or write flags. Network restrictions still apply.
+These are Polybridge's mechanisms, not an exhaustive list of commands that can run. Inherited
+harness/user settings, credentials, sandbox policy and network determine actual tool access.
+Claude's explicit denies win over inherited allow rules; at Publish, other commands still follow
+user permission settings. Codex does not mechanically forbid commits at Write in repo, and Vibe's
+Publish mode is broader than commit/push. Permission reports describe these differences; the bridge
+does not claim identical confinement. Native harness approval refusals retain their reason,
+while ordinary command stderr is not classified as an approval refusal.
 
 Codex reports additional workspace writable roots inherited from its user configuration and
 selected profile, with the configuration source. These are observed settings, not an OS receipt;
@@ -149,7 +135,9 @@ Polybridge does not claim identical confinement across harnesses.
 
 Write-capable tasks receive a private scratch directory through `PB_TASK_SCRATCH`, outside the
 repository. Claude and Codex receive that exact directory as an additional writable root;
-read-only tasks receive no scratch grant. Artifacts stay with the task record for inspection and
+read-only tasks receive no scratch grant. Each worker's internal preamble also names its exact
+absolute scratch path so it need not discover the environment variable. This context is hidden
+from the assignment display. Artifacts stay with the task record for inspection and
 recovery, and task retention deletes them without following symlinks. The full display assignment
 is stored in task metadata. Large Codex prompts use stdin with immediate EOF rather than argv,
 so complete input results do not exceed operating-system argument limits.
@@ -324,10 +312,12 @@ steps.
 **Continue previous node** (`continue_previous`) tries the session of the immediately preceding
 serial agent execution, including its actual fallback candidate. Reuse requires one unambiguous
 predecessor and compatible harness, model, effort, access, repository, and network settings.
-A historical session from another visit is never substituted. Convergence does not inherit a
-branch session. Incompatible or definitively unavailable predecessor sessions start Fresh; a
+Serial first entry never substitutes a historical predecessor session. On backward-edge loop
+re-entry, Continue previous node uses the target node's own latest compatible settled session.
+Retries use the selected execution's retained session. Convergence does not inherit a branch session. Incompatible or definitively unavailable predecessor sessions start Fresh; a
 fallback candidate also starts Fresh. Retries retain their own execution session. The inspector
-shows the actual mode and reason. Unknown or busy session outcomes require attention.
+shows the actual mode and reason, including a specific backend, freedom, model, effort, or
+network mismatch when reuse is unavailable. The orchestrator sees the same reason. Unknown or busy session outcomes require attention.
 
 The inspector provides keyboard duration entry and a Seconds / Minutes / Hours selector.
 Changing units preserves the limit; typed fractional durations round to the nearest whole second.
@@ -336,7 +326,12 @@ Agent nodes may set `timeout_seconds` to a positive integer; omitted, null, or z
 The deadline applies to each candidate execution. Expiry counts against the current visit's
 attempt allowance. Polybridge cancels the task and its descendants, confirms settlement, and
 records a timeout notice before using an ordered fallback. Unconfirmed cancellation pauses for
-attention instead of starting overlapping work.
+attention instead of starting overlapping work. The cancellation allowance includes SIGTERM
+escalation and drain time. A recovered positively settled timeout still permits an unused fallback
+in the same activation. Deadlines are persisted on each candidate reservation. Ordinary MCP
+server restart does not stop the detached workflow supervisor; if that supervisor itself is lost,
+surviving tasks require reconciliation and are not silently adopted or redispatched. A persisted
+deadline provides diagnostics, not a watchdog that survives loss of the supervisor.
 
 Planning nodes publish the latest complete technical-plan revision. Earlier versions remain in
 immutable execution results for orchestrator inspection; a planning adjudicator that revises the
@@ -762,3 +757,15 @@ polybridge-ctl workflow-abandon-dispatch RUN_ID EXECUTION_ID TASK_ID \
 The command refuses agent callers, live or uncertain supervisors, recorded tasks and unrelated
 reservations. It persists the confirmation and reason without scheduling work or granting
 attempts. Resume or recovery remains a separate explicit action.
+
+
+### Monitor polling and complete detail retrieval
+
+Monitor polls `workflow-status RUN_ID --monitor-view --json`, a bounded metadata response with
+content digests. It caches immutable execution results and reads only changed views using
+`workflow-detail RUN_ID --view VIEW --cursor CURSOR --json`. Views include the definition,
+checklist, technical plan, decisions, builder draft, and an execution index with per-execution
+digests. Execution views use `execution:EXECUTION_ID`. Stable JSON chunk cursors bind to content,
+run, and view; changed content requires restarting rather than combining revisions.
+Ordinary `workflow-status` retains its full response contract. Managed orchestrators still use
+settled-node inspection; Monitor-only execution views cannot bypass that access boundary.
