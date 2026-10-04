@@ -911,10 +911,10 @@ async def _managed_workflow_reader() -> tuple[dict[str, Any], dict[str, Any]] | 
     if caller is None:
         return None
     association = workflow_hooks.owner(_reg().log_dir, caller.record.task_id, strict=True)
-    if association is None or association.get("role") == "builder":
+    if association is None:
         return None
     run = workflows.WorkflowStore(root=_reg().log_dir.parent).get_run(association["workflow_run_id"])
-    if run.get("execution_contract") != "delegation":
+    if association.get("role") != "builder" and run.get("execution_contract") != "delegation":
         return None
     return association, run
 
@@ -938,23 +938,8 @@ async def _guard_task_read(task_id: str) -> None:
 
 
 def _guard_saved_workflow_authority(caller: Any, definition: dict[str, Any]) -> None:
-    """An ordinary agent may save only capabilities inside its recorded envelope."""
-    from . import workflows
-    from .backends.base import check_nested_enforcement
-    record = caller.record
-    if record.freedom not in FREEDOMS:
-        raise ValueError("Saving a workflow requires known caller freedom")
-    configs = [(definition["orchestrator"], "read_only", None)]
-    configs.extend((node["agent"], workflows.effective_freedom(node, "unrestricted", permission_policy="saved_node"), node.get("network")) for node in definition["nodes"] if node["type"] == "agent")
-    for config, freedom, network in configs:
-        if FREEDOMS.index(freedom) > FREEDOMS.index(record.freedom):
-            raise ValueError("Saved workflow access cannot exceed the caller's freedom")
-        if network is True and record.network is False:
-            raise ValueError("Saved workflow network cannot exceed the caller's network restriction")
-        for candidate in [config, *config.get("fallbacks", [])]:
-            backend_ = backends.get(candidate["backend"])
-            enforcement = backend_.enforcement(freedom, network)
-            check_nested_enforcement(record.enforcement or {}, enforcement, parent_backend=record.backend, child_backend=backend_.name, parent_repo=record.repo_path, child_repo=record.repo_path)
+    from .workflow_inspection import guard_saved_workflow_authority
+    guard_saved_workflow_authority(caller, definition)
 
 
 async def _workflow_call(action: str, **kwargs: Any) -> Any:
@@ -1018,6 +1003,19 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
         managed = await _managed_workflow_reader()
         if managed is not None:
             association, owned_run = managed
+            if association["role"] == "builder":
+                if action in {"status", "inspect", "detail"} and kwargs["run_id"] != owned_run["workflow_run_id"]:
+                    raise ValueError("Builders may only inspect their own workflow run")
+                if action == "status":
+                    from .workflow_responses import compact
+                    return compact(owned_run)
+                if action == "detail" and kwargs["view"] in {"builder_draft", "generated_definition"}:
+                    from .workflow_responses import detail
+                    return detail(owned_run, kwargs["view"], kwargs.get("cursor"), kwargs.get("limit", 8000))
+                if action == "list_runs":
+                    from .workflow_responses import compact
+                    return [compact(owned_run)]
+                raise ValueError("Builders may only inspect their own draft and builder run")
             if association["role"] != "orchestrator":
                 raise ValueError("Worker nodes cannot inspect workflow context")
             if action in {"status", "inspect", "detail"} and kwargs["run_id"] != owned_run["workflow_run_id"]:

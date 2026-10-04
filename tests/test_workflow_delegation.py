@@ -1396,3 +1396,81 @@ async def test_orchestrator_visible_prompt_uses_request_once_then_checkpoint(sto
     assert all(c['original_request'] == 'ORIGINAL PRIVATE REQUEST' for c in registry.contexts)
     turns = [t for a in run['activations'] if a['role'] == 'orchestrator' for t in a['tasks']]
     assert [t['assignment_prompt'] for t in turns] == [k['display_prompt'] for p, k in calls]
+
+
+async def test_optional_settled_timeout_with_prior_denial_bypasses(storage, tmp_path):
+    denial = {"command": "git -C repo rev-parse HEAD", "reason": "Not allowed"}
+    registry = Registry(storage.root, outputs={"left": {"status": "failed", "summary": "Node timed out", "timed_out": True, "timeout_seconds": 600, "permission_denials": [denial]}})
+    run, _ = await run_flow(storage, tmp_path, parallel(True), registry, guided=True)
+    assert run["status"] == "completed"
+    activation = next(a for a in run["activations"] if a["role"] == "node" and a["node_id"] == "left")
+    assert activation["optional_failure"]
+    assert activation["node_result"]["result"]["failure_kind"] == "timeout"
+    assert activation["node_result"]["evidence"][0]["permission_denials"] == [denial]
+    assert activation["node_result"]["evidence"][0]["timed_out"] is True
+    assert not run["joins"]
+
+
+async def test_resume_optional_timeout_reconciles_old_unmarked_failure(storage, tmp_path, monkeypatch):
+    original = d.mark_optional_failure
+    monkeypatch.setattr(d, "mark_optional_failure", lambda *args: None)
+    def policy(context, registry):
+        if context["current_stage"]["node_id"] == "left":
+            return {"decision_id": context["decision_id"], "action": "needs_input", "reason": "Old optional timeout was blocked", "question": "Continue?"}
+        return default_decision(context, registry)
+    registry = Registry(storage.root, policy, outputs={"left": {"status": "failed", "summary": "Timeout", "timed_out": True, "permission_denials": ["Denied incidental read"]}})
+    run, _ = await run_flow(storage, tmp_path, parallel(True), registry, guided=True)
+    assert run["status"] == "needs_input"
+    monkeypatch.setattr(d, "mark_optional_failure", original)
+    registry.policy = default_decision
+    storage.control(run["workflow_run_id"], "resume", instructions="Continue after timeout", decision_id=run["input_decision_id"])
+    await w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"])
+    run = storage.get_run(run["workflow_run_id"])
+    assert run["status"] == "completed"
+    assert next(a for a in run["activations"] if a["role"] == "node" and a["node_id"] == "left")["optional_failure"]
+
+
+async def test_optional_timeout_explicit_parallel_releases_join(storage, tmp_path):
+    from test_workflow_explicit_parallel import explicit
+    from test_workflow_traversal import policy
+    g = explicit()
+    for n in g["nodes"]:
+        if n["type"] == "agent":
+            n.update(role="task", title=n["id"], agent={"backend": "codex"})
+    g["orchestrator"] = {"backend": "codex"}
+    next(n for n in g["nodes"] if n["id"] == "right").update(optional=True, title="right")
+    registry = Registry(storage.root, policy, {"right": {"status": "failed", "summary": "Timeout", "timed_out": True, "permission_denials": ["Denied read"]}})
+    run, _ = await run_flow(storage, tmp_path, g, registry, guided=True)
+    assert run["status"] == "completed"
+    assert len(run["released_parallel_groups"]) == 1
+    assert not run["joins"]
+    assert "optional_branch_bypassed" in (storage.root / "workflow-runs" / (run["workflow_run_id"] + ".jsonl")).read_text()
+
+
+def test_every_issued_barrier_arrival_validates():
+    from test_workflow_explicit_parallel import explicit
+    g = w.validate_definition(explicit())
+    right = next(n for n in g["nodes"] if n["id"] == "right")
+    right["optional"] = True
+    token = {"id": "branch", "decision_id": "decision", "execution_complete": True, "execution_activation_id": "result", "result": {"status": "failed"}, "stack": ["group"]}
+    activation = {"id": "result", "role": "node", "node_id": "right", "status": "failed", "tasks": [], "node_result": {"status": "failed", "result": {"failure_kind": "permission"}}, "optional_failure": False}
+    run = {"definition": g, "activations": [activation], "joins": {"group": {"join_id": "merge"}}, "tasks": [], "runner_policy": "guided", "transitions": 0}
+    assert not any(c["kind"] == "barrier_arrival" for c in d.continuations(run, right, token, False))
+    activation["optional_failure"] = True
+    choices = d.continuations(run, right, token, False)
+    assert choices
+    for choice in choices:
+        d.validate_decision(run, right, token, {"decision_id": "decision", "action": "continue", "reason": "Settled optional branch", "next": [{"continuation_id": choice["continuation_id"]}]}, False)
+
+
+@pytest.mark.parametrize("mutation", ["unknown", "permission", "live", "cancelled"])
+def test_settled_timeout_never_overrides_unsafe_terminal_cause(mutation):
+    activation = {"status": "failed", "node_result": {"status": "failed", "result": {"failure_kind": "timeout"}}, "tasks": [{"status": "failed", "result": {"status": "failed", "timed_out": True, "permission_denials": ["Denied"]}}]}
+    if mutation == "unknown":
+        activation["tasks"][0]["result"]["outcome_unknown"] = True
+    elif mutation == "permission":
+        activation["node_result"]["result"]["failure_kind"] = "permission"
+    else:
+        activation["tasks"][0]["status"] = mutation if mutation == "cancelled" else "running"
+    assert not d.settled_timeout(activation)
+    assert not d.retry_eligible(activation)

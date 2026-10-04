@@ -715,6 +715,11 @@ belong to the group. An optional step cannot bypass required steps before that P
 Sequential optional nodes and forks containing only optional branches are rejected. Selecting an
 optional path alone does not grant failure tolerance. Unknown outcomes, cancellation, security or
 enforcement refusals, repository/session problems, and workflow limits still require attention.
+A positively settled timeout may bypass an optional branch even if earlier tool calls were denied;
+the timeout and all permission denials remain in its failure evidence. A failure or block caused by
+a permission refusal remains ineligible. Parallel-end arrivals are offered only when their required
+failure evidence is resolved; otherwise the orchestrator receives the blocker and available recovery
+choices. Reloading and resuming an older paused run rechecks this eligibility.
 Unsupported model, turn, or reasoning settings count as unavailable candidates after fallbacks.
 
 ### Explicit retries and task navigation
@@ -761,11 +766,21 @@ attempts. Resume or recovery remains a separate explicit action.
 
 ### Monitor polling and complete detail retrieval
 
-Monitor polls `workflow-status RUN_ID --monitor-view --json`, a bounded metadata response with
-content digests. It caches immutable execution results and reads only changed views using
-`workflow-detail RUN_ID --view VIEW --cursor CURSOR --json`. Views include the definition,
-checklist, technical plan, decisions, builder draft, and an execution index with per-execution
-digests. Execution views use `execution:EXECUTION_ID`. Stable JSON chunk cursors bind to content,
-run, and view; changed content requires restarting rather than combining revisions.
-Ordinary `workflow-status` retains its full response contract. Managed orchestrators still use
-settled-node inspection; Monitor-only execution views cannot bypass that access boundary.
+Monitor polls `workflow-status RUN_ID --monitor-view --json` for bounded metadata and content
+digests. When content or state changes, it captures one coherent transport snapshot using
+`workflow-status RUN_ID --monitor-view --snapshot --json`. Subsequent `--cursor CURSOR` calls
+read the same immutable snapshot in bounded 128 KiB JSON chunks, so a running workflow cannot
+invalidate an in-progress load. Completed paging deletes its temporary snapshot; abandoned
+snapshots expire after five minutes. These files do not update saved workflows or run records.
+
+The window coordinator retains the last loaded content for up to eight runs. Reopening a run
+shows that content immediately while refreshing; a failed refresh preserves it. Unchanged polls
+transfer metadata only. Changed snapshots currently transfer the complete run, rather than
+individually fetching old execution results. This trades some bytes for coherent loading and
+far fewer CLI subprocesses.
+
+`workflow-detail RUN_ID --view VIEW --cursor CURSOR --json` remains available for lossless
+individual views, including definitions, checklists, plans and execution history. Its content-bound
+cursors still require restarting when their view changes. Ordinary `workflow-status` retains its
+full response contract. Snapshot transport is a local Monitor-only CLI operation: managed agents
+cannot use it to bypass settled-node inspection or access another run.

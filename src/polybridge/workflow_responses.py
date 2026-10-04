@@ -154,3 +154,10 @@ def detail(run: dict[str, Any], view: str, cursor: str | None = None, limit: int
     end = offset + len(chunk)
     next_cursor = base64.urlsafe_b64encode(json.dumps({"identity": identity, "offset": end}).encode()).decode() if end < len(serialized) else None
     return {"response_version": 1, "workflow_run_id": run["workflow_run_id"], "view": view, "encoding": "json", "content_sha256": digest, "offset": offset, "total_characters": len(serialized), "chunk": chunk, "next_cursor": next_cursor}
+
+
+def monitor_snapshot(run, run_id, cache, cursor=None):
+    """Local CLI-only lossless paging of a stable Monitor transport snapshot."""
+    from .workflow_monitor_snapshot import snapshot
+    captured = run | {"monitor_digests": monitor(run)["monitor_digests"]} if run is not None else None
+    return snapshot(captured, run_id, cache, cursor)

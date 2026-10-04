@@ -156,6 +156,8 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
             wp.add_argument("workflow_run_id")
         if action == "status":
             wp.add_argument("--monitor-view", action="store_true")
+            wp.add_argument("--snapshot", action="store_true")
+            wp.add_argument("--cursor")
         if action == "detail":
             wp.add_argument("--view", required=True)
             wp.add_argument("--cursor")
@@ -642,7 +644,12 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
         if action == "detail":
             return await server.get_workflow_run_detail(args.workflow_run_id, args.view, args.cursor)
         if action == "status" and args.monitor_view:
-            from .workflow_responses import monitor
+            from .workflow_responses import monitor, monitor_snapshot
+            if args.snapshot:
+                if await server._verified_workflow_caller() is not None:
+                    raise ValueError("Monitor snapshots are only available to the local Monitor")
+                run = None if args.cursor else await server._workflow_call("status", run_id=args.workflow_run_id)
+                return monitor_snapshot(run, args.workflow_run_id, default_log_dir().parent / "monitor_snapshots", args.cursor)
             return monitor(await server._workflow_call("status", run_id=args.workflow_run_id))
         if action == "wait":
             return await server._wait_workflow_full(args.workflow_run_id, args.timeout_seconds)

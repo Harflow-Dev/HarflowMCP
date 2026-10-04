@@ -138,10 +138,10 @@ def managed_reader(log_dir: Any) -> tuple[dict[str, Any], dict[str, Any]] | None
             return None
     storage = WorkflowStore(root=log_dir.parent)
     association = storage.task_owner(caller.record.task_id, strict=True)
-    if association is None or association.get("role") == "builder":
+    if association is None:
         return None
     run = storage.get_run(association["workflow_run_id"])
-    return (association, run) if run.get("execution_contract") == "delegation" else None
+    return (association, run) if association.get("role") == "builder" or run.get("execution_contract") == "delegation" else None
 
 
 def guard_task_read(task_id: str, managed: tuple[dict[str, Any], dict[str, Any]] | None) -> None:
@@ -151,7 +151,10 @@ def guard_task_read(task_id: str, managed: tuple[dict[str, Any], dict[str, Any]]
     activation = next((a for a in run.get("activations", []) if any(t.get("task_id") == task_id for t in a.get("tasks", []))), None)
     if activation is None:
         raise ValueError("Managed agents may only read tasks from their own workflow run")
-    if association["role"] == "node":
+    if association["role"] == "builder":
+        if activation.get("role") != "builder":
+            raise ValueError("Builders may only inspect their own builder tasks")
+    elif association["role"] == "node":
         if activation["id"] != association["activation_id"]:
             raise ValueError("Worker nodes may only inspect their own execution")
     else:
@@ -213,3 +216,24 @@ def inspect_request(run: dict[str, Any], root: Any, request: dict[str, Any]) -> 
         raise ValueError("Node execution has no dispatched task activity")
     page = read_page(events_path(root / "tasks", task["task_id"]), limit=limit, before_seq=before, after_seq=after)
     return {"workflow_run_id": run["workflow_run_id"], "execution_id": execution_id, "node_id": activation["node_id"], "task_id": task["task_id"], "events": page.events, "has_more": page.has_more, "next_before_seq": page.next_before_seq, "next_after_seq": page.next_after_seq, "skipped_oversized": page.skipped_oversized}
+
+
+def guard_saved_workflow_authority(caller: Any, definition: dict[str, Any]) -> None:
+    """An ordinary agent may save only capabilities inside its recorded envelope."""
+    from . import workflows, backends
+    from .backends.base import FREEDOMS
+    from .backends.base import check_nested_enforcement
+    record = caller.record
+    if record.freedom not in FREEDOMS:
+        raise ValueError("Saving a workflow requires known caller freedom")
+    configs = [(definition["orchestrator"], "read_only", None)]
+    configs.extend((node["agent"], workflows.effective_freedom(node, "unrestricted", permission_policy="saved_node"), node.get("network")) for node in definition["nodes"] if node["type"] == "agent")
+    for config, freedom, network in configs:
+        if FREEDOMS.index(freedom) > FREEDOMS.index(record.freedom):
+            raise ValueError("Saved workflow access cannot exceed the caller's freedom")
+        if network is True and record.network is False:
+            raise ValueError("Saved workflow network cannot exceed the caller's network restriction")
+        for candidate in [config, *config.get("fallbacks", [])]:
+            backend_ = backends.get(candidate["backend"])
+            enforcement = backend_.enforcement(freedom, network)
+            check_nested_enforcement(record.enforcement or {}, enforcement, parent_backend=record.backend, child_backend=backend_.name, parent_repo=record.repo_path, child_repo=record.repo_path)

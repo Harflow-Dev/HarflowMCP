@@ -218,6 +218,18 @@ def unresolved_required(run: dict[str, Any], token: dict[str, Any]) -> list[dict
     return [a for a in run["activations"] if a["role"] == "node" and a["id"] in refs and a.get("node_result", {}).get("status") in {"failed", "blocked"} and not a.get("optional_failure") and not a.get("resolved_by_execution_id")]
 
 
+def settled_timeout(activation: dict[str, Any]) -> bool:
+    """A settled timeout is the terminal cause; earlier denials remain evidence."""
+    tasks = activation.get("tasks", [])
+    result = activation.get("node_result", {})
+    if not settled(activation) or result.get("status") != "failed" or result.get("result", {}).get("failure_kind") != "timeout" or not tasks:
+        return False
+    terminal = tasks[-1].get("result", {})
+    if terminal.get("timed_out") is not True or terminal.get("status") != "failed":
+        return False
+    return not any(t.get("result", {}).get("outcome_unknown") or t.get("status") in {"cancelled", "running", "cancelling", "uncertain", "reserved"} for t in tasks)
+
+
 def retry_eligible(activation: dict[str, Any], *, guided: bool = False, node: dict[str, Any] | None = None, run: dict[str, Any] | None = None) -> bool:
     """Only positively settled failures can be explicitly reassigned."""
     result = activation.get("node_result", {})
@@ -233,6 +245,8 @@ def retry_eligible(activation: dict[str, Any], *, guided: bool = False, node: di
         return True  # Reassignment includes caller context but never changes saved permissions.
     if result.get("result", {}).get("failure_kind") in {"authority", "permission", "cancelled", "uncertain"}:
         return False
+    if settled_timeout(activation):
+        return True
     if any(t.get("result", {}).get("permission_denials") for t in activation.get("tasks", [])):
         authorization = (run or {}).get("protocol_retry_authorizations", {}).get(activation.get("id"), {})
         if guided and result.get("result", {}).get("failure_kind") == "protocol" and authorization.get("node_id") == activation.get("node_id") and isinstance(authorization.get("reason"), str) and authorization["reason"].strip():
@@ -327,6 +341,8 @@ def continuations(run: dict[str, Any], node: dict[str, Any], token: dict[str, An
             if edge["source"] != node["id"]:
                 continue
             target = nodes[edge["target"]]
+            if target["type"] == "parallel_end" and unresolved_required(run, token):
+                continue  # Do not advertise a join arrival which validation must reject.
             barrier = any(run["joins"].get(g, {}).get("join_id") == target["id"] for g in token.get("stack", []))
             failed = token.get("result", {}).get("status") in {"failed", "blocked"} and not node.get("optional", False)
             # Required failures cannot silently satisfy unconditional success paths.
@@ -391,7 +407,11 @@ def decision_context(run: dict[str, Any], node: dict[str, Any], token: dict[str,
             description["result_contract"] = {"status": "succeeded|failed|blocked", "result": "role-specific object", "evidence": "array"}
         graph.append(description)
     refs = list(dict.fromkeys(([token["execution_activation_id"]] if token.get("execution_activation_id") and token.get("execution_complete") else token.get("input_result_refs", [])) + token.get("recovered_execution_refs", [])))
-    return {"workflow_run_id": run["workflow_run_id"], "decision_id": token["decision_id"], "routing_mode": run["definition"].get("routing_mode", "legacy"), "routing_rules": "Ordinary nodes choose exactly one continuation; Parallel start selects ALL forward branches. Parallel end waits for every branch; no harness runs for structural nodes." if run["definition"].get("routing_mode") == "explicit" else "Select legal continuations", "original_request": run["prompt"], "workflow_purpose": next(n.get("prompt", "") for n in run["definition"]["nodes"] if n["type"] == "start"), "current_stage": {"node_id": node["id"], "phase": "assignment" if execute else "routing", "token_id": token["id"]}, "workflow_graph": {"nodes": graph, "connections": run["definition"]["connections"]}, "input_results": result_inputs(run, refs), "settled_executions": [{"execution_id": a["id"], "result_ref": a["id"], "node_id": a["node_id"], "status": a["node_result"]["status"], "attempts": [{"task_id": t["task_id"], "status": t["status"], "candidate": t.get("candidate", {}), "harness_metadata": t.get("harness_metadata", {})} for t in a["tasks"]]} for a in run["activations"] if a["role"] == "node" and settled(a) and a.get("node_result")], "technical_plan": run.get("technical_plan", "")[:16000], "technical_plan_truncated": len(run.get("technical_plan", "")) > 16000, "technical_plan_execution_id": run.get("technical_plan_execution_id"), "checklist": run.get("tasks", []), "checklist_disposition": run.get("checklist_disposition"), "recent_decisions": run["decisions"][-10:], "valid_continuations": continuations(run, node, token, execute, root=root), "recovery_instructions": run.get("instructions", ""), "transitions_remaining": run["definition"]["max_transitions"] + run.get("transition_grant", 0) - run["transitions"], "inspection_results": token.get("inspection_results", [])[-1:], "inspection_history": [{"request": item["request"], "summary": item.get("summary", ""), "metadata": {k: item["response"][k] for k in ("execution_id", "task_id", "content_sha256", "offset", "next_cursor", "has_more") if k in item["response"]}} for item in token.get("inspection_results", [])[-20:]], "inspections_remaining": run["definition"].get("max_inspections", 20) - token.get("inspection_count", 0), "inspection": "Return final JSON action inspect with requests [{execution_id:<result_ref>,view:result|activity,task_id:optional,cursor:optional,limit:optional,before_seq:optional,after_seq:optional}]. Polybridge retrieves settled results and returns inspection_results in the next decision. Request exactly one page per inspect action; preserve relevant findings in reason for subsequent Fresh decisions. No MCP inspection is required. Result response chunk is JSON text; concatenate pages until next_cursor is null then decode {node_result,raw_output}. All settled executions in this run are inspectable."}
+    nodes = {n["id"]: n for n in run["definition"]["nodes"]}
+    failures = unresolved_required(run, token)
+    has_barrier_exit = any(e["source"] == node["id"] and nodes[e["target"]]["type"] == "parallel_end" for e in run["definition"]["connections"])
+    blockers = [{"reason": "Required failed branch needs recovery before Parallel end; retry execution, choose a recovery path, fail, or request input", "execution_ids": [a["id"] for a in failures]}] if not execute and failures and has_barrier_exit else []
+    return {"workflow_run_id": run["workflow_run_id"], "decision_id": token["decision_id"], "routing_mode": run["definition"].get("routing_mode", "legacy"), "routing_rules": "Ordinary nodes choose exactly one continuation; Parallel start selects ALL forward branches. Parallel end waits for every branch; no harness runs for structural nodes." if run["definition"].get("routing_mode") == "explicit" else "Select legal continuations", "original_request": run["prompt"], "workflow_purpose": next(n.get("prompt", "") for n in run["definition"]["nodes"] if n["type"] == "start"), "current_stage": {"node_id": node["id"], "phase": "assignment" if execute else "routing", "token_id": token["id"]}, "workflow_graph": {"nodes": graph, "connections": run["definition"]["connections"]}, "input_results": result_inputs(run, refs), "settled_executions": [{"execution_id": a["id"], "result_ref": a["id"], "node_id": a["node_id"], "status": a["node_result"]["status"], "attempts": [{"task_id": t["task_id"], "status": t["status"], "candidate": t.get("candidate", {}), "harness_metadata": t.get("harness_metadata", {})} for t in a["tasks"]]} for a in run["activations"] if a["role"] == "node" and settled(a) and a.get("node_result")], "technical_plan": run.get("technical_plan", "")[:16000], "technical_plan_truncated": len(run.get("technical_plan", "")) > 16000, "technical_plan_execution_id": run.get("technical_plan_execution_id"), "checklist": run.get("tasks", []), "checklist_disposition": run.get("checklist_disposition"), "recent_decisions": run["decisions"][-10:], "valid_continuations": continuations(run, node, token, execute, root=root), "continuation_blockers": blockers, "recovery_instructions": run.get("instructions", ""), "transitions_remaining": run["definition"]["max_transitions"] + run.get("transition_grant", 0) - run["transitions"], "inspection_results": token.get("inspection_results", [])[-1:], "inspection_history": [{"request": item["request"], "summary": item.get("summary", ""), "metadata": {k: item["response"][k] for k in ("execution_id", "task_id", "content_sha256", "offset", "next_cursor", "has_more") if k in item["response"]}} for item in token.get("inspection_results", [])[-20:]], "inspections_remaining": run["definition"].get("max_inspections", 20) - token.get("inspection_count", 0), "inspection": "Return final JSON action inspect with requests [{execution_id:<result_ref>,view:result|activity,task_id:optional,cursor:optional,limit:optional,before_seq:optional,after_seq:optional}]. Polybridge retrieves settled results and returns inspection_results in the next decision. Request exactly one page per inspect action; preserve relevant findings in reason for subsequent Fresh decisions. No MCP inspection is required. Result response chunk is JSON text; concatenate pages until next_cursor is null then decode {node_result,raw_output}. All settled executions in this run are inspectable."}
 
 
 def completion_evidence(run: dict[str, Any], node: dict[str, Any], token: dict[str, Any], task_id: str) -> dict[str, Any] | None:
@@ -456,9 +476,7 @@ def validate_decision(run: dict[str, Any], node: dict[str, Any], token: dict[str
     for entry in entries:
         c = choices[entry["continuation_id"]]
         target = next(n for n in run["definition"]["nodes"] if n["id"] == c["node_id"])
-        relevant_refs = set(token.get("input_result_refs", []) + token.get("failed_execution_refs", []) + ([token["execution_activation_id"]] if token.get("execution_activation_id") else []))
-        unresolved = any(a["id"] in relevant_refs and a.get("node_result", {}).get("status") != "succeeded" and not a.get("optional_failure") and not a.get("resolved_by_execution_id") for a in run["activations"])
-        if target["type"] == "parallel_end" and unresolved:
+        if target["type"] == "parallel_end" and unresolved_required(run, token):
             raise w.WorkflowError("Required failed branch needs recovery before Parallel end; retry execution, choose a recovery path, fail, or request input")
         allowed = {"continuation_id", "prompt", "assigned_task_ids", "additional_result_refs", "session_mode", "resume_task_id"} if c["requires_prompt"] else {"continuation_id"}
         if "branch_continuations" in c:
@@ -793,7 +811,8 @@ def mark_optional_failure(run: dict[str, Any], node: dict[str, Any], activation:
     protocol = run.get("runner_policy") == "guided" and kind == "protocol" and value.get("status") == "failed" and settled(activation) and not any(t.get("result", {}).get("outcome_unknown") or t.get("status") in {"cancelled", "running", "uncertain", "reserved"} for t in activation.get("tasks", []))
     if protocol and protocol_repair_eligible(run, node, activation):
         return  # First correct the contract with the same harness while attempts remain.
-    eligible = not unsafe_kind and (value.get("status") == "failed" or safe_blocked) and not outcome.get("outcome_unknown") and (protocol or not outcome.get("permission_denials")) and (not outcome.get("execution_failure") or outcome.get("optional_failure_eligible", False))
+    timeout = settled_timeout(activation) and outcome.get("timed_out") is True and outcome.get("status") == "failed"
+    eligible = not unsafe_kind and (value.get("status") == "failed" or safe_blocked) and not outcome.get("outcome_unknown") and (protocol or timeout or not outcome.get("permission_denials")) and (not outcome.get("execution_failure") or outcome.get("optional_failure_eligible", False))
     if eligible:
         join = _w().optional_failure_join({**run, "status": "running"}, node, token)
         if join:

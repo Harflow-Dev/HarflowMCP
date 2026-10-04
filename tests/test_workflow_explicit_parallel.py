@@ -165,11 +165,13 @@ async def test_conditioned_failed_arrival_cannot_be_laundered_by_successor(stora
     next(e for e in graph["connections"] if e["source"] == "merge")["target"] = "adjudicate"
     graph["connections"].append({"id": "adjudicate-end", "source": "adjudicate", "target": "end"})
     output = {"status": "failed", "result": {"summary": "Review execution failed"}, "evidence": []}
-    run, _ = await run_flow(storage, tmp_path, graph, Registry(storage.root, policy, {"right": output}))
+    run, registry = await run_flow(storage, tmp_path, graph, Registry(storage.root, policy, {"right": output}))
     assert run["status"] == "failed"
     assert not any(a["node_id"] == "adjudicate" and a["role"] == "node" for a in run["activations"])
     assert run["joins"]
-    assert any("needs recovery before Parallel end" in c["error"] for c in run["decision_errors"])
+    blocked = next(c for c in registry.contexts if c["current_stage"]["node_id"] == "right")
+    assert not any(c["kind"] == "barrier_arrival" for c in blocked["valid_continuations"])
+    assert "needs recovery before Parallel end" in blocked["continuation_blockers"][0]["reason"]
 
 
 @pytest.mark.asyncio

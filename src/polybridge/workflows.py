@@ -1417,7 +1417,7 @@ class WorkflowSupervisor:
             if source:
                 previous = {"task_id": source["task_id"], "candidate": key + ":" + _candidate_key(source["candidate"]), "session_id": source.get("result", {}).get("session_id")}
         persistent_orchestrator = role == "orchestrator" and run.get("runner_policy") == "guided"
-        if persistent_orchestrator and previous.get("task_id"):
+        if (persistent_orchestrator or role == "builder" and run.get("builder_followup")) and previous.get("task_id"):
             parent = self.registry.get(previous["task_id"])
             record = task_store.read(self.registry._log_dir, previous["task_id"])
             retained = parent.snapshot() if parent is not None else None
@@ -2120,6 +2120,10 @@ class WorkflowSupervisor:
                     d.pop("updated_at", None)
                     self.update(lambda r: (r.update(status="completed", generated_definition=d, builder_draft=d, draft_revision=r.get("draft_revision", 0) + 1), next(x for x in r["activations"] if x["id"] == a["id"]).update(status="completed")), "builder_edit_proposed")
                 else:
+                    if current.get("caller_record"):
+                        from types import SimpleNamespace
+                        from .workflow_inspection import guard_saved_workflow_authority
+                        guard_saved_workflow_authority(SimpleNamespace(record=task_store.TaskRecord(**current["caller_record"])), d)
                     saved = self.store.save(d["name"], d)
                     self.update(lambda r: (r.update(status="completed", generated_definition=saved, builder_draft=saved, draft_revision=r.get("draft_revision", 0) + 1), next(x for x in r["activations"] if x["id"] == a["id"]).update(status="completed")), "builder_saved")
             except (ValueError, FileExistsError) as exc:
