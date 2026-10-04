@@ -1090,16 +1090,6 @@ class TaskRegistry:
         # below guards. One computation serves the notice, the Task, and the record, so all
         # three describe the same (freedom, network) pair.
         enforcement = backend.enforcement(freedom, network)  # type: ignore[arg-type]
-        task_scratch = None
-        if freedom != "read_only":
-            from . import scratch
-            from dataclasses import replace
-            task_scratch = scratch.create(self._log_dir, task_id)
-            writable = getattr(backend, "with_writable_directory", None)
-            if writable is not None:
-                invocation = writable(invocation, task_scratch, freedom)
-                backend.assert_safe(invocation, freedom, network)
-                enforcement = replace(enforcement, writable_roots=(*enforcement.writable_roots, str(task_scratch)))
 
         # Before the spawn, deliberately. Between `create_subprocess_exec` and the registration
         # below there must be no await at all: one there could be cancelled — a client
@@ -1147,6 +1137,27 @@ class TaskRegistry:
             )
         except Exception:
             base_commit, start_dirty = None, None
+
+        # Allocate only after cancellable probes finish. No await occurs between this setup
+        # and the spawn attempt, so cancellation during git bookkeeping cannot orphan scratch.
+        task_scratch = None
+        try:
+            if freedom != "read_only":
+                from . import scratch
+                from dataclasses import replace
+                task_scratch = scratch.create(self._log_dir, task_id)
+                writable = getattr(backend, "with_writable_directory", None)
+                if writable is not None:
+                    invocation = writable(invocation, task_scratch, freedom)
+                    backend.assert_safe(invocation, freedom, network)
+                    enforcement = replace(enforcement, writable_roots=(*enforcement.writable_roots, str(task_scratch)))
+        except BaseException:
+            if task_scratch is not None:
+                try:
+                    scratch.remove(self._log_dir, task_id)
+                except OSError:
+                    log.exception("task %s: could not clean scratch before spawn", task_id)
+            raise
 
         # So a nested polybridge server started by this agent (a codex/vibe MCP tool call, a
         # claude/opencode subprocess) can find its way back to this task via
