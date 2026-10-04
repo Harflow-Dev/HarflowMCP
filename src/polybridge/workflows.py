@@ -696,24 +696,25 @@ class WorkflowStore:
             raise WorkflowError("Unknown workflow action")
         if not isinstance(additional_attempts, int) or isinstance(additional_attempts, bool) or additional_attempts < 0:
             raise WorkflowError("additional_attempts must be a nonnegative integer")
-        if action in {"resume", "recover"}:
+        if action in {"resume", "recover", "cancel"}:
             observed = self.get_run(run_id)
             if observed.get("supervisor_identity"):
                 from . import identity
                 if identity.identity_check(observed["supervisor_identity"]) == "undecidable":
-                    raise WorkflowError("Supervisor identity is uncertain; cannot resume or recover")
-            if not _supervisor_present(observed):
+                    raise WorkflowError("Supervisor identity is uncertain; cannot " + ("cancel" if action == "cancel" else "resume or recover"))
+            if action in {"resume", "recover"} and not _supervisor_present(observed):
                 self.reconcile_run(run_id)
         control_detail: dict[str, Any] = {"instructions": instructions, "additional_attempts": additional_attempts, "retry_grants": {}}
         def change(r: dict[str, Any]) -> None:
             if r.get("execution_contract") == "delegation" and r.get("interaction_owner") and interaction_owner is not None and interaction_owner != r["interaction_owner"]:
                 raise WorkflowError("Workflow interaction belongs to its original caller")
-            if action in {"resume", "recover"}:
+            if action in {"resume", "recover", "cancel"}:
                 if r.get("supervisor_identity"):
                     from . import identity
                     if identity.identity_check(r["supervisor_identity"]) == "undecidable":
-                        raise WorkflowError("Supervisor identity is uncertain; cannot resume or recover")
-                _require_delegation_control(r)
+                        raise WorkflowError("Supervisor identity is uncertain; cannot " + ("cancel" if action == "cancel" else "resume or recover"))
+                if action in {"resume", "recover"}:
+                    _require_delegation_control(r)
             if action == "recover":
                 if r.get("kind") == "builder" or r["status"] != "failed":
                     raise WorkflowError("Only failed delegation workflows can recover")

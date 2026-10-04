@@ -214,3 +214,34 @@ async def test_checkout_timeout_does_not_leave_false_live_activation(tmp_path,mo
 @pytest.mark.parametrize('unsafe', [{'outcome_unknown': True}, {'permission_denials': ['denied']}])
 def test_unsafe_outage_diagnostics_never_authorize_fallback(unsafe):
     assert w.availability_failure({'status': 'failed', 'backend': 'codex', 'stderr_tail': ['rate_limit_exceeded'], **unsafe}) is None
+
+
+@pytest.mark.parametrize('checks', [['undecidable'], ['alive','undecidable']])
+def test_cancel_refuses_uncertain_supervisor_without_run_or_history_mutation(tmp_path, monkeypatch, checks):
+    from polybridge import identity
+    storage=w.WorkflowStore(tmp_path)
+    run=storage.create_run(w.validate_definition(definition()),'Run',tmp_path)
+    storage.update_run(run['workflow_run_id'],lambda r:r.update(status='running',supervisor_pid=999,supervisor_identity={'pid':999}),'fixture')
+    before={path:path.read_bytes() for path in storage.root.rglob('*') if path.is_file()}
+    values=iter(checks)
+    monkeypatch.setattr(identity,'identity_check',lambda _:next(values))
+    monkeypatch.setattr(w,'_launch',lambda *a:(_ for _ in ()).throw(AssertionError('must not launch')))
+    with pytest.raises(w.WorkflowError,match='uncertain.*cancel'):
+        storage.control(run['workflow_run_id'],'cancel')
+    after={path:path.read_bytes() for path in storage.root.rglob('*') if path.is_file()}
+    assert after==before
+    assert storage.get_run(run['workflow_run_id'])['status']=='running'
+
+
+@pytest.mark.parametrize('identity_state,expected_launch', [('dead', True), ('alive', False)])
+def test_cancel_verified_supervisor_mutates_and_launches_only_for_dead_owner(tmp_path,monkeypatch,identity_state,expected_launch):
+    from polybridge import identity
+    storage=w.WorkflowStore(tmp_path)
+    run=storage.create_run(w.validate_definition(definition()),'Run',tmp_path)
+    storage.update_run(run['workflow_run_id'],lambda r:r.update(status='running',supervisor_pid=999,supervisor_identity={'pid':999}),'fixture')
+    monkeypatch.setattr(identity,'identity_check',lambda _:identity_state)
+    launched=[]
+    monkeypatch.setattr(w,'_launch',lambda *a:launched.append(a))
+    result=storage.control(run['workflow_run_id'],'cancel')
+    assert result['status']=='cancelling'
+    assert bool(launched)==expected_launch
