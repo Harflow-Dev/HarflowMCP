@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from pathlib import Path
 import time
 import uuid
@@ -18,24 +19,157 @@ def _w():
     return workflows
 
 
+def parse_contract(text: str, *, guided: bool = False) -> dict[str, Any]:
+    """Guided runs tolerate surplus text while preserving a complete envelope."""
+    if not guided:
+        return _w().parse_json(text)
+    text = text.strip()
+    fences = list(re.finditer(r"```(?:json)?\s*\n?(.*?)```", text, re.DOTALL | re.IGNORECASE))
+    if text.startswith("["):
+        raise _w().WorkflowError("Agent response must be one JSON object")
+    fenced_values = []
+    for fence in fences:
+        try:
+            value = json.loads(fence.group(1).strip())
+        except ValueError:
+            continue
+        if isinstance(value, dict):
+            fenced_values.append(value)
+    decoder = json.JSONDecoder()
+    candidates: list[dict[str, Any]] = []
+    cursor = 0
+    # Examine complete objects, including fences, without scanning nested fields.
+    # A broken surplus envelope after a complete result is formatting noise.
+    while cursor < len(text):
+        match = re.search(r"\{", text[cursor:])
+        if not match:
+            break
+        begin = cursor + match.start()
+        try:
+            value, consumed = decoder.raw_decode(text[begin:])
+        except ValueError as exc:
+            if not candidates:
+                raise _w().WorkflowError("Malformed JSON contract: " + str(exc)) from exc
+            # Ignore surplus formatting, but continue checking later complete
+            # objects so a subsequent final failure cannot hide behind it.
+            cursor = begin + 1
+            continue
+        if not isinstance(value, dict):
+            raise _w().WorkflowError("Agent response must be one JSON object")
+        candidates.append(value)
+        cursor = begin + consumed
+    if not candidates:
+        raise _w().WorkflowError("Agent response must contain one complete JSON object")
+    candidates.extend(fenced_values)
+    if len(candidates) > 1:
+        # Duplicate identical envelopes do not introduce a conflicting result.
+        if any(value != candidates[0] for value in candidates[1:]):
+            raise _w().WorkflowError("Agent response contains conflicting complete JSON objects")
+    # A complete final fenced envelope is a convenient formatting choice; its
+    # meaning must still agree with any other complete envelope above.
+    if fences:
+        try:
+            value = json.loads(fences[-1].group(1).strip())
+        except ValueError:
+            value = None
+        if isinstance(value, dict) and value == candidates[-1]:
+            return value
+    return candidates[0]
+
+
+def normalize_decision(run: dict[str, Any], node: dict[str, Any], token: dict[str, Any], decision: dict[str, Any], execute: bool = False, *, clarification: bool = False, root: Path | None = None) -> tuple[dict[str, Any], list[str]]:
+    """Ignore harmless presentation fields without discarding dispatch meaning."""
+    if run.get("runner_policy") != "guided":
+        return decision, []
+    value = copy.deepcopy(decision)
+    warnings: list[str] = []
+    def clean(obj: dict[str, Any], allowed: set[str], path: str) -> None:
+        for key in set(obj) - allowed:
+            if any(part in key.lower() for part in ("permission", "access", "freedom", "network", "sandbox", "approval", "allowlist")) or key in {"agent", "harness", "backend", "model", "reasoning_effort"}:
+                raise _w().WorkflowError(f"{path}.{key} cannot override saved workflow permissions or harness settings")
+            warnings.append(f"Ignored {path}.{key}")
+            obj.pop(key)
+    allowed = {"decision_id", "action", "reason", "next", "question", "task_updates", "requests"}
+    if clarification:
+        allowed = {"decision_id", "action", "reason", "question_id", "answer", "session_mode", "requests", "question", "next", "task_updates"}
+    clean(value, allowed, "decision")
+    if value.get("action") == "inspect":
+        for key in ("next", "task_updates"):
+            if value.get(key):
+                raise _w().WorkflowError("Inspection cannot select continuations or update checklist")
+            if key in value:
+                warnings.append(f"Ignored decision.{key}")
+                value.pop(key)
+        for key in ("question", "question_id", "answer", "session_mode"):
+            if key in value:
+                warnings.append(f"Ignored decision.{key} for inspection")
+                value.pop(key)
+        if isinstance(value.get("requests"), list):
+            for index, request in enumerate(value["requests"]):
+                if isinstance(request, dict):
+                    clean(request, {"execution_id", "task_id", "view", "cursor", "limit", "before_seq", "after_seq"}, f"requests[{index}]")
+    if isinstance(value.get("next"), list):
+        choices = {c["continuation_id"]: c for c in continuations(run, node, token, execute, root=root)}
+        for index, entry in enumerate(value["next"]):
+            if not isinstance(entry, dict):
+                continue
+            clean(entry, {"continuation_id", "prompt", "assigned_task_ids", "additional_result_refs", "session_mode", "resume_task_id", "branch_assignments"}, f"next[{index}]")
+            choice = choices.get(entry.get("continuation_id"))
+            if choice and not choice["requires_prompt"]:
+                for key in ("assigned_task_ids", "additional_result_refs"):
+                    if key in entry and entry[key] == []:
+                        warnings.append(f"Ignored empty next[{index}].{key} for structural traversal")
+                        entry.pop(key)
+    return value, warnings
+
+
+def exhaust_decision(run: dict[str, Any], checkpoint: dict[str, Any], *, clarification: bool = False) -> None:
+    reason = "Orchestrator exhausted " + ("clarification " if clarification else "") + "decision attempts"
+    if run.get("runner_policy") == "guided":
+        correction = checkpoint.get("decision_error", "")
+        run.update(status="needs_attention", attention_reason=reason + (": " + correction if correction else ""), failed_decision_id=checkpoint["decision_id"])
+    else:
+        run.update(status="failed", failure_reason=reason, failed_decision_id=checkpoint["decision_id"])
+
+
+def decision_prompt(context: dict[str, Any]) -> str:
+    """Separate examples prevent fields for one action leaking into another."""
+    base = {"decision_id": context["decision_id"], "reason": "Explain the decision"}
+    examples = {
+        "structural_continue": {**base, "action": "continue", "next": [{"continuation_id": "issued structural continuation ID"}]},
+        "agent_continue": {**base, "action": "continue", "next": [{"continuation_id": "issued executable continuation ID", "prompt": "Focused assignment", "session_mode": "fresh"}]},
+        "inspect": {**base, "action": "inspect", "requests": [{"execution_id": "settled execution ID", "view": "result"}]},
+        "needs_input": {**base, "action": "needs_input", "question": "Question for the caller"},
+        "failed": {**base, "action": "failed"},
+        "complete": {**base, "action": "complete"},
+    }
+    return ("You are the workflow orchestrator. Own the objective and checklist, and delegate focused assignments. Polybridge owns state and dispatch. Ordinary tools remain available under configured access. Return ONLY one JSON object. Use the action-specific examples below; omit fields belonging to other actions. Structural continuations accept ONLY continuation_id, except a continuation with branch_continuations entering Parallel start requires branch_assignments containing assignments for ALL issued branches (the same executable/structural entry shape). Executable continuations require prompt; optional additional_result_refs and assigned_task_ids are arrays of issued result/task IDs. For Resume use session_mode resume and an issued resume_task_id; Fresh omits resume_task_id. Fixed Resume without a retained session boots Fresh. retry_execution explicitly consumes a node attempt, not an edge. Failed required results require an issued retry or recovery path, failure, or input. Complete only at End after every branch settles. Inspect exactly one page of a settled execution; inspection does not consume decision attempts. Optional task_updates are accepted for non-inspection actions and must obey checklist authority. Examples:\n" + json.dumps(examples) + "\nContext:\n" + json.dumps(context))
+
+
 def settled(activation: dict[str, Any]) -> bool:
     return activation.get("status") in {"completed", "failed"} and not any(t.get("status") in {"reserved", "running", "uncertain"} for t in activation.get("tasks", []))
 
 
 def decision_error_path(message: str) -> str:
     """Point corrections at their contract field while preserving the full error."""
+    if message.startswith("Unexpected continuation fields: "):
+        return "next[]." + message.split(": ", 1)[1].split(",", 1)[0]
+    if message.startswith("Unexpected inspection fields: "):
+        return message.split(": ", 1)[1].split(",", 1)[0]
     for needle, path in (("Decision ID", "decision_id"), ("checklist", "task_updates"), ("task update", "task_updates"), ("Completion requires", "task_updates"), ("result_ref", "next[].additional_result_refs"), ("Result reference", "next[].additional_result_refs"), ("session", "next[].session_mode"), ("assignment", "next[].prompt"), ("continuation", "next[].continuation_id")):
         if needle.lower() in message.lower():
             return path
     return "$"
 
 
-def retry_eligible(activation: dict[str, Any]) -> bool:
+def retry_eligible(activation: dict[str, Any], *, guided: bool = False) -> bool:
     """Only positively settled failures can be explicitly reassigned."""
     result = activation.get("node_result", {})
     if not settled(activation) or result.get("status") not in {"failed", "blocked"}:
         return False
-    if result.get("result", {}).get("failure_kind") in {"protocol", "authority", "permission", "cancelled", "uncertain"}:
+    if result.get("result", {}).get("failure_kind") == "protocol" and not guided:
+        return False
+    if result.get("result", {}).get("failure_kind") in {"authority", "permission", "cancelled", "uncertain"}:
         return False
     return not any(t.get("result", {}).get("permission_denials") or t.get("result", {}).get("outcome_unknown") or t.get("result", {}).get("status") in {"cancelled", "running", "cancelling"} for t in activation.get("tasks", []))
 
@@ -52,7 +186,7 @@ def result_inputs(run: dict[str, Any], refs: list[str], *, preview: bool = True)
         value = copy.deepcopy(activation["node_result"])
         serialized = json.dumps(value, ensure_ascii=False)
         truncated = preview and len(serialized) > 16000
-        data = {"harness_attempts": [{"task_id": t["task_id"], "metadata": t.get("harness_metadata", {})} for t in activation.get("tasks", [])], "retry_eligible": retry_eligible(activation), "result_ref": ref, "execution_id": ref, "node_id": activation["node_id"], "role": nodes[activation["node_id"]].get("role"), "status": value["status"], "attempt": 1 + sum(a["role"] == "node" and a["node_id"] == activation["node_id"] for a in run["activations"][:run["activations"].index(activation)]), "truncated": truncated}
+        data = {"harness_attempts": [{"task_id": t["task_id"], "metadata": t.get("harness_metadata", {})} for t in activation.get("tasks", [])], "retry_eligible": retry_eligible(activation, guided=run.get("runner_policy") == "guided"), "result_ref": ref, "execution_id": ref, "node_id": activation["node_id"], "role": nodes[activation["node_id"]].get("role"), "status": value["status"], "attempt": 1 + sum(a["role"] == "node" and a["node_id"] == activation["node_id"] for a in run["activations"][:run["activations"].index(activation)]), "truncated": truncated}
         if truncated:
             data["result_preview"] = serialized[:16000]
         else:
@@ -61,7 +195,7 @@ def result_inputs(run: dict[str, Any], refs: list[str], *, preview: bool = True)
     return found
 
 
-def available_sessions(run: dict[str, Any], node: dict[str, Any]) -> list[dict[str, Any]]:
+def available_sessions(run: dict[str, Any], node: dict[str, Any], *, root: Path | None = None) -> list[dict[str, Any]]:
     """Issue only the last compatible, positively observed session for this node."""
     w = _w()
     candidates = {w._candidate_key(c) for c in [node["agent"]] + node["agent"].get("fallbacks", []) if node["id"] + ":" + w._candidate_key(c) not in run.get("suppressed_candidates", [])}
@@ -71,17 +205,22 @@ def available_sessions(run: dict[str, Any], node: dict[str, Any]) -> list[dict[s
             continue
         for task in reversed(activation["tasks"]):
             snapshot = task.get("result", {})
+            if root is not None:
+                from . import store as task_store
+                record = task_store.read(root / "tasks", task["task_id"])
+                if record is None or record.session_id != snapshot.get("session_id") or record.status not in {"completed", "failed"} or record.repo_path != run["repo_path"] or record.freedom != w.run_effective_freedom(run, node) or record.network != network or record.backend != task.get("candidate", {}).get("backend"):
+                    continue
             if task.get("status") == "completed" and snapshot.get("session_id") and not snapshot.get("is_error") and task.get("repo_path") == run["repo_path"] and task.get("freedom") == w.run_effective_freedom(run, node) and task.get("network") == network and w._candidate_key(task.get("candidate", {})) in candidates:
                 return [{"task_id": task["task_id"], "execution_id": activation["id"], "candidate": task["candidate"], "session_id": snapshot["session_id"]}]
     return []
 
 
-def inspect_decision(supervisor: Any, decision: dict[str, Any], checkpoint: dict[str, Any], activation_id: str, *, question_id: str | None = None, execution_id: str | None = None) -> None:
+def inspect_decision(supervisor: Any, decision: dict[str, Any], checkpoint: dict[str, Any], activation_id: str, *, question_id: str | None = None, execution_id: str | None = None, protocol_warnings: list[str] | None = None) -> None:
     """Run final-JSON inspection requests without granting workflow state authority."""
     w = _w()
     from .workflow_inspection import inspect_request
     if set(decision) - {"decision_id", "action", "reason", "requests", "next", "task_updates"}:
-        raise w.WorkflowError("Unexpected inspection fields; permissions are owned by the saved workflow")
+        raise w.WorkflowError("Unexpected inspection fields: " + ", ".join(sorted(set(decision) - {"decision_id", "action", "reason", "requests", "next", "task_updates"})))
     if decision.get("decision_id") != checkpoint["decision_id"] or decision.get("action") != "inspect" or decision.get("next") or decision.get("task_updates"):
         raise w.WorkflowError("Invalid inspection decision")
     requests = decision.get("requests")
@@ -95,7 +234,7 @@ def inspect_decision(supervisor: Any, decision: dict[str, Any], checkpoint: dict
         raise w.WorkflowError("Inspection response exceeds 32k; request a smaller page limit")
     def accept(r: dict[str, Any]) -> None:
         a = next(a for a in r["activations"] if a["id"] == activation_id)
-        a.update(status="completed", inspection_requests=copy.deepcopy(requests))
+        a.update(status="completed", inspection_requests=copy.deepcopy(requests), protocol_warnings=protocol_warnings or [])
         if r["status"] != "running":
             a["decision_ignored"] = "Human control changed run state before inspection acceptance"
             return
@@ -104,13 +243,13 @@ def inspect_decision(supervisor: Any, decision: dict[str, Any], checkpoint: dict
         else:
             target = next(t for t in r["pending"] if t["id"] == checkpoint["id"])
         target["inspection_count"] = target.get("inspection_count", 0) + len(requests)
-        target.setdefault("inspection_results", []).extend([{ "request": copy.deepcopy(request), "response": copy.deepcopy(result), "summary": str(decision.get("reason", ""))[:1000]} for request, result in zip(requests, results)])
+        target.setdefault("inspection_results", []).extend([{ "request": copy.deepcopy(request), "response": copy.deepcopy(result), "summary": str(decision.get("reason", ""))[:1000], "protocol_warnings": protocol_warnings or []} for request, result in zip(requests, results)])
         target["decision_attempts"] = max(0, target.get("decision_attempts", 1) - 1)
         target.pop("decision_error", None)
     supervisor.update(accept, "orchestrator_inspection", {"requests": requests})
 
 
-def continuations(run: dict[str, Any], node: dict[str, Any], token: dict[str, Any], execute: bool) -> list[dict[str, Any]]:
+def continuations(run: dict[str, Any], node: dict[str, Any], token: dict[str, Any], execute: bool, *, root: Path | None = None) -> list[dict[str, Any]]:
     w = _w()
     if execute:
         choices = [{"continuation_id": "execute:" + token["id"], "node_id": node["id"], "kind": "execute", "requires_prompt": True}]
@@ -135,7 +274,7 @@ def continuations(run: dict[str, Any], node: dict[str, Any], token: dict[str, An
     if not execute and token.get("execution_complete"):
         activation = next((a for a in run["activations"] if a["id"] == token.get("execution_activation_id")), None)
         candidates_available = any(node["id"] + ":" + w._candidate_key(c) not in run.get("suppressed_candidates", []) for c in [node["agent"]] + node["agent"].get("fallbacks", []))
-        if activation and retry_eligible(activation) and candidates_available:
+        if activation and retry_eligible(activation, guided=run.get("runner_policy") == "guided") and candidates_available:
             choices.append({"continuation_id": "retry:" + activation["id"], "node_id": node["id"], "kind": "retry_execution", "requires_prompt": True, "execution_id": activation["id"]})
     for choice in choices:
         target = next(n for n in run["definition"]["nodes"] if n["id"] == choice["node_id"])
@@ -145,25 +284,32 @@ def continuations(run: dict[str, Any], node: dict[str, Any], token: dict[str, An
             if execute and token.get("requires_assignment") and token.get("execution_activation_id"):
                 choice["attempts_remaining"] = 1  # Reassign an existing interrupted execution, not a new node attempt.
             choice["session_mode"] = target["session_mode"]
-            choice["available_sessions"] = available_sessions(run, target)
+            choice["available_sessions"] = available_sessions(run, target, root=root)
+            if target["session_mode"] == "resume" and not choice["available_sessions"]:
+                choice["session_note"] = "No retained compatible session; Fresh bootstrap is allowed"
+    from .workflow_traversal import branch_choices
+    for choice in choices:
+        branches = branch_choices(run, choice, token, root=root)
+        if branches is not None:
+            choice["branch_continuations"] = branches
     return [c for c in choices if c["kind"] != "retry_execution" or c["attempts_remaining"] > 0]
 
 
-def decision_context(run: dict[str, Any], node: dict[str, Any], token: dict[str, Any], execute: bool) -> dict[str, Any]:
+def decision_context(run: dict[str, Any], node: dict[str, Any], token: dict[str, Any], execute: bool, *, root: Path | None = None) -> dict[str, Any]:
     w = _w()
     graph = []
     for n in run["definition"]["nodes"]:
-        description = {k: copy.deepcopy(n[k]) for k in ("id", "title", "type", "role", "instructions", "optional", "agent", "session_mode", "max_attempts", "max_context_questions", "parallel_group_id", "join_id") if k in n}
+        description = {k: copy.deepcopy(n[k]) for k in ("id", "title", "type", "role", "instructions", "optional", "agent", "session_mode", "max_attempts", "max_context_questions", "require_technical_plan", "parallel_group_id", "join_id") if k in n}
         if n["type"] == "agent":
             description["effective_freedom"] = w.run_effective_freedom(run, n)
             description["effective_network"] = False if run.get("network") is False else n.get("network", run.get("network"))
             description["result_contract"] = {"status": "succeeded|failed|blocked", "result": "role-specific object", "evidence": "array"}
         graph.append(description)
     refs = ([token["execution_activation_id"]] if token.get("execution_activation_id") and token.get("execution_complete") else token.get("input_result_refs", []))
-    return {"workflow_run_id": run["workflow_run_id"], "decision_id": token["decision_id"], "routing_mode": run["definition"].get("routing_mode", "legacy"), "routing_rules": "Ordinary nodes choose exactly one continuation; Parallel start selects ALL forward branches. Parallel end waits for every branch; no harness runs for structural nodes." if run["definition"].get("routing_mode") == "explicit" else "Select legal continuations", "original_request": run["prompt"], "workflow_purpose": next(n.get("prompt", "") for n in run["definition"]["nodes"] if n["type"] == "start"), "current_stage": {"node_id": node["id"], "phase": "assignment" if execute else "routing", "token_id": token["id"]}, "workflow_graph": {"nodes": graph, "connections": run["definition"]["connections"]}, "input_results": result_inputs(run, refs), "settled_executions": [{"execution_id": a["id"], "result_ref": a["id"], "node_id": a["node_id"], "status": a["node_result"]["status"], "attempts": [{"task_id": t["task_id"], "status": t["status"], "candidate": t.get("candidate", {}), "harness_metadata": t.get("harness_metadata", {})} for t in a["tasks"]]} for a in run["activations"] if a["role"] == "node" and settled(a) and a.get("node_result")], "technical_plan": run.get("technical_plan", "")[:16000], "technical_plan_truncated": len(run.get("technical_plan", "")) > 16000, "technical_plan_execution_id": run.get("technical_plan_execution_id"), "checklist": run.get("tasks", []), "recent_decisions": run["decisions"][-10:], "valid_continuations": continuations(run, node, token, execute), "recovery_instructions": run.get("instructions", ""), "transitions_remaining": run["definition"]["max_transitions"] + run.get("transition_grant", 0) - run["transitions"], "inspection_results": token.get("inspection_results", [])[-1:], "inspection_history": [{"request": item["request"], "summary": item.get("summary", ""), "metadata": {k: item["response"][k] for k in ("execution_id", "task_id", "content_sha256", "offset", "next_cursor", "has_more") if k in item["response"]}} for item in token.get("inspection_results", [])[-20:]], "inspections_remaining": run["definition"].get("max_inspections", 20) - token.get("inspection_count", 0), "inspection": "Return final JSON action inspect with requests [{execution_id:<result_ref>,view:result|activity,task_id:optional,cursor:optional,limit:optional,before_seq:optional,after_seq:optional}]. Polybridge retrieves settled results and returns inspection_results in the next decision. Request exactly one page per inspect action; preserve relevant findings in reason for subsequent Fresh decisions. No MCP inspection is required. Result response chunk is JSON text; concatenate pages until next_cursor is null then decode {node_result,raw_output}. All settled executions in this run are inspectable."}
+    return {"workflow_run_id": run["workflow_run_id"], "decision_id": token["decision_id"], "routing_mode": run["definition"].get("routing_mode", "legacy"), "routing_rules": "Ordinary nodes choose exactly one continuation; Parallel start selects ALL forward branches. Parallel end waits for every branch; no harness runs for structural nodes." if run["definition"].get("routing_mode") == "explicit" else "Select legal continuations", "original_request": run["prompt"], "workflow_purpose": next(n.get("prompt", "") for n in run["definition"]["nodes"] if n["type"] == "start"), "current_stage": {"node_id": node["id"], "phase": "assignment" if execute else "routing", "token_id": token["id"]}, "workflow_graph": {"nodes": graph, "connections": run["definition"]["connections"]}, "input_results": result_inputs(run, refs), "settled_executions": [{"execution_id": a["id"], "result_ref": a["id"], "node_id": a["node_id"], "status": a["node_result"]["status"], "attempts": [{"task_id": t["task_id"], "status": t["status"], "candidate": t.get("candidate", {}), "harness_metadata": t.get("harness_metadata", {})} for t in a["tasks"]]} for a in run["activations"] if a["role"] == "node" and settled(a) and a.get("node_result")], "technical_plan": run.get("technical_plan", "")[:16000], "technical_plan_truncated": len(run.get("technical_plan", "")) > 16000, "technical_plan_execution_id": run.get("technical_plan_execution_id"), "checklist": run.get("tasks", []), "recent_decisions": run["decisions"][-10:], "valid_continuations": continuations(run, node, token, execute, root=root), "recovery_instructions": run.get("instructions", ""), "transitions_remaining": run["definition"]["max_transitions"] + run.get("transition_grant", 0) - run["transitions"], "inspection_results": token.get("inspection_results", [])[-1:], "inspection_history": [{"request": item["request"], "summary": item.get("summary", ""), "metadata": {k: item["response"][k] for k in ("execution_id", "task_id", "content_sha256", "offset", "next_cursor", "has_more") if k in item["response"]}} for item in token.get("inspection_results", [])[-20:]], "inspections_remaining": run["definition"].get("max_inspections", 20) - token.get("inspection_count", 0), "inspection": "Return final JSON action inspect with requests [{execution_id:<result_ref>,view:result|activity,task_id:optional,cursor:optional,limit:optional,before_seq:optional,after_seq:optional}]. Polybridge retrieves settled results and returns inspection_results in the next decision. Request exactly one page per inspect action; preserve relevant findings in reason for subsequent Fresh decisions. No MCP inspection is required. Result response chunk is JSON text; concatenate pages until next_cursor is null then decode {node_result,raw_output}. All settled executions in this run are inspectable."}
 
 
-def validate_decision(run: dict[str, Any], node: dict[str, Any], token: dict[str, Any], decision: dict[str, Any], execute: bool) -> tuple[list[dict[str, Any]], dict[str, Any], str | None]:
+def validate_decision(run: dict[str, Any], node: dict[str, Any], token: dict[str, Any], decision: dict[str, Any], execute: bool, *, root: Path | None = None) -> tuple[list[dict[str, Any]], dict[str, Any], str | None]:
     w = _w()
     if set(decision) - {"decision_id", "action", "reason", "next", "question", "task_updates", "requests"}:
         raise w.WorkflowError("Unexpected decision fields; permissions are owned by the saved workflow")
@@ -188,7 +334,7 @@ def validate_decision(run: dict[str, Any], node: dict[str, Any], token: dict[str
                 raise w.WorkflowError("End cannot complete with unresolved required failure evidence")
     if action == "continue" and (not entries or node["type"] == "end"):
         raise w.WorkflowError("Continue requires a valid next continuation")
-    choices = {c["continuation_id"]: c for c in continuations(run, node, token, execute)}
+    choices = {c["continuation_id"]: c for c in continuations(run, node, token, execute, root=root)}
     ids = [entry.get("continuation_id") for entry in entries if isinstance(entry, dict)]
     if len(ids) != len(entries) or len(set(ids)) != len(ids) or any(i not in choices for i in ids):
         raise w.WorkflowError("Invalid or duplicate continuation; use valid_continuations")
@@ -205,6 +351,8 @@ def validate_decision(run: dict[str, Any], node: dict[str, Any], token: dict[str
         if target["type"] == "parallel_end" and unresolved:
             raise w.WorkflowError("Required failed branch needs recovery before Parallel end; retry execution, choose a recovery path, fail, or request input")
         allowed = {"continuation_id", "prompt", "assigned_task_ids", "additional_result_refs", "session_mode", "resume_task_id"} if c["requires_prompt"] else {"continuation_id"}
+        if "branch_continuations" in c:
+            allowed.add("branch_assignments")
         if set(entry) - allowed:
             raise w.WorkflowError("Unexpected continuation fields: " + ", ".join(sorted(set(entry) - allowed)))
         if c["requires_prompt"]:
@@ -222,20 +370,24 @@ def validate_decision(run: dict[str, Any], node: dict[str, Any], token: dict[str
             raise w.WorkflowError("additional_result_refs must be unique execution IDs")
         result_inputs(run, refs, preview=False)
         assignment = {"assignment_prompt": entry.get("prompt", ""), "assigned_task_ids": assigned, "additional_result_refs": refs}
+        from .workflow_traversal import validate_branch_assignments
+        structural_dispatch = validate_branch_assignments(run, c, token, entry, root=root)
+        if structural_dispatch is not None:
+            assignment["structural_dispatch"] = structural_dispatch
         if c["requires_prompt"]:
             target = next(n for n in run["definition"]["nodes"] if n["id"] == c["node_id"])
             mode = entry.get("session_mode", target["session_mode"])
             if mode not in {"fresh", "resume"}:
                 raise w.WorkflowError("agent_decides requires explicit session_mode fresh or resume")
-            if target["session_mode"] != "agent_decides" and mode != target["session_mode"] and not token.get("requires_assignment"):
+            if target["session_mode"] != "agent_decides" and mode != target["session_mode"] and not token.get("requires_assignment") and not (target["session_mode"] == "resume" and mode == "fresh" and not c["available_sessions"]):
                 raise w.WorkflowError("Assignment cannot override the node's fixed session mode")
             if token.get("requires_assignment") and mode != "fresh":
                 raise w.WorkflowError("Unavailable Resume requires an explicit Fresh reassignment")
             if mode == "resume":
                 refs = c["available_sessions"]
                 source = entry.get("resume_task_id")
-                if not refs and target["session_mode"] == "resume" and not any(a["role"] == "node" and a["node_id"] == target["id"] for a in run["activations"]):
-                    mode = "fresh"  # Fixed Resume boots its first session once.
+                if not refs and target["session_mode"] == "resume":
+                    mode = "fresh"  # Fixed Resume boots Fresh when no retained compatible session exists.
                 elif source not in {session["task_id"] for session in refs}:
                     raise w.WorkflowError("Resume requires an issued compatible resume_task_id")
                 else:
@@ -266,7 +418,10 @@ def validate_decision(run: dict[str, Any], node: dict[str, Any], token: dict[str
         if update["status"] == "completed":
             activation = next((a for a in run["activations"] if a["id"] == token.get("execution_activation_id")), None)
             result = activation.get("node_result", {}) if activation else {}
-            if node.get("role") != "implementation" or result.get("status") != "succeeded" or update["task_id"] not in activation.get("assigned_task_ids", []) or update["task_id"] not in result.get("result", {}).get("completed_task_ids", []):
+            evidence_node = node
+            if run.get("runner_policy") == "guided" and node["type"] == "end" and activation and token.get("completion_source_node_id") == activation["node_id"]:
+                evidence_node = next(n for n in run["definition"]["nodes"] if n["id"] == activation["node_id"])
+            if evidence_node.get("role") != "implementation" or result.get("status") != "succeeded" or update["task_id"] not in activation.get("assigned_task_ids", []) or update["task_id"] not in result.get("result", {}).get("completed_task_ids", []):
                 raise w.WorkflowError("Completion requires successful implementation evidence for an assigned task")
     if len(set(update_ids)) != len(update_ids):
         raise w.WorkflowError("Duplicate checklist updates")
@@ -287,10 +442,10 @@ async def decide(supervisor: Any, node: dict[str, Any], token: dict[str, Any], *
             if run["status"] != "running":
                 return None
             if token.get("decision_attempts", 0) >= run["definition"].get("max_decision_attempts", 3):
-                supervisor.update(lambda r: r.update(status="failed", failure_reason="Orchestrator exhausted decision attempts", failed_decision_id=token["decision_id"]), "decision_exhausted")
+                supervisor.update(lambda r: exhaust_decision(r, token), "decision_exhausted")
                 return None
-            context = decision_context(run, node, token, execute)
-            prompt = ('You are the workflow orchestrator. Own the objective and checklist, and delegate focused assignments. Polybridge owns workflow state and agent dispatch. Ordinary tools remain available under your configured access. Inspect settled executions by returning final JSON action inspect; Polybridge retrieves them. Return ONLY JSON {"decision_id":"...","action":"continue|complete|failed|needs_input|inspect","reason":"...","next":[{"continuation_id":"...","prompt":"focused assignment","additional_result_refs":[],"assigned_task_ids":[],"session_mode":"fresh|resume","resume_task_id":"issued task ID when resuming"}],"requests":[],"question":"required for needs_input","task_updates":[]}. Use only issued continuations. Structural transitions accept only continuation_id, with no session fields. Executable continuations require a focused prompt and applicable session fields. retry_execution consumes a node attempt, not an edge. Structural transitions have no prompt; at convergence Polybridge asks for one shared assignment. Complete only at End. Failed/blocked required results need an explicit conditional recovery path, failure, or input. Context:\n' + json.dumps(context))
+            context = decision_context(run, node, token, execute, root=supervisor.store.root)
+            prompt = decision_prompt(context)
             if token.get("decision_error"):
                 prompt += "\nCorrection: " + token["decision_error"]
             activation = supervisor._activation(node["id"], "orchestrator", copy.deepcopy(token))
@@ -301,23 +456,24 @@ async def decide(supervisor: Any, node: dict[str, Any], token: dict[str, Any], *
                 return None
             raw = outcome.get("summary") or ""
             try:
-                decision = w.parse_json(raw)
+                decision = parse_contract(raw, guided=run.get("runner_policy") == "guided")
+                decision, protocol_warnings = normalize_decision(run, node, token, decision, execute, root=supervisor.store.root)
                 if decision.get("action") == "inspect":
-                    inspect_decision(supervisor, decision, token, activation["id"])
+                    inspect_decision(supervisor, decision, token, activation["id"], protocol_warnings=protocol_warnings)
                     continue
                 # Validate against fresh durable state, not the dispatch-time preview.
                 live = supervisor.run()
                 token = next(t for t in live["pending"] if t["id"] == token["id"])
-                selected, assignments, join = validate_decision(live, node, token, decision, execute)
+                selected, assignments, join = validate_decision(live, node, token, decision, execute, root=supervisor.store.root)
                 def accept(r: dict[str, Any]) -> None:
                     t = next(t for t in r["pending"] if t["id"] == token["id"])
                     a = next(a for a in r["activations"] if a["id"] == activation["id"])
-                    a.update(status="completed", raw_output=raw)
+                    a.update(status="completed", raw_output=raw, protocol_warnings=protocol_warnings)
                     if r["status"] != "running":
                         a["decision_ignored"] = "Human control changed run state before acceptance"
                         return
                     r.pop("exhausted_retry_edges", None)
-                    r["decisions"].append({**decision, "node_id": node["id"], "activation_id": activation["id"], "selected_join_id": join})
+                    r["decisions"].append({**decision, "node_id": node["id"], "activation_id": activation["id"], "selected_join_id": join, "protocol_warnings": protocol_warnings})
                     action = decision["action"]
                     if action == "continue":
                         t.update(selected_connections=[e["id"] for e in selected], selected_join_id=join, assignments=assignments, accepted_decision_id=t["decision_id"])
@@ -367,11 +523,11 @@ async def decide(supervisor: Any, node: dict[str, Any], token: dict[str, Any], *
                 supervisor.update(reject, "invalid_decision", str(exc))
 
 
-def normalize_result(node: dict[str, Any], outcome: dict[str, Any], assigned_ids: list[str]) -> dict[str, Any]:
+def normalize_result(node: dict[str, Any], outcome: dict[str, Any], assigned_ids: list[str], *, guided: bool = False) -> dict[str, Any]:
     w = _w()
     if outcome.get("execution_failure"):
         return {"status": "blocked" if outcome.get("blocked_failure") else "failed", "result": {"failure_kind": "harness", "reason": outcome["execution_failure"]}, "evidence": [{k: copy.deepcopy(outcome[k]) for k in ("task_id", "status", "stderr_tail", "permission_denials", "candidates") if k in outcome}]}
-    value = w.parse_json(outcome.get("summary") or "")
+    value = parse_contract(outcome.get("summary") or "", guided=guided)
     if value.get("status") not in {"succeeded", "failed", "blocked", "asking"} or not isinstance(value.get("result"), dict) or not isinstance(value.get("evidence"), list):
         raise w.WorkflowError("Worker requires {status:succeeded|failed|blocked|asking,result:object,evidence:array}")
     result = value["result"]
@@ -387,8 +543,10 @@ def normalize_result(node: dict[str, Any], outcome: dict[str, Any], assigned_ids
             raise w.WorkflowError("asking requires a nonempty result.question")
         return {"status": "asking", "result": copy.deepcopy(result), "evidence": copy.deepcopy(value["evidence"])}
     if value["status"] == "succeeded" and node["role"] == "planning":
-        if not isinstance(result.get("technical_plan"), str) or not result["technical_plan"].strip():
+        if node.get("require_technical_plan", True) and (not isinstance(result.get("technical_plan"), str) or not result["technical_plan"].strip()):
             raise w.WorkflowError("Planning result requires a nonempty technical_plan Markdown string")
+        if "technical_plan" in result and not isinstance(result["technical_plan"], str):
+            raise w.WorkflowError("Planning technical_plan must be Markdown text when supplied")
         tasks = result.get("tasks")
         if not isinstance(tasks, list) or not tasks:
             raise w.WorkflowError("Planning result requires a nonempty tasks array")
@@ -411,6 +569,8 @@ def normalize_result(node: dict[str, Any], outcome: dict[str, Any], assigned_ids
 def worker_prompt(run: dict[str, Any], node: dict[str, Any], token: dict[str, Any]) -> str:
     descriptors = [{k: task[k] for k in ("id", "title", "description") if k in task} for task in run.get("tasks", []) if task["id"] in token.get("assigned_task_ids", [])]
     guidance = {"planning": "Plan the assigned work without implementing. Return both tasks with stable id/title/description and technical_plan as detailed Markdown covering the approach, affected components, interfaces, validation and risks. The checklist and technical plan are separate required outputs.", "implementation": "Implement only the assignment. Report completed_task_ids from assigned descriptors with validation evidence; do not update checklist state.", "review": "Review the assigned material without editing. Return verdict approved or changes_needed, findings and evidence. Finding issues is successful review execution.", "task": "Perform the bounded assignment and report observed check outcomes. A failing check can be successful execution; distinguish it from inability to perform the task."}[node["role"]]
+    if node["role"] == "planning" and not node.get("require_technical_plan", True):
+        guidance = "Plan the assignment without implementing. Return tasks with stable id/title/description; technical_plan Markdown is optional. A review brief may be included in result."
     refs = token.get("input_result_refs", []) + token.get("additional_result_refs", [])
     if token.get("resume_source_execution_id"):
         refs = refs + [token["resume_source_execution_id"]]
@@ -430,8 +590,9 @@ def finish_result(run: dict[str, Any], node: dict[str, Any], token_id: str, acti
     for key in ("recovered_result", "recovered_failed_result", "decision_id", "decision_attempts", "decision_error", "selected_connections", "accepted_decision_id", "assignments"):
         token.pop(key, None)
     if value["status"] == "succeeded" and node["role"] == "planning":
-        run["technical_plan"] = value["result"]["technical_plan"]
-        run["technical_plan_execution_id"] = activation_id
+        if value["result"].get("technical_plan"):
+            run["technical_plan"] = value["result"]["technical_plan"]
+            run["technical_plan_execution_id"] = activation_id
         for task in value["result"]["tasks"]:
             old = next((t for t in run["tasks"] if t["id"] == task["id"]), None)
             if old:
@@ -520,7 +681,7 @@ async def execute_node(supervisor: Any, node: dict[str, Any], token: dict[str, A
     while outcome:
         error = None
         try:
-            value = normalize_result(node, outcome, token.get("assigned_task_ids", []))
+            value = normalize_result(node, outcome, token.get("assigned_task_ids", []), guided=run.get("runner_policy") == "guided")
         except (ValueError, TypeError, AttributeError) as exc:
             error = str(exc)
             value = {"status": "failed", "result": {"failure_kind": "protocol", "reason": error}, "evidence": []}

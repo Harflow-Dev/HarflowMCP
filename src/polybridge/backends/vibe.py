@@ -263,6 +263,9 @@ class UnsafeInvocationError(RuntimeError):
 class VibeBackend:
     name = "vibe"
     binary = BINARY
+    # Programmatic Vibe replaces argv with this title after startup. Caller
+    # verification still requires the captured process start time and ancestry.
+    caller_process_titles = ("Vibe CLI",)
     capabilities = Capabilities(
         # vibe mints its own sessionId and reports it on the first stream entry.
         chooses_session_id=False,

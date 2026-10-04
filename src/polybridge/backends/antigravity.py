@@ -49,6 +49,7 @@ CLI facts established by measurement (agy 1.2.14, 2026-10-01; real captures in
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -288,6 +289,33 @@ def _tool_command(parameters: dict[str, Any]) -> str | None:
 
 
 class AntigravityBackend:
+    @staticmethod
+    def workflow_availability_failure(event: dict[str, Any]) -> str | None:
+        """Interpret only agy's terminal provider error, never response/tool prose."""
+        result = event.get("result")
+        if event.get("event") != "result" or not isinstance(result, dict) or result.get("status") != "ERROR" or result.get("denied_actions"):
+            return None
+        error = result.get("error")
+        codes = {"insufficient_quota", "model_not_found", "rate_limit_exceeded", "usage_limit_reached"}
+        outages = {"overloaded_error", "api_connection_error", "APITimeoutError", "APIConnectionError", "service_unavailable"}
+        if isinstance(error, dict):
+            if any(type(error.get(key)) is int and error[key] in {401, 403} for key in ("status", "status_code", "statusCode")):
+                return None
+            if any(error.get(key) in codes for key in ("type", "code", "name") if isinstance(error.get(key), str)):
+                return "backend availability rejected"
+            if any(type(error.get(key)) is int and error[key] in {500, 502, 503, 504, 529} for key in ("status", "status_code", "statusCode")):
+                return "provider server unavailable"
+            if any(error.get(key) in outages for key in ("type", "code", "name") if isinstance(error.get(key), str)):
+                return "provider transport unavailable"
+        elif isinstance(error, str):
+            if re.match(r"(?i)^(?:API[ _]Error|Provider[ _]Error|HTTP[ _]Error)\s*:?\s*(?:HTTP\s*)?(?:401|403)\b", error):
+                return None
+            if re.search(r"\b(?:insufficient_quota|model_not_found|rate_limit_exceeded|usage_limit_reached)\b", error):
+                return "backend availability rejected"
+            if re.match(r"(?i)^(?:API[ _]Error|Provider[ _]Error|HTTP[ _]Error)\s*:?\s*(?:HTTP\s*)?(?:500|502|503|504|529)\b", error):
+                return "provider server unavailable"
+        return None
+
     name = "antigravity"
     binary = BINARY
     capabilities = Capabilities(

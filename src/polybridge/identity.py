@@ -107,6 +107,8 @@ def check_detail(identity: Mapping | None) -> tuple[IdentityCheck, str]:
             return "alive", "start_time_match"
         if all(marker in command for marker in markers):
             return "alive", "start_time_match"
+        if command.strip() in identity.get("caller_process_titles", ()):
+            return "alive", "start_time_match"
         return "undecidable", "markers_missing"
 
     # Legacy record, or a fresh one whose `capture` call has not landed yet: no start_time to

@@ -88,7 +88,14 @@ def decorate_tasks(entries: list[dict[str, Any]], log_dir: Any) -> list[dict[str
     for entry in entries:
         task_id = entry.get("task_id")
         if task_id not in index and (entry.get("parent_task_id") or entry.get("spawned_by")):
-            association = storage.task_owner(task_id)
+            try:
+                association = storage.task_owner(task_id)
+            except (OSError, ValueError, KeyError, TypeError):
+                # Decoration is best effort; mutation/inspection authority keeps
+                # its separate strict ownership checks.
+                import logging
+                logging.getLogger(__name__).warning("Workflow decoration unavailable for %s", task_id, exc_info=True)
+                association = None
             if association is not None:
                 index[task_id] = {key: association[key] for key in inherited if key in association}
     return [{**entry, **index.get(entry.get("task_id"), {})} for entry in entries]

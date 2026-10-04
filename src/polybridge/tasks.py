@@ -740,7 +740,10 @@ class Task:
         snap["pending_messages"] = inbox.pending_messages(self.log_path.parent, self.task_id)
         if self.workflow_builder:
             from .workflows import builder_pending_messages
-            snap["pending_messages"] = builder_pending_messages(self.log_path.parent, self.task_id, snap["pending_messages"])
+            try:
+                snap["pending_messages"] = builder_pending_messages(self.log_path.parent, self.task_id, snap["pending_messages"])
+            except (OSError, ValueError, KeyError, TypeError):
+                log.warning("task %s: workflow pending-message bookkeeping unavailable", self.task_id, exc_info=True)
         return snap
 
 
@@ -1356,6 +1359,8 @@ class TaskRegistry:
         Takes the same inbox lock as the close protocol, so a message is either accepted before
         the close (and then forwarded or reported undelivered) or refused after it.
         """
+        from .workflow_hooks import refuse_direct_message
+        await asyncio.to_thread(refuse_direct_message, self._log_dir, task.task_id)
         if not task.live_input:
             raise inbox.SendRefused(
                 f"task {task.task_id} was not started with live input, so it cannot take a message "

@@ -10,6 +10,35 @@ BUDGET = 24 * 1024
 VIEWS = {"executions": "activations", "decisions": "decisions", "checklist": "tasks", "technical_plan": "technical_plan", "definition": "definition", "question": "input_question", "reason": "reason", "wait_reason": "wait_reason", "checkout_wait": "checkout_wait", "summary": "summary", "failure_reason": "failure_reason", "attention_reason": "attention_reason"}
 
 
+def history_page(runs: list[dict[str, Any]], offset: int = 0, limit: int = 100) -> dict[str, Any]:
+    """Bound Monitor history polling independently of full run and worker outputs."""
+    if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 100:
+        raise ValueError("offset must be nonnegative; limit must be 1–100")
+    # Current work remains visible even with a large, newer settled history.
+    ordered = sorted(runs, key=lambda r: (r.get("status") not in {"completed", "failed", "cancelled"} or r.get("settling", False), r.get("created_at", 0)), reverse=True)
+    entries = []
+    for run in ordered[offset:offset + limit]:
+        row = compact(run)
+        row["repo_path"] = str(run.get("repo_path", ""))[:1000]
+        row["prompt"] = str(run.get("prompt", ""))[:2000]
+        row["prompt_truncated"] = len(str(run.get("prompt", ""))) > 2000
+        row["decisions"] = [{"reason": str(run["decisions"][-1].get("reason", ""))[:2000]}] if run.get("decisions") else []
+        definition = run.get("definition", {})
+        row["backends"] = sorted({str(candidate.get("backend", ""))[:100] for candidate in [definition.get("orchestrator", {})] + [n.get("agent", {}) for n in definition.get("nodes", [])] if candidate.get("backend")})[:20]
+        row["node_labels"] = {str(n.get("id", ""))[:100]: str(n.get("title") or n.get("id", ""))[:200] for n in run.get("definition", {}).get("nodes", [])[:100]}
+        row["activations"] = [{key: str(a[key])[:100] if isinstance(a[key], str) else a[key] for key in ("id", "node_id", "role", "status", "created_at") if key in a} | {"tasks": [{"task_id": str(t.get("task_id", ""))[:100], "status": str(t.get("status", ""))[:100]} for t in a.get("tasks", [])[-10:]]} for a in run.get("activations", [])[-40:]]
+        row["activations_truncated"] = len(run.get("activations", [])) > 40 or any(len(a.get("tasks", [])) > 10 for a in run.get("activations", []))
+        if len(json.dumps(row, ensure_ascii=True).encode()) > 48 * 1024:
+            row.pop("node_labels", None)
+            row["activations"] = []
+            row["activations_truncated"] = True
+        if entries and len(json.dumps(entries + [row], ensure_ascii=True).encode()) > 256 * 1024:
+            break
+        entries.append(row)
+    following = offset + len(entries)
+    return {"runs": entries, "next_offset": following if following < len(ordered) else None}
+
+
 def compact(run: dict[str, Any]) -> dict[str, Any]:
     keys = ("workflow_run_id", "name", "revision", "kind", "status", "created_at", "updated_at", "interaction_owner", "settling", "input_decision_id", "execution_contract")
     result = {key: run[key] for key in keys if key in run and isinstance(run[key], (str, int, float, bool, type(None)))}

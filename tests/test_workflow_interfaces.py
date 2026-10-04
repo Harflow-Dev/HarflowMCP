@@ -90,7 +90,11 @@ def test_cli_workflow_collections_are_result_objects(action, key, monkeypatch, c
         return [{"name": "review"}]
     monkeypatch.setattr(server, "_workflow_call", invoke)
     assert ctl.main(["workflow-" + action, "--json"]) == 0
-    assert json.loads(capsys.readouterr().out) == {"v": 2, "result": {key: [{"name": "review"}]}}
+    result = json.loads(capsys.readouterr().out)["result"]
+    assert result[key][0]["name"] == "review"
+    if action == "list-runs":
+        assert result["next_offset"] is None
+        assert "definition" not in result[key][0]
 
 
 async def test_registry_honors_reserved_id_and_refuses_reuse(tmp_path, git_repo, fake_backend_clis):

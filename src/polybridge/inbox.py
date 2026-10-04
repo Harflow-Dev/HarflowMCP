@@ -243,6 +243,8 @@ def send_to_record(
     and an undecidable one — including a legacy record with no start time — cannot be trusted to.
     """
     store.validate_task_id(task_id)
+    from .workflow_hooks import refuse_direct_message
+    refuse_direct_message(log_dir, task_id)
     try:
         fd = lock_sync(log_dir, task_id, timeout)
     except control.LockTimeout:

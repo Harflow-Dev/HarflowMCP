@@ -314,6 +314,21 @@ optional assigned task IDs. Under Agent decides, each agent assignment also choo
 branch before requesting one assignment for its next agent. Start always asks the
 orchestrator for the first assignment.
 
+New runs avoid structural-only routing decisions. A continuation entering **Parallel start**
+includes `branch_continuations`; the orchestrator returns a `branch_assignments` array containing
+one separately written assignment for every issued branch. Branches can perform different jobs
+and do not share a prompt. Polybridge validates the complete bundle before advancing or dispatching
+anything, including nested groups. A single unconditional structural exit advances through normal
+transition accounting. A successful worker with one unconditional path to End goes straight to
+the completion decision, where the orchestrator still checks results and owns checklist updates.
+Conditional paths, recovery, questions, and every new agent assignment still require judgment.
+Parallel end already combines incoming results before one assignment decision for its next agent.
+
+Decision examples are action-specific. New runs ignore unknown presentation fields and record
+warnings alongside the accepted decision; empty assignment-reference fields on structural entries
+are harmless. Invalid identities, continuation selections, required fields, nonempty misplaced
+assignment context, and permission or harness overrides remain errors.
+
 An agent continuation decision looks like this (IDs are issued by Polybridge):
 
 ```json
@@ -331,7 +346,10 @@ An agent continuation decision looks like this (IDs are issued by Polybridge):
 
 Workers return `{status, result, evidence}`. Status is `succeeded`, `failed`, `blocked`, or `asking`;
 role-specific results retain plans, completed task IDs, review verdicts, and observed test outcomes.
-A successful planning result contains a human-readable technical plan as well as task descriptors:
+A successful planning result contains task descriptors. Planning nodes default to requiring a
+human-readable technical plan too; turn off **Require technical plan** for scoping or reviewer
+brief nodes (`require_technical_plan: false`). Such nodes can return a brief without inventing an
+implementation plan. A later brief does not erase a technical plan already recorded in the run:
 
 ```json
 {
@@ -349,7 +367,12 @@ receives both the plan and checklist descriptors in the planning result; the orc
 checklist completion. The right sidebar shows the plan and live checklist for each workflow run.
 
 A reviewer finding issues or a test step reporting failing tests can still execute successfully.
-Malformed output is a settled protocol failure, not an automatic formatting retry. An `asking`
+Polybridge accepts one unambiguous JSON contract surrounded by prose or a code fence. Conflicting
+objects remain protocol failures, with the complete raw output retained. New runs accept a complete
+result envelope followed by unrelated text or surplus formatting; a missing or malformed envelope
+still fails the protocol. Historical run snapshots retain their recorded runner policy.
+The orchestrator can explicitly select an issued retry for a settled protocol failure within its
+node budget; no worker is automatically rerun. An `asking`
 result contains `result.question` and optional `result.context`. The worker yields; the runner
 persists the question and marks its execution `waiting_for_answer`, without treating it as a final
 result. The orchestrator returns `answer` with the issued question ID and a focused answer prompt.
@@ -383,7 +406,10 @@ The clarification decision uses the issued decision and question IDs:
 
 Invalid decisions dispatch nothing. Polybridge returns the error and valid choices, with three
 total decision attempts by default (Start setting, range 1–10). This allowance resets after a valid
-decision and is separate from node retries. Exhaustion fails the run. Inspection does not consume
+decision and is separate from node retries. In new runs, exhaustion pauses scheduling with
+`needs_attention` and preserves the last decision error in `attention_reason`. The caller can
+resume with a correction; extra execution attempts remain an explicit grant. Historical snapshots
+keep their earlier exhaustion behavior. Inspection does not consume
 a decision attempt. Each decision checkpoint has a bounded inspection allowance (default 20,
 configurable 1–1000); repeated inspection cannot indefinitely postpone a decision. `needs_input` includes a question and suspends scheduling; running siblings settle,
 and status reports whether settling remains. Resume rejects live or uncertain dispatches.
@@ -431,6 +457,12 @@ remains the workflow prompt; answer prompts are stored separately for their indi
 
 Explicit `recover_workflow` requires a nonempty reason and a failed, settled run. It returns the
 failed decision to the orchestrator with a fresh decision allowance and preserves completed work.
+
+Decision exhaustion in new runs uses `needs_attention`, so use `resume_workflow` rather than
+failed-run recovery. The last contract correction remains visible. Resuming renews the decision
+allowance; `additional_attempts` grants execution/retry capacity only when explicitly requested.
+Already-running siblings finish and persist their results while scheduling is suspended. The
+Monitor shows **Settling** until they finish and refuses premature resume or session takeover.
 Extra execution/retry grants require `additional_attempts`; completed and cancelled runs cannot
 recover. Caller answers and override reasons are passed back into orchestrator context.
 

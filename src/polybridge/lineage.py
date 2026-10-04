@@ -195,7 +195,12 @@ def lineage_closure(
 
 def _candidate_identity(record: store.TaskRecord) -> dict[str, Any]:
     """The identity dict `identity.identity_check` expects for `record`."""
-    return identity.task_identity(record.pid, record.start_time, record.markers)
+    result = identity.task_identity(record.pid, record.start_time, record.markers)
+    from .backends import get
+    titles = getattr(get(record.backend), "caller_process_titles", ())
+    if titles:
+        result["caller_process_titles"] = titles
+    return result
 
 
 def _confirmed(record: store.TaskRecord, check: Callable[[Mapping[str, Any]], str]) -> bool:

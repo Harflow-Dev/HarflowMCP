@@ -4,6 +4,29 @@ from polybridge.workflow_responses import compact, detail, BUDGET
 from polybridge import server
 
 
+def test_monitor_history_is_bounded_and_prioritizes_active_runs():
+    from polybridge.workflow_responses import history_page
+    runs = [large_run() | {"workflow_run_id": str(i), "status": "completed", "created_at": i} for i in range(120)]
+    runs.append(large_run() | {"workflow_run_id": "active", "created_at": 0, "repo_path": "/work/repo", "prompt": "Review parser"})
+    page = history_page(runs, limit=100)
+    assert page["runs"][0]["workflow_run_id"] == "active"
+    assert page["runs"][0]["repo_path"] == "/work/repo"
+    assert page["runs"][0]["prompt"] == "Review parser"
+    assert len(json.dumps(page).encode()) < 260 * 1024
+    assert page["next_offset"] is not None
+    assert all("raw_output" not in a for r in page["runs"] for a in r["activations"])
+    assert all("definition" not in r for r in page["runs"])
+    second = history_page(runs, offset=page["next_offset"])
+    assert not ({r["workflow_run_id"] for r in page["runs"]} & {r["workflow_run_id"] for r in second["runs"]})
+
+
+@pytest.mark.parametrize("offset,limit", [(-1, 10), (0, 0), (0, 101), (True, 10)])
+def test_monitor_history_rejects_invalid_paging(offset, limit):
+    from polybridge.workflow_responses import history_page
+    with pytest.raises(ValueError):
+        history_page([], offset, limit)
+
+
 def large_run():
     return {"workflow_run_id": "r", "name": "Review", "status": "running", "definition": {"huge": "abc🧠" * 90000}, "activations": [{"id": str(i), "status": "completed", "raw_output": "x" * 100000, "result_error": "bad" * 10000} for i in range(10)], "input_question": "🧠" * 90000}
 

@@ -63,6 +63,35 @@ def test_corrupt_unrelated_run_does_not_break_human_bookkeeping(tmp_path):
         workflow_hooks.refuse_managed(tmp_path/"tasks","ordinary")
 
 
+@pytest.mark.parametrize("status,settling,allowed", [("running", False, False), ("needs_input", False, False), ("failed", True, False), ("failed", False, True)])
+async def test_direct_messages_respect_workflow_assignment_authority(tmp_path, status, settling, allowed):
+    from polybridge import inbox
+    from polybridge.tasks import TaskRegistry
+    storage = w.WorkflowStore(tmp_path)
+    run = storage.create_run(w.validate_definition(definition()), "go", tmp_path)
+    storage.update_run(run["workflow_run_id"], lambda r: r.update(status=status, activations=[{"id": "a", "node_id": "work", "role": "node", "status": "running" if settling else "completed", "tasks": [{"task_id": "child", "status": "running" if settling else "completed"}]}]), "fixture")
+    if allowed:
+        workflow_hooks.refuse_direct_message(tmp_path / "tasks", "child")
+    else:
+        registry = TaskRegistry(log_dir=tmp_path / "tasks", owner={}, open_monitor=False)
+        with pytest.raises(inbox.SendRefused, match="active workflow"):
+            await registry.send_message(SimpleNamespace(task_id="child", live_input=True), "change assignment")
+        with pytest.raises(inbox.SendRefused, match="active workflow"):
+            await registry.send_to_record("child", "change assignment")
+        assert not (tmp_path / "tasks/child.inbox.jsonl").exists()
+
+
+def test_optional_decoration_survives_missing_owned_run(tmp_path):
+    from polybridge.workflow_inspection import decorate_tasks
+    storage = w.WorkflowStore(tmp_path)
+    (storage.owners / "child.json").write_text(json.dumps({"workflow_run_id": "missing"}))
+    entries = [{"task_id": "child", "parent_task_id": "parent", "status": "completed"}]
+    assert decorate_tasks(entries, tmp_path / "tasks") == entries
+    from polybridge import inbox
+    with pytest.raises(inbox.SendRefused, match="ownership"):
+        workflow_hooks.refuse_direct_message(tmp_path / "tasks", "child")
+
+
 async def test_orphan_dead_process_does_not_hold_checkout(tmp_path,monkeypatch):
     storage=w.WorkflowStore(tmp_path)
     run=storage.create_run(w.validate_definition(definition()),"go",tmp_path)

@@ -1953,3 +1953,115 @@ async def test_recovered_optional_fallback_completed_snapshot_survives_second_in
     assert storage.get_run(run["workflow_run_id"])["status"] == "completed"
     assert fresh.calls == []
     assert len(registry.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_pause_before_start_preserves_initial_continuation(storage, tmp_path):
+    run = storage.create_run(w.validate_definition(definition()), "request", tmp_path)
+    rid = run["workflow_run_id"]
+    storage.control(rid, "pause")
+    registry = FakeRegistry(storage.root, [])
+    await w.WorkflowSupervisor(registry, storage).execute(rid)
+    paused = storage.get_run(rid)
+    assert paused["status"] == "paused"
+    assert [token["node_id"] for token in paused["pending"]] == ["start"]
+    assert registry.calls == []
+
+
+def test_resume_uncertain_supervisor_does_not_mutate(storage, tmp_path, monkeypatch):
+    from polybridge import identity
+    run = storage.create_run(w.validate_definition(definition()), "request", tmp_path)
+    rid = run["workflow_run_id"]
+    before = storage.update_run(rid, lambda r: r.update(status="paused", supervisor_identity={"pid": 123}), "fixture")
+    monkeypatch.setattr(identity, "identity_check", lambda _: "undecidable")
+    with pytest.raises(w.WorkflowError, match="identity is uncertain"):
+        storage.control(rid, "resume")
+    assert storage.get_run(rid) == before
+
+
+def test_failed_settling_workflow_keeps_tasks_pinned(storage, tmp_path):
+    run = storage.create_run(w.validate_definition(definition()), "request", tmp_path)
+    storage.update_run(run["workflow_run_id"], lambda r: r.update(status="failed", activations=[{"tasks": [{"task_id": "live-worker", "status": "running"}]}]), "fixture")
+    assert storage.pinned_tasks() == {"live-worker"}
+
+
+def test_planning_technical_plan_flag_is_boolean():
+    d = w.validate_definition(definition("planning"))
+    assert d["nodes"][1]["require_technical_plan"] is True
+    d["nodes"][1]["require_technical_plan"] = False
+    assert w.validate_definition(d)["nodes"][1]["require_technical_plan"] is False
+    d["nodes"][1]["require_technical_plan"] = "false"
+    with pytest.raises(w.WorkflowError, match="must be a boolean"):
+        w.validate_definition(d)
+
+
+@pytest.mark.asyncio
+async def test_supervisor_shutdown_hands_resumed_run_to_new_owner(storage, tmp_path, monkeypatch):
+    import fcntl
+    run = storage.create_run(w.validate_definition(definition()), "request", tmp_path)
+    rid = run["workflow_run_id"]
+    launched = []
+    async def finishing(self, run_id):
+        # A caller resumed after the old supervisor decided to stop.
+        self.store.update_run(run_id, lambda r: r.update(status="running", supervisor_pid=None, supervisor_identity=None), "resume_during_shutdown")
+    def launch(store, run_id):
+        with (store.runs / f"{run_id}.supervisor.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            launched.append(run_id)
+    monkeypatch.setattr(w.WorkflowSupervisor, "execute", finishing)
+    monkeypatch.setattr(w, "_launch", launch)
+    await w._main(SimpleNamespace(root=str(storage.root), run_id=rid))
+    assert launched == [rid]
+
+
+@pytest.mark.asyncio
+async def test_missing_resume_record_is_definitively_not_started(storage, tmp_path):
+    d = w.validate_definition(definition())
+    run = storage.create_run(d, "request", tmp_path)
+    rid = run["workflow_run_id"]
+    node = storage.get_run(rid)["definition"]["nodes"][1]
+    storage.update_run(rid, lambda r: r.update(status="running", supervisor_pid=__import__("os").getpid(), sessions={"work": {"task_id": "missing-source", "candidate": "work:" + w._candidate_key(node["agent"])}}), "fixture")
+    registry = FakeRegistry(storage.root, [])
+    supervisor = w.WorkflowSupervisor(registry, storage)
+    supervisor.run_id = rid
+    activation = supervisor._activation("work", "node")
+    assert await supervisor._dispatch(node, "assignment", "node", activation) is None
+    current = storage.get_run(rid)
+    assert current["activations"][0]["tasks"][0]["status"] == "not_started"
+    assert current["status"] == "needs_attention"
+    assert registry.calls == []
+
+
+@pytest.mark.asyncio
+async def test_run_owned_checkout_lease_allows_parallel_dispatch_and_keeps_exclusion(storage, tmp_path):
+    pool = {}
+    writer = w.CheckoutLease(storage, str(tmp_path), True, pool=pool)
+    sibling = w.CheckoutLease(storage, str(tmp_path), True, pool=pool)
+    await writer.__aenter__()
+    await sibling.__aenter__()
+    assert writer.handle is sibling.handle
+    other_run = w.CheckoutLease(storage, str(tmp_path), False, wait_seconds=0)
+    with pytest.raises(w.DispatchNotStarted, match="wait exhausted"):
+        await other_run.__aenter__()
+    await writer.__aexit__()
+    # The reader sibling still retains the exclusive run-owned lease.
+    other_run = w.CheckoutLease(storage, str(tmp_path), False, wait_seconds=0)
+    with pytest.raises(w.DispatchNotStarted, match="wait exhausted"):
+        await other_run.__aenter__()
+    await sibling.__aexit__()
+    async with w.CheckoutLease(storage, str(tmp_path), False, wait_seconds=0):
+        pass
+
+
+@pytest.mark.parametrize("error,expected", [("insufficient_quota", True), ({"code": "rate_limit_exceeded"}, True), ("API Error: 503 Service unavailable", True), ({"status_code": 503}, True), ("Test failed: expected HTTP 503", False), ("permission denied", False)])
+def test_antigravity_terminal_provider_error_fallback(tmp_path, error, expected):
+    # Synthetic protocol fixtures: no live quota request is used by this test.
+    stream = tmp_path / "agy.jsonl"
+    stream.write_text(json.dumps({"event": "result", "result": {"status": "ERROR", "error": error, "response": ""}}) + "\n")
+    assert bool(w.availability_failure({"status": "failed", "backend": "antigravity", "raw_stream_log": str(stream)})) is expected
+
+
+def test_antigravity_tool_error_does_not_authorize_fallback(tmp_path):
+    stream = tmp_path / "agy.jsonl"
+    stream.write_text(json.dumps({"event": "step_update", "result": {"status": "ERROR", "error": "insufficient_quota"}}) + "\n")
+    assert w.availability_failure({"status": "failed", "backend": "antigravity", "raw_stream_log": str(stream)}) is None

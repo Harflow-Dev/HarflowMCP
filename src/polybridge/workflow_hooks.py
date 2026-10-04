@@ -47,3 +47,19 @@ def refuse_managed(log_dir: Path, task_id: str) -> None:
             "Workflow-managed agents report results to their supervisor; direct dispatch and workflow mutations are refused",
             rule="workflow_managed",
         )
+
+
+def refuse_direct_message(log_dir: Path, task_id: str) -> None:
+    """Managed execution assignments can only change through the runner."""
+    from .inbox import SendRefused
+    from .workflows import TERMINAL
+    try:
+        association = owner(log_dir, task_id, strict=True)
+        if association is None or association.get("role") == "builder":
+            return
+        if association.get("status") not in TERMINAL or association.get("workflow_settling"):
+            raise SendRefused("This task belongs to an active workflow; respond through the workflow caller", code="workflow_active")
+    except SendRefused:
+        raise
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise SendRefused("Cannot establish workflow ownership safely", code="workflow_ownership_unknown") from exc

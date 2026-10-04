@@ -56,13 +56,17 @@ class Registry:
             if callable(result):
                 result = result(prompt, kwargs)
         snapshot = result if "summary" in result and "result" not in result else {"summary": json.dumps(result)}
+        snapshot.setdefault("backend", kwargs["backend"].name)
         task = Task(kwargs["task_id"], snapshot)
         task.kwargs = copy.deepcopy(kwargs)
+        task.repo = repo
+        from polybridge import store
+        store.write(self._log_dir, store.TaskRecord(task_id=task.task_id, backend=task.result["backend"], session_id=task.result["session_id"], repo_path=str(repo), started_at="2026-10-04T00:00:00Z", freedom=kwargs.get("freedom", "write_in_repo"), network=kwargs.get("network"), status=task.result["status"]))
         self.tasks[task.task_id] = task
         return task
 
     async def resume(self, previous, prompt, **kwargs):
-        return await self.start(prompt, Path("."), **{**previous.kwargs, **kwargs})
+        return await self.start(prompt, previous.repo, **{**previous.kwargs, **kwargs})
 
     def get(self, tid):
         return self.tasks.get(tid)
@@ -85,8 +89,9 @@ def storage(tmp_path, monkeypatch):
     return w.WorkflowStore(tmp_path)
 
 
-async def run_flow(storage, tmp_path, definition=None, registry=None):
+async def run_flow(storage, tmp_path, definition=None, registry=None, *, guided=False):
     run = storage.create_run(w.validate_definition(definition or graph()), "ORIGINAL PRIVATE REQUEST", tmp_path)
+    storage.update_run(run["workflow_run_id"], lambda current: current.update(runner_policy="guided") if guided else current.pop("runner_policy", None), "test_runner_policy")
     registry = registry or Registry(storage.root)
     await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]), 5)
     return storage.get_run(run["workflow_run_id"]), registry
@@ -446,6 +451,8 @@ async def test_parallel_input_suspension_settles_sibling_and_resume_does_not_rep
     await asyncio.wait_for(input_accepted.wait(), 3)
     pending = storage.get_run(run["workflow_run_id"])
     assert pending["status"] == "needs_input" and pending["settling"]
+    from polybridge import identity
+    monkeypatch.setattr(identity, "identity_check", lambda *args: "alive")
     with pytest.raises(w.WorkflowError, match="Unresolved"):
         storage.control(run["workflow_run_id"], "resume", instructions="Continue")
     release_right.set()
@@ -502,7 +509,7 @@ async def test_explicit_recovery_grant_unlocks_exhausted_retry(storage, tmp_path
     g = graph()
     g["connections"].append({"id": "retry", "source": "work", "target": "work", "condition": "Repeat once after inspection", "max_retries": limit})
     run = storage.create_run(w.validate_definition(g), "Request", tmp_path)
-    storage.update_run(run["workflow_run_id"], lambda r: r.update(retry_counts={"retry": limit}), "fixture")
+    storage.update_run(run["workflow_run_id"], lambda r: (r.pop("runner_policy", None), r.update(retry_counts={"retry": limit})), "fixture")
     def policy(c, registry):
         result = default_decision(c, registry)
         if c["current_stage"]["node_id"] == "work":
@@ -1016,7 +1023,7 @@ def test_structural_barrier_has_no_session_fields(storage, tmp_path):
     assert "available_sessions" not in choice
 
 
-@pytest.mark.parametrize("kind", ["protocol", "permission", "authority", "cancelled", "uncertain"])
+@pytest.mark.parametrize("kind", ["permission", "authority", "cancelled", "uncertain"])
 def test_unsafe_execution_never_offers_retry(kind):
     assert not d.retry_eligible({"status": "failed", "tasks": [], "node_result": {"status": "blocked", "result": {"failure_kind": kind}}})
 
@@ -1065,3 +1072,88 @@ def test_no_retry_or_resume_when_all_candidates_are_suppressed(storage, tmp_path
     token = {'id': 'token', 'node_id': 'work', 'execution_complete': True, 'execution_activation_id': activation['id'], 'result': activation['node_result']}
     assert not any(c['kind'] == 'retry_execution' for c in d.continuations(run, node, token, False))
     assert d.available_sessions(run, node) == []
+
+
+async def test_settled_protocol_failure_explicit_retry_recovers_without_repeating_sibling(storage, tmp_path):
+    definition = parallel()
+    counts = {'left': 0, 'right': 0}
+    def worker_left(prompt, kwargs):
+        counts['left'] += 1
+        if counts['left'] == 1:
+            return {'summary': '{"status":"succeeded"},"evidence":[]}'}
+        return {'status': 'succeeded', 'result': {'summary': 'Corrected envelope'}, 'evidence': []}
+    def worker_right(prompt, kwargs):
+        counts['right'] += 1
+        return {'status': 'succeeded', 'result': {'summary': 'Sibling retained'}, 'evidence': []}
+    def policy(context, registry):
+        retry = next((c for c in context['valid_continuations'] if c['kind'] == 'retry_execution'), None)
+        if retry:
+            assert context['input_results'][0]['retry_eligible']
+            return {'decision_id': context['decision_id'], 'action': 'continue', 'reason': 'Explicitly correct malformed result', 'next': [{'continuation_id': retry['continuation_id'], 'prompt': 'Perform the assigned review and return a valid envelope', 'session_mode': 'fresh'}]}
+        return default_decision(context, registry)
+    run, _ = await run_flow(storage, tmp_path, definition, Registry(storage.root, policy, {'left': worker_left, 'right': worker_right}), guided=True)
+    assert run['status'] == 'completed'
+    assert counts == {'left': 2, 'right': 1}
+    failed = next(a for a in run['activations'] if a.get('result_error'))
+    assert failed['raw_output'].endswith(',"evidence":[]}')
+    assert failed['resolved_by_execution_id']
+
+
+async def test_guided_parallel_trailing_worker_json_keeps_branches_successful(storage, tmp_path):
+    definition = parallel()
+    output = {'summary': json.dumps({'status': 'succeeded', 'result': {'summary': 'Review completed'}, 'evidence': ['reviewed']}) + ',"evidence":[]}'}
+    run, registry = await run_flow(storage, tmp_path, definition, Registry(storage.root, outputs={'left': output}), guided=True)
+    assert run['status'] == 'completed'
+    left = next(a for a in run['activations'] if a['role'] == 'node' and a['node_id'] == 'left')
+    assert left['node_result']['status'] == 'succeeded'
+    assert left['raw_output'].endswith(',"evidence":[]}')
+    assert len([a for a in run['activations'] if a['role'] == 'node' and a['node_id'] == 'left']) == 1
+
+
+async def test_guided_exhaustion_resume_does_not_repeat_worker(storage, tmp_path):
+    bad = True
+    def policy(context, registry):
+        result = default_decision(context, registry)
+        if bad:
+            result['decision_id'] = 'stale'
+        return result
+    run, registry = await run_flow(storage, tmp_path, registry=Registry(storage.root, policy), guided=True)
+    assert run['status'] == 'needs_attention'
+    assert 'Decision ID' in run['attention_reason']
+    assert not any(a['role'] == 'node' for a in run['activations'])
+    bad = False
+    storage.control(run['workflow_run_id'], 'resume', instructions='Correct the decision ID')
+    await w.WorkflowSupervisor(registry, storage).execute(run['workflow_run_id'])
+    assert storage.get_run(run['workflow_run_id'])['status'] == 'completed'
+    assert len([call for call in registry.calls if 'Context:\n' not in call[0]]) == 1
+
+
+async def test_guided_harmless_decision_fields_persist_warnings(storage, tmp_path):
+    def policy(context, registry):
+        result = default_decision(context, registry)
+        result['display_note'] = 'Presentation only'
+        for entry in result.get('next', []):
+            entry['label'] = 'Continue'
+            choice = next(c for c in context['valid_continuations'] if c['continuation_id'] == entry['continuation_id'])
+            if not choice['requires_prompt']:
+                entry.update(assigned_task_ids=[], additional_result_refs=[])
+        return result
+    run, _ = await run_flow(storage, tmp_path, registry=Registry(storage.root, policy), guided=True)
+    assert run['status'] == 'completed'
+    assert all(decision['protocol_warnings'] for decision in run['decisions'])
+    assert all('display_note' not in decision for decision in run['decisions'])
+
+
+async def test_guided_structural_nonempty_result_context_is_not_silently_dropped(storage, tmp_path):
+    definition = graph()
+    definition['nodes'].pop(1)
+    definition['connections'] = [{'id': 'begin', 'source': 'start', 'target': 'end'}]
+    def policy(context, registry):
+        result = default_decision(context, registry)
+        if context['current_stage']['node_id'] == 'start':
+            result['next'][0]['additional_result_refs'] = ['foreign']
+        return result
+    run, _ = await run_flow(storage, tmp_path, definition, Registry(storage.root, policy), guided=True)
+    assert run['status'] == 'needs_attention'
+    assert 'additional_result_refs' in run['attention_reason']
+    assert not any(a['role'] == 'node' for a in run['activations'])

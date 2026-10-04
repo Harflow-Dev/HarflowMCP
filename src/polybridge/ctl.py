@@ -161,6 +161,9 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
             wp.add_argument("--limit", type=int)
             wp.add_argument("--before-seq", type=int)
             wp.add_argument("--after-seq", type=int)
+        if action == "list-runs":
+            wp.add_argument("--offset", type=int, default=0)
+            wp.add_argument("--limit", type=int, default=100)
         if action == "recover":
             wp.add_argument("--reason", required=True)
             wp.add_argument("--additional-attempts", type=int, default=0)
@@ -590,6 +593,9 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
             return await server.apply_workflow_draft(json.loads(raw), args.expected_draft_revision)
         if action in {"list", "list-runs"}:
             entries = await server._workflow_call(action.replace("-", "_"))
+            if action == "list-runs":
+                from .workflow_responses import history_page
+                return history_page(entries, args.offset, args.limit)
             return {"workflows" if action == "list" else "runs": entries}
         if action in {"get", "delete"}:
             return await server._workflow_call(action, name=args.name)

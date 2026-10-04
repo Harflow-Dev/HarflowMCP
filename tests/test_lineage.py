@@ -54,6 +54,16 @@ def always(verdict: str):
     return lambda identity: verdict
 
 
+def test_vibe_caller_uses_backend_retitled_identity(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from polybridge import identity
+    record = make_record(tmp_path, "retitled", backend="vibe", markers=["vibe", str(tmp_path)])
+    monkeypatch.setattr(identity, "_run_ps", lambda _: SimpleNamespace(returncode=0, stdout=record.start_time + " Vibe CLI\n", stderr=""))
+    assert identity.identity_check(lineage._candidate_identity(record)) == "alive"
+    ordinary = make_record(tmp_path, "ordinary", backend="codex", markers=["codex", str(tmp_path)])
+    assert identity.identity_check(lineage._candidate_identity(ordinary)) == "undecidable"
+
+
 def raising_getsid(pid: int) -> int:
     raise OSError("no session for this process")
 

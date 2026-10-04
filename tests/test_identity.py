@@ -90,6 +90,17 @@ def test_a_matching_start_time_with_a_missing_marker_is_undecidable() -> None:
     assert identity.identity_check(with_bad_marker) == "undecidable"
 
 
+def test_known_caller_title_requires_exact_title_and_captured_start(monkeypatch):
+    from types import SimpleNamespace
+    start = "Thu Sep 24 12:00:00 2026"
+    monkeypatch.setattr(identity, "_run_ps", lambda _: SimpleNamespace(returncode=0, stdout=start + " Vibe CLI\n", stderr=""))
+    candidate = {"pid": 4242, "start_time": start, "markers": ["vibe", "/repo"], "caller_process_titles": ("Vibe CLI",)}
+    assert identity.identity_check(candidate) == "alive"
+    assert identity.identity_check(candidate | {"start_time": None}) != "alive"
+    assert identity.identity_check(candidate | {"start_time": "old"}) == "dead"
+    assert identity.identity_check(candidate | {"caller_process_titles": ("Vibe",)}) == "undecidable"
+
+
 def test_own_identity_is_cached_and_alive() -> None:
     identity.own_identity.cache_clear()
     first = identity.own_identity()

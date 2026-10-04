@@ -225,6 +225,10 @@ def validate_definition(raw: dict[str, Any]) -> dict[str, Any]:
             node.setdefault("role", "task")
             if node["role"] not in {"planning", "review", "implementation", "task"}:
                 raise WorkflowError(f"Invalid agent role: {node_id}")
+            if node["role"] == "planning":
+                node.setdefault("require_technical_plan", True)
+                if not isinstance(node["require_technical_plan"], bool):
+                    raise WorkflowError("Planning require_technical_plan must be a boolean")
             node["agent"] = _candidate(node.get("agent", {"backend": "codex"}))
             node.setdefault("instructions", "")
             if not isinstance(node["instructions"], str) or node.get("network") not in (None, True, False):
@@ -672,6 +676,7 @@ class WorkflowStore:
         run["tasks"] = []
         if kind == "workflow":
             run["execution_contract"] = "delegation"
+            run["runner_policy"] = "guided"
         run.update(retry_counts={}, retry_grants={})
         _write(self.runs / f"{rid}.json", run)
         return run
@@ -681,13 +686,23 @@ class WorkflowStore:
             raise WorkflowError("Unknown workflow action")
         if not isinstance(additional_attempts, int) or isinstance(additional_attempts, bool) or additional_attempts < 0:
             raise WorkflowError("additional_attempts must be a nonnegative integer")
-        if action in {"resume", "recover"} and not _supervisor_present(self.get_run(run_id)):
-            self.reconcile_run(run_id)
+        if action in {"resume", "recover"}:
+            observed = self.get_run(run_id)
+            if observed.get("supervisor_identity"):
+                from . import identity
+                if identity.identity_check(observed["supervisor_identity"]) == "undecidable":
+                    raise WorkflowError("Supervisor identity is uncertain; cannot resume or recover")
+            if not _supervisor_present(observed):
+                self.reconcile_run(run_id)
         control_detail: dict[str, Any] = {"instructions": instructions, "additional_attempts": additional_attempts, "retry_grants": {}}
         def change(r: dict[str, Any]) -> None:
             if r.get("execution_contract") == "delegation" and r.get("interaction_owner") and interaction_owner is not None and interaction_owner != r["interaction_owner"]:
                 raise WorkflowError("Workflow interaction belongs to its original caller")
             if action in {"resume", "recover"}:
+                if r.get("supervisor_identity"):
+                    from . import identity
+                    if identity.identity_check(r["supervisor_identity"]) == "undecidable":
+                        raise WorkflowError("Supervisor identity is uncertain; cannot resume or recover")
                 _require_delegation_control(r)
             if action == "recover":
                 if r.get("kind") == "builder" or r["status"] != "failed":
@@ -746,7 +761,7 @@ class WorkflowStore:
         return result
 
     def pinned_tasks(self) -> set[str]:
-        return {t["task_id"] for r in self.list_runs() if r["status"] not in TERMINAL for a in r["activations"] for t in a["tasks"]}
+        return {t["task_id"] for r in self.list_runs() if r["status"] not in TERMINAL or r.get("settling") or any(t["status"] in {"reserved", "running", "uncertain"} for a in r["activations"] for t in a["tasks"]) for a in r["activations"] for t in a["tasks"]}
 
     def task_association(self, task_id: str, *, strict: bool = False, _visited: set[str] | None = None) -> dict[str, Any] | None:
         visited = set() if _visited is None else _visited
@@ -1173,6 +1188,12 @@ def availability_failure(snapshot: dict[str, Any]) -> str | None:
                         continue
                     if not isinstance(event, dict):
                         continue
+                    adapter = backends.BACKENDS.get(backend)
+                    classify = getattr(adapter, "workflow_availability_failure", None)
+                    if classify:
+                        reason = classify(event)
+                        if reason:
+                            return reason
                     if backend in {"claude", "codex", "opencode", "vibe", "antigravity"} and event.get("type") in ({"turn.failed"} if backend == "codex" else {"error"}):
                         error = event.get("error")
                         if isinstance(error, dict):
@@ -1236,7 +1257,7 @@ def observed_harness_metadata(snapshot: dict[str, Any], metadata: dict[str, Any]
 
 class CheckoutLease:
     """OS leases shared across supervisors; process death releases the descriptor."""
-    def __init__(self, storage: WorkflowStore, repo: str, write: bool, should_continue: Any = None, *, wait_seconds: float = 30.0, on_wait: Any = None):
+    def __init__(self, storage: WorkflowStore, repo: str, write: bool, should_continue: Any = None, *, wait_seconds: float = 30.0, on_wait: Any = None, pool: dict[str, Any] | None = None):
         self.repo = str(Path(repo).resolve())
         self.store = storage
         self.path = storage.leases / (hashlib.sha256(self.repo.encode()).hexdigest() + ".lock")
@@ -1245,8 +1266,31 @@ class CheckoutLease:
         self.handle: Any = None
         self.wait_seconds = wait_seconds
         self.on_wait = on_wait
+        self.pool = pool
+        self.entry: dict[str, Any] | None = None
 
     async def __aenter__(self):
+        if self.pool is None:
+            return await self._acquire()
+        # One supervisor owns the pooled descriptor. Every dispatch uses the same
+        # strength (exclusive if this workflow has any writer), so joining cannot
+        # downgrade protection while a writer remains live.
+        entry = self.pool.setdefault(self.repo, {"guard": asyncio.Lock(), "handle": None, "users": 0, "write": self.write})
+        self.entry = entry
+        async with entry["guard"]:
+            if entry["write"] != self.write:
+                raise WorkflowError("Pooled checkout lease strength must remain consistent")
+            if self.should_continue is not None and not self.should_continue():
+                raise DispatchNotStarted("Scheduling stopped before dispatch")
+            if entry["handle"] is None:
+                await self._acquire()
+                entry["handle"] = self.handle
+            else:
+                self.handle = entry["handle"]
+            entry["users"] += 1
+        return self
+
+    async def _acquire(self):
         self.handle = self.path.open("a")
         deadline = time.monotonic() + self.wait_seconds
         notified = False
@@ -1300,6 +1344,13 @@ class CheckoutLease:
                     raise
 
     async def __aexit__(self, *_: Any):
+        if self.entry is not None:
+            async with self.entry["guard"]:
+                self.entry["users"] -= 1
+                if self.entry["users"]:
+                    self.handle = None
+                    return
+                self.entry["handle"] = None
         if self.handle:
             fcntl.flock(self.handle, fcntl.LOCK_UN)
             self.handle.close()
@@ -1311,6 +1362,7 @@ class WorkflowSupervisor:
         self.store = storage
         self.run_id = ""
         self.decision_lock = asyncio.Lock()
+        self.checkout_leases: dict[str, Any] = {}
 
     def run(self) -> dict[str, Any]:
         return self.store.get_run(self.run_id)
@@ -1389,7 +1441,7 @@ class WorkflowSupervisor:
                 backends.check_reasoning_effort(backend, candidate.get("reasoning_effort"))
                 capability_stage = "enforcement"
                 backend.enforcement(freedom, network)
-                async with CheckoutLease(self.store, run["repo_path"], freedom != "read_only", lambda: self.run()["status"] == "running", on_wait=lambda detail: self.update(lambda r: r.update(checkout_wait=detail), "checkout_wait", detail)):
+                async with CheckoutLease(self.store, run["repo_path"], any(n.get("freedom", ROLE_FREEDOM_DEFAULTS.get(n.get("role"), "read_only")) != "read_only" for n in run["definition"].get("nodes", []) if n["type"] == "agent") or freedom != "read_only", lambda: self.run()["status"] == "running", on_wait=lambda detail: self.update(lambda r: r.update(checkout_wait=detail), "checkout_wait", detail), pool=self.checkout_leases):
                     if self.run()["status"] != "running":
                         self._task_update(activation["id"], task_id, {"status": "not_started"})
                         return None
@@ -1401,7 +1453,7 @@ class WorkflowSupervisor:
                         else:
                             record = task_store.read(self.registry._log_dir, previous["task_id"])
                             if record is None:
-                                raise WorkflowError("Previous resume session is unavailable")
+                                raise SessionUnknownError("Previous resume session is unavailable")
                             task = await self.registry.resume_record(record, prompt, max_turns=candidate.get("max_turns"), network=network, task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder")
                     else:
                         if role == "builder":
@@ -1658,7 +1710,10 @@ class WorkflowSupervisor:
         if token.get("selected_connections"):
             selected = [e for e in r["definition"]["connections"] if e["id"] in token["selected_connections"]]
         else:
-            selected = await self._decision(node, result or token.get("context", {}), token)
+            from .workflow_traversal import automatic_edges
+            selected = automatic_edges(r, node, token) if r.get("execution_contract") == "delegation" else None
+            if selected is None:
+                selected = await self._decision(node, result or token.get("context", {}), token)
         if selected is None:
             return
         current = self.run()
@@ -1699,8 +1754,14 @@ class WorkflowSupervisor:
                 if rr.get("execution_contract") == "delegation":
                     refs = ([token["execution_activation_id"]] if token.get("execution_activation_id") else token.get("input_result_refs", []))
                     child["input_result_refs"] = refs
+                    target_node = next(n for n in rr["definition"]["nodes"] if n["id"] == edge["target"])
+                    if rr.get("runner_policy") == "guided" and target_node["type"] == "end" and token.get("execution_activation_id"):
+                        child["execution_activation_id"] = token["execution_activation_id"]
+                        child["completion_source_node_id"] = node["id"]
                     dispatch = token.get("assignments", {}).get(edge["id"], {})
                     child.update({k: copy.deepcopy(dispatch[k]) for k in ("assignment_prompt", "assigned_task_ids", "additional_result_refs", "execution_session_mode", "resume_task_id", "resume_source_execution_id") if k in dispatch})
+                    if "structural_dispatch" in dispatch:
+                        child.update(copy.deepcopy(dispatch["structural_dispatch"]))
                 rr["pending"].append(child)
         self.update(advance, "transition", [e["id"] for e in selected])
 
@@ -1836,13 +1897,17 @@ class WorkflowSupervisor:
         if not await self.reconcile() and self.run()["status"] != "cancelling":
             return
         run = self.run()
-        if run["status"] == "starting":
-            start = next(n["id"] for n in run["definition"]["nodes"] if n["type"] == "start")
-            from . import identity
-            self.update(lambda r: r.update(status="running", supervisor_pid=os.getpid(), supervisor_identity=identity.own_identity(), pending=[{"id": uuid.uuid4().hex, "node_id": start, "stack": [], "context": {}}]), "supervisor_started")
-        else:
-            from . import identity
-            self.update(lambda r: r.update(supervisor_pid=os.getpid(), supervisor_identity=identity.own_identity()), "supervisor_resumed")
+        from . import identity
+        def initialize(r: dict[str, Any]) -> None:
+            # Seed Start even if a caller paused before this process acquired ownership.
+            if r["status"] not in TERMINAL and not r.get("execution_initialized") and not r["pending"] and not r["activations"]:
+                start = next(n["id"] for n in r["definition"]["nodes"] if n["type"] == "start")
+                r["pending"] = [{"id": uuid.uuid4().hex, "node_id": start, "stack": [], "context": {}}]
+            r["execution_initialized"] = True
+            if r["status"] == "starting":
+                r["status"] = "running"
+            r.update(supervisor_pid=os.getpid(), supervisor_identity=identity.own_identity())
+        self.update(initialize, "supervisor_started")
         active: dict[str, asyncio.Task[Any]] = {}
         try:
             while True:
@@ -2014,7 +2079,7 @@ async def _main(args: Any) -> None:
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
             final = storage.get_run(args.run_id)
-            if final["kind"] == "builder" and final["status"] == "starting" and any(m["status"] == "pending" for m in final.get("builder_messages", [])):
+            if (final["kind"] == "builder" and final["status"] == "starting" and any(m["status"] == "pending" for m in final.get("builder_messages", []))) or (final["kind"] != "builder" and final["status"] in {"running", "cancelling"}):
                 _launch(storage, args.run_id)
 
 
