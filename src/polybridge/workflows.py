@@ -743,6 +743,11 @@ class WorkflowStore:
                 exhausted_edges = r.pop("exhausted_retry_edges", [])
                 if additional_attempts:
                     _positive(additional_attempts, "additional_attempts")
+                    if isinstance(instructions, str) and instructions.strip():
+                        from .workflow_delegation import settled
+                        for execution in r["activations"]:
+                            if execution["role"] == "node" and settled(execution) and execution.get("node_result", {}).get("result", {}).get("failure_kind") == "protocol":
+                                r.setdefault("protocol_retry_authorizations", {})[execution["id"]] = {"node_id": execution["node_id"], "reason": instructions.strip(), "granted_at": time.time()}
                     for n in r["definition"]["nodes"]:
                         r["attempt_grants"][n["id"]] = r["attempt_grants"].get(n["id"], 0) + additional_attempts
                     r["transition_grant"] = r.get("transition_grant", 0) + additional_attempts
@@ -751,7 +756,7 @@ class WorkflowStore:
                         r.setdefault("retry_grants", {})[edge_id] = prior + additional_attempts
                         control_detail["retry_grants"][edge_id] = {"additional": additional_attempts, "previous": prior, "total": prior + additional_attempts}
             else:
-                if action == "pause" and r["status"] == "cancelling":
+                if action == "pause" and r["status"] in {"cancelling", "needs_input"}:
                     return
                 r["status"] = "paused" if action == "pause" else "cancelling"
                 if instructions:
@@ -809,7 +814,7 @@ class WorkflowStore:
                 raise WorkflowError("Only a named unresolved recordless dispatch can be abandoned")
             if task_store.read(self.root / "tasks", task_id) is not None:
                 raise WorkflowError("Recorded tasks require process reconciliation, not abandonment")
-            task.update(status="not_started", reconciliation={"source": "human_confirmation", "reason": reason.strip(), "confirmed_no_process": True, "time": time.time()})
+            update_task_state(activation, task, {"status": "not_started", "reconciliation": {"source": "human_confirmation", "reason": reason.strip(), "confirmed_no_process": True, "time": time.time()}})
             if all(t["status"] == "not_started" for t in activation["tasks"]):
                 activation["status"] = "not_started"
             if r["status"] not in TERMINAL:
@@ -829,11 +834,11 @@ class WorkflowStore:
                         liveness = task_liveness(self.root / "tasks", record)
                         if not liveness["outcome_known"]:
                             snapshot.update(status="failed", outcome_unknown=True, recovery_reason="Managed process is dead but its owner did not record an authoritative outcome")
-                        task.update(status=snapshot["status"], result=snapshot, liveness=liveness)
+                        update_task_state(activation, task, {"status": snapshot["status"], "result": snapshot, "liveness": liveness})
                     elif record is None and task.get("dispatch_stage") == "preparing":
-                        task.update(status="not_started", recovery_reason="Supervisor stopped before requesting spawn")
+                        update_task_state(activation, task, {"status": "not_started", "recovery_reason": "Supervisor stopped before requesting spawn"})
                     else:
-                        task["status"] = "uncertain"
+                        update_task_state(activation, task, {"status": "uncertain"})
                 if activation["status"] in {"running", "reserved", "uncertain"} and all(t["status"] not in {"reserved", "running", "uncertain"} for t in activation["tasks"]):
                     activation["status"] = "completed" if activation["tasks"] and activation["tasks"][-1]["status"] == "completed" else "failed"
                 if activation["role"] == "node":
@@ -856,6 +861,15 @@ class WorkflowStore:
             from .workflow_delegation import reconcile_delegation
             return self.update_run(run_id, reconcile_delegation, "delegation_reconciled")
         return result
+
+
+def update_task_state(activation: dict[str, Any], task: dict[str, Any], values: dict[str, Any]) -> None:
+    """Keep a reply reservation and its durable question delivery state together."""
+    task.update(values)
+    question = next((q for q in activation.get("questions", []) if q.get("reply_task_id") == task["task_id"]), None)
+    if question and values.get("status"):
+        state = values["status"]
+        question["answer_delivery_state"] = "settled" if state in {"completed", "failed", "cancelled", "timed_out"} else state
 
 
 def _require_delegation_control(run: dict[str, Any]) -> None:
@@ -1434,6 +1448,12 @@ class WorkflowSupervisor:
             network = False if run["network"] is False else node.get("network", run["network"])
             task_id = uuid.uuid4().hex
             display_prompt = run.get("builder_turn_prompt", run["prompt"]) if role == "builder" else activation.get("turn_prompt", activation.get("assignment_prompt", run["prompt"]))
+            if role == "orchestrator" and run.get("runner_policy") == "guided" and any(t.get("status") != "not_started" for a in run["activations"] if a["role"] == "orchestrator" for t in a["tasks"]):
+                stage = next((n for n in run["definition"]["nodes"] if n["id"] == activation["node_id"]), {})
+                label = stage.get("title") or activation["node_id"]
+                checkpoint = activation.get("token") or {}
+                detail = "correcting the previous decision" if checkpoint.get("decision_error") else "choosing the next step"
+                display_prompt = f"Workflow checkpoint: {label} — {detail}."
             use_resume = (persistent_orchestrator or role == "node" and node.get("session_mode") == "resume" or role == "builder" and run.get("builder_followup")) and previous.get("candidate") == identity
             reservation = {"task_id": task_id, "candidate": candidate, "status": "reserved", "dispatch_stage": "preparing", "reserved_at": time.time(), "freedom": freedom, "assignment_prompt": display_prompt, "repo_path": run["repo_path"], "network": network, "session_mode": "resume" if use_resume else "fresh", "resume_task_id": previous.get("task_id") if use_resume else None}
             reservation["harness_metadata"] = {"requested": copy.deepcopy(candidate), "effective": {"backend": candidate["backend"], "model": candidate.get("model"), "reasoning_effort": candidate.get("reasoning_effort"), "freedom": freedom, "settings_source": "explicit_launch_arguments", "default_model": "unknown" if not candidate.get("model") else None, "provider_identity": "unknown"}, "observed": None, "provenance": "validated_launch_configuration", "verification_status": "configured_not_observed"}
@@ -1576,11 +1596,7 @@ class WorkflowSupervisor:
         def update(r: dict[str, Any]) -> None:
             a = next(a for a in r["activations"] if a["id"] == aid)
             task = next(t for t in a["tasks"] if t["task_id"] == tid)
-            task.update(values)
-            q = next((q for q in a.get("questions", []) if q.get("reply_task_id") == tid), None)
-            if q and values.get("status"):
-                state = values["status"]
-                q["answer_delivery_state"] = "settled" if state in {"completed", "failed", "cancelled", "timed_out"} else state
+            update_task_state(a, task, values)
         self.update(update, "task_state", {"task_id": tid, **values})
 
     def _activation(self, node_id: str, role: str, token: dict[str, Any] | None = None) -> dict[str, Any]:

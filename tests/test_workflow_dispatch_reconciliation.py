@@ -102,3 +102,36 @@ async def test_registry_marks_only_proven_exec_refusal(tmp_path, monkeypatch, du
             reasoning_effort=None, task_id='known')
     assert caught.value.polybridge_not_started is True
     assert not (tmp_path/'known.meta.json').exists()
+
+@pytest.mark.parametrize('operation', ['reconcile', 'abandon'])
+def test_recordless_answer_recovery_updates_question_delivery(tmp_path, monkeypatch, operation):
+    storage = w.WorkflowStore(tmp_path)
+    run = reserved(storage, tmp_path, 'preparing')
+    def question(r):
+        a = r['activations'][0]
+        a['questions'] = [{'question_id': 'question', 'reply_task_id': 'missing', 'status': 'answered', 'answer_delivery_state': 'reserved'}]
+    storage.update_run(run['workflow_run_id'], question, 'fixture')
+    monkeypatch.setattr('polybridge.workflow_delegation.reconcile_delegation', lambda r: None)
+    if operation == 'reconcile':
+        result = storage.reconcile_run(run['workflow_run_id'])
+    else:
+        result = storage.abandon_dispatch(run['workflow_run_id'], 'execution', 'missing', 'Confirmed stopped', True)
+    assert result['activations'][0]['questions'][0]['answer_delivery_state'] == 'not_started'
+
+@pytest.mark.parametrize('state', ['not_started', 'reserved', 'running', 'uncertain', 'completed'])
+def test_delegation_repairs_existing_stale_answer_delivery(state):
+    from polybridge import workflow_delegation as d
+    from test_workflow_delegation import graph
+    question = {'question_id': 'q', 'origin_task_id': 'origin', 'reply_task_id': 'reply', 'status': 'answered', 'answer_delivery_state': 'reserved'}
+    reply = {'task_id': 'reply', 'status': state}
+    if state == 'completed':
+        reply['result'] = {'status': 'completed', 'summary': 'observed reply'}
+    activation = {'id': 'a', 'node_id': 'work', 'role': 'node', 'status': 'waiting_for_answer', 'token': {'id': 't'}, 'pending_question_id': 'q', 'questions': [question], 'tasks': [reply]}
+    token = {'id': 't', 'node_id': 'work', 'execution_activation_id': 'a'}
+    run = {'activations': [activation], 'pending': [token], 'definition': w.validate_definition(graph())}
+    d.reconcile_delegation(run)
+    assert question['answer_delivery_state'] == ('settled' if state == 'completed' else state)
+    if state == 'completed':
+        assert token['recovered_result'] == reply['result']
+    else:
+        assert 'recovered_result' not in token

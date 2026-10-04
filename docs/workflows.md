@@ -417,8 +417,15 @@ Polybridge accepts one unambiguous JSON contract surrounded by prose or a code f
 objects remain protocol failures, with the complete raw output retained. New runs accept a complete
 result envelope followed by unrelated text or surplus formatting; a missing or malformed envelope
 still fails the protocol. Historical run snapshots retain their recorded runner policy.
-The orchestrator can explicitly select an issued retry for a settled protocol failure within its
-node budget; no worker is automatically rerun. An `asking`
+For guided runs, a malformed final envelope triggers a focused correction turn on the same
+harness, resuming its retained session when available. The turn explains the validation error
+and asks only for a corrected result, without repeating the work or changing permissions. Each
+correction consumes a node attempt; the original output and errors remain inspectable. When
+the budget is exhausted, required failures return to the orchestrator for recovery and safe
+optional branches may converge with their failure evidence. The Monitor shows a collapsible
+“Malformed output” activity cell. The orchestrator conversation displays the original request
+once, then brief checkpoint descriptions for later turns; internal decision guidance stays hidden. Explicit caller grants can reopen settled protocol retries
+without granting additional tool access. An `asking`
 result contains `result.question` and optional `result.context`. The worker yields; the runner
 persists the question and marks its execution `waiting_for_answer`, without treating it as a final
 result. The orchestrator returns `answer` with the issued question ID and a focused answer prompt.

@@ -1320,3 +1320,79 @@ async def test_required_terminal_nonavailability_snapshot_does_not_redispatch_or
     assert final['status'] == 'needs_input'
     assert not any('Assignment:\n' in prompt for prompt, _ in registry.calls)
     assert len([a for a in final['activations'] if a['role'] == 'node']) == 1
+
+
+@pytest.mark.parametrize('checkpoint_type', ['end', 'parallel_end'])
+@pytest.mark.parametrize('invalid', [None, 'unassigned', 'unrelated', 'superseded'])
+def test_recovered_checkpoint_checklist_evidence(checkpoint_type, invalid, monkeypatch):
+    checkpoint = {'id': 'checkpoint', 'type': checkpoint_type}
+    worker = {'id': 'work', 'type': 'agent', 'role': 'implementation'}
+    previous = {'id': 'old', 'role': 'node', 'node_id': 'work', 'resolved_by_execution_id': 'recovered'}
+    recovered = {'id': 'recovered', 'role': 'node', 'node_id': 'work', 'status': 'completed', 'tasks': [], 'retry_of_execution_id': 'old', 'resolved_execution_refs': ['old'], 'assigned_task_ids': ['task'], 'node_result': {'status': 'succeeded', 'result': {'completed_task_ids': ['task']}}}
+    token = {'recovered_execution_refs': ['recovered'], 'input_result_refs': ['recovered']}
+    run = {'runner_policy': 'guided', 'definition': {'nodes': [checkpoint, worker]}, 'activations': [previous, recovered]}
+    if invalid == 'unassigned':
+        recovered['assigned_task_ids'] = []
+    elif invalid == 'unrelated':
+        token['input_result_refs'] = []
+    elif invalid == 'superseded':
+        recovered['resolved_by_execution_id'] = 'newer'
+    evidence = d.completion_evidence(run, checkpoint, token, 'task')
+    assert (evidence['id'] if evidence else None) == ('recovered' if invalid is None else None)
+    token['decision_id'] = 'decision'
+    run['tasks'] = [{'id': 'task'}]
+    monkeypatch.setattr(d, 'continuations', lambda *args, **kwargs: [])
+    decision = {'decision_id': 'decision', 'action': 'needs_input', 'question': 'Proceed?', 'reason': 'Checkpoint', 'task_updates': [{'task_id': 'task', 'status': 'completed', 'reason': 'Verified'}]}
+    if invalid:
+        with pytest.raises(w.WorkflowError, match='Completion requires'):
+            d.validate_decision(run, checkpoint, token, decision, False)
+    else:
+        d.validate_decision(run, checkpoint, token, decision, False)
+
+
+
+async def test_end_recovered_implementation_completes_checklist_with_actual_provenance(storage, tmp_path):
+    definition = graph('implementation')
+    definition['connections'][-1]['condition'] = 'Inspect result at End'
+    run = storage.create_run(w.validate_definition(definition), 'Recover implementation', tmp_path)
+    storage.update_run(run['workflow_run_id'], lambda r: r.update(runner_policy='guided', tasks=[{'id': 'task', 'title': 'Implement', 'status': 'pending'}]), 'test_setup')
+    calls = 0
+    def worker(prompt, kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {'status': 'failed', 'result': {'reason': 'Implementation needs another attempt'}, 'evidence': []}
+        return {'status': 'succeeded', 'result': {'completed_task_ids': ['task']}, 'evidence': ['verified']}
+    def policy(context, registry):
+        if context['current_stage']['node_id'] == 'end':
+            recovery = next((c for c in context['valid_continuations'] if c.get('recovery_from_checkpoint')), None)
+            if recovery:
+                return {'decision_id': context['decision_id'], 'action': 'continue', 'reason': 'Recover failed implementation', 'next': [{'continuation_id': recovery['continuation_id'], 'prompt': 'Complete task', 'assigned_task_ids': ['task'], 'session_mode': 'fresh'}]}
+            return {'decision_id': context['decision_id'], 'action': 'complete', 'reason': 'Recovered implementation verified', 'task_updates': [{'task_id': 'task', 'status': 'completed', 'reason': 'Implementation evidence verified'}]}
+        result = default_decision(context, registry)
+        if context['current_stage']['node_id'] == 'work' and context['current_stage']['phase'] == 'routing':
+            result['next'] = [{'continuation_id': 'finish'}]
+        for entry in result.get('next', []):
+            if entry.get('prompt'):
+                entry['assigned_task_ids'] = ['task']
+        return result
+    registry = Registry(storage.root, policy, {'work': worker})
+    await w.WorkflowSupervisor(registry, storage).execute(run['workflow_run_id'])
+    final = storage.get_run(run['workflow_run_id'])
+    assert final['status'] == 'completed'
+    assert calls == 2
+    success = next(a for a in final['activations'] if a['role'] == 'node' and a.get('node_result', {}).get('status') == 'succeeded')
+    assert final['tasks'][0]['completed_by_activation_id'] == success['id']
+
+
+async def test_orchestrator_visible_prompt_uses_request_once_then_checkpoint(storage, tmp_path):
+    run, registry = await run_flow(storage, tmp_path, guided=True)
+    calls = [(p, k) for p, k in registry.calls if 'Context:\n' in p]
+    assert len(calls) >= 2
+    assert calls[0][1]['display_prompt'] == 'ORIGINAL PRIVATE REQUEST'
+    assert all(k['display_prompt'] != 'ORIGINAL PRIVATE REQUEST' for p, k in calls[1:])
+    assert all(k['display_prompt'].startswith('Workflow checkpoint:') for p, k in calls[1:])
+    assert all('decision_id' not in k['display_prompt'] and 'Context:' not in k['display_prompt'] for p, k in calls)
+    assert all(c['original_request'] == 'ORIGINAL PRIVATE REQUEST' for c in registry.contexts)
+    turns = [t for a in run['activations'] if a['role'] == 'orchestrator' for t in a['tasks']]
+    assert [t['assignment_prompt'] for t in turns] == [k['display_prompt'] for p, k in calls]

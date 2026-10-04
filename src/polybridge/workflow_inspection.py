@@ -82,6 +82,8 @@ def decorate_tasks(entries: list[dict[str, Any]], log_dir: Any) -> list[dict[str
                 if run.get("execution_contract") == "delegation" and activation.get("role") == "node" and isinstance(activation.get("assignment_prompt"), str):
                     assignment = task.get("assignment_prompt", activation["assignment_prompt"])
                     association.update(display_prompt=assignment, prompt=assignment)
+                if activation.get("role") == "node" and activation.get("result_error") and task["task_id"] == activation.get("tasks", [])[-1]["task_id"]:
+                    association["workflow_result_error"] = activation["result_error"]
                 index[task["task_id"]] = association
         return index
 

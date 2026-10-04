@@ -63,7 +63,7 @@ def test_list_json_is_exactly_one_document(home: Path, capsys: pytest.CaptureFix
     lines = [line for line in out.splitlines() if line.strip()]
     assert len(lines) == 1
     doc = json.loads(lines[0])
-    assert doc["v"] == 3
+    assert doc["v"] == 4
     assert len(doc["tasks"]) == 1
     assert doc["tasks"][0]["task_id"] == "task-1"
     assert doc["tasks"][0]["owner"]["pid"] == 4242
@@ -76,7 +76,7 @@ def test_list_json_with_no_tasks_is_still_one_document(
 
     assert code == 0
     doc = json.loads(capsys.readouterr().out)
-    assert doc == {"v": 3, "tasks": []}
+    assert doc == {"v": 4, "tasks": []}
 
 
 def test_list_plain_table_names_its_columns(home: Path, capsys: pytest.CaptureFixture) -> None:
@@ -112,7 +112,7 @@ def test_a_bad_since_value_is_a_usage_error(home: Path, capsys: pytest.CaptureFi
     assert exc_info.value.code == 2
     captured = capsys.readouterr()
     doc = json.loads(captured.out)
-    assert doc["v"] == 3
+    assert doc["v"] == 4
     assert doc["error"]["code"] == "usage"
     assert captured.err.strip()
 
@@ -127,7 +127,7 @@ def test_status_json_for_a_known_task(home: Path, capsys: pytest.CaptureFixture)
     lines = [line for line in out.splitlines() if line.strip()]
     assert len(lines) == 1
     doc = json.loads(lines[0])
-    assert doc["v"] == 3
+    assert doc["v"] == 4
     assert doc["task"]["task_id"] == "task-1"
     assert doc["task"]["status"] == "completed"
 
@@ -139,7 +139,7 @@ def test_status_json_for_an_unknown_task(home: Path, capsys: pytest.CaptureFixtu
     captured = capsys.readouterr()
     doc = json.loads(captured.out)
     assert doc == {
-        "v": 3,
+        "v": 4,
         "error": {"code": "unknown_task", "message": "unknown task_id: no-such-task"},
     }
     assert "no-such-task" in captured.err
@@ -182,7 +182,7 @@ def test_bad_subcommand_with_json_still_emits_a_usage_document(
 
     assert exc_info.value.code == 2
     doc = json.loads(capsys.readouterr().out)
-    assert doc["v"] == 3
+    assert doc["v"] == 4
     assert doc["error"]["code"] == "usage"
 
 
@@ -278,7 +278,7 @@ def test_send_queues_a_message_in_the_inbox(
 
     assert code == 0
     doc = _one_doc(capsys)
-    assert doc["v"] == 3
+    assert doc["v"] == 4
     assert doc["result"]["status"] == "queued"
     messages, _ = inbox.read_new(_log_dir(home), "task-1", 0)
     assert [m["text"] for m in messages] == ["please also check the tests"]
@@ -352,7 +352,7 @@ def test_backends_json_reports_the_registry_in_order(
     assert ctl.main(["backends", "--json"]) == 0
 
     doc = _one_doc(capsys)
-    assert doc["v"] == 3
+    assert doc["v"] == 4
     assert [b["backend"] for b in doc["backends"]] == [
         "claude", "codex", "opencode", "vibe", "antigravity"
     ]
