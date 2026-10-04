@@ -492,7 +492,8 @@ async def test_builder_prompts_for_orchestrator_routing_and_inferred_retry_gates
     await w.WorkflowSupervisor(registry, storage).build(run["workflow_run_id"])
     prompt = registry.calls[0][0]
     assert '"branch_mode": "auto"' in prompt
-    assert "orchestrator chooses one or multiple" in prompt
+    assert "Ordinary nodes choose exactly one" in prompt
+    assert "parallel_group_id" in prompt
     assert "do not set a backward flag" in prompt
 
 

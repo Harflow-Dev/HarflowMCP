@@ -1051,7 +1051,12 @@ async def get_workflow(name: str) -> dict[str, Any]:
 
 @mcp.tool()
 async def save_workflow(name: str, definition: dict[str, Any], expected_revision: int | None = None) -> dict[str, Any]:
-    """Validate and save a workflow; expected_revision protects concurrent edits."""
+    """Validate and save an explicit workflow; expected_revision protects concurrent edits.
+
+    Set routing_mode="explicit". Ordinary nodes choose exactly one outgoing path.
+    Parallel execution uses paired parallel_start/parallel_end nodes with shared
+    parallel_group_id. Every branch reaches its matching end; nesting is supported.
+    """
     return await _workflow_call("save", name=name, definition=definition, expected_revision=expected_revision)
 
 
@@ -1069,6 +1074,10 @@ async def workflow_builder(name: str, prompt: str, repo_path: str | None = None,
     Agent nodes are 200 x 92 points (reserve 20 x 10 grid cells); Start/End are 72 x 72
     (reserve 8 x 8 cells). Leave at least 40 points (4 cells) between node edges and avoid
     overlaps. Arrange forward steps left to right and parallel branches on separate rows.
+    Use routing_mode="explicit". Ordinary outgoing paths are exclusive alternatives.
+    Parallel execution requires paired parallel_start/parallel_end structural nodes with
+    a shared parallel_group_id; every branch must reach its matching end. Parallel start
+    runs all branches, which may contain multiple steps and properly nested groups.
     Preserve existing node positions exactly unless the user explicitly asks to move or rearrange them.
     The canvas expands automatically; there is no fixed right or bottom boundary.
     """
@@ -1090,6 +1099,10 @@ async def apply_workflow_draft(definition: dict[str, Any], expected_draft_revisi
     Positions are top-left logical points, with finite x/y >= 0, on a 10-point dot grid.
     Agent nodes are 200 x 92 points (reserve 20 x 10 grid cells); Start/End are 72 x 72
     (reserve 8 x 8 cells). Leave at least 40 points (4 cells) between node edges; no overlaps.
+    Use routing_mode="explicit". Ordinary outgoing paths are exclusive alternatives.
+    Parallel execution requires paired parallel_start/parallel_end structural nodes with
+    a shared parallel_group_id; every branch must reach its matching end. Parallel start
+    runs all branches, which may contain multiple steps and properly nested groups.
     Preserve existing node positions exactly unless the user explicitly asks to move or rearrange them.
     The canvas expands automatically; do not constrain nodes to a fixed viewport.
     """

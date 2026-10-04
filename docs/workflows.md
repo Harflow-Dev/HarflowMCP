@@ -33,7 +33,7 @@ sequenceDiagram
         else Continue with valid assignments
             Runner->>Runner: Validate and persist decision and dispatch reservations
             Runner->>Worker: Assignment, node instructions, selected results and task descriptors
-            Note over Runner,Worker: Selected branches may run in parallel
+            Note over Runner,Worker: Parallel start launches every branch
             Worker-->>Runner: Final JSON: succeeded, failed, blocked, or asking
             Runner->>Runner: Persist output and execution state
             opt Worker asks for context
@@ -43,7 +43,7 @@ sequenceDiagram
                 Worker-->>Runner: Final JSON result or another question
                 Note over Runner,Orchestrator: Parallel questions are handled one at a time
             end
-            Note over Runner,Worker: Shared convergence waits for all selected branches to settle
+            Note over Runner,Worker: Matching Parallel end waits for every branch to resolve
         else Needs caller input
             Runner->>Runner: Suspend scheduling while running siblings settle
             Runner-->>Caller: Question and input decision ID
@@ -82,8 +82,8 @@ backends; vendor logos are unnecessary.
 The menu bar also shows workflow run status alongside agent activity. Its popover lists workflows
 by name and status, including runs that need attention; selecting one opens that workflow run.
 
-The canvas supports Start, Agent, and End nodes. Connect parallel branches to the same next node;
-it waits for all active branches automatically. Agent steps have four roles:
+The canvas supports Start, Agent, End, Parallel start, and Parallel end nodes. Parallel boundaries
+are structural steps: they have no harness, worker assignment, access setting, or agent attempt. Agent steps have four roles:
 
 | Role | Purpose | Default access | Allowed access |
 |---|---|---|---|
@@ -170,10 +170,10 @@ polybridge-ctl workflow-build my-workflow --repo /absolute/path/to/repo \
 Definition JSON uses `nodes` and `connections`. An agent node's `role` is `planning`,
 `implementation`, `review`, or `task`; its `agent.fallbacks` is an ordered array. `session_mode`
 is `agent_decides`, `resume`, or `fresh` (default `agent_decides`). Connections specify `source`, `target`, `condition`, and an optional
-`default` fallback. Polybridge derives routing metadata (`branch_mode: auto`, `join_id`, and
-`backward`) from the graph; callers do not configure it. Legacy routing fields are accepted
-and normalized for new runs; existing run snapshots retain their original behavior. Legacy
-`join` nodes remain readable. Nodes store top-left canvas coordinates in `position: {x, y}`. Coordinates must be finite and nonnegative; the canvas expands automatically. Snapping uses a 10-point grid. Background dots are visual guides: their spacing adapts to zoom in multiples of that grid, keeping at least 20 points between dots on screen. Only visible dots are rendered, and their screen size stays constant. Agent nodes are 200 × 92 points (reserve 20 × 10 cells); Start and End are 72 × 72 points (reserve 8 × 8 cells). Builder agents are guided to leave at least 40 points between node edges and preserve existing positions exactly unless the user explicitly asks to move or rearrange nodes.
+`default` fallback. Definitions use `routing_mode: explicit`. A `parallel_start` and its
+`parallel_end` share a stable `parallel_group_id`. Polybridge derives retry direction from
+topology; callers do not configure a backward flag. Historical snapshots retain their original
+routing interpreter. Legacy `join` nodes remain readable in historical records. Nodes store top-left canvas coordinates in `position: {x, y}`. Coordinates must be finite and nonnegative; the canvas expands automatically. Snapping uses a 10-point grid. Background dots are visual guides: their spacing adapts to zoom in multiples of that grid, keeping at least 20 points between dots on screen. Only visible dots are rendered, and their screen size stays constant. Agent nodes are 200 × 92 points (reserve 20 × 10 cells); Start and End are 72 × 72 points (reserve 8 × 8 cells). Builder agents are guided to leave at least 40 points between node edges and preserve existing positions exactly unless the user explicitly asks to move or rearrange nodes.
 
 Each role receives built-in role guidance, custom step instructions, the orchestrator assignment,
 and explicitly labeled input results. Workers do not receive the original request, full graph, or
@@ -186,17 +186,57 @@ settings, including the orchestrator, fallback agents, and limits.
 
 ## Branches and attempts
 
-Outgoing connections carry condition prompts. The orchestrator evaluates evidence and chooses
-one or more legal connections. A default connection is available when the conditions are unclear;
-the orchestrator can also request input rather than guess. When parallel
-branches share a next node, that node waits for the selected branches of its own
-activation and then executes once. Conditional branches that were not selected do not block it.
-Conditional bypasses may share downstream steps with longer routes. Polybridge checks the
-paths actually selected: mutually exclusive alternatives are allowed, while parallel choices
-that duplicate work before their shared convergence are refused.
-Nested splits may converge at the same node. Paths without a common forward convergence and
-loops crossing an open parallel region are rejected. A retry arrow may share a step with
-forward arrows, but selecting a retry is exclusive: it cannot also launch a forward path.
+Outgoing connections on Start, agent nodes, and Parallel end are **exclusive alternatives**. The
+orchestrator chooses exactly one valid connection, or asks for input/stops when no justified path
+is available. Choosing multiple alternatives is a protocol error: Polybridge dispatches nothing
+and requests a correction within the decision-attempt allowance.
+
+Parallel start explicitly opens a group and launches **every forward branch**. Its outgoing arrow
+instructions describe branch purpose, not permission to omit a branch. Conditions for selecting
+the whole group belong on its incoming arrow. Polybridge obtains focused assignments for ready
+workers; structural traversal needs no assignment. `max_parallel` limits concurrent workers, so
+a group remains valid even when its branches execute one at a time.
+
+```mermaid
+flowchart LR
+    Scope[Scope and pin] -->|Inputs ready| Split[Parallel start]
+    Scope -->|Inputs unavailable| End[End]
+    Split --> Astra[Astra review]
+    Split --> Claude[Claude review]
+    Split --> Vibe[Vibe review: optional]
+    Astra --> Merge[Parallel end]
+    Claude --> Merge
+    Vibe --> Merge
+    Merge --> Adjudicate[Adjudicate and draft]
+    Adjudicate --> End
+```
+
+Each branch may contain several steps and its own exclusive conditional routes. Every possible
+forward route must reach the group's matching Parallel end. Sibling branches cannot overlap,
+enter one another, escape the group, or reach workflow End before closing. Nested groups close
+before their enclosing group; selecting either boundary in the canvas highlights its partner.
+
+```mermaid
+flowchart LR
+    OuterStart[Parallel start: outer] --> X1 --> X2 --> OuterEnd[Parallel end: outer]
+    OuterStart --> Y1 --> InnerStart[Parallel start: inner]
+    InnerStart --> Y2 --> InnerEnd[Parallel end: inner]
+    InnerStart --> Y3 --> InnerEnd
+    InnerEnd --> OuterEnd
+    OuterStart --> Z1 --> Z2 --> OuterEnd
+    OuterEnd --> Next[Next step]
+```
+
+Parallel end waits for its own branches to resolve, combines their immutable result references,
+and asks the orchestrator for the next continuation. An inner end can release while other outer
+branches are still working. Arrivals are persisted by group generation and branch identity;
+repeated arrival notifications cannot release a group twice. Required failures need recovery or
+an explicit stopping/input decision; they cannot silently satisfy the barrier. A recovered branch
+retains earlier failure evidence while its successful recovery resolves the barrier.
+
+Retry loops may remain inside a branch, but cannot cross an open parallel boundary. Retrying a
+whole closed group creates a new generation within the existing execution and transition budgets.
+A retry arrow may share a step with forward alternatives, but selecting it remains exclusive.
 
 Polybridge infers a retry when an arrow returns to a step that every path to its source passes
 through. Canvas placement does not determine direction; ambiguous cycles are rejected.
@@ -271,7 +311,7 @@ Its JSON decision contains `decision_id`, `action`, and `reason`. Actions are `c
 an assignment `prompt` for each agent execution, optional additional result references, and
 optional assigned task IDs. Under Agent decides, each agent assignment also chooses
 `session_mode: fresh|resume`; Resume identifies an issued `resume_task_id`. Structural traversal needs no assignment; convergence waits for every
-selected branch before requesting one assignment for its shared agent. Start always asks the
+branch before requesting one assignment for its next agent. Start always asks the
 orchestrator for the first assignment.
 
 An agent continuation decision looks like this (IDs are issued by Polybridge):
@@ -394,8 +434,14 @@ failed decision to the orchestrator with a fresh decision allowance and preserve
 Extra execution/retry grants require `additional_attempts`; completed and cancelled runs cannot
 recover. Caller answers and override reasons are passed back into orchestrator context.
 
-This feature is unreleased. Migration backs up and revision-checks saved definitions, switches
-nodes to Agent decides, and preserves graph IDs, conditions, layout, instructions, and agent settings.
+This feature is unreleased. Conversion backs up and revision-checks saved definitions before
+inserting explicit parallel boundaries around confirmed parallel regions. Original node IDs,
+settings, positions, and arrow IDs are preserved; selected branch arrows and arrivals are rewired
+through the new boundaries. Conditional alternatives remain outside the group. Ambiguous groups
+require an explicit conversion choice rather than guessing from outgoing arrow count. Eligibility
+checks previously used to omit an optional branch must move into that worker's instructions: an
+ineligible worker reports blocked without performing the restricted work. This policy change must
+be reviewed together with the converted definition. Conversion does not change session modes.
 Historical records retain their execution snapshots. Active runs must settle or be explicitly
 cancelled before cutover; migration does not cancel them automatically.
 
@@ -523,7 +569,7 @@ Silence, assistant/tool claims, and ordinary test failures do not trigger fallba
 Agent nodes may set `optional: true` (default `false`) to tolerate a definitive failure inside an
 active parallel branch. The step still runs and tries its configured fallbacks. If it fails, its
 branch arrives at the current convergence with explicit failure evidence; a required sibling must
-have been selected. An optional step cannot bypass required steps before that convergence.
+belong to the group. An optional step cannot bypass required steps before that Parallel end.
 Sequential optional nodes and forks containing only optional branches are rejected. Selecting an
 optional path alone does not grant failure tolerance. Unknown outcomes, cancellation, security or
 enforcement refusals, repository/session problems, and workflow limits still require attention.

@@ -37,6 +37,7 @@ BUILDER_LAYOUT_GUIDANCE = (
     "not its center and not grid-cell indices. Both coordinates must be finite and nonnegative. "
     "The dot grid spacing is 10 points; place newly created or repositioned nodes on multiples of 10. "
     "Agent nodes measure 200 x 92 points (20 x 9.2 grid cells; reserve 20 x 10 cells). "
+    "Parallel start and Parallel end are structural paired boundaries with parallel_group_id; reserve 12 x 8 grid cells. "
     "Start and End measure 72 x 72 points (7.2 x 7.2 grid cells; reserve 8 x 8 cells). "
     "Leave at least 40 points (4 grid cells) of clear space between node edges; do not overlap nodes. "
     "Arrange forward steps from left to right, with parallel branches on separate rows. "
@@ -178,6 +179,8 @@ def validate_definition(raw: dict[str, Any]) -> dict[str, Any]:
     d = copy.deepcopy(raw)
     d["name"] = _workflow_name(d.get("name"))
     d["schema_version"] = SCHEMA_VERSION
+    if d.get("routing_mode") not in (None, "explicit"):
+        raise WorkflowError("Invalid routing_mode")
     d.setdefault("description", "")
     if not isinstance(d["description"], str):
         raise WorkflowError("Description must be text")
@@ -198,8 +201,10 @@ def validate_definition(raw: dict[str, Any]) -> dict[str, Any]:
         if node_id in by_id:
             raise WorkflowError(f"Duplicate node {node_id}")
         by_id[node_id] = node
-        if node.get("type") not in {"start", "agent", "join", "end"}:
+        if node.get("type") not in {"start", "agent", "join", "end", "parallel_start", "parallel_end"}:
             raise WorkflowError(f"Invalid node type: {node_id}")
+        if node["type"] in {"parallel_start", "parallel_end"} and d.get("routing_mode") != "explicit":
+            raise WorkflowError("Parallel boundaries require explicit routing_mode")
         if node["type"] == "start":
             node.setdefault("prompt", "")
             if not isinstance(node["prompt"], str):
@@ -212,7 +217,7 @@ def validate_definition(raw: dict[str, Any]) -> dict[str, Any]:
             raise WorkflowError(f"Invalid branching mode: {node_id}")
         # Saved definitions/new launches adopt automatic routing. Existing run
         # snapshots are never revalidated, so their historical modes stay intact.
-        node["branch_mode"] = "auto"
+        node["branch_mode"] = "choose_one" if d.get("routing_mode") == "explicit" and node["type"] != "parallel_start" else "auto"
         if node["type"] == "agent":
             node.setdefault("optional", False)
             if not isinstance(node["optional"], bool):
@@ -328,27 +333,80 @@ def validate_definition(raw: dict[str, Any]) -> dict[str, Any]:
             shared = set.intersection(*(postdom(target) for target in successors)) if successors else set()
             postdominators[nid] = {nid} | shared
         return postdominators[nid]
-    for nid, node in by_id.items():
-        forward_edges = [edge for edge in outgoing[nid] if not edge["backward"]]
-        if len(forward_edges) <= 1:
-            node.pop("join_id", None)
-            continue
-        common = set.intersection(*(postdom(edge["target"]) for edge in forward_edges))
-        closest = [candidate for candidate in common if common <= postdom(candidate)]
-        if len(closest) != 1:
-            raise WorkflowError(f"Parallel branches from {nid} must converge at one common node before ending")
-        legacy = node.get("join_id")
-        if legacy in by_id and by_id[legacy]["type"] == "join" and legacy != closest[0]:
-            raise WorkflowError(f"Cross-branch connection at split {nid}: its legacy Join follows an earlier convergence; connect branches directly to their first shared node")
-        node["join_id"] = closest[0]
-    # Conditional alternatives may overlap in the *potential* graph. Safety is
-    # checked against actual selections and live fork generations at dispatch.
-    inferred_joins = {node.get("join_id") for node in nodes}
-    for node in nodes:
-        if node["type"] == "join" and node["id"] not in inferred_joins:
-            raise WorkflowError(f"Join {node['id']} is outside its matching split")
+    if d.get("routing_mode") == "explicit":
+        _validate_parallel_boundaries(d, outgoing, postdom)
+    else:
+        for nid, node in by_id.items():
+            forward_edges = [edge for edge in outgoing[nid] if not edge["backward"]]
+            if len(forward_edges) <= 1:
+                node.pop("join_id", None)
+                continue
+            common = set.intersection(*(postdom(edge["target"]) for edge in forward_edges))
+            closest = [candidate for candidate in common if common <= postdom(candidate)]
+            if len(closest) != 1:
+                raise WorkflowError(f"Parallel branches from {nid} must converge at one common node before ending")
+            legacy = node.get("join_id")
+            if legacy in by_id and by_id[legacy]["type"] == "join" and legacy != closest[0]:
+                raise WorkflowError(f"Cross-branch connection at split {nid}: its legacy Join follows an earlier convergence; connect branches directly to their first shared node")
+            node["join_id"] = closest[0]
+        # Conditional alternatives may overlap in the *potential* graph. Safety is
+        # checked against actual selections and live fork generations at dispatch.
+        inferred_joins = {node.get("join_id") for node in nodes}
+        for node in nodes:
+            if node["type"] == "join" and node["id"] not in inferred_joins:
+                raise WorkflowError(f"Join {node['id']} is outside its matching split")
     validate_optional_nodes(d)
     return d
+
+
+def _validate_parallel_boundaries(definition: dict[str, Any], outgoing: dict[str, Any], postdom: Any) -> None:
+    """Validate structured single-entry regions, including nested split/merge pairs."""
+    nodes = {n["id"]: n for n in definition["nodes"]}
+    pairs: dict[str, dict[str, str]] = {}
+    for node in nodes.values():
+        node.pop("join_id", None)
+        if node["type"] == "join":
+            raise WorkflowError("Use Parallel start and Parallel end instead of Join")
+        if node["type"] in {"parallel_start", "parallel_end"}:
+            group = _identifier(node.get("parallel_group_id"))
+            if node["type"] in pairs.setdefault(group, {}):
+                raise WorkflowError(f"Duplicate {node['type']} for parallel group {group}")
+            pairs[group][node["type"]] = node["id"]
+    for group, pair in pairs.items():
+        if set(pair) != {"parallel_start", "parallel_end"}:
+            raise WorkflowError(f"Parallel group {group} requires matching start and end")
+        start, end = pair["parallel_start"], pair["parallel_end"]
+        edges = [e for e in outgoing[start] if not e["backward"]]
+        if len(edges) < 2 or len(edges) != len(outgoing[start]):
+            raise WorkflowError(f"Parallel start {start} requires at least two forward branches and no retry outputs")
+        if end not in postdom(start):
+            raise WorkflowError(f"Every branch from Parallel start {start} must reach matching Parallel end {end}")
+        nodes[start]["join_id"] = end
+        regions = [_forward_reachable(definition, e["target"], end) for e in edges]
+        if any(not region for region in regions):
+            raise WorkflowError(f"Parallel start {start} cannot have an empty branch")
+        for index, region in enumerate(regions):
+            if any(region & previous for previous in regions[:index]):
+                raise WorkflowError(f"Parallel group {group} has crossing or overlapping sibling branches")
+            for nid in region:
+                nested = nodes[nid]
+                if nested["type"] == "end":
+                    raise WorkflowError(f"Parallel group {group} reaches workflow End before its matching end")
+                if nested["type"] in {"parallel_start", "parallel_end"}:
+                    partner = pairs[nested["parallel_group_id"]]
+                    if set(partner.values()) - region:
+                        raise WorkflowError(f"Parallel group {group} contains an improperly nested boundary")
+            for edge in definition["connections"]:
+                source, target = edge["source"], edge["target"]
+                if target in region and source not in region and not (source == start and edge in edges):
+                    raise WorkflowError(f"External entry into parallel branch {group}: {edge['id']}")
+                if source in region and target not in region and target != end:
+                    raise WorkflowError(f"Connection escapes parallel branch {group}: {edge['id']}")
+                if source == end and target in region:
+                    raise WorkflowError(f"Retry cannot enter a closed parallel branch: {edge['id']}")
+        for edge in definition["connections"]:
+            if edge["target"] == end and not any(edge["source"] in r for r in regions):
+                raise WorkflowError(f"External entry into Parallel end {end}")
 
 
 def _forward_reachable(definition: dict[str, Any], start: str, stop: str | None = None) -> set[str]:
@@ -403,6 +461,8 @@ def validate_optional_nodes(definition: dict[str, Any]) -> None:
         return
     valid: set[str] = set()
     for split in definition["nodes"]:
+        if definition.get("routing_mode") == "explicit" and split["type"] != "parallel_start":
+            continue
         edges = [e for e in definition["connections"] if e["source"] == split["id"] and not e.get("backward")]
         for i, edge in enumerate(edges):
             for other in edges[:i]:
@@ -458,6 +518,13 @@ def validate_selection(definition: dict[str, Any], node: dict[str, Any], selecte
         raise WorkflowError("Continuation selected an illegal outgoing connection")
     if node.get("branch_mode") == "choose_one" and len(selected) != 1:
         raise WorkflowError("Historical run permits exactly one connection")
+    if definition.get("routing_mode") == "explicit":
+        if node["type"] == "parallel_start":
+            forward = {e["id"] for e in definition["connections"] if e["source"] == node["id"] and not e.get("backward")}
+            if {e["id"] for e in selected} != forward:
+                raise WorkflowError("Parallel start must select all forward branches")
+        elif len(selected) != 1:
+            raise WorkflowError("Ordinary nodes must choose exactly one continuation")
     retry = [edge for edge in selected if edge.get("backward")]
     if retry:
         if len(selected) != 1:
@@ -832,6 +899,7 @@ def validate_builder_preview(value: Any, name: str) -> dict[str, Any]:
     """Render-safe incomplete graph; runnable topology is validated at finalization."""
     draft = _editing_context(value, "definition")
     draft["name"] = name
+    draft.setdefault("routing_mode", "explicit")
     draft.pop("revision", None)
     draft.pop("updated_at", None)
     nodes, edges = draft.setdefault("nodes", []), draft.setdefault("connections", [])
@@ -843,7 +911,7 @@ def validate_builder_preview(value: Any, name: str) -> dict[str, Any]:
         if nid in ids:
             raise WorkflowError(f"Duplicate node {nid}")
         ids.add(nid)
-        if not isinstance(node.get("type"), str) or node.get("type") not in {"start", "agent", "join", "end"}:
+        if not isinstance(node.get("type"), str) or node.get("type") not in {"start", "agent", "join", "end", "parallel_start", "parallel_end"}:
             raise WorkflowError(f"Invalid node type: {nid}")
         if node["type"] == "start":
             node.setdefault("prompt", "")
@@ -1620,10 +1688,14 @@ class WorkflowSupervisor:
             if legacy_fork or automatic_fork:
                 gid = uuid.uuid4().hex
                 join_id = selected_join if automatic_fork else node["join_id"]
-                rr["joins"][gid] = {"join_id": join_id, "split_id": node["id"], "expected": len(selected), "arrived": [], "stack": stack, "selected_targets": [e["target"] for e in selected]}
+                rr["joins"][gid] = {"join_id": join_id, "split_id": node["id"], "expected": len(selected), "arrived": [], "stack": stack, "selected_targets": [e["target"] for e in selected], "branch_ids": [e["id"] for e in selected], "parent_branch_ids": copy.deepcopy(token.get("branch_ids", {})), "branch_states": {e["id"]: "active" for e in selected}}
                 stack = stack + [gid]
             for edge in selected:
                 child = {"id": uuid.uuid4().hex, "node_id": edge["target"], "stack": stack, "context": _bounded(result or token.get("context", {})), "via": edge["id"]}
+                child["failed_execution_refs"] = copy.deepcopy(token.get("failed_execution_refs", []))
+                child["branch_ids"] = copy.deepcopy(token.get("branch_ids", {}))
+                if legacy_fork or automatic_fork:
+                    child["branch_ids"][gid] = edge["id"]
                 if rr.get("execution_contract") == "delegation":
                     refs = ([token["execution_activation_id"]] if token.get("execution_activation_id") else token.get("input_result_refs", []))
                     child["input_result_refs"] = refs
@@ -1715,8 +1787,18 @@ class WorkflowSupervisor:
         r = self.run()
         node = next(n for n in r["definition"]["nodes"] if n["id"] == token["node_id"])
         stack = token.get("stack", [])
+        if stack and stack[-1] in r.get("released_parallel_groups", {}):
+            self.update(lambda rr: rr.update(pending=[t for t in rr["pending"] if t["id"] != token["id"]]), "duplicate_join_arrival", token["id"])
+            return True
         if not stack or r["joins"].get(stack[-1], {}).get("join_id") != node["id"]:
+            if node["type"] == "parallel_end" and not token.get("joined"):
+                raise WorkflowError("Parallel end lacks its matching active generation")
             return False
+        if r["definition"].get("routing_mode") == "explicit":
+            unresolved = [a for a in r["activations"] if a["id"] in set(token.get("input_result_refs", []) + token.get("failed_execution_refs", [])) and a.get("node_result", {}).get("status") != "succeeded" and not a.get("optional_failure") and not a.get("resolved_by_execution_id")]
+            if unresolved:
+                self.attention("Required failed parallel branch needs explicit recovery before its Parallel end")
+                return True
         def arrive(rr: dict[str, Any]) -> None:
             stack = token.get("stack", [])
             if not stack:
@@ -1724,13 +1806,19 @@ class WorkflowSupervisor:
             group = rr["joins"][stack[-1]]
             if group["join_id"] != node["id"]:
                 raise WorkflowError("Join generation mismatch")
-            group["arrived"].append(token)
-            rr["pending"].remove(token)
+            branch_id = token.get("branch_ids", {}).get(stack[-1], token["id"])
+            if branch_id not in group.setdefault("arrival_ids", []):
+                group.setdefault("branch_states", {})[branch_id] = "optional_skipped" if token.get("context", {}).get("optional_failure") else "resolved"
+                group["arrival_ids"].append(branch_id)
+                group["arrived"].append(token)
+            rr["pending"] = [t for t in rr["pending"] if t["id"] != token["id"]]
             if len(group["arrived"]) == group["expected"]:
-                merged = {"id": uuid.uuid4().hex, "node_id": node["id"], "stack": group["stack"], "joined": True, "context": {"branches": [t["context"] for t in group["arrived"]]}}
+                merged = {"id": uuid.uuid4().hex, "node_id": node["id"], "stack": group["stack"], "joined": True, "branch_ids": group.get("parent_branch_ids", {}), "context": {"branches": [t["context"] for t in group["arrived"]]}}
                 if rr.get("execution_contract") == "delegation":
                     merged["input_result_refs"] = list(dict.fromkeys(ref for t in group["arrived"] for ref in t.get("input_result_refs", [])))
+                    merged["failed_execution_refs"] = list(dict.fromkeys(ref for t in group["arrived"] for ref in t.get("failed_execution_refs", [])))
                 rr["pending"].append(merged)
+                rr.setdefault("released_parallel_groups", {})[stack[-1]] = {"join_id": node["id"], "split_id": group.get("split_id"), "expected": group["expected"], "branch_states": group.get("branch_states", {}), "branch_ids": group.get("arrival_ids", []), "merged_token_id": merged["id"]}
                 del rr["joins"][stack[-1]]
         self.update(arrive, "join_arrival", token["id"])
         return True
@@ -1854,7 +1942,7 @@ class WorkflowSupervisor:
         self.update(lambda r: r.update(status="running", supervisor_pid=os.getpid(), supervisor_identity=identity.own_identity()), "builder_started")
         a = self._activation("builder", "builder")
         self.update(lambda r: next(x for x in r["activations"] if x["id"] == a["id"]).update(feedback_ids=r.get("builder_turn_feedback_ids", [])), "builder_feedback_associated")
-        prompt = "Create a Polybridge workflow definition. Do not write files or dispatch agents. Return ONLY a JSON object. Schema: " + json.dumps({"name": self.run()["name"], "orchestrator": {"backend": "codex", "fallbacks": []}, "nodes": [{"id": "start", "type": "start", "position": {"x": 80, "y": 80}, "branch_mode": "auto", "prompt": "Optional workflow purpose for the orchestrator"}, {"id": "work", "type": "agent", "position": {"x": 220, "y": 80}, "instructions": "...", "agent": {"backend": "codex"}, "session_mode": "agent_decides", "branch_mode": "auto", "max_attempts": 3, "max_context_questions": 10}, {"id": "end", "type": "end", "position": {"x": 480, "y": 80}, "branch_mode": "auto"}], "connections": [{"id": "begin", "source": "start", "target": "work"}, {"id": "finish", "source": "work", "target": "end"}], "max_parallel": 4, "max_transitions": 100}) + "\nStart may contain an optional prompt string describing the workflow purpose; Polybridge supplies it to orchestrator decisions alongside the runtime user request. The orchestrator chooses one or multiple outgoing paths from their condition prompts and the evidence. Parallel paths connect to a shared agent or End node; Polybridge infers convergence automatically. Do not create Join nodes or configurable branching modes. Retry arrows return to an earlier ancestor step; Polybridge infers loops from topology, so do not set a backward flag. Put explicit failure/retry and success/continue conditions on arrows. A retry connection may set max_retries to a nonnegative integer: this caps actual traversals of that arrow across the entire run; 0 disables retry, and an absent value adds no edge cap. Node max_attempts and max_transitions still apply and may stop earlier. A retry is selected exclusively and must stay inside its parallel region. Agent nodes may set optional:true only inside a safe parallel branch with an actually selected required sibling and no required successor before convergence. Optional steps still execute; only definitive failures or exhausted available candidates bypass to that convergence with failure evidence. Do not make sequential steps or all branches optional. Agent roles are planning, implementation, review and task; supply custom step instructions, while Polybridge adds the role guidance and result protocol. Request: " + self.run().get("builder_turn_prompt", self.run()["prompt"])
+        prompt = "Create a Polybridge workflow definition. Do not write files or dispatch agents. Return ONLY a JSON object. Schema: " + json.dumps({"name": self.run()["name"], "routing_mode": "explicit", "orchestrator": {"backend": "codex", "fallbacks": []}, "nodes": [{"id": "start", "type": "start", "position": {"x": 80, "y": 80}, "branch_mode": "auto", "prompt": "Optional workflow purpose for the orchestrator"}, {"id": "work", "type": "agent", "position": {"x": 220, "y": 80}, "instructions": "...", "agent": {"backend": "codex"}, "session_mode": "agent_decides", "branch_mode": "auto", "max_attempts": 3, "max_context_questions": 10}, {"id": "end", "type": "end", "position": {"x": 480, "y": 80}, "branch_mode": "auto"}], "connections": [{"id": "begin", "source": "start", "target": "work"}, {"id": "finish", "source": "work", "target": "end"}], "max_parallel": 4, "max_transitions": 100}) + "\nStart may contain an optional prompt string describing the workflow purpose; Polybridge supplies it to orchestrator decisions alongside the runtime user request. Set routing_mode to explicit. Ordinary nodes choose exactly one outgoing path. For parallel execution use structural parallel_start and parallel_end nodes sharing parallel_group_id. Parallel start selects all forward branches; every branch must reach its matching end. Branches may contain multiple steps and properly nested parallel groups. Do not create Join nodes. Conditions for choosing a group belong on incoming alternatives; split outgoing instructions describe branch purpose and never skip branches. Retry arrows return to an earlier ancestor step; Polybridge infers loops from topology, so do not set a backward flag. Put explicit failure/retry and success/continue conditions on arrows. A retry connection may set max_retries to a nonnegative integer: this caps actual traversals of that arrow across the entire run; 0 disables retry, and an absent value adds no edge cap. Node max_attempts and max_transitions still apply and may stop earlier. A retry is selected exclusively and must stay inside its parallel region. Agent nodes may set optional:true only inside a safe parallel branch with an actually selected required sibling and no required successor before convergence. Optional steps still execute; only definitive failures or exhausted available candidates bypass to that convergence with failure evidence. Do not make sequential steps or all branches optional. Agent roles are planning, implementation, review and task; supply custom step instructions, while Polybridge adds the role guidance and result protocol. Request: " + self.run().get("builder_turn_prompt", self.run()["prompt"])
         prompt += "\n" + BUILDER_LAYOUT_GUIDANCE
         if "editing_definition" in self.run():
             prompt += "\nRefine the current unsaved canvas below according to the request; it may be incomplete. Return the complete corrected workflow. Preserve existing node and connection IDs, agent settings, permissions and instructions unless the requested edit requires changing them. Preserve existing node positions exactly unless the user explicitly asks to move or rearrange existing nodes. Do not assign a revision or overwrite any saved definition. Read applicable repository AGENTS.md and skill files, especially skills specified in the request, and use their relevant guidance when refining the graph. You may read repository guidance and skills for context; only inspect files, do not implement the task or run the workflow. Current canvas:\n" + json.dumps(self.run()["editing_definition"])
@@ -1866,7 +1954,7 @@ class WorkflowSupervisor:
             try:
                 current = self.run()
                 applied = next(x for x in current["activations"] if x["id"] == a["id"]).get("draft_applied", False)
-                d = validate_definition({**(current["builder_draft"] if applied else parse_json(result.get("summary") or "")), "name": current["name"]})
+                d = validate_definition({**(current["builder_draft"] if applied else parse_json(result.get("summary") or "")), "name": current["name"], "routing_mode": "explicit"})
                 d["draft"] = True
                 if "editing_definition" in self.run() or self.run().get("builder_followup"):
                     metadata = self.run().get("editing_source", {"name": self.run()["name"], "revision": self.run().get("generated_definition", {}).get("revision", 0)})

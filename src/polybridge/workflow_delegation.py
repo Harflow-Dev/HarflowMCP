@@ -153,14 +153,14 @@ def decision_context(run: dict[str, Any], node: dict[str, Any], token: dict[str,
     w = _w()
     graph = []
     for n in run["definition"]["nodes"]:
-        description = {k: copy.deepcopy(n[k]) for k in ("id", "title", "type", "role", "instructions", "optional", "agent", "session_mode", "max_attempts", "max_context_questions") if k in n}
+        description = {k: copy.deepcopy(n[k]) for k in ("id", "title", "type", "role", "instructions", "optional", "agent", "session_mode", "max_attempts", "max_context_questions", "parallel_group_id", "join_id") if k in n}
         if n["type"] == "agent":
             description["effective_freedom"] = w.run_effective_freedom(run, n)
             description["effective_network"] = False if run.get("network") is False else n.get("network", run.get("network"))
             description["result_contract"] = {"status": "succeeded|failed|blocked", "result": "role-specific object", "evidence": "array"}
         graph.append(description)
     refs = ([token["execution_activation_id"]] if token.get("execution_activation_id") and token.get("execution_complete") else token.get("input_result_refs", []))
-    return {"workflow_run_id": run["workflow_run_id"], "decision_id": token["decision_id"], "original_request": run["prompt"], "workflow_purpose": next(n.get("prompt", "") for n in run["definition"]["nodes"] if n["type"] == "start"), "current_stage": {"node_id": node["id"], "phase": "assignment" if execute else "routing", "token_id": token["id"]}, "workflow_graph": {"nodes": graph, "connections": run["definition"]["connections"]}, "input_results": result_inputs(run, refs), "settled_executions": [{"execution_id": a["id"], "result_ref": a["id"], "node_id": a["node_id"], "status": a["node_result"]["status"], "attempts": [{"task_id": t["task_id"], "status": t["status"], "candidate": t.get("candidate", {}), "harness_metadata": t.get("harness_metadata", {})} for t in a["tasks"]]} for a in run["activations"] if a["role"] == "node" and settled(a) and a.get("node_result")], "technical_plan": run.get("technical_plan", "")[:16000], "technical_plan_truncated": len(run.get("technical_plan", "")) > 16000, "technical_plan_execution_id": run.get("technical_plan_execution_id"), "checklist": run.get("tasks", []), "recent_decisions": run["decisions"][-10:], "valid_continuations": continuations(run, node, token, execute), "recovery_instructions": run.get("instructions", ""), "transitions_remaining": run["definition"]["max_transitions"] + run.get("transition_grant", 0) - run["transitions"], "inspection_results": token.get("inspection_results", [])[-1:], "inspection_history": [{"request": item["request"], "summary": item.get("summary", ""), "metadata": {k: item["response"][k] for k in ("execution_id", "task_id", "content_sha256", "offset", "next_cursor", "has_more") if k in item["response"]}} for item in token.get("inspection_results", [])[-20:]], "inspections_remaining": run["definition"].get("max_inspections", 20) - token.get("inspection_count", 0), "inspection": "Return final JSON action inspect with requests [{execution_id:<result_ref>,view:result|activity,task_id:optional,cursor:optional,limit:optional,before_seq:optional,after_seq:optional}]. Polybridge retrieves settled results and returns inspection_results in the next decision. Request exactly one page per inspect action; preserve relevant findings in reason for subsequent Fresh decisions. No MCP inspection is required. Result response chunk is JSON text; concatenate pages until next_cursor is null then decode {node_result,raw_output}. All settled executions in this run are inspectable."}
+    return {"workflow_run_id": run["workflow_run_id"], "decision_id": token["decision_id"], "routing_mode": run["definition"].get("routing_mode", "legacy"), "routing_rules": "Ordinary nodes choose exactly one continuation; Parallel start selects ALL forward branches. Parallel end waits for every branch; no harness runs for structural nodes." if run["definition"].get("routing_mode") == "explicit" else "Select legal continuations", "original_request": run["prompt"], "workflow_purpose": next(n.get("prompt", "") for n in run["definition"]["nodes"] if n["type"] == "start"), "current_stage": {"node_id": node["id"], "phase": "assignment" if execute else "routing", "token_id": token["id"]}, "workflow_graph": {"nodes": graph, "connections": run["definition"]["connections"]}, "input_results": result_inputs(run, refs), "settled_executions": [{"execution_id": a["id"], "result_ref": a["id"], "node_id": a["node_id"], "status": a["node_result"]["status"], "attempts": [{"task_id": t["task_id"], "status": t["status"], "candidate": t.get("candidate", {}), "harness_metadata": t.get("harness_metadata", {})} for t in a["tasks"]]} for a in run["activations"] if a["role"] == "node" and settled(a) and a.get("node_result")], "technical_plan": run.get("technical_plan", "")[:16000], "technical_plan_truncated": len(run.get("technical_plan", "")) > 16000, "technical_plan_execution_id": run.get("technical_plan_execution_id"), "checklist": run.get("tasks", []), "recent_decisions": run["decisions"][-10:], "valid_continuations": continuations(run, node, token, execute), "recovery_instructions": run.get("instructions", ""), "transitions_remaining": run["definition"]["max_transitions"] + run.get("transition_grant", 0) - run["transitions"], "inspection_results": token.get("inspection_results", [])[-1:], "inspection_history": [{"request": item["request"], "summary": item.get("summary", ""), "metadata": {k: item["response"][k] for k in ("execution_id", "task_id", "content_sha256", "offset", "next_cursor", "has_more") if k in item["response"]}} for item in token.get("inspection_results", [])[-20:]], "inspections_remaining": run["definition"].get("max_inspections", 20) - token.get("inspection_count", 0), "inspection": "Return final JSON action inspect with requests [{execution_id:<result_ref>,view:result|activity,task_id:optional,cursor:optional,limit:optional,before_seq:optional,after_seq:optional}]. Polybridge retrieves settled results and returns inspection_results in the next decision. Request exactly one page per inspect action; preserve relevant findings in reason for subsequent Fresh decisions. No MCP inspection is required. Result response chunk is JSON text; concatenate pages until next_cursor is null then decode {node_result,raw_output}. All settled executions in this run are inspectable."}
 
 
 def validate_decision(run: dict[str, Any], node: dict[str, Any], token: dict[str, Any], decision: dict[str, Any], execute: bool) -> tuple[list[dict[str, Any]], dict[str, Any], str | None]:
@@ -182,9 +182,9 @@ def validate_decision(run: dict[str, Any], node: dict[str, Any], token: dict[str
     if action == "complete" and (node["type"] != "end" or execute or len(run["pending"]) != 1 or run["joins"]):
         raise w.WorkflowError("Completion requires a valid End traversal and all branches settled")
     if action == "complete":
-        for ref in token.get("input_result_refs", []):
+        for ref in set(token.get("input_result_refs", []) + token.get("failed_execution_refs", [])):
             a = next((a for a in run["activations"] if a["id"] == ref), None)
-            if a and a.get("node_result", {}).get("status") != "succeeded" and not a.get("optional_failure"):
+            if a and a.get("node_result", {}).get("status") != "succeeded" and not a.get("optional_failure") and not a.get("resolved_by_execution_id"):
                 raise w.WorkflowError("End cannot complete with unresolved required failure evidence")
     if action == "continue" and (not entries or node["type"] == "end"):
         raise w.WorkflowError("Continue requires a valid next continuation")
@@ -199,6 +199,11 @@ def validate_decision(run: dict[str, Any], node: dict[str, Any], token: dict[str
     known_tasks = {t["id"] for t in run.get("tasks", [])}
     for entry in entries:
         c = choices[entry["continuation_id"]]
+        target = next(n for n in run["definition"]["nodes"] if n["id"] == c["node_id"])
+        relevant_refs = set(token.get("input_result_refs", []) + token.get("failed_execution_refs", []) + ([token["execution_activation_id"]] if token.get("execution_activation_id") else []))
+        unresolved = any(a["id"] in relevant_refs and a.get("node_result", {}).get("status") != "succeeded" and not a.get("optional_failure") and not a.get("resolved_by_execution_id") for a in run["activations"])
+        if target["type"] == "parallel_end" and unresolved:
+            raise w.WorkflowError("Required failed branch needs recovery before Parallel end; retry execution, choose a recovery path, fail, or request input")
         allowed = {"continuation_id", "prompt", "assigned_task_ids", "additional_result_refs", "session_mode", "resume_task_id"} if c["requires_prompt"] else {"continuation_id"}
         if set(entry) - allowed:
             raise w.WorkflowError("Unexpected continuation fields: " + ", ".join(sorted(set(entry) - allowed)))
@@ -433,7 +438,30 @@ def finish_result(run: dict[str, Any], node: dict[str, Any], token_id: str, acti
                 old.update(title=task["title"], description=task.get("description", ""))
             else:
                 run["tasks"].append({"id": task["id"], "title": task["title"], "description": task.get("description", ""), "status": "pending", "source_activation_id": activation_id})
-    eligible = value["status"] == "failed" and (not outcome.get("execution_failure") or outcome.get("optional_failure_eligible", False))
+    prior_failures = list(token.get("failed_execution_refs", []))
+    if token.get("retry_of_execution_id"):
+        activation["retry_of_execution_id"] = token["retry_of_execution_id"]
+        prior_failures.append(token["retry_of_execution_id"])
+    if value["status"] == "succeeded":
+        resolved = []
+        outstanding = []
+        for previous_id in dict.fromkeys(prior_failures):
+            previous = next((a for a in run["activations"] if a["id"] == previous_id), None)
+            if previous and previous.get("node_result", {}).get("status") in {"failed", "blocked"} and previous["node_id"] == node["id"]:
+                previous["resolved_by_execution_id"] = activation_id
+                resolved.append(previous_id)
+            elif previous and not previous.get("resolved_by_execution_id") and not previous.get("optional_failure"):
+                outstanding.append(previous_id)
+        activation["resolved_execution_refs"] = resolved
+        token["failed_execution_refs"] = outstanding
+    else:
+        token["failed_execution_refs"] = list(dict.fromkeys(prior_failures + [activation_id]))
+    for generation, branch_id in token.get("branch_ids", {}).items():
+        if generation in run["joins"]:
+            run["joins"][generation].setdefault("branch_states", {})[branch_id] = "active" if value["status"] == "succeeded" else "unresolved_failure"
+    unsafe_kind = value["result"].get("failure_kind") in {"permission", "authority", "cancelled", "uncertain"} or (value["status"] == "blocked" and value["result"].get("failure_kind") == "protocol")
+    safe_blocked = value["status"] == "blocked" and value["result"].get("blocker_category") in {"unsupported_capability", "availability"}
+    eligible = not unsafe_kind and (value["status"] == "failed" or safe_blocked) and not outcome.get("outcome_unknown") and not outcome.get("permission_denials") and (not outcome.get("execution_failure") or outcome.get("optional_failure_eligible", False))
     if eligible:
         join = _w().optional_failure_join({**run, "status": "running"}, node, token)
         if join:
