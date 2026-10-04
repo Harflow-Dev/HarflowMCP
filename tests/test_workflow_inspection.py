@@ -321,11 +321,50 @@ def test_descendant_projection_inherits_owner_but_not_assignment(monkeypatch, tm
 
 
 def test_single_descendant_detail_retains_workflow_takeover_gate(monkeypatch, tmp_path):
-    from polybridge import workflows
+    from polybridge import workflows, store
     from polybridge.workflow_inspection import decorate_tasks
+    from polybridge.store import TaskRecord
+    def make_record(**kwargs):
+        return TaskRecord(backend="claude", session_id=None, repo_path=str(tmp_path), started_at="2026-10-04T00:00:00Z", prompt="test", **kwargs)
     monkeypatch.setattr(workflows.WorkflowStore, 'list_runs', lambda self: [])
+    storage = workflows.WorkflowStore(root=tmp_path)
+    (storage.owners / 'root.json').write_text('{}')
     monkeypatch.setattr(workflows.WorkflowStore, 'task_owner', lambda self, task_id: {'workflow_run_id': 'run', 'workflow_status': 'running', 'workflow_settling': True})
+    store.write(tmp_path / 'tasks', make_record(task_id='child', parent_task_id='root'))
     detail = decorate_tasks([{'task_id': 'grandchild', 'parent_task_id': 'child', 'prompt': 'own assignment'}], tmp_path / 'tasks')[0]
     assert detail['workflow_run_id'] == 'run'
     assert detail['workflow_settling'] is True
     assert detail['prompt'] == 'own assignment'
+
+
+def test_ordinary_descendants_use_one_run_scan_per_listing(monkeypatch, tmp_path):
+    from polybridge import workflows, store
+    from polybridge.workflow_inspection import decorate_tasks
+    from polybridge.store import TaskRecord
+    def make_record(**kwargs):
+        return TaskRecord(backend="claude", session_id=None, repo_path=str(tmp_path), started_at="2026-10-04T00:00:00Z", prompt="test", **kwargs)
+    calls = []
+    def runs(self):
+        calls.append(1)
+        return []
+    monkeypatch.setattr(workflows.WorkflowStore, 'list_runs', runs)
+    def forbidden(*args, **kwargs):
+        raise AssertionError('Unindexed ordinary tasks must not invoke ownership scan')
+    monkeypatch.setattr(workflows.WorkflowStore, 'task_owner', forbidden)
+    store.write(tmp_path / 'tasks', make_record(task_id='root'))
+    entries = [{'task_id': f'child-{i}', 'parent_task_id': 'root'} for i in range(40)]
+    assert decorate_tasks(entries, tmp_path / 'tasks') == entries
+    assert calls == [1]
+
+
+def test_decorating_hidden_cyclic_lineage_terminates(monkeypatch, tmp_path):
+    from polybridge import workflows, store
+    from polybridge.workflow_inspection import decorate_tasks
+    from polybridge.store import TaskRecord
+    def make_record(**kwargs):
+        return TaskRecord(backend="claude", session_id=None, repo_path=str(tmp_path), started_at="2026-10-04T00:00:00Z", prompt="test", **kwargs)
+    monkeypatch.setattr(workflows.WorkflowStore, 'list_runs', lambda self: [])
+    store.write(tmp_path / 'tasks', make_record(task_id='one', parent_task_id='two'))
+    store.write(tmp_path / 'tasks', make_record(task_id='two', parent_task_id='one'))
+    entries = [{'task_id': 'child', 'parent_task_id': 'one'}]
+    assert decorate_tasks(entries, tmp_path / 'tasks') == entries

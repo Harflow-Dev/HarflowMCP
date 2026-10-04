@@ -555,7 +555,10 @@ def snapshot(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
     pending = inbox.pending_messages(log_dir, record.task_id)
     if record.workflow_builder:
         from .workflows import builder_pending_messages
-        pending = builder_pending_messages(log_dir, record.task_id, pending)
+        try:
+            pending = builder_pending_messages(log_dir, record.task_id, pending)
+        except (OSError, ValueError, KeyError, TypeError):
+            log.warning("task %s: workflow pending-message bookkeeping unavailable", record.task_id, exc_info=True)
 
     return {
         "pending_messages": pending,

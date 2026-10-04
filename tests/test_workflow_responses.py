@@ -151,3 +151,19 @@ async def test_in_memory_mcp_client_short_hold_reports_timeout(monkeypatch):
     assert result['timed_out']
     assert result['requested_timeout_seconds'] == result['effective_timeout_seconds'] == 1
     assert result['response_version'] == 1
+
+
+def test_builder_compact_revision_and_lossless_draft_views():
+    from polybridge.workflow_responses import compact, detail
+    run = {"workflow_run_id": "builder", "kind": "builder", "status": "running", "draft_revision": 7, "builder_draft": {"nodes": [{"instructions": "large" * 10000}]}, "generated_definition": {"name": "Saved proposal"}}
+    assert compact(run)["draft_revision"] == 7
+    assert "builder_draft" not in compact(run)
+    for view in ("builder_draft", "generated_definition"):
+        chunks, cursor = [], None
+        while True:
+            response = detail(run, view, cursor=cursor)
+            chunks.append(response["chunk"])
+            cursor = response["next_cursor"]
+            if cursor is None:
+                break
+        assert json.loads("".join(chunks)) == run[view]

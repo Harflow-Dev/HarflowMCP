@@ -1414,6 +1414,8 @@ async def test_builder_omitted_repo_uses_owned_workspace_and_preserves_followup_
     registry = FakeRegistry(storage.root, [json.dumps(definition())])
     await w.WorkflowSupervisor(registry, storage).build(run["workflow_run_id"])
     assert "No user repository was supplied" in registry.calls[0][0]
+    assert "get_workflow_run_detail with view=builder_draft" in registry.calls[0][0]
+    assert "Never retry with a stale canvas" in registry.calls[0][0]
     assert registry.calls[0][1]["display_prompt"] == "Create reusable workflow"
     assert registry.calls[0][1]["workflow_builder"] is True
     await w.followup_workflow_builder(run["workflow_run_id"], "Refine", root=storage.root)
@@ -2065,3 +2067,64 @@ def test_antigravity_tool_error_does_not_authorize_fallback(tmp_path):
     stream = tmp_path / "agy.jsonl"
     stream.write_text(json.dumps({"event": "step_update", "result": {"status": "ERROR", "error": "insufficient_quota"}}) + "\n")
     assert w.availability_failure({"status": "failed", "backend": "antigravity", "raw_stream_log": str(stream)}) is None
+
+
+def test_builder_preview_accepts_agent_decides_and_planning_brief():
+    draft = definition("planning")
+    draft["nodes"][1].update(session_mode="agent_decides", require_technical_plan=False, require_tasks=False)
+    preview = w.validate_builder_preview(draft, "example")
+    assert preview["nodes"][1]["session_mode"] == "agent_decides"
+    assert preview["nodes"][1]["require_tasks"] is False
+    assert w.validate_definition(preview)["nodes"][1]["require_tasks"] is False
+    draft["nodes"][1]["require_technical_plan"] = True
+    for validate in (lambda value: w.validate_builder_preview(value, "example"), w.validate_definition):
+        validated = validate(draft)
+        assert validated["nodes"][1]["require_tasks"] is False
+        assert validated["nodes"][1]["require_technical_plan"] is True
+    draft["nodes"][1].update(require_technical_plan=False, require_tasks="false")
+    with pytest.raises(w.WorkflowError, match="boolean"):
+        w.validate_builder_preview(draft, "example")
+
+
+async def test_cancellation_supervisor_failure_does_not_respawn(storage, tmp_path, monkeypatch):
+    run = storage.create_run(w.validate_definition(definition()), "request", tmp_path)
+    rid = run["workflow_run_id"]
+    storage.update_run(rid, lambda r: r.update(status="cancelling", activations=[{"id": "active", "role": "node", "tasks": [{"task_id": "live", "status": "running"}]}]), "fixture")
+    async def broken(self, run_id):
+        raise RuntimeError("cancel transport unavailable")
+    cancelled = []
+    async def broken_cancel(self, task_id, **kwargs):
+        cancelled.append(task_id)
+        raise RuntimeError("cancel still unavailable")
+    from polybridge.tasks import TaskRegistry
+    monkeypatch.setattr(TaskRegistry, "cancel_cascade", broken_cancel)
+    launched = []
+    monkeypatch.setattr(w.WorkflowSupervisor, "execute", broken)
+    monkeypatch.setattr(w, "_launch", lambda *args: launched.append(args))
+    await w._main(SimpleNamespace(root=str(storage.root), run_id=rid))
+    final = storage.get_run(rid)
+    assert final["status"] == "needs_attention"
+    assert "Cancellation interrupted" in final["attention_reason"]
+    assert cancelled == ["live"]
+    assert not launched
+
+
+async def test_idle_live_builder_does_not_write_feedback_events(storage, tmp_path):
+    run = storage.create_run({"name": "example", "orchestrator": {"backend": "codex"}}, "Create", tmp_path, kind="builder", freedom="read_only")
+    class IdleRegistry(FakeRegistry):
+        async def start(self, prompt, repo_path, **kwargs):
+            task = await super().start(prompt, repo_path, **kwargs)
+            task.live_input = True
+            task.done.clear()
+            asyncio.get_running_loop().call_later(0.55, task.done.set)
+            return task
+    supervisor = w.WorkflowSupervisor(IdleRegistry(storage.root, [json.dumps(definition())]), storage)
+    events = []
+    original = supervisor.update
+    def observed(mutate, event, detail=None):
+        events.append(event)
+        return original(mutate, event, detail)
+    supervisor.update = observed
+    await supervisor.build(run["workflow_run_id"])
+    assert storage.get_run(run["workflow_run_id"])["status"] == "completed"
+    assert "builder_feedback_forwarding" not in events

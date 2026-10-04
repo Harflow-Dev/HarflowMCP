@@ -149,7 +149,9 @@ def edit(backend: str, *, allow: str | None = None, remove: str | None = None) -
         data = tomlkit.parse(raw) if backend in ("codex", "vibe") else jsonc.loads(raw or "{}")
         server, tool = entry.split("/")
         if backend == "codex":
-            policy = data.setdefault("mcp_servers", {}).setdefault(server, {})
+            policy = data.get("mcp_servers", {}).get(server)
+            if not isinstance(policy, dict) or not any(isinstance(policy.get(key), str) and policy[key].strip() for key in ("command", "url")):
+                raise ValueError("Register this MCP server in the global Codex configuration first; approval rules cannot create a server without a command or URL")
             rule = policy if tool == "*" else policy.setdefault("tools", {}).setdefault(tool, {})
             key = "default_tools_approval_mode" if tool == "*" else "approval_mode"
             if allow is not None:

@@ -226,9 +226,10 @@ def validate_definition(raw: dict[str, Any]) -> dict[str, Any]:
             if node["role"] not in {"planning", "review", "implementation", "task"}:
                 raise WorkflowError(f"Invalid agent role: {node_id}")
             if node["role"] == "planning":
-                node.setdefault("require_technical_plan", True)
-                if not isinstance(node["require_technical_plan"], bool):
-                    raise WorkflowError("Planning require_technical_plan must be a boolean")
+                for field in ("require_technical_plan", "require_tasks"):
+                    node.setdefault(field, True)
+                    if not isinstance(node[field], bool):
+                        raise WorkflowError(f"Planning {field} must be a boolean")
             node["agent"] = _candidate(node.get("agent", {"backend": "codex"}))
             node.setdefault("instructions", "")
             if not isinstance(node["instructions"], str) or node.get("network") not in (None, True, False):
@@ -813,6 +814,10 @@ class WorkflowStore:
                         task["status"] = "uncertain"
                 if activation["status"] in {"running", "reserved", "uncertain"} and all(t["status"] not in {"reserved", "running", "uncertain"} for t in activation["tasks"]):
                     activation["status"] = "completed" if activation["tasks"] and activation["tasks"][-1]["status"] == "completed" else "failed"
+                if activation["role"] == "node":
+                    owner = next((t for t in r["pending"] if t["id"] == (activation.get("token") or {}).get("id")), None)
+                    if owner and (owner.get("execution_activation_id") not in {None, activation["id"]} or owner.get("retry_of_execution_id") == activation["id"] or activation.get("resolved_by_execution_id")):
+                        continue  # Keep settled history without reclaiming a retry's token.
                 if activation["role"] == "node" and activation["status"] == "completed" and activation["tasks"]:
                     token = next((t for t in r["pending"] if t["id"] == (activation.get("token") or {}).get("id")), None)
                     if token and not token.get("execution_complete"):
@@ -941,13 +946,18 @@ def validate_builder_preview(value: Any, name: str) -> dict[str, Any]:
             node.setdefault("role", "task")
             if not isinstance(node["role"], str) or node["role"] not in {"planning", "implementation", "review", "task"}:
                 raise WorkflowError(f"Invalid agent role: {nid}")
+            if node["role"] == "planning":
+                for field in ("require_technical_plan", "require_tasks"):
+                    node.setdefault(field, True)
+                    if not isinstance(node[field], bool):
+                        raise WorkflowError(f"Planning {field} must be a boolean")
             node["agent"] = _candidate(node.get("agent", {"backend": "codex"}))
             node.setdefault("instructions", "")
             if not isinstance(node["instructions"], str):
                 raise WorkflowError(f"Invalid instructions: {nid}")
             if "freedom" in node and (not isinstance(node["freedom"], str) or node["freedom"] not in FREEDOMS):
                 raise WorkflowError(f"Invalid freedom: {nid}")
-            if "session_mode" in node and (not isinstance(node["session_mode"], str) or node["session_mode"] not in {"resume", "fresh"}):
+            if "session_mode" in node and (not isinstance(node["session_mode"], str) or node["session_mode"] not in {"resume", "fresh", "agent_decides"}):
                 raise WorkflowError(f"Invalid session mode: {nid}")
             if "optional" in node and not isinstance(node["optional"], bool):
                 raise WorkflowError("Agent optional must be a boolean")
@@ -1463,7 +1473,7 @@ class WorkflowSupervisor:
                     self.update(lambda r: r.pop("checkout_wait", None), "checkout_acquired")
                     self._task_update(activation["id"], task_id, {"status": "running", "dispatch_stage": "spawn_confirmed"})
                     while not task.done.is_set():
-                        if role == "builder" and getattr(task, "live_input", False):
+                        if role == "builder" and getattr(task, "live_input", False) and any(m.get("status") == "pending" for m in self.run().get("builder_messages", [])):
                             messages: list[dict[str, Any]] = []
                             def claim_live(r: dict[str, Any]) -> None:
                                 for m in r.get("builder_messages", []):
@@ -2011,7 +2021,7 @@ class WorkflowSupervisor:
         prompt += "\n" + BUILDER_LAYOUT_GUIDANCE
         if "editing_definition" in self.run():
             prompt += "\nRefine the current unsaved canvas below according to the request; it may be incomplete. Return the complete corrected workflow. Preserve existing node and connection IDs, agent settings, permissions and instructions unless the requested edit requires changing them. Preserve existing node positions exactly unless the user explicitly asks to move or rearrange existing nodes. Do not assign a revision or overwrite any saved definition. Read applicable repository AGENTS.md and skill files, especially skills specified in the request, and use their relevant guidance when refining the graph. You may read repository guidance and skills for context; only inspect files, do not implement the task or run the workflow. Current canvas:\n" + json.dumps(self.run()["editing_definition"])
-        prompt += "\nPublish canvas progress after each logical edit using polybridge.apply_workflow_draft (or polybridge-ctl workflow-builder-apply), with definition and expected_draft_revision. This updates only your builder preview, never saved workflows. Read get_workflow_status(workflow_run_id=" + self.run()["workflow_run_id"] + ") to resolve a revision conflict. Incomplete but render-safe graphs are allowed while building. If you applied any preview, the latest applied preview is authoritative and you may return a final summary; otherwise return the complete JSON definition. Current draft revision: " + str(self.run().get("draft_revision", 0)) + "\nCurrent draft:\n" + json.dumps(self.run().get("builder_draft", {}))
+        prompt += "\nPublish canvas progress after each logical edit using polybridge.apply_workflow_draft (or polybridge-ctl workflow-builder-apply), with definition and expected_draft_revision. This updates only your builder preview, never saved workflows. Read get_workflow_status(workflow_run_id=" + self.run()["workflow_run_id"] + ") for the current draft_revision when a revision conflicts, then read get_workflow_run_detail with view=builder_draft and follow next_cursor until has_more is false. Reassemble the complete draft, preserve concurrent edits, and reapply your changes using that latest draft_revision. Never retry with a stale canvas. Incomplete but render-safe graphs are allowed while building. If you applied any preview, the latest applied preview is authoritative and you may return a final summary; otherwise return the complete JSON definition. Current draft revision: " + str(self.run().get("draft_revision", 0)) + "\nCurrent draft:\n" + json.dumps(self.run().get("builder_draft", {}))
         if self.run().get("builder_has_repo_context") is False:
             prompt += "\nNo user repository was supplied. Your working directory is an isolated Polybridge builder workspace; do not infer a project or search elsewhere for repository context. Refine the supplied canvas and request without repository-specific skills or files."
         result = await self._dispatch({"id": "builder", "title": "Workflow builder"}, prompt, "builder", a)
@@ -2075,7 +2085,17 @@ async def _main(args: Any) -> None:
                 await supervisor.execute(args.run_id)
         except Exception as exc:
             supervisor.run_id = args.run_id
-            supervisor.attention(f"Supervisor failure: {exc}")
+            if storage.get_run(args.run_id)["status"] == "cancelling":
+                # A failed cancellation must not respawn the same broken supervisor.
+                # Attempt a bounded settlement, then require explicit reconciliation.
+                active_ids = [t["task_id"] for a in storage.get_run(args.run_id)["activations"] for t in a["tasks"] if t["status"] in {"running", "reserved", "uncertain"}]
+                try:
+                    await asyncio.wait_for(asyncio.gather(*(supervisor.registry.cancel_cascade(tid, workflow_control=True) for tid in active_ids), return_exceptions=True), timeout=5)
+                except TimeoutError:
+                    pass
+                storage.update_run(args.run_id, lambda r: r.update(status="needs_attention", attention_reason=f"Cancellation interrupted: {exc}; reconcile dispatches before resuming", supervisor_pid=None, supervisor_identity=None), "cancel_supervisor_failed")
+            else:
+                supervisor.attention(f"Supervisor failure: {exc}")
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
             final = storage.get_run(args.run_id)

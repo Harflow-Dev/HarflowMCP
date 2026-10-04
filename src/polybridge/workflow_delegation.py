@@ -143,7 +143,7 @@ def decision_prompt(context: dict[str, Any]) -> str:
         "failed": {**base, "action": "failed"},
         "complete": {**base, "action": "complete"},
     }
-    return ("You are the workflow orchestrator. Own the objective and checklist, and delegate focused assignments. Polybridge owns state and dispatch. Ordinary tools remain available under configured access. Return ONLY one JSON object. Use the action-specific examples below; omit fields belonging to other actions. Structural continuations accept ONLY continuation_id, except a continuation with branch_continuations entering Parallel start requires branch_assignments containing assignments for ALL issued branches (the same executable/structural entry shape). Executable continuations require prompt; optional additional_result_refs and assigned_task_ids are arrays of issued result/task IDs. For Resume use session_mode resume and an issued resume_task_id; Fresh omits resume_task_id. Fixed Resume without a retained session boots Fresh. retry_execution explicitly consumes a node attempt, not an edge. Failed required results require an issued retry or recovery path, failure, or input. Complete only at End after every branch settles. Inspect exactly one page of a settled execution; inspection does not consume decision attempts. Optional task_updates are accepted for non-inspection actions and must obey checklist authority. Examples:\n" + json.dumps(examples) + "\nContext:\n" + json.dumps(context))
+    return ("You are the workflow orchestrator. Own the objective and checklist, and delegate focused assignments. Polybridge owns state and dispatch. Ordinary tools remain available under configured access. Return ONLY one JSON object. Use the action-specific examples below; omit fields belonging to other actions. Structural continuations accept ONLY continuation_id, except a continuation with branch_continuations entering Parallel start requires branch_assignments containing assignments for ALL issued branches (the same executable/structural entry shape). Executable continuations require prompt; optional additional_result_refs and assigned_task_ids are arrays of issued result/task IDs. For Resume use session_mode resume and an issued resume_task_id; Fresh omits resume_task_id. Fixed Resume without a retained session boots Fresh. retry_execution explicitly consumes a node attempt, not an edge. Failed required results require an issued retry or recovery path, failure, or input. A planning result with no_checklist_needed is a proposal: judge its checklist_reason and either continue or explicitly select its issued retry_execution to request checklist tasks within the attempt budget. Complete only at End after every branch settles. Inspect exactly one page of a settled execution; inspection does not consume decision attempts. Optional task_updates are accepted for non-inspection actions and must obey checklist authority. Examples:\n" + json.dumps(examples) + "\nContext:\n" + json.dumps(context))
 
 
 def settled(activation: dict[str, Any]) -> bool:
@@ -162,10 +162,11 @@ def decision_error_path(message: str) -> str:
     return "$"
 
 
-def retry_eligible(activation: dict[str, Any], *, guided: bool = False) -> bool:
+def retry_eligible(activation: dict[str, Any], *, guided: bool = False, node: dict[str, Any] | None = None) -> bool:
     """Only positively settled failures can be explicitly reassigned."""
     result = activation.get("node_result", {})
-    if not settled(activation) or result.get("status") not in {"failed", "blocked"}:
+    replan = guided and node is not None and node.get("role") == "planning" and result.get("status") == "succeeded" and result.get("result", {}).get("no_checklist_needed") is True
+    if not settled(activation) or (result.get("status") not in {"failed", "blocked"} and not replan):
         return False
     if result.get("result", {}).get("failure_kind") == "protocol" and not guided:
         return False
@@ -186,7 +187,7 @@ def result_inputs(run: dict[str, Any], refs: list[str], *, preview: bool = True)
         value = copy.deepcopy(activation["node_result"])
         serialized = json.dumps(value, ensure_ascii=False)
         truncated = preview and len(serialized) > 16000
-        data = {"harness_attempts": [{"task_id": t["task_id"], "metadata": t.get("harness_metadata", {})} for t in activation.get("tasks", [])], "retry_eligible": retry_eligible(activation, guided=run.get("runner_policy") == "guided"), "result_ref": ref, "execution_id": ref, "node_id": activation["node_id"], "role": nodes[activation["node_id"]].get("role"), "status": value["status"], "attempt": 1 + sum(a["role"] == "node" and a["node_id"] == activation["node_id"] for a in run["activations"][:run["activations"].index(activation)]), "truncated": truncated}
+        data = {"harness_attempts": [{"task_id": t["task_id"], "metadata": t.get("harness_metadata", {})} for t in activation.get("tasks", [])], "retry_eligible": retry_eligible(activation, guided=run.get("runner_policy") == "guided", node=nodes[activation["node_id"]]), "result_ref": ref, "execution_id": ref, "node_id": activation["node_id"], "role": nodes[activation["node_id"]].get("role"), "status": value["status"], "attempt": 1 + sum(a["role"] == "node" and a["node_id"] == activation["node_id"] for a in run["activations"][:run["activations"].index(activation)]), "truncated": truncated}
         if truncated:
             data["result_preview"] = serialized[:16000]
         else:
@@ -274,7 +275,7 @@ def continuations(run: dict[str, Any], node: dict[str, Any], token: dict[str, An
     if not execute and token.get("execution_complete"):
         activation = next((a for a in run["activations"] if a["id"] == token.get("execution_activation_id")), None)
         candidates_available = any(node["id"] + ":" + w._candidate_key(c) not in run.get("suppressed_candidates", []) for c in [node["agent"]] + node["agent"].get("fallbacks", []))
-        if activation and retry_eligible(activation, guided=run.get("runner_policy") == "guided") and candidates_available:
+        if activation and retry_eligible(activation, guided=run.get("runner_policy") == "guided", node=node) and candidates_available:
             choices.append({"continuation_id": "retry:" + activation["id"], "node_id": node["id"], "kind": "retry_execution", "requires_prompt": True, "execution_id": activation["id"]})
     for choice in choices:
         target = next(n for n in run["definition"]["nodes"] if n["id"] == choice["node_id"])
@@ -299,7 +300,7 @@ def decision_context(run: dict[str, Any], node: dict[str, Any], token: dict[str,
     w = _w()
     graph = []
     for n in run["definition"]["nodes"]:
-        description = {k: copy.deepcopy(n[k]) for k in ("id", "title", "type", "role", "instructions", "optional", "agent", "session_mode", "max_attempts", "max_context_questions", "require_technical_plan", "parallel_group_id", "join_id") if k in n}
+        description = {k: copy.deepcopy(n[k]) for k in ("id", "title", "type", "role", "instructions", "optional", "agent", "session_mode", "max_attempts", "max_context_questions", "require_technical_plan", "require_tasks", "parallel_group_id", "join_id") if k in n}
         if n["type"] == "agent":
             description["effective_freedom"] = w.run_effective_freedom(run, n)
             description["effective_network"] = False if run.get("network") is False else n.get("network", run.get("network"))
@@ -548,8 +549,19 @@ def normalize_result(node: dict[str, Any], outcome: dict[str, Any], assigned_ids
         if "technical_plan" in result and not isinstance(result["technical_plan"], str):
             raise w.WorkflowError("Planning technical_plan must be Markdown text when supplied")
         tasks = result.get("tasks")
-        if not isinstance(tasks, list) or not tasks:
-            raise w.WorkflowError("Planning result requires a nonempty tasks array")
+        if "tasks" in result and not isinstance(tasks, list):
+            raise w.WorkflowError("Planning tasks must be an array when supplied")
+        no_checklist = result.get("no_checklist_needed", False)
+        if not isinstance(no_checklist, bool):
+            raise w.WorkflowError("Planning no_checklist_needed must be a boolean")
+        if no_checklist:
+            if tasks:
+                raise w.WorkflowError("Planning no_checklist_needed contradicts nonempty tasks")
+            if not isinstance(result.get("checklist_reason"), str) or not result["checklist_reason"].strip():
+                raise w.WorkflowError("Planning no_checklist_needed requires a nonempty checklist_reason")
+        elif node.get("require_tasks", True) and (not isinstance(tasks, list) or not tasks):
+            raise w.WorkflowError("Planning result requires a nonempty tasks array or no_checklist_needed with checklist_reason")
+        tasks = tasks or []
         ids = []
         for task in tasks:
             if not isinstance(task, dict) or not isinstance(task.get("title"), str) or not task["title"].strip() or not isinstance(task.get("description", ""), str):
@@ -569,8 +581,11 @@ def normalize_result(node: dict[str, Any], outcome: dict[str, Any], assigned_ids
 def worker_prompt(run: dict[str, Any], node: dict[str, Any], token: dict[str, Any]) -> str:
     descriptors = [{k: task[k] for k in ("id", "title", "description") if k in task} for task in run.get("tasks", []) if task["id"] in token.get("assigned_task_ids", [])]
     guidance = {"planning": "Plan the assigned work without implementing. Return both tasks with stable id/title/description and technical_plan as detailed Markdown covering the approach, affected components, interfaces, validation and risks. The checklist and technical plan are separate required outputs.", "implementation": "Implement only the assignment. Report completed_task_ids from assigned descriptors with validation evidence; do not update checklist state.", "review": "Review the assigned material without editing. Return verdict approved or changes_needed, findings and evidence. Finding issues is successful review execution.", "task": "Perform the bounded assignment and report observed check outcomes. A failing check can be successful execution; distinguish it from inability to perform the task."}[node["role"]]
-    if node["role"] == "planning" and not node.get("require_technical_plan", True):
-        guidance = "Plan the assignment without implementing. Return tasks with stable id/title/description; technical_plan Markdown is optional. A review brief may be included in result."
+    if node["role"] == "planning":
+        guidance = "Plan the assigned work without implementing. "
+        guidance += ("Return nonempty tasks with stable id/title/description. " if node.get("require_tasks", True) else "Checklist tasks are optional; when supplied use stable id/title/description. ")
+        guidance += "If the assignment needs no checklist, return no_checklist_needed:true and a nonempty checklist_reason explaining why; omit tasks or use an empty array. The orchestrator judges whether to proceed or request a revised plan. Never combine that marker with nonempty tasks. Existing checklist state is preserved when tasks are omitted. "
+        guidance += ("Return technical_plan as detailed Markdown covering approach, components, interfaces, validation and risks. " if node.get("require_technical_plan", True) else "technical_plan Markdown is optional; a focused scope or reviewer brief may be included in result. ")
     refs = token.get("input_result_refs", []) + token.get("additional_result_refs", [])
     if token.get("resume_source_execution_id"):
         refs = refs + [token["resume_source_execution_id"]]
@@ -593,7 +608,7 @@ def finish_result(run: dict[str, Any], node: dict[str, Any], token_id: str, acti
         if value["result"].get("technical_plan"):
             run["technical_plan"] = value["result"]["technical_plan"]
             run["technical_plan_execution_id"] = activation_id
-        for task in value["result"]["tasks"]:
+        for task in value["result"].get("tasks", []):
             old = next((t for t in run["tasks"] if t["id"] == task["id"]), None)
             if old:
                 old.update(title=task["title"], description=task.get("description", ""))
@@ -765,6 +780,9 @@ def reconcile_delegation(run: dict[str, Any]) -> None:
     """Reconnect proven outcomes; leave every ambiguous reservation uncertain."""
     nodes = {n["id"]: n for n in run["definition"]["nodes"]}
     for activation in run["activations"]:
+        owner = next((t for t in run["pending"] if t["id"] == (activation.get("token") or {}).get("id")), None)
+        if activation["role"] == "node" and owner and (owner.get("execution_activation_id") not in {None, activation["id"]} or owner.get("retry_of_execution_id") == activation["id"] or activation.get("resolved_by_execution_id")):
+            continue  # Superseded executions never mutate a retry checkpoint.
         if activation["role"] == "node":
             outage = recovered_resume_outage(run, activation)
             if outage:
@@ -803,6 +821,8 @@ def reconcile_delegation(run: dict[str, Any]) -> None:
         token = next((t for t in run["pending"] if t["id"] == (activation.get("token") or {}).get("id")), None)
         if token is None or token.get("execution_complete"):
             continue
+        if token.get("execution_activation_id") not in {None, activation["id"]} or token.get("retry_of_execution_id") == activation["id"] or activation.get("resolved_by_execution_id"):
+            continue  # A superseded attempt cannot reclaim its retry token.
         token["execution_activation_id"] = activation["id"]
         if token.get("requires_assignment"):
             activation["status"] = "result_pending"

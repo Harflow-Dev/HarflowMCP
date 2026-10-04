@@ -1157,3 +1157,26 @@ async def test_guided_structural_nonempty_result_context_is_not_silently_dropped
     assert run['status'] == 'needs_attention'
     assert 'additional_result_refs' in run['attention_reason']
     assert not any(a['role'] == 'node' for a in run['activations'])
+
+
+async def test_guided_orchestrator_can_reject_no_checklist_proposal_and_request_replan(storage, tmp_path):
+    definition = graph('planning')
+    definition['nodes'][1]['require_technical_plan'] = False
+    count = 0
+    def worker(prompt, kwargs):
+        nonlocal count
+        count += 1
+        if count == 1:
+            return {'status': 'succeeded', 'result': {'no_checklist_needed': True, 'checklist_reason': 'Seems simple'}, 'evidence': []}
+        assert 'Produce checklist tasks' in prompt
+        return {'status': 'succeeded', 'result': {'tasks': [{'id': 'verify', 'title': 'Verify changed behavior'}]}, 'evidence': []}
+    def policy(context, registry):
+        retry = next((c for c in context['valid_continuations'] if c['kind'] == 'retry_execution'), None)
+        if retry:
+            assert context['input_results'][0]['node_result']['result']['no_checklist_needed']
+            return {'decision_id': context['decision_id'], 'action': 'continue', 'reason': 'The change requires explicit validation tasks', 'next': [{'continuation_id': retry['continuation_id'], 'prompt': 'Produce checklist tasks covering validation', 'session_mode': 'fresh'}]}
+        return default_decision(context, registry)
+    run, _ = await run_flow(storage, tmp_path, definition, Registry(storage.root, policy, {'work': worker}), guided=True)
+    assert run['status'] == 'completed'
+    assert count == 2
+    assert run['tasks'][0]['id'] == 'verify'

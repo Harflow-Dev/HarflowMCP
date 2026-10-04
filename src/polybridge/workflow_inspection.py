@@ -85,17 +85,43 @@ def decorate_tasks(entries: list[dict[str, Any]], log_dir: Any) -> list[dict[str
             if ancestor is not None:
                 index[task_id] = {key: ancestor[key] for key in inherited if key in ancestor}
                 changed = True
+    from . import store as task_store
+    import logging
+    resolved: dict[str, dict[str, Any] | None] = {}
+
+    def ancestor_owner(task_id: str, visited: set[str]) -> dict[str, Any] | None:
+        if task_id in index:
+            return index[task_id]
+        if task_id in resolved:
+            return resolved[task_id]
+        if task_id in visited:
+            return None
+        visited = visited | {task_id}
+        association = None
+        try:
+            # Only use the ownership lookup when its receipt prevents a full
+            # run scan. Hidden ordinary ancestors are resolved from records.
+            from .workflows import _identifier
+            if (storage.owners / f"{_identifier(task_id)}.json").exists():
+                association = storage.task_owner(task_id)
+            else:
+                record = task_store.read(log_dir, task_id)
+                if record is not None:
+                    for ancestor in dict.fromkeys((record.parent_task_id, record.spawned_by)):
+                        if ancestor:
+                            association = ancestor_owner(ancestor, visited)
+                            if association is not None:
+                                break
+        except (OSError, ValueError, KeyError, TypeError):
+            logging.getLogger(__name__).warning("Workflow decoration unavailable for %s", task_id, exc_info=True)
+        resolved[task_id] = association
+        return association
+
     for entry in entries:
         task_id = entry.get("task_id")
-        if task_id not in index and (entry.get("parent_task_id") or entry.get("spawned_by")):
-            try:
-                association = storage.task_owner(task_id)
-            except (OSError, ValueError, KeyError, TypeError):
-                # Decoration is best effort; mutation/inspection authority keeps
-                # its separate strict ownership checks.
-                import logging
-                logging.getLogger(__name__).warning("Workflow decoration unavailable for %s", task_id, exc_info=True)
-                association = None
+        if task_id not in index:
+            association = next((owner for key in ("parent_task_id", "spawned_by")
+                                if entry.get(key) and (owner := ancestor_owner(entry[key], {task_id})) is not None), None)
             if association is not None:
                 index[task_id] = {key: association[key] for key in inherited if key in association}
     return [{**entry, **index.get(entry.get("task_id"), {})} for entry in entries]

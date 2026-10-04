@@ -1222,3 +1222,17 @@ def test_recovered_builder_marker_is_retained_in_listing(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "process_alive", lambda pid, markers: False)
     record = replace(make_record(status="failed", exit_code=None), workflow_builder=True)
     assert store.brief(tmp_path, record)["workflow_builder"] is True
+
+
+@pytest.mark.parametrize("error", [OSError("disk"), ValueError("record"), KeyError("run"), TypeError("shape")])
+def test_recovered_builder_snapshot_survives_pending_bookkeeping_failure(tmp_path, monkeypatch, error):
+    from polybridge import workflows
+    record = make_record(workflow_builder=True, status="completed", exit_code=0)
+    write_log(tmp_path, record.task_id, RESULT_EVENT)
+    def broken(*args):
+        raise error
+    monkeypatch.setattr(workflows, "builder_pending_messages", broken)
+    snap = store.snapshot(tmp_path, record)
+    assert snap["status"] == "completed"
+    assert snap["summary"] == "Created hello.txt."
+    assert snap["pending_messages"] == []

@@ -26,7 +26,7 @@ sequenceDiagram
         alt Invalid decision
             Runner->>Runner: Dispatch nothing and count decision attempt
             Runner->>Orchestrator: Correction and valid choices
-            Note over Runner,Orchestrator: Exhausted decision attempts fail the run
+            Note over Runner,Orchestrator: Exhausted decision attempts pause for attention
         else Inspect a settled execution
             Runner->>Orchestrator: Stored result or activity page
             Note over Runner,Orchestrator: Stay at the same decision checkpoint
@@ -58,9 +58,10 @@ sequenceDiagram
     end
 ```
 
-Only the orchestrator owns the original request and global checklist. Planning returns two
-separate outputs: task descriptors and a technical plan. Polybridge stores both, shows them in the
-Monitor, and includes them in later orchestrator context. A worker receives only its assignment,
+Only the orchestrator owns the original request and global checklist. Planning can return two
+separate outputs: task descriptors and a technical plan. Each planning node independently controls
+whether either output is required. Polybridge stores supplied outputs, shows them in the Monitor,
+and includes them in later orchestrator context. A worker receives only its assignment,
 local guidance, and selected inputs. Harnesses can still use their own tools during execution.
 
 The diagram shows the usual loop; fallbacks, retry budgets, optional branches, and failed-run
@@ -92,8 +93,10 @@ are structural steps: they have no harness, worker assignment, access setting, o
 | Review | Examine results and report issues or approval. | `read_only` | All four levels |
 | Task | Perform a specific action, such as updating Jira. | `publish` | All four levels |
 
-Successful Planning returns both a nonempty `tasks` checklist and a nonempty Markdown
-`technical_plan`. The Monitor right sidebar shows the technical plan alongside the live checklist.
+Planning defaults to requiring a nonempty `tasks` checklist and a nonempty Markdown
+`technical_plan`. **Require checklist** (`require_tasks`) and **Require technical plan**
+(`require_technical_plan`) are independent booleans; each defaults to true. A scoping brief may
+disable either requirement. The Monitor right sidebar shows the technical plan alongside the live checklist.
 Planning creates pending checklist entries. Workers can report progress, but **only validated
 orchestrator decisions complete or reopen checklist items**. The Monitor shows that status without
 a manual completion toggle.
@@ -129,7 +132,10 @@ previews and recent decision errors. They omit the graph, assignments and full r
 continue listing. CLI run snapshots remain complete for the Monitor.
 
 Read complete run content with `get_workflow_run_detail(workflow_run_id, view, cursor, limit)`.
-Views are `executions`, `decisions`, `checklist`, `technical_plan`, `definition`, `question`, `reason` and `wait_reason`.
+Views include `executions`, `decisions`, `checklist`, `technical_plan`, `definition`,
+`builder_draft`, `generated_definition`, `question`, `reason` and `wait_reason`. Builder status
+also includes the authoritative `draft_revision`, so a builder can resolve preview conflicts
+without fetching a complete graph in every status response.
 Concatenate each response's `chunk` until `next_cursor` is null, then decode JSON. Each chunk
 is bounded, including a single large result. Cursors bind the run, view and content hash;
 if content changes, restart that view. Managed orchestrators can read their own run only;
@@ -346,10 +352,17 @@ An agent continuation decision looks like this (IDs are issued by Polybridge):
 
 Workers return `{status, result, evidence}`. Status is `succeeded`, `failed`, `blocked`, or `asking`;
 role-specific results retain plans, completed task IDs, review verdicts, and observed test outcomes.
-A successful planning result contains task descriptors. Planning nodes default to requiring a
-human-readable technical plan too; turn off **Require technical plan** for scoping or reviewer
-brief nodes (`require_technical_plan: false`). Such nodes can return a brief without inventing an
-implementation plan. A later brief does not erase a technical plan already recorded in the run:
+Planning nodes independently configure **Require checklist** (`require_tasks`) and
+**Require technical plan** (`require_technical_plan`), both true by default. A review-scoping node
+can disable both and return a focused brief. If a checklist is required but the worker judges
+that no implementation tasks are appropriate, it returns `no_checklist_needed: true` and a
+nonempty `checklist_reason` instead of inventing tasks. This is explicit evidence for the
+orchestrator to assess when deciding whether to continue, retry, fail, or ask for input; it never
+marks existing checklist items completed. Even with one unconditional exit, this proposal gets
+an orchestrator decision: it may accept the brief or select an issued replan retry within the
+node attempt budget. Polybridge never retries the planning worker automatically.
+Omitted optional outputs preserve the previously stored
+checklist and technical plan. A normal planning result looks like:
 
 ```json
 {
@@ -455,6 +468,11 @@ Resume of `needs_input` includes the exact published `input_decision_id` as `dec
 later question. Monitor CLI controls also include `--monitor`. The caller's original request
 remains the workflow prompt; answer prompts are stored separately for their individual task attempts.
 
+If a supervisor encounters an exception while cancelling, Polybridge makes a bounded attempt to
+settle its active dispatches, then records `needs_attention` with the cancellation error. It does
+not repeatedly relaunch the failed cancellation supervisor. Existing task records remain
+available for reconciliation; uncertain dispatches cannot be resumed or repeated.
+
 Explicit `recover_workflow` requires a nonempty reason and a failed, settled run. It returns the
 failed decision to the orchestrator with a fresh decision allowance and preserves completed work.
 
@@ -527,7 +545,10 @@ Builder activity appears as a regular agent conversation beside the canvas. Each
 `apply_workflow_draft` update previews the placed steps while the agent works; these revisions
 are separate from saved workflow revisions and never write the saved definition. The builder
 receives its current draft revision and publishes updates with `expected_draft_revision`.
-Only the verified active builder task can publish a preview.
+Only the verified active builder task can publish a preview. Render-safe previews accept
+Fresh, Resume, and Agent decides sessions and validate both planning output flags. An idle live
+builder reads pending feedback without rewriting run state; state is persisted when feedback is
+actually claimed or delivered.
 
 Chat uses the same task composer. Messages join the current turn when supported, or queue for
 the next builder turn in the same run and conversation. CLI callers use:
@@ -623,6 +644,8 @@ Only a returned review verdict counts as a review; a blocked result is evidence 
 blocker, not an approval.
 
 The sidebar groups workflow and parallel executions under expandable parents. Opening
-a child from the overview selects its full task details. The overview focuses on live
+a child from the overview selects its full task details. Resumed turns share a child only
+when they belong to the same harness session; fresh sessions stay separate, including
+orchestrator sessions. The overview focuses on live
 activity; full decoded results remain in individual task details. Workflow tasks cannot
 be taken over while their parent run is active, suspended or still settling.

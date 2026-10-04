@@ -48,6 +48,8 @@ def automatic_edges(run: dict[str, Any], node: dict[str, Any], token: dict[str, 
     if run.get("runner_policy") != "guided":
         return None
     worker_end = node["type"] == "agent" and token.get("execution_complete") and token.get("result", {}).get("status") == "succeeded"
+    if node.get("role") == "planning" and token.get("result", {}).get("result", {}).get("no_checklist_needed") is True:
+        return None  # Accepting a no-checklist proposal is orchestrator judgment.
     if node["type"] not in {"parallel_end", "join"} and not worker_end:
         return None
     if worker_end:

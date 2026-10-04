@@ -23,6 +23,7 @@ def test_scoped_roundtrip_and_private_backup(home, backend):
     path = rules.config_path(backend)
     path.parent.mkdir(parents=True)
     original = {'other': 'untouched'}
+    if backend == 'codex': original['mcp_servers'] = {'polybridge': {'command': 'polybridge-server'}}
     if backend == 'opencode': original['mcp'] = {'polybridge': {'type': 'local', 'command': ['polybridge-server']}}
     if backend == 'vibe': original['mcp_servers'] = [{'name': 'polybridge', 'transport': 'stdio', 'command': 'polybridge-server'}]
     path.write_text(tomlkit.dumps(original) if backend in ('codex','vibe') else json.dumps(original))
@@ -38,7 +39,7 @@ def test_scoped_roundtrip_and_private_backup(home, backend):
 
 def test_codex_server_approval_is_scoped(home):
     path=rules.config_path('codex');path.parent.mkdir()
-    path.write_text('# keep\n[mcp_servers.polybridge.tools.apply_workflow_draft]\napproval_mode="prompt"\n[mcp_servers.other]\ndefault_tools_approval_mode="prompt"\n')
+    path.write_text('# keep\n[mcp_servers.polybridge]\ncommand="polybridge-server"\n[mcp_servers.polybridge.tools.apply_workflow_draft]\napproval_mode="prompt"\n[mcp_servers.other]\ndefault_tools_approval_mode="prompt"\n')
     rules.edit('codex',allow='polybridge/*')
     data=tomlkit.parse(path.read_text())
     assert data['mcp_servers']['polybridge']['tools']['apply_workflow_draft']['approval_mode']=='prompt'
@@ -93,6 +94,9 @@ def test_cli_read_and_write_human_guard(home, monkeypatch, capsys):
         log_dir = home / "tasks"
         async def _detect_caller(self): return None
     monkeypatch.setattr(server, '_reg', lambda: Human())
+    path = rules.config_path('codex')
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('[mcp_servers.polybridge]\ncommand="polybridge-server"\n')
     assert ctl.main(['mcp-allowlist','--backend','codex','--allow','polybridge/*','--json']) == 0
     assert json.loads(capsys.readouterr().out)['result']['entries'] == ['polybridge/*']
     monkeypatch.setattr(takeover, "caller_refusal", lambda *args: ("agent_caller", "managed"))
@@ -120,3 +124,26 @@ def test_unknown_opencode_version_refuses_mutation(home, monkeypatch, stdout, co
     monkeypatch.setattr(rules.subprocess,'run',lambda *a,**k:SimpleNamespace(stdout=stdout,returncode=code))
     assert not rules.edit('opencode',allow='polybridge/*')['supported']
     assert not rules.config_path('opencode').exists()
+
+
+@pytest.mark.parametrize('action', ['allow', 'remove'])
+@pytest.mark.parametrize('entry', ['polybridge/*', 'polybridge/apply_workflow_draft'])
+@pytest.mark.parametrize('existing', [False, True])
+def test_codex_approval_cannot_register_missing_server(home, action, entry, existing):
+    path = rules.config_path('codex')
+    if existing:
+        path.parent.mkdir(parents=True)
+        path.write_text('[mcp_servers.other]\ncommand="other-server"\n')
+    before = path.read_bytes() if existing else None
+    with pytest.raises(ValueError, match='Register this MCP server'):
+        rules.edit('codex', **{action: entry})
+    assert (path.read_bytes() if path.exists() else None) == before
+    assert not path.with_suffix(path.suffix + '.polybridge-backup').exists()
+
+
+def test_codex_registered_http_server_preserves_transport(home):
+    path = rules.config_path('codex')
+    path.parent.mkdir(parents=True)
+    path.write_text('[mcp_servers.polybridge]\nurl="https://example.org/mcp"\n')
+    rules.edit('codex', allow='polybridge/*')
+    assert tomlkit.parse(path.read_text())['mcp_servers']['polybridge']['url'] == 'https://example.org/mcp'

@@ -7,7 +7,7 @@ import json
 from typing import Any
 
 BUDGET = 24 * 1024
-VIEWS = {"executions": "activations", "decisions": "decisions", "checklist": "tasks", "technical_plan": "technical_plan", "definition": "definition", "question": "input_question", "reason": "reason", "wait_reason": "wait_reason", "checkout_wait": "checkout_wait", "summary": "summary", "failure_reason": "failure_reason", "attention_reason": "attention_reason"}
+VIEWS = {"executions": "activations", "decisions": "decisions", "checklist": "tasks", "technical_plan": "technical_plan", "definition": "definition", "question": "input_question", "reason": "reason", "wait_reason": "wait_reason", "checkout_wait": "checkout_wait", "summary": "summary", "failure_reason": "failure_reason", "attention_reason": "attention_reason", "builder_draft": "builder_draft", "generated_definition": "generated_definition"}
 
 
 def history_page(runs: list[dict[str, Any]], offset: int = 0, limit: int = 100) -> dict[str, Any]:
@@ -40,7 +40,7 @@ def history_page(runs: list[dict[str, Any]], offset: int = 0, limit: int = 100) 
 
 
 def compact(run: dict[str, Any]) -> dict[str, Any]:
-    keys = ("workflow_run_id", "name", "revision", "kind", "status", "created_at", "updated_at", "interaction_owner", "settling", "input_decision_id", "execution_contract")
+    keys = ("workflow_run_id", "name", "revision", "kind", "status", "created_at", "updated_at", "interaction_owner", "settling", "input_decision_id", "execution_contract", "draft_revision")
     result = {key: run[key] for key in keys if key in run and isinstance(run[key], (str, int, float, bool, type(None)))}
     result["response_version"] = 1
     result["details"] = {"tool": "get_workflow_run_detail", "views": list(VIEWS)}
