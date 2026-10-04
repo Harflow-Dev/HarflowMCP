@@ -22,7 +22,9 @@ CLI facts established by measurement, not assumption:
   a positional prompt is silently ignored, so a live run carries its prompt as the first stdin line
   and has no `--` and no positional at all. Mid-turn messages fold into the running turn; after a
   `result` the process idles until more input or EOF. Every run is live except one with `max_turns`
-  (an unmeasured combination), which keeps the classic `-- <prompt>` shape on stdin DEVNULL.
+  (an unmeasured combination). Capped runs use classic argv for small prompts, or raw text
+  one-shot stdin and immediate EOF for large prompts; native start and resume were verified
+  against an isolated local API with exact 1 MiB assignments.
 * **Partial messages** (claude 2.1.283, real captures in `tests/fixtures/claude_partial_*.jsonl`):
   `--include-partial-messages` adds `stream_event` lines to the stream-json output in both the
   classic and the live shape, and on resume. Each message opens with a `message_start` carrying the
@@ -459,13 +461,16 @@ class ClaudeBackend:
         """Live input unless a turn cap was asked for.
 
         `--max-turns` together with `--input-format stream-json` has never been measured, so a
-        capped run keeps the classic one-shot shape (`--` then the prompt as the sole positional,
-        stdin DEVNULL) and cannot take `send_message`. Everything else is live: the prompt becomes
-        the first stdin line and the pipe stays open until the pump closes it.
+        capped run keeps a one-shot shape and cannot take `send_message`: small prompts use the
+        measured positional boundary; large prompts use raw text stdin closed after the initial
+        bytes (installed CLI verified against a local fake API, no paid request). Everything else
+        is live: the prompt becomes the first stdin line and the pipe stays open until the pump closes it.
         """
         argv = self._common(freedom, model, max_turns, reasoning_effort, network)
         prompt = self._check_prompt(prompt)
         if max_turns is not None:
+            if len(prompt.encode("utf-8")) > 32 * 1024:
+                return Invocation([*argv, "--input-format", "text", *session_flags], stdin_mode="pipe_once", initial_input=prompt.encode("utf-8"))
             # `--` then the prompt: last, and explicitly not parsed as an option however it looks —
             # see the note in assert_safe about why this is load-bearing for claude specifically.
             return Invocation([*argv, *session_flags, "--", prompt])
@@ -559,10 +564,9 @@ class ClaudeBackend:
         if argv[:2] != [BINARY, "-p"]:
             raise UnsafeInvocationError(f"unrecognised claude argv layout: {argv!r}")
 
-        # Exactly two shapes, told apart by the separator and each validated completely — never a
-        # mixture. Classic: `--` then exactly one positional (the prompt), stdin DEVNULL. Live: no
-        # `--` and no positional at all, `--input-format stream-json`, a stdin pipe, and the prompt
-        # as the one stream-json line in `initial_input`.
+        # Three exact shapes, never a mixture: small classic prompts after `--` with DEVNULL;
+        # capped large text prompts in one-shot stdin with EOF; live stream-json stdin retained
+        # until the pump closes it. Both stdin forms have no positional prompt.
         #
         # Classic, the reason for `--`: only the option region is inspected, and everything after
         # `--` is the prompt — caller text that happens to contain a flag name must never be able to
@@ -583,8 +587,19 @@ class ClaudeBackend:
         # would be silently ignored by claude under `--input-format stream-json` (measured), so one
         # is refused rather than tolerated. The strict option walk below does that: in the live
         # shape every token must be a known option or its value.
-        live = "--" not in argv
-        if live:
+        one_shot = invocation.stdin_mode == "pipe_once"
+        live = "--" not in argv and not one_shot
+        if one_shot:
+            if "--" in argv or not isinstance(invocation.initial_input, bytes) or not invocation.initial_input:
+                raise UnsafeInvocationError("capped text stdin requires nonempty initial bytes and no positional prompt")
+            try:
+                decoded_input = invocation.initial_input.decode("utf-8")
+                if not decoded_input.strip():
+                    raise UnsafeInvocationError("capped text stdin requires a nonempty prompt")
+            except UnicodeDecodeError as exc:
+                raise UnsafeInvocationError("capped text stdin requires UTF-8 prompt bytes") from exc
+            options = argv[2:]
+        elif live:
             options = argv[2:]
             self._check_live_wiring(invocation)
         else:
@@ -598,6 +613,8 @@ class ClaudeBackend:
                     f"expected exactly one positional argument (the prompt) after `--`, found "
                     f"{len(positionals)}: {argv!r}"
                 )
+            if len(positionals[0].encode("utf-8")) > 32 * 1024:
+                raise UnsafeInvocationError("large capped prompts require one-shot text stdin")
             if invocation.stdin_mode != STDIN_DEVNULL or invocation.initial_input is not None:
                 raise UnsafeInvocationError(
                     f"a one-shot claude argv (prompt after `--`) must run with stdin DEVNULL and no "
@@ -647,6 +664,10 @@ class ClaudeBackend:
                     f"--max-turns on a live-input run, a combination this backend never builds: "
                     f"{argv!r}"
                 )
+        elif one_shot:
+            caps = seen.get("--max-turns", [])
+            if self._exactly_one(seen, "--input-format", argv) != "text" or len(caps) != 1 or not caps[0].isdigit() or int(caps[0]) <= 0:
+                raise UnsafeInvocationError("one-shot text stdin requires input-format text and a positive turn cap")
         elif input_values:
             raise UnsafeInvocationError(
                 f"--input-format on a one-shot argv, where claude would ignore the positional "

@@ -141,7 +141,7 @@ from the assignment display. Artifacts stay with the task record for inspection 
 recovery, and task retention deletes them without following symlinks. Large display assignments
 are stored once in private full-prompt files; task metadata contains a bounded preview and an
 explicit source reference. Detail reads verify and retrieve the complete assignment.
-Large Codex and Vibe prompts use stdin with immediate EOF rather than argv, so complete input
+Large Codex, Vibe, OpenCode, and capped Claude prompts use stdin with immediate EOF rather than argv, so complete input
 results do not exceed operating-system argument limits. Vibe trims outer whitespace on stdin;
 Polybridge explicitly refuses large Vibe assignments with outer whitespace rather than altering them.
 

@@ -1067,8 +1067,8 @@ class TaskRegistry:
         # The whole Invocation is checked, not just its argv, and the stdin wiring below comes from
         # it — never from the backend's name or its static capability — so a live-input argv can
         # only ever run with the pipe it was built for (claude without a turn cap, and every
-        # antigravity run, is live), and every other run keeps stdin DEVNULL (codex and vibe block
-        # forever reading an open stdin).
+        # antigravity run, is live). Classic runs use DEVNULL or a backend-validated one-shot
+        # prompt pipe which closes immediately at EOF, without a live-input pump.
         backend.assert_safe(invocation, freedom, network)  # type: ignore[arg-type]
 
         task_id = store.validate_task_id(task_id) if task_id else str(uuid.uuid4())

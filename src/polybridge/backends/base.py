@@ -41,7 +41,7 @@ class Invocation:
     was actually built — never from the backend's name or its static capability. A live-input run
     (`stdin_mode="pipe"`) carries its prompt as `initial_input`, because a CLI reading its input as a
     stream ignores a positional prompt (measured on claude). Every other run is `"devnull"` with no
-    initial input. Codex additionally supports "pipe_once": a large prompt is sent as
+    initial input. Backends may also support "pipe_once": a large prompt is sent as
     initial bytes and stdin is immediately closed, without a live-input pump.
     """
 

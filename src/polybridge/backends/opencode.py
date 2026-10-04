@@ -30,6 +30,11 @@ CLI facts established by capturing real runs, not assumption:
 * `-s <id>` resumes into the **same** session id — verified by comparing the ids across two runs.
 * No grandchild process: 1.18.3 runs its server in-process, so the only pid is the CLI leader.
 
+* Assignments over 32 KiB use one-shot UTF-8 stdin, closed immediately at EOF, with trailing
+  `--` and no argv message. The installed run handler reads `Bun.stdin.text()` and preserves
+  content without trimming when the argv message is empty. Start and resume use this transport;
+  small assignments retain the existing separated argv form.
+
 The freedom mapping is agent-based, and measured rather than reasoned about:
 
 * `--agent plan` declined to write a file or run bash, and wrote nothing. It said so in its own words
@@ -72,6 +77,7 @@ from .base import (
 )
 
 BINARY = "opencode"
+ARGV_PROMPT_BYTES = 32 * 1024
 
 AGENTS: dict[str, str] = {
     "read_only": "plan",
@@ -251,8 +257,7 @@ class OpencodeBackend:
         self._reject_turn_cap(max_turns)
         argv = [BINARY, "run", *self._options(repo, freedom, model, reasoning_effort, network)]
         # `--` then the prompt: last, and explicitly not parsed as an option however it looks.
-        argv += ["--", self._check_prompt(prompt)]
-        invocation = Invocation(argv)
+        invocation = self._prompt_invocation(argv, prompt)
         self.assert_safe(invocation, freedom, network)
         return invocation
 
@@ -275,8 +280,7 @@ class OpencodeBackend:
         # necessarily this task's conversation.
         options = self._options(repo, freedom, model, reasoning_effort, network)
         argv = [BINARY, "run", *options, "-s", session_id]
-        argv += ["--", self._check_prompt(prompt)]
-        invocation = Invocation(argv)
+        invocation = self._prompt_invocation(argv, prompt)
         self.assert_safe(invocation, freedom, network)
         return invocation
 
@@ -313,6 +317,12 @@ class OpencodeBackend:
                 "omit it rather than have it silently ignored"
             )
 
+    def _prompt_invocation(self, argv: list[str], prompt: str) -> Invocation:
+        prompt = self._check_prompt(prompt)
+        if len(prompt.encode("utf-8")) > ARGV_PROMPT_BYTES:
+            return Invocation([*argv, "--"], stdin_mode="pipe_once", initial_input=prompt.encode("utf-8"))
+        return Invocation([*argv, "--", prompt])
+
     @staticmethod
     def _check_prompt(prompt: str) -> str:
         if not prompt or not prompt.strip():
@@ -322,8 +332,18 @@ class OpencodeBackend:
     def assert_safe(
         self, invocation: Invocation, freedom: Freedom, network: bool | None = None
     ) -> None:
-        # No live input here: only a devnull-stdin Invocation is a shape this backend ever builds.
-        problem = classic_invocation_problem(invocation)
+        # EOF stdin is a one-shot assignment transport, never a live input pipe.
+        one_shot = isinstance(invocation, Invocation) and invocation.stdin_mode == "pipe_once"
+        if one_shot:
+            try:
+                prompt = invocation.initial_input.decode("utf-8") if isinstance(invocation.initial_input, bytes) else ""
+            except UnicodeError:
+                prompt = ""
+            if not prompt.strip() or invocation.argv[-1:] != ["--"]:
+                raise UnsafeInvocationError("OpenCode one-shot stdin requires nonempty UTF-8 input and trailing -- with no argv message")
+            problem = None
+        else:
+            problem = classic_invocation_problem(invocation)
         if problem is not None:
             raise UnsafeInvocationError(problem)
         argv = invocation.argv
@@ -344,6 +364,13 @@ class OpencodeBackend:
                 f"refusing to run opencode without a `--` separator before the prompt, which stops "
                 f"prompt text being parsed as options: {argv!r}"
             )
+        positionals = argv[argv.index("--") + 1:]
+        if one_shot and positionals:
+            raise UnsafeInvocationError("OpenCode one-shot stdin cannot also supply argv messages")
+        if not one_shot and (len(positionals) != 1 or not positionals[0].strip()):
+            raise UnsafeInvocationError("OpenCode requires exactly one nonempty argv assignment")
+        if not one_shot and len(positionals[0].encode("utf-8")) > ARGV_PROMPT_BYTES:
+            raise UnsafeInvocationError("OpenCode large assignments require one-shot stdin transport")
         seen = self._parse_options(argv[2 : argv.index("--")], argv)
 
         fmt = self._exactly_one(seen, "--format", argv)
