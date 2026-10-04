@@ -140,7 +140,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     resume_p.add_argument("--json", action="store_true")
 
     allowlist_p = sub.add_parser("mcp-allowlist", help="inspect or explicitly edit harness-global MCP approval rules")
-    allowlist_p.add_argument("--backend", required=True, choices=("codex", "claude", "vibe", "opencode", "antigravity"))
+    allowlist_p.add_argument("--backend", required=True, choices=tuple(backends.BACKENDS))
     allowlist_p.add_argument("--json", action="store_true")
     edits = allowlist_p.add_mutually_exclusive_group()
     edits.add_argument("--allow")
@@ -185,7 +185,9 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
         if action == "resume":
             wp.add_argument("--decision-id")
         if action == "builder-followup":
-            wp.add_argument("--prompt", required=True)
+            prompt_group = wp.add_mutually_exclusive_group(required=True)
+            prompt_group.add_argument("--prompt")
+            prompt_group.add_argument("--prompt-file", help="UTF-8 prompt file")
         if action == "builder-apply":
             wp.add_argument("--definition", required=True, help="Current draft JSON file, or - for stdin")
             wp.add_argument("--expected-draft-revision", type=int, required=True)
@@ -195,7 +197,9 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
                 wp.add_argument("--expected-revision", type=int)
         if action in {"start", "build"}:
             wp.add_argument("--repo", required=action == "start")
-            wp.add_argument("--prompt", required=True)
+            prompt_group = wp.add_mutually_exclusive_group(required=True)
+            prompt_group.add_argument("--prompt")
+            prompt_group.add_argument("--prompt-file", help="UTF-8 prompt file")
             wp.add_argument("--backend", required=action == "build")
             wp.add_argument("--model")
             wp.add_argument("--reasoning-effort")
@@ -580,6 +584,14 @@ def _cmd_detached(args: argparse.Namespace, action: Any) -> int:
     return 3
 
 
+def _workflow_prompt(args: argparse.Namespace) -> str:
+    """Read disposable prompt transport without changing its newline bytes."""
+    if path := getattr(args, "prompt_file", None):
+        with Path(path).open(encoding="utf-8", newline="") as stream:
+            return stream.read()
+    return args.prompt
+
+
 def _cmd_workflow(args: argparse.Namespace) -> int:
     action = args.command.removeprefix("workflow-")
     async def invoke() -> Any:
@@ -616,7 +628,7 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
                 refuse_managed(server._reg().log_dir, caller.record.task_id)
             return migrate_workflows()
         if action == "builder-followup":
-            return await server.followup_workflow_builder(args.workflow_run_id, args.prompt)
+            return await server.followup_workflow_builder(args.workflow_run_id, _workflow_prompt(args))
         if action == "builder-apply":
             raw = sys.stdin.read() if args.definition == "-" else Path(args.definition).read_text()
             return await server.apply_workflow_draft(json.loads(raw), args.expected_draft_revision)
@@ -632,6 +644,7 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
             raw = sys.stdin.read() if args.definition == "-" else Path(args.definition).read_text()
             return await server.save_workflow(args.name, json.loads(raw), args.expected_revision)
         if action in {"start", "build"}:
+            prompt = _workflow_prompt(args)
             candidate = {k: v for k, v in {"backend": args.backend, "model": args.model,
                          "reasoning_effort": args.reasoning_effort, "max_turns": args.max_turns}.items() if v is not None}
             if action == "build":
@@ -641,10 +654,10 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
                 source = json.loads(args.source) if args.source else None
                 if args.source_file:
                     source = json.loads(Path(args.source_file).read_text())
-                return await server.workflow_builder(args.name, args.prompt, args.repo, candidate, json.loads(args.fallbacks), definition, source)
+                return await server.workflow_builder(args.name, prompt, args.repo, candidate, json.loads(args.fallbacks), definition, source)
             if args.monitor:
-                return await server._workflow_call("start", name=args.name, prompt=args.prompt, repo_path=args.repo, overrides=candidate or None, freedom=args.freedom, network=_network(args.network), interaction_owner="monitor")
-            return await server._workflow_call("start", name=args.name, prompt=args.prompt, repo_path=args.repo, overrides=candidate or None, freedom=args.freedom, network=_network(args.network))
+                return await server._workflow_call("start", name=args.name, prompt=prompt, repo_path=args.repo, overrides=candidate or None, freedom=args.freedom, network=_network(args.network), interaction_owner="monitor")
+            return await server._workflow_call("start", name=args.name, prompt=prompt, repo_path=args.repo, overrides=candidate or None, freedom=args.freedom, network=_network(args.network))
         if action == "detail":
             return await server.get_workflow_run_detail(args.workflow_run_id, args.view, args.cursor)
         if action == "status" and args.monitor_view:

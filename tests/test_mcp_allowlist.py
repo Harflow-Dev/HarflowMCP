@@ -176,3 +176,32 @@ def test_new_backend_approval_adapter_needs_no_generic_editor_changes(home, monk
     assert rules.edit("custom-harness", allow="polybridge/tool")["entries"] == ["polybridge/tool"]
     assert rules.edit("custom-harness")["entries"] == ["polybridge/tool"]
     assert rules.edit("custom-harness", remove="polybridge/tool")["entries"] == []
+
+
+def test_registered_backend_approval_adapter_cli_roundtrip_and_human_guard(home, monkeypatch, capsys):
+    from types import SimpleNamespace
+    from polybridge import ctl, server, takeover
+    from polybridge.backends import BACKENDS
+
+    class CustomApproval:
+        detail_prefix = ''
+        def config_path(self): return home / 'registered-harness.json'
+        def unsupported_reason(self): return None
+        def parse(self, raw): return json.loads(raw or '{}')
+        def entries(self, data): return data.get('allow', [])
+        def update(self, raw, data, entry, *, allow):
+            data['allow'] = [entry] if allow else []
+            return json.dumps(data)
+
+    monkeypatch.setitem(BACKENDS, 'registered-harness', SimpleNamespace(mcp_approval=CustomApproval()))
+    monkeypatch.setattr(server, '_reg', lambda: SimpleNamespace(log_dir=home/'tasks'))
+    monkeypatch.setattr(takeover, 'caller_refusal', lambda _: None)
+    base=['mcp-allowlist','--backend','registered-harness','--json']
+    for extra, expected in [(['--allow','polybridge/tool'], ['polybridge/tool']), ([], ['polybridge/tool']), (['--remove','polybridge/tool'], [])]:
+        assert ctl.main(base+extra)==0
+        assert json.loads(capsys.readouterr().out)['result']['entries']==expected
+    monkeypatch.setattr(takeover, 'caller_refusal', lambda _: ('agent_caller','managed'))
+    before=(home/'registered-harness.json').read_bytes()
+    assert ctl.main(base+['--allow','polybridge/tool'])==1
+    assert json.loads(capsys.readouterr().out)['error']['code']=='human_only'
+    assert (home/'registered-harness.json').read_bytes()==before
