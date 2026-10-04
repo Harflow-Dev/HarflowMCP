@@ -25,13 +25,13 @@ async def test_workflow_rejects_task_only_options():
 
 def test_cli_workflow_start_envelope(monkeypatch, capsys):
     observed = {}
-    async def start(name, prompt, repo, overrides, freedom, network):
-        observed.update(name=name, overrides=overrides, network=network)
+    async def start(action, **kwargs):
+        observed.update(kwargs)
         return {"workflow_run_id": "run-1", "status": "pending"}
-    monkeypatch.setattr(server, "start_workflow", start)
+    monkeypatch.setattr(server, "_workflow_call", start)
     assert ctl.main(["run", "--workflow", "review", "--repo", "/tmp/repo", "--prompt", "do it", "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == {"v": 2, "result": {"workflow_run_id": "run-1", "status": "pending"}}
-    assert observed == {"name": "review", "overrides": None, "network": None}
+    assert observed == {"name": "review", "overrides": None, "network": None, "freedom": None, "prompt": "do it", "repo_path": "/tmp/repo"}
 
 
 def test_cli_save_reads_file_and_expected_revision(tmp_path, monkeypatch, capsys):
@@ -58,7 +58,7 @@ async def test_wait_workflow_checks_timeout():
 def test_managed_agent_cannot_directly_dispatch(monkeypatch, tmp_path):
     from polybridge import workflow_hooks
     from polybridge.backends.base import NestedDispatchRefused
-    monkeypatch.setattr(workflow_hooks, "owner", lambda *args: {"role": "node", "status": "running"})
+    monkeypatch.setattr(workflow_hooks, "owner", lambda *args, **kwargs: {"role": "node", "status": "running"})
     with pytest.raises(NestedDispatchRefused) as refused:
         workflow_hooks.refuse_managed(tmp_path, "reserved-1")
     assert refused.value.rule == "workflow_managed"
@@ -79,7 +79,7 @@ async def test_workflow_mutation_refuses_managed_caller(monkeypatch, tmp_path):
         return SimpleNamespace(record=SimpleNamespace(task_id="managed-1"))
     monkeypatch.setattr(registry, "_detect_caller", caller)
     monkeypatch.setattr(server, "_reg", lambda: registry)
-    monkeypatch.setattr(workflow_hooks, "owner", lambda *args: {"role": "builder"})
+    monkeypatch.setattr(workflow_hooks, "owner", lambda *args, **kwargs: {"role": "builder"})
     with pytest.raises(Exception, match="direct dispatch and workflow mutations"):
         await server.save_workflow("draft", {})
 
@@ -166,7 +166,7 @@ async def test_public_mcp_has_no_checklist_completion_mutation():
         "workflow_builder", "start_workflow", "list_workflow_runs",
         "get_workflow_status", "wait_for_workflow", "pause_workflow",
         "resume_workflow", "cancel_workflow", "followup_workflow_builder", "apply_workflow_draft",
-        "recover_workflow", "inspect_workflow_node",
+        "recover_workflow", "inspect_workflow_node", "get_workflow_run_detail",
     }
     for name in ("pause_workflow", "resume_workflow", "cancel_workflow"):
         assert not {"task_updates", "tasks", "completed_task_ids", "status", "completed"} & set(tools[name].input_schema["properties"])
@@ -211,14 +211,9 @@ def test_cli_validation_reports_malformed_input_as_transport_error(tmp_path, cap
 
 
 @pytest.mark.parametrize("freedom", ["read_only", "write_in_repo", "publish", "unrestricted"])
-def test_cli_workflow_launch_accepts_all_access_ceilings(freedom, monkeypatch, capsys):
-    async def start(name, prompt, repo, overrides, actual_freedom, network):
-        assert actual_freedom == freedom
-        assert network is None
-        return {"workflow_run_id": "run-1"}
-    monkeypatch.setattr(server, "start_workflow", start)
-    assert ctl.main(["workflow-start", "example", "--repo", "/tmp/repo", "--prompt", "task", "--freedom", freedom, "--json"]) == 0
-    assert json.loads(capsys.readouterr().out)["result"]["workflow_run_id"] == "run-1"
+def test_cli_workflow_launch_rejects_access_overrides(freedom, monkeypatch, capsys):
+    assert ctl.main(["workflow-start", "example", "--repo", "/tmp/repo", "--prompt", "task", "--freedom", freedom, "--json"]) == 1
+    assert "saved nodes" in json.loads(capsys.readouterr().out)["error"]["message"]
 
 
 async def test_builder_refinement_forwards_current_unsaved_canvas_and_saved_baseline(monkeypatch):

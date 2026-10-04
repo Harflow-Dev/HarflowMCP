@@ -154,9 +154,6 @@ def edit(backend: str, *, allow: str | None = None, remove: str | None = None) -
             key = "default_tools_approval_mode" if tool == "*" else "approval_mode"
             if allow is not None:
                 rule[key] = "approve"
-                if tool == "*":
-                    for per_tool in policy.get("tools", {}).values():
-                        if "approval_mode" in per_tool: per_tool["approval_mode"] = "approve"
             elif rule.get(key) == "approve": del rule[key]
             updated = tomlkit.dumps(data)
         elif backend == "vibe":

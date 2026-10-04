@@ -982,3 +982,86 @@ async def test_recovered_answer_resume_outage_cannot_fresh_before_orchestrator(s
     activation = next(a for a in run["activations"] if a["role"] == "node")
     assert len(activation["tasks"]) == 2
     assert activation["questions"][0]["answer_delivery_state"] == "requires_fresh"
+
+async def test_blocked_worker_can_retry_without_graph_loop(storage, tmp_path):
+    attempts = 0
+    def output(prompt, kwargs):
+        nonlocal attempts
+        attempts += 1
+        return {"status": "blocked" if attempts == 1 else "succeeded", "result": {"summary": "need corrected context"}, "evidence": []}
+    def policy(context, registry):
+        retries = [c for c in context["valid_continuations"] if c["kind"] == "retry_execution"]
+        if retries:
+            return {"decision_id": context["decision_id"], "action": "continue", "reason": "Correct context", "next": [{"continuation_id": retries[0]["continuation_id"], "prompt": "Corrected assignment", "session_mode": "fresh"}]}
+        return default_decision(context, registry)
+    run, registry = await run_flow(storage, tmp_path, registry=Registry(storage.root, policy, {"Work": output, "work": output}))
+    assert run["status"] == "completed"
+    assert attempts == 2
+    workers = [a for a in run["activations"] if a["role"] == "node"]
+    assert len(workers) == 2
+    assert workers[1]["assignment_prompt"] == "Corrected assignment"
+    assert run["transitions"] == 2
+    assert workers[0]["id"] in workers[1]["input_result_refs"]
+
+
+def test_structural_barrier_has_no_session_fields(storage, tmp_path):
+    definition = w.validate_definition(parallel())
+    run = storage.create_run(definition, "request", tmp_path)
+    run["joins"]["fork"] = {"join_id": "merge"}
+    token = {"id": "token", "node_id": "left", "stack": ["fork"]}
+    node = next(n for n in definition["nodes"] if n["id"] == "left")
+    choice = d.continuations(run, node, token, False)[0]
+    assert choice["kind"] == "barrier_arrival"
+    assert "session_mode" not in choice
+    assert "available_sessions" not in choice
+
+
+@pytest.mark.parametrize("kind", ["protocol", "permission", "authority", "cancelled", "uncertain"])
+def test_unsafe_execution_never_offers_retry(kind):
+    assert not d.retry_eligible({"status": "failed", "tasks": [], "node_result": {"status": "blocked", "result": {"failure_kind": kind}}})
+
+async def test_retry_at_parallel_branch_preserves_convergence_and_siblings(storage, tmp_path):
+    attempts = {"left": 0, "right": 0}
+    def worker(which):
+        def output(prompt, kwargs):
+            attempts[which] += 1
+            return {"status": "blocked" if which == "left" and attempts[which] == 1 else "succeeded", "result": {"summary": which}, "evidence": []}
+        return output
+    def policy(context, registry):
+        retries = [c for c in context["valid_continuations"] if c["kind"] == "retry_execution"]
+        if retries:
+            return {"decision_id": context["decision_id"], "action": "continue", "reason": "Resolve missing context", "next": [{"continuation_id": retries[0]["continuation_id"], "prompt": "Corrected branch", "session_mode": "fresh"}]}
+        return default_decision(context, registry)
+    definition = parallel()
+    definition['nodes'][1]['title'] = 'left'
+    definition['nodes'][2]['title'] = 'right'
+    run, _ = await run_flow(storage, tmp_path, definition, Registry(storage.root, policy, {'left': worker('left'), 'right': worker('right')}))
+    assert run['status'] == 'completed'
+    assert attempts == {'left': 2, 'right': 1}
+    assert len([a for a in run['activations'] if a['role'] == 'node' and a['node_id'] == 'merge']) == 1
+    assert not run['joins']
+
+
+async def test_retry_budget_exhaustion_stops_offering_execution(storage, tmp_path):
+    definition = graph()
+    definition['nodes'][1]['max_attempts'] = 1
+    def policy(context, registry):
+        if context['current_stage']['node_id'] == 'work':
+            assert not any(c['kind'] == 'retry_execution' for c in context['valid_continuations'])
+            return {'decision_id': context['decision_id'], 'action': 'failed', 'reason': 'No execution budget remains'}
+        return default_decision(context, registry)
+    run, _ = await run_flow(storage, tmp_path, definition, Registry(storage.root, policy, {'Work': {'status': 'blocked', 'result': {'reason': 'missing context'}, 'evidence': []}}))
+    assert run['status'] == 'failed'
+    assert len([a for a in run['activations'] if a['role'] == 'node']) == 1
+
+
+def test_no_retry_or_resume_when_all_candidates_are_suppressed(storage, tmp_path):
+    definition = w.validate_definition(graph())
+    run = storage.create_run(definition, 'request', tmp_path)
+    node = definition['nodes'][1]
+    activation = {'id': 'failed-worker', 'role': 'node', 'node_id': 'work', 'status': 'failed', 'tasks': [], 'node_result': {'status': 'failed', 'result': {'failure_kind': 'harness', 'reason': 'All agents unavailable'}, 'evidence': []}}
+    run['activations'] = [activation]
+    run['suppressed_candidates'] = ['work:' + w._candidate_key(node['agent'])]
+    token = {'id': 'token', 'node_id': 'work', 'execution_complete': True, 'execution_activation_id': activation['id'], 'result': activation['node_result']}
+    assert not any(c['kind'] == 'retry_execution' for c in d.continuations(run, node, token, False))
+    assert d.available_sessions(run, node) == []

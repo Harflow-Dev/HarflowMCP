@@ -299,7 +299,7 @@ async def start_task(
     prompt: str,
     repo_path: str,
     backend: str | None = None,
-    freedom: str = DEFAULT_FREEDOM,
+    freedom: str | None = None,
     model: str | None = None,
     max_turns: int | None = None,
     reasoning_effort: str | None = None,
@@ -374,13 +374,14 @@ async def start_task(
     if workflow is not None:
         if group is not None or title is not None:
             raise MCPError(INVALID_PARAMS, "workflow runs do not accept task group or title")
-        return await _workflow_call(
-            "start", name=workflow, prompt=prompt, repo_path=repo_path,
+        return await start_workflow(
+            name=workflow, prompt=prompt, repo_path=repo_path,
             overrides={k: v for k, v in {"backend": backend, "model": model, "max_turns": max_turns,
                        "reasoning_effort": reasoning_effort}.items() if v is not None},
             freedom=freedom, network=network,
         )
 
+    freedom = freedom if freedom is not None else DEFAULT_FREEDOM
     chosen = _backend(backend or DEFAULT_BACKEND)
     _check_freedom(freedom)
     _check_turn_cap(chosen, max_turns)
@@ -884,12 +885,28 @@ async def _filter_task_reads(entries: list[dict[str, Any]]) -> list[dict[str, An
     return filter_task_reads(entries, await _managed_workflow_reader())
 
 
+async def _verified_workflow_caller():
+    """Read/mutation authority must distinguish a human from failed detection."""
+    from . import lineage
+    caller = await _reg()._detect_caller()
+    if caller is not None:
+        return caller
+    detection = await asyncio.to_thread(lineage.detect_caller_detail, _reg().log_dir)
+    if detection.undecidable is not None:
+        raise MCPError(INVALID_PARAMS, "Workflow caller authority is undecidable: " + str(detection.undecidable))
+    if detection.caller is not None:
+        return detection.caller
+    if os.environ.get(lineage.ENV_TASK_ID):
+        raise MCPError(INVALID_PARAMS, "Workflow caller task identity cannot be verified")
+    return None
+
+
 async def _managed_workflow_reader() -> tuple[dict[str, Any], dict[str, Any]] | None:
     from . import workflow_hooks, workflows
-    caller = await _reg()._detect_caller()
+    caller = await _verified_workflow_caller()
     if caller is None:
         return None
-    association = workflow_hooks.owner(_reg().log_dir, caller.record.task_id)
+    association = workflow_hooks.owner(_reg().log_dir, caller.record.task_id, strict=True)
     if association is None or association.get("role") == "builder":
         return None
     run = workflows.WorkflowStore(root=_reg().log_dir.parent).get_run(association["workflow_run_id"])
@@ -920,28 +937,34 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
     from . import workflows
     try:
         if kwargs.get("interaction_owner") == "monitor":
-            if await _reg()._detect_caller() is not None:
-                raise ValueError("Only a human Monitor caller can claim monitor interaction ownership")
+            from .takeover import caller_refusal
+            refusal = await asyncio.to_thread(caller_refusal, _reg().log_dir)
+            if refusal is not None:
+                raise ValueError("Only a verified human Monitor caller can claim monitor interaction ownership: " + refusal[1])
         if action in {"pause", "resume", "recover"}:
             kwargs.setdefault("interaction_owner", "caller")
-        if action not in {"list", "list_runs", "get", "status", "inspect"}:
+        if action not in {"list", "list_runs", "get", "status", "inspect", "detail"}:
             from .workflow_hooks import refuse_managed
-            caller = await _reg()._detect_caller()
+            caller = await _verified_workflow_caller()
             if caller is not None:
                 refuse_managed(_reg().log_dir, caller.record.task_id)
+        if action == "start":
+            if kwargs.get("freedom") is not None:
+                raise ValueError("Workflow access is defined by saved nodes; caller freedom overrides are not supported")
+            kwargs["definition_snapshot"] = workflows.WorkflowStore().get(kwargs["name"])
         if action in {"start", "build"}:
             if not kwargs["prompt"] or not kwargs["prompt"].strip():
                 raise ValueError("prompt must be a non-empty string")
             if action == "build":
                 workflows._candidate({**kwargs["agent"], "fallbacks": kwargs.get("fallbacks") or kwargs["agent"].get("fallbacks", [])})
-            caller = await _reg()._detect_caller()
+            caller = await _verified_workflow_caller()
             if caller is not None:
                 configs = []
                 if action == "start":
-                    definition = workflows.WorkflowStore().get(kwargs["name"])
+                    definition = kwargs["definition_snapshot"]
                     orchestrator = {**definition["orchestrator"], **(kwargs.get("overrides") or {})}
                     configs.append((orchestrator, "read_only", kwargs.get("network")))
-                    configs.extend((n["agent"], workflows.effective_freedom(n, kwargs["freedom"]), False if kwargs.get("network") is False else n.get("network", kwargs.get("network"))) for n in definition["nodes"] if n["type"] == "agent")
+                    configs.extend((n["agent"], workflows.effective_freedom(n, "unrestricted", permission_policy="saved_node"), False if kwargs.get("network") is False else n.get("network", kwargs.get("network"))) for n in definition["nodes"] if n["type"] == "agent")
                 else:
                     configs.append(({**kwargs["agent"], "fallbacks": kwargs.get("fallbacks") or []}, "read_only", None))
                 path = await _validate_repo_path(kwargs["repo_path"]) if kwargs.get("repo_path") is not None else workflows.builder_workspace(workflows.WorkflowStore())
@@ -958,7 +981,6 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
                         _reg()._resolve_lineage(caller, child_enforcement=enforcement, child_backend=backend_.name, child_repo=path)
         if action == "start":
             kwargs["repo_path"] = await _validate_repo_path(kwargs["repo_path"])
-            _check_freedom(kwargs["freedom"])
             return await workflows.start_workflow(**kwargs)
         if action == "build":
             if kwargs.get("repo_path") is not None:
@@ -971,7 +993,7 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
             association, owned_run = managed
             if association["role"] != "orchestrator":
                 raise ValueError("Worker nodes cannot inspect workflow context")
-            if action in {"status", "inspect"} and kwargs["run_id"] != owned_run["workflow_run_id"]:
+            if action in {"status", "inspect", "detail"} and kwargs["run_id"] != owned_run["workflow_run_id"]:
                 raise ValueError("Orchestrators may only inspect their own workflow run")
             if action == "get":
                 if kwargs["name"] != owned_run["name"]:
@@ -981,6 +1003,11 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
                 return [owned_run["definition"]]
             if action == "list_runs":
                 return [_managed_run_summary(owned_run)]
+            if action == "detail":
+                if kwargs["view"] == "executions":
+                    raise ValueError("Use inspect_workflow_node for settled execution details")
+                from .workflow_responses import detail
+                return detail(owned_run, kwargs["view"], kwargs.get("cursor"), kwargs.get("limit", 8000))
             if action == "status":
                 return _managed_run_summary(owned_run)
         store_ = workflows.WorkflowStore()
@@ -999,6 +1026,10 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
             run = await asyncio.to_thread(store_.get_run, kwargs["run_id"])
             request = {key: value for key, value in kwargs.items() if key != "run_id"}
             return await asyncio.to_thread(inspect_request, run, store_.root, request)
+        if action == "detail":
+            from .workflow_responses import detail
+            run = await asyncio.to_thread(store_.get_run, kwargs["run_id"])
+            return detail(run, kwargs["view"], kwargs.get("cursor"), kwargs.get("limit", 8000))
         if action == "status":
             return await asyncio.to_thread(store_.get_run, kwargs["run_id"])
         return await asyncio.to_thread(store_.control, action=action, **kwargs)
@@ -1071,40 +1102,90 @@ async def apply_workflow_draft(definition: dict[str, Any], expected_draft_revisi
 
 
 @mcp.tool()
-async def start_workflow(name: str, prompt: str, repo_path: str, overrides: dict[str, Any] | None = None, freedom: str = DEFAULT_FREEDOM, network: StrictBool | None = None) -> dict[str, Any]:
+async def start_workflow(name: str, prompt: str, repo_path: str, overrides: dict[str, Any] | None = None, freedom: str | None = None, network: StrictBool | None = None) -> dict[str, Any]:
     """Start a durable workflow run; returns workflow_run_id rather than task_id."""
-    return await _workflow_call("start", name=name, prompt=prompt, repo_path=repo_path, overrides=overrides, freedom=freedom, network=network)
+    from .workflow_responses import compact
+    return compact(await _workflow_call("start", name=name, prompt=prompt, repo_path=repo_path, overrides=overrides, freedom=freedom, network=network))
 
 
 @mcp.tool()
-async def list_workflow_runs() -> list[dict[str, Any]]:
+async def list_workflow_runs(offset: int = 0, limit: int = 10) -> dict[str, Any]:
     """List recorded workflow runs."""
-    return await _workflow_call("list_runs")
+    from .workflow_responses import compact
+    if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 20:
+        raise MCPError(INVALID_PARAMS, "offset must be nonnegative; limit must be 1–20")
+    runs = await _workflow_call("list_runs")
+    entries = []
+    for run in runs[offset:offset + limit]:
+        candidate = compact(run)
+        import json
+        if len(json.dumps({"runs": entries + [candidate]}, ensure_ascii=True).encode()) > 22 * 1024:
+            break
+        entries.append(candidate)
+    next_offset = offset + len(entries)
+    return {"response_version": 1, "runs": entries, "next_offset": next_offset if next_offset < len(runs) else None}
 
 
 @mcp.tool()
 async def get_workflow_status(workflow_run_id: str) -> dict[str, Any]:
     """Read a workflow run's execution state and task associations."""
-    return await _workflow_call("status", run_id=workflow_run_id)
+    from .workflow_responses import compact
+    return compact(await _workflow_call("status", run_id=workflow_run_id))
+
+
+async def _wait_workflow_full(workflow_run_id: str, timeout_seconds: int = 30) -> dict[str, Any]:
+    if type(timeout_seconds) is not int or not 0 <= timeout_seconds <= 300:
+        raise MCPError(INVALID_PARAMS, "timeout_seconds must be between 0 and 300")
+    effective = min(timeout_seconds, 45)
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + effective
+    result = await _workflow_call("status", run_id=workflow_run_id)
+    path = Path.home() / ".polybridge" / "workflow-runs" / (workflow_run_id + ".json")
+    def revision():
+        try:
+            stat = path.stat()
+            return stat.st_mtime_ns, stat.st_size
+        except OSError:
+            return None
+    # First poll refreshes after the initial read, avoiding a read/stat race.
+    previous_revision = None
+    while True:
+        active = result.get("status") in {"running", "pending", "building", "pausing", "starting", "cancelling"}
+        if not active or loop.time() >= deadline:
+            return {**result, "requested_timeout_seconds": timeout_seconds, "effective_timeout_seconds": effective, "timed_out": active, "polling_guidance": "Poll wait_for_workflow again while running; server holds at most 45 seconds."}
+        await asyncio.sleep(min(1, max(0, deadline - loop.time())))
+        current_revision = revision()
+        if current_revision is None or current_revision != previous_revision:
+            result = await _workflow_call("status", run_id=workflow_run_id)
+            previous_revision = current_revision
 
 
 @mcp.tool()
 async def wait_for_workflow(workflow_run_id: str, timeout_seconds: int = 30) -> dict[str, Any]:
-    """Wait up to 300 seconds for completion, pause, or attention."""
-    if not 0 <= timeout_seconds <= 300:
-        raise MCPError(INVALID_PARAMS, "timeout_seconds must be between 0 and 300")
-    deadline = asyncio.get_running_loop().time() + timeout_seconds
-    while True:
-        result = await get_workflow_status(workflow_run_id)
-        if result.get("status") not in {"running", "pending", "building", "pausing", "starting", "cancelling"} or asyncio.get_running_loop().time() >= deadline:
-            return result
-        await asyncio.sleep(min(0.25, max(0, deadline - asyncio.get_running_loop().time())))
+    """Wait for attention/completion, default 30s; effective hold capped at 45s.
+
+    Requests up to 300s are accepted but capped; inspect returned timeout and polling fields.
+    """
+    from .workflow_responses import compact
+    run = await _wait_workflow_full(workflow_run_id, timeout_seconds)
+    return compact(run) | {key: run[key] for key in ("requested_timeout_seconds", "effective_timeout_seconds", "timed_out", "polling_guidance")}
+
+
+@mcp.tool()
+async def get_workflow_run_detail(workflow_run_id: str, view: str, cursor: str | None = None, limit: int = 8000) -> dict[str, Any]:
+    """Losslessly read executions, decisions, checklist, technical_plan, definition, question, reason or wait_reason.
+
+    Concatenate chunk fields then decode JSON. Cursors bind content, run and view; changed
+    content requires restarting. Managed orchestrators use settled node inspection for executions.
+    """
+    return await _workflow_call("detail", run_id=workflow_run_id, view=view, cursor=cursor, limit=limit)
 
 
 @mcp.tool()
 async def pause_workflow(workflow_run_id: str) -> dict[str, Any]:
     """Stop scheduling while active steps settle."""
-    return await _workflow_call("pause", run_id=workflow_run_id)
+    from .workflow_responses import compact
+    return compact(await _workflow_call("pause", run_id=workflow_run_id))
 
 
 @mcp.tool()
@@ -1114,7 +1195,8 @@ async def resume_workflow(workflow_run_id: str, instructions: str | None = None,
     For needs_input, supply its current input_decision_id as decision_id and a nonempty answer
     in instructions. Stale answers and live/uncertain dispatches are refused.
     """
-    return await _workflow_call("resume", run_id=workflow_run_id, instructions=instructions, additional_attempts=additional_attempts, decision_id=decision_id)
+    from .workflow_responses import compact
+    return compact(await _workflow_call("resume", run_id=workflow_run_id, instructions=instructions, additional_attempts=additional_attempts, decision_id=decision_id))
 
 
 @mcp.tool()
@@ -1138,13 +1220,15 @@ async def recover_workflow(workflow_run_id: str, reason: str, additional_attempt
     """Explicitly recover a failed settled run; retain completed work and supply a reason."""
     if not reason or not reason.strip():
         raise MCPError(INVALID_PARAMS, "Recovery reason must be nonempty")
-    return await _workflow_call("recover", run_id=workflow_run_id, instructions=reason, additional_attempts=additional_attempts)
+    from .workflow_responses import compact
+    return compact(await _workflow_call("recover", run_id=workflow_run_id, instructions=reason, additional_attempts=additional_attempts))
 
 
 @mcp.tool()
 async def cancel_workflow(workflow_run_id: str) -> dict[str, Any]:
     """Stop scheduling and cancel the workflow's associated tasks."""
-    return await _workflow_call("cancel", run_id=workflow_run_id)
+    from .workflow_responses import compact
+    return compact(await _workflow_call("cancel", run_id=workflow_run_id))
 
 
 def main() -> None:

@@ -55,7 +55,7 @@ def compatible_origin(run: dict[str, Any], node: dict[str, Any], activation: dic
     w, _ = _modules()
     source = next((t for t in activation["tasks"] if t["task_id"] == question["origin_task_id"]), None)
     network = False if run.get("network") is False else node.get("network", run.get("network"))
-    if source is None or source["status"] != "completed" or not source.get("result", {}).get("session_id") or source.get("repo_path") != run["repo_path"] or source.get("freedom") != w.effective_freedom(node, run["freedom"]) or source.get("network") != network:
+    if source is None or source["status"] != "completed" or not source.get("result", {}).get("session_id") or source.get("repo_path") != run["repo_path"] or source.get("freedom") != w.run_effective_freedom(run, node) or source.get("network") != network:
         raise w.WorkflowError("Question has no confirmed compatible session")
     return source
 
@@ -99,6 +99,8 @@ async def answer_question(supervisor: Any, node: dict[str, Any], token: dict[str
                 if decision.get("action") == "inspect":
                     d.inspect_decision(supervisor, decision, question, orchestration["id"], question_id=question_id, execution_id=activation_id)
                     continue
+                if set(decision) - {"decision_id", "action", "reason", "question_id", "answer", "session_mode", "requests", "question"}:
+                    raise w.WorkflowError("Unexpected clarification fields; permissions are owned by the saved workflow")
                 action = decision.get("action")
                 if decision.get("decision_id") != question["decision_id"] or action not in {"answer", "failed", "needs_input"} or not isinstance(decision.get("reason"), str) or not decision["reason"].strip() or decision.get("next") or decision.get("task_updates"):
                     raise w.WorkflowError("Invalid clarification decision")
@@ -132,7 +134,9 @@ async def answer_question(supervisor: Any, node: dict[str, Any], token: dict[str
                 return accepted["status"] == "running" and action == "answer"
             except (ValueError, TypeError, AttributeError) as exc:
                 def reject(r: dict[str, Any]) -> None:
-                    next(a for a in r["activations"] if a["id"] == orchestration["id"]).update(status="failed", raw_output=raw, result_error=str(exc))
+                    diagnostic = {"decision_id": question["decision_id"], "question_id": question_id, "attempt": question.get("decision_attempts", 0), "category": "clarification_validation", "error": str(exc)}
+                    next(a for a in r["activations"] if a["id"] == orchestration["id"]).update(status="failed", raw_output=raw, result_error=str(exc), decision_diagnostic=diagnostic)
+                    r.setdefault("decision_errors", []).append(diagnostic)
                     if r["status"] == "running":
                         question_record(r, activation_id, question_id)["decision_error"] = str(exc)
                 supervisor.update(reject, "invalid_question_decision", str(exc))

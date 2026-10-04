@@ -191,7 +191,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
                 input_group.add_argument("--definition-json", help="Current canvas JSON object")
                 wp.add_argument("--source", help="JSON saved name/revision/baseline metadata")
             else:
-                wp.add_argument("--freedom", default="write_in_repo", choices=("read_only", "write_in_repo", "publish", "unrestricted"))
+                wp.add_argument("--freedom", default=None, choices=("read_only", "write_in_repo", "publish", "unrestricted"))
                 wp.add_argument("--network", choices=("true", "false"))
         if action == "wait":
             wp.add_argument("--timeout-seconds", type=int, default=30)
@@ -575,7 +575,7 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
                 if not args.reason.strip():
                     raise ValueError("Recovery reason must be nonempty")
                 return await server._workflow_call("recover", run_id=args.workflow_run_id, instructions=args.reason, additional_attempts=args.additional_attempts, interaction_owner="monitor")
-            return await server.recover_workflow(args.workflow_run_id, args.reason, args.additional_attempts)
+            return await server._workflow_call("recover", run_id=args.workflow_run_id, instructions=args.reason, additional_attempts=args.additional_attempts)
         if action == "migrate":
             from .workflows import migrate_workflows
             from .workflow_hooks import refuse_managed
@@ -607,13 +607,13 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
                 return await server.workflow_builder(args.name, args.prompt, args.repo, candidate, json.loads(args.fallbacks), definition, source)
             if args.monitor:
                 return await server._workflow_call("start", name=args.name, prompt=args.prompt, repo_path=args.repo, overrides=candidate or None, freedom=args.freedom, network=_network(args.network), interaction_owner="monitor")
-            return await server.start_workflow(args.name, args.prompt, args.repo, candidate or None, args.freedom, _network(args.network))
+            return await server._workflow_call("start", name=args.name, prompt=args.prompt, repo_path=args.repo, overrides=candidate or None, freedom=args.freedom, network=_network(args.network))
         if action == "wait":
-            return await server.wait_for_workflow(args.workflow_run_id, args.timeout_seconds)
+            return await server._wait_workflow_full(args.workflow_run_id, args.timeout_seconds)
         if action == "resume":
             if args.monitor:
                 return await server._workflow_call("resume", run_id=args.workflow_run_id, instructions=args.instructions, additional_attempts=args.additional_attempts, decision_id=args.decision_id, interaction_owner="monitor")
-            return await server.resume_workflow(args.workflow_run_id, args.instructions, args.additional_attempts, args.decision_id)
+            return await server._workflow_call("resume", run_id=args.workflow_run_id, instructions=args.instructions, additional_attempts=args.additional_attempts, decision_id=args.decision_id)
         return await server._workflow_call(action, run_id=args.workflow_run_id, **({"interaction_owner": "monitor"} if getattr(args, "monitor", False) and action != "cancel" else {}))
     try:
         result = asyncio.run(invoke())
@@ -642,8 +642,10 @@ def main(argv: list[str] | None = None) -> int:
         from . import mcp_allowlist, server
         try:
             if args.allow is not None or args.remove is not None:
-                if asyncio.run(server._reg()._detect_caller()) is not None:
-                    return _fail(args, "human_only", "Only a human may change global MCP approval rules")
+                from .takeover import caller_refusal
+                refusal = caller_refusal(server._reg().log_dir)
+                if refusal is not None:
+                    return _fail(args, "human_only", "Only a verified human may change global MCP approval rules: " + refusal[1])
             result = mcp_allowlist.edit(args.backend, allow=args.allow, remove=args.remove)
             print(json.dumps({"v": CTL_JSON_VERSION, "result": result}) if args.json else result["detail"])
             return 0
@@ -669,7 +671,6 @@ def main(argv: list[str] | None = None) -> int:
                 return _fail(args, "invalid_params", "workflow runs do not accept task group or title")
             args.name = args.workflow
             args.command = "workflow-start"
-            args.freedom = args.freedom or "write_in_repo"
             return _cmd_workflow(args)
         if not args.backend:
             return _fail(args, "invalid_params", "--backend is required without --workflow")

@@ -108,8 +108,10 @@ selecting Publish or Unrestricted does not independently request network access.
 capability restrictions still apply.
 
 For example, a Task step that updates a Jira issue can request `"freedom": "publish"`.
-Launch that workflow with `--freedom publish` to retain that access; launching with
-`--freedom write_in_repo` caps the step. Set network separately where the backend supports it.
+The saved node access is authoritative for new runs. Callers cannot override it with
+`--freedom` or assignment fields. A parent harness that cannot delegate the configured
+access receives a refusal before dispatch. Historical runs retain their original access
+ceilings. Set network separately where the backend supports it.
 
 Each agent step configures its instructions, primary candidate, fallback candidates, access,
 session mode, and attempt budget. The orchestrator has its own candidate list, saved with the
@@ -120,13 +122,31 @@ inspection, recovery, and pause/resume/cancel. The Monitor acts through matching
 it never writes Polybridge state directly. Definition saves use an expected revision to reject
 concurrent edits. Editing or deleting a definition does not change existing run snapshots.
 
+MCP run start/status/wait/control responses use `response_version: 1` compact projections,
+with a 24 KiB target: identity, status, progress, interaction ownership, actionable question
+previews and recent decision errors. They omit the graph, assignments and full result history.
+`list_workflow_runs(offset=0, limit=10)` returns `runs` and `next_offset`; use the latter to
+continue listing. CLI run snapshots remain complete for the Monitor.
+
+Read complete run content with `get_workflow_run_detail(workflow_run_id, view, cursor, limit)`.
+Views are `executions`, `decisions`, `checklist`, `technical_plan`, `definition`, `question`, `reason` and `wait_reason`.
+Concatenate each response's `chunk` until `next_cursor` is null, then decode JSON. Each chunk
+is bounded, including a single large result. Cursors bind the run, view and content hash;
+if content changes, restart that view. Managed orchestrators can read their own run only;
+execution results still require settled-only `inspect_workflow_node` rather than a detail shortcut.
+
+`wait_for_workflow` defaults to 30 seconds and caps its effective hold at 45 seconds.
+It accepts legacy requests up to 300 seconds but returns `requested_timeout_seconds`,
+`effective_timeout_seconds`, `timed_out` and polling guidance. Repeat the wait while the run
+is active; a long request does not guarantee one long-lived transport connection.
+
 For example, load the supplied [implementation/review workflow](../examples/workflows/implement-review.json):
 
 ```bash
 polybridge-ctl workflow-save implement-review \
   --definition examples/workflows/implement-review.json --expected-revision 0 --json
 polybridge-ctl workflow-start implement-review --repo /absolute/path/to/repo \
-  --prompt "Implement the requested change" --freedom write_in_repo --json
+  --prompt "Implement the requested change" --json
 polybridge-ctl workflow-status <workflow_run_id> --json
 polybridge-ctl workflow-pause <workflow_run_id> --json
 polybridge-ctl workflow-resume <workflow_run_id> \
@@ -508,3 +528,23 @@ Sequential optional nodes and forks containing only optional branches are reject
 optional path alone does not grant failure tolerance. Unknown outcomes, cancellation, security or
 enforcement refusals, repository/session problems, and workflow limits still require attention.
 Unsupported model, turn, or reasoning settings count as unavailable candidates after fallbacks.
+
+### Explicit retries and task navigation
+
+A safely settled failed or blocked worker can expose a `retry_execution` continuation
+while its branch remains at that decision point and its node has attempts remaining.
+The orchestrator supplies a corrected assignment and an allowed session choice. This
+consumes a node attempt without traversing a graph edge or repeating completed siblings.
+Protocol failures, permission failures, cancellation and uncertain dispatches do not
+silently retry. Structural continuations accept only their continuation ID; session
+fields belong to executable assignments.
+
+Polybridge records requested and effective harness settings separately from observed
+runtime identity. Workers do not need to certify a model or effort they cannot inspect.
+Only a returned review verdict counts as a review; a blocked result is evidence of a
+blocker, not an approval.
+
+The sidebar groups workflow and parallel executions under expandable parents. Opening
+a child from the overview selects its full task details. The overview focuses on live
+activity; full decoded results remain in individual task details. Workflow tasks cannot
+be taken over while their parent run is active, suspended or still settling.

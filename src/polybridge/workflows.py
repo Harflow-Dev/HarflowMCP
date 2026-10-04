@@ -14,6 +14,7 @@ import fcntl
 import hashlib
 import json
 import math
+import logging
 import os
 from pathlib import Path
 import re
@@ -100,17 +101,23 @@ FREEDOMS = ("read_only", "write_in_repo", "publish", "unrestricted")
 ROLE_FREEDOM_DEFAULTS = {"planning": "read_only", "review": "read_only", "implementation": "write_in_repo", "task": "publish"}
 
 
-def effective_freedom(node: dict[str, Any], ceiling: str) -> str:
+def effective_freedom(node: dict[str, Any], ceiling: str = "unrestricted", *, permission_policy: str = "legacy_ceiling") -> str:
     """A node and all of its fallback agents share the run's access ceiling."""
     if ceiling not in FREEDOMS:
         raise WorkflowError("Workflow freedom must be read_only, write_in_repo, publish or unrestricted")
     requested = node.get("freedom", ROLE_FREEDOM_DEFAULTS[node.get("role", "task")])
     if requested not in FREEDOMS:
         raise WorkflowError("Invalid node freedom")
-    effective = FREEDOMS[min(FREEDOMS.index(requested), FREEDOMS.index(ceiling))]
+    if permission_policy not in {"legacy_ceiling", "saved_node"}:
+        raise WorkflowError("Unknown workflow permission policy")
+    effective = requested if permission_policy == "saved_node" else FREEDOMS[min(FREEDOMS.index(requested), FREEDOMS.index(ceiling))]
     if node.get("role") == "implementation" and effective == "read_only":
         raise WorkflowError("Implementation nodes cannot run read_only; choose at least write_in_repo for the run ceiling")
     return effective
+
+
+def run_effective_freedom(run: dict[str, Any], node: dict[str, Any]) -> str:
+    return effective_freedom(node, run.get("freedom", "write_in_repo"), permission_policy=run.get("permission_policy", "legacy_ceiling"))
 
 
 def _identifier(value: Any) -> str:
@@ -508,7 +515,8 @@ class WorkflowStore:
         self.definitions = self.root / "workflows"
         self.runs = self.root / "workflow-runs"
         self.leases = self.root / "workflow-leases"
-        for directory in (self.definitions, self.runs, self.leases):
+        self.owners = self.root / "workflow-owners"
+        for directory in (self.definitions, self.runs, self.leases, self.owners):
             directory.mkdir(parents=True, exist_ok=True, mode=0o700)
 
     @contextmanager
@@ -551,8 +559,16 @@ class WorkflowStore:
         run["settling"] = any(t.get("status") in {"reserved", "running", "uncertain"} for a in run["activations"] for t in a["tasks"])
         return run
 
-    def list_runs(self) -> list[dict[str, Any]]:
-        return sorted((self.get_run(p.stem) for p in self.runs.glob("*.json")), key=lambda r: r["created_at"], reverse=True)
+    def list_runs(self, *, strict: bool = False) -> list[dict[str, Any]]:
+        runs = []
+        for path in self.runs.glob("*.json"):
+            try:
+                runs.append(self.get_run(path.stem))
+            except (OSError, ValueError, KeyError, TypeError):
+                if strict:
+                    raise WorkflowError(f"Workflow ownership is unavailable: {path.name}") from None
+                logging.getLogger(__name__).warning("Skipping unreadable workflow record %s", path.name)
+        return sorted(runs, key=lambda r: r["created_at"], reverse=True)
 
     def update_run(self, run_id: str, mutator: Any, event: str, detail: Any = None) -> dict[str, Any]:
         with self.lock(f"run:{run_id}"):
@@ -562,6 +578,9 @@ class WorkflowStore:
             run["sequence"] = run.get("sequence", 0) + 1
             run.pop("settling", None)
             _write(self.runs / f"{run_id}.json", run)
+            for activation in run.get("activations", []):
+                for task in activation.get("tasks", []):
+                    _write(self.owners / f"{_identifier(task['task_id'])}.json", {"workflow_run_id": run_id})
             with (self.runs / f"{run_id}.jsonl").open("a", encoding="utf-8") as f:
                 f.write(json.dumps({"sequence": run["sequence"], "time": run["updated_at"], "event": event, "detail": detail}) + "\n")
                 f.flush()
@@ -569,16 +588,20 @@ class WorkflowStore:
             run["settling"] = any(t.get("status") in {"reserved", "running", "uncertain"} for a in run["activations"] for t in a["tasks"])
             return run
 
-    def create_run(self, definition: dict[str, Any], prompt: str, repo_path: Path, *, freedom: str = "write_in_repo", network: bool | None = None, kind: str = "workflow") -> dict[str, Any]:
+    def create_run(self, definition: dict[str, Any], prompt: str, repo_path: Path, *, freedom: str = "write_in_repo", network: bool | None = None, kind: str = "workflow", permission_policy: str = "legacy_ceiling") -> dict[str, Any]:
+        if permission_policy not in {"saved_node", "legacy_ceiling"}:
+            raise WorkflowError("Unknown workflow permission policy")
         if freedom not in FREEDOMS:
             raise WorkflowError("Workflow freedom must be read_only, write_in_repo, publish or unrestricted")
         for node in definition.get("nodes", []):
             if node.get("type") == "agent":
-                effective_freedom(node, freedom)
+                effective_freedom(node, freedom, permission_policy=permission_policy)
         if not Path(repo_path).is_dir():
             raise WorkflowError("Repository directory does not exist")
         rid = uuid.uuid4().hex
         run = {"workflow_run_id": rid, "kind": kind, "name": definition["name"], "definition": copy.deepcopy(definition), "revision": definition.get("revision", 0), "prompt": prompt, "repo_path": str(Path(repo_path).resolve()), "freedom": freedom, "network": network, "status": "starting", "created_at": time.time(), "updated_at": time.time(), "sequence": 0, "transitions": 0, "activations": [], "decisions": [], "sessions": {}, "suppressed_candidates": [], "pending": [], "joins": {}, "instructions": "", "attempt_grants": {}, "supervisor_pid": None}
+        run["permission_policy"] = permission_policy
+        run["definition_hash"] = hashlib.sha256(json.dumps(definition, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         run["tasks"] = []
         if kind == "workflow":
             run["execution_contract"] = "delegation"
@@ -607,6 +630,10 @@ class WorkflowStore:
             elif r["status"] in TERMINAL:
                 raise WorkflowError("Workflow is terminal")
             if action in {"resume", "recover"}:
+                from . import control as task_control
+                reservations = task_control.takeover_reservations(self.root / "tasks")
+                if any(task.get("task_id") in reservations for activation in r["activations"] for task in activation["tasks"]):
+                    raise WorkflowError("Workflow sessions are reserved for human takeover; cannot resume or recover")
                 if action == "resume" and r["status"] not in {"paused", "needs_attention", "needs_input"}:
                     raise WorkflowError("Only paused/attention/input workflows can resume")
                 if any(a["status"] in {"reserved", "uncertain", "running"} or any(t["status"] in {"reserved", "uncertain", "running"} for t in a["tasks"]) for a in r["activations"]):
@@ -641,6 +668,8 @@ class WorkflowStore:
                         r.setdefault("retry_grants", {})[edge_id] = prior + additional_attempts
                         control_detail["retry_grants"][edge_id] = {"additional": additional_attempts, "previous": prior, "total": prior + additional_attempts}
             else:
+                if action == "pause" and r["status"] == "cancelling":
+                    return
                 r["status"] = "paused" if action == "pause" else "cancelling"
                 if instructions:
                     r["instructions"] = instructions
@@ -652,16 +681,37 @@ class WorkflowStore:
     def pinned_tasks(self) -> set[str]:
         return {t["task_id"] for r in self.list_runs() if r["status"] not in TERMINAL for a in r["activations"] for t in a["tasks"]}
 
-    def task_association(self, task_id: str) -> dict[str, Any] | None:
-        for r in self.list_runs():
+    def task_association(self, task_id: str, *, strict: bool = False, _visited: set[str] | None = None) -> dict[str, Any] | None:
+        visited = set() if _visited is None else _visited
+        if task_id in visited:
+            raise WorkflowError("Cyclic task lineage cannot establish workflow ownership")
+        visited.add(task_id)
+        indexed = self.owners / f"{_identifier(task_id)}.json"
+        if indexed.exists():
+            receipt = json.loads(indexed.read_text())
+            runs = [self.get_run(receipt["workflow_run_id"])]
+        else:
+            runs = self.list_runs()
+        for r in runs:
             for a in r["activations"]:
                 for t in a["tasks"]:
                     if t["task_id"] == task_id:
-                        return {"workflow_run_id": r["workflow_run_id"], "workflow_node_id": a["node_id"], "workflow_role": a["role"], "execution_contract": r.get("execution_contract"), "node_id": a["node_id"], "role": a["role"], "activation_id": a["id"], "status": r["status"]}
+                        return {"workflow_run_id": r["workflow_run_id"], "workflow_node_id": a["node_id"], "workflow_role": a["role"], "execution_contract": r.get("execution_contract"), "node_id": a["node_id"], "role": a["role"], "activation_id": a["id"], "status": r["status"], "workflow_status": r["status"], "workflow_settling": r.get("settling", False)}
+        if indexed.exists():
+            raise WorkflowError("Workflow ownership receipt no longer matches its run")
+        record = task_store.read(self.root / "tasks", task_id)
+        if record is not None:
+            for ancestor in dict.fromkeys((record.parent_task_id, record.spawned_by)):
+                if ancestor:
+                    association = self.task_association(ancestor, strict=strict, _visited=set(visited))
+                    if association is not None:
+                        return {**association, "workflow_ancestor_task_id": ancestor}
+        if strict:
+            self.list_runs(strict=True)
         return None
 
-    def task_owner(self, task_id: str) -> dict[str, Any] | None:
-        return self.task_association(task_id)
+    def task_owner(self, task_id: str, *, strict: bool = False) -> dict[str, Any] | None:
+        return self.task_association(task_id, strict=strict)
 
     def reconcile_run(self, run_id: str) -> dict[str, Any]:
         """Recover only outcomes positively recorded by their original task owner."""
@@ -671,11 +721,15 @@ class WorkflowStore:
                     if task["status"] not in {"reserved", "running", "uncertain"}:
                         continue
                     record = task_store.read(self.root / "tasks", task["task_id"])
-                    if record and record.status in {"completed", "failed", "timed_out", "cancelled"} and not task_store.outcome_unobserved(record):
-                        task.update(status=record.status, result=task_store.snapshot(self.root / "tasks", record))
+                    if record and task_liveness(self.root / "tasks", record)["process_alive"] is False:
+                        snapshot = task_store.snapshot(self.root / "tasks", record)
+                        liveness = task_liveness(self.root / "tasks", record)
+                        if not liveness["outcome_known"]:
+                            snapshot.update(status="failed", outcome_unknown=True, recovery_reason="Managed process is dead but its owner did not record an authoritative outcome")
+                        task.update(status=snapshot["status"], result=snapshot, liveness=liveness)
                     else:
                         task["status"] = "uncertain"
-                if activation["status"] == "running" and all(t["status"] not in {"reserved", "running", "uncertain"} for t in activation["tasks"]):
+                if activation["status"] in {"running", "reserved", "uncertain"} and all(t["status"] not in {"reserved", "running", "uncertain"} for t in activation["tasks"]):
                     activation["status"] = "completed" if activation["tasks"] and activation["tasks"][-1]["status"] == "completed" else "failed"
                 if activation["role"] == "node" and activation["status"] == "completed" and activation["tasks"]:
                     token = next((t for t in r["pending"] if t["id"] == (activation.get("token") or {}).get("id")), None)
@@ -731,7 +785,7 @@ def _launch(storage: WorkflowStore, run_id: str) -> None:
         subprocess.Popen([sys.executable, "-m", "polybridge.workflows", "supervise", run_id, "--root", str(storage.root)], stdin=subprocess.DEVNULL, stdout=output, stderr=output, start_new_session=True, close_fds=True)
 
 
-async def start_workflow(name: str, prompt: str, repo_path: Path, *, overrides: dict[str, Any] | None = None, freedom: str = "write_in_repo", network: bool | None = None, root: Path | None = None, interaction_owner: str = "caller") -> dict[str, Any]:
+async def start_workflow(name: str, prompt: str, repo_path: Path, *, overrides: dict[str, Any] | None = None, freedom: str | None = None, network: bool | None = None, root: Path | None = None, interaction_owner: str = "caller", definition_snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
     if interaction_owner not in {"caller", "monitor"}:
         raise WorkflowError("Invalid interaction owner")
     if not isinstance(prompt, str) or not prompt.strip():
@@ -739,14 +793,18 @@ async def start_workflow(name: str, prompt: str, repo_path: Path, *, overrides: 
     storage = WorkflowStore(root)
     if any(r.get("kind") != "builder" and r.get("execution_contract") != "delegation" and r["status"] not in TERMINAL for r in storage.list_runs()):
         raise WorkflowError("Active historical runs must settle or be cancelled before delegation execution")
-    definition = storage.get(name)
+    if freedom is not None:
+        raise WorkflowError("Workflow access is defined by saved nodes; caller freedom overrides are not supported")
+    definition = copy.deepcopy(definition_snapshot) if definition_snapshot is not None else storage.get(name)
+    if definition.get("name") != name:
+        raise WorkflowError("Authorized workflow snapshot name mismatch")
     if overrides:
         if overrides.get("backend", definition["orchestrator"]["backend"]) != definition["orchestrator"]["backend"]:
             for setting in ("model", "reasoning_effort", "max_turns"):
                 definition["orchestrator"].pop(setting, None)
         definition["orchestrator"] = {**definition["orchestrator"], **overrides}
     definition = validate_definition(definition)
-    run = storage.create_run(definition, prompt, repo_path, freedom=freedom, network=network)
+    run = storage.create_run(definition, prompt, repo_path, freedom="unrestricted", network=network, permission_policy="saved_node")
     storage.update_run(run["workflow_run_id"], lambda r: r.update(interaction_owner=interaction_owner), "interaction_owner")
     await _capture_caller(storage, run["workflow_run_id"])
     _launch(storage, run["workflow_run_id"])
@@ -1006,7 +1064,7 @@ def failure_diagnostic(snapshot: dict[str, Any], prompt: str) -> str:
 
 def availability_failure(snapshot: dict[str, Any]) -> str | None:
     """Only process diagnostics, never summaries or tool output, authorize fallback."""
-    if snapshot.get("status") != "failed":
+    if snapshot.get("status") != "failed" or snapshot.get("outcome_unknown") or snapshot.get("permission_denials"):
         return None
     diagnostic = "\n".join(snapshot.get("stderr_tail", []))
     backend = snapshot.get("backend")
@@ -1073,18 +1131,57 @@ def availability_failure(snapshot: dict[str, Any]) -> str | None:
     return None
 
 
+def task_liveness(log_dir: Path, record: Any) -> dict[str, Any]:
+    """Process safety and outcome authority are independent recovery facts."""
+    from . import identity
+    observed = record.status in task_store.TERMINAL_RECORD_STATUSES and not task_store.outcome_unobserved(record)
+    verdict, reason = identity.check_detail(identity.task_identity(record.pid, record.start_time, record.markers))
+    # An authoritative exit receipt proves the managed process has settled.
+    alive = False if observed else {"alive": True, "dead": False}.get(verdict)
+    status, note, _, _ = task_store.resolve_status(log_dir, record, detail=False)
+    return {"process_alive": alive, "outcome_known": observed, "resolved_status": status, "reason": reason or note}
+
+
+def observed_harness_metadata(snapshot: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
+    """Only native initialization envelopes count as runtime identity evidence."""
+    result = copy.deepcopy(metadata)
+    path = snapshot.get("raw_stream_log")
+    if not path:
+        return result
+    try:
+        with Path(path).open(encoding="utf-8") as stream:
+            for number, line in enumerate(stream):
+                if number >= 1000:
+                    break
+                try:
+                    event = json.loads(line)
+                except (ValueError, TypeError):
+                    continue
+                native_init = snapshot.get("backend") == "claude" and event.get("type") == "system" and event.get("subtype") == "init"
+                if native_init and isinstance(event.get("model"), str) and event["model"]:
+                    result.update(observed={"model": event["model"]}, provenance="harness_initialization_event", verification_status="observed")
+                    break
+    except (OSError, UnicodeError):
+        pass
+    return result
+
+
 class CheckoutLease:
     """OS leases shared across supervisors; process death releases the descriptor."""
-    def __init__(self, storage: WorkflowStore, repo: str, write: bool, should_continue: Any = None):
+    def __init__(self, storage: WorkflowStore, repo: str, write: bool, should_continue: Any = None, *, wait_seconds: float = 30.0, on_wait: Any = None):
         self.repo = str(Path(repo).resolve())
         self.store = storage
         self.path = storage.leases / (hashlib.sha256(self.repo.encode()).hexdigest() + ".lock")
         self.write = write
         self.should_continue = should_continue
         self.handle: Any = None
+        self.wait_seconds = wait_seconds
+        self.on_wait = on_wait
 
     async def __aenter__(self):
         self.handle = self.path.open("a")
+        deadline = time.monotonic() + self.wait_seconds
+        notified = False
         while True:
             if self.should_continue is not None and not self.should_continue():
                 self.handle.close()
@@ -1092,6 +1189,7 @@ class CheckoutLease:
             # After a supervisor crash its agent processes may outlive the OS lease.
             # Their durable associations still block conflicting checkout activity.
             orphan_conflict = False
+            conflict_owner = None
             for run in self.store.list_runs():
                 if run["repo_path"] != self.repo or _supervisor_present(run):
                     continue
@@ -1100,17 +1198,38 @@ class CheckoutLease:
                         if task["status"] not in {"running", "reserved", "uncertain"}:
                             continue
                         record = task_store.read(self.store.root / "tasks", task["task_id"])
-                        unresolved = record is None or record.status == "running" or task_store.outcome_unobserved(record)
+                        unresolved = record is None or task_liveness(self.store.root / "tasks", record)["process_alive"] is not False
                         if unresolved and (self.write or task.get("freedom", "write_in_repo") != "read_only"):
                             orphan_conflict = True
+                            conflict_owner = {"workflow_run_id": run["workflow_run_id"], "task_id": task["task_id"]}
             if orphan_conflict:
-                await asyncio.sleep(0.1)
+                if not notified and self.on_wait:
+                    self.on_wait({"reason": "Checkout held by a live or uncertain orphan task", "repo_path": self.repo, "owner": conflict_owner})
+                    notified = True
+                if time.monotonic() >= deadline:
+                    self.handle.close()
+                    raise DispatchNotStarted("Checkout wait exhausted; reconciliation is required")
+                try:
+                    await asyncio.sleep(0.1)
+                except BaseException:
+                    self.handle.close()
+                    raise
                 continue
             try:
                 fcntl.flock(self.handle, (fcntl.LOCK_EX if self.write else fcntl.LOCK_SH) | fcntl.LOCK_NB)
                 return self
             except BlockingIOError:
-                await asyncio.sleep(0.1)
+                if not notified and self.on_wait:
+                    self.on_wait({"reason": "Checkout held by another active workflow", "repo_path": self.repo})
+                    notified = True
+                if time.monotonic() >= deadline:
+                    self.handle.close()
+                    raise DispatchNotStarted("Checkout wait exhausted; another workflow still holds its lease")
+                try:
+                    await asyncio.sleep(0.1)
+                except BaseException:
+                    self.handle.close()
+                    raise
 
     async def __aexit__(self, *_: Any):
         if self.handle:
@@ -1178,7 +1297,7 @@ class WorkflowSupervisor:
             if run["status"] != "running":
                 return None
             try:
-                freedom = "read_only" if role != "node" else effective_freedom(node, run["freedom"])
+                freedom = "read_only" if role != "node" else run_effective_freedom(run, node)
             except WorkflowError as exc:
                 self.attention(f"Dispatch configuration refused: {exc}")
                 return None
@@ -1186,6 +1305,7 @@ class WorkflowSupervisor:
             task_id = uuid.uuid4().hex
             display_prompt = run.get("builder_turn_prompt", run["prompt"]) if role == "builder" else activation.get("turn_prompt", activation.get("assignment_prompt", run["prompt"]))
             reservation = {"task_id": task_id, "candidate": candidate, "status": "reserved", "reserved_at": time.time(), "freedom": freedom, "assignment_prompt": display_prompt, "repo_path": run["repo_path"], "network": network, "session_mode": "resume" if role == "node" and node.get("session_mode") == "resume" and previous.get("candidate") == identity else "fresh", "resume_task_id": previous.get("task_id") if role == "node" and node.get("session_mode") == "resume" and previous.get("candidate") == identity else None}
+            reservation["harness_metadata"] = {"requested": copy.deepcopy(candidate), "effective": {"backend": candidate["backend"], "model": candidate.get("model"), "reasoning_effort": candidate.get("reasoning_effort"), "freedom": freedom, "settings_source": "explicit_launch_arguments", "default_model": "unknown" if not candidate.get("model") else None, "provider_identity": "unknown"}, "observed": None, "provenance": "validated_launch_configuration", "verification_status": "configured_not_observed"}
             def reserve(r: dict[str, Any]) -> None:
                 a = next(a for a in r["activations"] if a["id"] == activation["id"])
                 a["tasks"].append(reservation)
@@ -1201,7 +1321,7 @@ class WorkflowSupervisor:
                 backends.check_reasoning_effort(backend, candidate.get("reasoning_effort"))
                 capability_stage = "enforcement"
                 backend.enforcement(freedom, network)
-                async with CheckoutLease(self.store, run["repo_path"], freedom != "read_only", lambda: self.run()["status"] == "running"):
+                async with CheckoutLease(self.store, run["repo_path"], freedom != "read_only", lambda: self.run()["status"] == "running", on_wait=lambda detail: self.update(lambda r: r.update(checkout_wait=detail), "checkout_wait", detail)):
                     if self.run()["status"] != "running":
                         self._task_update(activation["id"], task_id, {"status": "not_started"})
                         return None
@@ -1220,7 +1340,8 @@ class WorkflowSupervisor:
                             latest = self.run()
                             prompt += "\nLatest authoritative builder preview, revision " + str(latest.get("draft_revision", 0)) + ":\n" + json.dumps(latest.get("builder_draft", {}))
                         task = await self.registry.start(prompt, Path(run["repo_path"]), backend=backend, freedom=freedom, network=network, model=candidate.get("model"), reasoning_effort=candidate.get("reasoning_effort"), max_turns=candidate.get("max_turns"), task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder", title=f"{run['name']} · {node.get('title', key)}")
-                    self._task_update(activation["id"], task_id, {"status": "running"})
+                    self.update(lambda r: r.pop("checkout_wait", None), "checkout_acquired")
+                    self._task_update(activation["id"], task_id, {"status": "running", "dispatch_stage": "spawn_confirmed"})
                     while not task.done.is_set():
                         if role == "builder" and getattr(task, "live_input", False):
                             messages: list[dict[str, Any]] = []
@@ -1248,9 +1369,16 @@ class WorkflowSupervisor:
                         except TimeoutError:
                             pass
                     snapshot = task.snapshot()
-                self._task_update(activation["id"], task_id, {"status": snapshot["status"], "result": snapshot, "finished_at": time.time()})
-            except DispatchNotStarted:
+                self._task_update(activation["id"], task_id, {"status": snapshot["status"], "result": snapshot, "finished_at": time.time(), "harness_metadata": observed_harness_metadata(snapshot, reservation["harness_metadata"])})
+            except DispatchNotStarted as exc:
                 self._task_update(activation["id"], task_id, {"status": "not_started"})
+                def not_started(r: dict[str, Any]) -> None:
+                    current = next(a for a in r["activations"] if a["id"] == activation["id"])
+                    if all(t["status"] == "not_started" for t in current["tasks"]):
+                        current["status"] = "not_started"
+                self.update(not_started, "dispatch_not_started")
+                if "wait exhausted" in str(exc):
+                    self.attention(str(exc))
                 return None
             except backends.NestedDispatchRefused as exc:
                 self._task_update(activation["id"], task_id, {"status": "not_started", "error": str(exc)})

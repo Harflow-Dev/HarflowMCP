@@ -40,6 +40,7 @@ from .backends import (
     Backend,
     Enforcement,
     Invocation,
+    NestedDispatchRefused,
     check_nested_depth,
     check_nested_enforcement,
 )
@@ -798,6 +799,26 @@ class TaskRegistry:
             log.debug("caller detection failed", exc_info=True)
             return None
 
+    async def _detect_caller_detail(self) -> lineage.Detection:
+        if self._caller_override is not None:
+            return lineage.Detection(self._caller_override)
+        caller = await self._detect_caller()
+        if caller is not None:
+            return lineage.Detection(caller)
+        try:
+            result = await asyncio.to_thread(lineage.detect_caller_detail, self._log_dir)
+        except Exception as exc:
+            return lineage.Detection(None, f"caller detection failed: {exc}")
+        if result.caller is None and os.environ.get(lineage.ENV_TASK_ID):
+            return lineage.Detection(None, result.undecidable or "PB_TASK_ID is set but its authority cannot be verified")
+        return result
+
+    async def _mutation_caller(self) -> lineage.Caller | None:
+        detection = await self._detect_caller_detail()
+        if detection.undecidable is not None:
+            raise NestedDispatchRefused("Caller authority cannot be established: " + detection.undecidable, rule="caller_undecidable")
+        return detection.caller
+
     def _resolve_lineage(
         self,
         caller: lineage.Caller | None,
@@ -869,7 +890,7 @@ class TaskRegistry:
             network=network,
         )
 
-        caller = await self._detect_caller()
+        caller = await self._mutation_caller()
         spawned_by, root_task_id, depth, max_depth, lineage_detected = self._resolve_lineage(
             caller,
             child_enforcement=backend.enforcement(freedom, network),  # type: ignore[arg-type]
@@ -931,7 +952,7 @@ class TaskRegistry:
 
         # Caller detection and the nested-dispatch caps run before the session lock — they are
         # read-only and must never block on, or be blocked by, another resume of this session.
-        caller = await self._detect_caller()
+        caller = await self._mutation_caller()
         spawned_by, root_task_id, depth, max_depth, lineage_detected = self._resolve_lineage(
             caller,
             child_enforcement=backend.enforcement(parent.freedom, effective_network),  # type: ignore[arg-type]
@@ -2380,7 +2401,7 @@ class TaskRegistry:
         """
         if not workflow_control:
             from .workflow_hooks import pause_for_task, refuse_managed
-            caller = await self._detect_caller()
+            caller = await self._mutation_caller()
             if caller is not None:
                 refuse_managed(self._log_dir, caller.record.task_id)
             pause_for_task(self._log_dir, task_id, "Task cancelled outside the workflow supervisor")
@@ -2589,7 +2610,7 @@ class TaskRegistry:
         effective_network = network if network is not None else record.network
 
         # Same ordering as `resume`: caller detection and the caps run before the session lock.
-        caller = await self._detect_caller()
+        caller = await self._mutation_caller()
         spawned_by, root_task_id, depth, max_depth, lineage_detected = self._resolve_lineage(
             caller,
             child_enforcement=backend.enforcement(record.freedom, effective_network),  # type: ignore[arg-type]

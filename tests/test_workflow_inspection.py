@@ -93,10 +93,11 @@ def test_cli_inspection_parity(monkeypatch, capsys):
 
 
 def test_cli_recovery_parity(monkeypatch, capsys):
-    async def recover(run_id, reason, additional_attempts):
-        assert (run_id, reason, additional_attempts) == ("r1", "Inspected the failure", 2)
+    async def recover(action, **kwargs):
+        assert action == "recover"
+        assert kwargs == {"run_id": "r1", "instructions": "Inspected the failure", "additional_attempts": 2}
         return {"status": "running"}
-    monkeypatch.setattr(server, "recover_workflow", recover)
+    monkeypatch.setattr(server, "_workflow_call", recover)
     assert ctl.main(["workflow-recover", "r1", "--reason", "Inspected the failure", "--additional-attempts", "2", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["result"]["status"] == "running"
 
@@ -129,10 +130,12 @@ async def test_workflow_read_scope_and_worker_graph_denial(run, monkeypatch):
 
 
 async def test_wait_returns_suspension_and_settling_without_waiting(monkeypatch):
-    async def status(run_id):
-        return {"workflow_run_id": run_id, "status": "needs_input", "settling": True, "question": "Which scope?"}
-    monkeypatch.setattr(server, "get_workflow_status", status)
-    assert await server.wait_for_workflow("r1", 30) == {"workflow_run_id": "r1", "status": "needs_input", "settling": True, "question": "Which scope?"}
+    async def status(action, **kwargs):
+        return {"workflow_run_id": kwargs["run_id"], "status": "needs_input", "settling": True, "input_question": "Which scope?"}
+    monkeypatch.setattr(server, "_workflow_call", status)
+    result = await server.wait_for_workflow("r1", 30)
+    assert result["status"] == "needs_input" and result["settling"]
+    assert result["input_question"] == "Which scope?" and not result["timed_out"]
 
 
 def test_task_listing_metadata_preserves_assignment_and_original_entry(run, monkeypatch, tmp_path):
@@ -258,6 +261,8 @@ async def test_managed_agent_cannot_claim_monitor_ownership(monkeypatch, tmp_pat
         return SimpleNamespace(record=SimpleNamespace(task_id="managed"))
     monkeypatch.setattr(registry, "_detect_caller", caller)
     monkeypatch.setattr(server, "_registry", registry)
+    from polybridge import takeover
+    monkeypatch.setattr(takeover, "caller_refusal", lambda *args: ("agent_caller", "managed agent"))
     with pytest.raises(Exception, match="human Monitor"):
         await server._workflow_call("start", interaction_owner="monitor")
 
@@ -301,3 +306,26 @@ def test_cancelled_execution_activity_remains_inspectable_without_result(run, tm
     run["activations"][0].pop("node_result")
     run["activations"][0]["status"] = "cancelled"
     assert inspect_request(run, tmp_path, {"execution_id": "old", "view": "activity"})["events"] == []
+
+
+def test_descendant_projection_inherits_owner_but_not_assignment(monkeypatch, tmp_path):
+    from polybridge import workflows
+    from polybridge.workflow_inspection import decorate_tasks
+    owner = {'workflow_run_id': 'run', 'status': 'running', 'settling': True, 'name': 'Review', 'execution_contract': 'delegation', 'activations': [{'id': 'execution', 'node_id': 'work', 'role': 'node', 'assignment_prompt': 'private ancestor assignment', 'tasks': [{'task_id': 'root'}]}]}
+    monkeypatch.setattr(workflows.WorkflowStore, 'list_runs', lambda self: [owner])
+    entries = [{'task_id': 'grandchild', 'parent_task_id': 'child', 'prompt': 'own prompt'}, {'task_id': 'child', 'spawned_by': 'root', 'prompt': 'own child prompt'}]
+    projected = decorate_tasks(entries, tmp_path / 'tasks')
+    assert all(t['workflow_run_id'] == 'run' and t['workflow_settling'] is True for t in projected)
+    assert projected[0]['prompt'] == 'own prompt'
+    assert all('workflow_execution_id' not in t for t in projected)
+
+
+def test_single_descendant_detail_retains_workflow_takeover_gate(monkeypatch, tmp_path):
+    from polybridge import workflows
+    from polybridge.workflow_inspection import decorate_tasks
+    monkeypatch.setattr(workflows.WorkflowStore, 'list_runs', lambda self: [])
+    monkeypatch.setattr(workflows.WorkflowStore, 'task_owner', lambda self, task_id: {'workflow_run_id': 'run', 'workflow_status': 'running', 'workflow_settling': True})
+    detail = decorate_tasks([{'task_id': 'grandchild', 'parent_task_id': 'child', 'prompt': 'own assignment'}], tmp_path / 'tasks')[0]
+    assert detail['workflow_run_id'] == 'run'
+    assert detail['workflow_settling'] is True
+    assert detail['prompt'] == 'own assignment'

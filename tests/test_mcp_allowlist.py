@@ -41,7 +41,9 @@ def test_codex_server_approval_is_scoped(home):
     path.write_text('# keep\n[mcp_servers.polybridge.tools.apply_workflow_draft]\napproval_mode="prompt"\n[mcp_servers.other]\ndefault_tools_approval_mode="prompt"\n')
     rules.edit('codex',allow='polybridge/*')
     data=tomlkit.parse(path.read_text())
-    assert data['mcp_servers']['polybridge']['tools']['apply_workflow_draft']['approval_mode']=='approve'
+    assert data['mcp_servers']['polybridge']['tools']['apply_workflow_draft']['approval_mode']=='prompt'
+    rules.edit('codex',remove='polybridge/*')
+    assert tomlkit.parse(path.read_text())['mcp_servers']['polybridge']['tools']['apply_workflow_draft']['approval_mode']=='prompt'
     assert data['mcp_servers']['other']['default_tools_approval_mode']=='prompt'
     assert '# keep' in path.read_text()
 
@@ -85,12 +87,17 @@ def test_vibe_wildcard_refused(home):
 
 def test_cli_read_and_write_human_guard(home, monkeypatch, capsys):
     from polybridge import ctl, server
+    from polybridge import takeover
+    monkeypatch.setattr(takeover, "caller_refusal", lambda *args: None)
     class Human:
+        log_dir = home / "tasks"
         async def _detect_caller(self): return None
     monkeypatch.setattr(server, '_reg', lambda: Human())
     assert ctl.main(['mcp-allowlist','--backend','codex','--allow','polybridge/*','--json']) == 0
     assert json.loads(capsys.readouterr().out)['result']['entries'] == ['polybridge/*']
+    monkeypatch.setattr(takeover, "caller_refusal", lambda *args: ("agent_caller", "managed"))
     class Agent:
+        log_dir = home / "tasks"
         async def _detect_caller(self): return object()
     monkeypatch.setattr(server, '_reg', lambda: Agent())
     before=rules.config_path('codex').read_bytes()

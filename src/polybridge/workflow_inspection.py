@@ -63,13 +63,34 @@ def decorate_tasks(entries: list[dict[str, Any]], log_dir: Any) -> list[dict[str
     """Build one association index per listing; avoid scanning every run for every task."""
     from .workflows import WorkflowStore
     index = {}
-    for run in WorkflowStore(root=log_dir.parent).list_runs():
+    storage = WorkflowStore(root=log_dir.parent)
+    for run in storage.list_runs():
         for activation in run.get("activations", []):
             for task in activation.get("tasks", []):
-                index[task["task_id"]] = {"workflow_run_id": run["workflow_run_id"], "workflow_node_id": activation["node_id"], "workflow_execution_id": activation["id"], "workflow_role": activation["role"], "execution_contract": run.get("execution_contract"), "interaction_owner": run.get("interaction_owner", "caller"), "workflow_status": run["status"] if "status" in run else None}
+                index[task["task_id"]] = {"workflow_run_id": run["workflow_run_id"], "workflow_node_id": activation["node_id"], "workflow_execution_id": activation["id"], "workflow_role": activation["role"], "execution_contract": run.get("execution_contract"), "interaction_owner": run.get("interaction_owner", "caller"), "workflow_status": run["status"] if "status" in run else None, "workflow_settling": run.get("settling", False), "workflow_name": run.get("name")}
                 if run.get("execution_contract") == "delegation" and activation.get("role") == "node" and isinstance(activation.get("assignment_prompt"), str):
                     assignment = task.get("assignment_prompt", activation["assignment_prompt"])
                     index[task["task_id"]].update(display_prompt=assignment, prompt=assignment)
+    # Follow-up and spawned task records inherit ownership without inheriting the
+    # ancestor's assignment prompt or pretending to be that execution.
+    changed = True
+    inherited = ("workflow_run_id", "workflow_name", "workflow_status", "workflow_settling", "interaction_owner", "execution_contract")
+    while changed:
+        changed = False
+        for entry in entries:
+            task_id = entry.get("task_id")
+            if task_id in index:
+                continue
+            ancestor = next((index.get(entry.get(key)) for key in ("parent_task_id", "spawned_by") if entry.get(key) in index), None)
+            if ancestor is not None:
+                index[task_id] = {key: ancestor[key] for key in inherited if key in ancestor}
+                changed = True
+    for entry in entries:
+        task_id = entry.get("task_id")
+        if task_id not in index and (entry.get("parent_task_id") or entry.get("spawned_by")):
+            association = storage.task_owner(task_id)
+            if association is not None:
+                index[task_id] = {key: association[key] for key in inherited if key in association}
     return [{**entry, **index.get(entry.get("task_id"), {})} for entry in entries]
 
 
@@ -79,9 +100,17 @@ def managed_reader(log_dir: Any) -> tuple[dict[str, Any], dict[str, Any]] | None
     from .workflows import WorkflowStore
     caller = lineage.detect_caller(log_dir)
     if caller is None:
-        return None
+        import os
+        detection = lineage.detect_caller_detail(log_dir)
+        if detection.undecidable is not None:
+            raise ValueError("Workflow caller authority is undecidable: " + str(detection.undecidable))
+        caller = detection.caller
+        if caller is None and os.environ.get(lineage.ENV_TASK_ID):
+            raise ValueError("Workflow caller task identity cannot be verified")
+        if caller is None:
+            return None
     storage = WorkflowStore(root=log_dir.parent)
-    association = storage.task_owner(caller.record.task_id)
+    association = storage.task_owner(caller.record.task_id, strict=True)
     if association is None or association.get("role") == "builder":
         return None
     run = storage.get_run(association["workflow_run_id"])
