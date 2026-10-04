@@ -205,7 +205,9 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
                 input_group = wp.add_mutually_exclusive_group()
                 input_group.add_argument("--definition", help="Current canvas JSON file, or - for stdin")
                 input_group.add_argument("--definition-json", help="Current canvas JSON object")
-                wp.add_argument("--source", help="JSON saved name/revision/baseline metadata")
+                source_group = wp.add_mutually_exclusive_group()
+                source_group.add_argument("--source", help="JSON saved name/revision/baseline metadata")
+                source_group.add_argument("--source-file", help="Saved name/revision/baseline metadata JSON file")
             else:
                 wp.add_argument("--freedom", default=None, choices=("read_only", "write_in_repo", "publish", "unrestricted"))
                 wp.add_argument("--network", choices=("true", "false"))
@@ -637,6 +639,8 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
                 if args.definition:
                     definition = json.loads(sys.stdin.read() if args.definition == "-" else Path(args.definition).read_text())
                 source = json.loads(args.source) if args.source else None
+                if args.source_file:
+                    source = json.loads(Path(args.source_file).read_text())
                 return await server.workflow_builder(args.name, args.prompt, args.repo, candidate, json.loads(args.fallbacks), definition, source)
             if args.monitor:
                 return await server._workflow_call("start", name=args.name, prompt=args.prompt, repo_path=args.repo, overrides=candidate or None, freedom=args.freedom, network=_network(args.network), interaction_owner="monitor")
