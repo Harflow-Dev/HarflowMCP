@@ -835,7 +835,14 @@ class WorkflowStore:
     def update_run(self, run_id: str, mutator: Any, event: str, detail: Any = None) -> dict[str, Any]:
         with self.lock(f"run:{run_id}"):
             run = self.get_run(run_id)
+            attention_before = (run.get("status"), run.get("attention_reason"), run.get("failure_reason"), run.get("failed_decision_id"))
             mutator(run)
+            attention_after = (run.get("status"), run.get("attention_reason"), run.get("failure_reason"), run.get("failed_decision_id"))
+            if run.get("status") in {"needs_attention", "paused", "failed"}:
+                if attention_before != attention_after or "attention_checkpoint" not in run:
+                    run["attention_checkpoint"] = run.get("sequence", 0) + 1
+            else:
+                run.pop("attention_checkpoint", None)
             run["updated_at"] = time.time()
             run["sequence"] = run.get("sequence", 0) + 1
             run.pop("settling", None)
@@ -884,12 +891,45 @@ class WorkflowStore:
         self._index_run(run, previous_directory_mtime=previous_directory_mtime)
         return run
 
-    def control(self, run_id: str, action: str, instructions: str | None = None, additional_attempts: int = 0, *, decision_id: str | None = None, interaction_owner: str | None = None, _internal: bool = False) -> dict[str, Any]:
+    def control(self, run_id: str, action: str, instructions: str | None = None, additional_attempts: int = 0, *, decision_id: str | None = None, interaction_owner: str | None = None, _internal: bool = False, _delivery: dict[str, Any] | None = None) -> dict[str, Any]:
         if action not in {"pause", "resume", "cancel", "recover"}:
             raise WorkflowError("Unknown workflow action")
         if not isinstance(additional_attempts, int) or isinstance(additional_attempts, bool) or additional_attempts < 0:
             raise WorkflowError("additional_attempts must be a nonnegative integer")
         observed = self.get_run(run_id)
+        if _delivery is not None:
+            if not _internal:
+                raise WorkflowError("Forwarded delivery is internal only")
+            if observed.get("forwarded_delivery_receipt") == _delivery:
+                return observed
+
+        def record_delivery(r: dict[str, Any]) -> None:
+            if _delivery is not None:
+                r["forwarded_delivery_receipt"] = copy.deepcopy(_delivery)
+
+        def prepare_delivery(source_id: str, source_action: str, source: dict[str, Any]) -> dict[str, Any]:
+            payload = {"source_id": source_id, "action": source_action, "instructions": instructions,
+                       "additional_attempts": additional_attempts, "decision_id": decision_id,
+                       "interaction_owner": interaction_owner, "source": source}
+            previous = observed.get("forwarded_delivery")
+            replace_delivered = False
+            if previous is not None and (previous.get("payload", {}).get("source") != source or previous.get("payload", {}).get("decision_id") != decision_id):
+                prior_source = self.get_run(previous["payload"]["source_id"])
+                replace_delivered = prior_source.get("forwarded_delivery_receipt") == previous
+            def prepare(r: dict[str, Any]) -> None:
+                if r.get("interaction_owner") and interaction_owner is not None and interaction_owner != r["interaction_owner"]:
+                    raise WorkflowError("Workflow interaction belongs to its original caller")
+                if r.get("status") != observed.get("status") or r.get("input_decision_id") != observed.get("input_decision_id") or r.get("input_source") != observed.get("input_source") or r.get("attention_source") != observed.get("attention_source"):
+                    raise WorkflowError("The forwarded source moved on; re-read the current run")
+                pending = r.get("forwarded_delivery")
+                if pending is not None and not (replace_delivered and pending == previous):
+                    if pending.get("payload") != payload:
+                        raise WorkflowError("A forwarded delivery is pending; retry its original answer and grants")
+                else:
+                    r["forwarded_delivery"] = {"id": uuid.uuid4().hex, "payload": copy.deepcopy(payload)}
+            prepared = self.update_run(run_id, prepare, "forwarded_delivery_prepared", {"source": source_id})
+            return prepared["forwarded_delivery"]
+
         link = observed.get("parent_link") or {}
         if link and not _internal:
             # Public controls belong to the root; children are driven by their parents.
@@ -902,10 +942,13 @@ class WorkflowStore:
                 raise WorkflowError("Resuming needs_input requires the current input decision_id")
             # The answer belongs to the source run; it grants no fresh child and no
             # attempts beyond the attention source.
-            self.control(source_id, "resume", instructions=instructions, additional_attempts=additional_attempts, decision_id=decision_id, interaction_owner=interaction_owner, _internal=True)
+            delivery = prepare_delivery(source_id, "resume", observed["input_source"])
+            self.control(source_id, "resume", instructions=instructions, additional_attempts=additional_attempts, decision_id=decision_id, interaction_owner=interaction_owner, _internal=True, _delivery=delivery)
             def clear_forwarded(r: dict[str, Any]) -> None:
-                if r.get("status") != "needs_input" or r.get("input_decision_id") != decision_id:
+                if r.get("status") != "needs_input" or r.get("input_decision_id") != decision_id or r.get("input_source") != observed.get("input_source") or r.get("forwarded_delivery") != delivery:
                     raise WorkflowError("The forwarded question moved on; re-read the current question and answer again")
+                record_delivery(r)
+                r.pop("forwarded_delivery", None)
                 r["status"] = "running"
                 r["instructions"] = instructions or ""
                 r.pop("input_question", None)
@@ -923,14 +966,19 @@ class WorkflowStore:
             source = observed["attention_source"]
             source_id = source["workflow_run_id"]
             source_run = self.get_run(source_id)
-            source_action = "recover" if source_run.get("status") == "failed" else "resume"
+            previous_payload = (observed.get("forwarded_delivery") or {}).get("payload", {})
+            same_source = previous_payload.get("source_id") == source_id and previous_payload.get("source") == source
+            source_action = (previous_payload.get("action") if same_source else None) or ("recover" if source_run.get("status") == "failed" else "resume")
+            delivery = prepare_delivery(source_id, source_action, source)
             # The grant and recovery instructions belong to the paused child;
             # resuming the root must not allocate a fresh invocation or grant its siblings.
             self.control(source_id, source_action, instructions=instructions, additional_attempts=additional_attempts,
-                         interaction_owner=interaction_owner, _internal=True)
+                         interaction_owner=interaction_owner, _internal=True, _delivery=delivery)
             def clear_attention(r: dict[str, Any]) -> None:
-                if r.get("status") not in {"needs_attention", "paused"} or r.get("attention_source") != source:
+                if r.get("status") not in {"needs_attention", "paused"} or r.get("attention_source") != source or r.get("forwarded_delivery") != delivery:
                     raise WorkflowError("The child attention source moved on; re-read the current run before resuming")
+                record_delivery(r)
+                r.pop("forwarded_delivery", None)
                 r["status"] = "running"
                 r.pop("attention_source", None)
                 r.pop("attention_reason", None)
@@ -949,6 +997,8 @@ class WorkflowStore:
                 self.reconcile_run(run_id)
         control_detail: dict[str, Any] = {"instructions": instructions, "additional_attempts": additional_attempts, "retry_grants": {}}
         def change(r: dict[str, Any]) -> None:
+            if _delivery is not None and r.get("forwarded_delivery_receipt") == _delivery:
+                return
             if r.get("execution_contract") == "delegation" and r.get("interaction_owner") and interaction_owner is not None and interaction_owner != r["interaction_owner"]:
                 raise WorkflowError("Workflow interaction belongs to its original caller")
             if action in {"resume", "recover", "cancel"}:
@@ -1025,6 +1075,7 @@ class WorkflowStore:
                 r["status"] = "paused" if action == "pause" else "cancelling"
                 if instructions:
                     r["instructions"] = instructions
+            record_delivery(r)
         result = self.update_run(run_id, change, f"control:{action}", control_detail)
         if action in {"resume", "recover", "cancel"} and not _supervisor_present(result) and not result.get("parent_link"):
             _launch(self, run_id)
@@ -1198,10 +1249,37 @@ def _supervisor_present(run: dict[str, Any]) -> bool:
     return _alive(run.get("supervisor_pid"))
 
 
+def _require_no_active_historical_runs(storage: WorkflowStore) -> None:
+    # One bounded migration step per attempt; callers retry after indexing settles.
+    page = storage.list_run_page(active_only=True)
+    if page.get("bootstrap_pending") or page.get("history_incomplete"):
+        raise WorkflowError("Workflow history indexing is incomplete; retry after indexing or inspect oversized runs directly")
+    with storage._ownership_catalog().connect() as db:
+        historical = db.execute("SELECT 1 FROM entries INDEXED BY active_historical WHERE active=1 AND COALESCE(json_extract(payload,'$.kind'),'workflow')!='builder' AND COALESCE(json_extract(payload,'$.execution_contract'),'')!='delegation' LIMIT 1").fetchone()
+    if historical:
+        raise WorkflowError("Active historical runs must settle or be cancelled before delegation execution")
+
+
 def _launch(storage: WorkflowStore, run_id: str) -> None:
+    reservation = storage.get_run(run_id)
     log = storage.runs / f"{run_id}.supervisor.log"
-    with log.open("ab") as output:
+    output = None
+    try:
+        output = log.open("ab")
         subprocess.Popen([sys.executable, "-m", "polybridge.workflows", "supervise", run_id, "--root", str(storage.root)], stdin=subprocess.DEVNULL, stdout=output, stderr=output, start_new_session=True, close_fds=True)
+    except OSError as exc:
+        # These failures precede a successfully returned child process. Keep the
+        # reservation and its owner recoverable instead of leaving a phantom start.
+        reason = f"Supervisor could not start for workflow run {run_id}: {exc}"
+        def launch_failed(r: dict[str, Any]) -> None:
+            # An independently advanced run owns its newer outcome and supervisor.
+            if r.get("sequence") == reservation.get("sequence") and r.get("status") == reservation.get("status"):
+                r.update(status="needs_attention", attention_reason=reason)
+        storage.update_run(run_id, launch_failed, "supervisor_launch_failed")
+        raise WorkflowError(reason) from exc
+    finally:
+        if output is not None:
+            output.close()
 
 
 async def start_workflow(name: str, prompt: str, repo_path: Path, *, overrides: dict[str, Any] | None = None, freedom: str | None = None, network: bool | None = None, root: Path | None = None, interaction_owner: str = "caller", definition_snapshot: dict[str, Any] | None = None, dependency_tree: dict[str, Any] | None = None, _verified_caller: Any = _CALLER_UNSET) -> dict[str, Any]:
@@ -1210,8 +1288,7 @@ async def start_workflow(name: str, prompt: str, repo_path: Path, *, overrides: 
     if not isinstance(prompt, str) or not prompt.strip():
         raise WorkflowError("Workflow prompt must be nonempty")
     storage = WorkflowStore(root)
-    if any(r.get("kind") != "builder" and r.get("execution_contract") != "delegation" and r["status"] not in TERMINAL for r in storage.list_runs()):
-        raise WorkflowError("Active historical runs must settle or be cancelled before delegation execution")
+    await asyncio.to_thread(_require_no_active_historical_runs, storage)
     if freedom is not None:
         raise WorkflowError("Workflow access is defined by saved nodes; caller freedom overrides are not supported")
     definition = copy.deepcopy(definition_snapshot) if definition_snapshot is not None else storage.get(name)

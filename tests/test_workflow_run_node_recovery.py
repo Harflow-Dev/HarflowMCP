@@ -676,3 +676,139 @@ async def test_terminal_parallel_child_live_tasks_are_signaled_without_overwriti
         outcome = inv.outcome_for_child(store, parent, activation, parent['definition']['nodes'][1])
         assert outcome['result']['child_outcome']['kind'] == 'uncertain'
         assert store.get_run(parent['workflow_run_id'])['status'] == 'running'
+
+
+@pytest.mark.parametrize('kind', ['input', 'paused', 'failed'])
+@pytest.mark.parametrize('failure_target', ['child', 'child-after-write', 'parent'])
+def test_forwarded_resume_delivery_is_durable_and_exactly_once(store, tmp_path, monkeypatch, kind, failure_target):
+    parent = seed_parent(store, tmp_path, 'parent', stage='waiting')
+    child = finished_child(store, parent, parent['activations'][0], status='needs_input' if kind == 'input' else kind)
+    child.update(interaction_owner='monitor')
+    source = {'workflow_run_id': child['workflow_run_id'], 'workflow_name': child['name']}
+    if kind == 'input':
+        child.update(input_decision_id='question-one', input_question='Answer me')
+    write_run(store, child)
+    def seed(r):
+        r.update(interaction_owner='monitor', status='needs_input' if kind == 'input' else 'needs_attention')
+        if kind == 'input':
+            r.update(input_source=source, input_decision_id='question-one', input_question='Answer me')
+        else:
+            r.update(attention_source=source)
+    store.update_run(parent['workflow_run_id'], seed, 'fixture')
+    original = store.update_run
+    failed = False
+    def injected(identifier, change, event, detail=None):
+        nonlocal failed
+        target = identifier == child['workflow_run_id'] and event in {'control:resume', 'control:recover'} if failure_target.startswith('child') else identifier == parent['workflow_run_id'] and event in {'forwarded_input_answered', 'forwarded_attention_resumed'}
+        if target and not failed:
+            failed = True
+            if failure_target == 'child-after-write':
+                original(identifier, change, event, detail)
+            raise OSError('injected write failure')
+        return original(identifier, change, event, detail)
+    monkeypatch.setattr(store, 'update_run', injected)
+    options = {'decision_id': 'question-one'} if kind == 'input' else {}
+    with pytest.raises(OSError, match='injected'):
+        store.control(parent['workflow_run_id'], 'resume', 'exact answer', 2, interaction_owner='monitor', **options)
+    # Restart: the delivery identity and accepted child receipt come from disk.
+    restarted = w.WorkflowStore(root=store.root)
+    with pytest.raises(w.WorkflowError, match='original caller'):
+        restarted.control(parent['workflow_run_id'], 'resume', 'exact answer', 2, interaction_owner='caller', **options)
+    with pytest.raises(w.WorkflowError, match='pending'):
+        restarted.control(parent['workflow_run_id'], 'resume', 'changed answer', 3, interaction_owner='monitor', **options)
+    if failure_target == 'parent':
+        # A child may already publish its next checkpoint before parent acknowledgment.
+        restarted.update_run(child['workflow_run_id'], lambda r: r.update(status='needs_input', input_decision_id='question-two', input_question='Next question'), 'fixture')
+    result = restarted.control(parent['workflow_run_id'], 'resume', 'exact answer', 2, interaction_owner='monitor', **options)
+    assert result['status'] == 'running' and 'forwarded_delivery' not in result
+    actual = restarted.get_run(child['workflow_run_id'])
+    assert actual['transition_grant'] == 2
+    assert actual['instructions'] == 'exact answer'
+    assert not result.get('transition_grant')
+    if failure_target == 'parent':
+        assert actual['input_decision_id'] == 'question-two' and actual['status'] == 'needs_input'
+    else:
+        assert actual['status'] == 'running'
+
+
+def test_forwarded_delivery_retry_preserves_and_allows_new_parent_question(store, tmp_path, monkeypatch):
+    parent = seed_parent(store, tmp_path, 'parent', stage='waiting')
+    child = finished_child(store, parent, parent['activations'][0], status='needs_input')
+    source = {'workflow_run_id': child['workflow_run_id'], 'workflow_name': child['name']}
+    child.update(input_decision_id='one', input_question='First')
+    write_run(store, child)
+    store.update_run(parent['workflow_run_id'], lambda r: r.update(status='needs_input', input_source=source, input_decision_id='one', input_question='First'), 'fixture')
+    original = store.update_run
+    def moved(identifier, change, event, detail=None):
+        if event == 'forwarded_input_answered':
+            original(child['workflow_run_id'], lambda r: r.update(status='needs_input', input_decision_id='two', input_question='Second'), 'fixture')
+            original(parent['workflow_run_id'], lambda r: r.update(input_decision_id='two', input_question='Second'), 'fixture')
+        return original(identifier, change, event, detail)
+    monkeypatch.setattr(store, 'update_run', moved)
+    with pytest.raises(w.WorkflowError, match='moved on'):
+        store.control(parent['workflow_run_id'], 'resume', 'First answer', 2, decision_id='one')
+    restarted = w.WorkflowStore(root=store.root)
+    with pytest.raises(w.WorkflowError, match='current input decision_id'):
+        restarted.control(parent['workflow_run_id'], 'resume', 'First answer', 2, decision_id='one')
+    assert restarted.get_run(parent['workflow_run_id'])['input_question'] == 'Second'
+    restarted.control(parent['workflow_run_id'], 'resume', 'Second answer', 1, decision_id='two')
+    assert restarted.get_run(child['workflow_run_id'])['transition_grant'] == 3
+    assert restarted.get_run(child['workflow_run_id'])['instructions'] == 'Second answer'
+
+
+def test_forwarded_attention_new_source_uses_its_own_control_action(store, tmp_path, monkeypatch):
+    parent = seed_parent(store, tmp_path, 'parent', stage='waiting')
+    old_child = finished_child(store, parent, parent['activations'][0], status='failed')
+    new_child = copy.deepcopy(old_child)
+    new_child.update(workflow_run_id=uuid.uuid4().hex, status='paused')
+    write_run(store, old_child)
+    write_run(store, new_child)
+    old_source = {'workflow_run_id': old_child['workflow_run_id'], 'workflow_name': 'child'}
+    new_source = {'workflow_run_id': new_child['workflow_run_id'], 'workflow_name': 'child'}
+    store.update_run(parent['workflow_run_id'], lambda r: r.update(status='needs_attention', attention_source=old_source), 'fixture')
+    original = store.update_run
+    def moved(identifier, change, event, detail=None):
+        if event == 'forwarded_attention_resumed':
+            original(parent['workflow_run_id'], lambda r: r.update(attention_source=new_source), 'fixture')
+        return original(identifier, change, event, detail)
+    monkeypatch.setattr(store, 'update_run', moved)
+    with pytest.raises(w.WorkflowError, match='moved on'):
+        store.control(parent['workflow_run_id'], 'resume', 'Recover old child', 2)
+    assert store.get_run(old_child['workflow_run_id'])['transition_grant'] == 2
+    restarted = w.WorkflowStore(root=store.root)
+    result = restarted.control(parent['workflow_run_id'], 'resume', 'Resume new child', 1)
+    assert result['status'] == 'running'
+    assert restarted.get_run(new_child['workflow_run_id'])['status'] == 'running'
+    assert restarted.get_run(new_child['workflow_run_id'])['transition_grant'] == 1
+    assert restarted.get_run(old_child['workflow_run_id'])['transition_grant'] == 2
+
+
+def test_forwarded_attention_same_child_new_checkpoint_survives_prior_ack(store, tmp_path, monkeypatch):
+    parent = seed_parent(store, tmp_path, 'parent', stage='waiting')
+    child = finished_child(store, parent, parent['activations'][0], status='paused')
+    write_run(store, child)
+    cid = child['workflow_run_id']
+    first = store.update_run(cid, lambda r: r.update(attention_reason='Same reason'), 'suspend')
+    inv.publish_attention(store, first)
+    first_source = store.get_run(parent['workflow_run_id'])['attention_source']
+    # Repeated publications and unrelated writes retain this suspension identity.
+    inv.publish_attention(store, store.update_run(cid, lambda r: r.update(instructions='unchanged suspension'), 'poll'))
+    assert store.get_run(parent['workflow_run_id'])['attention_source'] == first_source
+    original = store.update_run
+    def moved(identifier, change, event, detail=None):
+        if event == 'forwarded_attention_resumed':
+            again = original(cid, lambda r: r.update(status='paused', attention_reason='Same reason'), 'suspend_again')
+            inv.publish_attention(store, again)
+        return original(identifier, change, event, detail)
+    monkeypatch.setattr(store, 'update_run', moved)
+    with pytest.raises(w.WorkflowError, match='moved on'):
+        store.control(parent['workflow_run_id'], 'resume', 'First answer', 2)
+    suspended = store.get_run(parent['workflow_run_id'])
+    assert suspended['status'] == 'paused'
+    assert suspended['attention_source']['attention_checkpoint'] != first_source['attention_checkpoint']
+    restarted = w.WorkflowStore(root=store.root)
+    result = restarted.control(parent['workflow_run_id'], 'resume', 'Second answer', 1)
+    assert result['status'] == 'running'
+    actual = restarted.get_run(cid)
+    assert actual['transition_grant'] == 3
+    assert actual['instructions'] == 'Second answer'

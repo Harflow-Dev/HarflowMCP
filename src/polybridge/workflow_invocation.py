@@ -578,7 +578,7 @@ def publish_attention(store: Any, source: dict[str, Any]) -> None:
             if parent_id == root_id:
                 break
             walker = store.get_run(parent_id)
-        attention_source = {"workflow_run_id": source["workflow_run_id"], "workflow_name": source.get("name", ""), "path": list(reversed(path))}
+        attention_source = {"workflow_run_id": source["workflow_run_id"], "workflow_name": source.get("name", ""), "path": list(reversed(path)), "attention_checkpoint": source.get("attention_checkpoint", source.get("sequence", 0))}
     def forward(r: dict[str, Any]) -> None:
         if r["status"] in _w().TERMINAL or r["status"] in {"cancelling", "needs_input"}:
             return

@@ -651,7 +651,7 @@ def test_schema_three_cache_rebuild_is_bounded_without_decoding_old_headers(tmp_
     page = store.list_page(directory)
     assert page['bootstrap_pending'] and len(reads) == 100
     with index.connect() as db:
-        assert db.execute("SELECT value FROM state WHERE key='schema_version'").fetchone() == ('4',)
+        assert db.execute("SELECT value FROM state WHERE key='schema_version'").fetchone() == ('5',)
         assert db.execute("SELECT count(*) FROM entries WHERE id LIKE 'old%'").fetchone() == (0,)
     assert originals == {p.name: p.read_bytes() for p in directory.glob('*.meta.json')}
 

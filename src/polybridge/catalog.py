@@ -24,7 +24,7 @@ def bound_header(header: dict[str, Any]) -> dict[str, Any]:
     result = dict(header)
     if isinstance(result.get('sessions'), dict):
         result['sessions'] = {'orchestrator': str(result['sessions']['orchestrator'])[:128]} if result['sessions'].get('orchestrator') else {}
-    protected = {'task_id', 'workflow_run_id', 'parent_workflow_run_id', 'root_workflow_run_id', 'orchestrator_session_owner_run_id', 'workflow_session_owner_run_id', 'session_id', 'parent_task_id', 'root_task_id', 'spawned_by', 'status', 'started_at', 'created_at', 'updated_at', 'backend', 'kind', 'sessions'}
+    protected = {'task_id', 'workflow_run_id', 'parent_workflow_run_id', 'root_workflow_run_id', 'orchestrator_session_owner_run_id', 'workflow_session_owner_run_id', 'session_id', 'parent_task_id', 'root_task_id', 'spawned_by', 'status', 'started_at', 'created_at', 'updated_at', 'backend', 'kind', 'execution_contract', 'sessions'}
     protected.update({'persisted_status', 'observed_exit', 'process_identity_state', 'needs_reconciliation', 'status_reconciled'})
     for key, value in list(result.items()):
         if isinstance(value, str):
@@ -93,17 +93,18 @@ class Catalog:
         db.execute('CREATE TABLE IF NOT EXISTS sources (id TEXT PRIMARY KEY,mtime INTEGER,size INTEGER)')
         db.execute('CREATE TABLE IF NOT EXISTS seen (id TEXT PRIMARY KEY,generation INTEGER NOT NULL)')
         version = db.execute("SELECT value FROM state WHERE key='schema_version'").fetchone()
-        if version != ('4',):
+        if version != ('5',):
             db.execute('DELETE FROM entries')
             db.execute('DELETE FROM callers')
             db.execute('DELETE FROM associations')
             db.execute('DELETE FROM sources')
             db.execute('DELETE FROM seen')
             db.execute('DELETE FROM state')
-            db.execute("INSERT INTO state VALUES ('schema_version','4')")
+            db.execute("INSERT INTO state VALUES ('schema_version','5')")
         # Build only after invalidating old derivative headers. The partial index
         # makes warm authority readiness independent of retained history size.
         db.execute("CREATE INDEX IF NOT EXISTS incomplete_headers ON entries(id) WHERE json_extract(payload,'$.needs_direct_lookup')=1")
+        db.execute("CREATE INDEX IF NOT EXISTS active_historical ON entries(id) WHERE active=1 AND COALESCE(json_extract(payload,'$.kind'),'workflow')!='builder' AND COALESCE(json_extract(payload,'$.execution_contract'),'')!='delegation'")
         db.commit()
         return db
 
