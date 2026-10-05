@@ -904,7 +904,7 @@ attempts. Resume or recovery remains a separate explicit action.
 ### Monitor polling and complete detail retrieval
 
 Monitor polls `workflow-status RUN_ID --monitor-view --json` for bounded metadata and content
-digests. When content or state changes, it captures one coherent transport snapshot using
+digests. On initial loading, it captures one coherent transport snapshot using
 `workflow-status RUN_ID --monitor-view --snapshot --json`. Subsequent `--cursor CURSOR` calls
 read the same immutable snapshot in bounded 128 KiB JSON chunks, so a running workflow cannot
 invalidate an in-progress load. Completed paging deletes its temporary snapshot; abandoned
@@ -912,9 +912,13 @@ snapshots expire after five minutes. These files do not update saved workflows o
 
 The window coordinator retains the last loaded content for up to eight runs. Reopening a run
 shows that content immediately while refreshing; a failed refresh preserves it. Unchanged polls
-transfer metadata only. Changed snapshots currently transfer the complete run, rather than
-individually fetching old execution results. This trades some bytes for coherent loading and
-far fewer CLI subprocesses.
+transfer metadata only. Changed fields use `workflow-detail RUN_ID --view VIEW --monitor-view
+--json`; only changed executions are fetched when the execution index changes. This local
+transport captures the requested view once and serves immutable 128 KiB continuation chunks.
+Each continuation reads a bounded receipt, seeks the requested page, and verifies file identity
+and page integrity without rereading or hashing the whole cached view. Receipts bind the run,
+view, digest and immutable file anchors. Native loading checks the advertised content digest
+before merging a changed view and retries a stale view once.
 
 `workflow-detail RUN_ID --view VIEW --cursor CURSOR --json` remains available for lossless
 individual views, including definitions, checklists, plans and execution history. Its content-bound

@@ -169,6 +169,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
             wp.add_argument("--snapshot", action="store_true")
             wp.add_argument("--cursor")
         if action == "detail":
+            wp.add_argument("--monitor-view", action="store_true")
             wp.add_argument("--view", required=True)
             wp.add_argument("--cursor")
         if action == "abandon-dispatch":
@@ -688,6 +689,12 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
                 return await server._workflow_call("start", name=args.name, prompt=prompt, repo_path=args.repo, overrides=candidate or None, freedom=args.freedom, network=_network(args.network), interaction_owner="monitor")
             return await server._workflow_call("start", name=args.name, prompt=prompt, repo_path=args.repo, overrides=candidate or None, freedom=args.freedom, network=_network(args.network))
         if action == "detail":
+            if args.monitor_view:
+                from .workflow_responses import monitor_detail
+                if await server._verified_workflow_caller() is not None:
+                    raise ValueError("Monitor detail snapshots are only available to the local Monitor")
+                run = None if args.cursor else await server._workflow_call("status", run_id=args.workflow_run_id)
+                return monitor_detail(run, args.workflow_run_id, args.view, default_log_dir().parent / "monitor_snapshots", args.cursor)
             return await server.get_workflow_run_detail(args.workflow_run_id, args.view, args.cursor)
         if action == "status" and args.monitor_view:
             from .workflow_responses import monitor, monitor_snapshot

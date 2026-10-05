@@ -183,3 +183,12 @@ def monitor_snapshot(run, run_id, cache, cursor=None):
     from .workflow_monitor_snapshot import snapshot
     captured = run | {"monitor_digests": monitor(run)["monitor_digests"]} if run is not None else None
     return snapshot(captured, run_id, cache, cursor)
+
+
+def monitor_detail(run, run_id, view, cache, cursor=None):
+    """CLI-only frozen view transport; managed/public detail semantics remain unchanged."""
+    from .workflow_monitor_snapshot import snapshot
+    serialized = _serialize(_view_value(run, view)).encode('ascii') if run is not None else None
+    page = snapshot(run, run_id, cache, cursor, view=view, serialized=serialized)
+    page.pop('monitor_snapshot')
+    return {**page, 'response_version': 1, 'view': view, 'encoding': 'json'}
