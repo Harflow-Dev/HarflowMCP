@@ -452,11 +452,11 @@ async def test_cancel_subtree_includes_nested_grandchildren_only(store, tmp_path
     child = child_runs(store, run)[0]
     grandchild = copy.deepcopy(child)
     grandchild['workflow_run_id'] = uuid.uuid4().hex
-    grandchild['parent_link']['workflow_run_id'] = child['workflow_run_id']
+    grandchild['parent_link'].update(workflow_run_id=child['workflow_run_id'], execution_id='nested')
     grandchild['status'] = 'running'
     grandchild['activations'] = []
     write_run(store, grandchild)
-    store.update_run(child['workflow_run_id'], lambda r: r.update(status='running', activations=[]), 'test_live_child')
+    store.update_run(child['workflow_run_id'], lambda r: r.update(status='running', activations=[{'id': 'nested', 'tasks': [], 'invocation': {'child_workflow_run_id': grandchild['workflow_run_id']}}]), 'test_live_child')
     await inv.WorkflowTree(store).cancel_descendants(child['workflow_run_id'], registry, include_self=True)
     assert store.get_run(child['workflow_run_id'])['status'] == 'cancelled'
     assert store.get_run(grandchild['workflow_run_id'])['status'] == 'cancelled'
@@ -582,3 +582,62 @@ async def test_cancellation_does_not_settle_parent_with_uncertain_grandchild(sto
     assert not reconciled['pending'][0].get('execution_complete')
     assert reconciled['status'] == 'needs_attention'
     assert reconciled['activations'][0]['status'] == 'uncertain'
+
+
+async def test_cancel_linked_tree_never_reads_unrelated_giant_history(store, tmp_path, monkeypatch):
+    parent = seed_parent(store, tmp_path, 'parent', stage='running')
+    child = finished_child(store, parent, parent['activations'][0], status='running')
+    child['activations'] = []
+    write_run(store, child)
+    unrelated = store.runs / 'unrelated-giant.json'
+    unrelated.write_bytes(b'x' * (5 * 1024 * 1024))
+    monkeypatch.setattr(store, 'list_runs', lambda *a, **k: pytest.fail('cancel scanned retained history'))
+    read = store.get_run
+    ids = []
+    def only_linked(identifier, **kwargs):
+        ids.append(identifier)
+        assert identifier in {parent['workflow_run_id'], child['workflow_run_id']}
+        return read(identifier, **kwargs)
+    monkeypatch.setattr(store, 'get_run', only_linked)
+    await inv.WorkflowTree(store).cancel_descendants(parent['workflow_run_id'], object(), include_self=True)
+    assert read(parent['workflow_run_id'])['status'] == 'cancelled'
+    assert read(child['workflow_run_id'])['status'] == 'cancelled'
+    assert len(unrelated.read_bytes()) == 5 * 1024 * 1024
+
+
+@pytest.mark.parametrize('kind', ['missing', 'corrupt', 'mismatched', 'cycle'])
+async def test_cancel_unprovable_child_link_keeps_source_unsettled(store, tmp_path, kind):
+    parent = seed_parent(store, tmp_path, 'parent', stage='running')
+    activation = parent['activations'][0]
+    child_id = activation['invocation']['child_workflow_run_id']
+    if kind == 'corrupt':
+        (store.runs / f'{child_id}.json').write_text('{broken')
+    elif kind == 'mismatched':
+        child = finished_child(store, parent, activation, status='running')
+        child['parent_link']['execution_id'] = 'foreign-execution'
+        write_run(store, child)
+    elif kind == 'cycle':
+        child = finished_child(store, parent, activation, status='running')
+        child['activations'] = [{'id': 'back', 'tasks': [], 'invocation': {'child_workflow_run_id': parent['workflow_run_id']}}]
+        write_run(store, child)
+        store.update_run(parent['workflow_run_id'], lambda r: r.update(parent_link={'workflow_run_id': child_id, 'execution_id': 'back'}), 'cycle_fixture')
+    await inv.WorkflowTree(store).cancel_descendants(parent['workflow_run_id'], object(), include_self=True)
+    assert store.get_run(parent['workflow_run_id'])['status'] == 'cancelling'
+    if kind == 'mismatched':
+        assert store.get_run(child_id)['status'] == 'running'
+    if kind == 'cycle':
+        assert store.get_run(child_id)['status'] == 'cancelling'
+
+
+async def test_cancel_duplicate_invocation_and_completed_child_is_idempotent(store, tmp_path):
+    parent = seed_parent(store, tmp_path, 'parent', stage='running')
+    activation = parent['activations'][0]
+    child = finished_child(store, parent, activation, status='completed')
+    write_run(store, child)
+    store.update_run(parent['workflow_run_id'], lambda r: r['activations'].append(copy.deepcopy(r['activations'][0])), 'duplicate_fixture')
+    class NoCancel:
+        async def cancel_cascade(self, *a, **k):
+            pytest.fail('completed child task was cancelled')
+    await inv.WorkflowTree(store).cancel_descendants(parent['workflow_run_id'], NoCancel(), include_self=True)
+    assert store.get_run(parent['workflow_run_id'])['status'] == 'cancelled'
+    assert store.get_run(child['workflow_run_id'])['status'] == 'completed'

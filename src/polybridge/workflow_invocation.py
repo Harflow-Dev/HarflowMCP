@@ -148,42 +148,65 @@ class WorkflowTree:
 
     async def cancel_descendants(self, run_id: str, registry: Any, *, include_self: bool = False) -> None:
         """Cancel live descendants; a child without live work settles cancelled."""
-        records = {r["workflow_run_id"]: r for r in self.store.list_runs()}
-        def depth(record: dict[str, Any]) -> int:
-            current = record
-            seen: set[str] = set()
-            while current["workflow_run_id"] not in seen:
-                seen.add(current["workflow_run_id"])
-                parent_id = (current.get("parent_link") or {}).get("workflow_run_id")
-                if parent_id not in records:
-                    break
-                current = records[parent_id]
-            return len(seen)
-        for observed in sorted(records.values(), key=depth, reverse=True):
-            current_id = observed["workflow_run_id"]
-            belongs = include_self and current_id == run_id
-            visited: set[str] = set()
-            while current_id in records and current_id not in visited:
+        # Only persisted invocation edges establish descendants. Retained history
+        # can be arbitrarily large and contains unrelated trees.
+        root = self.store.get_run(run_id)
+        records, children, unresolved = {run_id: root}, {}, set()
+        ordered, visited, visiting = [], set(), set()
+        stack = [(run_id, False)]
+        while stack:
+            current_id, exiting = stack.pop()
+            if exiting:
+                visiting.discard(current_id)
                 visited.add(current_id)
-                current_id = (records[current_id].get("parent_link") or {}).get("workflow_run_id")
-                if current_id == run_id:
-                    belongs = True
-                    break
-            if not belongs:
+                ordered.append(current_id)
                 continue
-            if observed.get("status") in _w().TERMINAL:
+            if current_id in visited:
                 continue
-            live = [t["task_id"] for a in observed.get("activations", []) for t in a.get("tasks", []) if t.get("status") in {"running", "reserved", "uncertain"}]
-            for task_id in live:
+            if current_id in visiting:
+                unresolved.add(current_id)
+                continue
+            visiting.add(current_id)
+            stack.append((current_id, True))
+            observed = records[current_id]
+            linked = []
+            for activation in observed.get('activations', []):
+                invocation = activation.get('invocation')
+                if not invocation:
+                    continue
                 try:
-                    await registry.cancel_cascade(task_id, workflow_control=True)
-                except Exception:
-                    pass
-            descendants_settled = invocation_children_settled(self.store, observed)
-            if live or not descendants_settled:
-                self.store.update_run(observed["workflow_run_id"], lambda r: r.update(status="cancelling") if r["status"] not in _w().TERMINAL else None, "tree_cancel_propagated", {"root": run_id})
-            else:
-                self.store.update_run(observed["workflow_run_id"], lambda r: r.update(status="cancelled") if r["status"] not in _w().TERMINAL else None, "tree_cancelled", {"root": run_id})
+                    child_id = invocation['child_workflow_run_id']
+                    child = records.get(child_id) or self.store.get_run(child_id)
+                    link = child.get('parent_link') or {}
+                    if child.get('workflow_run_id') != child_id or link.get('workflow_run_id') != current_id or link.get('execution_id') != activation.get('id'):
+                        raise ValueError('Child invocation link does not match its parent')
+                    if child_id in visiting:
+                        raise ValueError('Cyclic child invocation link')
+                except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                    unresolved.add(current_id)
+                    continue
+                records[child_id] = child
+                linked.append(child_id)
+            children[current_id] = set(linked)
+            for child_id in reversed(linked):
+                if child_id not in visited:
+                    stack.append((child_id, False))
+        settled = {}
+        for current_id in ordered:
+            observed = records[current_id]
+            live = [t['task_id'] for a in observed.get('activations', []) for t in a.get('tasks', []) if t.get('status') in {'running', 'reserved', 'uncertain'}]
+            descendants_settled = current_id not in unresolved and all(settled.get(child_id, False) for child_id in children.get(current_id, ()))
+            selected = include_self or current_id != run_id
+            if selected and observed.get('status') not in _w().TERMINAL:
+                for task_id in live:
+                    try:
+                        await registry.cancel_cascade(task_id, workflow_control=True)
+                    except Exception:
+                        pass
+                status = 'cancelling' if live or not descendants_settled else 'cancelled'
+                self.store.update_run(current_id, lambda r, status=status: r.update(status=status) if r['status'] not in _w().TERMINAL else None, 'tree_cancel_propagated' if status == 'cancelling' else 'tree_cancelled', {'root': run_id})
+                records[current_id] = self.store.get_run(current_id)
+            settled[current_id] = not live and descendants_settled and records[current_id].get('status') in _w().TERMINAL
 
 
 def tree_write_strength(run: dict[str, Any], dispatch_freedom: str) -> bool:

@@ -272,7 +272,9 @@ source. Concurrent questions are served in creation order. Answer the root's cur
 its answer goes to that source checkpoint without repeating completed work or granting attempts.
 Public child controls redirect callers to the root. Explicit attempt grants apply to the attention
 source only. A child invocation timeout excludes idle suspension for caller input. Cancellation
-and timeout propagate through descendants and require settlement before redispatch.
+and timeout follow persisted child invocation links and require settlement before redispatch.
+Cancellation does not enumerate unrelated retained runs. Missing or mismatched child records
+keep the affected ancestor unsettled until recovery establishes the child outcome.
 
 Recovering a child preserves its existing work and attempt accounting; retrying an invocation
 creates a new child and consumes an attempt. Permission, cancellation and uncertain outcomes
