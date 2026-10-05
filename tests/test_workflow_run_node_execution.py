@@ -509,7 +509,10 @@ async def test_no_workflow_nodes_at_max_parallel_one_goes_fresh_and_tries_fallba
     assert saved["nodes"][1]["session_mode"] == "resume"
 
 
-async def test_read_only_child_uses_writer_roots_pooled_checkout_strength(tmp_path):
+async def test_read_only_child_uses_writer_roots_pooled_checkout_strength(tmp_path, monkeypatch):
+    # TreeRegistry simulates dispatch; this lease regression requires no installed CLI.
+    monkeypatch.setattr(w.backends, 'is_installed', lambda backend: True)
+    monkeypatch.setattr(w, '_launch', lambda *args: None)
     storage = w.WorkflowStore(tmp_path)
     child = child_graph()
     next(n for n in child['nodes'] if n['id'] == 'work')['freedom'] = 'read_only'

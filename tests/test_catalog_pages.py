@@ -543,3 +543,29 @@ def test_many_legacy_receipt_decorations_share_one_workflow_metadata_budget(tmp_
     page = store.list_page(tmp_path / 'tasks')
     assert sum(consumed) <= METADATA_BATCH_BYTES
     assert page['ownership_incomplete'] and page['history_incomplete'] and not page['counts_complete']
+
+
+@pytest.mark.parametrize('backend,title,current_start,expected_state', [
+    ('vibe', 'Vibe CLI', 'Wed Sep 24 10:00:00 2026', 'alive'),
+    ('vibe', 'Unrelated CLI', 'Wed Sep 24 10:00:00 2026', 'uncertain'),
+    ('vibe', 'Vibe CLI', 'Wed Sep 24 11:00:00 2026', 'dead'),
+    ('codex', 'Vibe CLI', 'Wed Sep 24 10:00:00 2026', 'uncertain'),
+])
+def test_indexed_active_inventory_uses_adapter_titles_only_with_matching_identity(tmp_path, monkeypatch, backend, title, current_start, expected_state):
+    task = replace(record('retitled'), backend=backend, status='running', exit_code=None, pid=123,
+                   start_time='Wed Sep 24 10:00:00 2026', markers=[backend, '/repo'])
+    store.write(tmp_path, task)
+    monkeypatch.setattr(store.identity, '_run_ps', lambda pid: SimpleNamespace(returncode=0, stdout=current_start + ' ' + title + '\n', stderr=''))
+    monkeypatch.setattr(store, 'read', lambda *a, **k: pytest.fail('warm indexed identity loaded metadata'))
+    page = store.list_page(tmp_path, active_only=True)
+    item = page['items'][0]
+    assert item['process_identity_state'] == expected_state
+    if expected_state == 'alive':
+        assert page['counts_complete'] and page['total_active_count'] == 1
+        assert item['status'] == 'running' and not item['needs_reconciliation']
+    elif expected_state == 'uncertain':
+        assert not page['counts_complete'] and page['total_active_count'] is None
+        assert item['needs_reconciliation']
+    else:
+        assert page['counts_complete'] and page['total_active_count'] == 0
+        assert item['status'] == 'unknown' and item['needs_reconciliation']

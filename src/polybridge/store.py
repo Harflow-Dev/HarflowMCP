@@ -329,7 +329,14 @@ def bootstrap_catalog(log_dir: Path) -> bool:
 
 def _project_indexed_status(header: dict[str, Any], record: TaskRecord) -> bool:
     unobserved = outcome_unobserved(record)
-    state = identity.identity_check(identity.task_identity(record.pid, record.start_time, record.markers)) if unobserved and record.pid is not None else ('undecidable' if unobserved else 'dead')
+    if unobserved and record.pid is not None:
+        candidate = identity.task_identity(record.pid, record.start_time, record.markers)
+        titles = getattr(get_backend(record.backend), 'caller_process_titles', ())
+        if titles:
+            candidate['caller_process_titles'] = titles
+        state = identity.identity_check(candidate)
+    else:
+        state = 'undecidable' if unobserved else 'dead'
     state = 'uncertain' if state not in {'alive', 'dead'} else state
     active = unobserved and state != 'dead'
     if active:
