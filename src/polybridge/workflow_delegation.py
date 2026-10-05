@@ -230,6 +230,23 @@ def settled_timeout(activation: dict[str, Any]) -> bool:
     return not any(t.get("result", {}).get("outcome_unknown") or t.get("status") in {"cancelled", "running", "cancelling", "uncertain", "reserved"} for t in tasks)
 
 
+def caller_decision_block(activation: dict[str, Any]) -> bool:
+    """A completed worker deliberately stopped for judgment, not a tool/access failure."""
+    value = activation.get("node_result", {})
+    tasks = activation.get("tasks", [])
+    if value.get("status") != "blocked" or not settled(activation) or not tasks:
+        return False
+    result = value.get("result", {})
+    if any(result.get(key) in {"permission", "cancelled", "uncertain"} for key in ("blocker_category", "failure_kind")):
+        return False
+    if any(t.get("result", {}).get("permission_denials") or t.get("result", {}).get("outcome_unknown") for t in tasks):
+        return False
+    if any(t.get("status") in {"reserved", "running", "cancelling", "cancelled", "uncertain"} or t.get("result", {}).get("status") in {"reserved", "running", "cancelling", "cancelled", "uncertain"} for t in tasks):
+        return False
+    terminal = tasks[-1].get("result", {})
+    return terminal.get("status") == "completed" and not terminal.get("is_error") and terminal.get("exit_code") in {None, 0}
+
+
 def retry_eligible(activation: dict[str, Any], *, guided: bool = False, node: dict[str, Any] | None = None, run: dict[str, Any] | None = None) -> bool:
     """Only positively settled failures can be explicitly reassigned."""
     result = activation.get("node_result", {})
@@ -241,7 +258,9 @@ def retry_eligible(activation: dict[str, Any], *, guided: bool = False, node: di
     if any(t.get("result", {}).get("outcome_unknown") or t.get("result", {}).get("status") in {"cancelled", "running", "cancelling"} for t in activation.get("tasks", [])):
         return False
     resolved = (run or {}).get("blocker_retry_authorizations", {}).get(activation.get("id"), {})
-    if guided and result.get("status") == "blocked" and resolved.get("node_id") == activation.get("node_id") and str(resolved.get("reason", "")).strip() and result.get("result", {}).get("blocker_category") not in {"authority", "cancelled", "uncertain"} and result.get("result", {}).get("failure_kind") not in {"authority", "cancelled", "uncertain"}:
+    if guided and resolved.get("authorization_kind") == "caller_answer":
+        return resolved.get("node_id") == activation.get("node_id") and isinstance(resolved.get("reason"), str) and bool(resolved["reason"].strip()) and caller_decision_block(activation)
+    if guided and result.get("status") == "blocked" and resolved.get("node_id") == activation.get("node_id") and str(resolved.get("reason", "")).strip() and result.get("result", {}).get("blocker_category") not in {"authority", "permission", "cancelled", "uncertain"} and result.get("result", {}).get("failure_kind") not in {"authority", "permission", "cancelled", "uncertain"}:
         return True  # Reassignment includes caller context but never changes saved permissions.
     if result.get("result", {}).get("failure_kind") in {"authority", "permission", "cancelled", "uncertain"}:
         return False
@@ -380,7 +399,8 @@ def continuations(run: dict[str, Any], node: dict[str, Any], token: dict[str, An
             choice["session_mode"] = target["session_mode"]
             if target["session_mode"] == "continue_previous":
                 from .workflow_execution_policy import previous_session
-                session_token = {**token, **({"retry_of_execution_id": choice["execution_id"]} if choice.get("execution_id") else {"via": choice["continuation_id"]} if choice["kind"] != "execute" else {})}
+                from .workflow_execution_policy import continuation_session_token
+                session_token = continuation_session_token(token, choice)
                 choice["available_sessions"] = previous_session(run, target, session_token, root=root)
                 from .workflow_execution_policy import previous_session_reason
                 choice["session_note"] = previous_session_reason(run, target, session_token, root=root)
@@ -510,7 +530,8 @@ def validate_decision(run: dict[str, Any], node: dict[str, Any], token: dict[str
             mode = entry.get("session_mode", target["session_mode"])
             if target["session_mode"] == "continue_previous" or target["session_mode"] == "agent_decides" and mode == "continue_previous":
                 from .workflow_execution_policy import previous_session
-                session_token = {**token, **({"retry_of_execution_id": c["execution_id"]} if c.get("execution_id") else {"via": c["continuation_id"]} if c["kind"] != "execute" else {})}
+                from .workflow_execution_policy import continuation_session_token
+                session_token = continuation_session_token(token, c)
                 c = {**c, "available_sessions": previous_session(run, target, session_token, root=root)}
                 from .workflow_execution_policy import previous_session_reason
                 assignment["session_reason"] = previous_session_reason(run, target, session_token, root=root)

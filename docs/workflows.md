@@ -568,8 +568,13 @@ failed decision to the orchestrator with a fresh decision allowance and preserve
 Decision exhaustion in new runs uses `needs_attention`, so use `resume_workflow` rather than
 failed-run recovery. The last contract correction remains visible. Resuming renews the decision
 allowance; `additional_attempts` grants execution/retry capacity only when explicitly requested.
-A caller answer with an explicit attempt grant can reopen a settled blocked worker, including
-missing-context blocks at End, within the granted budget. Its assignment includes the answer;
+A verified answer to the current `needs_input` can reopen its referenced settled worker when
+the worker deliberately stopped for a caller decision, including an `authority`-labelled decision.
+The harness must have completed without permission denials, errors, or an unknown outcome.
+The answer is attached verbatim to the retry assignment; it does not grant tools or extra attempts.
+An available node attempt is required; exhausted budgets need an explicit `additional_attempts` grant.
+Permission-caused blocks retain their existing recovery rules. Explicit grants can also reopen
+eligible missing-context blocks at End, within the granted budget. Its assignment includes the answer;
 completed nodes are not replayed and saved access cannot be raised.
 Already-running siblings finish and persist their results while scheduling is suspended. The
 Monitor shows **Settling** until they finish and refuses premature resume or session takeover.
@@ -716,11 +721,13 @@ active parallel branch. The step still runs and tries its configured fallbacks. 
 branch arrives at the current convergence with explicit failure evidence; a required sibling must
 belong to the group. An optional step cannot bypass required steps before that Parallel end.
 Sequential optional nodes and forks containing only optional branches are rejected. Selecting an
-optional path alone does not grant failure tolerance. Unknown outcomes, cancellation, security or
-enforcement refusals, repository/session problems, and workflow limits still require attention.
+optional path alone does not grant failure tolerance. Unknown outcomes, cancellation, failures caused
+by security or enforcement refusals, repository/session problems, and workflow limits still require attention.
 A positively settled timeout may bypass an optional branch even if earlier tool calls were denied;
 the timeout and all permission denials remain in its failure evidence. A failure or block caused by
-a permission refusal remains ineligible. Parallel-end arrivals are offered only when their required
+a permission refusal remains ineligible. In guided runs, a settled malformed-output protocol failure
+can also converge after its correction attempts are exhausted, retaining the raw output and any
+incidental denials as evidence; it does not authorize denied tools. Parallel-end arrivals are offered only when their required
 failure evidence is resolved; otherwise the orchestrator receives the blocker and available recovery
 choices. Reloading and resuming an older paused run rechecks this eligibility.
 Unsupported model, turn, or reasoning settings count as unavailable candidates after fallbacks.

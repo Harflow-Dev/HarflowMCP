@@ -731,11 +731,20 @@ class WorkflowStore:
                     raise WorkflowError("Only paused/attention/input workflows can resume")
                 if any(a["status"] in {"reserved", "uncertain", "running"} or any(t["status"] in {"reserved", "uncertain", "running"} for t in a["tasks"]) for a in r["activations"]):
                     raise WorkflowError("Unresolved dispatches must be reconciled before resume")
+                answered_executions: set[str] = set()
                 if r["status"] == "needs_input":
                     if not isinstance(instructions, str) or not instructions.strip():
                         raise WorkflowError("Resuming needs_input requires an answer or reason")
                     if decision_id != r.get("input_decision_id"):
                         raise WorkflowError("Resuming needs_input requires the current input decision_id")
+                    from .workflow_delegation import caller_decision_block, unresolved_required
+                    for token in r.get("pending", []):
+                        if token.get("decision_id") != decision_id:
+                            continue
+                        for execution in unresolved_required(r, token):
+                            if caller_decision_block(execution):
+                                answered_executions.add(execution["id"])
+                                r.setdefault("blocker_retry_authorizations", {})[execution["id"]] = {"node_id": execution["node_id"], "reason": instructions, "authorization_kind": "caller_answer", "source_decision_id": decision_id, "granted_at": time.time()}
                 r["status"] = "running"
                 r["instructions"] = instructions or ""
                 for token in r.get("pending", []):
@@ -756,7 +765,7 @@ class WorkflowStore:
                     if isinstance(instructions, str) and instructions.strip():
                         from .workflow_delegation import settled
                         for execution in r["activations"]:
-                            if execution["role"] == "node" and settled(execution) and execution.get("node_result", {}).get("status") == "blocked":
+                            if execution["role"] == "node" and settled(execution) and execution.get("node_result", {}).get("status") == "blocked" and execution["id"] not in answered_executions:
                                 r.setdefault("blocker_retry_authorizations", {})[execution["id"]] = {"node_id": execution["node_id"], "reason": instructions.strip(), "granted_at": time.time()}
                             if execution["role"] == "node" and settled(execution) and execution.get("node_result", {}).get("result", {}).get("failure_kind") == "protocol":
                                 r.setdefault("protocol_retry_authorizations", {})[execution["id"]] = {"node_id": execution["node_id"], "reason": instructions.strip(), "granted_at": time.time()}

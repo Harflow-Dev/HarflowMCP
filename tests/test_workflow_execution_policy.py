@@ -433,3 +433,33 @@ def test_timeout_intent_restores_only_authoritative_settled_cancellation(storage
     restored = storage.reconcile_run(run['workflow_run_id'])
     assert restored['activations'][0]['tasks'][0]['result']['timed_out']
     assert restored['pending'][0]['recovered_failed_result']['timed_out']
+
+
+@pytest.mark.parametrize('protocol_repair', [False, True])
+async def test_successful_retry_forwards_its_session_to_next_serial_node(storage, tmp_path, protocol_repair):
+    calls = 0
+    def work(prompt, kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {'summary': 'malformed final'} if protocol_repair else {'status': 'failed', 'result': {'summary': 'Retry this execution'}, 'evidence': []}
+        return {'status': 'succeeded', 'result': {'summary': 'Succeeded'}, 'evidence': []}
+    run, _ = await run_flow(storage, tmp_path, serial(), Registry(storage.root, outputs={'work': work}), guided=True)
+    assert run['status'] == 'completed'
+    workers = [a for a in run['activations'] if a['role'] == 'node']
+    latest = next(a for a in reversed(workers) if a['node_id'] == 'work')
+    downstream = next(a for a in workers if a['node_id'] == 'second')
+    assert downstream['tasks'][0]['resume_task_id'] == latest['tasks'][-1]['task_id']
+    assert downstream['tasks'][0]['session_mode'] == 'resume'
+
+
+async def test_forward_continuity_ignores_previous_target_history_after_source_retry(storage, tmp_path):
+    from polybridge import workflow_delegation as d
+    run, _ = await run_flow(storage, tmp_path, serial(), guided=True)
+    source = next(a for a in run['activations'] if a['role'] == 'node' and a['node_id'] == 'work')
+    source_node = next(n for n in run['definition']['nodes'] if n['id'] == 'work')
+    token = {'id': 'forward', 'node_id': 'work', 'decision_id': 'decision', 'execution_complete': True, 'execution_activation_id': source['id'], 'retry_of_execution_id': 'older-source', 'result': source['node_result']}
+    choice = next(c for c in d.continuations(run, source_node, token, False, root=storage.root) if c['node_id'] == 'second')
+    assert choice['available_sessions'][0]['execution_id'] == source['id']
+    _, assignments, _ = d.validate_decision(run, source_node, token, {'decision_id': 'decision', 'action': 'continue', 'reason': 'Continue after successful retry', 'next': [{'continuation_id': choice['continuation_id'], 'prompt': 'Next focused assignment'}]}, False, root=storage.root)
+    assert assignments[choice['continuation_id']]['resume_source_execution_id'] == source['id']

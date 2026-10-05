@@ -16,6 +16,17 @@ def attempts_used(run: dict[str, Any], node: dict[str, Any], token: dict[str, An
     return sum(a['role'] == 'node' and a['node_id'] == node['id'] and any(t.get('status') != 'not_started' for t in a.get('tasks', [])) and (run.get('execution_policy') != 'visit' or (a.get('visit_id') or (a.get('token') or {}).get('id')) == visit) for a in run['activations'])
 
 
+def continuation_session_token(token: dict[str, Any], choice: dict[str, Any]) -> dict[str, Any]:
+    """A retry marker belongs to its execution, never a later serial destination."""
+    result = dict(token)
+    if choice.get('execution_id'):
+        result['retry_of_execution_id'] = choice['execution_id']
+    elif choice['kind'] != 'execute':
+        result.pop('retry_of_execution_id', None)
+        result['via'] = choice['continuation_id']
+    return result
+
+
 def previous_session(run: dict[str, Any], node: dict[str, Any], token: dict[str, Any], *, root=None) -> list[dict[str, Any]]:
     from . import workflow_delegation as d, workflows as w
     # A retained execution's own session wins for retries; predecessors are only for first entry.
