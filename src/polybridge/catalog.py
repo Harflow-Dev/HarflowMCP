@@ -93,14 +93,17 @@ class Catalog:
         db.execute('CREATE TABLE IF NOT EXISTS sources (id TEXT PRIMARY KEY,mtime INTEGER,size INTEGER)')
         db.execute('CREATE TABLE IF NOT EXISTS seen (id TEXT PRIMARY KEY,generation INTEGER NOT NULL)')
         version = db.execute("SELECT value FROM state WHERE key='schema_version'").fetchone()
-        if version != ('3',):
+        if version != ('4',):
             db.execute('DELETE FROM entries')
             db.execute('DELETE FROM callers')
             db.execute('DELETE FROM associations')
             db.execute('DELETE FROM sources')
             db.execute('DELETE FROM seen')
             db.execute('DELETE FROM state')
-            db.execute("INSERT INTO state VALUES ('schema_version','3')")
+            db.execute("INSERT INTO state VALUES ('schema_version','4')")
+        # Build only after invalidating old derivative headers. The partial index
+        # makes warm authority readiness independent of retained history size.
+        db.execute("CREATE INDEX IF NOT EXISTS incomplete_headers ON entries(id) WHERE json_extract(payload,'$.needs_direct_lookup')=1")
         db.commit()
         return db
 

@@ -979,6 +979,17 @@ async def _verified_workflow_caller():
     return None
 
 
+async def _bounded_managed_workflow_reader() -> tuple[dict[str, Any], dict[str, Any]] | None:
+    from .workflow_inspection import managed_page_reader
+    try:
+        ready, managed = await asyncio.to_thread(managed_page_reader, _reg().log_dir)
+        if not ready:
+            raise ValueError("Workflow caller authority indexing is incomplete; retry after bounded indexing progresses")
+        return managed
+    except ValueError as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+
 async def _managed_workflow_reader() -> tuple[dict[str, Any], dict[str, Any]] | None:
     from . import workflow_hooks, workflows
     caller = await _verified_workflow_caller()
@@ -991,6 +1002,20 @@ async def _managed_workflow_reader() -> tuple[dict[str, Any], dict[str, Any]] | 
     if association.get("role") != "builder" and run.get("execution_contract") != "delegation":
         return None
     return association, run
+
+
+async def _bounded_workflow_caller():
+    """Verify Monitor transport callers without replaying retained task metadata."""
+    from . import lineage
+    from .catalog import Catalog
+    directory = _reg().log_dir
+    if not Catalog(directory, store.RECORD_SUFFIX).ready():
+        await asyncio.to_thread(store.bootstrap_catalog, directory)
+        raise MCPError(INVALID_PARAMS, "Workflow caller authority indexing is incomplete; retry after bounded indexing progresses")
+    detection = await asyncio.to_thread(lineage.detect_catalog_caller, directory)
+    if detection.undecidable is not None:
+        raise MCPError(INVALID_PARAMS, "Workflow caller authority is undecidable: " + str(detection.undecidable))
+    return detection.caller
 
 
 def _managed_run_summary(run: dict[str, Any]) -> dict[str, Any]:
@@ -1018,6 +1043,7 @@ def _guard_saved_workflow_authority(caller: Any, definition: dict[str, Any]) -> 
 
 async def _workflow_call(action: str, **kwargs: Any) -> Any:
     from . import workflows
+    bounded_read = kwargs.pop("_bounded_read", False)
     try:
         if kwargs.get("interaction_owner") == "monitor":
             from .takeover import caller_refusal
@@ -1101,6 +1127,8 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
             ready, managed = await asyncio.to_thread(managed_page_reader, _reg().log_dir)
             if not ready:
                 return page_indexing_response(_reg().log_dir)
+        elif bounded_read and action in {"status", "detail"}:
+            managed = await _bounded_managed_workflow_reader()
         else:
             managed = await _managed_workflow_reader()
         if managed is not None:

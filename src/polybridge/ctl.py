@@ -701,19 +701,19 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
         if action == "detail":
             if args.monitor_view:
                 from .workflow_responses import monitor_detail
-                if await server._verified_workflow_caller() is not None:
+                if await server._bounded_workflow_caller() is not None:
                     raise ValueError("Monitor detail snapshots are only available to the local Monitor")
-                run = None if args.cursor else await server._workflow_call("status", run_id=args.workflow_run_id)
+                run = None if args.cursor else await server._workflow_call("status", run_id=args.workflow_run_id, _bounded_read=True)
                 return monitor_detail(run, args.workflow_run_id, args.view, default_log_dir().parent / "monitor_snapshots", args.cursor)
             return await server.get_workflow_run_detail(args.workflow_run_id, args.view, args.cursor)
         if action == "status" and args.monitor_view:
             from .workflow_responses import monitor, monitor_snapshot
             if args.snapshot:
-                if await server._verified_workflow_caller() is not None:
+                if await server._bounded_workflow_caller() is not None:
                     raise ValueError("Monitor snapshots are only available to the local Monitor")
-                run = None if args.cursor else await server._workflow_call("status", run_id=args.workflow_run_id)
+                run = None if args.cursor else await server._workflow_call("status", run_id=args.workflow_run_id, _bounded_read=True)
                 return monitor_snapshot(run, args.workflow_run_id, default_log_dir().parent / "monitor_snapshots", args.cursor)
-            return monitor(await server._workflow_call("status", run_id=args.workflow_run_id))
+            return monitor(await server._workflow_call("status", run_id=args.workflow_run_id, _bounded_read=True))
         if action == "wait":
             return await server._wait_workflow_full(args.workflow_run_id, args.timeout_seconds)
         if action == "resume":

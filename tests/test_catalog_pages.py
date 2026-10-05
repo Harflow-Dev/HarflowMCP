@@ -569,3 +569,88 @@ def test_indexed_active_inventory_uses_adapter_titles_only_with_matching_identit
     else:
         assert page['counts_complete'] and page['total_active_count'] == 0
         assert item['status'] == 'unknown' and item['needs_reconciliation']
+
+
+async def test_selected_workflow_polling_never_scans_retained_task_history(tmp_path, monkeypatch):
+    human_authority(monkeypatch)
+    directory = tmp_path / 'tasks'
+    legacy_tasks(directory, 250)
+    monkeypatch.setattr(server, '_reg', lambda: SimpleNamespace(log_dir=directory))
+    storage = workflows.WorkflowStore(root=tmp_path)
+    monkeypatch.setattr(workflows, 'WorkflowStore', lambda **kwargs: storage)
+    monkeypatch.setattr(storage, 'get_run', lambda identifier, **kwargs: {'workflow_run_id': identifier, 'status': 'completed', 'definition': {}})
+    for _ in range(3):
+        with pytest.raises(Exception, match='indexing is incomplete'):
+            await server._workflow_call('status', run_id='selected', _bounded_read=True)
+    for _ in range(4):
+        assert (await server._workflow_call('status', run_id='selected', _bounded_read=True))['workflow_run_id'] == 'selected'
+        assert (await server._workflow_call('detail', run_id='selected', view='definition', _bounded_read=True))['chunk'] == '{}'
+        assert await server._bounded_workflow_caller() is None
+    monkeypatch.setenv(lineage.ENV_TASK_ID, 'unverified-task')
+    with pytest.raises(Exception, match='cannot be verified'):
+        await server._workflow_call('status', run_id='selected', _bounded_read=True)
+    with pytest.raises(Exception, match='cannot be verified'):
+        await server._bounded_workflow_caller()
+
+
+@pytest.mark.parametrize('role', ['orchestrator', 'node'])
+async def test_bounded_selected_read_preserves_managed_owner_authority(tmp_path, monkeypatch, role):
+    from polybridge import workflow_inspection
+    monkeypatch.setattr(server, '_reg', lambda: SimpleNamespace(log_dir=tmp_path / 'tasks'))
+    managed = ({'role': role}, {'workflow_run_id': 'owned', 'definition': {}, 'activations': []})
+    monkeypatch.setattr(workflow_inspection, 'managed_page_reader', lambda path: (True, managed))
+    if role == 'node':
+        with pytest.raises(Exception, match='Worker nodes'):
+            await server._workflow_call('status', run_id='owned', _bounded_read=True)
+    else:
+        assert (await server._workflow_call('status', run_id='owned', _bounded_read=True))['workflow_run_id'] == 'owned'
+        with pytest.raises(Exception, match='own workflow run'):
+            await server._workflow_call('detail', run_id='unrelated', view='definition', _bounded_read=True)
+        with pytest.raises(Exception, match='settled execution'):
+            await server._workflow_call('detail', run_id='owned', view='executions', _bounded_read=True)
+
+
+def test_placeholder_readiness_uses_partial_index_and_tracks_updates(tmp_path):
+    index = catalog.Catalog(tmp_path, store.RECORD_SUFFIX)
+    with index.connect() as db:
+        db.execute("INSERT OR REPLACE INTO state VALUES ('complete','1')")
+        query = "SELECT 1 FROM entries WHERE json_extract(payload,'$.needs_direct_lookup')=1 LIMIT 1"
+        plan = db.execute('EXPLAIN QUERY PLAN ' + query).fetchall()
+        assert any('incomplete_headers' in row[3] for row in plan)
+        index._put(db, {'task_id': 'oversized', 'needs_direct_lookup': True}, 0, True, 'oversized')
+    # Directory fingerprint is independent of placeholder readiness.
+    with index.connect() as db:
+        db.execute("INSERT OR REPLACE INTO state VALUES ('directory_mtime',?)", (str(tmp_path.stat().st_mtime_ns),))
+    assert not index.ready()
+    with index.connect() as db:
+        index._put(db, {'task_id': 'oversized', 'status': 'completed'}, 1, False, 'oversized')
+    assert index.ready()
+    with index.connect() as db:
+        index._put(db, {'task_id': 'oversized', 'needs_direct_lookup': True}, 0, True, 'oversized')
+    assert not index.ready()
+    index.remove('oversized', previous_directory_mtime=tmp_path.stat().st_mtime_ns)
+    with index.connect() as db:
+        db.execute("INSERT OR REPLACE INTO state VALUES ('complete','1')")
+        db.execute("INSERT OR REPLACE INTO state VALUES ('directory_mtime',?)", (str(tmp_path.stat().st_mtime_ns),))
+    assert index.ready()
+
+
+def test_schema_three_cache_rebuild_is_bounded_without_decoding_old_headers(tmp_path, monkeypatch):
+    directory = tmp_path / 'tasks'
+    legacy_tasks(directory, 205)
+    originals = {p.name: p.read_bytes() for p in directory.glob('*.meta.json')}
+    index = catalog.Catalog(directory, store.RECORD_SUFFIX)
+    with index.connect() as db:
+        db.execute('DROP INDEX incomplete_headers')
+        db.execute("UPDATE state SET value='3' WHERE key='schema_version'")
+        # Invalid old payload proves partial-index construction never evaluates it.
+        db.executemany('INSERT INTO entries VALUES (?,0,0,NULL,?)', [(f'old{i}', 'invalid JSON') for i in range(250)])
+    reads = []
+    original = store.read
+    monkeypatch.setattr(store, 'read', lambda *args, **kwargs: (reads.append(args[1]), original(*args, **kwargs))[1])
+    page = store.list_page(directory)
+    assert page['bootstrap_pending'] and len(reads) == 100
+    with index.connect() as db:
+        assert db.execute("SELECT value FROM state WHERE key='schema_version'").fetchone() == ('4',)
+        assert db.execute("SELECT count(*) FROM entries WHERE id LIKE 'old%'").fetchone() == (0,)
+    assert originals == {p.name: p.read_bytes() for p in directory.glob('*.meta.json')}

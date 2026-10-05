@@ -63,7 +63,7 @@ def test_cli_snapshot_pages_do_not_reload_changing_run(monkeypatch, tmp_path, ca
     from polybridge import ctl, server
     from unittest.mock import AsyncMock
     monkeypatch.setattr(ctl, "default_log_dir", lambda: tmp_path / "tasks")
-    monkeypatch.setattr(server, "_verified_workflow_caller", AsyncMock(return_value=None))
+    monkeypatch.setattr(server, "_bounded_workflow_caller", AsyncMock(return_value=None))
     read = AsyncMock(return_value={"workflow_run_id": "run", "summary": "x" * 400000})
     monkeypatch.setattr(server, "_workflow_call", read)
     assert ctl.main(["workflow-status", "run", "--monitor-view", "--snapshot", "--json"]) == 0
@@ -76,7 +76,7 @@ def test_managed_cli_snapshot_is_refused_before_any_content(monkeypatch, tmp_pat
     from polybridge import ctl, server
     from unittest.mock import AsyncMock
     monkeypatch.setattr(ctl, "default_log_dir", lambda: tmp_path / "tasks")
-    monkeypatch.setattr(server, "_verified_workflow_caller", AsyncMock(return_value=object()))
+    monkeypatch.setattr(server, "_bounded_workflow_caller", AsyncMock(return_value=object()))
     read = AsyncMock()
     monkeypatch.setattr(server, "_workflow_call", read)
     assert ctl.main(["workflow-status", "run", "--monitor-view", "--snapshot", "--json"]) != 0
@@ -152,7 +152,7 @@ def test_monitor_detail_cli_freezes_only_view_and_never_reloads_on_continuations
     from unittest.mock import AsyncMock
     monkeypatch.setattr(ctl, 'default_log_dir', lambda: tmp_path / 'tasks')
     guard = AsyncMock(return_value=None)
-    monkeypatch.setattr(server, '_verified_workflow_caller', guard)
+    monkeypatch.setattr(server, '_bounded_workflow_caller', guard)
     run = {'workflow_run_id': 'run', 'summary': 'x' * 400000, 'definition': {'name': 'untouched'}}
     read = AsyncMock(return_value=run)
     monkeypatch.setattr(server, '_workflow_call', read)
@@ -181,7 +181,7 @@ def test_monitor_detail_cursor_cannot_change_view_or_bypass_managed_guard(monkey
     with pytest.raises(ValueError):
         workflow_responses.monitor_detail(None, 'run', 'definition', tmp_path, page['next_cursor'])
     monkeypatch.setattr(ctl, 'default_log_dir', lambda: tmp_path / 'tasks')
-    monkeypatch.setattr(server, '_verified_workflow_caller', AsyncMock(return_value=object()))
+    monkeypatch.setattr(server, '_bounded_workflow_caller', AsyncMock(return_value=object()))
     read = AsyncMock()
     monkeypatch.setattr(server, '_workflow_call', read)
     assert ctl.main(['workflow-detail', 'run', '--view', 'summary', '--monitor-view', '--cursor', page['next_cursor'], '--json']) != 0
@@ -197,3 +197,26 @@ def test_default_workflow_detail_cli_keeps_public_cursor_semantics(monkeypatch, 
     assert ctl.main(['workflow-detail', 'run', '--view', 'summary', '--cursor', 'public-cursor', '--json']) == 0
     assert json.loads(capsys.readouterr().out)['result'] == {'legacy': True}
     public.assert_awaited_once_with('run', 'summary', 'public-cursor')
+
+
+@pytest.mark.parametrize('action', ['workflow-status', 'workflow-detail'])
+@pytest.mark.parametrize('cursor', [None, 'untrusted-continuation'])
+def test_monitor_cli_cold_and_unknown_authority_never_uses_legacy_detection(monkeypatch, tmp_path, capsys, action, cursor):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from polybridge import ctl, lineage, server, store
+    directory = tmp_path / 'tasks'
+    monkeypatch.setattr(ctl, 'default_log_dir', lambda: directory)
+    monkeypatch.setattr(server, '_reg', lambda: SimpleNamespace(log_dir=directory))
+    monkeypatch.setattr(store, 'read_all', lambda *args: pytest.fail('retained metadata scan'))
+    monkeypatch.setattr(server, '_verified_workflow_caller', AsyncMock(side_effect=AssertionError('legacy verification')))
+    read = AsyncMock()
+    monkeypatch.setattr(server, '_workflow_call', read)
+    options = ['--snapshot'] if action == 'workflow-status' else ['--view', 'summary']
+    args = [action, 'run', '--monitor-view', '--json', *options] + (['--cursor', cursor] if cursor else [])
+    assert ctl.main(args) != 0
+    assert 'indexing is incomplete' in capsys.readouterr().out
+    monkeypatch.setenv(lineage.ENV_TASK_ID, 'missing-task')
+    assert ctl.main(args) != 0
+    assert 'cannot be verified' in capsys.readouterr().out
+    assert read.await_count == 0
