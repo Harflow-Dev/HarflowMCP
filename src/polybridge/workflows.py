@@ -723,9 +723,21 @@ class WorkflowStore:
                 result["notice"] = "This workflow is still referenced by: " + ", ".join(referenced_by)
         return result
 
-    def get_run(self, run_id: str) -> dict[str, Any]:
-        run = json.loads((self.runs / f"{_identifier(run_id)}.json").read_text())
+    def get_run(self, run_id: str, *, metadata_byte_limit: int | None = None, metadata_budget: Any = None) -> dict[str, Any]:
+        path = self.runs / f"{_identifier(run_id)}.json"
+        if metadata_byte_limit is None:
+            run = json.loads(path.read_text())
+        else:
+            from .bounded_io import read_json
+            run = read_json(path, metadata_byte_limit, budget=metadata_budget)
         run["settling"] = any(t.get("status") in {"reserved", "running", "uncertain"} for a in run["activations"] for t in a["tasks"])
+        if metadata_byte_limit is None and (self.runs / '.listing.sqlite3').exists():
+            from .catalog import Catalog
+            catalog = Catalog(self.runs, '.json')
+            with catalog.connect() as db:
+                placeholder = db.execute("SELECT json_extract(payload,'$.needs_direct_lookup') FROM entries WHERE id=?", (run_id,)).fetchone()
+            if placeholder and placeholder[0]:
+                catalog.record(self._catalog_run_header(run), float(run['created_at']), run.get('status') not in TERMINAL, run_id)
         return run
 
     def list_runs(self, *, strict: bool = False) -> list[dict[str, Any]]:
@@ -739,6 +751,87 @@ class WorkflowStore:
                 logging.getLogger(__name__).warning("Skipping unreadable workflow record %s", path.name)
         return sorted(runs, key=lambda r: r["created_at"], reverse=True)
 
+    def run_header(self, run: dict[str, Any]) -> dict[str, Any]:
+        from .workflow_responses import compact
+        result = compact(run)
+        for key in ('name', 'repo_path', 'prompt'):
+            result[key] = str(run.get(key, ''))[:1000]
+        result['prompt_truncated'] = len(str(run.get('prompt', ''))) > 1000
+        definition = run.get('definition', {})
+        result['backends'] = sorted({str(c.get('backend', ''))[:100] for c in [definition.get('orchestrator', {})] + [n.get('agent', {}) for n in definition.get('nodes', [])] if c.get('backend')})[:20]
+        result['decisions'] = [{'reason': str(run['decisions'][-1].get('reason', ''))[:500]}] if run.get('decisions') else []
+        result['sessions'] = {'orchestrator': str(run['sessions']['orchestrator'])[:128]} if run.get('sessions', {}).get('orchestrator') else {}
+        # The index contains headers, never execution history, graph or worker output.
+        for key in list(result):
+            if isinstance(result[key], str):
+                result[key] = result[key][:1000]
+        from .catalog import bound_header
+        return bound_header(result)
+
+    def _index_run(self, run: dict[str, Any], *, previous_directory_mtime: int | None = None) -> None:
+        from .catalog import Catalog
+        Catalog(self.runs, '.json').record(self._catalog_run_header(run), float(run['created_at']), run.get('status') not in TERMINAL, run['workflow_run_id'], previous_directory_mtime=previous_directory_mtime)
+
+    def _ownership_catalog(self):
+        from .catalog import Catalog
+        return Catalog(self.runs, '.json')
+
+    def _catalog_run_header(self, run: dict[str, Any]) -> dict[str, Any]:
+        header = self.run_header(run)
+        header['_associations'] = {task['task_id']: {'workflow_run_id': run['workflow_run_id'], 'workflow_node_id': activation.get('node_id'), 'workflow_role': activation.get('role'), 'node_id': activation.get('node_id'), 'role': activation.get('role'), 'activation_id': activation.get('id'), 'execution_contract': run.get('execution_contract'), 'status': run.get('status')}
+                                   for activation in run.get('activations', []) for task in activation.get('tasks', [])}
+        return header
+
+    def list_run_page(self, *, limit: int = 100, cursor: str | None = None, active_only: bool = False, run_ids: list[str] | None = None) -> dict[str, Any]:
+        from .catalog import Catalog
+        def load(identifier: str, *, _metadata_budget=None):
+            try:
+                run = self.get_run(identifier, metadata_byte_limit=4 * 1024 * 1024, metadata_budget=_metadata_budget)
+            except FileNotFoundError:
+                return None
+            return self._catalog_run_header(run), float(run['created_at']), run.get('status') not in TERMINAL
+        load.bounded_metadata = True
+        catalog = Catalog(self.runs, '.json')
+        if run_ids is not None:
+            identifiers = [_identifier(identifier) for identifier in run_ids]
+            return {'items': catalog.headers(identifiers, load), 'next_cursor': None, 'has_more': False, 'bootstrap_pending': False}
+        return catalog.page(load, limit=limit, cursor=cursor, active_only=active_only)
+
+    def get_run_header(self, run_id: str, *, _catalog: Any = None) -> dict[str, Any]:
+        from .catalog import Catalog
+        def load(identifier: str, *, _metadata_budget=None):
+            try:
+                run = self.get_run(identifier, metadata_byte_limit=4 * 1024 * 1024, metadata_budget=_metadata_budget)
+            except FileNotFoundError:
+                return None
+            return self._catalog_run_header(run), float(run['created_at']), run.get('status') not in TERMINAL
+        load.bounded_metadata = True
+        headers = (_catalog or Catalog(self.runs, '.json')).headers([_identifier(run_id)], load)
+        if not headers:
+            raise FileNotFoundError(f'Workflow run unavailable: {run_id}')
+        return headers[0]
+
+    def related_run_headers(self, run_ids: list[str], *, byte_budget: int = 64 * 1024) -> list[dict[str, Any]]:
+        from .catalog import Catalog
+        catalog = Catalog(self.runs, '.json')
+        result, seen, queue, used = [], set(), list(run_ids), 0
+        while queue and len(seen) < 32:
+            identifier = queue.pop(0)
+            if identifier in seen:
+                continue
+            seen.add(identifier)
+            try:
+                header = self.get_run_header(identifier, _catalog=catalog)
+            except (OSError, ValueError, KeyError):
+                continue
+            size = len(json.dumps(header, ensure_ascii=True).encode())
+            if used + size > byte_budget:
+                break
+            result.append(header)
+            used += size
+            queue[0:0] = [header[key] for key in ('parent_workflow_run_id', 'root_workflow_run_id', 'orchestrator_session_owner_run_id') if header.get(key) and header[key] not in seen]
+        return result
+
     def update_run(self, run_id: str, mutator: Any, event: str, detail: Any = None) -> dict[str, Any]:
         with self.lock(f"run:{run_id}"):
             run = self.get_run(run_id)
@@ -746,14 +839,19 @@ class WorkflowStore:
             run["updated_at"] = time.time()
             run["sequence"] = run.get("sequence", 0) + 1
             run.pop("settling", None)
+            previous_directory_mtime = self.runs.stat().st_mtime_ns
             _write(self.runs / f"{run_id}.json", run)
             for activation in run.get("activations", []):
                 for task in activation.get("tasks", []):
-                    _write(self.owners / f"{_identifier(task['task_id'])}.json", {"workflow_run_id": run_id})
+                    receipt = {"workflow_run_id": run_id, "workflow_node_id": activation.get('node_id'), "workflow_execution_id": activation.get('id'), "workflow_role": activation.get('role'), "workflow_name": run.get('name'), "workflow_status": run.get('status'), "execution_contract": run.get('execution_contract'), "interaction_owner": run.get('interaction_owner', 'caller'), "root_workflow_run_id": (run.get('parent_link') or {}).get('root_workflow_run_id', run_id)}
+                    if activation.get('role') == 'orchestrator' and run.get('orchestrator_session_owner_run_id'):
+                        receipt['workflow_session_owner_run_id'] = run['orchestrator_session_owner_run_id']
+                    _write(self.owners / f"{_identifier(task['task_id'])}.json", receipt)
             with (self.runs / f"{run_id}.jsonl").open("a", encoding="utf-8") as f:
                 f.write(json.dumps({"sequence": run["sequence"], "time": run["updated_at"], "event": event, "detail": detail}) + "\n")
                 f.flush()
                 os.fsync(f.fileno())
+            self._index_run(run, previous_directory_mtime=previous_directory_mtime)
             run["settling"] = any(t.get("status") in {"reserved", "running", "uncertain"} for a in run["activations"] for t in a["tasks"])
             return run
 
@@ -781,7 +879,9 @@ class WorkflowStore:
         run.update(retry_counts={}, retry_grants={})
         if dependency_tree is not None:
             run["dependency_tree"] = copy.deepcopy(dependency_tree)
+        previous_directory_mtime = self.runs.stat().st_mtime_ns
         _write(self.runs / f"{rid}.json", run)
+        self._index_run(run, previous_directory_mtime=previous_directory_mtime)
         return run
 
     def control(self, run_id: str, action: str, instructions: str | None = None, additional_attempts: int = 0, *, decision_id: str | None = None, interaction_owner: str | None = None, _internal: bool = False) -> dict[str, Any]:
@@ -946,15 +1046,16 @@ class WorkflowStore:
                 pinned.update(t["task_id"] for a in r["activations"] for t in a["tasks"])
         return pinned
 
-    def task_association(self, task_id: str, *, strict: bool = False, _visited: set[str] | None = None) -> dict[str, Any] | None:
+    def task_association(self, task_id: str, *, strict: bool = False, _visited: set[str] | None = None, metadata_byte_limit: int | None = None) -> dict[str, Any] | None:
         visited = set() if _visited is None else _visited
         if task_id in visited:
             raise WorkflowError("Cyclic task lineage cannot establish workflow ownership")
         visited.add(task_id)
         indexed = self.owners / f"{_identifier(task_id)}.json"
         if indexed.exists():
-            receipt = json.loads(indexed.read_text())
-            runs = [self.get_run(receipt["workflow_run_id"])]
+            from .bounded_io import read_receipt
+            receipt = read_receipt(indexed)
+            runs = [self.get_run(receipt["workflow_run_id"], metadata_byte_limit=metadata_byte_limit)]
         else:
             runs = self.list_runs()
         for r in runs:
@@ -975,8 +1076,8 @@ class WorkflowStore:
             self.list_runs(strict=True)
         return None
 
-    def task_owner(self, task_id: str, *, strict: bool = False) -> dict[str, Any] | None:
-        return self.task_association(task_id, strict=strict)
+    def task_owner(self, task_id: str, *, strict: bool = False, metadata_byte_limit: int | None = None) -> dict[str, Any] | None:
+        return self.task_association(task_id, strict=strict, metadata_byte_limit=metadata_byte_limit)
 
     def abandon_dispatch(self, run_id: str, execution_id: str, task_id: str, reason: str, confirm_no_process: bool) -> dict[str, Any]:
         """Human CLI reconciliation after independently confirming a recordless dispatch is stopped."""
@@ -1743,7 +1844,9 @@ class WorkflowSupervisor:
                 capability_stage = "enforcement"
                 backend.enforcement(freedom, network)
                 from .workflow_invocation import tree_write_strength
-                async with CheckoutLease(self.store, run["repo_path"], tree_write_strength(run, freedom), lambda: self.tree.tree_running(self.run()), on_wait=lambda detail: self.update(lambda r: r.update(checkout_wait=detail), "checkout_wait", detail), pool=self.checkout_leases):
+                root_id = (run.get('parent_link') or {}).get('root_workflow_run_id', run['workflow_run_id'])
+                lease_run = run if root_id == run['workflow_run_id'] else self.store.get_run(root_id)
+                async with CheckoutLease(self.store, run["repo_path"], tree_write_strength(lease_run, freedom), lambda: self.tree.tree_running(self.run()), on_wait=lambda detail: self.update(lambda r: r.update(checkout_wait=detail), "checkout_wait", detail), pool=self.checkout_leases):
                     if not self.tree.tree_running(self.run()):
                         self._task_update(activation["id"], task_id, {"status": "not_started"})
                         return None

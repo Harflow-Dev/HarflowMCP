@@ -167,7 +167,7 @@ async def test_public_mcp_has_no_checklist_completion_mutation():
     # orchestrator decision can supply task_updates to change the run checklist.
     assert set(name for name in tools if "workflow" in name) == {
         "list_workflows", "get_workflow", "save_workflow", "delete_workflow",
-        "workflow_builder", "start_workflow", "list_workflow_runs",
+        "workflow_builder", "start_workflow", "list_workflow_runs", "list_workflow_run_page",
         "get_workflow_status", "wait_for_workflow", "pause_workflow",
         "resume_workflow", "cancel_workflow", "followup_workflow_builder", "apply_workflow_draft",
         "recover_workflow", "inspect_workflow_node", "get_workflow_run_detail",

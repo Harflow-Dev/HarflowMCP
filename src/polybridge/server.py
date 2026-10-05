@@ -703,6 +703,33 @@ async def list_tasks(status: str | None = None, backend: str | None = None) -> l
 
 
 @mcp.tool()
+async def list_task_page(limit: int = 100, cursor: str | None = None, active_only: bool = False, session_id: str | None = None, task_ids: list[str] | None = None) -> dict[str, Any]:
+    """Stable newest-first persisted task headers; inspect a task for reconciled status/output.
+
+    bootstrap_pending indicates bounded legacy indexing is still loading chronology.
+    Active-only pages are a separate inventory and do not reorder history cursors.
+    """
+    try:
+        from .workflow_inspection import managed_page_reader, page_indexing_response
+        ready, managed = await asyncio.to_thread(managed_page_reader, _reg().log_dir)
+        if not ready:
+            return page_indexing_response(_reg().log_dir)
+        page = await asyncio.to_thread(store.list_page, _reg().log_dir, limit=limit, cursor=cursor, active_only=active_only, session_id=session_id, task_ids=task_ids)
+        from .workflow_inspection import filter_task_reads
+        visible = filter_task_reads(page['items'], managed)
+        if managed is not None:
+            page['total_active_count'] = sum(item.get('status') not in store.TERMINAL_RECORD_STATUSES for item in visible)
+            page.pop('total_active_root_count', None)
+            page.pop('total_attention_root_count', None)
+            page.update(next_cursor=None, has_more=False)
+        page['items'] = visible
+        page['related_headers'] = filter_task_reads(page.get('related_headers', []), managed)
+        return page
+    except ValueError as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+
+@mcp.tool()
 async def cancel_task(task_id: str) -> dict[str, Any]:
     """Stop a running task, terminating the agent and any processes it spawned, and cascade the
     same stop to any live descendants this bridge can find.
@@ -842,6 +869,53 @@ async def get_task_events(
 
 
 @mcp.tool()
+async def get_task_event_page(
+    task_id: str, limit: int = 100, cursor: str | None = None,
+    kinds: list[str] | None = None,
+) -> dict[str, Any]:
+    """Read one bounded recent or older activity page using an opaque stable cursor.
+
+    Defaults to 100 records; each call reads at most 1 MiB plus integrity anchors
+    and returns at most 256 KiB. Pass next_cursor for exactly one older page.
+    Append-only live growth preserves the historical snapshot. Replacement or
+    truncation requires reloading without a cursor. Filtering can return an empty
+    page with has_more true. An indexing response exposes no task events; retry
+    after the bounded legacy catalog bootstrap advances.
+    """
+    from .event_history import read_cursor_page
+    from . import workflow_inspection
+
+    try:
+        store.validate_task_id(task_id)
+        if type(limit) is not int or not 1 <= limit <= 200:
+            raise ValueError("limit must be between 1 and 200")
+        if kinds is not None and (not isinstance(kinds, list) or not kinds or
+                any(not isinstance(kind, str) or kind not in EVENT_KINDS for kind in kinds)):
+            raise ValueError("kinds must be a non-empty list of known event kinds")
+        ready, managed = await asyncio.to_thread(
+            workflow_inspection.managed_page_reader, _reg().log_dir)
+        if not ready:
+            pending = await asyncio.to_thread(workflow_inspection.page_indexing_response, _reg().log_dir)
+            return {"task_id": task_id, "events": [], "has_more": False,
+                    "next_cursor": None, "indexing": pending["bootstrap_pending"],
+                    **{key: pending[key] for key in ("bootstrap_pending", "history_incomplete", "authority_incomplete", "counts_complete", "note") if key in pending}}
+        workflow_inspection.guard_task_read(task_id, managed)
+        from .catalog import METADATA_BYTES
+        record = await asyncio.to_thread(store.read, _reg().log_dir, task_id,
+                                         include_prompt=False, metadata_byte_limit=METADATA_BYTES)
+        if _reg().get(task_id) is None and record is None:
+            raise ValueError(f"unknown task_id: {task_id}")
+        page = await asyncio.to_thread(read_cursor_page, events_path(_reg().log_dir, task_id),
+                                       limit=limit, cursor=cursor, kinds=kinds)
+    except ValueError as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+    return {"task_id": task_id, "events": page.events, "has_more": page.has_more,
+            "next_cursor": page.next_cursor, "snapshot_end": page.snapshot_end,
+            "live_offset": page.live_offset, "bytes_read": page.bytes_read,
+            "decoded_records": page.decoded_records, "indexing": False}
+
+
+@mcp.tool()
 async def send_message(task_id: str, text: str) -> dict[str, Any]:
     """Add a message to a running live-input task, as if the user had typed it mid-run.
 
@@ -952,7 +1026,7 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
                 raise ValueError("Only a verified human Monitor caller can claim monitor interaction ownership: " + refusal[1])
         if action in {"pause", "resume", "recover"}:
             kwargs.setdefault("interaction_owner", "caller")
-        if action not in {"list", "list_runs", "get", "status", "inspect", "detail"}:
+        if action not in {"list", "list_runs", "list_run_page", "get_run_header", "get", "status", "inspect", "detail"}:
             from .workflow_hooks import refuse_managed
             caller = await _verified_workflow_caller()
             if caller is not None:
@@ -1022,9 +1096,26 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
             return await workflows.build_workflow(**kwargs, _verified_caller=caller)
         if action == "builder_followup":
             return await workflows.followup_workflow_builder(**kwargs)
-        managed = await _managed_workflow_reader()
+        if action in {'list_run_page', 'get_run_header'}:
+            from .workflow_inspection import managed_page_reader, page_indexing_response
+            ready, managed = await asyncio.to_thread(managed_page_reader, _reg().log_dir)
+            if not ready:
+                return page_indexing_response(_reg().log_dir)
+        else:
+            managed = await _managed_workflow_reader()
         if managed is not None:
             association, owned_run = managed
+            if action in {'list_run_page', 'get_run_header'}:
+                if association['role'] not in {'builder', 'orchestrator'}:
+                    raise ValueError('Worker nodes cannot inspect workflow context')
+                if action == 'get_run_header' and kwargs['run_id'] != owned_run['workflow_run_id']:
+                    raise ValueError('Managed callers may only inspect their own workflow run')
+                from .workflow_responses import compact
+                header = compact(owned_run)
+                if action == 'get_run_header':
+                    return header
+                active = owned_run.get('status') not in workflows.TERMINAL
+                return {'items': [header] if not kwargs.get('active_only') or active else [], 'next_cursor': None, 'has_more': False, 'bootstrap_pending': False, 'total_active_count': int(active), 'related_headers': []}
             if association["role"] == "builder":
                 if action in {"status", "inspect", "detail"} and kwargs["run_id"] != owned_run["workflow_run_id"]:
                     raise ValueError("Builders may only inspect their own workflow run")
@@ -1063,6 +1154,19 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
             return await asyncio.to_thread(store_.list)
         if action == "list_runs":
             return await asyncio.to_thread(store_.list_runs)
+        if action == 'get_run_header':
+            return await asyncio.to_thread(store_.get_run_header, kwargs['run_id'])
+        if action == 'list_run_page':
+            related_id = kwargs.pop('related_run_id', None)
+            if related_id is not None:
+                related = await asyncio.to_thread(store_.related_run_headers, [related_id])
+                return {'items': [], 'next_cursor': None, 'has_more': False, 'bootstrap_pending': False, 'related_headers': related}
+            page = await asyncio.to_thread(store_.list_run_page, **kwargs)
+            ids = [item[key] for item in page['items'] for key in ('parent_workflow_run_id', 'orchestrator_session_owner_run_id') if item.get(key)]
+            import json
+            budget = min(64 * 1024, max(0, 256 * 1024 - len(json.dumps(page, ensure_ascii=True).encode()) - 2048))
+            page['related_headers'] = await asyncio.to_thread(store_.related_run_headers, ids, byte_budget=budget)
+            return page
         if action == "get":
             return await asyncio.to_thread(store_.get, kwargs["name"])
         if action == "save":
@@ -1132,7 +1236,12 @@ async def workflow_builder(name: str, prompt: str, repo_path: str | None = None,
     Use routing_mode="explicit". Ordinary outgoing paths are exclusive alternatives.
     Parallel execution requires paired parallel_start/parallel_end structural nodes with
     a shared parallel_group_id; every branch must reach its matching end. Parallel start
-    runs all branches, which may contain multiple steps and properly nested groups.
+    defaults to `branch_selection: "all"`. With `branch_selection: "orchestrator"`, the
+    orchestrator selects applicable issued branch continuations, assigns each selected entry
+    through `branch_assignments`, and records a non-empty `selection_reason` explaining
+    selections and exclusions before dispatch. Optional `selection_guidance` advises that
+    choice. Selected branches may contain multiple steps and properly nested groups;
+    convergence uses the frozen selected membership, including singleton selections.
     Preserve existing node positions exactly unless the user explicitly asks to move or rearrange them.
     Preserve any supplied Run workflow nodes exactly (workflow_ref, orchestrator_mode,
     attempts, timeout, optional); never author new Run workflow references.
@@ -1159,7 +1268,12 @@ async def apply_workflow_draft(definition: dict[str, Any], expected_draft_revisi
     Use routing_mode="explicit". Ordinary outgoing paths are exclusive alternatives.
     Parallel execution requires paired parallel_start/parallel_end structural nodes with
     a shared parallel_group_id; every branch must reach its matching end. Parallel start
-    runs all branches, which may contain multiple steps and properly nested groups.
+    defaults to `branch_selection: "all"`. With `branch_selection: "orchestrator"`, the
+    orchestrator selects applicable issued branch continuations, assigns each selected entry
+    through `branch_assignments`, and records a non-empty `selection_reason` explaining
+    selections and exclusions before dispatch. Optional `selection_guidance` advises that
+    choice. Selected branches may contain multiple steps and properly nested groups;
+    convergence uses the frozen selected membership, including singleton selections.
     Preserve existing node positions exactly unless the user explicitly asks to move or rearrange them.
     The canvas expands automatically; do not constrain nodes to a fixed viewport.
     """
@@ -1200,6 +1314,12 @@ async def list_workflow_runs(offset: int = 0, limit: int = 10) -> dict[str, Any]
         entries.append(candidate)
     next_offset = offset + len(entries)
     return {"response_version": 1, "runs": entries, "next_offset": next_offset if next_offset < len(runs) else None}
+
+
+@mcp.tool()
+async def list_workflow_run_page(limit: int = 100, cursor: str | None = None, active_only: bool = False, related_run_id: str | None = None, run_ids: list[str] | None = None) -> dict[str, Any]:
+    """Stable newest-first run headers, with bounded ancestor/session-owner lookups."""
+    return await _workflow_call('list_run_page', limit=limit, cursor=cursor, active_only=active_only, related_run_id=related_run_id, run_ids=run_ids)
 
 
 @mcp.tool()

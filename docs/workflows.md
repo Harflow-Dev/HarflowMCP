@@ -913,3 +913,55 @@ individual views, including definitions, checklists, plans and execution history
 cursors still require restarting when their view changes. Ordinary `workflow-status` retains its
 full response contract. Snapshot transport is a local Monitor-only CLI operation: managed agents
 cannot use it to bypass settled-node inspection or access another run.
+
+### Bounded task, execution and activity history
+
+Monitor loads recent task and workflow headers in pages of 100, separately from live active
+updates. **Load more** requests one older page; ordinary refreshes merge by stable identity and
+retain loaded pages. Direct ID lookup can reveal an execution outside the loaded page, including
+its ancestor and orchestrator session-owner headers. Root-tree totals do not depend on which
+historical page is visible. Loading, indexing, retry and end states remain explicit.
+
+`task-list-page` and `workflow-list-page` use opaque chronology cursors rather than shifting
+array offsets. Existing listing callers retain their original interfaces. A compact local catalog
+stores bounded headers; modern record writes maintain it. Legacy records are indexed in bounded
+batches without rewriting them. During bootstrap, recent history remains explicitly indexing
+until its chronological ordering is known. Filename discovery still examines directory entries;
+it does not decode the entire historical collection in one request.
+
+Activity initially reads the newest 100 events and tails new events from that boundary.
+**Load more** reads one older byte window, with a 1 MiB scan ceiling and the existing response
+byte ceilings. Cursors bind file identity and snapshot integrity; replacement or truncation
+requires a fresh generation. Loaded pages retain tool-call/result pairing across boundaries and
+preserve the scroll anchor when older events prepend. Deliberate selection or filter changes
+reset paging. `get_task_event_page` exposes the bounded cursor reader to MCP callers; existing
+sequence-based `get_task_events` remains compatible. Sparse filters or malformed large records
+can yield an empty page with a continuation, so callers must use `has_more`, not page length.
+
+Cumulative summary accounting is independent of the loaded activity window. Background scans
+process bounded chunks and retain compact counts and edit identities instead of raw history.
+Unloaded conversation members and unfinished summary bootstrap are labelled incomplete.
+These bounds address large-history loading; they do not establish the cause of the reported
+intermittent Monitor stall. Verification and measurements are recorded in
+[draft investigation](drafts/monitor-performance-feedback.md).
+
+Legacy catalog loads cap each metadata file at 4 MiB and each catalog load batch at 8 MiB.
+Workflow header paging and ancestor expansion have separate bounded batches (at most 16 MiB
+combined), rather than implying an 8 MiB ceiling for the entire endpoint. A file beyond the
+ceiling becomes an explicit unknown header requiring direct inspection; loaded known history
+remains available with incomplete chronology and count indicators. If an oversized task record
+prevents proving caller authority, paged APIs fail closed with `authority_incomplete`, expose no
+new IDs, and explain the existing direct-status inspection route. Direct full detail interfaces
+retain their prior behavior and can populate the derivative index without rewriting the record.
+Private cached caller identity projections are limited to 8 KiB, preserve required markers
+without truncation, and fail closed when identity cannot be represented. Ownership receipts
+are capped at 16 KiB; legacy ownership decoration shares one bounded workflow catalog batch
+across the page. A read-only inventory found all existing task metadata below 12 KiB and all workflow records
+below 4 MiB when the limits were selected.
+
+Task pages reconcile at most 100 requested and 100 rotating indexed active process identities,
+so unloaded active records can settle without fetching historical pages or replaying streams.
+Uncertain or dead-but-unreconciled outcomes stay explicit; verified process death does not prove
+a failed harness result. Finish notifications wait for the reconciled outcome. Counts remain
+unknown until the relevant identities have been checked, and transient indexing preserves the
+last verified totals.

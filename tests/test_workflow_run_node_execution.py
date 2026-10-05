@@ -509,6 +509,17 @@ async def test_no_workflow_nodes_at_max_parallel_one_goes_fresh_and_tries_fallba
     assert saved["nodes"][1]["session_mode"] == "resume"
 
 
+async def test_read_only_child_uses_writer_roots_pooled_checkout_strength(tmp_path):
+    storage = w.WorkflowStore(tmp_path)
+    child = child_graph()
+    next(n for n in child['nodes'] if n['id'] == 'work')['freedom'] = 'read_only'
+    saved = storage.save('child', child)
+    storage.save('parent', parent_graph(saved['workflow_id'], prep=True))
+    run, registry = await run_tree(storage, tmp_path, 'parent')
+    assert run['status'] == 'completed', run.get('attention_reason')
+    assert any(call['run'] == 'child' and call['label'] == 'work' and call['kwargs']['freedom'] == 'read_only' for call in registry.dispatches)
+
+
 async def test_pooled_checkout_lease_is_shared_and_another_tree_waits(tmp_path):
     from polybridge.workflow_invocation import WorkflowTree
 

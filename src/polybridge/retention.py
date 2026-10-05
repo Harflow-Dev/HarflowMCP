@@ -457,4 +457,10 @@ def _delete_task_files(log_dir: Path, task_id: str) -> bool:
             pass
         except OSError:
             return False
+    try:
+        from .catalog import Catalog
+        Catalog(log_dir, store.RECORD_SUFFIX).remove(task_id)
+        Catalog(log_dir.parent / 'workflow-runs', '.json').remove(task_id)
+    except Exception:
+        log.warning('Could not remove retained task from listing indexes: %s', task_id, exc_info=True)
     return True

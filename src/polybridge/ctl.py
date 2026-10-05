@@ -80,6 +80,13 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
         "--since", default=None, help="only tasks started within this long ago, e.g. 7d, 12h"
     )
     list_p.add_argument("--json", action="store_true")
+    page_p = sub.add_parser('task-list-page', help='bounded task header history')
+    page_p.add_argument('--json', action='store_true')
+    page_p.add_argument('--limit', type=int, default=100)
+    page_p.add_argument('--cursor')
+    page_p.add_argument('--active-only', action='store_true')
+    page_p.add_argument('--session-id')
+    page_p.add_argument('--task-ids')
 
     backends_p = sub.add_parser(
         "backends", help="list the registered backends and whether each is on PATH"
@@ -150,7 +157,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     edits.add_argument("--remove")
 
     workflow_parsers = []
-    for action in ("validate", "list", "get", "save", "delete", "build", "start", "list-runs", "status", "detail", "wait", "pause", "resume", "cancel", "builder-followup", "builder-apply", "inspect", "recover", "migrate", "abandon-dispatch"):
+    for action in ("validate", "list", "list-page", "get", "save", "delete", "build", "start", "list-runs", "status", "detail", "wait", "pause", "resume", "cancel", "builder-followup", "builder-apply", "inspect", "recover", "migrate", "abandon-dispatch"):
         wp = sub.add_parser("workflow-" + action, help=action + " workflows")
         wp.add_argument("--json", action="store_true")
         if action in {"get", "save", "delete", "build", "start"}:
@@ -180,6 +187,12 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
         if action == "list-runs":
             wp.add_argument("--offset", type=int, default=0)
             wp.add_argument("--limit", type=int, default=100)
+        if action == 'list-page':
+            wp.add_argument('--limit', type=int, default=100)
+            wp.add_argument('--cursor')
+            wp.add_argument('--active-only', action='store_true')
+            wp.add_argument('--related-run-id')
+            wp.add_argument('--run-ids')
         if action == "recover":
             wp.add_argument("--reason", required=True)
             wp.add_argument("--additional-attempts", type=int, default=0)
@@ -646,6 +659,8 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
         if action == "builder-apply":
             raw = sys.stdin.read() if args.definition == "-" else Path(args.definition).read_text()
             return await server.apply_workflow_draft(json.loads(raw), args.expected_draft_revision)
+        if action == 'list-page':
+            return await server.list_workflow_run_page(args.limit, args.cursor, args.active_only, args.related_run_id, args.run_ids.split(',') if args.run_ids is not None else None)
         if action in {"list", "list-runs"}:
             entries = await server._workflow_call(action.replace("-", "_"))
             if action == "list-runs":
@@ -729,6 +744,27 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_workflow(args)
     if args.command == "list":
         return _cmd_list(args, list_p)
+    if args.command == 'task-list-page':
+        try:
+            from .workflow_inspection import filter_task_reads, managed_page_reader
+            ready, managed = managed_page_reader(default_log_dir())
+            if not ready:
+                from .workflow_inspection import page_indexing_response
+                result = page_indexing_response(default_log_dir())
+                print(json.dumps({'v': CTL_JSON_VERSION, 'result': result}) if args.json else json.dumps(result, indent=2))
+                return 0
+            result = store.list_page(default_log_dir(), limit=args.limit, cursor=args.cursor, active_only=args.active_only, session_id=args.session_id, task_ids=args.task_ids.split(',') if args.task_ids is not None else None)
+            result['items'] = filter_task_reads(result['items'], managed)
+            result['related_headers'] = filter_task_reads(result.get('related_headers', []), managed)
+            if managed is not None:
+                result['total_active_count'] = sum(item.get('status') not in store.TERMINAL_RECORD_STATUSES for item in result['items'])
+                result.pop('total_active_root_count', None)
+                result.pop('total_attention_root_count', None)
+                result.update(next_cursor=None, has_more=False)
+            print(json.dumps({'v': CTL_JSON_VERSION, 'result': result}) if args.json else json.dumps(result, indent=2))
+            return 0
+        except (ValueError, OSError) as exc:
+            return _fail(args, 'invalid_params', str(exc))
     if args.command == "backends":
         return _cmd_backends(args)
     if args.command == "send":

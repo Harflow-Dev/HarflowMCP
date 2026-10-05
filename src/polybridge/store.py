@@ -171,6 +171,7 @@ def write_landed(log_dir: Path, record: TaskRecord) -> bool:
     Same never-raise contract; False for an invalid id, a refused backwards move, or an I/O
     failure. For a caller that must tell the user when a status it published did not stick.
     """
+    previous_directory_mtime = log_dir.stat().st_mtime_ns if log_dir.exists() else None
     try:
         target = record_path(log_dir, record.task_id)
     except InvalidTaskId:
@@ -225,16 +226,26 @@ def write_landed(log_dir: Path, record: TaskRecord) -> bool:
     except OSError:
         log.warning("could not persist record for task %s", record.task_id, exc_info=True)
         return False
+    from .catalog import Catalog
+    header, stamp, active = listing_header(record)
+    Catalog(log_dir, RECORD_SUFFIX).record(header, stamp, active, record.task_id, previous_directory_mtime=previous_directory_mtime)
     return True
 
 
-def read(log_dir: Path, task_id: str, *, include_prompt: bool = True) -> TaskRecord | None:
+def read(log_dir: Path, task_id: str, *, include_prompt: bool = True, metadata_byte_limit: int | None = None, metadata_budget: Any = None) -> TaskRecord | None:
     path = record_path(log_dir, task_id)
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        if metadata_byte_limit is None:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        else:
+            from .bounded_io import read_json
+            raw = read_json(path, metadata_byte_limit, budget=metadata_budget)
     except FileNotFoundError:
         return None
-    except (OSError, ValueError):
+    except (OSError, ValueError) as exc:
+        from .bounded_io import ReadLimit
+        if isinstance(exc, ReadLimit):
+            raise
         log.warning("ignoring unreadable task record %s", path, exc_info=True)
         return None
     if not isinstance(raw, dict):
@@ -274,6 +285,168 @@ def read_all(log_dir: Path) -> list[TaskRecord]:
         return []
     records = [read(log_dir, path.name[: -len(RECORD_SUFFIX)], include_prompt=False) for path in paths]
     return sorted((r for r in records if r is not None), key=lambda r: r.started_at)
+
+
+def listing_header(record: TaskRecord) -> tuple[dict[str, Any], float, bool]:
+    """Listing metadata only: never reconstruct an outcome by replaying a stream."""
+    keys = ('task_id', 'backend', 'session_id', 'repo_path', 'status', 'freedom', 'started_at',
+            'parent_task_id', 'spawned_by', 'root_task_id', 'depth', 'max_depth', 'group', 'title',
+            'lineage_detected', 'live_input', 'workflow_builder', 'owner', 'finished_at')
+    header = {key: getattr(record, key) for key in keys}
+    for key, value in list(header.items()):
+        if isinstance(value, str):
+            header[key] = value[:1000]
+    if isinstance(record.owner, dict):
+        header['owner'] = {key: value for key, value in record.owner.items() if key in {'pid', 'start_time'}}
+    try:
+        duration = _duration_seconds(record, record.finished_at)
+    except (TypeError, ValueError):
+        duration = None
+    header.update(recovered=True, duration_seconds=duration, notices=[str(n)[:500] for n in record.bridge_notices[:4]])
+    unobserved = outcome_unobserved(record)
+    header.update(persisted_status=record.status, observed_exit=not unobserved, needs_reconciliation=unobserved, status_reconciled=False, process_identity_state=None)
+    if unobserved:
+        header['status'] = 'running'
+    caller_keys = ('task_id', 'backend', 'session_id', 'repo_path', 'started_at', 'freedom', 'markers', 'pid', 'pgid', 'start_time', 'status', 'exit_code', 'root_task_id', 'parent_task_id', 'spawned_by', 'depth', 'max_depth', 'network', 'owner', 'group')
+    header['_caller'] = {key: getattr(record, key) for key in caller_keys}
+    try:
+        stamp = datetime.fromisoformat(record.started_at).timestamp()
+    except (ValueError, TypeError, OverflowError):
+        stamp = 0.0
+    return header, stamp, unobserved
+
+
+def bootstrap_catalog(log_dir: Path) -> bool:
+    from .catalog import Catalog
+    def load(identifier: str, *, _metadata_budget=None):
+        record = read(log_dir, identifier, include_prompt=False, metadata_byte_limit=4 * 1024 * 1024, metadata_budget=_metadata_budget)
+        return listing_header(record) if record is not None else None
+    load.bounded_metadata = True
+    catalog = Catalog(log_dir, RECORD_SUFFIX)
+    with catalog.connect() as db:
+        return catalog.bootstrap(db, load)
+
+
+def _project_indexed_status(header: dict[str, Any], record: TaskRecord) -> bool:
+    unobserved = outcome_unobserved(record)
+    state = identity.identity_check(identity.task_identity(record.pid, record.start_time, record.markers)) if unobserved and record.pid is not None else ('undecidable' if unobserved else 'dead')
+    state = 'uncertain' if state not in {'alive', 'dead'} else state
+    active = unobserved and state != 'dead'
+    if active:
+        status = 'running'
+        needs = state == 'uncertain' or record.status in TERMINAL_RECORD_STATUSES and not header.get('status_reconciled')
+    elif not unobserved or header.get('status_reconciled'):
+        status, needs = header['status'], False
+    else:
+        status = record.status if record.status in {'cancelled', 'completed', 'timed_out'} else 'unknown'
+        needs = status == 'unknown'
+        if needs:
+            header['note'] = 'process ended; outcome needs inspection'
+    header.update(status=status, persisted_status=record.status, observed_exit=not unobserved, process_identity_state=state, needs_reconciliation=needs)
+    return active
+
+
+def list_page(log_dir: Path, *, limit: int = 100, cursor: str | None = None, active_only: bool = False, session_id: str | None = None, task_ids: list[str] | None = None) -> dict[str, Any]:
+    from .catalog import Catalog
+    def load(identifier: str, *, _metadata_budget=None):
+        record = read(log_dir, identifier, include_prompt=False, metadata_byte_limit=4 * 1024 * 1024, metadata_budget=_metadata_budget)
+        return listing_header(record) if record is not None else None
+    load.bounded_metadata = True
+    catalog = Catalog(log_dir, RECORD_SUFFIX)
+    with catalog.connect() as db:
+        # Upgrade existing headers without decoding metadata or losing chronology.
+        db.execute("UPDATE entries SET active=1,payload=json_set(payload,'$.needs_reconciliation',json('true'),'$.observed_exit',json('false'),'$.persisted_status',json_extract(payload,'$.status'),'$.status','running') WHERE id IN (SELECT id FROM callers WHERE terminal=0) AND json_type(payload,'$.needs_reconciliation') IS NULL")
+    if task_ids is not None:
+        identifiers = [validate_task_id(identifier) for identifier in task_ids]
+        page = {'items': catalog.headers(identifiers, load), 'next_cursor': None, 'has_more': False, 'bootstrap_pending': False}
+    else:
+        page = catalog.page(load, limit=limit, cursor=cursor, active_only=active_only, session_id=session_id)
+    from .workflows import WorkflowStore
+    workflow_storage = WorkflowStore(log_dir.parent)
+    workflow_catalog = Catalog(workflow_storage.runs, '.json')
+    for item in page['items']:
+        try:
+            from .bounded_io import read_receipt
+            receipt = read_receipt(log_dir.parent / 'workflow-owners' / f"{validate_task_id(item['task_id'])}.json")
+            allowed = {'workflow_run_id', 'workflow_node_id', 'workflow_execution_id', 'workflow_role', 'workflow_name', 'workflow_status', 'workflow_session_owner_run_id', 'root_workflow_run_id', 'interaction_owner', 'execution_contract'}
+            item.update({key: str(value)[:100] if isinstance(value, str) else value for key, value in receipt.items() if key in allowed and isinstance(value, (str, bool, int, type(None)))})
+            if 'workflow_role' not in receipt:
+                from .workflows import WorkflowStore
+                header = workflow_storage.get_run_header(receipt['workflow_run_id'], _catalog=workflow_catalog)
+                if header.get('needs_direct_lookup'):
+                    page.update(ownership_incomplete=True, history_incomplete=True, counts_complete=False, total_active_count=None, total_active_root_count=None, total_attention_root_count=None)
+                item.update(workflow_name=header.get('name'), workflow_status=header.get('status'), root_workflow_run_id=header.get('root_workflow_run_id', header['workflow_run_id']))
+                if item.get('session_id') == header.get('sessions', {}).get('orchestrator') and header.get('orchestrator_session_owner_run_id'):
+                    item['workflow_session_owner_run_id'] = header['orchestrator_session_owner_run_id']
+        except (OSError, ValueError, TypeError) as exc:
+            if isinstance(exc, ValueError):
+                page.update(ownership_incomplete=True, history_incomplete=True, counts_complete=False, total_active_count=None, total_active_root_count=None, total_attention_root_count=None)
+            pass
+    from .catalog import bound_header
+    with catalog.connect() as db:
+        for item in page['items']:
+            row = db.execute('SELECT payload FROM callers WHERE id=?', (item['task_id'],)).fetchone()
+            if row is None:
+                continue
+            record = TaskRecord(**json.loads(row[0]))
+            active = _project_indexed_status(item, record)
+            db.execute('UPDATE entries SET active=?,payload=? WHERE id=?', (int(active), json.dumps(bound_header(item), ensure_ascii=True, separators=(',', ':')), record.task_id))
+        # Independently rotate <=100 other active identities. Older unloaded work
+        # must eventually reconcile without requiring users to load all history.
+        excluded = [item['task_id'] for item in page['items']]
+        exclusion = ' AND e.id NOT IN (' + ','.join('?' for _ in excluded) + ')' if excluded else ''
+        row = db.execute("SELECT value FROM state WHERE key='identity_after'").fetchone()
+        boundary = json.loads(row[0]) if row else None
+        selection = 'SELECT e.id,e.stamp,e.payload,c.payload FROM entries e JOIN callers c ON c.id=e.id WHERE e.active=1 AND c.terminal=0' + exclusion
+        suffix = ' ORDER BY e.stamp DESC,e.id DESC LIMIT 100'
+        rotating = db.execute(selection + (' AND (e.stamp<? OR (e.stamp=? AND e.id<?))' if boundary else '') + suffix, (*excluded, *((boundary[0], boundary[0], boundary[1]) if boundary else ()))).fetchall()
+        if not rotating and boundary is not None:
+            rotating = db.execute(selection + suffix, excluded).fetchall()
+        for identifier, stamp, payload, caller in rotating:
+            header = json.loads(payload)
+            active = _project_indexed_status(header, TaskRecord(**json.loads(caller)))
+            db.execute('UPDATE entries SET active=?,payload=? WHERE id=?', (int(active), json.dumps(bound_header(header), ensure_ascii=True, separators=(',', ':')), identifier))
+        if rotating:
+            db.execute('INSERT OR REPLACE INTO state VALUES (?,?)', ('identity_after', json.dumps([rotating[-1][1], rotating[-1][0]])))
+        if 'total_active_count' in page and not page['bootstrap_pending'] and not page.get('history_incomplete'):
+            where, values = (' AND session=?', (session_id,)) if session_id is not None else ('', ())
+            unresolved = db.execute("SELECT COUNT(*) FROM entries WHERE active=1 AND (json_extract(payload,'$.process_identity_state') IS NULL OR json_extract(payload,'$.process_identity_state')='uncertain')" + where, values).fetchone()[0]
+            page['counts_complete'] = not bool(unresolved)
+            page['total_active_count'] = None if unresolved else db.execute('SELECT COUNT(*) FROM entries WHERE active=1' + where, values).fetchone()[0]
+    page['items'] = [bound_header(item) for item in page['items']]
+    related, visited = [], {item['task_id'] for item in page['items']}
+    queue = [item[key] for item in page['items'] for key in ('parent_task_id', 'spawned_by', 'root_task_id') if item.get(key) and item[key] not in visited]
+    with catalog.connect() as db:
+        while queue and len(related) < 32 and len(visited) < 132:
+            identifier = validate_task_id(queue.pop(0))
+            if identifier in visited:
+                continue
+            visited.add(identifier)
+            row = db.execute('SELECT payload FROM entries WHERE id=?', (identifier,)).fetchone()
+            if row is None or not record_path(log_dir, identifier).exists():
+                continue
+            if catalog._changed(db, identifier):
+                value = catalog._load_bounded(identifier, load)
+                if value is None:
+                    catalog._remove(db, identifier)
+                    continue
+                header, stamp, active = value
+                catalog._put(db, header, stamp, active, identifier)
+                row = db.execute('SELECT payload FROM entries WHERE id=?', (identifier,)).fetchone()
+            header = json.loads(row[0])
+            try:
+                from .bounded_io import read_receipt
+                receipt = read_receipt(log_dir.parent / 'workflow-owners' / f'{identifier}.json')
+                header.update({key: str(value)[:100] if isinstance(value, str) else value for key, value in receipt.items() if key.startswith('workflow_') and isinstance(value, (str, bool, int, type(None)))})
+                header = bound_header(header)
+            except (OSError, ValueError, TypeError) as exc:
+                if isinstance(exc, ValueError):
+                    page.update(ownership_incomplete=True, history_incomplete=True, counts_complete=False, total_active_count=None, total_active_root_count=None, total_attention_root_count=None)
+                pass
+            related.append(header)
+            queue[0:0] = [header[key] for key in ('parent_task_id', 'spawned_by', 'root_task_id') if header.get(key) and header[key] not in visited]
+    page['related_headers'] = related
+    return page
 
 
 def process_alive(pid: int | None, markers: Sequence[str]) -> bool:
@@ -595,6 +768,10 @@ def snapshot(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
             raise ValueError("Full task assignment is unavailable; prompt preview is not authoritative")
         record = authoritative
     status, note, state, tail, owned = _resolve(log_dir, record, detail=True)
+    from .catalog import Catalog
+    header, stamp, _active = listing_header(record)
+    header.update(status=status, needs_reconciliation=False, status_reconciled=True)
+    Catalog(log_dir, RECORD_SUFFIX).record(header, stamp, status == 'running', record.task_id)
     from . import inbox
     pending = inbox.pending_messages(log_dir, record.task_id)
     if record.workflow_builder:

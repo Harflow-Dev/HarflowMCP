@@ -101,7 +101,8 @@ def decorate_tasks(entries: list[dict[str, Any]], log_dir: Any) -> list[dict[str
         try:
             receipt = storage.owners / f"{_identifier(task_id)}.json"
             if receipt.exists():
-                run_id = json.loads(receipt.read_text())["workflow_run_id"]
+                from .bounded_io import read_receipt
+                run_id = read_receipt(receipt)["workflow_run_id"]
                 association = run_index(run_id).get(task_id)
                 if association is None:
                     raise ValueError("Task receipt does not match its workflow run")
@@ -123,6 +124,72 @@ def decorate_tasks(entries: list[dict[str, Any]], log_dir: Any) -> list[dict[str
         return association
 
     return [{**entry, **(owner(entry["task_id"], set()) or {})} if entry.get("task_id") else entry for entry in entries]
+
+
+def managed_page_reader(log_dir: Any) -> tuple[bool, tuple[dict[str, Any], dict[str, Any]] | None]:
+    """Prepare bounded caller index, then preserve managed read authority without scans."""
+    from . import lineage, store
+    from .catalog import Catalog
+    from .workflows import WorkflowStore
+    if not Catalog(log_dir, store.RECORD_SUFFIX).ready():
+        store.bootstrap_catalog(log_dir)
+        # Do not combine a bootstrap decode batch with managed ownership decoding.
+        return False, None
+    detection = lineage.detect_catalog_caller(log_dir)
+    if detection.undecidable is not None:
+        raise ValueError('Workflow caller authority is undecidable: ' + detection.undecidable)
+    if detection.caller is None:
+        return True, None
+    storage = WorkflowStore(root=log_dir.parent)
+    receipt = storage.owners / f'{detection.caller.record.task_id}.json'
+    if not receipt.exists():
+        # Missing ownership is not evidence that a verified agent is unmanaged.
+        # Resolve only through the bounded run catalog, never list_runs().
+        if not storage._ownership_catalog().ready():
+            storage.list_run_page()
+            return False, None
+        queue, visited, association = [(detection.caller.record.task_id, set())], set(), None
+        with storage._ownership_catalog().connect() as ownership_db, Catalog(log_dir, store.RECORD_SUFFIX).connect() as task_db:
+            while queue and len(visited) < 64:
+                identifier, path = queue.pop(0)
+                if identifier in path:
+                    raise ValueError('Workflow caller ownership ancestry is cyclic')
+                if identifier in visited:
+                    continue
+                visited.add(identifier)
+                row = ownership_db.execute('SELECT payload FROM associations WHERE id=?', (identifier,)).fetchone()
+                if row is not None:
+                    association = json.loads(row[0])
+                    break
+                task_row = task_db.execute('SELECT payload FROM callers WHERE id=?', (identifier,)).fetchone()
+                if task_row is not None:
+                    task = json.loads(task_row[0])
+                    queue.extend((task[key], path | {identifier}) for key in ('parent_task_id', 'spawned_by') if task.get(key))
+            if queue and association is None:
+                raise ValueError('Workflow caller ownership ancestry exceeds its bounded limit')
+        if association is None:
+            return True, None
+        run = storage.get_run(association['workflow_run_id'], metadata_byte_limit=4 * 1024 * 1024)
+    else:
+        association = storage.task_owner(detection.caller.record.task_id, strict=True, metadata_byte_limit=4 * 1024 * 1024)
+        if association is None:
+            raise ValueError('Workflow task ownership is unavailable')
+        run = storage.get_run(association['workflow_run_id'], metadata_byte_limit=4 * 1024 * 1024)
+    return True, (association, run) if association.get('role') == 'builder' or run.get('execution_contract') == 'delegation' else None
+
+
+def page_indexing_response(log_dir: Any) -> dict[str, Any]:
+    """No identifiers are exposed while bounded caller authority is incomplete."""
+    from .catalog import Catalog
+    from . import store
+    with Catalog(log_dir, store.RECORD_SUFFIX).connect() as db:
+        incomplete = db.execute("SELECT 1 FROM entries WHERE json_extract(payload,'$.needs_direct_lookup')=1 LIMIT 1").fetchone() is not None
+    result = {'items': [], 'related_headers': [], 'next_cursor': None, 'has_more': False,
+              'bootstrap_pending': not incomplete, 'history_incomplete': incomplete,
+              'authority_incomplete': incomplete, 'counts_complete': False}
+    if incomplete:
+        result['note'] = 'Task metadata exceeds bounded authority indexing; inspect known tasks with direct status before loading history.'
+    return result
 
 
 def managed_reader(log_dir: Any) -> tuple[dict[str, Any], dict[str, Any]] | None:
