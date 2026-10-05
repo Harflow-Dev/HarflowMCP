@@ -164,6 +164,8 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
             wp.add_argument("name")
         if action in {"status", "detail", "wait", "pause", "resume", "cancel", "builder-followup", "inspect", "recover", "abandon-dispatch"}:
             wp.add_argument("workflow_run_id")
+        if action == "list":
+            wp.add_argument("--monitor-view", action="store_true")
         if action == "status":
             wp.add_argument("--monitor-view", action="store_true")
             wp.add_argument("--snapshot", action="store_true")
@@ -673,7 +675,7 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
         if action == 'list-page':
             return await server.list_workflow_run_page(args.limit, args.cursor, args.active_only, args.related_run_id, args.run_ids.split(',') if args.run_ids is not None else None)
         if action in {"list", "list-runs"}:
-            entries = await server._workflow_call(action.replace("-", "_"))
+            entries = await server._workflow_call(action.replace("-", "_"), **({"_bounded_read": True} if action == "list" and args.monitor_view else {}))
             if action == "list-runs":
                 from .workflow_responses import history_page
                 return history_page(entries, args.offset, args.limit)

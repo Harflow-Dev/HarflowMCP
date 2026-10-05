@@ -654,3 +654,55 @@ def test_schema_three_cache_rebuild_is_bounded_without_decoding_old_headers(tmp_
         assert db.execute("SELECT value FROM state WHERE key='schema_version'").fetchone() == ('4',)
         assert db.execute("SELECT count(*) FROM entries WHERE id LIKE 'old%'").fetchone() == (0,)
     assert originals == {p.name: p.read_bytes() for p in directory.glob('*.meta.json')}
+
+
+def test_monitor_definition_list_uses_bounded_authority_but_public_first_read_is_unchanged(tmp_path, monkeypatch, capsys):
+    from unittest.mock import AsyncMock
+    human_authority(monkeypatch)
+    directory = tmp_path / 'tasks'
+    legacy_tasks(directory, 250)
+    monkeypatch.setattr(ctl, 'default_log_dir', lambda: directory)
+    monkeypatch.setattr(server, '_reg', lambda: SimpleNamespace(log_dir=directory))
+    storage = workflows.WorkflowStore(root=tmp_path)
+    monkeypatch.setattr(workflows, 'WorkflowStore', lambda **kwargs: storage)
+    monkeypatch.setattr(storage, 'list', lambda: [{'name': 'saved'}])
+    legacy = AsyncMock(return_value=None)
+    monkeypatch.setattr(server, '_managed_workflow_reader', legacy)
+    # Ordinary CLI still succeeds on the first call with a cold task catalog.
+    assert ctl.main(['workflow-list', '--json']) == 0
+    assert json.loads(capsys.readouterr().out)['result']['workflows'] == [{'name': 'saved'}]
+    assert legacy.await_count == 1
+    for _ in range(3):
+        assert ctl.main(['workflow-list', '--monitor-view', '--json']) != 0
+        assert 'indexing is incomplete' in capsys.readouterr().out
+    for _ in range(4):
+        assert ctl.main(['workflow-list', '--monitor-view', '--json']) == 0
+        assert json.loads(capsys.readouterr().out)['result']['workflows'] == [{'name': 'saved'}]
+    assert legacy.await_count == 1
+    monkeypatch.setenv(lineage.ENV_TASK_ID, 'unknown-task')
+    assert ctl.main(['workflow-list', '--monitor-view', '--json']) != 0
+    assert 'cannot be verified' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize('role', ['orchestrator', 'builder', 'node'])
+async def test_monitor_definition_list_retains_managed_scope(tmp_path, monkeypatch, role):
+    from polybridge import workflow_inspection
+    monkeypatch.setattr(server, '_reg', lambda: SimpleNamespace(log_dir=tmp_path / 'tasks'))
+    managed = ({'role': role}, {'workflow_run_id': 'owned', 'definition': {'name': 'owned'}})
+    monkeypatch.setattr(workflow_inspection, 'managed_page_reader', lambda path: (True, managed))
+    if role == 'orchestrator':
+        assert await server._workflow_call('list', _bounded_read=True) == [{'name': 'owned'}]
+    else:
+        with pytest.raises(Exception, match='Builders may only|Worker nodes'):
+            await server._workflow_call('list', _bounded_read=True)
+
+
+async def test_public_definition_list_does_not_require_catalog_bootstrap(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+    from polybridge import workflow_inspection
+    monkeypatch.setattr(server, '_managed_workflow_reader', AsyncMock(return_value=None))
+    monkeypatch.setattr(workflow_inspection, 'managed_page_reader', lambda *args: pytest.fail('private Monitor reader'))
+    storage = workflows.WorkflowStore(root=tmp_path)
+    monkeypatch.setattr(workflows, 'WorkflowStore', lambda **kwargs: storage)
+    monkeypatch.setattr(storage, 'list', lambda: [{'name': 'public'}])
+    assert await server.list_workflows() == [{'name': 'public'}]

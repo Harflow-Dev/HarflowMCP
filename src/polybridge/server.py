@@ -1127,7 +1127,7 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
             ready, managed = await asyncio.to_thread(managed_page_reader, _reg().log_dir)
             if not ready:
                 return page_indexing_response(_reg().log_dir)
-        elif bounded_read and action in {"status", "detail"}:
+        elif bounded_read and action in {"status", "detail", "list"}:
             managed = await _bounded_managed_workflow_reader()
         else:
             managed = await _managed_workflow_reader()
