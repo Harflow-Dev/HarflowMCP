@@ -257,13 +257,33 @@ def session_owner_id(parent_run: dict[str, Any]) -> str:
 
 
 def write_child_run(store: Any, run: dict[str, Any]) -> None:
-    """Create the child record exclusively; a second writer must fail loudly."""
+    """Publish a flushed child record exclusively, never a partially written ID."""
     path = store.runs / f"{run['workflow_run_id']}.json"
-    with path.open("x", encoding="utf-8") as handle:
-        os.chmod(path, 0o600)
-        json.dump(run, handle, ensure_ascii=False)
-        handle.flush()
-        os.fsync(handle.fileno())
+    temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    fd, created = None, False
+    try:
+        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        created = True
+        handle = os.fdopen(fd, "w", encoding="utf-8")
+        fd = None  # The text handle now owns the descriptor, including failures.
+        with handle:
+            json.dump(run, handle, ensure_ascii=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        # Same-directory hard linking creates the final name atomically and
+        # refuses an existing reservation; replace() would overwrite its owner.
+        os.link(temp, path)
+        temp.unlink()
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if fd is not None:
+            os.close(fd)
+        if created:
+            temp.unlink(missing_ok=True)
 
 
 def child_run_record(store: Any, parent_run: dict[str, Any], activation: dict[str, Any], node: dict[str, Any], invocation: dict[str, Any]) -> dict[str, Any]:
@@ -772,6 +792,11 @@ async def run_child(supervisor: Any, node: dict[str, Any], token: dict[str, Any]
             write_child_run(store, child)
         except FileExistsError:
             existing = store.get_run(child_id)
+            link = existing.get("parent_link") or {}
+            if link.get("execution_id") != activation["id"] or link.get("workflow_run_id") != run["workflow_run_id"]:
+                outcome = invocation_outcome("uncertain", existing, invocation, node, failure_reason="Existing child run does not match this invocation")
+                _settle_invocation(supervisor, node, token, activation, outcome, invocation)
+                return
         invocation["stage"] = "created"
         supervisor.update(lambda r: next(a for a in r["activations"] if a["id"] == activation["id"]).update(invocation=copy.deepcopy(invocation)), "child_created", {"child_workflow_run_id": child_id})
     else:
