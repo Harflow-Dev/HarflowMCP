@@ -142,7 +142,6 @@ does not approve arbitrary commands, change tool allowlists, or enable network a
 persistent Configure scratch access control is added because it would duplicate the exact launch
 grant or broaden access. Adapters without an explicit writable-directory extension cannot claim
 such a grant merely from a supplied path; additional adapter launch support is outside this stage.
-See the [scratch access outcome](drafts/scratch-access-outcome.md).
 Artifacts stay with the task record for inspection and
 recovery, and task retention deletes them without following symlinks. Large display assignments
 are stored once in private full-prompt files; task metadata contains a bounded preview and an
@@ -198,6 +197,8 @@ polybridge-ctl workflow-status <workflow_run_id> --json
 polybridge-ctl workflow-pause <workflow_run_id> --json
 polybridge-ctl workflow-resume <workflow_run_id> \
   --instructions "Address the reported failure" --additional-attempts 1 --json
+polybridge-ctl workflow-resume <workflow_run_id> \
+  --instructions-file /absolute/path/to/answer.txt --decision-id EXACT_DECISION_ID --json
 ```
 
 Validate an editable graph before saving with
@@ -668,8 +669,16 @@ existing read access. These are API boundaries, not filesystem isolation.
 polybridge-ctl workflow-inspect RUN_ID EXECUTION_ID --view result --json
 polybridge-ctl workflow-inspect RUN_ID EXECUTION_ID --task-id TASK_ID --view activity --json
 polybridge-ctl workflow-recover RUN_ID --reason "Inspected and resolved the outage" --json
+polybridge-ctl workflow-recover RUN_ID --reason-file /absolute/path/to/recovery.txt --json
 polybridge-ctl workflow-migrate --json
 ```
+
+For large control text, `workflow-resume --instructions-file` and `workflow-recover --reason-file`
+read a UTF-8 file without placing its contents on the command argument vector. These flags are
+mutually exclusive with `--instructions` and `--reason`, respectively. File transport preserves
+CRLF, newlines, Unicode, and leading/trailing whitespace without trimming. Unreadable or invalid
+UTF-8 files fail before dispatch. Recovery still requires a reason; resume instructions remain
+optional. The same ownership, decision-ID, and explicit attempt-grant rules apply.
 
 Interaction ownership is recorded when the run starts. MCP and ordinary CLI starts belong to the
 **caller**: `needs_input` returns the question to that caller, and the Monitor shows the question
@@ -954,8 +963,8 @@ Cumulative summary accounting is independent of the loaded activity window. Back
 process bounded chunks and retain compact counts and edit identities instead of raw history.
 Unloaded conversation members and unfinished summary bootstrap are labelled incomplete.
 These bounds address large-history loading; they do not establish the cause of the reported
-intermittent Monitor stall. Verification and measurements are recorded in
-[draft investigation](drafts/monitor-performance-feedback.md).
+intermittent Monitor stall. The remaining observations and investigation are recorded in
+[stall investigation](drafts/monitor-performance-feedback.md).
 
 Legacy catalog loads cap each metadata file at 4 MiB and each catalog load batch at 8 MiB.
 Workflow header paging and ancestor expansion have separate bounded batches (at most 16 MiB

@@ -195,7 +195,9 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
             wp.add_argument('--related-run-id')
             wp.add_argument('--run-ids')
         if action == "recover":
-            wp.add_argument("--reason", required=True)
+            reason_group = wp.add_mutually_exclusive_group(required=True)
+            reason_group.add_argument("--reason")
+            reason_group.add_argument("--reason-file", help="UTF-8 recovery reason file")
             wp.add_argument("--additional-attempts", type=int, default=0)
         if action in {"start", "pause", "resume", "recover", "cancel"}:
             wp.add_argument("--monitor", action="store_true", help="Human Monitor-owned workflow interaction")
@@ -235,7 +237,9 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
         if action == "wait":
             wp.add_argument("--timeout-seconds", type=int, default=30)
         if action == "resume":
-            wp.add_argument("--instructions")
+            instructions_group = wp.add_mutually_exclusive_group()
+            instructions_group.add_argument("--instructions")
+            instructions_group.add_argument("--instructions-file", help="UTF-8 resume instructions file")
             wp.add_argument("--additional-attempts", type=int, default=0)
         workflow_parsers.append(wp)
 
@@ -603,10 +607,15 @@ def _cmd_detached(args: argparse.Namespace, action: Any) -> int:
 
 def _workflow_prompt(args: argparse.Namespace) -> str:
     """Read disposable prompt transport without changing its newline bytes."""
-    if path := getattr(args, "prompt_file", None):
+    return _workflow_text(args, "prompt")
+
+
+def _workflow_text(args: argparse.Namespace, field: str) -> str | None:
+    """Read exact UTF-8 control text without putting it on the argument vector."""
+    if path := getattr(args, field + "_file", None):
         with Path(path).open(encoding="utf-8", newline="") as stream:
             return stream.read()
-    return args.prompt
+    return getattr(args, field)
 
 
 def _cmd_workflow(args: argparse.Namespace) -> int:
@@ -643,11 +652,12 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
         if action == "inspect":
             return await server.inspect_workflow_node(args.workflow_run_id, args.execution_id, args.task_id, args.view, args.cursor, args.limit, args.before_seq, args.after_seq)
         if action == "recover":
+            reason = _workflow_text(args, "reason")
             if args.monitor:
-                if not args.reason.strip():
+                if not reason.strip():
                     raise ValueError("Recovery reason must be nonempty")
-                return await server._workflow_call("recover", run_id=args.workflow_run_id, instructions=args.reason, additional_attempts=args.additional_attempts, interaction_owner="monitor")
-            return await server._workflow_call("recover", run_id=args.workflow_run_id, instructions=args.reason, additional_attempts=args.additional_attempts)
+                return await server._workflow_call("recover", run_id=args.workflow_run_id, instructions=reason, additional_attempts=args.additional_attempts, interaction_owner="monitor")
+            return await server._workflow_call("recover", run_id=args.workflow_run_id, instructions=reason, additional_attempts=args.additional_attempts)
         if action == "migrate":
             from .workflows import migrate_workflows
             from .workflow_hooks import refuse_managed
@@ -707,9 +717,10 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
         if action == "wait":
             return await server._wait_workflow_full(args.workflow_run_id, args.timeout_seconds)
         if action == "resume":
+            instructions = _workflow_text(args, "instructions")
             if args.monitor:
-                return await server._workflow_call("resume", run_id=args.workflow_run_id, instructions=args.instructions, additional_attempts=args.additional_attempts, decision_id=args.decision_id, interaction_owner="monitor")
-            return await server._workflow_call("resume", run_id=args.workflow_run_id, instructions=args.instructions, additional_attempts=args.additional_attempts, decision_id=args.decision_id)
+                return await server._workflow_call("resume", run_id=args.workflow_run_id, instructions=instructions, additional_attempts=args.additional_attempts, decision_id=args.decision_id, interaction_owner="monitor")
+            return await server._workflow_call("resume", run_id=args.workflow_run_id, instructions=instructions, additional_attempts=args.additional_attempts, decision_id=args.decision_id)
         return await server._workflow_call(action, run_id=args.workflow_run_id, **({"interaction_owner": "monitor"} if getattr(args, "monitor", False) and action != "cancel" else {}))
     try:
         result = asyncio.run(invoke())
