@@ -382,7 +382,13 @@ async def test_parallel_questions_preserve_first_identity_and_route_each_answer(
     store.save('parallel-parent', {**parent_multi([child['workflow_id'], child['workflow_id']]), 'name': 'parallel-parent'})
     run, registry = await run_tree(store, tmp_path, 'parallel-parent')
     children = sorted(child_runs(store, run), key=lambda r: r['created_at'])
-    store.update_run(run['workflow_run_id'], lambda r: r.update(status='running'), 'test_reopen_root')
+    def reopen_root(r):
+        r['status'] = 'running'
+        for activation in r['activations']:
+            if activation.get('invocation'):
+                activation['status'] = 'waiting_for_child'
+                activation['invocation']['stage'] = 'waiting'
+    store.update_run(run['workflow_run_id'], reopen_root, 'test_reopen_root')
     for index, source in enumerate(children):
         def suspend(r, index=index):
             r.update(status='needs_input', input_question=f'Question {index}', input_decision_id=f'question-{index}')

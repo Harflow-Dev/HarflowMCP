@@ -92,13 +92,40 @@ def test_optional_decoration_survives_missing_owned_run(tmp_path):
         workflow_hooks.refuse_direct_message(tmp_path / "tasks", "child")
 
 
-async def test_orphan_dead_process_does_not_hold_checkout(tmp_path,monkeypatch):
-    storage=w.WorkflowStore(tmp_path)
-    run=storage.create_run(w.validate_definition(definition()),"go",tmp_path)
-    storage.update_run(run["workflow_run_id"],lambda r:r.update(status="needs_attention",activations=[{"id":"a","node_id":"work","role":"node","status":"running","tasks":[{"task_id":"dead","status":"running","freedom":"write_in_repo"}]}]),"fixture")
-    monkeypatch.setattr(w.task_store,"read",lambda *a:SimpleNamespace(status="running"))
-    monkeypatch.setattr(w,"task_liveness",lambda *a:{"process_alive":False,"outcome_known":False})
-    async with w.CheckoutLease(storage,str(tmp_path),True,wait_seconds=.01): pass
+@pytest.mark.parametrize("verdict", ["dead", "alive", "undecidable"])
+async def test_orphan_process_identity_controls_checkout(tmp_path, monkeypatch, verdict):
+    from polybridge import identity, store
+    storage = w.WorkflowStore(tmp_path)
+    run = storage.create_run(w.validate_definition(definition()), "go", tmp_path)
+    storage.update_run(run["workflow_run_id"], lambda r: r.update(status="needs_attention", activations=[{"id": "a", "node_id": "work", "role": "node", "status": "running", "tasks": [{"task_id": "orphan", "status": "running", "freedom": "write_in_repo"}]}]), "fixture")
+    record = store.TaskRecord('orphan', 'codex', 'session', str(tmp_path), 'now', status='running', pid=123, start_time='recorded-start', markers=['recorded-worker'])
+    store.write(tmp_path / 'tasks', record)
+    storage.list_run_page()  # Isolate process proof from the first bootstrap barrier.
+    read = store.read
+    reads, proofs = [], []
+    def bounded_read(directory, identifier, **kwargs):
+        assert identifier == 'orphan'
+        assert kwargs['include_prompt'] is False
+        assert kwargs['metadata_byte_limit'] == 4 * 1024 * 1024
+        reads.append(identifier)
+        return read(directory, identifier, **kwargs)
+    def proof(candidate):
+        proofs.append(candidate)
+        return verdict, 'verified fixture process identity'
+    monkeypatch.setattr(store, 'read', bounded_read)
+    monkeypatch.setattr(identity, 'check_detail', proof)
+    monkeypatch.setattr(w, 'task_liveness', lambda *args: pytest.fail('legacy stream-replaying liveness helper'))
+    lease = w.CheckoutLease(storage, str(tmp_path), True, wait_seconds=.01)
+    if verdict == 'dead':
+        async with lease:
+            pass
+    else:
+        with pytest.raises(w.DispatchNotStarted, match='reconciliation'):
+            async with lease:
+                pass
+    assert reads and len(reads) == len(proofs)
+    assert all(candidate == identity.task_identity(record.pid, record.start_time, record.markers) for candidate in proofs)
+    assert lease.handle.closed
 
 
 async def test_missing_dispatch_stays_blocking_and_wait_is_bounded(tmp_path):

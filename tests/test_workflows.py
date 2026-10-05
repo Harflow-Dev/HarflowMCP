@@ -1801,12 +1801,28 @@ async def test_single_selected_optional_failure_has_no_tolerance(storage, tmp_pa
     assert not any(a.get("optional_failure") for a in run["activations"])
 
 
-async def test_optional_fallback_exhaustion_continues_required_branch(storage, tmp_path):
+async def test_optional_fallback_exhaustion_continues_required_branch(storage, tmp_path, monkeypatch):
     graph = optional_parallel_definition()
+    next(n for n in graph["nodes"] if n["id"] == "left")["instructions"] = "optional branch fixture"
+    next(n for n in graph["nodes"] if n["id"] == "right")["instructions"] = "required branch fixture"
+    original_start = FakeRegistry.start
+    async def start(registry, prompt, repo_path, **kwargs):
+        owner = storage.task_owner(kwargs["task_id"])
+        if owner and owner.get("role") == "node" and owner.get("node_id") == "left":
+            registry.calls.append((prompt, kwargs))
+            task = FakeTask(kwargs["task_id"], summary="", status="failed", backend=kwargs["backend"].name, stderr=["API Error: 503 unavailable"])
+        elif owner and owner.get("role") == "node" and owner.get("node_id") == "right":
+            registry.calls.append((prompt, kwargs))
+            task = FakeTask(kwargs["task_id"], "required success")
+        else:
+            return await original_start(registry, prompt, repo_path, **kwargs)
+        registry.tasks[task.task_id] = task
+        return task
+    monkeypatch.setattr(FakeRegistry, "start", start)
     next(n for n in graph["nodes"] if n["id"] == "left")["agent"]["fallbacks"] = [{"backend": "claude"}]
     decision = json.dumps({"action": "continue", "connections": ["left-edge", "right-edge"], "reason": "Both"})
-    run, registry = await execute(storage, tmp_path, graph, ["split", decision, {"summary": "", "status": "failed", "backend": "codex", "stderr": ["API Error: 503 unavailable"]}, {"summary": "", "status": "failed", "backend": "claude", "stderr": ["API Error: 529 overloaded_error"]}, "required success"])
-    assert run["status"] == "completed"
+    run, registry = await execute(storage, tmp_path, graph, ["split", decision])
+    assert run["status"] == "completed", (run.get("attention_reason"), [(a["node_id"], a["role"], [t.get("result") for t in a["tasks"]]) for a in run["activations"]])
     assert any(a.get("optional_failure") for a in run["activations"])
 
 

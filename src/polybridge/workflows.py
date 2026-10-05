@@ -778,6 +778,11 @@ class WorkflowStore:
 
     def _catalog_run_header(self, run: dict[str, Any]) -> dict[str, Any]:
         header = self.run_header(run)
+        header['_checkout'] = [{'task_id': task['task_id'], 'workflow_run_id': run['workflow_run_id'],
+                                'repo_path': str(Path(run['repo_path']).resolve()), 'freedom': task.get('freedom', 'write_in_repo'),
+                                'supervisor_pid': run.get('supervisor_pid'), 'supervisor_identity': run.get('supervisor_identity')}
+                               for activation in run.get('activations', []) for task in activation.get('tasks', [])
+                               if task.get('status') in {'running', 'reserved', 'uncertain'}]
         header['_associations'] = {task['task_id']: {'workflow_run_id': run['workflow_run_id'], 'workflow_node_id': activation.get('node_id'), 'workflow_role': activation.get('role'), 'node_id': activation.get('node_id'), 'role': activation.get('role'), 'activation_id': activation.get('id'), 'execution_contract': run.get('execution_contract'), 'status': run.get('status')}
                                    for activation in run.get('activations', []) for task in activation.get('tasks', [])}
         return header
@@ -1681,17 +1686,44 @@ class CheckoutLease:
 
     def _orphan_owner(self) -> dict[str, str] | None:
         """Durable live dispatches remain a barrier when their supervisor dies."""
-        for run in self.store.list_runs():
-            if run["repo_path"] != self.repo or _supervisor_present(run):
+        from .catalog import Catalog
+        from . import identity
+        index = self.store._ownership_catalog()
+        if not index.ready():
+            self.store.list_run_page()
+            return {"workflow_run_id": "unknown", "task_id": "indexing"}
+        with index.connect() as db:
+            rows = db.execute('SELECT checkout_tasks.payload,sources.mtime,sources.size,checkout_tasks.run_id FROM checkout_tasks LEFT JOIN sources ON sources.id=checkout_tasks.run_id WHERE repo=? ORDER BY checkout_tasks.id LIMIT 101', (self.repo,)).fetchall()
+        if len(rows) > 100:
+            return {"workflow_run_id": "unknown", "task_id": "too_many_checkout_owners"}
+        budget = Catalog(self.store.root / 'tasks', task_store.RECORD_SUFFIX)
+        checked = set()
+        for row in rows:
+            run_id = row[3]
+            if run_id in checked:
                 continue
-            for activation in run["activations"]:
-                for task in activation["tasks"]:
-                    if task["status"] not in {"running", "reserved", "uncertain"}:
-                        continue
-                    record = task_store.read(self.store.root / "tasks", task["task_id"])
-                    unresolved = record is None or task_liveness(self.store.root / "tasks", record)["process_alive"] is not False
-                    if unresolved and (self.write or task.get("freedom", "write_in_repo") != "read_only"):
-                        return {"workflow_run_id": run["workflow_run_id"], "task_id": task["task_id"]}
+            checked.add(run_id)
+            try:
+                source = (self.store.runs / f'{run_id}.json').stat()
+                if (source.st_mtime_ns, source.st_size) != (row[1], row[2]):
+                    with self.store.lock(f'run:{run_id}'):
+                        refreshed = self.store.get_run(run_id, metadata_byte_limit=4 * 1024 * 1024, metadata_budget=budget)
+                        self.store._index_run(refreshed, previous_directory_mtime=self.store.runs.stat().st_mtime_ns)
+                    return {"workflow_run_id": run_id, "task_id": "ownership_refreshed"}
+            except (OSError, ValueError, TypeError):
+                return {"workflow_run_id": run_id, "task_id": "ownership_uncertain"}
+        for row in rows:
+            task = json.loads(row[0])
+            if _supervisor_present(task) or not self.write and task.get('freedom') == 'read_only':
+                continue
+            try:
+                record = task_store.read(self.store.root / 'tasks', task['task_id'], include_prompt=False, metadata_byte_limit=4 * 1024 * 1024, metadata_budget=budget)
+                observed = record is not None and record.status in task_store.TERMINAL_RECORD_STATUSES and not task_store.outcome_unobserved(record)
+                verdict = 'dead' if observed else identity.check_detail(identity.task_identity(record.pid, record.start_time, record.markers))[0] if record is not None else 'undecidable'
+            except (OSError, ValueError, TypeError):
+                verdict = 'undecidable'
+            if verdict != 'dead':
+                return {"workflow_run_id": task['workflow_run_id'], "task_id": task['task_id']}
         return None
 
     async def _acquire(self):
@@ -1704,7 +1736,11 @@ class CheckoutLease:
                 raise DispatchNotStarted("Scheduling stopped before dispatch")
             # After a supervisor crash its agent processes may outlive the OS lease.
             # Their durable associations still block conflicting checkout activity.
-            conflict_owner = self._orphan_owner()
+            try:
+                conflict_owner = await asyncio.to_thread(self._orphan_owner)
+            except BaseException:
+                self.handle.close()
+                raise
             orphan_conflict = conflict_owner is not None
             if orphan_conflict:
                 if not notified and self.on_wait:
@@ -1724,7 +1760,7 @@ class CheckoutLease:
                 # The prior owner may die between the scan and flock acquisition.
                 # Recheck durable associations while holding the descriptor.
                 try:
-                    conflict_owner = self._orphan_owner()
+                    conflict_owner = await asyncio.to_thread(self._orphan_owner)
                 except BaseException:
                     fcntl.flock(self.handle, fcntl.LOCK_UN)
                     self.handle.close()

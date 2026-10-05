@@ -534,24 +534,100 @@ def publish_input(store: Any, source: dict[str, Any]) -> None:
     root_id = link.get("root_workflow_run_id")
     if not root_id or root_id == source["workflow_run_id"]:
         return
-    waiting = [r for r in store.list_runs() if (r.get("parent_link") or {}).get("root_workflow_run_id") == root_id and r.get("status") == "needs_input" and r.get("input_decision_id") and r.get("input_question")]
-    if waiting:
-        source = min(waiting, key=lambda r: (r.get("created_at", 0), r["workflow_run_id"]))
+    # Only persisted invocation edges establish this tree. Retained run history
+    # can be arbitrarily large and must never be decoded to choose a question.
+    from .bounded_io import ReadLimit
+    from .catalog import Catalog
+    from .workflow_references import MAX_WORKFLOW_NESTING_DEPTH
+    budget = Catalog(store.runs, '.json')
+    exhausted = False
+    def read(identifier: str) -> dict[str, Any]:
+        return store.get_run(identifier, metadata_byte_limit=4 * 1024 * 1024, metadata_budget=budget)
+    def unavailable() -> None:
+        def suspend(r: dict[str, Any]) -> None:
+            if r.get('status') not in _w().TERMINAL and r.get('status') != 'needs_input':
+                r.update(status='needs_attention', attention_reason='Workflow input tree could not be completely verified within bounded metadata arbitration; inspect its known runs directly before retrying')
+        store.update_run(root_id, suspend, 'child_input_arbitration_unavailable')
+    try:
+        root = read(root_id)
+    except ReadLimit:
+        raise _w().WorkflowError('Workflow input ancestry exceeds bounded metadata arbitration') from None
+    except (OSError, ValueError, KeyError):
+        return
+    if root.get("status") in _w().TERMINAL or root.get("status") == "needs_input" and root.get("input_decision_id"):
+        return
+    records = {root_id: root}
+    # Establish the publishing source's exact ownership before any root mutation.
+    child_id, ancestry = source['workflow_run_id'], set()
+    try:
+        while child_id != root_id:
+            if child_id in ancestry or len(ancestry) >= MAX_WORKFLOW_NESTING_DEPTH - 1:
+                return
+            ancestry.add(child_id)
+            child = records.get(child_id) or read(child_id)
+            records[child_id] = child
+            child_link = child.get('parent_link') or {}
+            if child.get('workflow_run_id') != child_id or child_link.get('root_workflow_run_id') != root_id:
+                return
+            parent_id = child_link.get('workflow_run_id')
+            parent = records.get(parent_id) or read(parent_id)
+            records[parent_id] = parent
+            activation = next((a for a in parent.get('activations', []) if a.get('id') == child_link.get('execution_id') and (a.get('invocation') or {}).get('child_workflow_run_id') == child_id), None)
+            if activation is None:
+                return
+            outcome = (activation.get('node_result', {}).get('result') or {}).get('child_outcome') or {}
+            if activation.get('status') == 'completed' and activation['invocation'].get('stage') == 'settled' and outcome.get('kind') == 'completed':
+                return
+            child_id = parent_id
+    except ReadLimit:
+        raise _w().WorkflowError('Workflow input ancestry exceeds bounded metadata arbitration') from None
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return
+    paths = {root_id: [root_id]}
+    stack, waiting = [root_id], []
+    while stack:
+        parent_id = stack.pop()
+        parent, path = records[parent_id], paths[parent_id]
+        if len(path) >= MAX_WORKFLOW_NESTING_DEPTH:
+            continue
+        for activation in parent.get("activations", []):
+            invocation = activation.get("invocation")
+            if not invocation:
+                continue
+            outcome = (activation.get('node_result', {}).get('result') or {}).get('child_outcome') or {}
+            if activation.get('status') == 'completed' and invocation.get('stage') == 'settled' and outcome.get('kind') == 'completed':
+                continue
+            try:
+                child_id = invocation["child_workflow_run_id"]
+                child = records.get(child_id) or read(child_id)
+                child_link = child.get("parent_link") or {}
+                if child.get("workflow_run_id") != child_id or child_link.get("workflow_run_id") != parent_id or child_link.get("execution_id") != activation.get("id") or child_link.get("root_workflow_run_id") != root_id:
+                    exhausted = True
+                    break
+                records[child_id] = child
+                if child_id in paths:
+                    continue
+                paths[child_id] = [*path, child_id]
+                stack.append(child_id)
+                if child.get("status") == "needs_input" and child.get("input_decision_id") and child.get("input_question"):
+                    waiting.append(child)
+            except ReadLimit:
+                exhausted = True
+                break
+            except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                exhausted = True
+                break
+        if exhausted:
+            unavailable()
+            return
+    if source['workflow_run_id'] not in paths or not waiting:
+        return
+    source = min(waiting, key=lambda r: (r.get("created_at", 0), r["workflow_run_id"]))
     question = source.get("input_question")
     decision_id = source.get("input_decision_id")
     if not question or not decision_id:
         return
-    path = [source["workflow_run_id"]]
-    walker = source
-    while (walker.get("parent_link") or {}).get("workflow_run_id"):
-        parent_id = walker["parent_link"]["workflow_run_id"]
-        path.append(parent_id)
-        if parent_id == root_id:
-            break
-        try:
-            walker = store.get_run(parent_id)
-        except (OSError, ValueError, KeyError):
-            return
+    path = paths[source["workflow_run_id"]]
     def forward(r: dict[str, Any]) -> None:
         if r["status"] in _w().TERMINAL:
             return
@@ -559,7 +635,7 @@ def publish_input(store: Any, source: dict[str, Any]) -> None:
         # Other descendants remain suspended and will publish on re-entry.
         if r.get("status") == "needs_input" and r.get("input_decision_id"):
             return
-        r.update(status="needs_input", input_question=question, input_decision_id=decision_id, attention_reason="A workflow node needs caller input", input_source={"workflow_run_id": source["workflow_run_id"], "workflow_name": source.get("name", ""), "path": list(reversed(path))})
+        r.update(status="needs_input", input_question=question, input_decision_id=decision_id, attention_reason="A workflow node needs caller input", input_source={"workflow_run_id": source["workflow_run_id"], "workflow_name": source.get("name", ""), "path": path})
     store.update_run(root_id, forward, "child_input_forwarded", {"source": source["workflow_run_id"], "input_decision_id": decision_id})
 
 
@@ -805,7 +881,11 @@ async def run_child(supervisor: Any, node: dict[str, Any], token: dict[str, Any]
         stage_update("settled", "child_timeout_uncertain")
         return
     if child_final is not None and child_final.get("status") == "needs_input":
-        publish_input(store, child_final)
+        try:
+            await asyncio.to_thread(publish_input, store, child_final)
+        except _w().WorkflowError as exc:
+            supervisor.attention(str(exc))
+            return
         invocation["stage"] = "waiting"
         supervisor.update(lambda r: (next(a for a in r["activations"] if a["id"] == activation["id"]).update(status="waiting_for_child", invocation=copy.deepcopy(invocation)), r.update(suspended_via_root=True)), "child_waiting_for_input", {"child_workflow_run_id": child_id})
         return

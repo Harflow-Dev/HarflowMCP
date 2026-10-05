@@ -372,5 +372,11 @@ def _check_configs(record: Any, configs: list[tuple[dict[str, Any], str, bool | 
             raise ValueError("Saved workflow network cannot exceed the caller's network restriction")
         for candidate in [config, *config.get("fallbacks", [])]:
             backend_ = backends.get(candidate["backend"])
-            enforcement = backend_.enforcement(freedom, network)
+            try:
+                enforcement = backend_.enforcement(freedom, network)
+            except backends.NestedDispatchRefused:
+                raise
+            except backends.UnsupportedCapability:
+                continue
+            # A runnable weaker candidate remains forbidden even if another is safe.
             check_nested_enforcement(record.enforcement or {}, enforcement, parent_backend=record.backend, child_backend=backend_.name, parent_repo=record.repo_path, child_repo=record.repo_path)

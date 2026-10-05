@@ -24,7 +24,7 @@ def bound_header(header: dict[str, Any]) -> dict[str, Any]:
     result = dict(header)
     if isinstance(result.get('sessions'), dict):
         result['sessions'] = {'orchestrator': str(result['sessions']['orchestrator'])[:128]} if result['sessions'].get('orchestrator') else {}
-    protected = {'task_id', 'workflow_run_id', 'parent_workflow_run_id', 'root_workflow_run_id', 'orchestrator_session_owner_run_id', 'workflow_session_owner_run_id', 'session_id', 'parent_task_id', 'root_task_id', 'spawned_by', 'status', 'started_at', 'created_at', 'updated_at', 'backend', 'kind', 'execution_contract', 'sessions'}
+    protected = {'task_id', 'workflow_run_id', 'parent_workflow_run_id', 'root_workflow_run_id', 'orchestrator_session_owner_run_id', 'workflow_session_owner_run_id', 'session_id', 'parent_task_id', 'root_task_id', 'spawned_by', 'status', 'started_at', 'created_at', 'updated_at', 'backend', 'kind', 'execution_contract', 'needs_direct_lookup', 'sessions'}
     protected.update({'persisted_status', 'observed_exit', 'process_identity_state', 'needs_reconciliation', 'status_reconciled'})
     for key, value in list(result.items()):
         if isinstance(value, str):
@@ -92,15 +92,19 @@ class Catalog:
         db.execute('CREATE TABLE IF NOT EXISTS associations (id TEXT PRIMARY KEY,payload TEXT NOT NULL)')
         db.execute('CREATE TABLE IF NOT EXISTS sources (id TEXT PRIMARY KEY,mtime INTEGER,size INTEGER)')
         db.execute('CREATE TABLE IF NOT EXISTS seen (id TEXT PRIMARY KEY,generation INTEGER NOT NULL)')
+        db.execute('CREATE TABLE IF NOT EXISTS checkout_tasks (id TEXT PRIMARY KEY,run_id TEXT NOT NULL,repo TEXT NOT NULL,payload TEXT NOT NULL)')
+        db.execute('CREATE INDEX IF NOT EXISTS checkout_repo ON checkout_tasks(repo)')
+        db.execute('CREATE INDEX IF NOT EXISTS checkout_run ON checkout_tasks(run_id)')
         version = db.execute("SELECT value FROM state WHERE key='schema_version'").fetchone()
-        if version != ('5',):
+        if version != ('6',):
+            db.execute('DELETE FROM checkout_tasks')
             db.execute('DELETE FROM entries')
             db.execute('DELETE FROM callers')
             db.execute('DELETE FROM associations')
             db.execute('DELETE FROM sources')
             db.execute('DELETE FROM seen')
             db.execute('DELETE FROM state')
-            db.execute("INSERT INTO state VALUES ('schema_version','5')")
+            db.execute("INSERT INTO state VALUES ('schema_version','6')")
         # Build only after invalidating old derivative headers. The partial index
         # makes warm authority readiness independent of retained history size.
         db.execute("CREATE INDEX IF NOT EXISTS incomplete_headers ON entries(id) WHERE json_extract(payload,'$.needs_direct_lookup')=1")
@@ -110,6 +114,14 @@ class Catalog:
 
     def _put(self, db: sqlite3.Connection, header: dict[str, Any], stamp: float, active: bool, identifier: str) -> None:
         header = dict(header)
+        checkout = header.pop('_checkout', [])
+        db.execute('DELETE FROM checkout_tasks WHERE run_id=?', (identifier,))
+        for task in checkout:
+            encoded = json.dumps(task, ensure_ascii=True, separators=(',', ':'))
+            if len(encoded.encode()) > 8 * 1024:
+                header.update(needs_direct_lookup=True, status='unknown')
+                continue
+            db.execute('INSERT OR REPLACE INTO checkout_tasks VALUES (?,?,?,?)', (task['task_id'], identifier, task['repo_path'], encoded))
         caller = header.pop('_caller', None)
         associations = header.pop('_associations', {})
         for task_id, association in associations.items():
@@ -154,6 +166,7 @@ class Catalog:
             return True
 
     def _remove(self, db: sqlite3.Connection, identifier: str) -> None:
+        db.execute('DELETE FROM checkout_tasks WHERE run_id=?', (identifier,))
         db.execute("DELETE FROM associations WHERE json_extract(payload,'$.workflow_run_id')=?", (identifier,))
         for table in ('entries', 'callers', 'associations', 'sources', 'seen'):
             db.execute(f'DELETE FROM {table} WHERE id=?', (identifier,))
@@ -228,6 +241,7 @@ class Catalog:
         if not pending:
             generation = int(state.get('scan_generation', '0'))
             stale = 'SELECT id FROM entries WHERE id NOT IN (SELECT id FROM seen WHERE generation=?)'
+            db.execute(f"DELETE FROM checkout_tasks WHERE run_id IN ({stale})", (generation,))
             db.execute(f"DELETE FROM associations WHERE json_extract(payload,'$.workflow_run_id') IN ({stale})", (generation,))
             for table in ('callers', 'sources', 'entries'):
                 db.execute(f'DELETE FROM {table} WHERE id NOT IN (SELECT id FROM seen WHERE generation=?)', (generation,))
