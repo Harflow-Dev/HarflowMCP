@@ -8,7 +8,10 @@ version = "0.1.0"
 description = "Local MCP server that dispatches coding tasks to headless agents (Claude Code, Codex, opencode, vibe, Antigravity)"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["mcp>=2.0,<3"]
+dependencies = [
+    "mcp>=2.0,<3",
+    "tomlkit>=0.13,<1",
+]
 
 [project.scripts]
 polybridge-server = "polybridge.server:main"

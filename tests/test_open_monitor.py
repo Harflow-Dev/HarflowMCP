@@ -134,7 +134,12 @@ async def test_opening_is_skipped(
         log_dir=tmp_path / "tasks", monitor_launcher=launcher, open_monitor=skip != "registry_off"
     )
 
-    await _start(registry, git_repo, backend)
+    if skip == "pb_task_id":
+        from polybridge.backends import NestedDispatchRefused
+        with pytest.raises(NestedDispatchRefused, match="PB_TASK_ID"):
+            await _start(registry, git_repo, backend)
+    else:
+        await _start(registry, git_repo, backend)
 
     assert launcher.urls == []
 

@@ -333,6 +333,8 @@ async def take_over(
     record = await asyncio.to_thread(store.read, log_dir, task_id)
     if record is None:
         raise control.TakeoverRefused("unknown_task", f"unknown task_id: {task_id}")
+    from .workflow_hooks import refuse_takeover
+    await asyncio.to_thread(refuse_takeover, log_dir, task_id)
     controller = await asyncio.to_thread(identity.own_identity)
 
     n: int | None = None
@@ -373,6 +375,7 @@ async def take_over(
                         f"another run started on session {record.session_id} meanwhile: "
                         f"{', '.join(holders)}",
                     )
+                await asyncio.to_thread(refuse_takeover, log_dir, task_id)
                 await asyncio.to_thread(control.mark_takeover_ready, log_dir, task_id, n)
         except control.LockTimeout:
             raise _Refusal("session_busy", "the session lock could not be taken to finish") from None
@@ -438,6 +441,8 @@ def attach(
     record = store.read(log_dir, task_id)
     if record is None:
         raise control.TakeoverRefused("unknown_task", f"unknown task_id: {task_id}")
+    from .workflow_hooks import refuse_takeover
+    refuse_takeover(log_dir, task_id)
     if not record.session_id:
         raise control.TakeoverRefused("not_ready", f"task {task_id} has no takeover ready to attach")
     try:

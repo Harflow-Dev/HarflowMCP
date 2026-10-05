@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, NamedTuple, Protocol, runtime_checkable
 
+from .mcp_approval import MCPApprovalPolicy
+
 Freedom = Literal["read_only", "write_in_repo", "publish", "unrestricted"]
 
 FREEDOMS: tuple[Freedom, ...] = ("read_only", "write_in_repo", "publish", "unrestricted")
@@ -25,7 +27,7 @@ DEFAULT_FREEDOM: Freedom = "write_in_repo"
 
 Status = Literal["running", "completed", "failed", "timed_out", "cancelled"]
 
-StdinMode = Literal["devnull", "pipe"]
+StdinMode = Literal["devnull", "pipe", "pipe_once"]
 STDIN_DEVNULL: StdinMode = "devnull"
 STDIN_PIPE: StdinMode = "pipe"
 
@@ -39,12 +41,14 @@ class Invocation:
     was actually built — never from the backend's name or its static capability. A live-input run
     (`stdin_mode="pipe"`) carries its prompt as `initial_input`, because a CLI reading its input as a
     stream ignores a positional prompt (measured on claude). Every other run is `"devnull"` with no
-    initial input: codex and vibe block forever reading an open stdin, so DEVNULL is mandatory there.
+    initial input. Backends may also support "pipe_once": a large prompt is sent as
+    initial bytes and stdin is immediately closed, without a live-input pump.
     """
 
     argv: list[str]
     stdin_mode: StdinMode = STDIN_DEVNULL
     initial_input: bytes | None = None
+    scratch_directory: str | None = None
 
     @property
     def live_input(self) -> bool:
@@ -354,6 +358,7 @@ class Backend(Protocol):
     name: str
     binary: str
     capabilities: Capabilities
+    mcp_approval: MCPApprovalPolicy
 
     def build_start_argv(
         self,

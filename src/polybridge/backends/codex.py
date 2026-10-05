@@ -2,8 +2,9 @@
 
 CLI facts established by capturing a real run, not assumption:
 
-* `codex exec` **blocks forever reading stdin** unless stdin is closed. Spawning with
-  `stdin=DEVNULL` is mandatory, not tidiness.
+* `codex exec` **blocks forever reading stdin** unless stdin is closed. Small prompts use
+  `stdin=DEVNULL`; prompts over 32 KiB use the documented `-` positional and a one-shot
+  pipe closed immediately after delivery. This avoids argv size limits without truncation.
 * An approval prompt would hang a headless run just as badly, so `approval_policy="never"` is pinned
   alongside the sandbox mode.
 * The event stream is nothing like Claude's::
@@ -62,10 +63,15 @@ only: measured, `git push <local bare repo> HEAD:refs/heads/main` still landed w
 
 from __future__ import annotations
 
+from dataclasses import replace
+import os
+import tomllib
+
 from pathlib import Path
 from typing import Any
 
 from . import normalize as nz
+from .mcp_approval import CodexApproval
 from .base import (
     EFFORTS,
     Accumulator,
@@ -196,8 +202,8 @@ _MODE_CAVEATS: dict[str, tuple[str, ...]] = {
 # /etc`. Long aliases (`--cd`, `--sandbox`, `--config`, `--model`) are deliberately absent even though
 # codex accepts them: this backend never writes them, so admitting them here would reopen the same
 # hole under a different spelling.
-BOOLEAN_FLAGS = ("--json",)
-VALUE_FLAGS = ("-C", "-s", "-c", "-m")
+BOOLEAN_FLAGS = ("--json", "--skip-git-repo-check")
+VALUE_FLAGS = ("-C", "-s", "-c", "-m", "--add-dir")
 
 # The only `-c key=value` literals this backend ever writes, matched byte-for-byte rather than
 # parsed. Measured: codex normalises whitespace around a `-c key=value` pair before applying it, and
@@ -254,7 +260,25 @@ class UnsafeInvocationError(RuntimeError):
 
 
 class CodexBackend:
+    @staticmethod
+    def workflow_stderr_availability_failure(diagnostic: str) -> str | None:
+        from .workflow_diagnostics import stderr_availability
+        return stderr_availability(diagnostic, quota_patterns=('(?im)^.*(?:usage_limit_reached|insufficient_quota|model_not_found|rate_limit_exceeded).*$',))
+
+    @staticmethod
+    def workflow_availability_failure(event: dict[str, Any]) -> str | None:
+        from .workflow_diagnostics import provider_error
+        return provider_error(event, event_type="turn.failed", quota_reason="codex availability rejected")
+
+    @staticmethod
+    def workflow_failure_diagnostic(event: dict[str, Any]) -> str | None:
+        error = event.get("error")
+        if event.get("type") == "turn.failed" and isinstance(error, dict) and isinstance(error.get("message"), str):
+            return error["message"]
+        return None
+
     name = "codex"
+    mcp_approval = CodexApproval()
     binary = BINARY
     capabilities = Capabilities(
         # Codex mints its own thread id and reports it in the stream.
@@ -294,6 +318,20 @@ class CodexBackend:
         supports_live_input=False,
     )
 
+    def with_writable_directory(self, invocation: Invocation, path: Path, freedom: Freedom) -> Invocation:
+        if freedom == "read_only":
+            raise ValueError("read-only tasks cannot receive a writable scratch directory")
+        directory = str(path.resolve())
+        if invocation.scratch_directory is not None:
+            raise ValueError("invocation already has a scratch directory")
+        argv = list(invocation.argv)
+        # Both start and resume accept this global option before their positional region.
+        index = argv.index("--") if "--" in argv else len(argv)
+        if index and argv[index - 1] == "resume":
+            index -= 1
+        argv[index:index] = ["--add-dir", directory]
+        return replace(invocation, argv=argv, scratch_directory=directory)
+
     def build_start_argv(
         self,
         prompt: str,
@@ -312,7 +350,7 @@ class CodexBackend:
         argv = [BINARY, "exec", *self._options(repo, freedom, model, reasoning_effort, network)]
         # `--` then the prompt: last, and explicitly not parsed as an option however it looks.
         argv += ["--", self._check_prompt(prompt)]
-        invocation = Invocation(argv)
+        invocation = self._prompt_invocation(argv, prompt)
         self.assert_safe(invocation, freedom, network)
         return invocation
 
@@ -340,9 +378,18 @@ class CodexBackend:
         ]
         # `codex exec resume [SESSION_ID] [PROMPT]` — both positional, after `--`.
         argv += ["--", session_id, self._check_prompt(prompt)]
-        invocation = Invocation(argv)
+        invocation = self._prompt_invocation(argv, prompt)
         self.assert_safe(invocation, freedom, network)
         return invocation
+
+    @staticmethod
+    def _prompt_invocation(argv: list[str], prompt: str) -> Invocation:
+        # Exec accepts '-' as a stdin prompt. Unlike a live stream, stdin must reach
+        # EOF immediately after these bytes, otherwise the CLI waits indefinitely.
+        if prompt == "-" or len(prompt.encode("utf-8")) > 32 * 1024:
+            argv[-1] = "-"
+            return Invocation(argv, stdin_mode="pipe_once", initial_input=prompt.encode("utf-8"))
+        return Invocation(argv)
 
     def _options(
         self,
@@ -354,7 +401,10 @@ class CodexBackend:
     ) -> list[str]:
         check_reasoning_effort(self, reasoning_effort)
         resolved = self._resolve_network(freedom, network)
-        options = ["--json", "-C", str(repo), "-s", SANDBOX_MODES[freedom], *NEVER_ASK]
+        # Polybridge explicitly chooses the working directory; a Git checkout is not
+        # required for read-only builders. This skips only Codex's Git-directory guard,
+        # while sandbox and approval overrides below remain mandatory.
+        options = ["--json", "--skip-git-repo-check", "-C", str(repo), "-s", SANDBOX_MODES[freedom], *NEVER_ASK]
         if SANDBOX_MODES[freedom] == "workspace-write":
             # Only meaningful for workspace-write: the key is scoped to that sandbox, and
             # `read-only` was measured immune to it even when the user's config sets it true.
@@ -400,7 +450,13 @@ class CodexBackend:
         self, invocation: Invocation, freedom: Freedom, network: bool | None = None
     ) -> None:
         # No live input here: only a devnull-stdin Invocation is a shape this backend ever builds.
-        problem = classic_invocation_problem(invocation)
+        one_shot = isinstance(invocation, Invocation) and invocation.stdin_mode == "pipe_once"
+        if one_shot:
+            if not isinstance(invocation.initial_input, bytes) or not invocation.initial_input.strip() or invocation.argv[-1:] != ["-"]:
+                raise UnsafeInvocationError("one-shot stdin requires a nonempty prompt and '-' positional")
+            problem = None
+        else:
+            problem = classic_invocation_problem(invocation)
         if problem is not None:
             raise UnsafeInvocationError(problem)
         argv = invocation.argv
@@ -438,6 +494,10 @@ class CodexBackend:
             )
 
         seen, is_resume = self._parse_options(options, argv)
+        expected_directories = [invocation.scratch_directory] if invocation.scratch_directory else []
+        if seen.get("--add-dir", []) != expected_directories or (expected_directories and freedom == "read_only"):
+            raise UnsafeInvocationError("additional directory must match this invocation's writable scratch directory")
+
 
         # Positional arity, not just separator presence. `exec` takes one positional (the prompt),
         # `exec resume` takes two (session id then prompt) — and a resume missing its prompt is the
@@ -457,6 +517,9 @@ class CodexBackend:
         # the allowlist's promise is that nothing else wrote here either.
         if len(seen.get("--json", [])) != 1:
             raise UnsafeInvocationError(f"refusing to run codex without exactly one --json: {argv!r}")
+
+        if len(seen.get("--skip-git-repo-check", [])) > 1:
+            raise UnsafeInvocationError("expected at most one --skip-git-repo-check")
 
         cds = seen.get("-C", [])
         if len(cds) != 1:
@@ -615,6 +678,25 @@ class CodexBackend:
                 )
         return seen, is_resume
 
+    @staticmethod
+    def _configured_writable_roots() -> tuple[tuple[str, ...], str]:
+        config_path = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))) / "config.toml"
+        try:
+            config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+            settings = config.get("sandbox_workspace_write", {})
+            profile = config.get("profile")
+            profiles = config.get("profiles", {})
+            if isinstance(profile, str) and isinstance(profiles, dict):
+                selected = profiles.get(profile, {})
+                if isinstance(selected, dict) and isinstance(selected.get("sandbox_workspace_write"), dict):
+                    settings = {**(settings if isinstance(settings, dict) else {}), **selected["sandbox_workspace_write"]}
+            roots = settings.get("writable_roots", []) if isinstance(settings, dict) else []
+            if isinstance(roots, list) and all(isinstance(root, str) for root in roots):
+                return tuple(roots), str(config_path)
+        except (OSError, UnicodeError, ValueError):
+            pass
+        return (), str(config_path)
+
     def enforcement(self, freedom: Freedom, network: bool | None = None) -> Enforcement:
         mode = SANDBOX_MODES[freedom]
         unrestricted = freedom == "unrestricted"
@@ -641,13 +723,16 @@ class CodexBackend:
             caveats.append(_NETWORK_CAVEAT)
             if freedom == "write_in_repo":
                 caveats.append(_NETWORK_TRUE_AT_WRITE_IN_REPO_CAVEAT)
+        configured_roots, config_path = self._configured_writable_roots() if mode == "workspace-write" else ((), "")
+        if configured_roots:
+            caveats.append(f"Additional writable_roots inherited from {config_path}; these are configured paths observed at launch, including the selected profile, not an OS sandbox receipt. Relative paths remain as configured and configuration can change before the CLI reads it.")
         return Enforcement(
             freedom=freedom,
             mechanism=mechanism,
             # Imposed by the OS, not by the agent's own judgement — except when switched off.
             os_enforced=not unrestricted,
             writes_confined=not unrestricted,
-            writable_roots=WRITABLE_ROOTS[freedom],
+            writable_roots=tuple(dict.fromkeys((*WRITABLE_ROOTS[freedom], *configured_roots))),
             # Codex has no per-command deny list at all, so neither claim can be made.
             commit_push_blocked=False,
             direct_commit_commands_denied=False,

@@ -22,7 +22,9 @@ CLI facts established by measurement, not assumption:
   a positional prompt is silently ignored, so a live run carries its prompt as the first stdin line
   and has no `--` and no positional at all. Mid-turn messages fold into the running turn; after a
   `result` the process idles until more input or EOF. Every run is live except one with `max_turns`
-  (an unmeasured combination), which keeps the classic `-- <prompt>` shape on stdin DEVNULL.
+  (an unmeasured combination). Capped runs use classic argv for small prompts, or raw text
+  one-shot stdin and immediate EOF for large prompts; native start and resume were verified
+  against an isolated local API with exact 1 MiB assignments.
 * **Partial messages** (claude 2.1.283, real captures in `tests/fixtures/claude_partial_*.jsonl`):
   `--include-partial-messages` adds `stream_event` lines to the stream-json output in both the
   classic and the live shape, and on resume. Each message opens with a `message_start` carrying the
@@ -38,8 +40,7 @@ command requires approval", because `acceptEdits` auto-approves *edits*, not arb
 headless `-p` mode has nobody to give that approval. The lever that actually works is an allow-list:
 `--permission-mode acceptEdits --allowedTools "Bash(git commit:*),Bash(git push:*)"` let both commands
 succeed with an empty `permission_denials`, and the commit landed in a bare remote. So at `publish`
-the deny patterns are dropped and `--allowedTools "Bash(git commit:*),Bash(git push:*),Bash(gh pr
-create:*)"` is added instead — deny and allow are never combined, since deny beats allow and would be
+the deny patterns are dropped and `--allowedTools "Bash(git commit:*),Bash(git push:*)"` is added instead — deny and allow are never combined, since deny beats allow and would be
 self-defeating. Everything else still needs approval, which a headless run cannot give, so it is
 still refused — `publish` is a genuine middle tier here, not a fallback to `bypassPermissions`. Also
 measured: the approval layer refuses a *chained* command citing each part separately (e.g.
@@ -58,11 +59,14 @@ the commit landed in both the working repo and the remote.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import json
 from pathlib import Path
 from typing import Any
 
 from . import normalize as nz
+from .mcp_approval import ClaudeApproval
 from .base import (
     EFFORTS,
     FREEDOMS,
@@ -92,10 +96,9 @@ DISALLOWED_TOOLS = "Bash(git commit:*),Bash(git push:*)"
 # allow-list, and `unrestricted` drops them as the (documented) compatibility break above.
 DENY_FREEDOMS: frozenset[str] = frozenset({"read_only", "write_in_repo"})
 
-# One comma-separated value, same reason as DISALLOWED_TOOLS. Measured as the mechanism that
-# actually lets `publish` commit/push/open-a-PR headlessly — see the module docstring.
+# Publish grants generic VCS publishing only. Harness settings own other commands.
 ALLOWED_TOOLS: dict[str, str] = {
-    "publish": "Bash(git commit:*),Bash(git push:*),Bash(gh pr create:*)",
+    "publish": "Bash(git commit:*),Bash(git push:*)",
 }
 
 # Flags that would cut a dispatched agent off from the user's own MCP servers, settings, hooks and
@@ -113,6 +116,7 @@ FORBIDDEN_FLAGS = ("--strict-mcp-config", "--setting-sources", "--safe-mode", "-
 # writes them, so admitting them here would reopen the same hole under a different spelling.
 BOOLEAN_FLAGS = ("--verbose", "--include-partial-messages")
 VALUE_FLAGS = (
+    "--add-dir",
     "--output-format",
     "--input-format",
     "--permission-mode",
@@ -175,7 +179,8 @@ _PUBLISH_ALLOWLIST_CAVEAT = (
     "acceptEdits and no denies, git commit was still refused with \"This command requires "
     "approval\"; the allow-list is the mechanism that actually works). Everything not allow-listed "
     "still needs approval, which a headless run cannot give, so it is still refused — this is a "
-    "genuine middle tier, not a fallback to bypassPermissions"
+    "genuine middle tier, not a fallback to bypassPermissions. Inherited user rules can grant additional commands, "
+    "and command-prefix approval is not an OS sandbox"
 )
 _CHAINED_COMMAND_CAVEAT = (
     "claude's approval layer refuses a chained command citing each part separately (measured: "
@@ -310,7 +315,45 @@ class UnsafeInvocationError(RuntimeError):
 
 
 class ClaudeBackend:
+    @staticmethod
+    def workflow_observed_metadata(snapshot: dict[str, Any]) -> dict[str, Any] | None:
+        path = snapshot.get("raw_stream_log")
+        if not path:
+            return None
+        try:
+            with Path(path).open(encoding="utf-8") as stream:
+                for number, line in enumerate(stream):
+                    if number >= 1000:
+                        break
+                    try:
+                        event = json.loads(line)
+                    except (ValueError, TypeError):
+                        continue
+                    if isinstance(event, dict) and event.get("type") == "system" and event.get("subtype") == "init" and isinstance(event.get("model"), str) and event["model"]:
+                        return {"observed": {"model": event["model"]}, "provenance": "harness_initialization_event", "verification_status": "observed"}
+        except (OSError, UnicodeError):
+            pass
+        return None
+
+    @staticmethod
+    def workflow_stderr_availability_failure(diagnostic: str) -> str | None:
+        from .workflow_diagnostics import stderr_availability
+        return stderr_availability(diagnostic, quota_patterns=("(?im)^.*(?:You've hit your limit|Credit balance is too low|rate_limit_error|model_not_found).*$",))
+
+    @staticmethod
+    def workflow_availability_failure(event: dict[str, Any]) -> str | None:
+        from .workflow_diagnostics import provider_error
+        info = event.get("rate_limit_info")
+        if event.get("type") == "rate_limit_event" and isinstance(info, dict) and info.get("status") == "rejected":
+            return "claude quota rejected"
+        return provider_error(event, event_type="error", extra_transport_codes=("api_error",))
+
+    @staticmethod
+    def workflow_failure_diagnostic(event: dict[str, Any]) -> str | None:
+        return None
+
     name = "claude"
+    mcp_approval = ClaudeApproval()
     binary = BINARY
     capabilities = Capabilities(
         chooses_session_id=True,
@@ -338,6 +381,20 @@ class ClaudeBackend:
         # settles the run regardless of how many messages were queued. agy is the contrast case.
         live_input_message_is_turn=False,
     )
+
+    def with_writable_directory(self, invocation: Invocation, path: Path, freedom: Freedom) -> Invocation:
+        if freedom == "read_only":
+            raise ValueError("read-only tasks cannot receive a writable scratch directory")
+        directory = str(path.resolve())
+        if invocation.scratch_directory is not None:
+            raise ValueError("invocation already has a scratch directory")
+        argv = list(invocation.argv)
+        # Both start and resume accept this global option before their positional region.
+        index = argv.index("--") if "--" in argv else len(argv)
+        if index and argv[index - 1] == "resume":
+            index -= 1
+        argv[index:index] = ["--add-dir", directory]
+        return replace(invocation, argv=argv, scratch_directory=directory)
 
     def build_start_argv(
         self,
@@ -404,13 +461,16 @@ class ClaudeBackend:
         """Live input unless a turn cap was asked for.
 
         `--max-turns` together with `--input-format stream-json` has never been measured, so a
-        capped run keeps the classic one-shot shape (`--` then the prompt as the sole positional,
-        stdin DEVNULL) and cannot take `send_message`. Everything else is live: the prompt becomes
-        the first stdin line and the pipe stays open until the pump closes it.
+        capped run keeps a one-shot shape and cannot take `send_message`: small prompts use the
+        measured positional boundary; large prompts use raw text stdin closed after the initial
+        bytes (installed CLI verified against a local fake API, no paid request). Everything else
+        is live: the prompt becomes the first stdin line and the pipe stays open until the pump closes it.
         """
         argv = self._common(freedom, model, max_turns, reasoning_effort, network)
         prompt = self._check_prompt(prompt)
         if max_turns is not None:
+            if len(prompt.encode("utf-8")) > 32 * 1024:
+                return Invocation([*argv, "--input-format", "text", *session_flags], stdin_mode="pipe_once", initial_input=prompt.encode("utf-8"))
             # `--` then the prompt: last, and explicitly not parsed as an option however it looks —
             # see the note in assert_safe about why this is load-bearing for claude specifically.
             return Invocation([*argv, *session_flags, "--", prompt])
@@ -504,10 +564,9 @@ class ClaudeBackend:
         if argv[:2] != [BINARY, "-p"]:
             raise UnsafeInvocationError(f"unrecognised claude argv layout: {argv!r}")
 
-        # Exactly two shapes, told apart by the separator and each validated completely — never a
-        # mixture. Classic: `--` then exactly one positional (the prompt), stdin DEVNULL. Live: no
-        # `--` and no positional at all, `--input-format stream-json`, a stdin pipe, and the prompt
-        # as the one stream-json line in `initial_input`.
+        # Three exact shapes, never a mixture: small classic prompts after `--` with DEVNULL;
+        # capped large text prompts in one-shot stdin with EOF; live stream-json stdin retained
+        # until the pump closes it. Both stdin forms have no positional prompt.
         #
         # Classic, the reason for `--`: only the option region is inspected, and everything after
         # `--` is the prompt — caller text that happens to contain a flag name must never be able to
@@ -528,8 +587,19 @@ class ClaudeBackend:
         # would be silently ignored by claude under `--input-format stream-json` (measured), so one
         # is refused rather than tolerated. The strict option walk below does that: in the live
         # shape every token must be a known option or its value.
-        live = "--" not in argv
-        if live:
+        one_shot = invocation.stdin_mode == "pipe_once"
+        live = "--" not in argv and not one_shot
+        if one_shot:
+            if "--" in argv or not isinstance(invocation.initial_input, bytes) or not invocation.initial_input:
+                raise UnsafeInvocationError("capped text stdin requires nonempty initial bytes and no positional prompt")
+            try:
+                decoded_input = invocation.initial_input.decode("utf-8")
+                if not decoded_input.strip():
+                    raise UnsafeInvocationError("capped text stdin requires a nonempty prompt")
+            except UnicodeDecodeError as exc:
+                raise UnsafeInvocationError("capped text stdin requires UTF-8 prompt bytes") from exc
+            options = argv[2:]
+        elif live:
             options = argv[2:]
             self._check_live_wiring(invocation)
         else:
@@ -543,6 +613,8 @@ class ClaudeBackend:
                     f"expected exactly one positional argument (the prompt) after `--`, found "
                     f"{len(positionals)}: {argv!r}"
                 )
+            if len(positionals[0].encode("utf-8")) > 32 * 1024:
+                raise UnsafeInvocationError("large capped prompts require one-shot text stdin")
             if invocation.stdin_mode != STDIN_DEVNULL or invocation.initial_input is not None:
                 raise UnsafeInvocationError(
                     f"a one-shot claude argv (prompt after `--`) must run with stdin DEVNULL and no "
@@ -567,6 +639,10 @@ class ClaudeBackend:
                 )
 
         seen = self._parse_options(options, argv)
+        expected_directories = [invocation.scratch_directory] if invocation.scratch_directory else []
+        if seen.get("--add-dir", []) != expected_directories or (expected_directories and freedom == "read_only"):
+            raise UnsafeInvocationError("additional directory must match this invocation's writable scratch directory")
+
 
         self._exactly_one(seen, "--verbose", argv)
         # Exactly once, like --verbose: a second copy would be a shape this backend never writes,
@@ -588,6 +664,10 @@ class ClaudeBackend:
                     f"--max-turns on a live-input run, a combination this backend never builds: "
                     f"{argv!r}"
                 )
+        elif one_shot:
+            caps = seen.get("--max-turns", [])
+            if self._exactly_one(seen, "--input-format", argv) != "text" or len(caps) != 1 or not caps[0].isdigit() or int(caps[0]) <= 0:
+                raise UnsafeInvocationError("one-shot text stdin requires input-format text and a positive turn cap")
         elif input_values:
             raise UnsafeInvocationError(
                 f"--input-format on a one-shot argv, where claude would ignore the positional "
@@ -604,17 +684,7 @@ class ClaudeBackend:
         deny_values = seen.get("--disallowedTools", [])
         allow_values = seen.get("--allowedTools", [])
 
-        # Structurally impossible for both to survive the walk, whatever spelling arrived and
-        # whatever freedom is in play: deny beats allow, so both present would silently neuter an
-        # allow-list freedom rather than error loudly. Checked before either per-freedom branch
-        # below, so this is the invariant itself — not merely a consequence of DENY_FREEDOMS and
-        # ALLOWED_TOOLS happening not to share a freedom today.
-        if deny_values and allow_values:
-            raise UnsafeInvocationError(
-                f"--disallowedTools and --allowedTools both present: deny beats allow, which "
-                f"would silently neuter this freedom's allow-list: {argv!r}"
-            )
-
+        # Exact per-freedom validation rejects broader or conflicting allow rules.
         if freedom in DENY_FREEDOMS:
             denied = self._exactly_one(seen, "--disallowedTools", argv)
             if denied != DISALLOWED_TOOLS:
@@ -821,6 +891,23 @@ class ClaudeBackend:
             acc.session_id = session_id
 
         event_type = event.get("type")
+        if event_type in ("assistant", "user"):
+            message = event.get("message")
+            content = message.get("content", []) if isinstance(message, dict) else []
+            tools = acc.stream_state.setdefault("denial_tool_inputs", {})
+            for block in content if isinstance(content, list) else []:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "tool_use" and isinstance(block.get("id"), str):
+                    tools[block["id"]] = {"tool_name": block.get("name"), "tool_input": block.get("input")}
+                elif block.get("type") == "tool_result" and block.get("is_error"):
+                    reason = _tool_result_text(block.get("content"))
+                    if isinstance(reason, str) and any(marker in reason.lower() for marker in (
+                        "this command requires approval", "permission to use", "contains brace with quote character",
+                    )):
+                        denial = {**tools.get(block.get("tool_use_id"), {}), "tool_use_id": block.get("tool_use_id"),
+                                  "reason": reason, "source": "harness_tool_refusal"}
+                        acc.denials = self._union_denials(acc.denials, [denial])
         if event_type == "system":
             self._ingest_system(event, acc)
         elif event_type in ("assistant", "user"):
@@ -943,12 +1030,17 @@ class ClaudeBackend:
         previous: list[dict[str, Any]], denials: list[Any]
     ) -> list[dict[str, Any]]:
         """Every distinct denial across results, in first-seen order."""
-        union = list(previous)
-        seen = {json.dumps(entry, sort_keys=True, default=str) for entry in union}
-        for entry in denials:
-            key = json.dumps(entry, sort_keys=True, default=str)
-            if key not in seen:
-                seen.add(key)
+        union: list[dict[str, Any]] = []
+        positions: dict[str, int] = {}
+        for entry in [*previous, *denials]:
+            tool_id = entry.get("tool_use_id") if isinstance(entry, dict) else None
+            key = ("tool:" + tool_id) if isinstance(tool_id, str) and tool_id else json.dumps(entry, sort_keys=True, default=str)
+            if key in positions:
+                index = positions[key]
+                if isinstance(union[index], dict) and isinstance(entry, dict):
+                    union[index] = {**union[index], **entry}
+            else:
+                positions[key] = len(union)
                 union.append(entry)
         return union
 

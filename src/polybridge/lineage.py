@@ -38,6 +38,8 @@ returns None — a task with no detected caller is treated as a root task, not a
 
 from __future__ import annotations
 
+import json
+
 import logging
 import os
 import re
@@ -195,7 +197,12 @@ def lineage_closure(
 
 def _candidate_identity(record: store.TaskRecord) -> dict[str, Any]:
     """The identity dict `identity.identity_check` expects for `record`."""
-    return identity.task_identity(record.pid, record.start_time, record.markers)
+    result = identity.task_identity(record.pid, record.start_time, record.markers)
+    from .backends import get
+    titles = getattr(get(record.backend), "caller_process_titles", ())
+    if titles:
+        result["caller_process_titles"] = titles
+    return result
 
 
 def _confirmed(record: store.TaskRecord, check: Callable[[Mapping[str, Any]], str]) -> bool:
@@ -419,3 +426,45 @@ def detect_caller_detail(
     except Exception as exc:
         log.debug("caller detection failed", exc_info=True)
         return Detection(None, f"caller detection failed: {type(exc).__name__}: {exc}")
+
+
+def detect_catalog_caller(log_dir: Path, *, environ: Mapping[str, str] | None = None,
+                          getsid: Callable[[int], int] = os.getsid, getpid: Callable[[], int] = os.getpid,
+                          process_table: Callable[[], Mapping[int, int] | None] | None = None,
+                          check: Callable[[Mapping[str, Any]], str] | None = None) -> Detection:
+    """Fail-closed authority for bounded APIs, querying only related indexed identities.
+
+    The caller must complete bounded catalog bootstrap first. Legacy detection is unchanged.
+    No missing/incomplete catalog ever falls back to historical metadata scanning.
+    """
+    from .catalog import Catalog
+    env = environ if environ is not None else os.environ
+    check_fn = check if check is not None else identity.identity_check
+    table_fn = process_table if process_table is not None else _default_process_table
+    try:
+        table = table_fn()
+        own_pid, sid = getpid(), _own_sid(getsid)
+        if table is None or own_pid not in table or sid is None:
+            return Detection(None, 'Process ancestry/session cannot be checked')
+        chain = ancestors(own_pid, table)[:100]
+        with Catalog(log_dir, store.RECORD_SUFFIX).connect() as db:
+            complete = db.execute("SELECT value FROM state WHERE key='complete'").fetchone()
+            if complete != ('1',):
+                return Detection(None, 'Task catalog bootstrap is incomplete')
+            placeholders = ','.join('?' for _ in chain) or 'NULL'
+            rows = db.execute(f'SELECT payload FROM callers WHERE terminal=0 AND (pgid=? OR pid IN ({placeholders}) OR id=?) LIMIT 101', (sid, *chain, env.get(ENV_TASK_ID, ''))).fetchall()
+        if len(rows) > 100:
+            return Detection(None, 'More than 100 related caller identities require reconciliation')
+        candidates = [store.TaskRecord(**json.loads(row[0])) for row in rows]
+        found = _by_pb_task_id(log_dir, env, candidates, getsid, getpid, lambda: table, check_fn)
+        found = found or _by_session(candidates, getsid, check_fn) or _by_ancestry(candidates, getpid, lambda: table, check_fn)
+        if found is not None:
+            return Detection(found)
+        if env.get(ENV_TASK_ID):
+            return Detection(None, 'Workflow caller task identity cannot be verified')
+        for record in candidates:
+            if check_fn(_candidate_identity(record)) != 'dead':
+                return Detection(None, f'Task {record.task_id} caller identity is uncertain')
+        return Detection(None)
+    except Exception as exc:
+        return Detection(None, f'Catalog caller detection failed: {type(exc).__name__}: {exc}')

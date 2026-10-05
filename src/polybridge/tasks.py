@@ -40,6 +40,7 @@ from .backends import (
     Backend,
     Enforcement,
     Invocation,
+    NestedDispatchRefused,
     check_nested_depth,
     check_nested_enforcement,
 )
@@ -528,6 +529,8 @@ class Task:
     max_turns: int
     log_path: Path
     started_at: datetime
+    display_prompt: str | None = None
+    workflow_builder: bool = False
     model: str | None = None
     reasoning_effort: str | None = None
     parent_task_id: str | None = None
@@ -682,6 +685,7 @@ class Task:
         """
         return {
             "task_id": self.task_id,
+            "workflow_builder": self.workflow_builder,
             "backend": self.backend,
             "session_id": self.session_id,
             "repo_path": str(self.repo_path),
@@ -733,6 +737,13 @@ class Task:
         # Only meaningful when something went wrong, and usually empty otherwise.
         if self.status == "failed" and self.stderr_tail:
             snap["stderr_tail"] = list(self.stderr_tail)
+        snap["pending_messages"] = inbox.pending_messages(self.log_path.parent, self.task_id)
+        if self.workflow_builder:
+            from .workflows import builder_pending_messages
+            try:
+                snap["pending_messages"] = builder_pending_messages(self.log_path.parent, self.task_id, snap["pending_messages"])
+            except (OSError, ValueError, KeyError, TypeError):
+                log.warning("task %s: workflow pending-message bookkeeping unavailable", self.task_id, exc_info=True)
         return snap
 
 
@@ -746,9 +757,11 @@ class TaskRegistry:
         owner: dict[str, Any] | None = None,
         *,
         open_monitor: bool = True,
+        caller_override: lineage.Caller | None = None,
         monitor_launcher: Callable[[str], Awaitable[int]] | None = None,
     ) -> None:
         self._tasks: dict[str, Task] = {}
+        self._caller_override = caller_override
         # Whether a root task this registry starts opens the Monitor app (A4.3). False for
         # `polybridge-ctl run`/`resume`, which the app itself drives.
         self._open_monitor = open_monitor
@@ -781,11 +794,33 @@ class TaskRegistry:
         monkeypatch) cannot become an exception either — per CLAUDE.md, bookkeeping must never
         change an outcome.
         """
+        if self._caller_override is not None:
+            return self._caller_override
         try:
             return await asyncio.to_thread(lineage.detect_caller, self._log_dir)
         except Exception:
             log.debug("caller detection failed", exc_info=True)
             return None
+
+    async def _detect_caller_detail(self) -> lineage.Detection:
+        if self._caller_override is not None:
+            return lineage.Detection(self._caller_override)
+        caller = await self._detect_caller()
+        if caller is not None:
+            return lineage.Detection(caller)
+        try:
+            result = await asyncio.to_thread(lineage.detect_caller_detail, self._log_dir)
+        except Exception as exc:
+            return lineage.Detection(None, f"caller detection failed: {exc}")
+        if result.caller is None and os.environ.get(lineage.ENV_TASK_ID):
+            return lineage.Detection(None, result.undecidable or "PB_TASK_ID is set but its authority cannot be verified")
+        return result
+
+    async def _mutation_caller(self) -> lineage.Caller | None:
+        detection = await self._detect_caller_detail()
+        if detection.undecidable is not None:
+            raise NestedDispatchRefused("Caller authority cannot be established: " + detection.undecidable, rule="caller_undecidable")
+        return detection.caller
 
     def _resolve_lineage(
         self,
@@ -805,6 +840,9 @@ class TaskRegistry:
         """
         if caller is None:
             return None, None, 0, lineage.max_depth_default(), None
+
+        from .workflow_hooks import refuse_managed
+        refuse_managed(self._log_dir, caller.record.task_id)
 
         parent_max_depth = (
             caller.record.max_depth
@@ -834,6 +872,9 @@ class TaskRegistry:
         model: str | None = None,
         reasoning_effort: str | None = None,
         network: bool | None = None,
+        task_id: str | None = None,
+        display_prompt: str | None = None,
+        workflow_builder: bool = False,
         group: str | None = None,
         title: str | None = None,
     ) -> Task:
@@ -852,7 +893,7 @@ class TaskRegistry:
             network=network,
         )
 
-        caller = await self._detect_caller()
+        caller = await self._mutation_caller()
         spawned_by, root_task_id, depth, max_depth, lineage_detected = self._resolve_lineage(
             caller,
             child_enforcement=backend.enforcement(freedom, network),  # type: ignore[arg-type]
@@ -867,6 +908,8 @@ class TaskRegistry:
             invocation,
             backend=backend,
             prompt=prompt,
+            display_prompt=display_prompt,
+            workflow_builder=workflow_builder,
             repo_path=repo_path,
             session_id=session_id,
             freedom=freedom,
@@ -881,6 +924,7 @@ class TaskRegistry:
             group=resolved_group,
             title=title,
             lineage_detected=lineage_detected,
+            task_id=task_id,
         )
 
     async def resume(
@@ -890,6 +934,9 @@ class TaskRegistry:
         *,
         max_turns: int | None = None,
         network: bool | None = None,
+        task_id: str | None = None,
+        display_prompt: str | None = None,
+        workflow_builder: bool = False,
     ) -> Task:
         """Continue `parent`'s session as a new task sharing its session id."""
         if parent.session_id is None:
@@ -908,7 +955,7 @@ class TaskRegistry:
 
         # Caller detection and the nested-dispatch caps run before the session lock — they are
         # read-only and must never block on, or be blocked by, another resume of this session.
-        caller = await self._detect_caller()
+        caller = await self._mutation_caller()
         spawned_by, root_task_id, depth, max_depth, lineage_detected = self._resolve_lineage(
             caller,
             child_enforcement=backend.enforcement(parent.freedom, effective_network),  # type: ignore[arg-type]
@@ -916,6 +963,10 @@ class TaskRegistry:
             child_repo=parent.repo_path,
         )
         resolved_group = caller.record.group if caller is not None else parent.group
+
+        if task_id is None:
+            from .workflow_hooks import pause_for_task
+            pause_for_task(self._log_dir, parent.task_id, "Task resumed outside the workflow supervisor")
 
         try:
             async with control.session_lock(
@@ -954,6 +1005,8 @@ class TaskRegistry:
                     invocation,
                     backend=backend,
                     prompt=followup_prompt,
+                    display_prompt=display_prompt,
+                    workflow_builder=workflow_builder,
                     repo_path=parent.repo_path,
                     session_id=parent.session_id,
                     freedom=parent.freedom,
@@ -970,6 +1023,7 @@ class TaskRegistry:
                     # The resumed task's own title, whoever the caller is — unlike `group`.
                     title=parent.title,
                     lineage_detected=lineage_detected,
+                    task_id=task_id,
                 )
         except control.LockTimeout:
             raise SessionBusyError(
@@ -998,6 +1052,9 @@ class TaskRegistry:
         group: str | None = None,
         title: str | None = None,
         lineage_detected: str | None = None,
+        task_id: str | None = None,
+        display_prompt: str | None = None,
+        workflow_builder: bool = False,
     ) -> Task:
         # Re-checked at the point of execution, not only where the argv was built, so no future
         # caller of this method can launch an agent without its backend's guarantees — and, now
@@ -1010,11 +1067,15 @@ class TaskRegistry:
         # The whole Invocation is checked, not just its argv, and the stdin wiring below comes from
         # it — never from the backend's name or its static capability — so a live-input argv can
         # only ever run with the pipe it was built for (claude without a turn cap, and every
-        # antigravity run, is live), and every other run keeps stdin DEVNULL (codex and vibe block
-        # forever reading an open stdin).
+        # antigravity run, is live). Classic runs use DEVNULL or a backend-validated one-shot
+        # prompt pipe which closes immediately at EOF, without a live-input pump.
         backend.assert_safe(invocation, freedom, network)  # type: ignore[arg-type]
 
-        task_id = str(uuid.uuid4())
+        task_id = store.validate_task_id(task_id) if task_id else str(uuid.uuid4())
+        if self.get(task_id) is not None or store.read(self._log_dir, task_id) is not None:
+            exc = ValueError(f"task_id already exists: {task_id}")
+            exc.polybridge_not_started = True  # type: ignore[attr-defined]
+            raise exc
         # A root task (no detected caller) is the root of its own dispatch chain.
         root_task_id = root_task_id if root_task_id is not None else task_id
         if max_depth is None:
@@ -1077,6 +1138,27 @@ class TaskRegistry:
         except Exception:
             base_commit, start_dirty = None, None
 
+        # Allocate only after cancellable probes finish. No await occurs between this setup
+        # and the spawn attempt, so cancellation during git bookkeeping cannot orphan scratch.
+        task_scratch = None
+        try:
+            if freedom != "read_only":
+                from . import scratch
+                from dataclasses import replace
+                task_scratch = scratch.create(self._log_dir, task_id)
+                writable = getattr(backend, "with_writable_directory", None)
+                if writable is not None:
+                    invocation = writable(invocation, task_scratch, freedom)
+                    backend.assert_safe(invocation, freedom, network)
+                    enforcement = replace(enforcement, writable_roots=(*enforcement.writable_roots, str(task_scratch)))
+        except BaseException:
+            if task_scratch is not None:
+                try:
+                    scratch.remove(self._log_dir, task_id)
+                except OSError:
+                    log.exception("task %s: could not clean scratch before spawn", task_id)
+            raise
+
         # So a nested polybridge server started by this agent (a codex/vibe MCP tool call, a
         # claude/opencode subprocess) can find its way back to this task via
         # `lineage.detect_caller`'s PB_TASK_ID method, when the environment survives that far.
@@ -1088,18 +1170,32 @@ class TaskRegistry:
             lineage.ENV_DEPTH: str(depth),
         }
 
-        proc = await asyncio.create_subprocess_exec(
-            *invocation.argv,
-            cwd=str(repo_path),
-            stdin=asyncio.subprocess.PIPE if invocation.live_input else asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            limit=STREAM_LINE_LIMIT,
-            env=spawn_env,
-            # Own process group, so cancellation reaches the shell children an agent spawns instead
-            # of orphaning them.
-            start_new_session=True,
-        )
+        spawn_env.pop("PB_TASK_SCRATCH", None)
+        if task_scratch is not None:
+            spawn_env["PB_TASK_SCRATCH"] = str(task_scratch)
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *invocation.argv,
+                cwd=str(repo_path),
+                stdin=asyncio.subprocess.PIPE if invocation.stdin_mode in ("pipe", "pipe_once") else asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                limit=STREAM_LINE_LIMIT,
+                env=spawn_env,
+                # Own process group, so cancellation reaches the shell children an agent spawns instead
+                # of orphaning them.
+                start_new_session=True,
+            )
+        except OSError as exc:
+            # exec failed before returning a process; later failures remain ambiguous.
+            exc.polybridge_not_started = True  # type: ignore[attr-defined]
+            if task_scratch is not None:
+                try:
+                    scratch.remove(self._log_dir, task_id)
+                except OSError:
+                    log.exception("task %s: could not clean scratch after failed exec", task_id)
+            raise
 
         task = Task(
             task_id=task_id,
@@ -1107,6 +1203,8 @@ class TaskRegistry:
             session_id=session_id,
             repo_path=repo_path,
             prompt=prompt,
+            display_prompt=display_prompt,
+            workflow_builder=workflow_builder,
             max_turns=max_turns,
             log_path=log_path,
             started_at=_now(),
@@ -1157,14 +1255,15 @@ class TaskRegistry:
         # always seq 0. Guarded on its own: a broken event log must not cost the dispatch itself.
         try:
             task.events = EventLog(events_path(self._log_dir, task_id), task_id)
-            task.events.write(
+            _write_event(
+                task,
                 "task_started",
                 {
                     "backend": task.backend,
                     "freedom": task.freedom,
                     "network": task.network,
                     "repo_path": str(task.repo_path),
-                    "prompt": task.prompt,
+                    "prompt": task.display_prompt if task.display_prompt is not None else task.prompt,
                     "model": task.model,
                     "reasoning_effort": task.reasoning_effort,
                     "parent_task_id": task.parent_task_id,
@@ -1184,7 +1283,13 @@ class TaskRegistry:
         # Outside the no-await window, and still before any await: the prompt is the first stdin
         # line of a live-input run (a positional would be ignored), written synchronously so it is
         # queued ahead of anything else, then flushed below.
-        if invocation.live_input:
+        if invocation.stdin_mode == "pipe_once":
+            self._write_initial_input(task, invocation.initial_input or b"")
+            try:
+                await self._flush_stdin(task)
+            finally:
+                _close_stdin(task)
+        elif invocation.live_input:
             self._write_initial_input(task, invocation.initial_input or b"")
             task.pump = asyncio.create_task(self._pump(task), name=f"pb-pump-{task_id}")
             await self._flush_stdin(task)
@@ -1279,7 +1384,7 @@ class TaskRegistry:
         """Queue a live-input run's prompt on its stdin — synchronous, so nothing can be written
         ahead of it — and log it as the run's first `user_message`."""
         if _write_stdin(task, data):
-            _write_event(task, "user_message", {"text": task.prompt, "source": "initial"})
+            _write_event(task, "user_message", {"text": task.display_prompt if task.display_prompt is not None else task.prompt, "source": "initial"})
         else:
             log.warning("task %s: stdin was already gone before the prompt could be written", task.task_id)
 
@@ -1290,6 +1395,15 @@ class TaskRegistry:
 
     # --- live input: send, pump, close protocol ------------------------------------------------
 
+    def workflow_notice(self, task_id: str, text: str) -> None:
+        """Supervisor-owned presentation event; never changes the observed task outcome."""
+        task = self.get(task_id)
+        if task is not None:
+            try:
+                _write_event(task, "notice", {"text": text})
+            except (OSError, ValueError):
+                log.warning("Workflow notice unavailable for %s", task_id, exc_info=True)
+
     async def send_message(self, task: Task, text: str) -> dict[str, Any]:
         """Queue `text` for a live-input task this server owns. Returns "queued", never
         "delivered": the pump writes it, and the event log records whether it did.
@@ -1297,6 +1411,8 @@ class TaskRegistry:
         Takes the same inbox lock as the close protocol, so a message is either accepted before
         the close (and then forwarded or reported undelivered) or refused after it.
         """
+        from .workflow_hooks import refuse_direct_message
+        await asyncio.to_thread(refuse_direct_message, self._log_dir, task.task_id)
         if not task.live_input:
             raise inbox.SendRefused(
                 f"task {task.task_id} was not started with live input, so it cannot take a message "
@@ -1321,7 +1437,7 @@ class TaskRegistry:
                     code="settled",
                 )
             message = inbox.make_message(text, self._owner)
-            task.inbox_queue.append(message)
+            inbox.append_locked(self._log_dir, task.task_id, message)
         finally:
             inbox.unlock(fd)
         task.pump_wake.set()
@@ -1748,7 +1864,9 @@ class TaskRegistry:
                 max_turns=task.max_turns,
                 network=task.network,
                 parent_task_id=task.parent_task_id,
-                prompt=task.prompt[: store.PROMPT_PREVIEW_CHARS],
+                stderr_tail=list(task.stderr_tail),
+                workflow_builder=task.workflow_builder,
+                prompt=(task.display_prompt if task.display_prompt is not None else task.prompt),
                 status=task.status,
                 exit_code=task.exit_code,
                 finished_at=task.finished_at.isoformat() if task.finished_at else None,
@@ -2332,12 +2450,18 @@ class TaskRegistry:
 
         return outcomes
 
-    async def cancel_cascade(self, task_id: str) -> dict[str, Any]:
+    async def cancel_cascade(self, task_id: str, *, workflow_control: bool = False) -> dict[str, Any]:
         """Run `_cancel_cascade` as a registry-held task, shielded from the caller.
 
         Same reason `cancel` shields `_escalate`: the SIGKILL escalation for tasks this server does
         not own lives inside the cascade, and a client disconnecting mid-call must not abandon it.
         """
+        if not workflow_control:
+            from .workflow_hooks import pause_for_task, refuse_managed
+            caller = await self._mutation_caller()
+            if caller is not None:
+                refuse_managed(self._log_dir, caller.record.task_id)
+            pause_for_task(self._log_dir, task_id, "Task cancelled outside the workflow supervisor")
         return await self._shielded(self._cancel_cascade(task_id), f"pb-cascade-{task_id}")
 
     async def _shielded(self, coro: Any, name: str) -> Any:
@@ -2517,6 +2641,9 @@ class TaskRegistry:
         *,
         max_turns: int | None = None,
         network: bool | None = None,
+        task_id: str | None = None,
+        display_prompt: str | None = None,
+        workflow_builder: bool = False,
     ) -> Task:
         """Continue the session of a task recovered from disk."""
         if not record.session_id:
@@ -2540,7 +2667,7 @@ class TaskRegistry:
         effective_network = network if network is not None else record.network
 
         # Same ordering as `resume`: caller detection and the caps run before the session lock.
-        caller = await self._detect_caller()
+        caller = await self._mutation_caller()
         spawned_by, root_task_id, depth, max_depth, lineage_detected = self._resolve_lineage(
             caller,
             child_enforcement=backend.enforcement(record.freedom, effective_network),  # type: ignore[arg-type]
@@ -2548,6 +2675,10 @@ class TaskRegistry:
             child_repo=repo_path,
         )
         resolved_group = caller.record.group if caller is not None else record.group
+
+        if task_id is None:
+            from .workflow_hooks import pause_for_task
+            pause_for_task(self._log_dir, record.task_id, "Task resumed outside the workflow supervisor")
 
         try:
             async with control.session_lock(
@@ -2581,6 +2712,8 @@ class TaskRegistry:
                     invocation,
                     backend=backend,
                     prompt=followup_prompt,
+                    display_prompt=display_prompt,
+                    workflow_builder=workflow_builder,
                     repo_path=repo_path,
                     session_id=record.session_id,
                     freedom=record.freedom,
@@ -2596,6 +2729,7 @@ class TaskRegistry:
                     group=resolved_group,
                     title=record.title,
                     lineage_detected=lineage_detected,
+                    task_id=task_id,
                 )
         except control.LockTimeout:
             raise SessionBusyError(
@@ -2730,6 +2864,12 @@ def _write_event(task: Task, kind: str, fields: dict[str, Any]) -> None:
     if task.events is None:
         return
     try:
+        if task.workflow_builder and ((kind == "user_message" and fields.get("source") == "initial") or (kind == "task_started" and not task.live_input)):
+            from .workflows import builder_feedback_ids
+            try:
+                fields = {**fields, "message_ids": builder_feedback_ids(task.log_path.parent, task.task_id)}
+            except Exception:
+                log.debug("task %s: builder feedback association unavailable", task.task_id, exc_info=True)
         task.events.write(kind, fields)
     except Exception:
         log.debug("task %s: could not write a %s event", task.task_id, kind, exc_info=True)
@@ -2925,6 +3065,8 @@ def _record_events(task: Task, backend: Backend, event: dict[str, Any], raw_offs
         if kind is None:
             task.acc.normalize_errors += 1
             continue
+        if kind == "user_message" and task.display_prompt is not None and fields.get("text") == task.prompt:
+            fields["text"] = task.display_prompt
         source_ts = fields.pop("source_ts", None)
         try:
             task.events.write(kind, fields, raw_offset=raw_offset, source_ts=source_ts)

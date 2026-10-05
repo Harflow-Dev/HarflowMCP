@@ -243,6 +243,8 @@ def send_to_record(
     and an undecidable one — including a legacy record with no start time — cannot be trusted to.
     """
     store.validate_task_id(task_id)
+    from .workflow_hooks import refuse_direct_message
+    refuse_direct_message(log_dir, task_id)
     try:
         fd = lock_sync(log_dir, task_id, timeout)
     except control.LockTimeout:
@@ -306,3 +308,59 @@ def _check_open(log_dir: Path, record: store.TaskRecord) -> None:
             "has settled",
             code="owner_not_alive",
         )
+
+
+def _json_rows(path: Path, incomplete: list[bool] | None = None):
+    """Stream complete bounded lines; never parse torn/oversized records."""
+    try:
+        with path.open("rb") as handle:
+            while line := handle.readline(1_000_001):
+                if len(line) > 1_000_000:
+                    if incomplete is not None:
+                        incomplete[0] = True
+                    while line and not line.endswith(b"\n"):
+                        line = handle.readline(1_000_001)
+                    continue
+                if not line.endswith(b"\n"):
+                    if incomplete is not None:
+                        incomplete[0] = True
+                    continue
+                try:
+                    value = json.loads(line)
+                except (ValueError, UnicodeDecodeError):
+                    if incomplete is not None:
+                        incomplete[0] = True
+                    continue
+                if isinstance(value, dict):
+                    yield value
+    except FileNotFoundError:
+        return
+    except OSError:
+        if incomplete is not None:
+            incomplete[0] = True
+        return
+
+
+def delivered_ids(log_dir: Path, task_id: str) -> set[str] | None:
+    from . import events
+    ids: set[str] = set()
+    incomplete = [False]
+    for event in _json_rows(events.events_path(log_dir, task_id), incomplete):
+        if event.get("kind") in {"user_message", "undelivered", "task_started"}:
+            mid = event.get("message_id")
+            if isinstance(mid, str):
+                ids.add(mid)
+            mids = event.get("message_ids")
+            if isinstance(mids, list):
+                ids.update(mid for mid in mids if isinstance(mid, str))
+    return None if incomplete[0] else ids
+
+
+def pending_messages(log_dir: Path, task_id: str) -> list[dict[str, Any]]:
+    queued = {m["id"]: m for m in _json_rows(inbox_path(log_dir, task_id)) if isinstance(m.get("id"), str) and isinstance(m.get("text"), str)}
+    if not queued:
+        return []
+    terminal = delivered_ids(log_dir, task_id)
+    if terminal is None:
+        return []  # Delivery evidence is incomplete; never resurrect an already sent message.
+    return [{"id": mid, "text": m["text"], "status": "pending", "queued_at": m.get("queued_at")} for mid, m in queued.items() if mid not in terminal]

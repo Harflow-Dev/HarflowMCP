@@ -119,6 +119,8 @@ def sweep(log_dir: Path, days: int, now: datetime) -> dict[str, int]:
         "deleted_temp_files": 0,
     }
 
+    from .workflows import WorkflowStore
+    pinned = WorkflowStore(root=log_dir.parent).pinned_tasks()
     records = store.read_all(log_dir)
     by_id = {r.task_id: r for r in records}
     statuses = {r.task_id: store.resolve_status(log_dir, r, detail=False)[0] for r in records}
@@ -148,6 +150,8 @@ def sweep(log_dir: Path, days: int, now: datetime) -> dict[str, int]:
     _sweep_temp_files(log_dir, by_id, statuses, now, stats)
 
     for record in records:
+        if record.task_id in pinned:
+            continue
         if statuses.get(record.task_id) not in store.TERMINAL_RECORD_STATUSES:
             continue
         if not _older_than(record, days, now):
@@ -441,6 +445,11 @@ def _delete_task_files(log_dir: Path, task_id: str) -> bool:
             complete = False
     if not complete:
         return False
+    try:
+        from . import scratch
+        scratch.remove(log_dir, task_id)
+    except OSError:
+        return False  # Retain the record so cleanup can be retried safely.
     if record_path is not None:
         try:
             record_path.unlink()
@@ -448,4 +457,10 @@ def _delete_task_files(log_dir: Path, task_id: str) -> bool:
             pass
         except OSError:
             return False
+    try:
+        from .catalog import Catalog
+        Catalog(log_dir, store.RECORD_SUFFIX).remove(task_id)
+        Catalog(log_dir.parent / 'workflow-runs', '.json').remove(task_id)
+    except Exception:
+        log.warning('Could not remove retained task from listing indexes: %s', task_id, exc_info=True)
     return True

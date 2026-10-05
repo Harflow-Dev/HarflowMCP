@@ -5,8 +5,10 @@ introduced this module and CLAUDE.md's per-CLI section.
 
 **Invocation and stdin**
 * `get_prompt_from_stdin()` runs unconditionally before mode dispatch and reads `sys.stdin` whenever
-  it is not a tty, blocking forever on a pipe that never closes. `stdin=DEVNULL` is mandatory, same
-  reason as codex.
+  it is not a tty, blocking forever on a pipe that never closes. Small prompts use DEVNULL;
+  prompts over 32 KiB use one-shot UTF-8 stdin followed immediately by EOF and trailing `--prompt=`
+  to select programmatic mode. Native stdin ingestion strips outer whitespace: large prompts with
+  outer whitespace fail explicitly rather than being altered. Start and resume use this transport.
 * Programmatic mode is `-p/--prompt TEXT` with `--output streaming`. **The `PROMPT` positional is
   ignored in programmatic mode** — the CLI reads `args.prompt or stdin_prompt` — so there is no
   working `--` separator of the kind codex and opencode rely on. `-p` is `nargs="?", const=""`, so a
@@ -118,10 +120,14 @@ xhigh->max` — vibe's own OpenAI-responses backend maps its `max` to `xhigh`.
 from __future__ import annotations
 
 import re
+import json
+import os
+import tomllib
 from pathlib import Path
 from typing import Any
 
 from . import normalize as nz
+from .mcp_approval import VibeApproval
 from .base import (
     FREEDOMS,
     Accumulator,
@@ -141,7 +147,12 @@ from .base import (
     reject_model,
 )
 
+# Large prompts use the native EOF stdin path with --prompt= selecting programmatic mode.
+# Installed Vibe get_prompt_from_stdin strips outer whitespace, so oversized inputs with
+# such whitespace are refused rather than silently changed. Both start and resume use
+# the same pipe_once transport; its stdin closes immediately after the full UTF-8 payload.
 BINARY = "vibe"
+ARGV_PROMPT_BYTES = 32 * 1024
 
 AGENTS: dict[str, str] = {
     "read_only": "plan",
@@ -261,8 +272,85 @@ class UnsafeInvocationError(RuntimeError):
 
 
 class VibeBackend:
+    @staticmethod
+    def workflow_observed_metadata(snapshot: dict[str, Any]) -> dict[str, Any] | None:
+        """Read Vibe's own session config snapshot, never worker self-report text."""
+        session_id = snapshot.get("session_id")
+        if not isinstance(session_id, str) or not session_id:
+            return None
+        home = Path(os.environ.get("VIBE_HOME", str(Path.home() / ".vibe"))).expanduser()
+        directory = home / "logs" / "session"
+        try:
+            config_path = home / "config.toml"
+            if config_path.is_file():
+                config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+                logging = config.get("session_logging")
+                if isinstance(logging, dict) and isinstance(logging.get("save_dir"), str) and logging["save_dir"]:
+                    directory = Path(logging["save_dir"]).expanduser()
+            # Current Vibe writes a unified store. Resolve only its committed generation,
+            # and verify the full native session identity before trusting model metadata.
+            if re.fullmatch(r"[A-Za-z0-9_-]+", session_id):
+                unified = directory / "unified" / session_id
+                current_path = unified / "CURRENT"
+                if current_path.is_file() and current_path.stat().st_size <= 1024 * 1024:
+                    current = json.loads(current_path.read_text(encoding="utf-8"))
+                    generation = current.get("generation") if isinstance(current, dict) else None
+                    if isinstance(current, dict) and current.get("session_id") == session_id and isinstance(generation, str) and re.fullmatch(r"[0-9]{16}", generation):
+                        state_path = unified / "generations" / generation / "runtime-state.json"
+                        if state_path.stat().st_size <= 8 * 1024 * 1024:
+                            state = json.loads(state_path.read_text(encoding="utf-8"))
+                            metadata = state.get("session_metadata", {}) if isinstance(state, dict) else {}
+                            active = metadata.get("active_model") if isinstance(metadata, dict) else None
+                            if isinstance(state, dict) and state.get("session_id") == session_id and isinstance(active, str) and active:
+                                observed = {"active_model": active, "model": active}
+                                if isinstance(metadata.get("reasoning_effort"), str):
+                                    observed["reasoning_effort"] = metadata["reasoning_effort"]
+                                return {"observed": observed, "provenance": "harness_session_configuration", "verification_status": "observed_configuration", "metadata_source": str(state_path)}
+            # Session folder names include the first eight characters of their ID.
+            # Still verify the complete native ID before accepting metadata.
+            paths = sorted(directory.glob("*" + session_id[:8] + "*/meta.json"), reverse=True)[:20]
+            for path in paths:
+                if path.stat().st_size > 1024 * 1024:
+                    continue
+                metadata = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(metadata, dict) or metadata.get("session_id") != session_id:
+                    continue
+                config = metadata.get("config")
+                active = config.get("active_model") if isinstance(config, dict) else None
+                if not isinstance(active, str) or not active:
+                    continue
+                observed = {"active_model": active, "model": active}
+                models = config.get("models", [])
+                if isinstance(models, list):
+                    model = next((m for m in models if isinstance(m, dict) and m.get("alias") == active), None)
+                    if model:
+                        if isinstance(model.get("name"), str) and model["name"]:
+                            observed["model"] = model["name"]
+                        if isinstance(model.get("thinking"), str):
+                            observed["reasoning_effort"] = model["thinking"]
+                        if isinstance(model.get("provider"), str):
+                            observed["provider"] = model["provider"]
+                return {"observed": observed, "provenance": "harness_session_configuration", "verification_status": "observed_configuration", "metadata_source": str(path)}
+        except (OSError, ValueError, UnicodeError):
+            pass
+        return None
+
+    @staticmethod
+    def workflow_stderr_availability_failure(diagnostic: str) -> str | None:
+        from .workflow_diagnostics import stderr_availability
+        return stderr_availability(diagnostic, quota_patterns=('(?im)^.*(?:insufficient_quota|model_not_found|rate_limit_exceeded).*$',))
+
+    @staticmethod
+    def workflow_availability_failure(event: dict[str, Any]) -> str | None:
+        from .workflow_diagnostics import provider_error
+        return provider_error(event, event_type="error")
+
     name = "vibe"
+    mcp_approval = VibeApproval()
     binary = BINARY
+    # Programmatic Vibe replaces argv with this title after startup. Caller
+    # verification still requires the captured process start time and ancestry.
+    caller_process_titles = ("Vibe CLI",)
     capabilities = Capabilities(
         # vibe mints its own sessionId and reports it on the first stream entry.
         chooses_session_id=False,
@@ -309,8 +397,7 @@ class VibeBackend:
         ]
         # The single canonical token, last: no `--` separator works here (see module docstring), so
         # this is the only thing standing between prompt text and being parsed as an option.
-        argv.append(f"--prompt={self._check_prompt(prompt)}")
-        invocation = Invocation(argv)
+        invocation = self._prompt_invocation(argv, prompt)
         self.assert_safe(invocation, freedom, network)
         return invocation
 
@@ -333,8 +420,7 @@ class VibeBackend:
             *self._options(repo, freedom, model, max_turns, reasoning_effort, network),
         ]
         argv += ["--resume", session_id]
-        argv.append(f"--prompt={self._check_prompt(prompt)}")
-        invocation = Invocation(argv)
+        invocation = self._prompt_invocation(argv, prompt)
         self.assert_safe(invocation, freedom, network)
         return invocation
 
@@ -366,6 +452,14 @@ class VibeBackend:
             options += ["--max-turns", str(max_turns)]
         return options
 
+    def _prompt_invocation(self, argv: list[str], prompt: str) -> Invocation:
+        prompt = self._check_prompt(prompt)
+        if len(prompt.encode("utf-8")) > ARGV_PROMPT_BYTES:
+            if prompt != prompt.strip():
+                raise UnsupportedCapability("Vibe trims outer whitespace from stdin prompts. Remove outer whitespace or choose another harness for this large assignment.")
+            return Invocation([*argv, "--prompt="], stdin_mode="pipe_once", initial_input=prompt.encode("utf-8"))
+        return Invocation([*argv, f"--prompt={prompt}"])
+
     @staticmethod
     def _check_prompt(prompt: str) -> str:
         if not prompt or not prompt.strip():
@@ -375,8 +469,18 @@ class VibeBackend:
     def assert_safe(
         self, invocation: Invocation, freedom: Freedom, network: bool | None = None
     ) -> None:
-        # No live input here: only a devnull-stdin Invocation is a shape this backend ever builds.
-        problem = classic_invocation_problem(invocation)
+        # One-shot stdin is closed after delivery, never a live conversation pipe.
+        one_shot = isinstance(invocation, Invocation) and invocation.stdin_mode == "pipe_once"
+        if one_shot:
+            try:
+                prompt = invocation.initial_input.decode("utf-8") if isinstance(invocation.initial_input, bytes) else ""
+            except UnicodeError:
+                prompt = ""
+            if not prompt or prompt != prompt.strip() or invocation.argv[-1:] != ["--prompt="]:
+                raise UnsafeInvocationError("Vibe one-shot stdin requires exact nonempty UTF-8 input, no outer whitespace, and an empty trailing --prompt=")
+            problem = None
+        else:
+            problem = classic_invocation_problem(invocation)
         if problem is not None:
             raise UnsafeInvocationError(problem)
         argv = invocation.argv
@@ -399,11 +503,13 @@ class VibeBackend:
         prompt_value = (
             prompt_token[len("--prompt=") :] if prompt_token.startswith("--prompt=") else None
         )
-        if len(argv) < 2 or prompt_value is None or not prompt_value.strip():
+        if len(argv) < 2 or prompt_value is None or (not one_shot and not prompt_value.strip()):
             raise UnsafeInvocationError(
                 f"refusing to run vibe without a non-empty --prompt=<text> as the very last token: "
                 f"{argv!r}"
             )
+        if not one_shot and len(prompt_value.encode("utf-8")) > ARGV_PROMPT_BYTES:
+            raise UnsafeInvocationError("Vibe large assignments require one-shot stdin transport")
         options = argv[1:-1]
         seen = self._parse_options(options, argv)
 
