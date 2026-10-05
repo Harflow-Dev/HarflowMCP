@@ -641,3 +641,38 @@ async def test_cancel_duplicate_invocation_and_completed_child_is_idempotent(sto
     await inv.WorkflowTree(store).cancel_descendants(parent['workflow_run_id'], NoCancel(), include_self=True)
     assert store.get_run(parent['workflow_run_id'])['status'] == 'cancelled'
     assert store.get_run(child['workflow_run_id'])['status'] == 'completed'
+
+
+@pytest.mark.parametrize('source', ['root_cancel', 'root_failure', 'invocation_timeout'])
+async def test_terminal_parallel_child_live_tasks_are_signaled_without_overwriting_failure(store, tmp_path, source):
+    parent = seed_parent(store, tmp_path, 'parent', stage='running')
+    activation = parent['activations'][0]
+    child = finished_child(store, parent, activation, status='failed')
+    child['failure_reason'] = 'One parallel branch failed'
+    child['definition'] = child_graph('child', parallel=True, work_count=2)
+    child['activations'] = [
+        {'id': 'settled', 'role': 'node', 'node_id': 'work1', 'status': 'failed', 'tasks': [{'task_id': 'completed-work', 'status': 'completed'}, {'task_id': 'failed-work', 'status': 'failed'}]},
+        {'id': 'sibling', 'role': 'node', 'node_id': 'work2', 'status': 'running', 'tasks': [{'task_id': 'running-work', 'status': 'running'}, {'task_id': 'reserved-work', 'status': 'reserved'}, {'task_id': 'uncertain-work', 'status': 'uncertain'}]},
+    ]
+    write_run(store, child)
+    if source != 'invocation_timeout':
+        store.update_run(parent['workflow_run_id'], lambda r: r.update(status='cancelling' if source == 'root_cancel' else 'failed'), 'root_fixture')
+    class RefusedCancel:
+        def __init__(self):
+            self.calls = []
+        async def cancel_cascade(self, task_id, **kwargs):
+            self.calls.append((task_id, kwargs))
+            raise RuntimeError('Task identity remains uncertain')
+    registry = RefusedCancel()
+    target = child['workflow_run_id'] if source == 'invocation_timeout' else parent['workflow_run_id']
+    await inv.WorkflowTree(store).cancel_descendants(target, registry, include_self=source == 'invocation_timeout')
+    assert [task_id for task_id, _ in registry.calls] == ['running-work', 'reserved-work', 'uncertain-work']
+    assert all(options['workflow_control'] for _, options in registry.calls)
+    updated = store.get_run(child['workflow_run_id'])
+    assert updated['status'] == 'failed' and updated['failure_reason'] == 'One parallel branch failed'
+    assert not inv.child_settled(updated, store=store)
+    if source == 'invocation_timeout':
+        activation['invocation'].update(timeout_expired=True, timeout_confirmed=False)
+        outcome = inv.outcome_for_child(store, parent, activation, parent['definition']['nodes'][1])
+        assert outcome['result']['child_outcome']['kind'] == 'uncertain'
+        assert store.get_run(parent['workflow_run_id'])['status'] == 'running'

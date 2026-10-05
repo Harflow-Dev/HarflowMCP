@@ -197,12 +197,15 @@ class WorkflowTree:
             live = [t['task_id'] for a in observed.get('activations', []) for t in a.get('tasks', []) if t.get('status') in {'running', 'reserved', 'uncertain'}]
             descendants_settled = current_id not in unresolved and all(settled.get(child_id, False) for child_id in children.get(current_id, ()))
             selected = include_self or current_id != run_id
-            if selected and observed.get('status') not in _w().TERMINAL:
+            if selected:
+                # A failed parallel branch can mark its run terminal while a
+                # sibling task is still live. Signal the tasks, preserve outcome.
                 for task_id in live:
                     try:
                         await registry.cancel_cascade(task_id, workflow_control=True)
                     except Exception:
                         pass
+            if selected and observed.get('status') not in _w().TERMINAL:
                 status = 'cancelling' if live or not descendants_settled else 'cancelled'
                 self.store.update_run(current_id, lambda r, status=status: r.update(status=status) if r['status'] not in _w().TERMINAL else None, 'tree_cancel_propagated' if status == 'cancelling' else 'tree_cancelled', {'root': run_id})
                 records[current_id] = self.store.get_run(current_id)
