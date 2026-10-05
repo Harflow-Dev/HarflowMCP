@@ -137,7 +137,13 @@ Write-capable tasks receive a private scratch directory through `PB_TASK_SCRATCH
 repository. Claude and Codex receive that exact directory as an additional writable root;
 read-only tasks receive no scratch grant. Each worker's internal preamble also names its exact
 absolute scratch path so it need not discover the environment variable. This context is hidden
-from the assignment display. Artifacts stay with the task record for inspection and
+from the assignment display. Directory access and Bash approval are separate: a writable root
+does not approve arbitrary commands, change tool allowlists, or enable network access. No
+persistent Configure scratch access control is added because it would duplicate the exact launch
+grant or broaden access. Adapters without an explicit writable-directory extension cannot claim
+such a grant merely from a supplied path; additional adapter launch support is outside this stage.
+See the [scratch access outcome](drafts/scratch-access-outcome.md).
+Artifacts stay with the task record for inspection and
 recovery, and task retention deletes them without following symlinks. Large display assignments
 are stored once in private full-prompt files; task metadata contains a bounded preview and an
 explicit source reference. Detail reads verify and retrieve the complete assignment.
