@@ -217,6 +217,13 @@ def validate_definition(raw: dict[str, Any]) -> dict[str, Any]:
             node.setdefault("prompt", "")
             if not isinstance(node["prompt"], str):
                 raise WorkflowError("Start prompt must be a string")
+        if node["type"] == "parallel_start":
+            node.setdefault("branch_selection", "all")
+            if not isinstance(node["branch_selection"], str) or node["branch_selection"] not in {"all", "orchestrator"}:
+                raise WorkflowError("Parallel branch_selection must be all or orchestrator")
+            node.setdefault("selection_guidance", "")
+            if not isinstance(node["selection_guidance"], str):
+                raise WorkflowError("Parallel selection_guidance must be a string")
         node.setdefault("title", node_id)
         node.setdefault("position", {"x": 80 + 260 * index, "y": 80})
         if not isinstance(node["title"], str) or not isinstance(node["position"], dict) or any(not isinstance(node["position"].get(k), (int, float)) or isinstance(node["position"].get(k), bool) or not math.isfinite(node["position"][k]) or node["position"][k] < 0 for k in ("x", "y")):
@@ -562,8 +569,10 @@ def validate_selection(definition: dict[str, Any], node: dict[str, Any], selecte
     if definition.get("routing_mode") == "explicit":
         if node["type"] == "parallel_start":
             forward = {e["id"] for e in definition["connections"] if e["source"] == node["id"] and not e.get("backward")}
-            if {e["id"] for e in selected} != forward:
+            if node.get("branch_selection", "all") == "all" and {e["id"] for e in selected} != forward:
                 raise WorkflowError("Parallel start must select all forward branches")
+            if any(e.get("backward") for e in selected):
+                raise WorkflowError("Parallel start selections require forward branch entries")
         elif len(selected) != 1:
             raise WorkflowError("Ordinary nodes must choose exactly one continuation")
     retry = [edge for edge in selected if edge.get("backward")]
@@ -584,9 +593,10 @@ def validate_selection(definition: dict[str, Any], node: dict[str, Any], selecte
             if split_id in reachable:
                 raise WorkflowError(f"Retry cannot escape active parallel split {split_id}")
         return None
-    if len(selected) == 1:
+    explicit_split = definition.get("routing_mode") == "explicit" and node["type"] == "parallel_start"
+    if len(selected) == 1 and not explicit_split:
         return None
-    join_id = _selection_join(definition, [edge["target"] for edge in selected])
+    join_id = next(n["id"] for n in definition["nodes"] if n["type"] == "parallel_end" and n.get("parallel_group_id") == node.get("parallel_group_id")) if explicit_split else _selection_join(definition, [edge["target"] for edge in selected])
     regions = [_forward_reachable(definition, edge["target"], join_id) for edge in selected]
     for index, region in enumerate(regions):
         for other in regions[:index]:
@@ -1175,6 +1185,11 @@ def validate_builder_preview(value: Any, name: str) -> dict[str, Any]:
         ids.add(nid)
         if not isinstance(node.get("type"), str) or node.get("type") not in {"start", "agent", "join", "end", "parallel_start", "parallel_end", "workflow"}:
             raise WorkflowError(f"Invalid node type: {nid}")
+        if node["type"] == "parallel_start":
+            if not isinstance(node.get("branch_selection", "all"), str) or node.get("branch_selection", "all") not in {"all", "orchestrator"}:
+                raise WorkflowError("Parallel branch_selection must be all or orchestrator")
+            if not isinstance(node.get("selection_guidance", ""), str):
+                raise WorkflowError("Parallel selection_guidance must be a string")
         if node["type"] == "workflow":
             ref = node.get("workflow_ref")
             if not isinstance(ref, dict) or not isinstance(ref.get("workflow_id"), str) or not ref["workflow_id"].strip():
@@ -2091,11 +2106,16 @@ class WorkflowSupervisor:
             rr["pending"] = [t for t in rr["pending"] if t["id"] != token["id"]]
             stack = copy.deepcopy(token.get("stack", []))
             legacy_fork = node.get("branch_mode") == "all_matching" and len([e for e in rr["definition"]["connections"] if e["source"] == node["id"]]) > 1
-            automatic_fork = node.get("branch_mode") == "auto" and len(selected) > 1 and not any(e["backward"] for e in selected)
+            explicit_split = rr["definition"].get("routing_mode") == "explicit" and node["type"] == "parallel_start"
+            automatic_fork = explicit_split or node.get("branch_mode") == "auto" and len(selected) > 1 and not any(e["backward"] for e in selected)
             if legacy_fork or automatic_fork:
                 gid = uuid.uuid4().hex
                 join_id = selected_join if automatic_fork else node["join_id"]
                 rr["joins"][gid] = {"join_id": join_id, "split_id": node["id"], "expected": len(selected), "arrived": [], "stack": stack, "selected_targets": [e["target"] for e in selected], "branch_ids": [e["id"] for e in selected], "parent_branch_ids": copy.deepcopy(token.get("branch_ids", {})), "branch_states": {e["id"]: "active" for e in selected}}
+                if explicit_split:
+                    selected_ids = [e["id"] for e in selected]
+                    excluded_ids = [e["id"] for e in rr["definition"]["connections"] if e["source"] == node["id"] and not e.get("backward") and e["id"] not in selected_ids]
+                    rr["joins"][gid].update(selected_connection_ids=selected_ids, excluded_connection_ids=excluded_ids, selection_reason=token.get("selection_reason", "All configured branches apply"), selection_decision_id=token.get("selection_decision_id") or token.get("accepted_decision_id"), selection_sequence=rr.get("sequence", 0) + 1, branch_assignments=copy.deepcopy(token.get("assignments", {})))
                 stack = stack + [gid]
             for edge in selected:
                 child = {"id": uuid.uuid4().hex, "node_id": edge["target"], "stack": stack, "context": _bounded(result or token.get("context", {})), "via": edge["id"]}
@@ -2201,12 +2221,18 @@ class WorkflowSupervisor:
         node = next(n for n in r["definition"]["nodes"] if n["id"] == token["node_id"])
         stack = token.get("stack", [])
         if stack and stack[-1] in r.get("released_parallel_groups", {}):
+            released = r["released_parallel_groups"][stack[-1]]
+            if "selected_connection_ids" in released and token.get("branch_ids", {}).get(stack[-1]) not in released["selected_connection_ids"]:
+                raise WorkflowError("Parallel end arrival is not part of the frozen selected branches")
             self.update(lambda rr: rr.update(pending=[t for t in rr["pending"] if t["id"] != token["id"]]), "duplicate_join_arrival", token["id"])
             return True
         if not stack or r["joins"].get(stack[-1], {}).get("join_id") != node["id"]:
             if node["type"] == "parallel_end" and not token.get("joined"):
                 raise WorkflowError("Parallel end lacks its matching active generation")
             return False
+        active_group = r["joins"][stack[-1]]
+        if "selected_connection_ids" in active_group and token.get("branch_ids", {}).get(stack[-1]) not in active_group["selected_connection_ids"]:
+            raise WorkflowError("Parallel end arrival is not part of the frozen selected branches")
         if r["definition"].get("routing_mode") == "explicit":
             unresolved = [a for a in r["activations"] if a["id"] in set(token.get("input_result_refs", []) + token.get("failed_execution_refs", [])) and a.get("node_result", {}).get("status") != "succeeded" and not a.get("optional_failure") and not a.get("resolved_by_execution_id")]
             if unresolved:
@@ -2220,18 +2246,22 @@ class WorkflowSupervisor:
             if group["join_id"] != node["id"]:
                 raise WorkflowError("Join generation mismatch")
             branch_id = token.get("branch_ids", {}).get(stack[-1], token["id"])
+            selected_ids = group.get("selected_connection_ids")
+            if selected_ids is not None and token.get("branch_ids", {}).get(stack[-1]) not in selected_ids:
+                raise WorkflowError("Parallel end arrival is not part of the frozen selected branches")
             if branch_id not in group.setdefault("arrival_ids", []):
                 group.setdefault("branch_states", {})[branch_id] = "optional_skipped" if token.get("context", {}).get("optional_failure") else "resolved"
                 group["arrival_ids"].append(branch_id)
                 group["arrived"].append(token)
             rr["pending"] = [t for t in rr["pending"] if t["id"] != token["id"]]
-            if len(group["arrived"]) == group["expected"]:
+            membership_complete = set(group.get("arrival_ids", [])) == set(selected_ids) if selected_ids is not None else True
+            if len(group["arrived"]) == group["expected"] and membership_complete:
                 merged = {"id": uuid.uuid4().hex, "node_id": node["id"], "stack": group["stack"], "joined": True, "branch_ids": group.get("parent_branch_ids", {}), "context": {"branches": [t["context"] for t in group["arrived"]]}}
                 if rr.get("execution_contract") == "delegation":
                     merged["input_result_refs"] = list(dict.fromkeys(ref for t in group["arrived"] for ref in t.get("input_result_refs", [])))
                     merged["failed_execution_refs"] = list(dict.fromkeys(ref for t in group["arrived"] for ref in t.get("failed_execution_refs", [])))
                 rr["pending"].append(merged)
-                rr.setdefault("released_parallel_groups", {})[stack[-1]] = {"join_id": node["id"], "split_id": group.get("split_id"), "expected": group["expected"], "branch_states": group.get("branch_states", {}), "branch_ids": group.get("arrival_ids", []), "merged_token_id": merged["id"]}
+                rr.setdefault("released_parallel_groups", {})[stack[-1]] = {"join_id": node["id"], "split_id": group.get("split_id"), "expected": group["expected"], "branch_states": group.get("branch_states", {}), "branch_ids": group.get("arrival_ids", []), "merged_token_id": merged["id"], **{key: copy.deepcopy(group[key]) for key in ("selected_connection_ids", "excluded_connection_ids", "selection_reason", "selection_decision_id", "selection_sequence", "stack", "parent_branch_ids", "branch_assignments") if key in group}}
                 del rr["joins"][stack[-1]]
         self.update(arrive, "join_arrival", token["id"])
         return True
@@ -2272,6 +2302,8 @@ class WorkflowSupervisor:
             r["execution_initialized"] = True
             if r["status"] == "starting":
                 r["status"] = "running"
+            if r.get("kind") != "builder" and any(n.get("branch_selection") == "orchestrator" for n in r["definition"]["nodes"]) and (r.get("execution_contract") != "delegation" or r.get("runner_policy") != "guided"):
+                r.update(status="needs_attention", attention_reason="Selectable parallel branches require guided delegation execution")
             r.update(supervisor_pid=os.getpid(), supervisor_identity=identity.own_identity())
         self.update(initialize, "supervisor_started")
         active: dict[str, asyncio.Task[Any]] = {}
@@ -2391,7 +2423,7 @@ class WorkflowSupervisor:
         self.update(lambda r: r.update(status="running", supervisor_pid=os.getpid(), supervisor_identity=identity.own_identity()), "builder_started")
         a = self._activation("builder", "builder")
         self.update(lambda r: next(x for x in r["activations"] if x["id"] == a["id"]).update(feedback_ids=r.get("builder_turn_feedback_ids", [])), "builder_feedback_associated")
-        prompt = "Create a Polybridge workflow definition. Do not write files or dispatch agents. Return ONLY a JSON object. Schema: " + json.dumps({"name": self.run()["name"], "routing_mode": "explicit", "orchestrator": {"backend": "codex", "fallbacks": []}, "nodes": [{"id": "start", "type": "start", "position": {"x": 80, "y": 80}, "branch_mode": "auto", "prompt": "Optional workflow purpose for the orchestrator"}, {"id": "work", "type": "agent", "position": {"x": 220, "y": 80}, "instructions": "...", "agent": {"backend": "codex"}, "session_mode": "agent_decides", "branch_mode": "auto", "max_attempts": 3, "max_context_questions": 10}, {"id": "end", "type": "end", "position": {"x": 480, "y": 80}, "branch_mode": "auto"}], "connections": [{"id": "begin", "source": "start", "target": "work"}, {"id": "finish", "source": "work", "target": "end"}], "max_parallel": 4, "max_transitions": 100}) + "\nStart may contain an optional prompt string describing the workflow purpose; Polybridge supplies it to orchestrator decisions alongside the runtime user request. Set routing_mode to explicit. Ordinary nodes choose exactly one outgoing path. For parallel execution use structural parallel_start and parallel_end nodes sharing parallel_group_id. Parallel start selects all forward branches; every branch must reach its matching end. Branches may contain multiple steps and properly nested parallel groups. Do not create Join nodes. Conditions for choosing a group belong on incoming alternatives; split outgoing instructions describe branch purpose and never skip branches. Retry arrows return to an earlier ancestor step; Polybridge infers loops from topology, so do not set a backward flag. Put explicit failure/retry and success/continue conditions on arrows. A retry connection may set max_retries to a nonnegative integer: this caps actual traversals of that arrow across the entire run; 0 disables retry, and an absent value adds no edge cap. Node max_attempts and max_transitions still apply and may stop earlier. A retry is selected exclusively and must stay inside its parallel region. Agent nodes may set optional:true only inside a safe parallel branch with an actually selected required sibling and no required successor before convergence. Optional steps still execute; only definitive failures or exhausted available candidates bypass to that convergence with failure evidence. Do not make sequential steps or all branches optional. Agent roles are planning, implementation, review and task; supply custom step instructions, while Polybridge adds the role guidance and result protocol. Request: " + self.run().get("builder_turn_prompt", self.run()["prompt"])
+        prompt = "Create a Polybridge workflow definition. Do not write files or dispatch agents. Return ONLY a JSON object. Schema: " + json.dumps({"name": self.run()["name"], "routing_mode": "explicit", "orchestrator": {"backend": "codex", "fallbacks": []}, "nodes": [{"id": "start", "type": "start", "position": {"x": 80, "y": 80}, "branch_mode": "auto", "prompt": "Optional workflow purpose for the orchestrator"}, {"id": "work", "type": "agent", "position": {"x": 220, "y": 80}, "instructions": "...", "agent": {"backend": "codex"}, "session_mode": "agent_decides", "branch_mode": "auto", "max_attempts": 3, "max_context_questions": 10}, {"id": "end", "type": "end", "position": {"x": 480, "y": 80}, "branch_mode": "auto"}], "connections": [{"id": "begin", "source": "start", "target": "work"}, {"id": "finish", "source": "work", "target": "end"}], "max_parallel": 4, "max_transitions": 100}) + "\nStart may contain an optional prompt string describing the workflow purpose; Polybridge supplies it to orchestrator decisions alongside the runtime user request. Set routing_mode to explicit. Ordinary nodes choose exactly one outgoing path. For parallel execution use structural parallel_start and parallel_end nodes sharing parallel_group_id. Parallel start defaults to branch_selection all. Set branch_selection orchestrator and optional selection_guidance when applicability should be chosen for each group invocation. Selection chooses one or more branch entries and records a reason explaining selections and exclusions; every configured branch must reach its matching end. Branches may contain multiple steps and properly nested parallel groups. Do not create Join nodes. Conditions for choosing a group belong on incoming alternatives; split outgoing instructions describe branch purpose. Applicability selection is available only on Orchestrator selects groups; an empty selection is forbidden, so skipping a whole group uses an incoming alternative. Retry arrows return to an earlier ancestor step; Polybridge infers loops from topology, so do not set a backward flag. Put explicit failure/retry and success/continue conditions on arrows. A retry connection may set max_retries to a nonnegative integer: this caps actual traversals of that arrow across the entire run; 0 disables retry, and an absent value adds no edge cap. Node max_attempts and max_transitions still apply and may stop earlier. A retry is selected exclusively and must stay inside its parallel region. Agent nodes may set optional:true only inside a safe parallel branch with an actually selected required sibling and no required successor before convergence. Optional steps still execute; only definitive failures or exhausted available candidates bypass to that convergence with failure evidence. Do not make sequential steps or all branches optional. Agent roles are planning, implementation, review and task; supply custom step instructions, while Polybridge adds the role guidance and result protocol. Request: " + self.run().get("builder_turn_prompt", self.run()["prompt"])
         prompt += "\n" + BUILDER_LAYOUT_GUIDANCE
         prompt += "\nRun workflow nodes (type workflow) reference a saved workflow by workflow_ref.workflow_id. Preserve any existing Run workflow nodes exactly as supplied: keep their workflow_ref, orchestrator_mode, max_attempts, timeout_seconds, optional flag and instructions unchanged. Never author new Run workflow nodes, change their references, or convert them to agent nodes."
         if "editing_definition" in self.run():

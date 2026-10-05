@@ -33,7 +33,7 @@ sequenceDiagram
         else Continue with valid assignments
             Runner->>Runner: Validate and persist decision and dispatch reservations
             Runner->>Worker: Assignment, node instructions, selected results and task descriptors
-            Note over Runner,Worker: Parallel start launches every branch
+            Note over Runner,Worker: Parallel start launches the selected branch set
             Worker-->>Runner: Final JSON: succeeded, failed, blocked, or asking
             Runner->>Runner: Persist output and execution state
             opt Worker asks for context
@@ -43,7 +43,7 @@ sequenceDiagram
                 Worker-->>Runner: Final JSON result or another question
                 Note over Runner,Orchestrator: Parallel questions are handled one at a time
             end
-            Note over Runner,Worker: Matching Parallel end waits for every branch to resolve
+            Note over Runner,Worker: Matching Parallel end waits for selected branches to resolve
         else Needs caller input
             Runner->>Runner: Suspend scheduling while running siblings settle
             Runner-->>Caller: Question and input decision ID
@@ -307,11 +307,22 @@ orchestrator chooses exactly one valid connection, or asks for input/stops when 
 is available. Choosing multiple alternatives is a protocol error: Polybridge dispatches nothing
 and requests a correction within the decision-attempt allowance.
 
-Parallel start explicitly opens a group and launches **every forward branch**. Its outgoing arrow
-instructions describe branch purpose, not permission to omit a branch. Conditions for selecting
-the whole group belong on its incoming arrow. Polybridge obtains focused assignments for ready
-workers; structural traversal needs no assignment. `max_parallel` limits concurrent harness turns across the workflow tree, so
-a group remains valid even when its branches execute one at a time.
+Parallel start opens a group with **Branch selection** set to **All branches** by default. This
+preserves the existing behavior: every forward branch runs. **Orchestrator selects** instead chooses
+one or more applicable branch entries, using optional selection guidance and the request. The
+orchestrator supplies a separate assignment for each selected executable entry and a reason
+explaining selections and exclusions. The complete selection and assignments are validated before
+any branch dispatches. Empty, duplicate, unknown, or downstream-node selections are invalid.
+
+Selection is frozen per group invocation and persisted with its assignments and decision identity.
+Restart and recovery use the same selected set; a loop re-entering Parallel start creates a new
+invocation and can select differently. To skip the whole group, use an alternative incoming route.
+Applicability selection does not make selected required work optional or relax failure-bypass
+rules: selecting a branch with optional work requires an actually selected required sibling, and an optional-only selection is rejected before dispatch.
+
+Outgoing arrow instructions describe branch purpose. Polybridge obtains focused assignments for
+ready workers; structural traversal needs no assignment. `max_parallel` limits concurrent harness
+turns across the workflow tree, so a group remains valid when branches execute one at a time.
 
 ```mermaid
 flowchart LR
@@ -343,12 +354,23 @@ flowchart LR
     OuterEnd --> Next[Next step]
 ```
 
-Parallel end waits for its own branches to resolve, combines their immutable result references,
+Parallel end waits for exactly its selected branches to resolve, combines their immutable result references,
 and asks the orchestrator for the next continuation. An inner end can release while other outer
 branches are still working. Arrivals are persisted by group generation and branch identity;
 repeated arrival notifications cannot release a group twice. Required failures need recovery or
 an explicit stopping/input decision; they cannot silently satisfy the barrier. A recovered branch
 retains earlier failure evidence while its successful recovery resolves the barrier.
+
+Monitor labels excluded branch regions **Not selected**, dims their connections, and shows each
+group invocation's selected/excluded entries and recorded reason. This presentation is scoped to
+the active or most recent enclosing invocation; a later loop can select a previously excluded
+branch. It does not report exclusion as execution success or failure.
+
+Definitions set `branch_selection: "all"|"orchestrator"` and optional `selection_guidance` on
+`parallel_start` only. Durable group records retain `selected_connection_ids`,
+`excluded_connection_ids`, `selection_reason`, `selection_decision_id`, selected assignments, and
+the enclosing group identity; released history preserves them after convergence. Historical
+records without selection fields keep their previous All branches behavior.
 
 Retry loops may remain inside a branch, but cannot cross an open parallel boundary. Retrying a
 whole closed group creates a new generation within the existing execution and transition budgets.
@@ -462,8 +484,8 @@ Its JSON decision contains `decision_id`, `action`, and `reason`. Actions are `c
 `complete`, `failed`, `needs_input`, `inspect`, or `answer`. Continuing selects `continuation_id` entries and supplies
 an assignment `prompt` for each agent execution, optional additional result references, and
 optional assigned task IDs. Under Agent decides, each agent assignment also chooses
-`session_mode: fresh|resume|continue_previous`; Resume identifies an issued `resume_task_id`. Structural traversal needs no assignment; convergence waits for every
-branch before requesting one assignment for its next agent. Start always asks the
+`session_mode: fresh|resume|continue_previous`; Resume identifies an issued `resume_task_id`. Structural traversal needs no assignment; convergence waits for the selected
+branches before requesting one assignment for its next agent. Start always asks the
 orchestrator for the first assignment. New runs retain one compatible native orchestrator session
 across decisions, inspections, and worker questions. Each checkpoint still has its own durable
 execution record and current authoritative context. A candidate change or a definitively missing
@@ -471,9 +493,12 @@ retained session boots Fresh; uncertain dispatch outcomes require reconciliation
 restarting the conversation or repeating work.
 
 New runs avoid structural-only routing decisions. A continuation entering **Parallel start**
-includes `branch_continuations`; the orchestrator returns a `branch_assignments` array containing
-one separately written assignment for every issued branch. Branches can perform different jobs
-and do not share a prompt. Polybridge validates the complete bundle before advancing or dispatching
+includes `branch_continuations`, `branch_selection`, and `selection_guidance`. The orchestrator
+returns `branch_assignments`: every issued entry under All branches, or one or more selected
+entries under Orchestrator selects. Selectable groups also require `selection_reason` explaining
+selection and exclusions. Executable entries receive separately written assignments; structural
+entries carry their own validated nested branch bundle. Branches can perform different jobs and
+do not share a prompt. Polybridge validates the complete bundle before advancing or dispatching
 anything, including nested groups. A single unconditional structural exit advances through normal
 transition accounting. A successful worker with one unconditional path to End goes straight to
 the completion decision, where the orchestrator still checks results and owns checklist updates.
@@ -496,6 +521,25 @@ An agent continuation decision looks like this (IDs are issued by Polybridge):
     "continuation_id": "issued-continuation-id",
     "prompt": "Review the attached plan for missing cases and report concrete findings",
     "session_mode": "fresh"
+  }]
+}
+```
+
+For an Orchestrator selects split with issued iOS and Android branches, this selects only iOS:
+
+```json
+{
+  "decision_id": "issued-decision-id",
+  "action": "continue",
+  "reason": "The request concerns the iOS implementation",
+  "next": [{
+    "continuation_id": "issued-parallel-start-id",
+    "selection_reason": "Select iOS; exclude Android because it is outside the request",
+    "branch_assignments": [{
+      "continuation_id": "issued-ios-branch-id",
+      "prompt": "Implement the requested iOS change and verify its affected tests",
+      "session_mode": "fresh"
+    }]
   }]
 }
 ```

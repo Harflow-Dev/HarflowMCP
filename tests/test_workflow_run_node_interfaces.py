@@ -227,3 +227,23 @@ async def test_successor_worker_receives_complete_child_result_in_runtime_prompt
     prompt = next(call['prompt'] for call in registry.dispatches if call['label'] == 'consume')
     assert big in prompt
     assert len(big) > inv.INVOCATION_PREVIEW_BUDGET
+
+
+async def test_final_json_inspection_preserves_and_authorizes_descendant_target(store, tmp_path):
+    parent, activation, child = seeded_two_level(store, tmp_path)
+    parent['runner_policy'] = 'guided'
+    token = parent['pending'][0]
+    token['decision_id'] = 'inspect-child'
+    node = next(n for n in parent['definition']['nodes'] if n['id'] == 'call')
+    request = {'workflow_run_id': child['workflow_run_id'], 'execution_id': child['activations'][0]['id'], 'view': 'result'}
+    decision = {'decision_id': token['decision_id'], 'action': 'inspect', 'reason': 'Read child evidence', 'requests': [request]}
+    normalized, warnings = d.normalize_decision(parent, node, token, decision, False, root=store.root)
+    assert normalized['requests'] == [request]
+    assert not warnings
+    page = workflow_inspection.inspect_request(parent, store.root, normalized['requests'][0])
+    assert page['workflow_run_id'] == child['workflow_run_id']
+    unrelated = seed_parent(store, tmp_path, 'parent', stage='preparing')
+    decision['requests'][0]['workflow_run_id'] = unrelated['workflow_run_id']
+    normalized, _ = d.normalize_decision(parent, node, token, decision, False, root=store.root)
+    with pytest.raises(ValueError):
+        workflow_inspection.inspect_request(parent, store.root, normalized['requests'][0])
