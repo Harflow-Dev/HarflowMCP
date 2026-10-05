@@ -225,6 +225,81 @@ and evidence, review gives a verdict and concrete findings, and task steps repor
 results. Only the orchestrator changes checklist statuses. Select Start to edit workflow
 settings, including the orchestrator, fallback agents, and limits.
 
+## Run workflow nodes
+
+A **Run workflow** node (`type: workflow`) references one saved definition by
+`workflow_ref.workflow_id`. The stable identity survives edits; this release has no rename
+operation. The inspector shows the referenced workflow and its access requirements. Invocation
+settings include assignment guidance, attempts, timeout and optionality; harness, model, network,
+access and worker session settings remain owned by the saved child definition. The root network policy can disable network across the tree; child network settings cannot re-enable it.
+
+**Child orchestrator** is the default: the parent supplies a focused assignment that becomes the
+child's request, and the child uses its own orchestrator, checklist and technical plan. **Current
+orchestrator** reuses the nearest owning ancestor's session with serialized turns. Child decisions
+and checklist items still belong to the child boundary. Neither mode flattens graphs or shares
+worker sessions across workflows.
+
+```mermaid
+flowchart LR
+    Parent[Parent checkpoint] --> Invoke[Run workflow: focused assignment]
+    Invoke --> ChildStart[Child Start]
+    subgraph Child[Separate pinned child run]
+        ChildStart --> Worker[Child worker] --> ChildEnd[Child End]
+    end
+    ChildEnd --> Outcome[Structured child outcome and result references]
+    Outcome --> Next[Parent decision]
+```
+
+Save validates dependencies under the definitions-tree lock. Start pins the complete dependency
+tree, including revisions and content hashes. Missing references, direct or indirect cycles and
+more than four levels (root is level one) are rejected. Repeated references from separate branches
+are valid. Later edits or deletion cannot change a pinned run. Deleting a referenced definition
+reports `referenced_by`; new parent runs then require the missing dependency to be restored.
+
+The root's `max_parallel` limits harness turns throughout the tree. Waiting invocations occupy no
+harness slot. Children share checkout coordination and the root supervisor, while keeping linked
+run records and immutable results. Full child results remain available through scoped descendant
+inspection; bounded previews carry retrieval references and truncation information.
+
+Child questions are forwarded to the original caller with their exact decision identity and
+source. Concurrent questions are served in creation order. Answer the root's current decision ID;
+its answer goes to that source checkpoint without repeating completed work or granting attempts.
+Public child controls redirect callers to the root. Explicit attempt grants apply to the attention
+source only. A child invocation timeout excludes idle suspension for caller input. Cancellation
+and timeout propagate through descendants and require settlement before redispatch.
+
+Recovering a child preserves its existing work and attempt accounting; retrying an invocation
+creates a new child and consumes an attempt. Permission, cancellation and uncertain outcomes
+cannot be bypassed. Only settled child failures and settled timeouts are eligible for optional
+bypass under the ordinary required-sibling rule; runtime failures are ineligible. Completing a
+child never automatically completes parent checklist tasks. The parent orchestrator may explicitly
+complete tasks assigned to a succeeded invocation using its child outcome as evidence.
+
+Monitor opens each child in its own canvas with its assignment, checklist and plan, and a parent
+breadcrumb. Sidebar groups follow persisted parent links; Current-mode checkpoints share the
+owner's orchestrator conversation while decision history remains scoped. Takeover stays unavailable
+while the root tree is active, suspended or settling. CTL JSON v5 supplies these links and states;
+the backend and Monitor must be delivered together. Historical snapshots remain readable.
+
+To author a reference, save a child, obtain its `workflow_id` from `workflow-get CHILD --json`,
+and use this node in a parent's explicit-routing definition:
+
+```json
+{
+  "id": "child-review",
+  "type": "workflow",
+  "workflow_ref": {"workflow_id": "ID_FROM_SAVED_CHILD"},
+  "orchestrator_mode": "child",
+  "instructions": "Review only the assigned change and report concrete findings",
+  "max_attempts": 3
+}
+```
+
+Start the parent in a temporary test repository. Open the node's child run, verify the assignment
+and parent breadcrumb, then repeat with Current orchestrator. Use a parallel pair of Current-mode
+invocations to check one shared session, and exercise a forwarded question and root cancellation.
+Tests pin exact answer routing and recovery independently of model behavior.
+
 ## Branches and attempts
 
 Outgoing connections on Start, agent nodes, and Parallel end are **exclusive alternatives**. The
@@ -235,7 +310,7 @@ and requests a correction within the decision-attempt allowance.
 Parallel start explicitly opens a group and launches **every forward branch**. Its outgoing arrow
 instructions describe branch purpose, not permission to omit a branch. Conditions for selecting
 the whole group belong on its incoming arrow. Polybridge obtains focused assignments for ready
-workers; structural traversal needs no assignment. `max_parallel` limits concurrent workers, so
+workers; structural traversal needs no assignment. `max_parallel` limits concurrent harness turns across the workflow tree, so
 a group remains valid even when its branches execute one at a time.
 
 ```mermaid

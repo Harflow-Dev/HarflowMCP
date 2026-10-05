@@ -30,7 +30,7 @@ def test_cli_workflow_start_envelope(monkeypatch, capsys):
         return {"workflow_run_id": "run-1", "status": "pending"}
     monkeypatch.setattr(server, "_workflow_call", start)
     assert ctl.main(["run", "--workflow", "review", "--repo", "/tmp/repo", "--prompt", "do it", "--json"]) == 0
-    assert json.loads(capsys.readouterr().out) == {"v": 4, "result": {"workflow_run_id": "run-1", "status": "pending"}}
+    assert json.loads(capsys.readouterr().out) == {"v": 5, "result": {"workflow_run_id": "run-1", "status": "pending"}}
     assert observed == {"name": "review", "overrides": None, "network": None, "freedom": None, "prompt": "do it", "repo_path": "/tmp/repo"}
 
 

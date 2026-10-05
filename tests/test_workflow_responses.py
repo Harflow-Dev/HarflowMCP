@@ -99,7 +99,7 @@ async def test_undecidable_workflow_reader_fails_closed(monkeypatch):
 async def test_authorized_definition_is_exact_snapshot_launched(monkeypatch, tmp_path):
     from polybridge import workflows
     monkeypatch.setenv('HOME', str(tmp_path))
-    snapshot = {'name': 'example', 'revision': 1, 'nodes': [], 'orchestrator': {'backend': 'codex'}}
+    snapshot = {'name': 'example', 'revision': 1, 'routing_mode': 'explicit', 'orchestrator': {'backend': 'codex'}, 'nodes': [{'id': 'start', 'type': 'start'}, {'id': 'end', 'type': 'end'}], 'connections': [{'id': 'go', 'source': 'start', 'target': 'end'}]}
     calls = []
     def get(self, name):
         calls.append(name)
@@ -109,7 +109,10 @@ async def test_authorized_definition_is_exact_snapshot_launched(monkeypatch, tmp
     async def validate(path):
         return tmp_path
     async def launch(**kwargs):
-        assert kwargs['definition_snapshot'] is snapshot
+        launched = kwargs['definition_snapshot']
+        assert launched == workflows.launch_definition(snapshot, None)
+        tree = kwargs['dependency_tree']
+        assert tree['workflows'][tree['root_workflow_id']]['definition'] == launched
         return {'workflow_run_id': 'r', 'status': 'pending'}
     monkeypatch.setattr(workflows.WorkflowStore, 'get', get)
     monkeypatch.setattr(workflows, 'start_workflow', launch)

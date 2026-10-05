@@ -6,20 +6,39 @@ from pathlib import Path
 from typing import Any
 
 
+def _tree_gate(log_dir: Path, association: dict[str, Any]) -> dict[str, Any] | None:
+    """Root status and settling for the run owning a task; None when unavailable."""
+    try:
+        from .workflows import WorkflowStore
+        store = WorkflowStore(root=log_dir.parent)
+        run = store.get_run(association["workflow_run_id"])
+        from .workflow_invocation import tree_state
+        return tree_state(store, run)
+    except (OSError, ValueError, KeyError, TypeError):
+        logging.getLogger(__name__).warning("Workflow tree state unavailable for %s", association.get("workflow_run_id"), exc_info=True)
+        return None
+
+
 def owner(log_dir: Path, task_id: str, *, strict: bool = False) -> dict[str, Any] | None:
     from .workflows import WorkflowStore
     return WorkflowStore(root=log_dir.parent).task_owner(task_id, strict=strict)
 
 
 def pause_for_task(log_dir: Path, task_id: str, reason: str) -> None:
-    """Human task control must survive unavailable optional workflow bookkeeping."""
+    """Human task control must survive unavailable optional workflow bookkeeping.
+
+    A child run has no public controls of its own: pausing pauses the root.
+    """
     try:
         association = owner(log_dir, task_id)
         if association is not None and association.get("status") not in {"completed", "failed", "cancelled", "cancelling"}:
             from .workflows import WorkflowStore
-            run_id = association.get("workflow_run_id") or association.get("run_id")
+            store = WorkflowStore(root=log_dir.parent)
+            run = store.get_run(association["workflow_run_id"])
+            link = run.get("parent_link") or {}
+            run_id = link.get("root_workflow_run_id") or association.get("workflow_run_id") or association.get("run_id")
             if run_id:
-                WorkflowStore(root=log_dir.parent).control(run_id, "pause", instructions=reason)
+                store.control(run_id, "pause", instructions=reason)
     except (OSError, ValueError, KeyError, TypeError):
         logging.getLogger(__name__).warning("Workflow pause bookkeeping unavailable for %s", task_id, exc_info=True)
 
@@ -31,9 +50,13 @@ def refuse_takeover(log_dir: Path, task_id: str) -> None:
         association = owner(log_dir, task_id, strict=True)
         if association is None:
             return
-        run = WorkflowStore(root=log_dir.parent).get_run(association["workflow_run_id"])
+        store = WorkflowStore(root=log_dir.parent)
+        run = store.get_run(association["workflow_run_id"])
         if run.get("kind") == "builder" or run["status"] not in TERMINAL or run.get("settling"):
             raise control.TakeoverRefused("workflow_active", "Workflow tasks can only be taken over after the entire workflow has finished and settled")
+        state = _tree_gate(log_dir, association)
+        if state is not None and (state["root_status"] not in TERMINAL or state["settling"]):
+            raise control.TakeoverRefused("workflow_tree_active", "Workflow tasks can only be taken over after the entire workflow tree has finished and settled")
     except control.TakeoverRefused:
         raise
     except (OSError, ValueError, KeyError, TypeError) as exc:
@@ -59,6 +82,9 @@ def refuse_direct_message(log_dir: Path, task_id: str) -> None:
             return
         if association.get("status") not in TERMINAL or association.get("workflow_settling"):
             raise SendRefused("This task belongs to an active workflow; respond through the workflow caller", code="workflow_active")
+        state = _tree_gate(log_dir, association)
+        if state is not None and (state["root_status"] not in TERMINAL or state["settling"]):
+            raise SendRefused("This task belongs to an active workflow tree; respond through the workflow caller", code="workflow_active")
     except SendRefused:
         raise
     except (OSError, ValueError, KeyError, TypeError) as exc:

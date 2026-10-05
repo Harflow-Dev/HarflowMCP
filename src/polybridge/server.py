@@ -958,12 +958,19 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
             if caller is not None:
                 refuse_managed(_reg().log_dir, caller.record.task_id)
         if action == "save" and caller is not None:
-            definition = workflows.validate_definition({**kwargs["definition"], "name": kwargs["name"]})
-            _guard_saved_workflow_authority(caller, definition)
+            def guard_tree(resolved: dict[str, Any], _caller: Any = caller) -> None:
+                _guard_saved_workflow_authority(_caller, resolved)
+        else:
+            guard_tree = None
         if action == "start":
             if kwargs.get("freedom") is not None:
                 raise ValueError("Workflow access is defined by saved nodes; caller freedom overrides are not supported")
-            kwargs["definition_snapshot"] = workflows.WorkflowStore().get(kwargs["name"])
+            store_ = workflows.WorkflowStore()
+            kwargs["definition_snapshot"] = await asyncio.to_thread(store_.get, kwargs["name"])
+            kwargs["definition_snapshot"] = workflows.launch_definition(kwargs["definition_snapshot"], kwargs.get("overrides"))
+            # Resolve once: the pinned tree feeds both authority and the run.
+            from .workflow_references import resolve_dependencies
+            kwargs["dependency_tree"] = await asyncio.to_thread(resolve_dependencies, store_, definition=kwargs["definition_snapshot"], substitute_name=kwargs["name"])
         if action in {"start", "build"}:
             if not kwargs["prompt"] or not kwargs["prompt"].strip():
                 raise ValueError("prompt must be a non-empty string")
@@ -971,26 +978,41 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
                 workflows._candidate({**kwargs["agent"], "fallbacks": kwargs.get("fallbacks") or kwargs["agent"].get("fallbacks", [])})
             caller = await _verified_workflow_caller()
             if caller is not None:
-                configs = []
-                if action == "start":
-                    definition = kwargs["definition_snapshot"]
-                    orchestrator = {**definition["orchestrator"], **(kwargs.get("overrides") or {})}
-                    configs.append((orchestrator, "read_only", kwargs.get("network")))
-                    configs.extend((n["agent"], workflows.effective_freedom(n, "unrestricted", permission_policy="saved_node"), False if kwargs.get("network") is False else n.get("network", kwargs.get("network"))) for n in definition["nodes"] if n["type"] == "agent")
-                else:
-                    configs.append(({**kwargs["agent"], "fallbacks": kwargs.get("fallbacks") or []}, "read_only", None))
                 path = await _validate_repo_path(kwargs["repo_path"]) if kwargs.get("repo_path") is not None else workflows.builder_workspace(workflows.WorkflowStore())
-                for config, freedom, network in configs:
-                    for candidate in [config, *config.get("fallbacks", [])]:
-                        backend_ = backends.get(candidate["backend"])
-                        try:
-                            enforcement = backend_.enforcement(freedom, network)
-                        except backends.NestedDispatchRefused:
-                            raise
-                        except backends.UnsupportedCapability:
-                            # The supervisor journals this candidate refusal and tries its fallback.
-                            continue
-                        _reg()._resolve_lineage(caller, child_enforcement=enforcement, child_backend=backend_.name, child_repo=path)
+                if action == "start":
+                    # Authority walks the resolved tree: every pinned node candidate at
+                    # its saved freedom with the run's network, and an orchestrator only
+                    # for the root and definitions reached through Child-mode edges.
+                    tree = kwargs["dependency_tree"]
+                    child_reached = {edge["to"] for edge in tree.get("edges", []) if edge.get("orchestrator_mode", "child") == "child"}
+                    network = kwargs.get("network")
+                    for ident, entry in tree.get("workflows", {}).items():
+                        definition = entry["definition"]
+                        configs = [(definition["orchestrator"], "read_only", network)] if ident == tree["root_workflow_id"] or ident in child_reached else []
+                        configs.extend((n["agent"], workflows.effective_freedom(n, "unrestricted", permission_policy="saved_node"), False if network is False else n.get("network", network)) for n in definition["nodes"] if n["type"] == "agent")
+                        for config, freedom, node_network in configs:
+                            for candidate in [config, *config.get("fallbacks", [])]:
+                                backend_ = backends.get(candidate["backend"])
+                                try:
+                                    enforcement = backend_.enforcement(freedom, node_network)
+                                except backends.NestedDispatchRefused:
+                                    raise
+                                except backends.UnsupportedCapability:
+                                    # The supervisor journals this candidate refusal and tries its fallback.
+                                    continue
+                                _reg()._resolve_lineage(caller, child_enforcement=enforcement, child_backend=backend_.name, child_repo=path)
+                else:
+                    configs = [({**kwargs["agent"], "fallbacks": kwargs.get("fallbacks") or []}, "read_only", None)]
+                    for config, freedom, network in configs:
+                        for candidate in [config, *config.get("fallbacks", [])]:
+                            backend_ = backends.get(candidate["backend"])
+                            try:
+                                enforcement = backend_.enforcement(freedom, network)
+                            except backends.NestedDispatchRefused:
+                                raise
+                            except backends.UnsupportedCapability:
+                                continue
+                            _reg()._resolve_lineage(caller, child_enforcement=enforcement, child_backend=backend_.name, child_repo=path)
         if action == "start":
             kwargs["repo_path"] = await _validate_repo_path(kwargs["repo_path"])
             return await workflows.start_workflow(**kwargs, _verified_caller=caller)
@@ -1044,7 +1066,7 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
         if action == "get":
             return await asyncio.to_thread(store_.get, kwargs["name"])
         if action == "save":
-            return await asyncio.to_thread(store_.save, **kwargs)
+            return await asyncio.to_thread(store_.save, kwargs["name"], kwargs["definition"], kwargs.get("expected_revision"), authority_guard=guard_tree)
         if action == "delete":
             return await asyncio.to_thread(store_.delete, kwargs["name"])
         if action == "inspect":
@@ -1082,8 +1104,13 @@ async def save_workflow(name: str, definition: dict[str, Any], expected_revision
     Set routing_mode="explicit". Ordinary nodes choose exactly one outgoing path.
     Parallel execution uses paired parallel_start/parallel_end nodes with shared
     parallel_group_id. Every branch reaches its matching end; nesting is supported.
-    Agent callers may save only access and network settings within their recorded
-    capability envelope; verified human callers can author workflow permissions.
+    A Run workflow node (type "workflow") references a saved workflow by
+    workflow_ref.workflow_id with orchestrator_mode child or current; its whole
+    dependency tree is resolved and pinned at save, so missing references, cycles
+    (reported as A > B > C > A) and nesting beyond four levels are refused before
+    anything is written. Agent callers may save only access and network settings
+    within their recorded capability envelope, checked over the resolved tree;
+    verified human callers can author workflow permissions.
     """
     return await _workflow_call("save", name=name, definition=definition, expected_revision=expected_revision)
 
@@ -1107,6 +1134,8 @@ async def workflow_builder(name: str, prompt: str, repo_path: str | None = None,
     a shared parallel_group_id; every branch must reach its matching end. Parallel start
     runs all branches, which may contain multiple steps and properly nested groups.
     Preserve existing node positions exactly unless the user explicitly asks to move or rearrange them.
+    Preserve any supplied Run workflow nodes exactly (workflow_ref, orchestrator_mode,
+    attempts, timeout, optional); never author new Run workflow references.
     The canvas expands automatically; there is no fixed right or bottom boundary.
     """
     if agent is None:
@@ -1144,7 +1173,13 @@ async def apply_workflow_draft(definition: dict[str, Any], expected_draft_revisi
 
 @mcp.tool()
 async def start_workflow(name: str, prompt: str, repo_path: str, overrides: dict[str, Any] | None = None, freedom: str | None = None, network: StrictBool | None = None) -> dict[str, Any]:
-    """Start a durable workflow run; returns workflow_run_id rather than task_id."""
+    """Start a durable workflow run; returns workflow_run_id rather than task_id.
+
+    The complete dependency tree of any Run workflow node is resolved and pinned
+    before the run is created, so later edits or deletes never reinterpret the
+    run. Children are linked runs that share the root's harness-turn budget;
+    public controls apply to the root run id only.
+    """
     from .workflow_responses import compact
     return compact(await _workflow_call("start", name=name, prompt=prompt, repo_path=repo_path, overrides=overrides, freedom=freedom, network=network))
 
@@ -1169,7 +1204,13 @@ async def list_workflow_runs(offset: int = 0, limit: int = 10) -> dict[str, Any]
 
 @mcp.tool()
 async def get_workflow_status(workflow_run_id: str) -> dict[str, Any]:
-    """Read a workflow run's execution state and task associations."""
+    """Read a workflow run's execution state and task associations.
+
+    Child runs of Run workflow nodes report their parent and root links,
+    orchestrator mode and session owner, input source, tree settling state and
+    per-execution child invocation status. Public controls on a child id are
+    refused with the root run id.
+    """
     from .workflow_responses import compact
     return compact(await _workflow_call("status", run_id=workflow_run_id))
 
@@ -1234,7 +1275,9 @@ async def resume_workflow(workflow_run_id: str, instructions: str | None = None,
     """Resume a caller-owned run with instructions and optional explicit attempt grants.
 
     For needs_input, supply its current input_decision_id as decision_id and a nonempty answer
-    in instructions. Stale answers and live/uncertain dispatches are refused.
+    in instructions. Stale answers and live/uncertain dispatches are refused. When the root
+    run carries a forwarded question from a Run workflow descendant, the answer is applied to
+    the attention source run; additional_attempts go to that source and grant no fresh child.
     """
     from .workflow_responses import compact
     return compact(await _workflow_call("resume", run_id=workflow_run_id, instructions=instructions, additional_attempts=additional_attempts, decision_id=decision_id))
@@ -1249,7 +1292,8 @@ async def inspect_workflow_node(workflow_run_id: str, execution_id: str, task_id
     normalized node_result and full raw_output. Selecting task_id reads a specific fallback
     attempt. Activity uses normalized events with before_seq/after_seq. Result limit is
     characters (default 16000, max 32000); activity limit is events (default 50, max 200).
-    No live or uncertain execution can be inspected.
+    No live or uncertain execution can be inspected. Orchestrator inspect decisions may name
+    a linked child run through workflow_run_id, authorized only by a verified parent chain.
     """
     if view == "result" and (before_seq is not None or after_seq is not None):
         raise MCPError(INVALID_PARAMS, "Result view uses cursor, not event sequence cursors")

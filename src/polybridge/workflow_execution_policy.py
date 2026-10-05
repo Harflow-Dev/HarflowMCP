@@ -13,7 +13,7 @@ def visit_id(run: dict[str, Any], token: dict[str, Any]) -> str | None:
 
 def attempts_used(run: dict[str, Any], node: dict[str, Any], token: dict[str, Any]) -> int:
     visit = visit_id(run, token)
-    return sum(a['role'] == 'node' and a['node_id'] == node['id'] and any(t.get('status') != 'not_started' for t in a.get('tasks', [])) and (run.get('execution_policy') != 'visit' or (a.get('visit_id') or (a.get('token') or {}).get('id')) == visit) for a in run['activations'])
+    return sum(a['role'] == 'node' and a['node_id'] == node['id'] and (a.get('invocation') or any(t.get('status') != 'not_started' for t in a.get('tasks', []))) and (run.get('execution_policy') != 'visit' or (a.get('visit_id') or (a.get('token') or {}).get('id')) == visit) for a in run['activations'])
 
 
 def continuation_session_token(token: dict[str, Any], choice: dict[str, Any]) -> dict[str, Any]:

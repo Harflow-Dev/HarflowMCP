@@ -92,6 +92,25 @@ def history_page(runs: list[dict[str, Any]], offset: int = 0, limit: int = 100) 
 def compact(run: dict[str, Any]) -> dict[str, Any]:
     keys = ("workflow_run_id", "name", "revision", "kind", "status", "created_at", "updated_at", "interaction_owner", "settling", "input_decision_id", "execution_contract", "draft_revision")
     result = {key: run[key] for key in keys if key in run and isinstance(run[key], (str, int, float, bool, type(None)))}
+    link = run.get("parent_link") or {}
+    if link:
+        # A child run reports its place in the tree; bounded identifiers only.
+        result["parent_workflow_run_id"] = str(link.get("workflow_run_id", ""))[:100]
+        result["root_workflow_run_id"] = str(link.get("root_workflow_run_id", ""))[:100]
+        result["parent_execution_id"] = str(link.get("execution_id", ""))[:100]
+        result["orchestrator_mode"] = str(run.get("orchestrator_mode", "child"))[:20]
+    if run.get("orchestrator_session_owner_run_id"):
+        result["orchestrator_session_owner_run_id"] = str(run["orchestrator_session_owner_run_id"])[:100]
+    if isinstance(run.get("input_source"), dict):
+        source = run["input_source"]
+        result["input_source"] = {"workflow_run_id": str(source.get("workflow_run_id", ""))[:100], "workflow_name": str(source.get("workflow_name", ""))[:200], "path": [str(item)[:100] for item in source.get("path", [])][:16]}
+    if link or run.get("dependency_tree"):
+        # Bounded tree projection derived from this record: a run in a tree is
+        # settling while anything visible here is unsettled, and a child run is
+        # marked suspended via its root when its own child awaits caller input.
+        result["tree_settling"] = bool(run.get("settling")) or run.get("status") not in {"completed", "failed", "cancelled"} or bool(run.get("suspended_via_root"))
+        if run.get("suspended_via_root"):
+            result["suspended_via_root"] = True
     disposition = run.get("checklist_disposition")
     if isinstance(disposition, dict):
         result["checklist_disposition"] = {key: str(disposition[key])[:100] for key in ("status", "execution_id", "decision_id") if key in disposition}
@@ -111,6 +130,9 @@ def compact(run: dict[str, Any]) -> dict[str, Any]:
         owner = wait.get("owner") or {}
         result["checkout_wait"] = {"reason": str(wait.get("reason", ""))[:300], "repo_path": str(wait.get("repo_path", ""))[:300], "owner": {key: str(owner.get(key, ""))[:100] for key in ("workflow_run_id", "task_id")}}
     result["current_stage"] = [{"execution_id": str(a.get("id", ""))[:100], "node_id": str(a.get("node_id", ""))[:100], "role": str(a.get("role", ""))[:100], "status": str(a.get("status", ""))[:100]} for a in activations if a.get("status") in {"running", "starting", "reserved", "uncertain"}][:8]
+    invocations = [{"execution_id": str(a.get("id", ""))[:100], "child_workflow_run_id": str((a.get("invocation") or {}).get("child_workflow_run_id", ""))[:100], "stage": str((a.get("invocation") or {}).get("stage", ""))[:40], "child_outcome_kind": str((((a.get("node_result") or {}).get("result") or {}).get("child_outcome") or {}).get("kind", ""))[:40]} for a in activations if a.get("invocation")]
+    if invocations:
+        result["child_invocations"] = invocations[:8]
     errors = [{"execution_id": a.get("id"), "decision_id": (a.get("decision_diagnostic") or {}).get("decision_id", a.get("decision_id")), "error": str(a["result_error"])[:1000], "diagnostic": {key: str((a.get("decision_diagnostic") or {}).get(key, ""))[:100] for key in ("attempt", "category", "field_path", "field", "path")}} for a in activations if a.get("result_error")]
     result["decision_errors"] = errors[-3:]
     # User-authored identity fields can also be large; never permit them to defeat the budget.

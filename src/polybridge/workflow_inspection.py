@@ -76,9 +76,13 @@ def decorate_tasks(entries: list[dict[str, Any]], log_dir: Any) -> list[dict[str
         index: dict[str, dict[str, Any]] = {}
         run_cache[run_id] = index
         run = storage.get_run(_identifier(run_id))
+        from .workflow_invocation import tree_state
+        state = tree_state(storage, run)
         for activation in run.get("activations", []):
             for task in activation.get("tasks", []):
-                association = {"workflow_run_id": run["workflow_run_id"], "workflow_node_id": activation["node_id"], "workflow_execution_id": activation["id"], "workflow_role": activation["role"], "execution_contract": run.get("execution_contract"), "interaction_owner": run.get("interaction_owner", "caller"), "workflow_status": run.get("status"), "workflow_settling": run.get("settling", False), "workflow_name": run.get("name")}
+                association = {"workflow_run_id": run["workflow_run_id"], "workflow_node_id": activation["node_id"], "workflow_execution_id": activation["id"], "workflow_role": activation["role"], "execution_contract": run.get("execution_contract"), "interaction_owner": run.get("interaction_owner", "caller"), "workflow_status": run.get("status"), "workflow_settling": run.get("settling", False), "workflow_name": run.get("name"), "root_workflow_run_id": state["root_workflow_run_id"], "workflow_tree_status": state["root_status"], "workflow_tree_settling": state["settling"], "suspended_via_root": state.get("suspended_via_root", False)}
+                if run.get("orchestrator_session_owner_run_id") and activation.get("role") == "orchestrator":
+                    association["workflow_session_owner_run_id"] = run["orchestrator_session_owner_run_id"]
                 if run.get("execution_contract") == "delegation" and activation.get("role") == "node" and isinstance(activation.get("assignment_prompt"), str):
                     assignment = task.get("assignment_prompt", activation["assignment_prompt"])
                     association.update(display_prompt=assignment, prompt=assignment)
@@ -175,12 +179,48 @@ def filter_task_reads(entries: list[dict[str, Any]], managed: tuple[dict[str, An
     return [entry for entry in entries if entry["task_id"] in allowed]
 
 
+def _authorized_linked_run(run: dict[str, Any], root: Any, target_id: str) -> dict[str, Any]:
+    """Authorize inspection of a linked child run through a verified parent chain."""
+    from .workflows import WorkflowStore
+    store = WorkflowStore(root)
+    current_id = target_id
+    target = None
+    for _ in range(8):  # Bounded by the nesting depth limit.
+        try:
+            current = store.get_run(current_id)
+        except (OSError, ValueError, KeyError) as exc:
+            raise ValueError("Unknown linked child workflow run") from exc
+        if target is None:
+            target = current
+        link = current.get("parent_link") or {}
+        parent_id = link.get("workflow_run_id")
+        if not parent_id:
+            raise ValueError("Requested run is not part of this workflow tree")
+        try:
+            parent = store.get_run(parent_id)
+        except (OSError, ValueError, KeyError) as exc:
+            raise ValueError("Linked parent run is unavailable") from exc
+        activation = next((a for a in parent.get("activations", []) if a.get("id") == link.get("execution_id")), None)
+        invocation = (activation or {}).get("invocation") or {}
+        if invocation.get("child_workflow_run_id") != current_id:
+            raise ValueError("Linked child run does not match its persisted invocation")
+        tree = parent.get("dependency_tree") or {}
+        parent_workflow_id = parent.get("workflow_id") or tree.get("root_workflow_id")
+        edge = next((e for e in tree.get("edges", []) if e.get("from") == parent_workflow_id and e.get("node_id") == link.get("node_id") and e.get("to") == current.get("workflow_id")), None)
+        if edge is None:
+            raise ValueError("Linked child run has no edge in the pinned dependency tree")
+        if parent_id == run["workflow_run_id"]:
+            return target
+        current_id = parent_id
+    raise ValueError("Linked workflow chain exceeds the nesting limit")
+
+
 def inspect_request(run: dict[str, Any], root: Any, request: dict[str, Any]) -> dict[str, Any]:
     """Runner-side inspection, with no MCP server, registry, or agent tool dependency."""
     from .events import events_path, read_page
     if not isinstance(request, dict):
         raise ValueError("Inspection request must be an object")
-    allowed = {"execution_id", "task_id", "view", "cursor", "limit", "before_seq", "after_seq"}
+    allowed = {"execution_id", "task_id", "view", "cursor", "limit", "before_seq", "after_seq", "workflow_run_id"}
     if set(request) - allowed:
         raise ValueError("Unknown inspection request fields")
     execution_id = request.get("execution_id")
@@ -189,6 +229,14 @@ def inspect_request(run: dict[str, Any], root: Any, request: dict[str, Any]) -> 
     task_id = request.get("task_id")
     if task_id is not None and (not isinstance(task_id, str) or not task_id):
         raise ValueError("task_id must be a nonempty string")
+    target_run = run
+    target_id = request.get("workflow_run_id")
+    if target_id is not None:
+        if not isinstance(target_id, str) or not target_id:
+            raise ValueError("workflow_run_id must be a nonempty string")
+        if target_id != run["workflow_run_id"]:
+            # Only a verified parent_link chain up to a direct child is inspectable.
+            target_run = _authorized_linked_run(run, root, target_id)
     view = request.get("view", "result")
     limit = request.get("limit")
     if view == "result":
@@ -196,7 +244,7 @@ def inspect_request(run: dict[str, Any], root: Any, request: dict[str, Any]) -> 
             raise ValueError("Result view uses cursor, not event sequence cursors")
         if request.get("cursor") is not None and not isinstance(request["cursor"], str):
             raise ValueError("cursor must be a string")
-        return result_page(run, execution_id, task_id=task_id, cursor=request.get("cursor"), limit=16000 if limit is None else limit)
+        return result_page(target_run, execution_id, task_id=task_id, cursor=request.get("cursor"), limit=16000 if limit is None else limit)
     if view != "activity":
         raise ValueError("view must be result or activity")
     if request.get("cursor") is not None:
@@ -210,24 +258,46 @@ def inspect_request(run: dict[str, Any], root: Any, request: dict[str, Any]) -> 
         raise ValueError("cannot specify both before_seq and after_seq")
     if any(value is not None and (type(value) is not int or value < 0) for value in (before, after)):
         raise ValueError("Activity cursors must be nonnegative integers")
-    activation = execution(run, execution_id)
+    activation = execution(target_run, execution_id)
     task = selected_task(activation, task_id)
     if task is None:
         raise ValueError("Node execution has no dispatched task activity")
     page = read_page(events_path(root / "tasks", task["task_id"]), limit=limit, before_seq=before, after_seq=after)
-    return {"workflow_run_id": run["workflow_run_id"], "execution_id": execution_id, "node_id": activation["node_id"], "task_id": task["task_id"], "events": page.events, "has_more": page.has_more, "next_before_seq": page.next_before_seq, "next_after_seq": page.next_after_seq, "skipped_oversized": page.skipped_oversized}
+    return {"workflow_run_id": target_run["workflow_run_id"], "execution_id": execution_id, "node_id": activation["node_id"], "task_id": task["task_id"], "events": page.events, "has_more": page.has_more, "next_before_seq": page.next_before_seq, "next_after_seq": page.next_after_seq, "skipped_oversized": page.skipped_oversized}
 
 
-def guard_saved_workflow_authority(caller: Any, definition: dict[str, Any]) -> None:
-    """An ordinary agent may save only capabilities inside its recorded envelope."""
+def guard_saved_workflow_authority(caller: Any, value: Any) -> None:
+    """An ordinary agent may save only capabilities inside its recorded envelope.
+
+    ``value`` is a definition or a resolved dependency tree; a tree checks every
+    pinned node candidate at its saved freedom, and an orchestrator only for the
+    root and definitions reached through Child-mode edges.
+    """
     from . import workflows, backends
     from .backends.base import FREEDOMS
     from .backends.base import check_nested_enforcement
     record = caller.record
     if record.freedom not in FREEDOMS:
         raise ValueError("Saving a workflow requires known caller freedom")
+    if isinstance(value, dict) and "workflows" in value and "root_workflow_id" in value:
+        child_reached = {edge["to"] for edge in value.get("edges", []) if edge.get("orchestrator_mode", "child") == "child"}
+        for ident, entry in value["workflows"].items():
+            definition = entry["definition"]
+            configs = []
+            if ident == value["root_workflow_id"] or ident in child_reached:
+                configs.append((definition["orchestrator"], "read_only", None))
+            configs.extend((node["agent"], workflows.effective_freedom(node, "unrestricted", permission_policy="saved_node"), node.get("network")) for node in definition["nodes"] if node["type"] == "agent")
+            _check_configs(record, configs)
+        return
+    definition = value
     configs = [(definition["orchestrator"], "read_only", None)]
     configs.extend((node["agent"], workflows.effective_freedom(node, "unrestricted", permission_policy="saved_node"), node.get("network")) for node in definition["nodes"] if node["type"] == "agent")
+    _check_configs(record, configs)
+
+
+def _check_configs(record: Any, configs: list[tuple[dict[str, Any], str, bool | None]]) -> None:
+    from . import backends
+    from .backends.base import FREEDOMS, check_nested_enforcement
     for config, freedom, network in configs:
         if FREEDOMS.index(freedom) > FREEDOMS.index(record.freedom):
             raise ValueError("Saved workflow access cannot exceed the caller's freedom")

@@ -43,6 +43,10 @@ def no_caller_detected(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(
         lineage, "detect_caller_detail", lambda *args, **kwargs: lineage.Detection(None)
     )
+    # A suite run from inside a polybridge-managed worker inherits `PB_TASK_ID`; the
+    # registry would then (correctly) refuse mutations as an unverifiable managed
+    # caller. CI runs without it, so clear it to keep the same isolation everywhere.
+    monkeypatch.delenv("PB_TASK_ID", raising=False)
 
 
 @pytest.fixture

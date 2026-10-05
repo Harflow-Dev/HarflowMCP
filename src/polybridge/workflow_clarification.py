@@ -74,7 +74,7 @@ async def answer_question(supervisor: Any, node: dict[str, Any], token: dict[str
             run = supervisor.run()
             activation = next(a for a in run["activations"] if a["id"] == activation_id)
             question = question_record(run, activation_id, question_id)
-            if run["status"] != "running":
+            if not supervisor.tree.tree_running(run):
                 return False
             if question["status"] == "answered" and question["answer_delivery_state"] not in {"not_started", "requires_fresh"}:
                 return True
@@ -136,6 +136,9 @@ async def answer_question(supervisor: Any, node: dict[str, Any], token: dict[str
                     if r["status"] != "running":
                         a["decision_ignored"] = "Human control changed run state before answer acceptance"
                         return
+                    if not supervisor.tree.tree_running(r):
+                        a["decision_ignored"] = "Workflow tree stopped running before answer acceptance"
+                        return
                     q = question_record(r, activation_id, question_id)
                     r["decisions"].append({**decision, "node_id": node["id"], "activation_id": orchestration["id"], "execution_id": activation_id, "protocol_warnings": protocol_warnings})
                     if action == "answer":
@@ -151,7 +154,7 @@ async def answer_question(supervisor: Any, node: dict[str, Any], token: dict[str
                     diagnostic = {"decision_id": question["decision_id"], "question_id": question_id, "attempt": question.get("decision_attempts", 0), "category": "clarification_validation", "error": str(exc)}
                     next(a for a in r["activations"] if a["id"] == orchestration["id"]).update(status="failed", raw_output=raw, result_error=str(exc), decision_diagnostic=diagnostic)
                     r.setdefault("decision_errors", []).append(diagnostic)
-                    if r["status"] == "running":
+                    if r["status"] == "running" and supervisor.tree.tree_running(r):
                         question_record(r, activation_id, question_id)["decision_error"] = str(exc)
                 supervisor.update(reject, "invalid_question_decision", str(exc))
 
@@ -179,6 +182,6 @@ async def continue_worker(supervisor: Any, node: dict[str, Any], token: dict[str
     supervisor.update(prepare, "answer_prepared", {"question_id": question_id})
     activation = next(a for a in supervisor.run()["activations"] if a["id"] == activation_id)
     history = [{"question_id": q["question_id"], "question": q["question"], "answer": q.get("answer"), "observed_progress": w._bounded(q.get("progress", {})), "evidence": w._bounded(q.get("evidence", []))} for q in activation.get("questions", [])]
-    prompt = d.worker_prompt(run, node, token) + "\nClarification history and observed progress (continue without repeating completed work):\n" + json.dumps(history) + "\nAnswer to your latest question:\n" + question["answer"]
+    prompt = d.worker_prompt(run, node, token, root=supervisor.store.root) + "\nClarification history and observed progress (continue without repeating completed work):\n" + json.dumps(history) + "\nAnswer to your latest question:\n" + question["answer"]
     dispatch_node = {**node, "session_mode": mode}
     return await supervisor._dispatch(dispatch_node, prompt, "node", activation)
