@@ -43,10 +43,14 @@ def test_abandon_refuses_without_positive_human_reconciliation(tmp_path, monkeyp
         monkeypatch.setattr(w, '_supervisor_present', lambda r: True)
     if case == 'record':
         monkeypatch.setattr(w.task_store, 'read', lambda *a: SimpleNamespace(status='running'))
+    from polybridge import scratch
+    path = scratch.create(storage.root / 'tasks', 'missing')
+    (path / 'artifact').write_text('keep unresolved evidence')
     before = (storage.runs/(run['workflow_run_id']+'.json')).read_bytes()
     with pytest.raises(w.WorkflowError):
         storage.abandon_dispatch(run['workflow_run_id'], 'execution', 'wrong' if case=='wrong_task' else 'missing', '' if case=='reason' else 'Confirmed stopped', case!='confirm')
     assert (storage.runs/(run['workflow_run_id']+'.json')).read_bytes() == before
+    assert (path / 'artifact').read_text() == 'keep unresolved evidence'
 
 
 def test_abandon_cli_refuses_agent_caller(monkeypatch, capsys, tmp_path):
@@ -135,3 +139,46 @@ def test_delegation_repairs_existing_stale_answer_delivery(state):
         assert token['recovered_result'] == reply['result']
     else:
         assert 'recovered_result' not in token
+
+
+def test_abandon_removes_recordless_scratch_only_after_durable_confirmation(tmp_path, monkeypatch):
+    from polybridge import scratch
+    storage = w.WorkflowStore(tmp_path)
+    run = reserved(storage, tmp_path)
+    path = scratch.create(storage.root / 'tasks', 'missing')
+    (path / 'artifact').write_text('ambiguous dispatch artifact')
+    remove = scratch.remove
+    def after_commit(log_dir, task_id):
+        persisted = storage.get_run(run['workflow_run_id'])
+        assert persisted['activations'][0]['tasks'][0]['status'] == 'not_started'
+        assert persisted['activations'][0]['tasks'][0]['reconciliation']['confirmed_no_process']
+        remove(log_dir, task_id)
+    monkeypatch.setattr(scratch, 'remove', after_commit)
+    storage.abandon_dispatch(run['workflow_run_id'], 'execution', 'missing', 'Confirmed stopped', True)
+    assert not path.exists()
+
+
+def test_abandon_failed_persistence_preserves_ambiguous_scratch(tmp_path, monkeypatch):
+    from polybridge import scratch
+    storage = w.WorkflowStore(tmp_path)
+    run = reserved(storage, tmp_path)
+    path = scratch.create(storage.root / 'tasks', 'missing')
+    (path / 'artifact').write_text('keep until confirmed')
+    def fail(*args, **kwargs):
+        raise OSError('Persistence unavailable')
+    monkeypatch.setattr(storage, 'update_run', fail)
+    with pytest.raises(OSError, match='Persistence unavailable'):
+        storage.abandon_dispatch(run['workflow_run_id'], 'execution', 'missing', 'Confirmed stopped', True)
+    assert (path / 'artifact').read_text() == 'keep until confirmed'
+
+
+def test_abandon_cleanup_error_does_not_reverse_durable_reconciliation(tmp_path, monkeypatch, caplog):
+    from polybridge import scratch
+    storage = w.WorkflowStore(tmp_path)
+    run = reserved(storage, tmp_path)
+    def fail(*args):
+        raise OSError('Scratch cleanup unavailable')
+    monkeypatch.setattr(scratch, 'remove', fail)
+    result = storage.abandon_dispatch(run['workflow_run_id'], 'execution', 'missing', 'Confirmed stopped', True)
+    assert result['activations'][0]['tasks'][0]['status'] == 'not_started'
+    assert 'scratch' in caplog.text.lower()

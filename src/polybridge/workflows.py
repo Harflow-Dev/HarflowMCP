@@ -840,7 +840,15 @@ class WorkflowStore:
                 activation["status"] = "not_started"
             if r["status"] not in TERMINAL:
                 r.update(status="needs_attention", attention_reason="Dispatch abandoned after human confirmation; explicit resume is required")
-        return self.update_run(run_id, abandon, "dispatch_abandoned", {"execution_id": execution_id, "task_id": task_id, "reason": reason.strip()})
+        result = self.update_run(run_id, abandon, "dispatch_abandoned", {"execution_id": execution_id, "task_id": task_id, "reason": reason.strip()})
+        # Ambiguous spawn artifacts stay intact until no-process reconciliation is durable.
+        # Cleanup is bookkeeping and must not undo an already committed reconciliation.
+        try:
+            from . import scratch
+            scratch.remove(self.root / "tasks", task_id)
+        except Exception:
+            logging.getLogger(__name__).warning("Unable to remove abandoned dispatch scratch for %s", task_id, exc_info=True)
+        return result
 
     def reconcile_run(self, run_id: str) -> dict[str, Any]:
         """Recover only outcomes positively recorded by their original task owner."""
