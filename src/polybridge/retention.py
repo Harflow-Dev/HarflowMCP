@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import hashlib
+import math
 import logging
 import os
 import re
@@ -163,6 +165,7 @@ def sweep(log_dir: Path, days: int, now: datetime) -> dict[str, int]:
             continue
         _delete_task(log_dir, record, stats, now, _family(record.task_id, children), by_id)
 
+    _sweep_native_events(log_dir, days, now, stats)
     return stats
 
 
@@ -464,3 +467,126 @@ def _delete_task_files(log_dir: Path, task_id: str) -> bool:
     except Exception:
         log.warning('Could not remove retained task from listing indexes: %s', task_id, exc_info=True)
     return True
+
+
+# Bound each owning tree independently of unrelated retained workflow history.
+# An incomplete tree keeps its evidence without blocking cleanup of other trees.
+_NATIVE_RUN_LIMIT = 256
+_NATIVE_METADATA_BYTES = 32 * 1024 * 1024
+_NATIVE_RUN_BYTES = 4 * 1024 * 1024
+
+
+def _sweep_native_events(log_dir: Path, days: int, now: datetime, stats: dict[str, int]) -> None:
+    """Reclaim only exact recordless native event logs; keep durable attempts for retries."""
+    from .bounded_io import read_json
+    from .events import events_path
+    from .workflows import TERMINAL
+
+    directory = log_dir.parent / "workflow-runs"
+    cutoff = now.timestamp() - timedelta(days=days).total_seconds()
+
+    def tree(root):
+        runs, pending, remaining = {}, [(root, None, None)], _NATIVE_METADATA_BYTES
+        while pending:
+            identifier, parent, execution = pending.pop()
+            store.validate_task_id(identifier)
+            if identifier in runs or len(runs) >= _NATIVE_RUN_LIMIT:
+                raise ValueError("Cyclic or oversized native retention tree")
+            path = directory / f"{identifier}.json"
+            remaining -= path.stat().st_size
+            if remaining < 0:
+                raise ValueError("Native retention tree exceeds byte budget")
+            run = read_json(path, _NATIVE_RUN_BYTES)
+            if run["workflow_run_id"] != identifier:
+                raise ValueError("Mismatched workflow ownership")
+            if parent is not None:
+                link = run.get("parent_link") or {}
+                if link.get("workflow_run_id") != parent or link.get("execution_id") != execution or root_id(run) != root:
+                    raise ValueError("Mismatched child invocation ownership")
+            runs[identifier] = run
+            for activation in run["activations"]:
+                invocation = activation.get("invocation")
+                if invocation:
+                    pending.append((invocation["child_workflow_run_id"], identifier, activation["id"]))
+        return runs
+
+    def root_id(run):
+        link = run.get("parent_link") or {}
+        return link.get("root_workflow_run_id") or link.get("workflow_run_id") or run["workflow_run_id"]
+
+    def native_settled(task):
+        return ((task.get("native_terminal") is True and task.get("dispatch_stage") == "child_settled"
+                 and task.get("status") in TERMINAL)
+                or task.get("status") == task.get("dispatch_stage") == "not_started")
+
+    def safe(run):
+        return run["status"] in TERMINAL and not run.get("settling") and all(
+            task["status"] in TERMINAL | {"not_started"}
+            and (task.get("execution_kind") != "native_subagent" or native_settled(task))
+            for activation in run["activations"] for task in activation["tasks"]
+        )
+
+    for candidate_path in directory.glob("*.json"):
+        try:
+            run = read_json(candidate_path, _NATIVE_RUN_BYTES)
+            run_id = run["workflow_run_id"]
+            if run_id != candidate_path.stem:
+                continue
+            # Roots enumerate all durable descendants once. Child-only orphans
+            # cannot establish complete ownership and keep their evidence.
+            if root_id(run) != run_id:
+                continue
+            root = run_id
+            runs = tree(root)
+            tree_ids = set(runs)
+            if not all(safe(r) for r in runs.values()):
+                continue
+            attempts = [t for member in runs.values() for a in member["activations"] for t in a["tasks"]
+                        if t.get("execution_kind") == "native_subagent"]
+            if not attempts:
+                continue
+            with contextlib.ExitStack() as locks:
+                try:
+                    for identifier in sorted(tree_ids | {root}):
+                        store.validate_task_id(identifier)
+                        key = hashlib.sha256(f"run:{identifier}".encode()).hexdigest()
+                        handle = locks.enter_context((log_dir.parent / f".workflow-{key}.lock").open("a"))
+                        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except (OSError, store.InvalidTaskId):
+                    continue
+                # Repeat the bounded inventory under the owning run/root locks: a
+                # resumed tree or newly uncertain receipt must preserve its evidence.
+                fresh = tree(root)
+                if set(fresh) != tree_ids:
+                    continue
+                if run_id not in fresh or root not in fresh or root_id(fresh[run_id]) != root:
+                    continue
+                if any(r["workflow_run_id"] != identifier or root_id(r) != root for identifier, r in fresh.items()):
+                    continue
+                if not all(safe(r) for r in fresh.values()):
+                    continue
+                for activation in (a for identifier in tree_ids for a in fresh[identifier]["activations"]):
+                    for task in activation["tasks"]:
+                        if task.get("execution_kind") != "native_subagent":
+                            continue
+                        if not native_settled(task):
+                            continue
+                        finished = task.get("finished_at")
+                        if isinstance(finished, bool) or not isinstance(finished, (int, float)) or not math.isfinite(finished) or finished >= cutoff:
+                            continue
+                        identifier = task["task_id"]
+                        store.validate_task_id(identifier)
+                        if (log_dir / f"{identifier}{store.RECORD_SUFFIX}").exists():
+                            continue  # A genuine task record owns its ordinary retention.
+                        path = events_path(log_dir, identifier)
+                        try:
+                            if path.stat().st_mtime >= cutoff:
+                                continue
+                            path.unlink()
+                            stats["deleted_native_events"] = stats.get("deleted_native_events", 0) + 1
+                        except FileNotFoundError:
+                            pass
+                        except OSError:
+                            stats["kept_delete_failed"] += 1
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            log.debug("Native retention ownership unavailable; preserving tree evidence", exc_info=True)

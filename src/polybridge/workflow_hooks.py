@@ -24,6 +24,14 @@ def owner(log_dir: Path, task_id: str, *, strict: bool = False) -> dict[str, Any
     return WorkflowStore(root=log_dir.parent).task_owner(task_id, strict=strict)
 
 
+def refuse_native_control(log_dir: Path, task_id: str) -> None:
+    """Internal parent turns are controlled through the owning workflow only."""
+    association = owner(log_dir, task_id, strict=True)
+    if association is not None and association.get("role") == "native_control":
+        from .workflows import WorkflowError
+        raise WorkflowError("Internal native transports cannot be controlled independently; control the root workflow instead")
+
+
 def pause_for_task(log_dir: Path, task_id: str, reason: str) -> None:
     """Human task control must survive unavailable optional workflow bookkeeping.
 
@@ -50,8 +58,13 @@ def refuse_takeover(log_dir: Path, task_id: str) -> None:
         association = owner(log_dir, task_id, strict=True)
         if association is None:
             return
+        if association.get("role") == "native_control":
+            raise control.TakeoverRefused("native_control_takeover", "Internal native transports are controlled through their workflow")
         store = WorkflowStore(root=log_dir.parent)
         run = store.get_run(association["workflow_run_id"])
+        attempt = next((t for a in run.get("activations", []) for t in a.get("tasks", []) if t.get("task_id") == task_id), {})
+        if attempt.get("execution_kind") == "native_subagent":
+            raise control.TakeoverRefused("native_child_takeover", "Native subagents belong to their orchestrator and cannot be taken over independently")
         if run.get("kind") == "builder" or run["status"] not in TERMINAL or run.get("settling"):
             raise control.TakeoverRefused("workflow_active", "Workflow tasks can only be taken over after the entire workflow has finished and settled")
         state = _tree_gate(log_dir, association)

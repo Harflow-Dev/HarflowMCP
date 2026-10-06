@@ -83,10 +83,12 @@ class TreeSlots:
 class WorkflowTree:
     """State shared by every supervisor in one workflow run tree."""
 
-    def __init__(self, store: Any, root_run_id: str | None = None, permits: int | None = None):
+    def __init__(self, store: Any, root_run_id: str | None = None, permits: int | None = None, scheduling_policy: str = "legacy"):
         self.store = store
         self.root_run_id = root_run_id or ""
         self.slots = TreeSlots(permits) if permits is not None else None
+        self.control_slots = TreeSlots(1) if scheduling_policy == "native_workers_plus_control_v1" else None
+        self.scheduling_policy = scheduling_policy
         self.leases: dict[str, Any] = {}
         self.session_locks: dict[str, Any] = {}
         self.supervisors: dict[str, Any] = {}
@@ -121,30 +123,30 @@ class WorkflowTree:
         except (OSError, ValueError, KeyError):
             return True
 
-    async def acquire_slot(self, should_continue: Any) -> None:
+    async def acquire_slot(self, should_continue: Any, *, control: bool = False) -> None:
         if self.slots is None:
             # Builder runs have no tree budget; liveness still gates dispatch.
             if not should_continue():
                 from .workflows import DispatchNotStarted
                 raise DispatchNotStarted("Scheduling stopped before dispatch")
             return
-        await self.slots.acquire(should_continue)
+        await (self.control_slots if control and self.control_slots is not None else self.slots).acquire(should_continue)
 
-    def release_slot(self) -> None:
+    def release_slot(self, *, control: bool = False) -> None:
         if self.slots is not None:
-            self.slots.release()
+            (self.control_slots if control and self.control_slots is not None else self.slots).release()
 
-    def hold_slot(self, run_id: str, task_id: str) -> None:
+    def hold_slot(self, run_id: str, task_id: str, *, control: bool = False) -> None:
         """An uncertain attempt keeps its slot until reconciliation frees it."""
         if self.slots is not None:
-            self.held[(run_id, task_id)] = True
+            self.held[(run_id, task_id)] = control
 
     def release_held(self, run_id: str) -> None:
         if self.slots is None:
             return
         for key in [key for key in self.held if key[0] == run_id]:
-            self.held.pop(key, None)
-            self.slots.release()
+            control = self.held.pop(key, False)
+            self.release_slot(control=control)
 
     async def cancel_descendants(self, run_id: str, registry: Any, *, include_self: bool = False) -> None:
         """Cancel live descendants; a child without live work settles cancelled."""
@@ -194,7 +196,7 @@ class WorkflowTree:
         settled = {}
         for current_id in ordered:
             observed = records[current_id]
-            live = [t['task_id'] for a in observed.get('activations', []) for t in a.get('tasks', []) if t.get('status') in {'running', 'reserved', 'uncertain'}]
+            live = list(dict.fromkeys(t.get('transport_task_id', t['task_id']) for a in observed.get('activations', []) for t in a.get('tasks', []) if t.get('status') in {'running', 'reserved', 'uncertain'}))
             descendants_settled = current_id not in unresolved and all(settled.get(child_id, False) for child_id in children.get(current_id, ()))
             selected = include_self or current_id != run_id
             if selected:

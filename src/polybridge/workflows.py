@@ -236,7 +236,7 @@ def validate_definition(raw: dict[str, Any]) -> dict[str, Any]:
         if node["type"] == "workflow":
             if d.get("routing_mode") != "explicit":
                 raise WorkflowError(f"Run workflow nodes require explicit routing_mode: {node_id}")
-            for field in ("agent", "role", "freedom", "network", "session_mode", "max_context_questions"):
+            for field in ("agent", "role", "freedom", "network", "session_mode", "execution_mode", "max_context_questions"):
                 if field in node:
                     raise WorkflowError(f"Run workflow nodes do not accept {field}: {node_id}")
             ref = node.get("workflow_ref")
@@ -279,6 +279,9 @@ def validate_definition(raw: dict[str, Any]) -> dict[str, Any]:
                 raise WorkflowError("Workflow nodes support read_only, write_in_repo, publish or unrestricted")
             if node["role"] == "implementation" and node["freedom"] == "read_only":
                 raise WorkflowError("Implementation nodes cannot use read_only")
+            node.setdefault("execution_mode", "headless")
+            if node["execution_mode"] not in {"headless", "prefer_subagent"}:
+                raise WorkflowError(f"Invalid execution mode: {node_id}")
             node.setdefault("session_mode", "agent_decides")
             if node["session_mode"] not in {"resume", "fresh", "agent_decides", "continue_previous"}:
                 raise WorkflowError(f"Invalid session mode: {node_id}")
@@ -661,6 +664,9 @@ class WorkflowStore:
         from .workflow_references import workflow_identity
         definition = json.loads((self.definitions / f"{_workflow_name(name)}.json").read_text())
         definition.setdefault("workflow_id", workflow_identity(definition))
+        for node in definition.get("nodes", []):
+            if node.get("type") == "agent":
+                node.setdefault("execution_mode", "headless")
         return definition
 
     def list(self) -> list[dict[str, Any]]:
@@ -668,6 +674,9 @@ class WorkflowStore:
         definitions = [json.loads(p.read_text()) for p in sorted(self.definitions.glob("*.json"))]
         for definition in definitions:
             definition.setdefault("workflow_id", workflow_identity(definition))
+            for node in definition.get("nodes", []):
+                if node.get("type") == "agent":
+                    node.setdefault("execution_mode", "headless")
         return definitions
 
     def save(self, name: str, definition: dict[str, Any], expected_revision: int | None = None, *, authority_guard: Any = None) -> dict[str, Any]:
@@ -685,6 +694,13 @@ class WorkflowStore:
             with self.lock(f"definition:{name}"):
                 path = self.definitions / f"{_workflow_name(name)}.json"
                 old = json.loads(path.read_text()) if path.exists() else None
+                # New authoring prefers native execution. Existing nodes whose
+                # historical definition omitted this field retain Headless.
+                old_nodes = {n["id"]: n for n in (old or {}).get("nodes", [])}
+                raw_nodes = {n["id"]: n for n in definition.get("nodes", [])}
+                for node in d["nodes"]:
+                    if node.get("type") == "agent" and "execution_mode" not in raw_nodes[node["id"]]:
+                        node["execution_mode"] = old_nodes.get(node["id"], {}).get("execution_mode", "headless") if node["id"] in old_nodes else "prefer_subagent"
                 revision = old["revision"] if old else 0
                 if expected_revision != revision and (old or expected_revision not in (None, 0)):
                     raise WorkflowError(f"Stale workflow revision: expected {expected_revision}, current {revision}")
@@ -780,6 +796,7 @@ class WorkflowStore:
         header = self.run_header(run)
         header['_checkout'] = [{'task_id': task['task_id'], 'workflow_run_id': run['workflow_run_id'],
                                 'repo_path': str(Path(run['repo_path']).resolve()), 'freedom': task.get('freedom', 'write_in_repo'),
+                                'execution_kind': task.get('execution_kind', 'headless'),
                                 'supervisor_pid': run.get('supervisor_pid'), 'supervisor_identity': run.get('supervisor_identity')}
                                for activation in run.get('activations', []) for task in activation.get('tasks', [])
                                if task.get('status') in {'running', 'reserved', 'uncertain'}]
@@ -883,6 +900,8 @@ class WorkflowStore:
             run.update(caller_record=asdict(caller.record), caller_method=caller.method)
         run["permission_policy"] = permission_policy
         run["definition_hash"] = hashlib.sha256(json.dumps(definition, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        from .workflow_native import scheduling_policy
+        run["scheduling_policy"] = scheduling_policy(definition, dependency_tree)
         run["tasks"] = []
         if kind == "workflow":
             run["execution_contract"] = "delegation"
@@ -1146,6 +1165,8 @@ class WorkflowStore:
             task = next((t for t in activation["tasks"] if t["task_id"] == task_id), None) if activation else None
             if task is None or task.get("status") not in {"reserved", "uncertain"}:
                 raise WorkflowError("Only a named unresolved recordless dispatch can be abandoned")
+            if task.get("execution_kind") == "native_subagent":
+                raise WorkflowError("Native child outcomes require child reconciliation; absence of a parent process is insufficient")
             if task_store.read(self.root / "tasks", task_id) is not None:
                 raise WorkflowError("Recorded tasks require process reconciliation, not abandonment")
             update_task_state(activation, task, {"status": "not_started", "reconciliation": {"source": "human_confirmation", "reason": reason.strip(), "confirmed_no_process": True, "time": time.time()}})
@@ -1169,6 +1190,9 @@ class WorkflowStore:
             for activation in r["activations"]:
                 for task in activation["tasks"]:
                     if task["status"] not in {"reserved", "running", "uncertain"}:
+                        continue
+                    if task.get("execution_kind") == "native_subagent":
+                        update_task_state(activation, task, {"status": "not_started" if task.get("dispatch_stage") == "preparing" else "uncertain"})
                         continue
                     record = task_store.read(self.root / "tasks", task["task_id"])
                     if record and task_liveness(self.root / "tasks", record)["process_alive"] is False:
@@ -1410,6 +1434,8 @@ def validate_builder_preview(value: Any, name: str) -> dict[str, Any]:
                 raise WorkflowError(f"Invalid instructions: {nid}")
             if "freedom" in node and (not isinstance(node["freedom"], str) or node["freedom"] not in FREEDOMS):
                 raise WorkflowError(f"Invalid freedom: {nid}")
+            if "execution_mode" in node and node["execution_mode"] not in {"headless", "prefer_subagent"}:
+                raise WorkflowError(f"Invalid execution mode: {nid}")
             if "session_mode" in node and (not isinstance(node["session_mode"], str) or node["session_mode"] not in {"resume", "fresh", "agent_decides", "continue_previous"}):
                 raise WorkflowError(f"Invalid session mode: {nid}")
             if "optional" in node and not isinstance(node["optional"], bool):
@@ -1714,7 +1740,14 @@ class CheckoutLease:
                 return {"workflow_run_id": run_id, "task_id": "ownership_uncertain"}
         for row in rows:
             task = json.loads(row[0])
-            if _supervisor_present(task) or not self.write and task.get('freedom') == 'read_only':
+            if not self.write and task.get('freedom') == 'read_only':
+                continue
+            if task.get("execution_kind") == "native_subagent":
+                # The receipt remains authoritative even while its supervisor
+                # lives: uncertainty can release the OS descriptor before that
+                # supervisor exits. Existing pooled holders do not re-probe.
+                return {"workflow_run_id": task["workflow_run_id"], "task_id": task["task_id"]}
+            if _supervisor_present(task):
                 continue
             try:
                 record = task_store.read(self.store.root / 'tasks', task['task_id'], include_prompt=False, metadata_byte_limit=4 * 1024 * 1024, metadata_budget=budget)
@@ -1840,6 +1873,11 @@ class WorkflowSupervisor:
 
     async def _dispatch(self, node: dict[str, Any], prompt: str, role: str, activation: dict[str, Any]) -> dict[str, Any] | None:
         from .tasks import SessionUnknownError, SessionBusyError, RepoUnavailableError
+        if role == "node" and node.get("execution_mode") == "prefer_subagent":
+            from .workflow_native import dispatch_native
+            handled, outcome = await dispatch_native(self, node, prompt, activation)
+            if handled:
+                return outcome
         run = self.run()
         config = node.get("agent", run["definition"]["orchestrator"])
         candidates = [config] + config.get("fallbacks", [])
@@ -1927,10 +1965,10 @@ class WorkflowSupervisor:
             # An uncertain attempt keeps its slot until reconciliation.
             slot_uncertain = False
             try:
-                await self.tree.acquire_slot(lambda: self.tree.tree_running(self.run()))
+                await self.tree.acquire_slot(lambda: self.tree.tree_running(self.run()), control=role != "node")
             except DispatchNotStarted:
                 return None
-            reservation = {"task_id": task_id, "candidate": candidate, "status": "reserved", "dispatch_stage": "preparing", "reserved_at": time.time(), "freedom": freedom, "assignment_prompt": display_prompt, "repo_path": run["repo_path"], "network": network, "session_mode": "resume" if use_resume else "fresh", "resume_task_id": previous.get("task_id") if use_resume else None}
+            reservation = {"task_id": task_id, "candidate": candidate, "status": "reserved", "dispatch_stage": "preparing", "reserved_at": time.time(), "freedom": freedom, "assignment_prompt": display_prompt, "repo_path": run["repo_path"], "network": network, "session_mode": "resume" if use_resume else "fresh", "resume_task_id": previous.get("task_id") if use_resume else None, "execution_kind": "headless", "execution_fallback_reason": activation.get("execution_fallback_reason")}
             reservation["harness_metadata"] = {"requested": copy.deepcopy(candidate), "effective": {"backend": candidate["backend"], "model": candidate.get("model"), "reasoning_effort": candidate.get("reasoning_effort"), "freedom": freedom, "settings_source": "explicit_launch_arguments", "default_model": "unknown" if not candidate.get("model") else None, "provider_identity": "unknown"}, "observed": None, "provenance": "validated_launch_configuration", "verification_status": "configured_not_observed"}
             def reserve(r: dict[str, Any]) -> None:
                 a = next(a for a in r["activations"] if a["id"] == activation["id"])
@@ -1947,7 +1985,7 @@ class WorkflowSupervisor:
                 self.update(reserve, "dispatch_reserved", reservation)
             except BaseException:
                 # No spawn was requested; failed persistence must not strand a permit.
-                self.tree.release_slot()
+                self.tree.release_slot(control=role != "node")
                 raise
             capability_stage = "settings"
             try:
@@ -2129,9 +2167,9 @@ class WorkflowSupervisor:
                 # Every exit from the attempt releases its slot; an uncertain attempt
                 # keeps the slot until reconciliation frees it explicitly.
                 if slot_uncertain:
-                    self.tree.hold_slot(self.run_id, task_id)
+                    self.tree.hold_slot(self.run_id, task_id, control=role != "node")
                 else:
-                    self.tree.release_slot()
+                    self.tree.release_slot(control=role != "node")
         reason = f"All agents unavailable for {key}"
         if role == "node" and run.get("execution_contract") == "delegation":
             if capability_refused:
@@ -2504,7 +2542,7 @@ class WorkflowSupervisor:
         if self.tree.slots is None and run.get("kind") != "builder" and not run.get("parent_link"):
             # The root owns the tree budget; children share this object.
             from .workflow_invocation import WorkflowTree
-            self.tree = WorkflowTree(self.store, run_id, permits=run["definition"].get("max_parallel", 4))
+            self.tree = WorkflowTree(self.store, run_id, permits=run["definition"].get("max_parallel", 4), scheduling_policy=run.get("scheduling_policy", "legacy"))
             self.checkout_leases = self.tree.leases
             self.tree.supervisors[run_id] = self
         def initialize(r: dict[str, Any]) -> None:
@@ -2543,7 +2581,7 @@ class WorkflowSupervisor:
                     for a in run["activations"]:
                         for t in a["tasks"]:
                             if t["status"] in {"running", "reserved", "uncertain"}:
-                                await self.registry.cancel_cascade(t["task_id"], workflow_control=True)
+                                await self.registry.cancel_cascade(t.get("transport_task_id", t["task_id"]), workflow_control=True)
                     if not active:
                         settled = self.store.reconcile_run(self.run_id)
                         if any(t["status"] in {"reserved", "running", "uncertain"} for a in settled["activations"] for t in a["tasks"]) or any((a.get("invocation") or {}).get("stage") in {"preparing", "created", "running"} and a.get("status") not in {"completed", "failed", "cancelled"} for a in settled["activations"]):
@@ -2639,7 +2677,7 @@ class WorkflowSupervisor:
         self.update(lambda r: r.update(status="running", supervisor_pid=os.getpid(), supervisor_identity=identity.own_identity()), "builder_started")
         a = self._activation("builder", "builder")
         self.update(lambda r: next(x for x in r["activations"] if x["id"] == a["id"]).update(feedback_ids=r.get("builder_turn_feedback_ids", [])), "builder_feedback_associated")
-        prompt = "Create a Polybridge workflow definition. Do not write files or dispatch agents. Return ONLY a JSON object. Schema: " + json.dumps({"name": self.run()["name"], "routing_mode": "explicit", "orchestrator": {"backend": "codex", "fallbacks": []}, "nodes": [{"id": "start", "type": "start", "position": {"x": 80, "y": 80}, "branch_mode": "auto", "prompt": "Optional workflow purpose for the orchestrator"}, {"id": "work", "type": "agent", "position": {"x": 220, "y": 80}, "instructions": "...", "agent": {"backend": "codex"}, "session_mode": "agent_decides", "branch_mode": "auto", "max_attempts": 3, "max_context_questions": 10}, {"id": "end", "type": "end", "position": {"x": 480, "y": 80}, "branch_mode": "auto"}], "connections": [{"id": "begin", "source": "start", "target": "work"}, {"id": "finish", "source": "work", "target": "end"}], "max_parallel": 4, "max_transitions": 100}) + "\nStart may contain an optional prompt string describing the workflow purpose; Polybridge supplies it to orchestrator decisions alongside the runtime user request. Set routing_mode to explicit. Ordinary nodes choose exactly one outgoing path. For parallel execution use structural parallel_start and parallel_end nodes sharing parallel_group_id. Parallel start defaults to branch_selection all. Set branch_selection orchestrator and optional selection_guidance when applicability should be chosen for each group invocation. Selection chooses one or more branch entries and records a reason explaining selections and exclusions; every configured branch must reach its matching end. Branches may contain multiple steps and properly nested parallel groups. Do not create Join nodes. Conditions for choosing a group belong on incoming alternatives; split outgoing instructions describe branch purpose. Applicability selection is available only on Orchestrator selects groups; an empty selection is forbidden, so skipping a whole group uses an incoming alternative. Retry arrows return to an earlier ancestor step; Polybridge infers loops from topology, so do not set a backward flag. Put explicit failure/retry and success/continue conditions on arrows. A retry connection may set max_retries to a nonnegative integer: this caps actual traversals of that arrow across the entire run; 0 disables retry, and an absent value adds no edge cap. Node max_attempts and max_transitions still apply and may stop earlier. A retry is selected exclusively and must stay inside its parallel region. Agent nodes may set optional:true only inside a safe parallel branch with an actually selected required sibling and no required successor before convergence. Optional steps still execute; only definitive failures or exhausted available candidates bypass to that convergence with failure evidence. Do not make sequential steps or all branches optional. Agent roles are planning, implementation, review and task; supply custom step instructions, while Polybridge adds the role guidance and result protocol. Request: " + self.run().get("builder_turn_prompt", self.run()["prompt"])
+        prompt = "Create a Polybridge workflow definition. Do not write files or dispatch agents. Return ONLY a JSON object. Schema: " + json.dumps({"name": self.run()["name"], "routing_mode": "explicit", "orchestrator": {"backend": "codex", "fallbacks": []}, "nodes": [{"id": "start", "type": "start", "position": {"x": 80, "y": 80}, "branch_mode": "auto", "prompt": "Optional workflow purpose for the orchestrator"}, {"id": "work", "type": "agent", "position": {"x": 220, "y": 80}, "instructions": "...", "agent": {"backend": "codex"}, "session_mode": "agent_decides", "execution_mode": "prefer_subagent", "branch_mode": "auto", "max_attempts": 3, "max_context_questions": 10}, {"id": "end", "type": "end", "position": {"x": 480, "y": 80}, "branch_mode": "auto"}], "connections": [{"id": "begin", "source": "start", "target": "work"}, {"id": "finish", "source": "work", "target": "end"}], "max_parallel": 4, "max_transitions": 100}) + "\nStart may contain an optional prompt string describing the workflow purpose; Polybridge supplies it to orchestrator decisions alongside the runtime user request. Set routing_mode to explicit. Ordinary nodes choose exactly one outgoing path. For parallel execution use structural parallel_start and parallel_end nodes sharing parallel_group_id. Parallel start defaults to branch_selection all. Set branch_selection orchestrator and optional selection_guidance when applicability should be chosen for each group invocation. Selection chooses one or more branch entries and records a reason explaining selections and exclusions; every configured branch must reach its matching end. Branches may contain multiple steps and properly nested parallel groups. Do not create Join nodes. Conditions for choosing a group belong on incoming alternatives; split outgoing instructions describe branch purpose. Applicability selection is available only on Orchestrator selects groups; an empty selection is forbidden, so skipping a whole group uses an incoming alternative. Retry arrows return to an earlier ancestor step; Polybridge infers loops from topology, so do not set a backward flag. Put explicit failure/retry and success/continue conditions on arrows. A retry connection may set max_retries to a nonnegative integer: this caps actual traversals of that arrow across the entire run; 0 disables retry, and an absent value adds no edge cap. Node max_attempts and max_transitions still apply and may stop earlier. A retry is selected exclusively and must stay inside its parallel region. Agent nodes may set optional:true only inside a safe parallel branch with an actually selected required sibling and no required successor before convergence. Optional steps still execute; only definitive failures or exhausted available candidates bypass to that convergence with failure evidence. Do not make sequential steps or all branches optional. Agent roles are planning, implementation, review and task; supply custom step instructions, while Polybridge adds the role guidance and result protocol. Request: " + self.run().get("builder_turn_prompt", self.run()["prompt"])
         prompt += "\n" + BUILDER_LAYOUT_GUIDANCE
         prompt += "\nRun workflow nodes (type workflow) reference a saved workflow by workflow_ref.workflow_id. Preserve any existing Run workflow nodes exactly as supplied: keep their workflow_ref, orchestrator_mode, max_attempts, timeout_seconds, optional flag and instructions unchanged. Never author new Run workflow nodes, change their references, or convert them to agent nodes."
         if "editing_definition" in self.run():
@@ -2652,7 +2690,13 @@ class WorkflowSupervisor:
             try:
                 current = self.run()
                 applied = next(x for x in current["activations"] if x["id"] == a["id"]).get("draft_applied", False)
-                d = validate_definition({**(current["builder_draft"] if applied else parse_json(result.get("summary") or "")), "name": current["name"], "routing_mode": "explicit"})
+                proposal = copy.deepcopy(current["builder_draft"] if applied else parse_json(result.get("summary") or ""))
+                baseline = current.get("editing_definition", current.get("generated_definition", {}))
+                previous_nodes = {n["id"]: n for n in baseline.get("nodes", [])}
+                for proposed_node in proposal.get("nodes", []):
+                    if proposed_node.get("type") == "agent" and "execution_mode" not in proposed_node:
+                        proposed_node["execution_mode"] = previous_nodes.get(proposed_node["id"], {}).get("execution_mode", "headless") if proposed_node["id"] in previous_nodes else "prefer_subagent"
+                d = validate_definition({**proposal, "name": current["name"], "routing_mode": "explicit"})
                 d["draft"] = True
                 if "editing_definition" in self.run() or self.run().get("builder_followup"):
                     metadata = self.run().get("editing_source", {"name": self.run()["name"], "revision": self.run().get("generated_definition", {}).get("revision", 0)})

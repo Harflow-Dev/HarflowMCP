@@ -325,8 +325,12 @@ def inspect_request(run: dict[str, Any], root: Any, request: dict[str, Any]) -> 
         raise ValueError("cannot specify both before_seq and after_seq")
     if any(value is not None and (type(value) is not int or value < 0) for value in (before, after)):
         raise ValueError("Activity cursors must be nonnegative integers")
-    activation = execution(target_run, execution_id)
+    activation = next((a for a in target_run.get("activations", []) if a.get("id") == execution_id and a.get("role") == "node"), None)
+    if activation is None:
+        raise ValueError("Unknown node execution in this workflow run")
     task = selected_task(activation, task_id)
+    if task is None or task.get("execution_kind") != "native_subagent":
+        activation = execution(target_run, execution_id)
     if task is None:
         raise ValueError("Node execution has no dispatched task activity")
     page = read_page(events_path(root / "tasks", task["task_id"]), limit=limit, before_seq=before, after_seq=after)

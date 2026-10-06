@@ -11,7 +11,8 @@ this process owns; `takeover` / `takeover-attach` are the human-only takeover (`
 and `resume` fork a process that owns the new task until it settles (`detached.py`). `backends`
 reports the registered backends and whether each binary is on PATH (`backends.is_installed`) — no
 `--version` probe, no subprocess. Every command prints one versioned JSON document
-(`"v": 5`, `CTL_JSON_VERSION`) with `--json`. v5 adds Run workflow node presentation
+(`"v": 6`, `CTL_JSON_VERSION`) with `--json`. v6 adds native execution
+preference, presentation, availability and frozen scheduling metadata. v5 adds Run workflow node presentation
 metadata: parent/root run links, orchestrator mode and session owner, input source,
 tree settling and suspended-via-root flags, per-execution child invocation status,
 and workflow-validate dependency reports.
@@ -37,7 +38,7 @@ from .tasks import default_log_dir
 # Bumped to 2 when `status`/`list`'s snapshot/brief documents gained `resume_command` (Monitor
 # piece 3/3). `setup` and the event log are separate contracts and stay at v1 — see CLAUDE.md's
 # "The Monitor app is a consumer of three frozen contracts".
-CTL_JSON_VERSION = 5
+CTL_JSON_VERSION = 6
 
 # How long `cancel`/`takeover` stay alive for a failing `.sig` write to be retried before exiting —
 # the lease (60 s) is what a later recovery waits for anyway.
@@ -642,7 +643,8 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
                     dependencies = {"root_workflow_id": tree["root_workflow_id"], "workflows": {ident: {"name": entry["name"], "revision": entry["revision"], "definition_sha256": entry["definition_sha256"]} for ident, entry in tree["workflows"].items()}, "edges": tree["edges"], "access": tree["access"]}
                 except DependencyError as exc:
                     error = str(exc)
-            return {"valid": error is None, "definition": canonical, **({"dependencies": dependencies} if dependencies is not None else {}), **({"error": error} if error is not None else {})}
+            from .backends.native import available as native_available
+            return {"valid": error is None, "native_subagents_available": native_available(), "definition": canonical, **({"dependencies": dependencies} if dependencies is not None else {}), **({"error": error} if error is not None else {})}
         from . import server
         if action == "abandon-dispatch":
             from .workflows import WorkflowStore

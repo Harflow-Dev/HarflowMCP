@@ -937,6 +937,7 @@ class TaskRegistry:
         task_id: str | None = None,
         display_prompt: str | None = None,
         workflow_builder: bool = False,
+        native_subagent: bool = False,
     ) -> Task:
         """Continue `parent`'s session as a new task sharing its session id."""
         if parent.session_id is None:
@@ -1001,6 +1002,12 @@ class TaskRegistry:
                     reasoning_effort=parent.reasoning_effort,
                     network=effective_network,
                 )
+                if native_subagent:
+                    from .backends.native import adapter
+                    native = adapter(backend)
+                    if native is None:
+                        raise ValueError("No certified native adapter")
+                    invocation = native.configure(invocation)
                 return await self._spawn(
                     invocation,
                     backend=backend,
@@ -2457,7 +2464,8 @@ class TaskRegistry:
         not own lives inside the cascade, and a client disconnecting mid-call must not abandon it.
         """
         if not workflow_control:
-            from .workflow_hooks import pause_for_task, refuse_managed
+            from .workflow_hooks import pause_for_task, refuse_managed, refuse_native_control
+            refuse_native_control(self._log_dir, task_id)
             caller = await self._mutation_caller()
             if caller is not None:
                 refuse_managed(self._log_dir, caller.record.task_id)
@@ -2644,6 +2652,7 @@ class TaskRegistry:
         task_id: str | None = None,
         display_prompt: str | None = None,
         workflow_builder: bool = False,
+        native_subagent: bool = False,
     ) -> Task:
         """Continue the session of a task recovered from disk."""
         if not record.session_id:
@@ -2708,6 +2717,12 @@ class TaskRegistry:
                     reasoning_effort=record.reasoning_effort,
                     network=effective_network,
                 )
+                if native_subagent:
+                    from .backends.native import adapter
+                    native = adapter(backend)
+                    if native is None:
+                        raise ValueError("No certified native adapter")
+                    invocation = native.configure(invocation)
                 return await self._spawn(
                     invocation,
                     backend=backend,
@@ -2989,6 +3004,20 @@ async def _drain_stdout(task: Task, registry: TaskRegistry) -> None:
             if event is None:
                 task.acc.unparsable_lines += 1
                 continue
+            # Native lifecycle persistence is authoritative and intentionally
+            # precedes best-effort normalization. Failure invalidates native
+            # settlement but must never stop draining the parent subprocess.
+            observer = getattr(registry, "_workflow_native_observers", {}).get(task.task_id)
+            if observer is not None:
+                try:
+                    observer(event)
+                except Exception as exc:
+                    failures = getattr(registry, "_workflow_native_failures", None)
+                    if failures is None:
+                        failures = registry._workflow_native_failures = {}
+                    failures[task.task_id] = str(exc)
+                    registry._workflow_native_observers.pop(task.task_id, None)
+                    log.warning("Native lifecycle persistence failed for %s; draining continues", task.task_id, exc_info=True)
             backend = get_backend(task.backend)
             backend.ingest(event, task.acc)
             _record_events(task, backend, event, raw_offset)
