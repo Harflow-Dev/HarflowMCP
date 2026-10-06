@@ -1,4 +1,5 @@
 """Optional reviewer bypass is a structured opt-in, never natural-language consent."""
+import asyncio
 import copy
 import json
 
@@ -54,9 +55,52 @@ async def forwarded(storage, tmp_path):
     return root, child
 
 
+@pytest.mark.parametrize('forward_answer', [False, True])
+@pytest.mark.parametrize('answer, allow', [
+    ('No, retain the reviewer', False),
+    ('Please reconsider the remaining reviews', False),
+    ('Proceed without the reviewer for this updated reason', True),
+])
+async def test_latest_checkpoint_answer_replaces_skip_consent(storage, tmp_path, forward_answer, answer, allow):
+    run, registry = await suspended(storage, tmp_path)
+    decision_id = run['input_decision_id']
+    first = storage.control(run['workflow_run_id'], 'resume', instructions=ANSWER, decision_id=decision_id, allow_optional_review_skip=True)
+    execution_id = next(iter(first['optional_skip_authorizations']))
+    unrelated = {'source_decision_id': 'other-checkpoint', 'reason': 'Unrelated consent', 'allow_optional_review_skip': True}
+    storage.update_run(run['workflow_run_id'], lambda r: r['optional_skip_authorizations'].update(unrelated=unrelated), 'fixture')
+
+    # An orchestrator may ask another question at the same routing checkpoint
+    # rather than consuming the previously issued skip continuation.
+    registry.policy = lambda context, _: {'decision_id': context['decision_id'], 'action': 'needs_input', 'question': 'Still proceed without the reviewer?', 'reason': 'Reconsider coverage'}
+    await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run['workflow_run_id']), 5)
+    asked = storage.get_run(run['workflow_run_id'])
+    assert asked['status'] == 'needs_input' and asked['input_decision_id'] == decision_id
+    target_id = run['workflow_run_id']
+    if forward_answer:
+        root = copy.deepcopy(asked)
+        target_id = 'forwarding-root'
+        root.update(workflow_run_id=target_id, pending=[], activations=[], joins={}, input_source={'workflow_run_id': run['workflow_run_id']})
+        (storage.runs / (target_id + '.json')).write_text(json.dumps(root))
+    storage.control(target_id, 'resume', instructions=answer, decision_id=decision_id, allow_optional_review_skip=allow)
+    resumed = storage.get_run(run['workflow_run_id'])
+    assert resumed['optional_skip_authorizations']['unrelated'] == unrelated
+    token = next(t for t in resumed['pending'] if t['node_id'] == 'right')
+    node = next(n for n in resumed['definition']['nodes'] if n['id'] == 'right')
+    skips = [c for c in d.continuations(resumed, node, token, False, root=storage.root) if c['kind'] == 'skip_optional_review']
+    assert bool(skips) is allow
+    if allow:
+        assert resumed['optional_skip_authorizations'][execution_id]['reason'] == answer
+    else:
+        assert execution_id not in resumed['optional_skip_authorizations']
+
+
 @pytest.mark.parametrize('failure', ['before_child_write', 'after_child_write', 'parent_write'])
-async def test_forwarded_consent_delivery_is_exact_and_idempotent(storage, tmp_path, monkeypatch, failure):
+@pytest.mark.parametrize('allow', [False, True])
+async def test_forwarded_consent_delivery_is_exact_and_idempotent(storage, tmp_path, monkeypatch, failure, allow):
     root, child = await forwarded(storage, tmp_path)
+    execution_id = next(t['execution_activation_id'] for t in child['pending'] if t['node_id'] == 'right')
+    prior = {'node_id': 'right', 'source_decision_id': child['input_decision_id'], 'reason': 'Earlier answer', 'allow_optional_review_skip': True}
+    storage.update_run(child['workflow_run_id'], lambda r: r.update(optional_skip_authorizations={execution_id: prior}), 'fixture')
     original = storage.update_run
     failed = False
     def injected(identifier, change, event, detail=None):
@@ -68,15 +112,18 @@ async def test_forwarded_consent_delivery_is_exact_and_idempotent(storage, tmp_p
             raise OSError('injected failure')
         return original(identifier, change, event, detail)
     monkeypatch.setattr(storage, 'update_run', injected)
-    options = dict(instructions=ANSWER, decision_id=child['input_decision_id'], allow_optional_review_skip=True)
+    options = dict(instructions=ANSWER, decision_id=child['input_decision_id'], allow_optional_review_skip=allow)
     with pytest.raises(OSError): storage.control(root['workflow_run_id'], 'resume', **options)
     pending = storage.get_run(root['workflow_run_id'])['forwarded_delivery']
-    assert pending['payload']['allow_optional_review_skip'] is True
-    with pytest.raises(w.WorkflowError): storage.control(root['workflow_run_id'], 'resume', **(options | {'allow_optional_review_skip': False}))
+    assert pending['payload']['allow_optional_review_skip'] is allow
+    with pytest.raises(w.WorkflowError): storage.control(root['workflow_run_id'], 'resume', **(options | {'allow_optional_review_skip': not allow}))
     result = storage.control(root['workflow_run_id'], 'resume', **options)
     assert result['status'] == 'running' and 'optional_review_skip_available' not in result
     grants = storage.get_run(child['workflow_run_id'])['optional_skip_authorizations']
-    assert len(grants) == 1 and next(iter(grants.values()))['allow_optional_review_skip'] is True
+    if allow:
+        assert len(grants) == 1 and grants[execution_id]['reason'] == ANSWER
+    else:
+        assert grants == {}
     assert storage.get_run(child['workflow_run_id'])['forwarded_delivery_receipt'] == pending
 
 

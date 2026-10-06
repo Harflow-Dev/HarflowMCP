@@ -1431,6 +1431,8 @@ async def resume_workflow(workflow_run_id: str, instructions: str | None = None,
     permission denial, when optional_review_skip_available is true. The core revalidates
     eligibility and decision_id; this grants no retry, required-review bypass, or permissions.
     For a forwarded question, consent applies only to its originating child checkpoint.
+    Each accepted answer replaces previous skip consent at that checkpoint: the default
+    False revokes it, while True renews it with the latest answer as its reason.
     """
     from .workflow_responses import compact
     return compact(await _workflow_call("resume", run_id=workflow_run_id, instructions=instructions, additional_attempts=additional_attempts, decision_id=decision_id, allow_optional_review_skip=allow_optional_review_skip))

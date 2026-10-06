@@ -1110,6 +1110,13 @@ class WorkflowStore:
                         raise WorkflowError("Resuming needs_input requires an answer or reason")
                     if decision_id != r.get("input_decision_id"):
                         raise WorkflowError("Resuming needs_input requires the current input decision_id")
+                    # The latest accepted answer replaces consent at this checkpoint.
+                    # Keep grants for other checkpoints; receipt replay returns above
+                    # without revoking a previously delivered answer's authorization.
+                    authorizations = r.get("optional_skip_authorizations", {})
+                    for execution_id in list(authorizations):
+                        if authorizations[execution_id].get("source_decision_id") == decision_id:
+                            del authorizations[execution_id]
                     if allow_optional_review_skip:
                         for node, execution in qualifying_skips(r):
                             r.setdefault("optional_skip_authorizations", {})[execution["id"]] = {"node_id": node["id"], "reason": instructions.strip(), "source_decision_id": decision_id, "allow_optional_review_skip": True, "granted_at": time.time()}

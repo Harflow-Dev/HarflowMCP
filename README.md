@@ -95,7 +95,8 @@ and `wait_for_workflow(workflow_run_id)`. You can also pass `workflow="Feature D
 `start_task`. Workflow starts return a **`workflow_run_id`**, which uses workflow status tools.
 Use `resume_workflow` to answer a suspended run, or `recover_workflow` with a reason for an eligible
 failed run. Skipping an eligible refused optional reviewer requires the caller's explicit
-`allow_optional_review_skip=true`; an ordinary answer grants no skip permission.
+`allow_optional_review_skip=true`; an ordinary answer grants no skip permission and revokes
+prior skip consent at the same checkpoint. Each accepted answer supersedes that checkpoint's consent.
 [Caller input and recovery details](docs/workflows.md#control-and-recovery).
 
 From the terminal:

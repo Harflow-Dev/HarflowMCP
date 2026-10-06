@@ -784,7 +784,11 @@ For a settled permission refusal in an optional review node, answer the current 
 without that reviewer, also pass `allow_optional_review_skip=true` (CLI
 `--allow-optional-review-skip`). The default is false: a normal answer, including a negative answer,
 does not authorize a skip. Do not set the flag unless the caller explicitly agrees to proceed
-without the reviewer. In a Monitor-owned run, the separate **Proceed without optional reviewer**
+without the reviewer. If the orchestrator asks again at the same checkpoint, the latest accepted
+answer supersedes its earlier consent: false revokes previous skip grants there, while true renews
+them with the latest reason. Grants for other checkpoints are preserved. Forwarded answers apply
+this replacement at the originating child checkpoint, and retrying the same delivered answer is
+idempotent. In a Monitor-owned run, the separate **Proceed without optional reviewer**
 button makes that choice; ordinary **Resume** does not. The availability indicator is only a hint:
 Polybridge rechecks eligibility and the current decision when accepting the request.
 
