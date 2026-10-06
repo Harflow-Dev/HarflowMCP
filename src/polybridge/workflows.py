@@ -855,8 +855,16 @@ class WorkflowStore:
         return result
 
     def update_run(self, run_id: str, mutator: Any, event: str, detail: Any = None) -> dict[str, Any]:
-        with self.lock(f"run:{run_id}"):
+        observed = self.get_run(run_id)
+        root_id = (observed.get("parent_link") or {}).get("root_workflow_run_id") or run_id
+        # All tree mutations serialize with the human cancellation eligibility check.
+        with self.lock(f"tree-mutation:{root_id}"), self.lock(f"run:{run_id}"):
             run = self.get_run(run_id)
+            if event in {"dispatch_reserved", "native_reserved", "invocation_reserved", "child_decision_reopened"}:
+                root = run if root_id == run_id else self.get_run(root_id)
+                runnable = {"running", "building"} if run.get("kind") == "builder" else {"running"}
+                if root.get("status") not in runnable or event != "child_decision_reopened" and run.get("status") not in runnable:
+                    raise DispatchNotStarted("Scheduling stopped before reservation")
             attention_before = (run.get("status"), run.get("attention_reason"), run.get("failure_reason"), run.get("failed_decision_id"))
             mutator(run)
             attention_after = (run.get("status"), run.get("attention_reason"), run.get("failure_reason"), run.get("failed_decision_id"))
@@ -868,6 +876,8 @@ class WorkflowStore:
             run["updated_at"] = time.time()
             run["sequence"] = run.get("sequence", 0) + 1
             run.pop("settling", None)
+            run.pop("can_cancel_from_monitor", None)
+            run.pop("monitor_cancel_reason", None)
             previous_directory_mtime = self.runs.stat().st_mtime_ns
             _write(self.runs / f"{run_id}.json", run)
             for activation in run.get("activations", []):
@@ -1079,7 +1089,12 @@ class WorkflowStore:
         def change(r: dict[str, Any]) -> None:
             if _delivery is not None and r.get("forwarded_delivery_receipt") == _delivery:
                 return
-            if r.get("execution_contract") == "delegation" and r.get("interaction_owner") and interaction_owner is not None and interaction_owner != r["interaction_owner"]:
+            if action == "cancel" and interaction_owner == "monitor":
+                from .workflow_cancellation import eligibility
+                allowed, reason = eligibility(self, r)
+                if not allowed:
+                    raise WorkflowError(reason)
+            elif r.get("execution_contract") == "delegation" and r.get("interaction_owner") and interaction_owner is not None and interaction_owner != r["interaction_owner"]:
                 raise WorkflowError("Workflow interaction belongs to its original caller")
             if action in {"resume", "recover", "cancel"}:
                 if r.get("supervisor_identity"):
@@ -2644,15 +2659,26 @@ class WorkflowSupervisor:
                         self.update(lambda r: r.update(status="cancelling"), "ancestor_terminal", {"root": root_id, "status": root_status})
                         run = self.run()
                 if run["status"] == "cancelling":
-                    await self.tree.cancel_descendants(run_id, self.registry)
+                    cancellation = await self.tree.cancel_descendants(run_id, self.registry)
+                    if cancellation["unresolved_runs"] or cancellation["errors"]:
+                        self.update(lambda r: r.update(cancellation_errors=cancellation), "cancel_descendant_errors", cancellation)
                     for a in run["activations"]:
                         for t in a["tasks"]:
                             if t["status"] in {"running", "reserved", "uncertain"}:
-                                await self.registry.cancel_cascade(t.get("transport_task_id", t["task_id"]), workflow_control=True)
+                                outcome = await self.registry.cancel_cascade(t.get("transport_task_id", t["task_id"]), workflow_control=True)
+                                from .workflow_cancellation import cascade_error
+                                error = cascade_error(outcome)
+                                if error:
+                                    cancellation["errors"].append({"workflow_run_id": run_id, "task_id": t["task_id"], "error": error})
                     if not active:
                         settled = self.store.reconcile_run(self.run_id)
-                        if any(t["status"] in {"reserved", "running", "uncertain"} for a in settled["activations"] for t in a["tasks"]) or any((a.get("invocation") or {}).get("stage") in {"preparing", "created", "running"} and a.get("status") not in {"completed", "failed", "cancelled"} for a in settled["activations"]):
-                            self.update(lambda r: r.update(status="needs_attention", attention_reason="Cancellation could not prove all dispatches settled"), "cancel_unresolved")
+                        from .workflow_invocation import invocation_children_settled
+                        if not invocation_children_settled(self.store, settled) or cancellation["unresolved_runs"] or cancellation["errors"] or any(t["status"] in {"reserved", "running", "uncertain"} for a in settled["activations"] for t in a["tasks"]) or any((a.get("invocation") or {}).get("stage") in {"preparing", "created", "running"} and a.get("status") not in {"completed", "failed", "cancelled"} for a in settled["activations"]):
+                            issues = [f"{e['task_id']}: {e['error']}" for e in cancellation["errors"]]
+                            if cancellation["unresolved_runs"]:
+                                issues.append("Unresolved descendant links: " + ", ".join(cancellation["unresolved_runs"]))
+                            reason = "Cancellation could not prove all dispatches settled" + (": " + "; ".join(issues) if issues else "")
+                            self.update(lambda r: r.update(status="needs_attention", attention_reason=reason), "cancel_unresolved")
                         else:
                             def cancelled(r: dict[str, Any]) -> None:
                                 r["status"] = "cancelled"

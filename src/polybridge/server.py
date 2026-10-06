@@ -1467,7 +1467,14 @@ async def recover_workflow(workflow_run_id: str, reason: str, additional_attempt
 
 @mcp.tool()
 async def cancel_workflow(workflow_run_id: str) -> dict[str, Any]:
-    """Stop scheduling and cancel the workflow's associated tasks."""
+    """Stop root scheduling and cascade cancellation to associated tasks and children.
+
+    A cancellation request returns ``cancelling`` until settlement is observed;
+    unresolved dispatches or cancellation transport errors return ``needs_attention``.
+    Child runs must be controlled through their root workflow run.
+    Human Monitor cancellation uses the local CLI verified-human boundary; it does
+    not transfer the original caller's answer, retry, or continuation ownership.
+    """
     from .workflow_responses import compact
     return compact(await _workflow_call("cancel", run_id=workflow_run_id))
 
