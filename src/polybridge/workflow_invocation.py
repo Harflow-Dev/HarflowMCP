@@ -657,6 +657,7 @@ def publish_input(store: Any, source: dict[str, Any]) -> None:
         # Other descendants remain suspended and will publish on re-entry.
         if r.get("status") == "needs_input" and r.get("input_decision_id"):
             return
+        r["optional_review_skip_available"] = source.get("optional_review_skip_available") is True
         r.update(status="needs_input", input_question=question, input_decision_id=decision_id, attention_reason="A workflow node needs caller input", input_source={"workflow_run_id": source["workflow_run_id"], "workflow_name": source.get("name", ""), "path": path})
     store.update_run(root_id, forward, "child_input_forwarded", {"source": source["workflow_run_id"], "input_decision_id": decision_id})
 

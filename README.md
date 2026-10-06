@@ -94,7 +94,10 @@ The MCP tools are `start_workflow(name, prompt, repo_path)`, `get_workflow_statu
 and `wait_for_workflow(workflow_run_id)`. You can also pass `workflow="Feature Delivery"` to
 `start_task`. Workflow starts return a **`workflow_run_id`**, which uses workflow status tools.
 Use `resume_workflow` to answer a suspended run, or `recover_workflow` with a reason for an eligible
-failed run. [Caller input and recovery details](docs/workflows.md#control-and-recovery).
+failed run. Skipping an eligible refused optional reviewer requires the caller's explicit
+`allow_optional_review_skip=true`; an ordinary answer grants no skip permission and revokes
+prior skip consent at the same checkpoint. Each accepted answer supersedes that checkpoint's consent.
+[Caller input and recovery details](docs/workflows.md#control-and-recovery).
 
 From the terminal:
 
@@ -130,6 +133,10 @@ polybridge-ctl status <task_id>
 
 Call `list_backends` to check installation and actual enforcement capabilities. Each harness needs
 its own installation, authentication, and model access; Polybridge does not provide these accounts.
+
+Before assigning a harness to a node, read [harness permissions and setup](docs/harness-permissions.md).
+It covers all five harnesses, setup for each node type, build/test and MCP approvals, network access,
+and common headless permission refusals.
 
 ## Access and local storage
 

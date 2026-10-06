@@ -173,6 +173,8 @@ orchestrator decisions complete or reopen checklist items**. The Monitor shows t
 a manual completion toggle.
 
 Access levels are `read_only`, `write_in_repo`, `publish`, and `unrestricted`.
+See [harness permissions and setup](harness-permissions.md) for all five harnesses and the additional
+command, credential, network, and MCP setup needed for each node role.
 Saved node access is authoritative for new runs; callers and assignment prompts cannot raise it.
 Fallback candidates use that node's effective access. Historical runs retain their original launch
 ceilings. Network is a separate optional setting, subject to backend capabilities.
@@ -777,9 +779,35 @@ available for reconciliation; uncertain dispatches cannot be resumed or repeated
 Explicit `recover_workflow` requires a nonempty reason and a failed, settled run. It returns the
 failed decision to the orchestrator with a fresh decision allowance and preserves completed work.
 
-A reported Vibe permission refusal left a review run waiting for input after the caller chose to
-proceed without that reviewer. The unresolved sequence and follow-up work are recorded in
-[the investigation note](drafts/workflow-vibe-refusal-recovery.md).
+For a settled permission refusal in an optional review node, answer the current question with
+`resume_workflow`, its exact `decision_id`, and nonempty `instructions`. To authorize proceeding
+without that reviewer, also pass `allow_optional_review_skip=true` (CLI
+`--allow-optional-review-skip`). The default is false: a normal answer, including a negative answer,
+does not authorize a skip. Do not set the flag unless the caller explicitly agrees to proceed
+without the reviewer. If the orchestrator asks again at the same checkpoint, the latest accepted
+answer supersedes its earlier consent: false revokes previous skip grants there, while true renews
+them with the latest reason. Grants for other checkpoints are preserved. Forwarded answers apply
+this replacement at the originating child checkpoint, and retrying the same delivered answer is
+idempotent. In a Monitor-owned run, the separate **Proceed without optional reviewer**
+button makes that choice; ordinary **Resume** does not. The availability indicator is only a hint:
+Polybridge rechecks eligibility and the current decision when accepting the request.
+
+```bash
+polybridge-ctl workflow-resume RUN_ID --decision-id CURRENT_DECISION_ID \
+  --instructions 'Proceed without this reviewer; reconcile the available reviews.' \
+  --allow-optional-review-skip --json
+```
+
+The orchestrator may then select the issued `skip_optional_review` continuation.
+This requires an active safe parallel convergence with a required sibling. The skip also discards
+settled protocol failures in that execution's own repair chain, retaining their evidence. It preserves
+the failed result and forwards the denied tool/command with its task identity and the caller's and
+orchestrator's skip reasons to final review. It does not approve the reviewer, retry denied
+tools, grant attempts, or change saved permissions. Required reviewers, child workflows, authority
+blocks, cancelled work, and unknown outcomes cannot use this route. The caller answer alone does
+not skip anything: the orchestrator records its explicit decision and reason. For a question
+forwarded from a child run, the opt-in follows the exact answer to that source checkpoint;
+it authorizes no other reviewer or child invocation.
 
 Decision exhaustion in new runs uses `needs_attention`, so use `resume_workflow` rather than
 failed-run recovery. The last contract correction remains visible. Resuming renews the decision

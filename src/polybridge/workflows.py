@@ -915,17 +915,68 @@ class WorkflowStore:
         self._index_run(run, previous_directory_mtime=previous_directory_mtime)
         return run
 
-    def control(self, run_id: str, action: str, instructions: str | None = None, additional_attempts: int = 0, *, decision_id: str | None = None, interaction_owner: str | None = None, _internal: bool = False, _delivery: dict[str, Any] | None = None) -> dict[str, Any]:
+    def control(self, run_id: str, action: str, instructions: str | None = None, additional_attempts: int = 0, *, decision_id: str | None = None, allow_optional_review_skip: bool = False, interaction_owner: str | None = None, _internal: bool = False, _delivery: dict[str, Any] | None = None) -> dict[str, Any]:
         if action not in {"pause", "resume", "cancel", "recover"}:
             raise WorkflowError("Unknown workflow action")
         if not isinstance(additional_attempts, int) or isinstance(additional_attempts, bool) or additional_attempts < 0:
             raise WorkflowError("additional_attempts must be a nonnegative integer")
+        if type(allow_optional_review_skip) is not bool:
+            raise WorkflowError("allow_optional_review_skip must be a boolean")
+        if allow_optional_review_skip and action != "resume":
+            raise WorkflowError("Optional review skip consent is only available when resuming needs_input")
         observed = self.get_run(run_id)
         if _delivery is not None:
             if not _internal:
                 raise WorkflowError("Forwarded delivery is internal only")
+            if _delivery.get("payload", {}).get("allow_optional_review_skip", False) is not allow_optional_review_skip:
+                raise WorkflowError("Forwarded consent does not match its delivery")
             if observed.get("forwarded_delivery_receipt") == _delivery:
                 return observed
+
+        def qualifying_skips(r: dict[str, Any]) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+            if r.get("status") != "needs_input":
+                raise WorkflowError("Optional review skip consent requires a qualifying needs_input checkpoint")
+            if decision_id != r.get("input_decision_id"):
+                raise WorkflowError("Resuming needs_input requires the current input decision_id")
+            from .workflow_delegation import optional_review_refusal_join
+            eligible = []
+            for token in r.get("pending", []):
+                if token.get("decision_id") != decision_id:
+                    continue
+                execution = next((a for a in r["activations"] if a["id"] == token.get("execution_activation_id")), None)
+                node = next((n for n in r["definition"]["nodes"] if n["id"] == token.get("node_id")), None)
+                if execution and node and optional_review_refusal_join(r, node, execution, token):
+                    eligible.append((node, execution))
+            if not eligible:
+                raise WorkflowError("No qualifying optional review refusal is awaiting this answer")
+            return eligible
+
+        def validate_forwarded_consent(r: dict[str, Any], visited: set[str]) -> None:
+            if r["workflow_run_id"] in visited:
+                raise WorkflowError("Forwarded input source contains a cycle")
+            visited.add(r["workflow_run_id"])
+            source_id = (r.get("input_source") or {}).get("workflow_run_id")
+            if source_id not in (None, r["workflow_run_id"]):
+                if r.get("status") != "needs_input" or decision_id != r.get("input_decision_id"):
+                    raise WorkflowError("Resuming needs_input requires the current input decision_id")
+                source = self.get_run(source_id)
+                previous = r.get("forwarded_delivery")
+                payload = (previous or {}).get("payload", {})
+                if (previous and source.get("forwarded_delivery_receipt") == previous
+                        and payload.get("allow_optional_review_skip") is True
+                        and payload.get("decision_id") == decision_id
+                        and payload.get("instructions") == instructions
+                        and payload.get("additional_attempts") == additional_attempts
+                        and payload.get("interaction_owner") == interaction_owner
+                        and payload.get("source") == r.get("input_source")):
+                    return
+                validate_forwarded_consent(source, visited)
+            else:
+                qualifying_skips(r)
+
+        if allow_optional_review_skip:
+            # Validate before reconciliation or preparing any durable forwarded delivery.
+            validate_forwarded_consent(observed, set())
 
         def record_delivery(r: dict[str, Any]) -> None:
             if _delivery is not None:
@@ -934,7 +985,7 @@ class WorkflowStore:
         def prepare_delivery(source_id: str, source_action: str, source: dict[str, Any]) -> dict[str, Any]:
             payload = {"source_id": source_id, "action": source_action, "instructions": instructions,
                        "additional_attempts": additional_attempts, "decision_id": decision_id,
-                       "interaction_owner": interaction_owner, "source": source}
+                       "allow_optional_review_skip": allow_optional_review_skip, "interaction_owner": interaction_owner, "source": source}
             previous = observed.get("forwarded_delivery")
             replace_delivered = False
             if previous is not None and (previous.get("payload", {}).get("source") != source or previous.get("payload", {}).get("decision_id") != decision_id):
@@ -947,7 +998,10 @@ class WorkflowStore:
                     raise WorkflowError("The forwarded source moved on; re-read the current run")
                 pending = r.get("forwarded_delivery")
                 if pending is not None and not (replace_delivered and pending == previous):
-                    if pending.get("payload") != payload:
+                    pending_payload = copy.deepcopy(pending.get("payload", {}))
+                    # Existing deliveries predate structured consent and mean no opt-in.
+                    pending_payload.setdefault("allow_optional_review_skip", False)
+                    if pending_payload != payload:
                         raise WorkflowError("A forwarded delivery is pending; retry its original answer and grants")
                 else:
                     r["forwarded_delivery"] = {"id": uuid.uuid4().hex, "payload": copy.deepcopy(payload)}
@@ -967,7 +1021,7 @@ class WorkflowStore:
             # The answer belongs to the source run; it grants no fresh child and no
             # attempts beyond the attention source.
             delivery = prepare_delivery(source_id, "resume", observed["input_source"])
-            self.control(source_id, "resume", instructions=instructions, additional_attempts=additional_attempts, decision_id=decision_id, interaction_owner=interaction_owner, _internal=True, _delivery=delivery)
+            self.control(source_id, "resume", instructions=instructions, additional_attempts=additional_attempts, decision_id=decision_id, allow_optional_review_skip=allow_optional_review_skip, interaction_owner=interaction_owner, _internal=True, _delivery=delivery)
             def clear_forwarded(r: dict[str, Any]) -> None:
                 if r.get("status") != "needs_input" or r.get("input_decision_id") != decision_id or r.get("input_source") != observed.get("input_source") or r.get("forwarded_delivery") != delivery:
                     raise WorkflowError("The forwarded question moved on; re-read the current question and answer again")
@@ -977,6 +1031,7 @@ class WorkflowStore:
                 r["instructions"] = instructions or ""
                 r.pop("input_question", None)
                 r.pop("input_decision_id", None)
+                r.pop("optional_review_skip_available", None)
                 r.pop("input_source", None)
                 r["suppressed_candidates"] = []
                 for token in r.get("pending", []):
@@ -1005,6 +1060,7 @@ class WorkflowStore:
                 r.pop("forwarded_delivery", None)
                 r["status"] = "running"
                 r.pop("attention_source", None)
+                r.pop("optional_review_skip_available", None)
                 r.pop("attention_reason", None)
                 r.pop("suspended_via_root", None)
             result = self.update_run(run_id, clear_attention, "forwarded_attention_resumed", {"source": source_id})
@@ -1019,7 +1075,7 @@ class WorkflowStore:
                     raise WorkflowError("Supervisor identity is uncertain; cannot " + ("cancel" if action == "cancel" else "resume or recover"))
             if action in {"resume", "recover"} and not _supervisor_present(observed):
                 self.reconcile_run(run_id)
-        control_detail: dict[str, Any] = {"instructions": instructions, "additional_attempts": additional_attempts, "retry_grants": {}}
+        control_detail: dict[str, Any] = {"instructions": instructions, "additional_attempts": additional_attempts, "retry_grants": {}, "allow_optional_review_skip": allow_optional_review_skip}
         def change(r: dict[str, Any]) -> None:
             if _delivery is not None and r.get("forwarded_delivery_receipt") == _delivery:
                 return
@@ -1054,6 +1110,16 @@ class WorkflowStore:
                         raise WorkflowError("Resuming needs_input requires an answer or reason")
                     if decision_id != r.get("input_decision_id"):
                         raise WorkflowError("Resuming needs_input requires the current input decision_id")
+                    # The latest accepted answer replaces consent at this checkpoint.
+                    # Keep grants for other checkpoints; receipt replay returns above
+                    # without revoking a previously delivered answer's authorization.
+                    authorizations = r.get("optional_skip_authorizations", {})
+                    for execution_id in list(authorizations):
+                        if authorizations[execution_id].get("source_decision_id") == decision_id:
+                            del authorizations[execution_id]
+                    if allow_optional_review_skip:
+                        for node, execution in qualifying_skips(r):
+                            r.setdefault("optional_skip_authorizations", {})[execution["id"]] = {"node_id": node["id"], "reason": instructions.strip(), "source_decision_id": decision_id, "allow_optional_review_skip": True, "granted_at": time.time()}
                     from .workflow_delegation import caller_decision_block, unresolved_required
                     for token in r.get("pending", []):
                         if token.get("decision_id") != decision_id:
@@ -1074,6 +1140,7 @@ class WorkflowStore:
                             question.pop("decision_error", None)
                 r.pop("input_question", None)
                 r.pop("input_decision_id", None)
+                r.pop("optional_review_skip_available", None)
                 r.pop("failure_reason", None)
                 r["suppressed_candidates"] = []
                 exhausted_edges = r.pop("exhausted_retry_edges", [])

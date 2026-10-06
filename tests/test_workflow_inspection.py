@@ -260,7 +260,7 @@ def test_cli_monitor_start_and_resume_forward_internal_owner(monkeypatch, capsys
     assert ctl.main(["workflow-start", "feature", "--repo", "/tmp/repo", "--prompt", "Work", "--monitor", "--json"]) == 0
     assert observed[-1][1]["interaction_owner"] == "monitor"
     assert ctl.main(["workflow-resume", "r1", "--instructions", "Answer", "--decision-id", "d1", "--monitor", "--json"]) == 0
-    assert observed[-1] == ("resume", {"run_id": "r1", "instructions": "Answer", "additional_attempts": 0, "decision_id": "d1", "interaction_owner": "monitor"})
+    assert observed[-1] == ("resume", {"run_id": "r1", "instructions": "Answer", "additional_attempts": 0, "decision_id": "d1", "allow_optional_review_skip": False, "interaction_owner": "monitor"})
     capsys.readouterr()
 
 
