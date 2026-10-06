@@ -114,7 +114,7 @@ FORBIDDEN_FLAGS = ("--strict-mcp-config", "--setting-sources", "--safe-mode", "-
 # attached alias form `--disallowed-tools=...`. Long aliases (`--allowed-tools`,
 # `--disallowed-tools`) are deliberately absent even though claude accepts them: this backend never
 # writes them, so admitting them here would reopen the same hole under a different spelling.
-BOOLEAN_FLAGS = ("--verbose", "--include-partial-messages")
+BOOLEAN_FLAGS = ("--verbose", "--include-partial-messages", "--forward-subagent-text")
 VALUE_FLAGS = (
     "--add-dir",
     "--output-format",
@@ -127,6 +127,8 @@ VALUE_FLAGS = (
     "--effort",
     "--session-id",
     "--resume",
+    "--agents",
+    "--settings",
 )
 
 # The one `--input-format` value this backend writes, and only on a live-input run. Measured (claude
@@ -381,6 +383,11 @@ class ClaudeBackend:
         # settles the run regardless of how many messages were queued. agy is the contrast case.
         live_input_message_is_turn=False,
     )
+
+    @property
+    def native_subagent_adapter(self):
+        from .claude_native import ClaudeNativeAdapter
+        return ClaudeNativeAdapter()
 
     def with_writable_directory(self, invocation: Invocation, path: Path, freedom: Freedom) -> Invocation:
         if freedom == "read_only":
@@ -638,6 +645,8 @@ class ClaudeBackend:
                     f"settings, which it is meant to inherit: {argv!r}"
                 )
 
+        from .claude_native import validate_native
+        validate_native(invocation, freedom)
         seen = self._parse_options(options, argv)
         expected_directories = [invocation.scratch_directory] if invocation.scratch_directory else []
         if seen.get("--add-dir", []) != expected_directories or (expected_directories and freedom == "read_only"):

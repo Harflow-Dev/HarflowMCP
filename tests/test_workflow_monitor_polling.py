@@ -67,3 +67,11 @@ def test_monitor_cli_surface_is_additive_and_ordinary_status_unchanged():
     assert selected.monitor_view is True
     assert paged.view == "execution:a"
     assert paged.cursor == "opaque"
+
+
+def test_monitor_and_compact_preserve_frozen_native_scheduling_policy():
+    from polybridge.workflow_responses import compact
+    run = {"workflow_run_id": "run", "status": "running", "scheduling_policy": "native_workers_plus_control_v1", "activations": []}
+    assert compact(run)["scheduling_policy"] == "native_workers_plus_control_v1"
+    assert monitor(run)["scheduling_policy"] == "native_workers_plus_control_v1"
+    assert "scheduling_policy" not in compact({"workflow_run_id": "legacy", "activations": []})

@@ -90,7 +90,7 @@ def history_page(runs: list[dict[str, Any]], offset: int = 0, limit: int = 100) 
 
 
 def compact(run: dict[str, Any]) -> dict[str, Any]:
-    keys = ("workflow_run_id", "name", "revision", "kind", "status", "created_at", "updated_at", "interaction_owner", "settling", "input_decision_id", "execution_contract", "draft_revision")
+    keys = ("workflow_run_id", "name", "revision", "kind", "status", "created_at", "updated_at", "interaction_owner", "settling", "input_decision_id", "execution_contract", "draft_revision", "scheduling_policy")
     result = {key: run[key] for key in keys if key in run and isinstance(run[key], (str, int, float, bool, type(None)))}
     link = run.get("parent_link") or {}
     if link:

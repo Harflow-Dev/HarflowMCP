@@ -5,6 +5,52 @@ workflow context, and checklist. At each stage it selects a valid continuation a
 assignment for the next agent. Polybridge validates, dispatches, and durably records the decision.
 Conditions are instructions to the orchestrator, not code executed by Polybridge.
 
+## Native subagent execution
+
+New agent nodes default to **Prefer orchestrator subagent**. Previously saved nodes without an
+execution preference retain **Headless** execution. **Prefer orchestrator subagent** asks Polybridge to
+use a native child of the workflow's owning orchestrator when the harness and all requested node
+settings are compatible. It does not adopt the interactive chat that started the workflow.
+Unsupported combinations use headless execution before launch; the execution inspector records why.
+A native preference cannot raise access, enable network, change models, or silently replace Resume
+with Fresh. A missing native launch acknowledgement or an uncertain child outcome requires attention,
+not a second headless worker.
+
+Native executions have their own workflow execution identity and activity. The Monitor labels them
+**Subagent**, links to the owning orchestrator, and shows the activity available from the harness.
+Limited activity is labeled explicitly. Parent process liveness and a quiet activity stream do not
+prove whether a child is running; the runner uses correlated harness lifecycle evidence.
+A node advances only after confirmed child settlement and a valid structured worker result.
+
+A subagent has no independent **Take over** action. Stop and Resume are available only when the
+adapter supports those operations on that individual child. Parent takeover is refused while
+children remain unresolved. Cancellation and timeout must settle the child before retry or fallback;
+an unresolved child continues to protect its checkout even after its supervisor exits.
+
+Scheduling policy is frozen from the complete pinned workflow dependency tree before its first
+checkpoint. Trees with a native preference allow at most `max_parallel` workers plus one shared
+parent/control turn; this policy remains in effect if preferred nodes fall back to headless.
+The control allowance is shared across nested orchestrators, so native batches belonging to different
+owning sessions serialize. Trees with no native preference retain their existing harness-turn limit.
+
+Native support is certified per harness version and settings. Availability does not imply that every
+role, permission level, session mode, model, or parallel configuration is supported. The runner
+reports the actual execution mode rather than assuming that a preference was honored.
+
+The initial adapter supports **Claude Code 2.1.290**, root sequential workflows, Fresh child
+execution, `read_only` access, the exact inherited `claude-sonnet-4-6` model, and the
+default 100-turn cap on both the parent turn and child profile. The child profile
+permits Read, Glob, and Grep; it cannot run shell commands, edit files, or delegate further.
+Effort overrides, other turn caps, child Resume, parallel/nested native execution, other Claude versions,
+and other harnesses use Headless with an explanation. Native implementation nodes therefore
+remain Headless. The parent turn retains plan mode, applies a scoped setting disabling automatic
+permission classification, and adds no tool approval allowlist.
+
+The native CLI certification test uses an isolated localhost fake API with the real executable:
+`PB_CLI_INTEGRATION=1 uv run pytest tests/test_claude_native_subagent_cli.py`. It makes no paid model
+requests. This proves the tested CLI transport and permission behavior; it does not measure model
+quality or guarantee that an arbitrary assignment will succeed.
+
 ## How the runner works
 
 Polybridge runs the control loop. The orchestrator decides what to do; worker harnesses execute

@@ -49,6 +49,7 @@ class Invocation:
     stdin_mode: StdinMode = STDIN_DEVNULL
     initial_input: bytes | None = None
     scratch_directory: str | None = None
+    native_subagent: bool = False
 
     @property
     def live_input(self) -> bool:

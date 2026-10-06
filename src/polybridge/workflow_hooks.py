@@ -52,6 +52,9 @@ def refuse_takeover(log_dir: Path, task_id: str) -> None:
             return
         store = WorkflowStore(root=log_dir.parent)
         run = store.get_run(association["workflow_run_id"])
+        attempt = next((t for a in run.get("activations", []) for t in a.get("tasks", []) if t.get("task_id") == task_id), {})
+        if attempt.get("execution_kind") == "native_subagent":
+            raise control.TakeoverRefused("native_child_takeover", "Native subagents belong to their orchestrator and cannot be taken over independently")
         if run.get("kind") == "builder" or run["status"] not in TERMINAL or run.get("settling"):
             raise control.TakeoverRefused("workflow_active", "Workflow tasks can only be taken over after the entire workflow has finished and settled")
         state = _tree_gate(log_dir, association)
