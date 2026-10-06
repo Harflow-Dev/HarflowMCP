@@ -121,6 +121,29 @@ async def test_native_node_uses_owner_transport_and_no_child_process_record(nati
     assert worker["execution_kind"] == "native_subagent"
 
 
+async def test_native_observed_configuration_preserves_adapter_provenance(native_setup, tmp_path, monkeypatch):
+    storage, registry = native_setup
+    evidence = {"sandbox_mode": "read-only", "approval_policy": "never", "network": False, "provenance": "correlated_native_session"}
+    original = ClaudeNativeAdapter.observe
+
+    def observe(adapter, event, nonce, state):
+        assert state["expected_repo"] == str(tmp_path)
+        updates = original(adapter, event, nonce, state)
+        for update in updates:
+            if update["native_update"] == "settled":
+                update["observed_metadata"] = {**evidence, "model": "cannot_override_authoritative_model", "native_child_id": "cannot_override_authoritative_identity"}
+        return updates
+
+    monkeypatch.setattr(ClaudeNativeAdapter, "observe", observe)
+    run = storage.create_run(w.validate_definition(native_graph()), "Review", tmp_path)
+    await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]), 5)
+    observed = storage.get_run(run["workflow_run_id"])
+    assert observed["status"] == "completed"
+    worker = next(a for a in observed["activations"] if a["role"] == "node")
+    metadata = worker["tasks"][0]["harness_metadata"]["observed"]
+    assert metadata == {**evidence, "model": MODEL, "native_child_id": "native-child"}
+
+
 @pytest.mark.parametrize("terminal,forged", [(False, False), (True, True)])
 async def test_unproven_native_never_falls_back_or_completes(native_setup, tmp_path, terminal, forged):
     storage, _ = native_setup

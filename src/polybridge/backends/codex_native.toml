@@ -1,0 +1,8 @@
+# Certified default role: inherited effort, explicit model and read-only access.
+model = "gpt-6.1-sol"
+sandbox_mode = "read-only"
+approval_policy = "never"
+
+[features]
+multi_agent = false
+multi_agent_v2 = false
