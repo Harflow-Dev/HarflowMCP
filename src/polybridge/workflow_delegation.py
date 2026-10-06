@@ -144,7 +144,7 @@ def decision_prompt(context: dict[str, Any]) -> str:
         "failed": {**base, "action": "failed"},
         "complete": {**base, "action": "complete"},
     }
-    return ("You are the workflow orchestrator. Own the objective and checklist, and delegate focused assignments. Polybridge owns state and dispatch. Ordinary tools remain available under configured access. Return ONLY one JSON object. Every action MUST include the issued decision_id, an action, and a nonempty reason explaining the judgment, including complete and inspect. Do not return bare action strings. Use the action-specific examples below; omit fields belonging to other actions. Structural continuations accept ONLY continuation_id, except a continuation with branch_continuations entering Parallel start requires branch_assignments using the issued executable/structural entry shape. All branches requires every issued branch; Orchestrator selects requires one or more selected branch entries and a nonempty selection_reason explaining both selections and exclusions. Each executable branch receives its own focused assignment; do not select downstream nodes independently. Executable continuations require prompt; optional additional_result_refs and assigned_task_ids are arrays of issued result/task IDs. For Resume use session_mode resume and an issued resume_task_id; Fresh omits resume_task_id. Fixed Resume without a retained session boots Fresh. Agent decides may also choose session_mode continue_previous: Polybridge resumes a compatible single serial predecessor or boots Fresh; each fallback boots Fresh. Agent decides defaults Fresh when session_mode is omitted only if no compatible session is available; when a session is available choose Fresh or Resume explicitly. retry_execution explicitly consumes a node attempt, not an edge. Failed required results require an issued retry or recovery path, failure, or input. A planning result with no_checklist_needed is a proposal: judge its checklist_reason and either continue or explicitly select its issued retry_execution to request checklist tasks within the attempt budget. Complete only at End after every branch settles. Inspect exactly one page of a settled execution; inspection does not consume decision attempts. Optional task_updates are accepted for non-inspection actions and must obey checklist authority. Examples:\n" + json.dumps(examples) + "\nContext:\n" + json.dumps(context))
+    return ("You are the workflow orchestrator. Own the objective and checklist, and delegate focused assignments. Polybridge owns state and dispatch. Ordinary tools remain available under configured access. Return ONLY one JSON object. Every action MUST include the issued decision_id, an action, and a nonempty reason explaining the judgment, including complete and inspect. Do not return bare action strings. Use the action-specific examples below; omit fields belonging to other actions. Structural continuations accept ONLY continuation_id, except a continuation with branch_continuations entering Parallel start requires branch_assignments using the issued executable/structural entry shape. All branches requires every issued branch; Orchestrator selects requires one or more selected branch entries and a nonempty selection_reason explaining both selections and exclusions. Each executable branch receives its own focused assignment; do not select downstream nodes independently. Executable continuations require prompt; optional additional_result_refs and assigned_task_ids are arrays of issued result/task IDs. For Resume use session_mode resume and an issued resume_task_id; Fresh omits resume_task_id. Fixed Resume without a retained session boots Fresh. Agent decides may also choose session_mode continue_previous: Polybridge resumes a compatible single serial predecessor or boots Fresh; each fallback boots Fresh. Agent decides defaults Fresh when session_mode is omitted only if no compatible session is available; when a session is available choose Fresh or Resume explicitly. retry_execution explicitly consumes a node attempt, not an edge. skip_optional_review is a caller-authorized discard of the current settled optional review refusal: select only its issued skip_optional continuation with continuation_id and a reason, without assignments or task_updates. It preserves refusal evidence and cannot approve denied tools, alter permissions, retry the reviewer, or certify review success. Before caller authorization, request needs_input with the recommendation to proceed without the optional reviewer. Failed required results require an issued retry or recovery path, failure, or input. A planning result with no_checklist_needed is a proposal: judge its checklist_reason and either continue or explicitly select its issued retry_execution to request checklist tasks within the attempt budget. Complete only at End after every branch settles. Inspect exactly one page of a settled execution; inspection does not consume decision attempts. Optional task_updates are accepted for non-inspection actions and must obey checklist authority. Examples:\n" + json.dumps(examples) + "\nContext:\n" + json.dumps(context))
 
 
 def settled(activation: dict[str, Any]) -> bool:
@@ -282,6 +282,57 @@ def retry_eligible(activation: dict[str, Any], *, guided: bool = False, node: di
     return True
 
 
+def optional_review_refusal_join(run: dict[str, Any], node: dict[str, Any], activation: dict[str, Any], token: dict[str, Any]) -> str | None:
+    """A caller may discard a settled optional review refusal at a safe join."""
+    if run.get("runner_policy") != "guided" or node.get("type") != "agent" or node.get("role") != "review" or not node.get("optional"):
+        return None
+    if activation.get("invocation") or activation.get("role") != "node" or activation.get("node_id") != node.get("id") or token.get("node_id") != node.get("id"):
+        return None
+    if not token.get("execution_complete") or token.get("execution_activation_id") != activation.get("id") or not settled(activation):
+        return None
+    value = activation.get("node_result", {})
+    result = value.get("result", {})
+    if value.get("status") not in {"failed", "blocked"} or any(result.get(key) in {"authority", "cancelled", "uncertain"} for key in ("failure_kind", "blocker_category")):
+        return None
+    tasks = activation.get("tasks", [])
+    if not tasks or result.get("outcome_unknown"):
+        return None
+    for task in tasks:
+        snapshot = task.get("result", {})
+        if task.get("status") not in {"completed", "failed"} or snapshot.get("status") not in {"completed", "failed"} or snapshot.get("outcome_unknown"):
+            return None
+        if any(snapshot.get(key) in {"authority", "cancelled", "uncertain"} for key in ("failure_kind", "blocker_category")):
+            return None
+    if not any(task.get("result", {}).get("permission_denials") for task in tasks):
+        return None
+    return _w().optional_failure_join({**run, "status": "running"}, node, token)
+
+
+def optional_review_protocol_ancestors(run: dict[str, Any], node: dict[str, Any], activation: dict[str, Any], token: dict[str, Any]) -> list[dict[str, Any]]:
+    """Discard only safe protocol failures in this review's actual retry chain."""
+    activations = {item["id"]: item for item in run["activations"]}
+    failed_refs = set(token.get("failed_execution_refs", []))
+    ancestors = []
+    seen = {activation["id"]}
+    previous_id = activation.get("retry_of_execution_id")
+    while previous_id and previous_id not in seen:
+        seen.add(previous_id)
+        previous = activations.get(previous_id)
+        if not previous or previous.get("role") != "node" or previous.get("node_id") != node["id"] or previous.get("invocation") or not settled(previous):
+            break
+        value = previous.get("node_result", {})
+        result = value.get("result", {})
+        tasks = previous.get("tasks", [])
+        if value.get("status") != "failed" or result.get("failure_kind") != "protocol" or result.get("blocker_category") in {"authority", "cancelled", "uncertain"} or result.get("outcome_unknown") or not tasks:
+            break
+        if any(task.get("status") not in {"completed", "failed"} or task.get("result", {}).get("status") not in {"completed", "failed"} or task.get("result", {}).get("outcome_unknown") or any(task.get("result", {}).get(key) in {"authority", "cancelled", "uncertain"} for key in ("failure_kind", "blocker_category")) for task in tasks):
+            break
+        if previous_id in failed_refs:
+            ancestors.append(previous)
+        previous_id = previous.get("retry_of_execution_id")
+    return ancestors
+
+
 def result_inputs(run: dict[str, Any], refs: list[str], *, preview: bool = True, root: Path | None = None) -> list[dict[str, Any]]:
     """References always identify an immutable settled node execution, not a task."""
     w = _w()
@@ -409,6 +460,11 @@ def inspect_decision(supervisor: Any, decision: dict[str, Any], checkpoint: dict
 
 def continuations(run: dict[str, Any], node: dict[str, Any], token: dict[str, Any], execute: bool, *, root: Path | None = None) -> list[dict[str, Any]]:
     w = _w()
+    if not execute:
+        activation = next((a for a in run["activations"] if a["id"] == token.get("execution_activation_id")), None)
+        authorization = run.get("optional_skip_authorizations", {}).get(token.get("execution_activation_id"), {})
+        if activation and token.get("decision_id") and optional_review_refusal_join(run, node, activation, token) and authorization.get("node_id") == node["id"] and authorization.get("source_decision_id") == token["decision_id"] and isinstance(authorization.get("reason"), str) and authorization["reason"].strip():
+            return [{"continuation_id": "skip_optional:" + activation["id"], "node_id": node["id"], "kind": "skip_optional_review", "requires_prompt": False, "execution_id": activation["id"]}]
     if execute:
         choices = [{"continuation_id": "execute:" + token["id"], "node_id": node["id"], "kind": "execute", "requires_prompt": True}]
     else:
@@ -594,6 +650,10 @@ def validate_decision(run: dict[str, Any], node: dict[str, Any], token: dict[str
         raise w.WorkflowError("End only accepts issued required-execution recovery continuations")
     if any(choices[i]["kind"] == "retry_execution" for i in ids) and len(ids) != 1:
         raise w.WorkflowError("Retry execution must be selected exclusively")
+    if any(choices[i]["kind"] == "skip_optional_review" for i in ids):
+        if len(entries) != 1 or decision.get("task_updates", []) != [] or set(entries[0]) != {"continuation_id"}:
+            raise w.WorkflowError("Optional review skip must be selected exclusively without assignments or checklist updates")
+        return [], {ids[0]: {"skip_execution_id": choices[ids[0]]["execution_id"]}}, None
     selected = [choices[i]["connection"] for i in ids if "connection" in choices[i]]
     assignments = {}
     known_tasks = {t["id"] for t in run.get("tasks", [])}
@@ -759,6 +819,21 @@ async def decide(supervisor: Any, node: dict[str, Any], token: dict[str, Any], *
                         elif planned.get("tasks"):
                             r["checklist_disposition"] = {"status": "required", "reason": decision["reason"], "execution_id": source["id"], "decision_id": decision["decision_id"]}
                     if action == "continue":
+                        skip_id = next((key for key in assignments if key.startswith("skip_optional:")), None)
+                        if skip_id:
+                            execution_id = assignments[skip_id]["skip_execution_id"]
+                            source = next(item for item in r["activations"] if item["id"] == execution_id)
+                            authorization = r.get("optional_skip_authorizations", {}).get(execution_id, {})
+                            skip_join = optional_review_refusal_join(r, node, source, t)
+                            if not skip_join or authorization.get("node_id") != node["id"] or authorization.get("source_decision_id") != t.get("decision_id"):
+                                raise w.WorkflowError("Optional review skip authorization no longer matches this execution checkpoint")
+                            source.update(optional_failure=True, optional_skip={"caller_reason": authorization["reason"], "orchestrator_reason": decision["reason"], "source_decision_id": authorization["source_decision_id"], "decision_id": decision["decision_id"], "skipped_at": time.time()})
+                            for previous in optional_review_protocol_ancestors(r, node, source, t):
+                                previous.update(optional_failure=True, optional_skip={**copy.deepcopy(source["optional_skip"]), "scope": "protocol_retry_ancestor", "skipped_by_execution_id": execution_id})
+                            t["optional_failure_join"] = skip_join
+                            for key in ("selected_connections", "selected_join_id", "accepted_decision_id", "assignments", "selection_reason", "selection_decision_id", "decision_id", "decision_attempts", "decision_error"):
+                                t.pop(key, None)
+                            return
                         t.update(selected_connections=[e["id"] for e in selected], selected_join_id=join, assignments=assignments, accepted_decision_id=t["decision_id"])
                         if node["type"] == "parallel_start":
                             t.update(selection_reason=decision["reason"], selection_decision_id=decision["decision_id"])
@@ -810,7 +885,7 @@ async def decide(supervisor: Any, node: dict[str, Any], token: dict[str, Any], *
                 accepted = supervisor.update(accept, "decision_accepted", decision)
                 if not supervisor.tree.tree_running(accepted):
                     return None
-                return selected if decision["action"] == "continue" and not any(key.startswith(("retry:", "recover:", "recover_child:")) for key in assignments) else None
+                return selected if decision["action"] == "continue" and not any(key.startswith(("retry:", "recover:", "recover_child:", "skip_optional:")) for key in assignments) else None
             except (ValueError, TypeError, AttributeError) as exc:
                 def reject(r: dict[str, Any]) -> None:
                     diagnostic = {"decision_id": token["decision_id"], "attempt": token.get("decision_attempts", 0), "category": "harness" if outcome.get("execution_failure") else "validation", "field_path": decision_error_path(str(exc)), "error": str(exc), "valid_continuations": continuations(r, node, token, execute)}

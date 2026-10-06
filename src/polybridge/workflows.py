@@ -1054,10 +1054,14 @@ class WorkflowStore:
                         raise WorkflowError("Resuming needs_input requires an answer or reason")
                     if decision_id != r.get("input_decision_id"):
                         raise WorkflowError("Resuming needs_input requires the current input decision_id")
-                    from .workflow_delegation import caller_decision_block, unresolved_required
+                    from .workflow_delegation import caller_decision_block, optional_review_refusal_join, unresolved_required
                     for token in r.get("pending", []):
                         if token.get("decision_id") != decision_id:
                             continue
+                        execution = next((a for a in r["activations"] if a["id"] == token.get("execution_activation_id")), None)
+                        node = next((n for n in r["definition"]["nodes"] if n["id"] == token.get("node_id")), None)
+                        if execution and node and optional_review_refusal_join(r, node, execution, token):
+                            r.setdefault("optional_skip_authorizations", {})[execution["id"]] = {"node_id": node["id"], "reason": instructions.strip(), "source_decision_id": decision_id, "granted_at": time.time()}
                         for execution in unresolved_required(r, token):
                             if caller_decision_block(execution):
                                 answered_executions.add(execution["id"])

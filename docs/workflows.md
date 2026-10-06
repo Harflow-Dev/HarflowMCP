@@ -173,6 +173,8 @@ orchestrator decisions complete or reopen checklist items**. The Monitor shows t
 a manual completion toggle.
 
 Access levels are `read_only`, `write_in_repo`, `publish`, and `unrestricted`.
+See [harness permissions and setup](harness-permissions.md) for all five harnesses and the additional
+command, credential, network, and MCP setup needed for each node role.
 Saved node access is authoritative for new runs; callers and assignment prompts cannot raise it.
 Fallback candidates use that node's effective access. Historical runs retain their original launch
 ceilings. Network is a separate optional setting, subject to backend capabilities.
@@ -777,9 +779,15 @@ available for reconciliation; uncertain dispatches cannot be resumed or repeated
 Explicit `recover_workflow` requires a nonempty reason and a failed, settled run. It returns the
 failed decision to the orchestrator with a fresh decision allowance and preserves completed work.
 
-A reported Vibe permission refusal left a review run waiting for input after the caller chose to
-proceed without that reviewer. The unresolved sequence and follow-up work are recorded in
-[the investigation note](drafts/workflow-vibe-refusal-recovery.md).
+For a settled permission refusal in an optional review node, answer the current question with
+`resume_workflow`, its exact `decision_id`, and instructions explaining whether to proceed without
+the reviewer. The orchestrator may then select the issued `skip_optional_review` continuation.
+This requires an active safe parallel convergence with a required sibling. The skip also discards
+settled protocol failures in that execution's own repair chain, retaining their evidence. It preserves
+the failed result and denial evidence for final review; it does not approve the reviewer, retry denied
+tools, grant attempts, or change saved permissions. Required reviewers, child workflows, authority
+blocks, cancelled work, and unknown outcomes cannot use this route. The caller answer alone does
+not skip anything: the orchestrator records its explicit decision and reason.
 
 Decision exhaustion in new runs uses `needs_attention`, so use `resume_workflow` rather than
 failed-run recovery. The last contract correction remains visible. Resuming renews the decision
