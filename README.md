@@ -94,7 +94,9 @@ The MCP tools are `start_workflow(name, prompt, repo_path)`, `get_workflow_statu
 and `wait_for_workflow(workflow_run_id)`. You can also pass `workflow="Feature Delivery"` to
 `start_task`. Workflow starts return a **`workflow_run_id`**, which uses workflow status tools.
 Use `resume_workflow` to answer a suspended run, or `recover_workflow` with a reason for an eligible
-failed run. [Caller input and recovery details](docs/workflows.md#control-and-recovery).
+failed run. Skipping an eligible refused optional reviewer requires the caller's explicit
+`allow_optional_review_skip=true`; an ordinary answer grants no skip permission.
+[Caller input and recovery details](docs/workflows.md#control-and-recovery).
 
 From the terminal:
 

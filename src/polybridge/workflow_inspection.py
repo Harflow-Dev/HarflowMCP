@@ -41,6 +41,9 @@ def result_page(run: dict[str, Any], execution_id: str, *, task_id: str | None =
     task = selected_task(activation, task_id)
     # Explicit attempt selection returns that candidate's outcome; default returns the normalized node contract.
     payload = {"node_result": activation.get("node_result"), "raw_output": activation.get("raw_output", "")} if task_id is None else {"task_result": task.get("result", {}), "raw_output": task.get("raw_output", task.get("result", {}).get("summary", ""))}
+    if task_id is None:
+        from .workflow_delegation import result_evidence
+        payload.update(result_evidence(activation, run))
     serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     digest = hashlib.sha256(serialized.encode()).hexdigest()
     identity = [run["workflow_run_id"], execution_id, task_id, digest]

@@ -780,14 +780,30 @@ Explicit `recover_workflow` requires a nonempty reason and a failed, settled run
 failed decision to the orchestrator with a fresh decision allowance and preserves completed work.
 
 For a settled permission refusal in an optional review node, answer the current question with
-`resume_workflow`, its exact `decision_id`, and instructions explaining whether to proceed without
-the reviewer. The orchestrator may then select the issued `skip_optional_review` continuation.
+`resume_workflow`, its exact `decision_id`, and nonempty `instructions`. To authorize proceeding
+without that reviewer, also pass `allow_optional_review_skip=true` (CLI
+`--allow-optional-review-skip`). The default is false: a normal answer, including a negative answer,
+does not authorize a skip. Do not set the flag unless the caller explicitly agrees to proceed
+without the reviewer. In a Monitor-owned run, the separate **Proceed without optional reviewer**
+button makes that choice; ordinary **Resume** does not. The availability indicator is only a hint:
+Polybridge rechecks eligibility and the current decision when accepting the request.
+
+```bash
+polybridge-ctl workflow-resume RUN_ID --decision-id CURRENT_DECISION_ID \
+  --instructions 'Proceed without this reviewer; reconcile the available reviews.' \
+  --allow-optional-review-skip --json
+```
+
+The orchestrator may then select the issued `skip_optional_review` continuation.
 This requires an active safe parallel convergence with a required sibling. The skip also discards
 settled protocol failures in that execution's own repair chain, retaining their evidence. It preserves
-the failed result and denial evidence for final review; it does not approve the reviewer, retry denied
+the failed result and forwards the denied tool/command with its task identity and the caller's and
+orchestrator's skip reasons to final review. It does not approve the reviewer, retry denied
 tools, grant attempts, or change saved permissions. Required reviewers, child workflows, authority
 blocks, cancelled work, and unknown outcomes cannot use this route. The caller answer alone does
-not skip anything: the orchestrator records its explicit decision and reason.
+not skip anything: the orchestrator records its explicit decision and reason. For a question
+forwarded from a child run, the opt-in follows the exact answer to that source checkpoint;
+it authorizes no other reviewer or child invocation.
 
 Decision exhaustion in new runs uses `needs_attention`, so use `resume_workflow` rather than
 failed-run recovery. The last contract correction remains visible. Resuming renews the decision

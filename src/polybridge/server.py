@@ -1419,16 +1419,21 @@ async def pause_workflow(workflow_run_id: str) -> dict[str, Any]:
 
 
 @mcp.tool()
-async def resume_workflow(workflow_run_id: str, instructions: str | None = None, additional_attempts: int = 0, decision_id: str | None = None) -> dict[str, Any]:
+async def resume_workflow(workflow_run_id: str, instructions: str | None = None, additional_attempts: int = 0, decision_id: str | None = None, allow_optional_review_skip: StrictBool = False) -> dict[str, Any]:
     """Resume a caller-owned run with instructions and optional explicit attempt grants.
 
     For needs_input, supply its current input_decision_id as decision_id and a nonempty answer
     in instructions. Stale answers and live/uncertain dispatches are refused. When the root
     run carries a forwarded question from a Run workflow descendant, the answer is applied to
     the attention source run; additional_attempts go to that source and grant no fresh child.
+    Answers alone never authorize skipping. Set allow_optional_review_skip=True only to
+    permit the orchestrator to skip a current settled optional review with recorded harness
+    permission denial, when optional_review_skip_available is true. The core revalidates
+    eligibility and decision_id; this grants no retry, required-review bypass, or permissions.
+    For a forwarded question, consent applies only to its originating child checkpoint.
     """
     from .workflow_responses import compact
-    return compact(await _workflow_call("resume", run_id=workflow_run_id, instructions=instructions, additional_attempts=additional_attempts, decision_id=decision_id))
+    return compact(await _workflow_call("resume", run_id=workflow_run_id, instructions=instructions, additional_attempts=additional_attempts, decision_id=decision_id, allow_optional_review_skip=allow_optional_review_skip))
 
 
 @mcp.tool()
@@ -1437,7 +1442,8 @@ async def inspect_workflow_node(workflow_run_id: str, execution_id: str, task_id
 
     Result view returns lossless JSON text chunks: concatenate chunk fields until next_cursor
     is null, then decode JSON. Pass next_cursor back as cursor. Default payload contains the
-    normalized node_result and full raw_output. Selecting task_id reads a specific fallback
+    normalized node_result, full raw_output, permission_denials, and optional_skip consent
+    metadata when present. Selecting task_id reads a specific fallback
     attempt. Activity uses normalized events with before_seq/after_seq. Result limit is
     characters (default 16000, max 32000); activity limit is events (default 50, max 200).
     No live or uncertain execution can be inspected. Orchestrator inspect decisions may name

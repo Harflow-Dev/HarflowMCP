@@ -206,6 +206,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
             wp.add_argument("--monitor", action="store_true", help="Human Monitor-owned workflow interaction")
         if action == "resume":
             wp.add_argument("--decision-id")
+            wp.add_argument("--allow-optional-review-skip", action="store_true", help="Explicitly permit skipping the current eligible optional review refusal; requires its current decision ID and answer")
         if action == "builder-followup":
             prompt_group = wp.add_mutually_exclusive_group(required=True)
             prompt_group.add_argument("--prompt")
@@ -723,8 +724,8 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
         if action == "resume":
             instructions = _workflow_text(args, "instructions")
             if args.monitor:
-                return await server._workflow_call("resume", run_id=args.workflow_run_id, instructions=instructions, additional_attempts=args.additional_attempts, decision_id=args.decision_id, interaction_owner="monitor")
-            return await server._workflow_call("resume", run_id=args.workflow_run_id, instructions=instructions, additional_attempts=args.additional_attempts, decision_id=args.decision_id)
+                return await server._workflow_call("resume", run_id=args.workflow_run_id, instructions=instructions, additional_attempts=args.additional_attempts, decision_id=args.decision_id, allow_optional_review_skip=args.allow_optional_review_skip, interaction_owner="monitor")
+            return await server._workflow_call("resume", run_id=args.workflow_run_id, instructions=instructions, additional_attempts=args.additional_attempts, decision_id=args.decision_id, allow_optional_review_skip=args.allow_optional_review_skip)
         return await server._workflow_call(action, run_id=args.workflow_run_id, **({"interaction_owner": "monitor"} if getattr(args, "monitor", False) and action != "cancel" else {}))
     try:
         result = asyncio.run(invoke())

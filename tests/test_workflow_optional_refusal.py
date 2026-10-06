@@ -44,7 +44,7 @@ async def test_answer_and_explicit_skip_complete_final_review_without_replay(sto
     assert run['status'] == 'needs_input', (run.get('attention_reason'), [(c['current_stage'], c['settled_executions']) for c in registry.contexts])
     with pytest.raises(w.WorkflowError, match='failed'):
         storage.control(run['workflow_run_id'], 'recover', instructions=ANSWER)
-    resumed = storage.control(run['workflow_run_id'], 'resume', instructions=ANSWER, decision_id=run['input_decision_id'])
+    resumed = storage.control(run['workflow_run_id'], 'resume', instructions=ANSWER, decision_id=run['input_decision_id'], allow_optional_review_skip=True)
     token = next(t for t in resumed['pending'] if t['node_id'] == 'right')
     node = next(n for n in resumed['definition']['nodes'] if n['id'] == 'right')
     choices = d.continuations(resumed, node, token, False, root=storage.root)
@@ -99,7 +99,7 @@ async def test_skip_requires_current_answer_and_exclusive_structural_decision(st
     token = next(t for t in run['pending'] if t['node_id'] == 'right')
     node = next(n for n in run['definition']['nodes'] if n['id'] == 'right')
     assert not any(c['kind'] == 'skip_optional_review' for c in d.continuations(run, node, token, False, root=storage.root))
-    resumed = storage.control(run['workflow_run_id'], 'resume', instructions=ANSWER, decision_id=run['input_decision_id'])
+    resumed = storage.control(run['workflow_run_id'], 'resume', instructions=ANSWER, decision_id=run['input_decision_id'], allow_optional_review_skip=True)
     token = next(t for t in resumed['pending'] if t['node_id'] == 'right')
     choices = d.continuations(resumed, node, token, False, root=storage.root)
     skip = next(c for c in choices if c['kind'] == 'skip_optional_review')
@@ -124,7 +124,7 @@ async def test_settled_failed_refusal_can_be_discarded_with_answer(storage, tmp_
             a['tasks'][0].update(status='failed')
             a['tasks'][0]['result'].update(status='failed', exit_code=1)
     storage.update_run(run['workflow_run_id'], change, 'settled_refusal_fixture')
-    resumed = storage.control(run['workflow_run_id'], 'resume', instructions=ANSWER, decision_id=run['input_decision_id'])
+    resumed = storage.control(run['workflow_run_id'], 'resume', instructions=ANSWER, decision_id=run['input_decision_id'], allow_optional_review_skip=True)
     token = next(t for t in resumed['pending'] if t['node_id'] == 'right')
     node = next(n for n in resumed['definition']['nodes'] if n['id'] == 'right')
     assert [c['kind'] for c in d.continuations(resumed, node, token, False, root=storage.root)] == ['skip_optional_review']
@@ -152,7 +152,7 @@ async def test_skip_denied_protocol_repair_discards_its_failed_ancestor(storage,
     assert len(reviews) == 2
     assert reviews[0]['node_result']['result']['failure_kind'] == 'protocol'
     assert reviews[1]['retry_of_execution_id'] == reviews[0]['id']
-    storage.control(run['workflow_run_id'], 'resume', instructions=ANSWER, decision_id=run['input_decision_id'])
+    storage.control(run['workflow_run_id'], 'resume', instructions=ANSWER, decision_id=run['input_decision_id'], allow_optional_review_skip=True)
     await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run['workflow_run_id']), 5)
     final = storage.get_run(run['workflow_run_id'])
     assert final['status'] == 'completed', final.get('attention_reason')
