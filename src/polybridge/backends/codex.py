@@ -318,6 +318,11 @@ class CodexBackend:
         supports_live_input=False,
     )
 
+    @property
+    def native_subagent_adapter(self):
+        from .codex_native import CodexNativeAdapter
+        return CodexNativeAdapter()
+
     def with_writable_directory(self, invocation: Invocation, path: Path, freedom: Freedom) -> Invocation:
         if freedom == "read_only":
             raise ValueError("read-only tasks cannot receive a writable scratch directory")
@@ -449,6 +454,9 @@ class CodexBackend:
     def assert_safe(
         self, invocation: Invocation, freedom: Freedom, network: bool | None = None
     ) -> None:
+        if isinstance(invocation, Invocation) and invocation.native_subagent:
+            from .codex_native import validate_native
+            invocation = validate_native(invocation, freedom)
         # No live input here: only a devnull-stdin Invocation is a shape this backend ever builds.
         one_shot = isinstance(invocation, Invocation) and invocation.stdin_mode == "pipe_once"
         if one_shot:

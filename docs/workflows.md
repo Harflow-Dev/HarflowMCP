@@ -41,8 +41,8 @@ The initial adapter supports **Claude Code 2.1.290**, root sequential workflows,
 execution, `read_only` access, the exact inherited `claude-sonnet-4-6` model, and the
 default 100-turn cap on both the parent turn and child profile. The child profile
 permits Read, Glob, and Grep; it cannot run shell commands, edit files, or delegate further.
-Effort overrides, other turn caps, child Resume, parallel/nested native execution, other Claude versions,
-and other harnesses use Headless with an explanation. Native implementation nodes therefore
+Effort overrides, other turn caps, child Resume, parallel/nested native execution and other Claude versions
+use Headless with an explanation. Native implementation nodes therefore
 remain Headless. The parent turn retains plan mode, applies a scoped setting disabling automatic
 permission classification, and adds no tool approval allowlist.
 
@@ -51,13 +51,30 @@ The native CLI certification test uses an isolated localhost fake API with the r
 requests. This proves the tested CLI transport and permission behavior; it does not measure model
 quality or guarantee that an arbitrary assignment will succeed.
 
-Claude is the first certified adapter in this release. Codex, opencode, Vibe, and Antigravity
-do not yet have native adapters; their nodes run Headless even when Prefer orchestrator subagent
-is selected, with a visible fallback reason. This is an implementation and certification boundary,
-not a conclusion that native execution is impossible in those harnesses. The shared workflow and
-Monitor support is in place, but each additional adapter still needs verified child launch,
-lifecycle and terminal results, inherited permissions and settings, activity, and recovery behavior
-before native execution can be enabled.
+The Codex adapter supports **Codex CLI 0.160.1**, root sequential workflows, Fresh child
+execution, `read_only` access, and the exact inherited **gpt-6.1-sol** model. Both parent and
+worker must omit effort overrides and turn caps; Codex does not support turn caps. Network
+must remain blocked. The worker uses Codex's native tools under its inherited read-only
+sandbox and approval policy. A pinned default-agent profile prevents ambient roles from
+replacing its model, and a thread limit blocks further delegation. This matches Claude's workflow
+behavior and access boundary, rather than its narrower Read/Glob/Grep tool set.
+
+Codex child activity is **limited**: its exec JSON stream does not expose the child's complete
+lifecycle or tool activity. After the owning control process exits successfully, Polybridge
+verifies correlated parent and child session logs, the completed worker result, configuration,
+and dispatch acknowledgement before advancing the workflow. Verified child runtime errors are
+recorded as failed executions. Live child tool activity is not available. Missing, conflicting,
+or oversized evidence requires attention without a duplicate
+Headless dispatch. Child Resume, individual cancellation, takeover, write-capable workers,
+parallel/nested execution, other models, and other CLI versions remain unsupported.
+
+The Codex certification command is
+`PB_CLI_INTEGRATION=1 uv run pytest tests/test_codex_native_subagent_cli.py`.
+It uses the real pinned CLI with an isolated localhost fake API and makes no paid model calls.
+
+opencode, Vibe, and Antigravity do not yet have native adapters; their nodes run Headless even
+when Prefer orchestrator subagent is selected, with a visible fallback reason. Each additional
+adapter needs verified launch, settlement, inherited settings, activity, and recovery behavior.
 
 ## How the runner works
 
@@ -759,6 +776,10 @@ available for reconciliation; uncertain dispatches cannot be resumed or repeated
 
 Explicit `recover_workflow` requires a nonempty reason and a failed, settled run. It returns the
 failed decision to the orchestrator with a fresh decision allowance and preserves completed work.
+
+A reported Vibe permission refusal left a review run waiting for input after the caller chose to
+proceed without that reviewer. The unresolved sequence and follow-up work are recorded in
+[the investigation note](drafts/workflow-vibe-refusal-recovery.md).
 
 Decision exhaustion in new runs uses `needs_attention`, so use `resume_workflow` rather than
 failed-run recovery. The last contract correction remains visible. Resuming renews the decision

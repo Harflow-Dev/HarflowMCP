@@ -83,7 +83,7 @@ async def dispatch_native(supervisor: Any, node: dict[str, Any], assignment: str
     observers = getattr(supervisor.registry, "_workflow_native_observers", None)
     if observers is None:
         observers = supervisor.registry._workflow_native_observers = {}
-    state: dict[str, Any] = {"assignment": assignment, "owner_session_id": record.session_id, "expected_model": record.model}
+    state: dict[str, Any] = {"assignment": assignment, "owner_session_id": record.session_id, "expected_model": record.model, "expected_repo": record.repo_path, "expected_network": settings["network"], "expected_reasoning_effort": record.reasoning_effort}
     try:
         # Cross-owner turns queue without consuming workers or checkout leases.
         await supervisor.tree.acquire_slot(continue_running, control=True)
@@ -99,8 +99,7 @@ async def dispatch_native(supervisor: Any, node: dict[str, Any], assignment: str
             supervisor.update(reserve, "native_reserved", {"execution_id": execution_id, "nonce": nonce})
             log = events.EventLog(events.events_path(supervisor.registry._log_dir, execution_id), execution_id)
 
-            def observe(event: dict[str, Any]) -> None:
-                updates = native.observe(event, nonce, state)
+            def publish(updates: list[dict[str, Any]]) -> None:
                 for update in updates:
                     kind = update.pop("native_update")
                     if kind == "started":
@@ -122,7 +121,8 @@ async def dispatch_native(supervisor: Any, node: dict[str, Any], assignment: str
                         if update.get("permission_denials"):
                             result["permission_denials"] = copy.deepcopy(update["permission_denials"])
                         state["result"] = result
-                        supervisor._task_update(activation["id"], execution_id, {"status": update["status"], "dispatch_stage": "child_settled", "native_terminal": True, "result": result, "finished_at": time.time(), "harness_metadata": {**child["harness_metadata"], "observed": {"model": update.get("observed_model"), "native_child_id": state.get("native_child_id")}, "verification_status": "observed_native_child"}})
+                        observed = {**copy.deepcopy(update.get("observed_metadata", {})), "model": update.get("observed_model"), "native_child_id": state.get("native_child_id")}
+                        supervisor._task_update(activation["id"], execution_id, {"status": update["status"], "dispatch_stage": "child_settled", "native_terminal": True, "result": result, "finished_at": time.time(), "harness_metadata": {**child["harness_metadata"], "observed": observed, "verification_status": "observed_native_child"}})
                     elif kind == "permissions":
                         # Parent terminal evidence includes child refusals. Keep
                         # it conservatively on the child before graph decisions.
@@ -131,6 +131,10 @@ async def dispatch_native(supervisor: Any, node: dict[str, Any], assignment: str
                             supervisor._task_update(activation["id"], execution_id, {"result": state["result"]})
                     elif kind == "activity":
                         log.write(update.pop("event_kind"), update)
+
+            def observe(event: dict[str, Any]) -> None:
+                publish(native.observe(event, nonce, state))
+
             observers[transport_id] = observe
             supervisor._task_update(activation["id"], execution_id, {"dispatch_stage": "launch_requested", "launch_requested_at": time.time()})
             supervisor._task_update(transport_id, transport_id, {"dispatch_stage": "spawn_requested"})
@@ -161,6 +165,12 @@ async def dispatch_native(supervisor: Any, node: dict[str, Any], assignment: str
                 supervisor._task_update(activation["id"], execution_id, {"result": state["result"]})
             supervisor._task_update(transport_id, transport_id, {"status": snapshot["status"], "result": snapshot, "finished_at": time.time()})
             supervisor.update(lambda r: next(a for a in r["activations"] if a["id"] == transport_id).update(status=snapshot["status"]), "native_control_settled")
+            # Some harnesses flush authoritative native evidence only at exit.
+            # Read it off the event loop, then persist through the same path as
+            # live updates. A failed or interrupted transport cannot certify it.
+            finalize = getattr(native, "finalize", None)
+            if finalize is not None and snapshot["status"] == "completed" and not state.get("invalid") and not getattr(supervisor.registry, "_workflow_native_failures", {}).get(transport_id):
+                publish(await asyncio.to_thread(finalize, nonce, state))
             if snapshot["status"] != "completed" or "result" not in state or state.get("invalid") or getattr(supervisor.registry, "_workflow_native_failures", {}).get(transport_id):
                 uncertain = "result" not in state or bool(state.get("invalid")) or bool(getattr(supervisor.registry, "_workflow_native_failures", {}).get(transport_id))
                 supervisor._task_update(activation["id"], execution_id, {"status": "uncertain" if uncertain else state["result"]["status"], "error": "Native child or parent turn did not conclusively settle"})

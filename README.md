@@ -41,6 +41,10 @@ results. A worker can ask the orchestrator for missing context, then continue it
 branches, and persists progress. Only the orchestrator updates checklist state. The agents keep
 their own tools; internal workflow routing does not depend on agents calling Polybridge's MCP.
 
+**Prefer orchestrator subagent** supports certified fresh, sequential, read-only Claude and Codex
+workers. Other settings use Headless with an explanation; see the
+[supported versions and restrictions](docs/workflows.md#native-subagent-execution).
+
 When a run needs input, its caller supplies the answer. Monitor-started runs expose that interaction
 in the app; MCP-started runs return it to the calling tool.
 
