@@ -51,6 +51,14 @@ The native CLI certification test uses an isolated localhost fake API with the r
 requests. This proves the tested CLI transport and permission behavior; it does not measure model
 quality or guarantee that an arbitrary assignment will succeed.
 
+Claude is the first certified adapter in this release. Codex, opencode, Vibe, and Antigravity
+do not yet have native adapters; their nodes run Headless even when Prefer orchestrator subagent
+is selected, with a visible fallback reason. This is an implementation and certification boundary,
+not a conclusion that native execution is impossible in those harnesses. The shared workflow and
+Monitor support is in place, but each additional adapter still needs verified child launch,
+lifecycle and terminal results, inherited permissions and settings, activity, and recovery behavior
+before native execution can be enabled.
+
 ## How the runner works
 
 Polybridge runs the control loop. The orchestrator decides what to do; worker harnesses execute
