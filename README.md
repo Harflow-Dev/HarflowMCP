@@ -131,6 +131,10 @@ polybridge-ctl status <task_id>
 Call `list_backends` to check installation and actual enforcement capabilities. Each harness needs
 its own installation, authentication, and model access; Polybridge does not provide these accounts.
 
+Before assigning a harness to a node, read [harness permissions and setup](docs/harness-permissions.md).
+It covers all five harnesses, setup for each node type, build/test and MCP approvals, network access,
+and common headless permission refusals.
+
 ## Access and local storage
 
 | Access level | Intended scope |
