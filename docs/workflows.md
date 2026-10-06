@@ -539,6 +539,11 @@ can die between the initial scan and lock acquisition. Active and Needs attentio
 protect their referenced task records from ordinary retention. Finished run history retains compact
 outcomes; expired activity logs are shown as unavailable.
 
+Native child activity logs follow `PB_RETENTION_DAYS` too, despite having no process task record.
+Cleanup requires a fully settled workflow tree and both the execution's completion time and
+the log's last write to be older than the retention period. Active, uncertain, or incompletely
+recorded trees retain their evidence. Compact execution outcomes remain in workflow history.
+
 ## Delegation contracts and inspection
 
 The orchestrator receives a durable decision ID, current stage, node responsibilities and access,
