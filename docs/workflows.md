@@ -151,6 +151,12 @@ shows the canvas above the same agent activity columns used by Parallel. Paralle
 those columns. Highlighting comes from recorded task state. Agent names and colored dots identify
 backends; vendor logos are unnecessary.
 
+Task detail headers wrap the task title across the pane and show the repository beneath it.
+Status and actions share a toolbar in the main window, standalone task window, and embedded workflow task view.
+
+Task activity follows new messages automatically while you are at the bottom. Scrolling up pauses
+following so you can read earlier messages; returning to the bottom resumes it.
+
 The menu bar also shows workflow run status alongside agent activity. Its popover lists workflows
 by name and status, including runs that need attention; selecting one opens that workflow run.
 
@@ -763,7 +769,13 @@ Interaction ownership is recorded when the run starts. MCP and ordinary CLI star
 without offering an answer/control composer. Human Monitor starts use CLI `--monitor`; their
 questions are answered through the Monitor. Caller-owned controls cannot impersonate Monitor
 controls, and Monitor controls cannot resume, recover, or pause caller-owned runs. Explicit cancel
-remains available independently. Monitor terminal continuation is offered only after the workflow
+is separate from that ownership: Monitor-started root runs offer Cancel while active or idle.
+Caller-owned root runs offer Cancel only at an idle paused, input, attention, or stuck checkpoint,
+with no active or unresolved tasks or nested workflow execution. The runner checks eligibility
+again when the request arrives; stale views are refused without taking over caller interaction.
+Cancel cascades through linked children and their tasks. Child views offer **Open root to cancel**
+so the scope is clear. While cancellation settles, the Monitor shows **Cancelling**; errors remain
+visible and the run is refreshed. Monitor terminal continuation is offered only after the workflow
 has completed its valid End traversal, never while a node is still participating in execution.
 
 Resume of `needs_input` includes the exact published `input_decision_id` as `decision_id` (CLI
@@ -1019,6 +1031,9 @@ attempts. Resume or recovery remains a separate explicit action.
 
 
 ### Monitor polling and complete detail retrieval
+
+The ctl JSON contract is version 7; this version adds Monitor cancellation eligibility and refusal
+metadata. The matching Monitor accepts versions 1–7. Reinstall the CLI and rebuild the app together.
 
 Monitor polls `workflow-status RUN_ID --monitor-view --json` for bounded metadata and content
 digests. On initial loading, it captures one coherent transport snapshot using

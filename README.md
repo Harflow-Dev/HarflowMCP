@@ -77,6 +77,11 @@ In Monitor, click **+** beside **Workflows**, arrange the steps, select their ha
 them. Save the workflow, then run it with a repository and a request. You can also use **Edit with
 agent** to refine the graph and instructions.
 
+Task detail titles wrap across the pane with the repository below and status/actions in a toolbar,
+including standalone and embedded task views. Monitor offers Cancel for its own active workflows
+and idle caller-owned workflows; linked child views route cancellation to the root.
+See [workflow interaction and recovery](docs/workflows.md) for eligibility and cancellation outcomes.
+
 After updating your checkout, reinstall the CLI with `uv tool install . --force --no-cache` and
 rebuild Monitor, then repeat the copy and open commands above so the installed app and runner stay in sync.
 
