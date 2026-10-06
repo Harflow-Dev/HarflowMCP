@@ -143,7 +143,8 @@ directory selected by `VIBE_HOME`. Inspect project `.vibe/config.toml` and agent
 Polybridge supplies `--trust`, so project configuration can affect a worker.
 
 For **installed Vibe 2.25.8**, Bash uses literal command-prefix entries under `allowlist`. Merge
-the required entries into the existing list; this example illustrates local Git inspection:
+only the missing entries into the existing list and retain existing denies; this example illustrates
+local Git inspection, not a replacement configuration:
 
 ```toml
 [tools.bash]
@@ -152,10 +153,34 @@ allowlist = ["git status", "git diff", "git show"]
 ```
 
 These prefixes also allow trailing arguments; they are not exact-command grants or glob patterns.
-Use direct Git commands in the assigned working directory: allowing `git diff` does **not** allow
-`git -C /path/to/repo diff`. Polybridge already sets the working directory. If cross-repository
-inspection is required, add the specific path/subcommand prefix, such as `git -C /path/to/repo diff`,
-after checking that repository's access requirements. Add exact test/build prefixes when needed.
+Use direct Git commands in the assigned working directory: Polybridge already sets it. Allowing
+`git diff` does **not** allow `git -C /path/to/repo diff`. In the inspected 2.25.8 resolver, Git
+option and repository checks recognize direct subcommands but miss the `-C` form. Adding a `git -C`
+prefix can therefore approve options that direct Git would ask about, including `diff --output`
+and `diff --ext-diff`. Use direct Git to retain those checks rather than adding `-C` prefixes.
+
+For an assignment that explicitly needs a sibling repository, use a quoted directory change followed
+by direct Git, for example `cd '/path/to/sibling-repo' && git diff HEAD`. Each command must be allowed:
+merge the specific `cd '/path/to/sibling-repo'` prefix if needed, together with the required Git
+prefixes. Installed 2.25.8 also requires an outside-directory grant: append this string to the
+existing **Bash** `allowlist`, replacing the example with the repository path authorized for the
+assignment, and retain `permission = "ask"`:
+
+```text
+"vibe-path:exact:/path/to/sibling-repo"
+```
+
+That typed grant covers the directory itself. Read relative source paths after changing directory,
+for example `cd '/path/to/sibling-repo' && cat src/example.py`, or use a permitted Bash `grep`
+command with a relative path. Keep Git commands free of global options such as `-C`. Absolute child
+paths can require additional path grants; a legacy `/*` entry does not cover all descendants.
+
+The directory grant does not grant a command, bypass Git guardrails, or establish read-only
+confinement. Bash `cat`/`grep` reads do not inherit the native file tools' sensitive-file checks.
+Add required test/build prefixes separately after inspecting their permitted arguments. Native
+`read_file` and `grep` have separate path permissions and may still ask; do not copy broad recursive
+grants into those tools to silence refusals, since their allowlist matches precede sensitive-file
+checks in this version.
 
 Current [Vibe permission documentation](https://docs.mistral.ai/vibe/code/safety-approvals-permissions)
 and [configuration reference](https://docs.mistral.ai/vibe/code/cli/configuration-reference) call
