@@ -2464,7 +2464,8 @@ class TaskRegistry:
         not own lives inside the cascade, and a client disconnecting mid-call must not abandon it.
         """
         if not workflow_control:
-            from .workflow_hooks import pause_for_task, refuse_managed
+            from .workflow_hooks import pause_for_task, refuse_managed, refuse_native_control
+            refuse_native_control(self._log_dir, task_id)
             caller = await self._mutation_caller()
             if caller is not None:
                 refuse_managed(self._log_dir, caller.record.task_id)

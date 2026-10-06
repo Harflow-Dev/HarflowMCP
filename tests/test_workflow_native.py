@@ -385,3 +385,80 @@ async def test_duplicate_native_child_identity_across_same_owner_session_is_fenc
     assert workers[1]["tasks"][0]["status"] == "uncertain"
     assert "reused across executions" in workers[1]["tasks"][0]["error"]
     assert len(registry.native_calls) == 2
+
+@pytest.mark.parametrize("persisted", [False, True])
+@pytest.mark.parametrize("refusal", ["busy", "unknown", "repo", "positive", "ambiguous"])
+async def test_native_resume_refusal_releases_only_proven_no_spawn(native_setup, tmp_path, monkeypatch, persisted, refusal):
+    from polybridge.tasks import SessionBusyError, SessionUnknownError, RepoUnavailableError
+    storage, _ = native_setup
+    monkeypatch.setattr(w, "_launch", lambda *args: None)
+    errors = {"busy": SessionBusyError, "unknown": SessionUnknownError, "repo": RepoUnavailableError, "positive": OSError, "ambiguous": RuntimeError}
+    error = errors[refusal]("resume refused")
+    if refusal == "positive":
+        error.polybridge_not_started = True
+
+    class RefusingRegistry(NativeRegistry):
+        refuse = True
+        paths = []
+        def get(self, task_id):
+            return None if persisted else super().get(task_id)
+        async def resume_record(self, record, prompt, **kwargs):
+            return await self.resume(self.tasks[record.task_id], prompt, **kwargs)
+        async def resume(self, previous, prompt, **kwargs):
+            if kwargs.get("native_subagent") and self.refuse:
+                self.paths.append("persisted" if persisted else "live")
+                raise error
+            return await super().resume(previous, prompt, **kwargs)
+
+    registry = RefusingRegistry(tmp_path)
+    run = storage.create_run(w.validate_definition(native_graph()), "Review", tmp_path)
+    supervisor = w.WorkflowSupervisor(registry, storage)
+    await asyncio.wait_for(supervisor.execute(run["workflow_run_id"]), 5)
+    observed = storage.get_run(run["workflow_run_id"])
+    node = next(a for a in observed["activations"] if a["role"] == "node")
+    transport = next(a for a in observed["activations"] if a["role"] == "native_control")
+    child = node["tasks"][0]
+    assert registry.paths == ["persisted" if persisted else "live"]
+    assert observed["status"] == "needs_attention"
+    assert store.read(registry._log_dir, child["task_id"]) is None
+    assert store.read(registry._log_dir, transport["id"]) is None
+    if refusal == "ambiguous":
+        assert child["status"] == "uncertain"
+        assert child["task_id"] in storage.pinned_tasks()
+        assert observed["settling"]
+        assert w.CheckoutLease(storage, str(tmp_path), True)._orphan_owner() is not None
+        return
+    assert node["status"] == child["status"] == "not_started"
+    assert transport["status"] == transport["tasks"][0]["status"] == "not_started"
+    assert not observed["settling"]
+    assert not supervisor.tree.held
+    assert supervisor.tree.slots.free == observed["definition"]["max_parallel"]
+    assert supervisor.tree.control_slots.free == 1
+    assert w.CheckoutLease(storage, str(tmp_path), True)._orphan_owner() is None
+    registry.refuse = False
+    storage.control(run["workflow_run_id"], "resume")
+    await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]), 5)
+    assert storage.get_run(run["workflow_run_id"])["status"] == "completed"
+    assert len(registry.native_calls) == 1
+
+
+async def test_native_transport_direct_cancel_and_takeover_are_refused(native_setup, tmp_path, monkeypatch):
+    from polybridge.tasks import TaskRegistry
+    from polybridge.workflow_hooks import refuse_takeover
+    from polybridge.control import TakeoverRefused
+    storage, _ = native_setup
+    run = storage.create_run(w.validate_definition(native_graph()), "Review", tmp_path)
+    storage.update_run(run["workflow_run_id"], lambda r: r.update(status="running", activations=[{"id": "transport", "node_id": "orchestrator", "role": "native_control", "status": "running", "tasks": [{"task_id": "transport", "status": "running"}]}]), "transport_fixture")
+    registry = TaskRegistry(log_dir=tmp_path / "tasks", open_monitor=False)
+    calls = []
+    async def cancel(task_id):
+        calls.append(task_id)
+        return {"cancelled": True}
+    monkeypatch.setattr(registry, "_cancel_cascade", cancel)
+    with pytest.raises(w.WorkflowError, match="root workflow"):
+        await registry.cancel_cascade("transport")
+    assert calls == []
+    with pytest.raises(TakeoverRefused, match="Internal native transports"):
+        refuse_takeover(tmp_path / "tasks", "transport")
+    assert await registry.cancel_cascade("transport", workflow_control=True) == {"cancelled": True}
+    assert calls == ["transport"]

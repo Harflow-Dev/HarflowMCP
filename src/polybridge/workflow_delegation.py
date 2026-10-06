@@ -1126,7 +1126,7 @@ async def execute_node(supervisor: Any, node: dict[str, Any], token: dict[str, A
     current = next(a for a in supervisor.run()["activations"] if a["id"] == activation["id"])
     if current.get("pending_question_id"):
         supervisor.update(lambda r: next(a for a in r["activations"] if a["id"] == activation["id"]).update(status="waiting_for_answer"), "answer_waiting")
-    else:
+    elif current.get("status") != "not_started":
         supervisor.update(lambda r: next(a for a in r["activations"] if a["id"] == activation["id"]).update(status="failed"), "node_interrupted")
 
 

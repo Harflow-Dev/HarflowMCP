@@ -45,6 +45,7 @@ async def dispatch_native(supervisor: Any, node: dict[str, Any], assignment: str
     from .backends.native import adapter
     from .workflows import CheckoutLease, DispatchNotStarted, run_effective_freedom, _candidate_key
     from .workflow_invocation import tree_write_strength
+    from .tasks import SessionBusyError, SessionUnknownError, RepoUnavailableError
     run = supervisor.run()
     refuse = None
     if run.get("scheduling_policy") != POLICY:
@@ -173,9 +174,22 @@ async def dispatch_native(supervisor: Any, node: dict[str, Any], assignment: str
     except Exception as exc:
         latest = next((t for a in supervisor.run()["activations"] if a["id"] == activation["id"] for t in a["tasks"] if t["task_id"] == execution_id), None)
         if latest is not None:
-            uncertain = latest.get("dispatch_stage") != "preparing"
-            supervisor._task_update(activation["id"], execution_id, {"status": "uncertain" if uncertain else "not_started", "error": str(exc)})
-        supervisor.attention(f"Native dispatch requires reconciliation: {exc}")
+            no_spawn = isinstance(exc, (SessionBusyError, SessionUnknownError, RepoUnavailableError, backends.NestedDispatchRefused, backends.UnsupportedCapability)) or getattr(exc, "polybridge_not_started", False) is True
+            uncertain = bool(state.get("native_child_id")) or (latest.get("dispatch_stage") != "preparing" and not no_spawn)
+            if uncertain:
+                supervisor._task_update(activation["id"], execution_id, {"status": "uncertain", "error": str(exc)})
+            else:
+                # The launch intent precedes resume's session lock. A positive
+                # refusal under that lock proves neither reservation launched.
+                def not_started(r: dict[str, Any]) -> None:
+                    from .workflows import update_task_state
+                    for activation_id, task_id in ((activation["id"], execution_id), (transport_id, transport_id)):
+                        a = next(a for a in r["activations"] if a["id"] == activation_id)
+                        t = next(t for t in a["tasks"] if t["task_id"] == task_id)
+                        update_task_state(a, t, {"status": "not_started", "dispatch_stage": "not_started", "error": str(exc), "finished_at": time.time()})
+                        a["status"] = "not_started"
+                supervisor.update(not_started, "native_dispatch_not_started", {"reason": str(exc)})
+        supervisor.attention(f"Native dispatch requires reconciliation: {exc}" if uncertain else f"Native dispatch did not start: {exc}")
         return True, None
     finally:
         observers.pop(transport_id, None)
