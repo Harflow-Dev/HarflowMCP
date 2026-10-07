@@ -1111,7 +1111,8 @@ launcher turn does not make a still-running child appear finished. Selecting eit
 actual child workflow and its tasks; their selection highlights share the child run identity.
 Sidebar selections and inspector open actions show the exact child run in the existing window.
 The workflow inspector uses left-aligned child links, groups repeated invocations by saved
-workflow identity, and keeps individual run targets distinct.
+workflow identity, and keeps individual run targets distinct. Repeated-run groups start collapsed;
+disclosure changes use the sidebar animation and preserve the chosen state during polling.
 
 Parallel cells retain at least six recent activity rows and use spare cell height to show more
 recent history. Older rows leave the recent view only when space is needed. **Show all** reveals
