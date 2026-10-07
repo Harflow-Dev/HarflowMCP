@@ -1064,6 +1064,47 @@ cursors still require restarting when their view changes. Ordinary `workflow-sta
 full response contract. Snapshot transport is a local Monitor-only CLI operation: managed agents
 cannot use it to bypass settled-node inspection or access another run.
 
+### Monitor history and notifications
+
+Transient catalog preparation retries through Monitor's normal two-second read polling. It does
+not restart workflows, retry executions, or change permissions. Loaded definitions, history,
+selected content and scroll state stay visible while the catalog catches up. Read responses
+distinguish `ready`, `preparing`, and `blocked`; preparation includes its source and bounded
+progress, while persistent blocks retain actionable diagnostics. Pending caller authority
+does not expose new workflow identifiers or complete counts.
+
+A blocked first page shows available placeholders, the reported blocker and **Retry tasks**
+instead of remaining on a loading skeleton. Retrying refreshes reads; it does not grant access
+or rerun tasks. If deferred work remains alongside a persistent blocker, bounded preparation
+continues while the recovery guidance stays visible.
+
+A damaged derivative SQLite catalog is rebuilt under the catalog lock before task or workflow
+metadata is saved. Historical JSON records remain authoritative and are not rewritten by the
+rebuild. If rebuilding or committing invalidation fails, the save is refused and logged so stale
+caller authority cannot be published as ready.
+
+Actionable workflow browsing/loading errors appear in one top notification over the existing
+layout. The newest incident replaces the displayed one; repeating the same polling failure does
+not restart its timer. Dismiss with the × button, or let eight seconds of active display elapse.
+Hovering or keyboard focus pauses dismissal. Details and applicable read-refresh actions remain
+available after dismissal. Recovery clears that source's incident; dismissal alone does not.
+Catalog preparation is neutral loading state and does not create an error notification. Durable
+workflow failure outcomes and recovery warnings remain in run details.
+
+Parallel and workflow activity panels fade in once over 180 ms for newly arriving conversations.
+Initial history, reopening a view, older pages and resumed task IDs do not replay that entrance.
+Batch arrivals fade together. Notifications use a 200 ms slide/fade; Reduce Motion removes their
+movement and shows arriving panels immediately. Existing activity follow/scroll and expansion
+state stay attached to the conversation.
+
+Long workflow details stay within the window's available space. Run diagnostics and the
+inspector scroll independently so updates do not push the header, sidebar or canvas outside
+the window; split-pane dividers remain adjustable.
+
+For harness refusals and environment failures, use the
+[headless troubleshooting guide](harness-permissions.md#troubleshooting-a-headless-refusal)
+before an explicit workflow recovery action.
+
 ### Bounded task, execution and activity history
 
 Monitor loads recent task and workflow headers in pages of 100, separately from live active
@@ -1074,10 +1115,15 @@ historical page is visible. Loading, indexing, retry and end states remain expli
 
 `task-list-page` and `workflow-list-page` use opaque chronology cursors rather than shifting
 array offsets. Existing listing callers retain their original interfaces. A compact local catalog
-stores bounded headers; modern record writes maintain it. Legacy records are indexed in bounded
-batches without rewriting them. During bootstrap, recent history remains explicitly indexing
-until its chronological ordering is known. Filename discovery still examines directory entries;
-it does not decode the entire historical collection in one request.
+stores bounded headers; modern record writes maintain it. Legacy records are indexed through a
+persistent discovery/deferred-work queue without rewriting them. Unrelated logs and temporary
+files do not reset pending work. Each batch releases the catalog lock before the next bounded
+request. During bootstrap, recent history remains explicitly preparing until discovery,
+projections, deferred work and caller-authority validation are complete. Filename discovery
+examines suffix-matching directory entries without decoding the historical collection in one
+request. Supported writes invalidate the catalog before source replacement, so interrupted
+projection cannot leave stale authority ready. Derivative schema upgrades rebuild the catalog
+without rewriting historical metadata.
 
 Activity initially reads the newest 100 events and tails new events from that boundary.
 **Load more** reads one older byte window, with a 1 MiB scan ceiling and the existing response

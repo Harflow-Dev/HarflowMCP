@@ -166,6 +166,22 @@ def write(log_dir: Path, record: TaskRecord) -> None:
 
 
 def write_landed(log_dir: Path, record: TaskRecord) -> bool:
+    from .catalog import catalog_lock
+    import sqlite3
+    try:
+        validate_task_id(record.task_id)
+    except InvalidTaskId:
+        log.warning('refusing to persist a record for an invalid task id')
+        return False
+    try:
+        with catalog_lock(log_dir):
+            return _write_landed_locked(log_dir, record)
+    except (OSError, sqlite3.Error):
+        log.warning("could not lock record for task %s", record.task_id, exc_info=True)
+        return False
+
+
+def _write_landed_locked(log_dir: Path, record: TaskRecord) -> bool:
     """`write`, reporting whether the record actually landed on disk.
 
     Same never-raise contract; False for an invalid id, a refused backwards move, or an I/O
@@ -193,6 +209,8 @@ def write_landed(log_dir: Path, record: TaskRecord) -> bool:
         return False
 
     try:
+        from .catalog import Catalog
+        Catalog(log_dir, RECORD_SUFFIX).invalidate(record.task_id)
         log_dir.mkdir(parents=True, exist_ok=True)
         payload = asdict(record)
         if len(record.prompt) > PROMPT_PREVIEW_CHARS:
@@ -219,6 +237,7 @@ def write_landed(log_dir: Path, record: TaskRecord) -> bool:
                 json.dump(payload, handle, indent=2)
                 handle.flush()
                 os.fsync(handle.fileno())
+                written_source = os.fstat(handle.fileno())
             os.replace(handle.name, target)
         except BaseException:
             Path(handle.name).unlink(missing_ok=True)
@@ -228,6 +247,8 @@ def write_landed(log_dir: Path, record: TaskRecord) -> bool:
         return False
     from .catalog import Catalog
     header, stamp, active = listing_header(record)
+    from .catalog import source_identity
+    header['_source_identity'] = source_identity(written_source)
     Catalog(log_dir, RECORD_SUFFIX).record(header, stamp, active, record.task_id, previous_directory_mtime=previous_directory_mtime)
     return True
 
@@ -235,6 +256,8 @@ def write_landed(log_dir: Path, record: TaskRecord) -> bool:
 def read(log_dir: Path, task_id: str, *, include_prompt: bool = True, metadata_byte_limit: int | None = None, metadata_budget: Any = None) -> TaskRecord | None:
     path = record_path(log_dir, task_id)
     try:
+        from .catalog import source_identity
+        initial_source = source_identity(path.stat())
         if metadata_byte_limit is None:
             raw = json.loads(path.read_text(encoding="utf-8"))
         else:
@@ -272,6 +295,8 @@ def read(log_dir: Path, task_id: str, *, include_prompt: bool = True, metadata_b
                 reason = "Full task assignment is unavailable; prompt preview is not authoritative: " + str(exc)
                 log.warning("task %s: %s", task_id, reason)
                 record = replace(record, prompt="", prompt_error=reason)
+        if source_identity(path.stat()) == initial_source:
+            object.__setattr__(record, '_source_identity', initial_source)
         return record
     except (TypeError, ValueError, OSError):
         log.warning("ignoring malformed task record or unavailable full prompt %s", path)
@@ -317,7 +342,7 @@ def listing_header(record: TaskRecord) -> tuple[dict[str, Any], float, bool]:
 
 
 def bootstrap_catalog(log_dir: Path) -> bool:
-    from .catalog import Catalog
+    from .catalog import Catalog, DeferredRead
     def load(identifier: str, *, _metadata_budget=None):
         record = read(log_dir, identifier, include_prompt=False, metadata_byte_limit=4 * 1024 * 1024, metadata_budget=_metadata_budget)
         return listing_header(record) if record is not None else None
@@ -354,7 +379,7 @@ def _project_indexed_status(header: dict[str, Any], record: TaskRecord) -> bool:
 
 
 def list_page(log_dir: Path, *, limit: int = 100, cursor: str | None = None, active_only: bool = False, session_id: str | None = None, task_ids: list[str] | None = None) -> dict[str, Any]:
-    from .catalog import Catalog
+    from .catalog import Catalog, DeferredRead, apply_read_state
     def load(identifier: str, *, _metadata_budget=None):
         record = read(log_dir, identifier, include_prompt=False, metadata_byte_limit=4 * 1024 * 1024, metadata_budget=_metadata_budget)
         return listing_header(record) if record is not None else None
@@ -365,12 +390,16 @@ def list_page(log_dir: Path, *, limit: int = 100, cursor: str | None = None, act
         db.execute("UPDATE entries SET active=1,payload=json_set(payload,'$.needs_reconciliation',json('true'),'$.observed_exit',json('false'),'$.persisted_status',json_extract(payload,'$.status'),'$.status','running') WHERE id IN (SELECT id FROM callers WHERE terminal=0) AND json_type(payload,'$.needs_reconciliation') IS NULL")
     if task_ids is not None:
         identifiers = [validate_task_id(identifier) for identifier in task_ids]
-        page = {'items': catalog.headers(identifiers, load), 'next_cursor': None, 'has_more': False, 'bootstrap_pending': False}
+        page = catalog.header_page(identifiers, load)
+        if page['bootstrap_pending']:
+            page['related_headers'] = []
+            return page
     else:
         page = catalog.page(load, limit=limit, cursor=cursor, active_only=active_only, session_id=session_id)
     from .workflows import WorkflowStore
     workflow_storage = WorkflowStore(log_dir.parent)
     workflow_catalog = Catalog(workflow_storage.runs, '.json')
+    workflow_catalog.share_budget(catalog)
     for item in page['items']:
         try:
             from .bounded_io import read_receipt
@@ -380,6 +409,9 @@ def list_page(log_dir: Path, *, limit: int = 100, cursor: str | None = None, act
             if 'workflow_role' not in receipt:
                 from .workflows import WorkflowStore
                 header = workflow_storage.get_run_header(receipt['workflow_run_id'], _catalog=workflow_catalog)
+                if header.get('indexing'):
+                    apply_read_state(page, header['catalog_state'])
+                    continue
                 if header.get('needs_direct_lookup'):
                     page.update(ownership_incomplete=True, history_incomplete=True, counts_complete=False, total_active_count=None, total_active_root_count=None, total_attention_root_count=None)
                 item.update(workflow_name=header.get('name'), workflow_status=header.get('status'), root_workflow_run_id=header.get('root_workflow_run_id', header['workflow_run_id']))
@@ -430,17 +462,25 @@ def list_page(log_dir: Path, *, limit: int = 100, cursor: str | None = None, act
                 continue
             visited.add(identifier)
             row = db.execute('SELECT payload FROM entries WHERE id=?', (identifier,)).fetchone()
-            if row is None or not record_path(log_dir, identifier).exists():
+            if not record_path(log_dir, identifier).exists():
                 continue
-            if catalog._changed(db, identifier):
-                value = catalog._load_bounded(identifier, load)
-                if value is None:
-                    catalog._remove(db, identifier)
-                    continue
-                header, stamp, active = value
-                catalog._put(db, header, stamp, active, identifier)
-                row = db.execute('SELECT payload FROM entries WHERE id=?', (identifier,)).fetchone()
+            try:
+                if row is None or catalog._changed(db, identifier):
+                    value = catalog._load_bounded(identifier, load)
+                    if value is None:
+                        catalog._remove(db, identifier)
+                        continue
+                    header, stamp, active = value
+                    catalog._put(db, header, stamp, active, identifier)
+                    row = db.execute('SELECT payload FROM entries WHERE id=?', (identifier,)).fetchone()
+            except DeferredRead:
+                db.execute('INSERT OR IGNORE INTO pending VALUES (?)', (identifier,))
+                apply_read_state(page, catalog.state(db))
+                break
             header = json.loads(row[0])
+            if header.get('needs_direct_lookup'):
+                apply_read_state(page, catalog.state(db))
+                continue
             try:
                 from .bounded_io import read_receipt
                 receipt = read_receipt(log_dir.parent / 'workflow-owners' / f'{identifier}.json')
@@ -774,11 +814,18 @@ def snapshot(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
         if authoritative is None:
             raise ValueError("Full task assignment is unavailable; prompt preview is not authoritative")
         record = authoritative
+    captured_source = getattr(record, '_source_identity', None)
+    if captured_source is None:
+        persisted = read(log_dir, record.task_id)
+        if persisted == record:
+            captured_source = getattr(persisted, '_source_identity', None)
     status, note, state, tail, owned = _resolve(log_dir, record, detail=True)
     from .catalog import Catalog
     header, stamp, _active = listing_header(record)
     header.update(status=status, needs_reconciliation=False, status_reconciled=True)
-    Catalog(log_dir, RECORD_SUFFIX).record(header, stamp, status == 'running', record.task_id)
+    if captured_source is not None:
+        header['_source_identity'] = captured_source
+        Catalog(log_dir, RECORD_SUFFIX).record(header, stamp, status == 'running', record.task_id)
     from . import inbox
     pending = inbox.pending_messages(log_dir, record.task_id)
     if record.workflow_builder:

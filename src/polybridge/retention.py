@@ -16,6 +16,7 @@ import hashlib
 import math
 import logging
 import os
+import sqlite3
 import re
 from collections.abc import Collection
 from datetime import datetime, timedelta, timezone
@@ -316,6 +317,15 @@ def _has_fresh_descendant(
     return False
 
 
+
+@contextlib.contextmanager
+def _retention_catalog_locks(log_dir: Path):
+    # Existing session/task (and any owning run) locks precede catalogs. Managed
+    # readers take workflow then task catalogs, so removals use that same order.
+    from .catalog import catalog_lock
+    with catalog_lock(log_dir.parent / 'workflow-runs'), catalog_lock(log_dir):
+        yield
+
 def _delete_task(
     log_dir: Path,
     record: store.TaskRecord,
@@ -355,29 +365,30 @@ def _delete_task(
                 stats["kept_locked"] += 1
                 return
 
-            fresh = store.read(log_dir, task_id)
-            if fresh is None:
-                return  # already gone — another sweep, or a takeover, got there first
-            if not _conclusively_settled(fresh, store.resolve_status(log_dir, fresh, detail=False)[0]):
-                return
+            with _retention_catalog_locks(log_dir):
+                fresh = store.read(log_dir, task_id)
+                if fresh is None:
+                    return  # already gone — another sweep, or a takeover, got there first
+                if not _conclusively_settled(fresh, store.resolve_status(log_dir, fresh, detail=False)[0]):
+                    return
 
-            if _has_fresh_descendant(log_dir, family, by_id.keys()):
-                stats["kept_live_descendant"] += 1
-                return
+                if _has_fresh_descendant(log_dir, family, by_id.keys()):
+                    stats["kept_live_descendant"] += 1
+                    return
 
-            if _has_active_attempt(log_dir, task_id, now):
-                stats["kept_active_attempt"] += 1
-                return
+                if _has_active_attempt(log_dir, task_id, now):
+                    stats["kept_active_attempt"] += 1
+                    return
 
-            # Emptied first: once the record is gone no later sweep can find this task again, so an
-            # inbox that cannot be emptied now (its lock is busy) keeps the whole task for a retry.
-            if not _empty_inbox(log_dir, task_id):
-                stats["kept_locked"] += 1
-                return
-            if not _delete_task_files(log_dir, task_id):
-                stats["kept_delete_failed"] += 1
-                return
-            stats["deleted_tasks"] += 1
+                # Emptied first: once the record is gone no later sweep can find this task again, so an
+                # inbox that cannot be emptied now (its lock is busy) keeps the whole task for a retry.
+                if not _empty_inbox(log_dir, task_id):
+                    stats["kept_locked"] += 1
+                    return
+                if not _delete_task_files(log_dir, task_id):
+                    stats["kept_delete_failed"] += 1
+                    return
+                stats["deleted_tasks"] += 1
         finally:
             try:
                 fcntl.flock(lock_fd, fcntl.LOCK_UN)
@@ -419,6 +430,14 @@ def _empty_inbox(log_dir: Path, task_id: str) -> bool:
 
 
 def _delete_task_files(log_dir: Path, task_id: str) -> bool:
+    try:
+        with _retention_catalog_locks(log_dir):
+            return _delete_task_files_locked(log_dir, task_id)
+    except OSError:
+        return False
+
+
+def _delete_task_files_locked(log_dir: Path, task_id: str) -> bool:
     """Delete every `{task_id}.*` file except the lock files — `.lock`, and `.inbox.jsonl`, which is
     the inbox's `flock` target (see `inbox.py`) — with the record (`.meta.json`) last, and only once
     everything else is gone: the record is what lets a later sweep find this task again, so removing
@@ -455,10 +474,12 @@ def _delete_task_files(log_dir: Path, task_id: str) -> bool:
         return False  # Retain the record so cleanup can be retried safely.
     if record_path is not None:
         try:
+            from .catalog import Catalog
+            Catalog(log_dir, store.RECORD_SUFFIX).invalidate(task_id)
             record_path.unlink()
         except FileNotFoundError:
             pass
-        except OSError:
+        except (OSError, sqlite3.Error):
             return False
     try:
         from .catalog import Catalog

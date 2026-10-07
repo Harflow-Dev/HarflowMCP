@@ -626,6 +626,16 @@ def _workflow_text(args: argparse.Namespace, field: str) -> str | None:
 def _cmd_workflow(args: argparse.Namespace) -> int:
     action = args.command.removeprefix("workflow-")
     async def invoke() -> Any:
+        if getattr(args, 'monitor_view', False) and action in {'list', 'status', 'detail'}:
+            from .catalog import Catalog
+            from .workflow_inspection import page_indexing_response
+            directory = default_log_dir()
+            if not Catalog(directory, store.RECORD_SUFFIX).ready():
+                await asyncio.to_thread(store.bootstrap_catalog, directory)
+                pending = page_indexing_response(directory)
+                if action == 'list':
+                    pending['workflows'] = []
+                return pending
         if action == "validate":
             from .workflows import WorkflowError, validate_definition
             raw = sys.stdin.read() if args.definition == "-" else Path(args.definition).read_text()
@@ -680,6 +690,8 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
             return await server.list_workflow_run_page(args.limit, args.cursor, args.active_only, args.related_run_id, args.run_ids.split(',') if args.run_ids is not None else None)
         if action in {"list", "list-runs"}:
             entries = await server._workflow_call(action.replace("-", "_"), **({"_bounded_read": True} if action == "list" and args.monitor_view else {}))
+            if isinstance(entries, dict) and 'catalog_state' in entries:
+                return entries
             if action == "list-runs":
                 from .workflow_responses import history_page
                 return history_page(entries, args.offset, args.limit)
@@ -710,6 +722,8 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
                 if await server._bounded_workflow_caller() is not None:
                     raise ValueError("Monitor detail snapshots are only available to the local Monitor")
                 run = None if args.cursor else await server._workflow_call("status", run_id=args.workflow_run_id, _bounded_read=True)
+                if run is not None and run.get('catalog_state', {}).get('status') in {'preparing', 'blocked'}:
+                    return run
                 return monitor_detail(run, args.workflow_run_id, args.view, default_log_dir().parent / "monitor_snapshots", args.cursor)
             return await server.get_workflow_run_detail(args.workflow_run_id, args.view, args.cursor)
         if action == "status" and args.monitor_view:
@@ -720,10 +734,14 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
                 if await server._bounded_workflow_caller() is not None:
                     raise ValueError("Monitor snapshots are only available to the local Monitor")
                 run = None if args.cursor else await server._workflow_call("status", run_id=args.workflow_run_id, _bounded_read=True)
+                if run is not None and run.get('catalog_state', {}).get('status') in {'preparing', 'blocked'}:
+                    return run
                 if run is not None:
                     run = await asyncio.to_thread(monitor_projection, WorkflowStore(), run)
                 return monitor_snapshot(run, args.workflow_run_id, default_log_dir().parent / "monitor_snapshots", args.cursor)
             run = await server._workflow_call("status", run_id=args.workflow_run_id, _bounded_read=True)
+            if run.get('catalog_state', {}).get('status') in {'preparing', 'blocked'}:
+                return run
             return monitor(await asyncio.to_thread(monitor_projection, WorkflowStore(), run))
         if action == "wait":
             return await server._wait_workflow_full(args.workflow_run_id, args.timeout_seconds)
@@ -744,7 +762,13 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv=None):
+    from .catalog import metadata_request
+    with metadata_request():
+        return _main(argv)
+
+
+def _main(argv: list[str] | None = None) -> int:
     """Entry point for the `polybridge-ctl` console script, which calls `sys.exit(main())`."""
     argv = sys.argv[1:] if argv is None else list(argv)
     json_requested = "--json" in argv
@@ -786,7 +810,7 @@ def main(argv: list[str] | None = None) -> int:
             result['items'] = filter_task_reads(result['items'], managed)
             result['related_headers'] = filter_task_reads(result.get('related_headers', []), managed)
             if managed is not None:
-                result['total_active_count'] = sum(item.get('status') not in store.TERMINAL_RECORD_STATUSES for item in result['items'])
+                result['total_active_count'] = None if result.get('bootstrap_pending') or result.get('counts_complete') is False else sum(item.get('status') not in store.TERMINAL_RECORD_STATUSES for item in result['items'])
                 result.pop('total_active_root_count', None)
                 result.pop('total_attention_root_count', None)
                 result.update(next_cursor=None, has_more=False)

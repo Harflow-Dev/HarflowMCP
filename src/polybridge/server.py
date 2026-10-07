@@ -21,6 +21,7 @@ from mcp.types import INTERNAL_ERROR, INVALID_PARAMS
 
 from . import backends, control, identity, inbox, store
 from .backends import DEFAULT_BACKEND, DEFAULT_FREEDOM, FREEDOMS
+from .catalog import bounded_request
 from .events import EVENT_KINDS, events_path, read_page, read_recent
 from .tasks import (
     GIT_SAFE_CONFIG,
@@ -281,6 +282,7 @@ def _resolve_repo_path(repo_path: str) -> Path:
 
 async def _validate_repo_path(repo_path: str) -> Path:
     return await asyncio.to_thread(_resolve_repo_path, repo_path)
+
 
 
 @mcp.tool()
@@ -703,10 +705,12 @@ async def list_tasks(status: str | None = None, backend: str | None = None) -> l
 
 
 @mcp.tool()
+@bounded_request
 async def list_task_page(limit: int = 100, cursor: str | None = None, active_only: bool = False, session_id: str | None = None, task_ids: list[str] | None = None) -> dict[str, Any]:
     """Stable newest-first persisted task headers; inspect a task for reconciled status/output.
 
-    bootstrap_pending indicates bounded legacy indexing is still loading chronology.
+    bootstrap_pending indicates bounded indexing or requested-header refresh is preparing.
+    Preserve loaded headers and cursors while catalog_state reports preparing.
     Active-only pages are a separate inventory and do not reorder history cursors.
     """
     try:
@@ -718,7 +722,7 @@ async def list_task_page(limit: int = 100, cursor: str | None = None, active_onl
         from .workflow_inspection import filter_task_reads
         visible = filter_task_reads(page['items'], managed)
         if managed is not None:
-            page['total_active_count'] = sum(item.get('status') not in store.TERMINAL_RECORD_STATUSES for item in visible)
+            page['total_active_count'] = None if page.get('bootstrap_pending') or page.get('counts_complete') is False else sum(item.get('status') not in store.TERMINAL_RECORD_STATUSES for item in visible)
             page.pop('total_active_root_count', None)
             page.pop('total_attention_root_count', None)
             page.update(next_cursor=None, has_more=False)
@@ -869,6 +873,7 @@ async def get_task_events(
 
 
 @mcp.tool()
+@bounded_request
 async def get_task_event_page(
     task_id: str, limit: int = 100, cursor: str | None = None,
     kinds: list[str] | None = None,
@@ -898,11 +903,12 @@ async def get_task_event_page(
             pending = await asyncio.to_thread(workflow_inspection.page_indexing_response, _reg().log_dir)
             return {"task_id": task_id, "events": [], "has_more": False,
                     "next_cursor": None, "indexing": pending["bootstrap_pending"],
-                    **{key: pending[key] for key in ("bootstrap_pending", "history_incomplete", "authority_incomplete", "counts_complete", "note") if key in pending}}
+                    **{key: pending[key] for key in ("bootstrap_pending", "history_incomplete", "authority_incomplete", "counts_complete", "note", "catalog_state") if key in pending}}
         workflow_inspection.guard_task_read(task_id, managed)
-        from .catalog import METADATA_BYTES
+        from .catalog import METADATA_BYTES, Catalog
+        budget = Catalog(_reg().log_dir, store.RECORD_SUFFIX)
         record = await asyncio.to_thread(store.read, _reg().log_dir, task_id,
-                                         include_prompt=False, metadata_byte_limit=METADATA_BYTES)
+                                         include_prompt=False, metadata_byte_limit=METADATA_BYTES, metadata_budget=budget)
         if _reg().get(task_id) is None and record is None:
             raise ValueError(f"unknown task_id: {task_id}")
         page = await asyncio.to_thread(read_cursor_page, events_path(_reg().log_dir, task_id),
@@ -1041,6 +1047,7 @@ def _guard_saved_workflow_authority(caller: Any, definition: dict[str, Any]) -> 
     guard_saved_workflow_authority(caller, definition)
 
 
+@bounded_request
 async def _workflow_call(action: str, **kwargs: Any) -> Any:
     from . import workflows
     bounded_read = kwargs.pop("_bounded_read", False)
@@ -1128,7 +1135,13 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
             if not ready:
                 return page_indexing_response(_reg().log_dir)
         elif bounded_read and action in {"status", "detail", "list"}:
-            managed = await _bounded_managed_workflow_reader()
+            from .workflow_inspection import managed_page_reader, page_indexing_response
+            ready, managed = await asyncio.to_thread(managed_page_reader, _reg().log_dir)
+            if not ready:
+                pending = await asyncio.to_thread(page_indexing_response, _reg().log_dir)
+                if action == 'list':
+                    pending['workflows'] = []
+                return pending
         else:
             managed = await _managed_workflow_reader()
         if managed is not None:
@@ -1188,12 +1201,19 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
             related_id = kwargs.pop('related_run_id', None)
             if related_id is not None:
                 related = await asyncio.to_thread(store_.related_run_headers, [related_id])
-                return {'items': [], 'next_cursor': None, 'has_more': False, 'bootstrap_pending': False, 'related_headers': related}
+                page = {'items': [], 'next_cursor': None, 'has_more': False, 'bootstrap_pending': False, 'related_headers': related}
+                from .catalog import apply_read_state
+                if related.catalog_state:
+                    apply_read_state(page, related.catalog_state)
+                return page
             page = await asyncio.to_thread(store_.list_run_page, **kwargs)
             ids = [item[key] for item in page['items'] for key in ('parent_workflow_run_id', 'orchestrator_session_owner_run_id') if item.get(key)]
             import json
             budget = min(64 * 1024, max(0, 256 * 1024 - len(json.dumps(page, ensure_ascii=True).encode()) - 2048))
             page['related_headers'] = await asyncio.to_thread(store_.related_run_headers, ids, byte_budget=budget)
+            from .catalog import apply_read_state
+            if page['related_headers'].catalog_state:
+                apply_read_state(page, page['related_headers'].catalog_state)
             return page
         if action == "get":
             return await asyncio.to_thread(store_.get, kwargs["name"])
@@ -1346,7 +1366,12 @@ async def list_workflow_runs(offset: int = 0, limit: int = 10) -> dict[str, Any]
 
 @mcp.tool()
 async def list_workflow_run_page(limit: int = 100, cursor: str | None = None, active_only: bool = False, related_run_id: str | None = None, run_ids: list[str] | None = None) -> dict[str, Any]:
-    """Stable newest-first run headers, with bounded ancestor/session-owner lookups."""
+    """Stable newest-first run headers, with bounded ancestor/session-owner lookups.
+
+    Deferred explicit run_ids and ancestor reads report preparation; preserve loaded headers
+    and retry the read. Oversized or unsupported metadata reports blocked diagnostics with
+    incomplete counts, without publishing unknown placeholder outcomes.
+    """
     return await _workflow_call('list_run_page', limit=limit, cursor=cursor, active_only=active_only, related_run_id=related_run_id, run_ids=run_ids)
 
 

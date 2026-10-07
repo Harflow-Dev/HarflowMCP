@@ -205,7 +205,14 @@ def test_monitor_cli_cold_and_unknown_authority_never_uses_legacy_detection(monk
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
     from polybridge import ctl, lineage, server, store
+    from dataclasses import asdict
+    import os
     directory = tmp_path / 'tasks'
+    directory.mkdir()
+    for number in range(103):
+        task = store.TaskRecord(f'cold{number:03}', 'codex', 'session', '/repo', '2026-10-01T00:00:00+00:00', status='completed', exit_code=0)
+        (directory / f'{task.task_id}.meta.json').write_text(json.dumps(asdict(task)))
+    monkeypatch.setattr(lineage, '_default_process_table', lambda: {os.getpid(): 1, 1: 0})
     monkeypatch.setattr(ctl, 'default_log_dir', lambda: directory)
     monkeypatch.setattr(server, '_reg', lambda: SimpleNamespace(log_dir=directory))
     monkeypatch.setattr(store, 'read_all', lambda *args: pytest.fail('retained metadata scan'))
@@ -214,8 +221,12 @@ def test_monitor_cli_cold_and_unknown_authority_never_uses_legacy_detection(monk
     monkeypatch.setattr(server, '_workflow_call', read)
     options = ['--snapshot'] if action == 'workflow-status' else ['--view', 'summary']
     args = [action, 'run', '--monitor-view', '--json', *options] + (['--cursor', cursor] if cursor else [])
-    assert ctl.main(args) != 0
-    assert 'indexing is incomplete' in capsys.readouterr().out
+    assert ctl.main(args) == 0
+    pending = json.loads(capsys.readouterr().out)['result']
+    assert pending['catalog_state']['status'] == 'preparing'
+    assert 'workflow_run_id' not in pending
+    # Complete the final metadata batch before checking the unknown caller.
+    store.bootstrap_catalog(directory)
     monkeypatch.setenv(lineage.ENV_TASK_ID, 'missing-task')
     assert ctl.main(args) != 0
     assert 'cannot be verified' in capsys.readouterr().out

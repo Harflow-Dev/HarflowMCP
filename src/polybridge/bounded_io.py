@@ -14,6 +14,8 @@ class ReadLimit(ValueError):
 
 
 def read_json(path: Path, limit: int, *, budget: Any = None) -> Any:
+    if budget is not None and getattr(budget, 'metadata_decodes', 0) >= 100:
+        raise ReadLimit('Metadata decode request limit reached')
     available = limit if budget is None else min(limit, max(0, budget.metadata_limit - budget.metadata_bytes))
     with path.open('rb') as source:
         if os.fstat(source.fileno()).st_size > available:
@@ -24,6 +26,8 @@ def read_json(path: Path, limit: int, *, budget: Any = None) -> Any:
         budget.metadata_bytes += len(content)
     if grew:
         raise ReadLimit('JSON exceeds bounded read budget')
+    if budget is not None and hasattr(budget, 'metadata_decodes'):
+        budget.metadata_decodes += 1
     return json.loads(content)
 
 
