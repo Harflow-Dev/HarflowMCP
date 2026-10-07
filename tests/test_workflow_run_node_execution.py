@@ -73,6 +73,8 @@ def assignment_for(choice):
         entry["prompt"] = f"Focused assignment for {choice['node_id']}"
         if not choice.get("workflow"):
             entry["session_mode"] = "fresh"
+        elif choice.get("child_session_policy") == "agent_decides":
+            entry.update(child_session_mode="fresh", child_session_reason="Keep this invocation independent")
     if "branch_continuations" in choice:
         entry["branch_assignments"] = [assignment_for(branch) for branch in choice["branch_continuations"]]
     return entry
@@ -199,6 +201,9 @@ async def test_child_mode_prompt_assignment_and_isolation(two_level, tmp_path):
     assert child["parent_link"]["workflow_run_id"] == run["workflow_run_id"]
     assert child["parent_link"]["root_workflow_run_id"] == run["workflow_run_id"]
     assert child["orchestrator_mode"] == "child"
+    assert child["child_session_selection"]["requested_policy"] == "agent_decides"
+    assert child["child_session_selection"]["selected_mode"] == "fresh"
+    assert child["child_session_selection"]["reason"] == "Keep this invocation independent"
     assert "ORIGINAL PARENT REQUEST" not in json.dumps(child)
     # The child has its own orchestrator session, separate from the parent's.
     assert run["sessions"]["orchestrator"]["session_id"] != child["sessions"]["orchestrator"]["session_id"]
@@ -558,3 +563,20 @@ async def _acquire_lease(store, repo, tree, waits):
         waits.append(detail)
     async with w.CheckoutLease(store, repo, True, on_wait=on_wait, wait_seconds=30.0, pool=tree.leases):
         pass
+
+
+async def test_direct_child_checkpoint_chooses_default_conversation(two_level, tmp_path):
+    definition = two_level.get("parent")
+    tree = refs.resolve_dependencies(two_level, definition=definition)
+    run = two_level.create_run(w.validate_definition(definition), "ORIGINAL PARENT REQUEST", tmp_path, permission_policy="saved_node", dependency_tree=tree)
+    token = {"id": "converged-child", "node_id": "call", "stack": [], "input_result_refs": []}
+    two_level.update_run(run["workflow_run_id"], lambda r: r.update(status="running", runner_policy="guided", execution_initialized=True, pending=[token]), "converged_child_fixture")
+    registry = TreeRegistry(two_level.root)
+    await asyncio.wait_for(w.WorkflowSupervisor(registry, two_level).execute(run["workflow_run_id"]), 15)
+    final = two_level.get_run(run["workflow_run_id"])
+    assert final["status"] == "completed", final.get("attention_reason")
+    child = child_runs(two_level, final)[0]
+    assert child["child_session_selection"]["requested_policy"] == "agent_decides"
+    assert child["child_session_selection"]["selected_mode"] == "fresh"
+    context = registry.contexts[0]
+    assert context["valid_continuations"][0]["workflow"]["workflow_id"] == definition["nodes"][1]["workflow_ref"]["workflow_id"]

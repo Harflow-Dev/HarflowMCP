@@ -126,6 +126,28 @@ def sweep(log_dir: Path, days: int, now: datetime) -> dict[str, int]:
     pinned = WorkflowStore(root=log_dir.parent).pinned_tasks()
     records = store.read_all(log_dir)
     by_id = {r.task_id: r for r in records}
+    # An active workflow may select a completed conversation checkpoint. Keep
+    # later caller resumes as evidence that it advanced, even after they settle.
+    # Preserve the full same-session history and resume lineage while any such
+    # checkpoint is pinned; otherwise pruning only the external successor would
+    # make the old checkpoint appear unchanged again.
+    protected = set(pinned)
+    protected_sessions: set[str] = set()
+    while True:
+        before = len(protected), len(protected_sessions)
+        for record in records:
+            if record.task_id in protected:
+                if record.session_id:
+                    protected_sessions.add(record.session_id)
+                if record.parent_task_id:
+                    protected.add(record.parent_task_id)
+            if record.parent_task_id in protected or record.session_id and record.session_id in protected_sessions:
+                protected.add(record.task_id)
+                if record.session_id:
+                    protected_sessions.add(record.session_id)
+        if before == (len(protected), len(protected_sessions)):
+            break
+    pinned = protected
     statuses = {r.task_id: store.resolve_status(log_dir, r, detail=False)[0] for r in records}
 
     # Both edges count as descent: `parent_task_id` (resumed from) and `spawned_by` (dispatched by,

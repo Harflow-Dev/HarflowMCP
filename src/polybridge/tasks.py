@@ -938,8 +938,9 @@ class TaskRegistry:
         display_prompt: str | None = None,
         workflow_builder: bool = False,
         native_subagent: bool = False,
+        require_unchanged_session: bool = False,
     ) -> Task:
-        """Continue `parent`'s session as a new task sharing its session id."""
+        """Continue the session; strict inheritance may require no later writers."""
         if parent.session_id is None:
             raise SessionUnknownError(
                 f"task {parent.task_id} never disclosed a session id, so its conversation cannot "
@@ -978,6 +979,13 @@ class TaskRegistry:
                         f"session {parent.session_id} already has a running task, or is held by a takeover in "
                         "the Monitor; two concurrent runs would corrupt its shared conversation state"
                     )
+                if require_unchanged_session:
+                    try:
+                        successors = await asyncio.to_thread(store.session_successor_task_ids, self._log_dir, parent.task_id, parent.session_id)
+                    except ValueError as exc:
+                        raise SessionBusyError(f"Selected conversation checkpoint cannot be confirmed unchanged: {exc}") from exc
+                    if successors:
+                        raise SessionBusyError("Selected conversation checkpoint has successor tasks; strict Resume requires an unchanged session")
                 # The retention sweep takes this session lock before it deletes, so a parent still
                 # on disk here cannot vanish under the spawn below — and one that landed and is
                 # gone means the sweep deleted first, leaving nothing for the child to resume from.
@@ -2653,6 +2661,7 @@ class TaskRegistry:
         display_prompt: str | None = None,
         workflow_builder: bool = False,
         native_subagent: bool = False,
+        require_unchanged_session: bool = False,
     ) -> Task:
         """Continue the session of a task recovered from disk."""
         if not record.session_id:
@@ -2698,6 +2707,13 @@ class TaskRegistry:
                         f"session {record.session_id} already has a running task, or is held by a takeover in "
                         "the Monitor; two concurrent runs would corrupt its shared conversation state"
                     )
+                if require_unchanged_session:
+                    try:
+                        successors = await asyncio.to_thread(store.session_successor_task_ids, self._log_dir, record.task_id, record.session_id)
+                    except ValueError as exc:
+                        raise SessionBusyError(f"Selected conversation checkpoint cannot be confirmed unchanged: {exc}") from exc
+                    if successors:
+                        raise SessionBusyError("Selected conversation checkpoint has successor tasks; strict Resume requires an unchanged session")
                 # Same revalidation as `resume`: the sweep holds this lock while deleting, so a
                 # parent still readable here survives the spawn below — and one already gone was
                 # deleted first, leaving nothing for the child to resume from.

@@ -968,3 +968,42 @@ def live_session_ids(log_dir: Path) -> set[str]:
         if session_id
     )
     return live
+
+
+def session_successor_task_ids(log_dir: Path, task_id: str, session_id: str) -> set[str]:
+    """Find writes after a selected conversation checkpoint, including settled ones.
+
+    Resume lineage catches descendants that never disclosed a session ID. A
+    caller can also resume an earlier ancestor, so any same-session record
+    outside the proven ancestor chain counts. Wall-clock timestamps cannot
+    establish conversation ordering. Missing ancestry refuses strict reuse
+    instead of treating incomplete history as unchanged. Call under the
+    existing session lock when the answer gates a spawn.
+    """
+    records = read_all(log_dir)
+    indexed = {record.task_id: record for record in records}
+    source = indexed.get(task_id)
+    if source is None or source.session_id != session_id:
+        raise ValueError("Selected conversation checkpoint is no longer readable")
+    ancestors, current = set(), source.parent_task_id
+    while current:
+        if current == task_id or current in ancestors:
+            raise ValueError("Selected conversation checkpoint has cyclic resume ancestry")
+        ancestors.add(current)
+        parent = indexed.get(current)
+        if parent is None:
+            raise ValueError("Selected conversation checkpoint resume ancestry is incomplete")
+        current = parent.parent_task_id
+    # A caller may resume any preceding turn. Undisclosed-session branches
+    # from those ancestors still target this conversation, so inspect the whole
+    # proven resume family rather than only descendants of the selected turn.
+    lineage = {task_id} | ancestors
+    descendants, frontier = set(), lineage
+    while frontier:
+        children = {record.task_id for record in records if record.parent_task_id in frontier and record.task_id not in descendants and record.task_id not in lineage}
+        descendants.update(children)
+        frontier = children
+    for record in records:
+        if record.task_id != task_id and record.task_id not in ancestors and record.session_id == session_id:
+            descendants.add(record.task_id)
+    return descendants

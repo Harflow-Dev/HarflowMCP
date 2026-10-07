@@ -365,6 +365,49 @@ orchestrator** reuses the nearest owning ancestor's session with serialized turn
 and checklist items still belong to the child boundary. Neither mode flattens graphs or shares
 worker sessions across workflows.
 
+In Child mode, **Child session** selects `child_session_policy`: **Agent decides** (`agent_decides`, the default),
+**Fresh** (`fresh`), or **Resume** (`resume`). The preference remains saved when
+switching to Current mode, but is hidden and inactive there. Resume retains only the child
+orchestrator conversation. Each invocation starts a new pinned graph, checklist, technical plan,
+decision history, counters and worker-session state. The first turn establishes the new workflow
+scope and assignment; acknowledged context deltas apply only within that new scope.
+
+Reuse is limited to the latest earlier invocation of the same Run workflow node in the same
+immediate parent run. That invocation must have completed with all descendant dispatches
+conclusively settled. A newer failed, active, uncertain or incompatible invocation blocks reuse;
+the engine does not search past it for an older conversation. The pinned child revision and
+content, repository, saved orchestrator candidates, actual source harness/model/effort, access,
+network policy, retained task/session and CLI resume support must remain compatible. Existing
+cross-process session and takeover locks remain authoritative at dispatch. Any outside resume after the
+selected source invalidates reuse, even if it has completed or never disclosed a session ID. The engine
+checks conversation history again inside the session lock before launch, and retains successor evidence
+while the workflow checkpoint is pinned. Unproven conversation branches also require Fresh.
+Reuse requires an explicitly
+pinned model and, for harnesses that support effort selection, an explicitly pinned reasoning effort.
+Unknown ambient defaults cannot establish compatibility; harnesses that cannot pin these settings
+must use Fresh. Antigravity Child Resume is unavailable because its CLI can create a new
+conversation when a requested conversation is missing; ordinary task resume remains unchanged.
+The engine also rejects a resumed task that reports a different conversation identity before
+accepting its decision or dispatching workers. These restrictions leave Fresh and Current available.
+
+Explicit Resume refuses unavailable or incompatible sessions and never launches Fresh as a
+fallback. Select Fresh explicitly to start another conversation. Agent decides receives opaque
+eligible references and availability reasons in its continuation contract, and must choose
+`child_session_mode: fresh|resume` with a nonempty `child_session_reason`; Resume also requires an
+issued `child_session_ref`. It cannot supply arbitrary session IDs or change saved permissions.
+The selected mode, reason and source are persisted before child publication and checked again
+before dispatch. After a supervisor crash, a completed first Resume turn owned by this child can restore
+its session only when its persisted lineage, checkpoint, configuration and exit receipt match. Recovery
+re-asks the checkpoint with a full bootstrap and checks the restored conversation again under the
+session lock; foreign or ambiguous successor turns still block it. A refused or ambiguous resume
+does not trigger a fresh or fallback-harness launch.
+Monitor invocation details show the requested policy, selected behavior, source and refusal reason.
+
+This policy uses the saved child's headless orchestrator and the selected backend's retained-session
+resume capability. It does not add native worker reuse, cross-parent or cross-run reuse, or reuse of
+failed child conversations. Re-entering a suspended child continues its existing graph and remains
+separate from this policy.
+
 ```mermaid
 flowchart LR
     Parent[Parent checkpoint] --> Invoke[Run workflow: focused assignment]
@@ -418,6 +461,7 @@ and use this node in a parent's explicit-routing definition:
   "type": "workflow",
   "workflow_ref": {"workflow_id": "ID_FROM_SAVED_CHILD"},
   "orchestrator_mode": "child",
+  "child_session_policy": "agent_decides",
   "instructions": "Review only the assigned change and report concrete findings",
   "max_attempts": 3
 }

@@ -251,6 +251,9 @@ def validate_definition(raw: dict[str, Any]) -> dict[str, Any]:
             node.setdefault("orchestrator_mode", "child")
             if node["orchestrator_mode"] not in {"child", "current"}:
                 raise WorkflowError(f"Run workflow orchestrator_mode must be child or current: {node_id}")
+            node.setdefault("child_session_policy", "agent_decides")
+            if not isinstance(node["child_session_policy"], str) or node["child_session_policy"] not in {"fresh", "resume", "agent_decides"}:
+                raise WorkflowError(f"Invalid child_session_policy: {node_id}")
             node.setdefault("instructions", "")
             if not isinstance(node["instructions"], str):
                 raise WorkflowError(f"Run workflow instructions must be text: {node_id}")
@@ -1512,6 +1515,8 @@ def validate_builder_preview(value: Any, name: str) -> dict[str, Any]:
                 raise WorkflowError(f"Run workflow node requires workflow_ref.workflow_id: {nid}")
             if "orchestrator_mode" in node and node["orchestrator_mode"] not in {"child", "current"}:
                 raise WorkflowError(f"Invalid orchestrator_mode: {nid}")
+            if not isinstance(node.get("child_session_policy", "agent_decides"), str) or node.get("child_session_policy", "agent_decides") not in {"fresh", "resume", "agent_decides"}:
+                raise WorkflowError(f"Invalid child_session_policy: {nid}")
             if "optional" in node and not isinstance(node["optional"], bool):
                 raise WorkflowError(f"Invalid optional: {nid}")
             timeout = node.get("timeout_seconds")
@@ -2024,12 +2029,46 @@ class WorkflowSupervisor:
             if source:
                 previous = {"task_id": source["task_id"], "candidate": key + ":" + _candidate_key(source["candidate"]), "session_id": source.get("result", {}).get("session_id")}
         persistent_orchestrator = role == "orchestrator" and run.get("runner_policy") == "guided"
+        inherited = run.get("inherited_orchestrator_binding") if role == "orchestrator" and orchestrator_override is None and not run.get("sessions", {}).get("orchestrator") else None
+        recovered_inherited_turn = role == "orchestrator" and run.get("recovered_inherited_turn") is True
+        strict_child_resume = inherited is not None or recovered_inherited_turn
+        if recovered_inherited_turn:
+            inherited = {**run["inherited_orchestrator_binding"], "binding": copy.deepcopy(previous)}
+        def child_resume_refused(reason: str) -> None:
+            self.update(lambda r: r.update(child_session_refusal=reason), "child_session_resume_refused", reason)
+            link = run.get("parent_link") or {}
+            if link.get("workflow_run_id") and link.get("execution_id"):
+                def record_refusal(parent: dict[str, Any]) -> None:
+                    source = next((a for a in parent.get("activations", []) if a["id"] == link["execution_id"]), None)
+                    if source:
+                        source.setdefault("invocation", {})["child_session_refusal"] = reason
+                self.store.update_run(link["workflow_run_id"], record_refusal, "child_session_resume_refused", reason)
+            self.attention(reason)
+        if strict_child_resume:
+            from .workflow_child_sessions import validate_inherited
+            try:
+                if not recovered_inherited_turn:
+                    validate_inherited(self.store, run)
+            except (WorkflowError, OSError, ValueError, KeyError, TypeError) as exc:
+                child_resume_refused("Child Resume refused: " + str(exc))
+                return None
+            previous = copy.deepcopy(inherited["binding"])
+            # Resume inherits the actual source candidate, including fallback.
+            # No other candidate may start a fresh conversation for this choice.
+            candidates = [copy.deepcopy(inherited["candidate"])]
+            reset_scope = "\nNEW CHILD WORKFLOW INVOCATION: the retained conversation supplies context only. Reset prior completion, recovery, graph, decisions, checklist, counters and worker-session assumptions. Only this new workflow scope and its issued continuations authorize actions. Prior workers confer no reuse authority.\n"
+            prompt = reset_scope + prompt
+            if decision_context is not None:
+                decision_context = {**decision_context, "conversation_reset": reset_scope.strip()}
         if (persistent_orchestrator or role == "builder" and run.get("builder_followup")) and previous.get("task_id"):
             parent = self.registry.get(previous["task_id"])
             record = task_store.read(self.registry._log_dir, previous["task_id"])
             retained = parent.snapshot() if parent is not None else None
             compatible = (retained is not None and retained.get("status") == "completed" and retained.get("session_id")) or (record is not None and record.status == "completed" and record.session_id and record.freedom == "read_only" and record.repo_path == run["repo_path"])
             if not compatible:
+                if strict_child_resume:
+                    child_resume_refused("Child Resume refused: retained orchestrator session is unavailable")
+                    return None
                 previous = {}  # Fresh bootstrap is safe before any reservation or spawn.
         preferred = previous.get("candidate")
         if preferred and (persistent_orchestrator or role == "node" and node.get("session_mode") == "resume" or role == "builder" and run.get("builder_followup")):
@@ -2047,23 +2086,35 @@ class WorkflowSupervisor:
             candidate = candidates[candidate_position]
             identity = key + ":" + _candidate_key(candidate)
             if identity in self.run()["suppressed_candidates"]:
+                if strict_child_resume:
+                    child_resume_refused("Child Resume refused: selected source candidate is suppressed")
+                    return None
                 capability_refused = capability_refused or identity in self.run().get("suppressed_capability_candidates", [])
                 candidate_position += 1
                 continue
             observed = next((t.get("result") for t in reversed(activation["tasks"]) if _candidate_key(t.get("candidate", {})) == _candidate_key(candidate) and t.get("result")), None)
             if observed and observed.get("timed_out") and not observed.get("outcome_unknown"):
+                if strict_child_resume:
+                    child_resume_refused("Child Resume timed out; explicit Fresh selection required")
+                    return None
                 previous = {}
                 if candidate != candidates[-1]:
                     candidate_position += 1
                     continue  # Settled timeout already spent this candidate before restart.
                 return {**observed, "execution_failure": observed.get("summary", "Node timed out"), "optional_failure_eligible": True}
             if observed and availability_failure(observed):
+                if strict_child_resume:
+                    child_resume_refused("Child Resume unavailable; explicit Fresh selection required")
+                    return None
                 self.update(lambda r: r["suppressed_candidates"].append(identity), "recovered_fallback", {"candidate": candidate, "reason": availability_failure(observed)})
                 previous = {}
                 candidate_position += 1
                 continue
             backend = backends.get(candidate["backend"])
             if not backends.is_installed(backend):
+                if strict_child_resume:
+                    child_resume_refused("Child Resume refused: selected source CLI is unavailable")
+                    return None
                 self.update(lambda r: r["suppressed_candidates"].append(identity), "candidate_unavailable", {"candidate": candidate, "reason": "binary missing"})
                 candidate_position += 1
                 continue
@@ -2099,7 +2150,7 @@ class WorkflowSupervisor:
                 baseline = self.context_baselines.pop(session_owner, None)
                 from .workflow_prompt_delivery import orchestrator_input_manifests
                 manifests = orchestrator_input_manifests(run, decision_context)
-                rendered = render_decision_context(decision_context, session_owner=session_owner, scope=run["workflow_run_id"], baseline=baseline if use_resume else None, force_bootstrap=classification in {"protocol_repair", "fallback"}, classification=classification, evidence_manifests=manifests)
+                rendered = render_decision_context(decision_context, session_owner=session_owner, scope=run["workflow_run_id"], baseline=baseline if use_resume else None, force_bootstrap=strict_child_resume or classification in {"protocol_repair", "fallback"}, classification=classification, evidence_manifests=manifests)
                 dispatch_prompt, receipt, accounting = rendered.prompt, rendered.receipt, rendered.accounting
                 receipt["owner_prefix"] = owner_prefix
             elif optimized(run) and role == "node":
@@ -2176,12 +2227,12 @@ class WorkflowSupervisor:
                     if use_resume:
                         parent = self.registry.get(previous["task_id"])
                         if parent:
-                            task = await self.registry.resume(parent, dispatch_prompt, max_turns=candidate.get("max_turns"), network=network, task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder")
+                            task = await self.registry.resume(parent, dispatch_prompt, max_turns=candidate.get("max_turns"), network=network, task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder", **({"require_unchanged_session": True} if strict_child_resume else {}))
                         else:
                             record = task_store.read(self.registry._log_dir, previous["task_id"])
                             if record is None:
                                 raise SessionUnknownError("Previous resume session is unavailable")
-                            task = await self.registry.resume_record(record, dispatch_prompt, max_turns=candidate.get("max_turns"), network=network, task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder")
+                            task = await self.registry.resume_record(record, dispatch_prompt, max_turns=candidate.get("max_turns"), network=network, task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder", **({"require_unchanged_session": True} if strict_child_resume else {}))
                     else:
                         if role == "builder":
                             latest = self.run()
@@ -2249,7 +2300,13 @@ class WorkflowSupervisor:
                             notice(task.task_id, "Node timed out after " + str(node["timeout_seconds"]) + " seconds; attempt stopped before fallback")
                         snapshot = {**snapshot, "status": "failed", "failure_kind": "timeout", "timeout_seconds": node["timeout_seconds"], "summary": "Node timed out after " + str(node["timeout_seconds"]) + " seconds", "timed_out": True}
                 self._task_update(activation["id"], task_id, {"status": snapshot["status"], "result": snapshot, "finished_at": time.time(), "harness_metadata": observed_harness_metadata(snapshot, reservation["harness_metadata"]), "prompt_usage": {"usage": snapshot.get("usage"), "cost_usd": snapshot.get("total_cost_usd")}})
+                if strict_child_resume and snapshot.get("session_id") != inherited["source_session_id"]:
+                    child_resume_refused("Child Resume did not confirm the selected conversation identity; explicit Fresh selection required")
+                    return None
                 if snapshot.get("timed_out"):
+                    if strict_child_resume:
+                        child_resume_refused("Child Resume timed out; explicit Fresh selection required")
+                        return None
                     previous = {}
                     if candidate != candidates[-1]:
                         candidate_position += 1
@@ -2257,6 +2314,9 @@ class WorkflowSupervisor:
                     return {**snapshot, "execution_failure": snapshot["summary"], "optional_failure_eligible": True}
                 reason = availability_failure(snapshot)
                 if reason:
+                    if strict_child_resume:
+                        child_resume_refused("Child Resume unavailable: " + reason + "; explicit Fresh selection required")
+                        return None
                     if role == "node" and run.get("execution_contract") == "delegation" and node.get("session_mode") == "resume" and previous.get("candidate") == identity and not activation.get("continue_previous"):
                         from .workflow_delegation import require_fresh_checkpoint
                         self.update(lambda r: require_fresh_checkpoint(r, activation["id"], reason, identity), "resume_requires_fresh", {"task_id": task_id, "reason": reason})
@@ -2285,6 +2345,8 @@ class WorkflowSupervisor:
                     self.store.update_run(owner_id, record_owner_session, "session_recorded", {"child_workflow_run_id": run["workflow_run_id"], "task_id": task_id})
                 else:
                     self.update(lambda r: r["sessions"].__setitem__(key, {"candidate": identity, "task_id": task_id, "session_id": snapshot.get("session_id")}), "session_recorded", key)
+                if recovered_inherited_turn:
+                    self.update(lambda r: r.pop("recovered_inherited_turn", None), "inherited_recovery_continued")
                 return snapshot
             except DispatchNotStarted as exc:
                 self._task_update(activation["id"], task_id, {"status": "not_started"})
@@ -2303,6 +2365,9 @@ class WorkflowSupervisor:
             except backends.UnsupportedCapability as exc:
                 capability_refused = capability_refused or capability_stage != "settings"
                 self._task_update(activation["id"], task_id, {"status": "not_started", "error": str(exc)})
+                if strict_child_resume:
+                    child_resume_refused("Child Resume refused: " + str(exc) + "; explicit Fresh selection required")
+                    return None
                 self.update(lambda r: (r["suppressed_candidates"].append(identity), r.setdefault("suppressed_capability_candidates", []).append(identity) if capability_stage != "settings" else None), "candidate_capability_rejected", {"task_id": task_id, "candidate": candidate, "reason": str(exc)})
                 if activation.get("resume_question_id") and node.get("session_mode") == "resume" and capability_stage == "spawn":
                     self.update(lambda r: next(q for a in r["activations"] if a["id"] == activation["id"] for q in a.get("questions", []) if q["question_id"] == activation["resume_question_id"]).update(answer_delivery_state="not_started"), "answer_resume_unsupported")
@@ -2322,7 +2387,10 @@ class WorkflowSupervisor:
                     activation = next(a for a in self.run()["activations"] if a["id"] == activation["id"])
                     previous = {}
                     continue
-                self.attention(f"Dispatch configuration refused: {exc}")
+                if strict_child_resume:
+                    child_resume_refused(f"Child Resume configuration refused: {exc}")
+                else:
+                    self.attention(f"Dispatch configuration refused: {exc}")
                 return None
             except Exception as exc:
                 # Once a dispatch was reserved, only positive evidence that no spawn happened
@@ -2332,7 +2400,11 @@ class WorkflowSupervisor:
                 self._task_update(activation["id"], task_id, {"status": "not_started" if not_started else "uncertain", "error": str(exc)})
                 if not_started:
                     self.update(lambda r: next(a for a in r["activations"] if a["id"] == activation["id"]).update(status="not_started") if all(t["status"] == "not_started" for a in r["activations"] if a["id"] == activation["id"] for t in a["tasks"]) else None, "dispatch_not_started")
-                self.attention(f"Dispatch {task_id} did not start: {exc}" if not_started else f"Dispatch {task_id} requires reconciliation: {exc}")
+                reason = f"Dispatch {task_id} did not start: {exc}" if not_started else f"Dispatch {task_id} requires reconciliation: {exc}"
+                if strict_child_resume:
+                    child_resume_refused(reason)
+                else:
+                    self.attention(reason)
                 return None
             finally:
                 # Every exit from the attempt releases its slot; an uncertain attempt
@@ -2556,7 +2628,7 @@ class WorkflowSupervisor:
                         child["execution_activation_id"] = token["execution_activation_id"]
                         child["completion_source_node_id"] = node["id"]
                     dispatch = token.get("assignments", {}).get(edge["id"], {})
-                    child.update({k: copy.deepcopy(dispatch[k]) for k in ("assignment_prompt", "assigned_task_ids", "additional_result_refs", "execution_session_mode", "resume_task_id", "resume_source_execution_id", "continue_previous", "session_reason") if k in dispatch})
+                    child.update({k: copy.deepcopy(dispatch[k]) for k in ("assignment_prompt", "assigned_task_ids", "additional_result_refs", "execution_session_mode", "resume_task_id", "resume_source_execution_id", "continue_previous", "session_reason", "child_session_mode", "child_session_ref", "child_session_reason") if k in dispatch})
                     if "structural_dispatch" in dispatch:
                         child.update(copy.deepcopy(dispatch["structural_dispatch"]))
                 rr["pending"].append(child)
@@ -2702,6 +2774,8 @@ class WorkflowSupervisor:
             timed = any(t.get("status") == "uncertain" and t.get("timeout_deadline") is not None for a in self.run()["activations"] for t in a["tasks"])
             self.attention("Supervisor interrupted during a timed node: persisted timeout deadline requires process reconciliation; no worker or timer replayed" if timed else "Supervisor interrupted: reconcile observed task results before continuing; dispatches were not replayed")
             return False
+        from .workflow_child_sessions import recover_first_turn
+        await recover_first_turn(self)
         return True
 
     async def execute(self, run_id: str) -> None:
@@ -2861,7 +2935,7 @@ class WorkflowSupervisor:
         self.update(lambda r: next(x for x in r["activations"] if x["id"] == a["id"]).update(feedback_ids=r.get("builder_turn_feedback_ids", [])), "builder_feedback_associated")
         prompt = "Create a Polybridge workflow definition. Do not write files or dispatch agents. Return ONLY a JSON object. Schema: " + json.dumps({"name": self.run()["name"], "routing_mode": "explicit", "orchestrator": {"backend": "codex", "fallbacks": []}, "nodes": [{"id": "start", "type": "start", "position": {"x": 80, "y": 80}, "branch_mode": "auto", "prompt": "Optional workflow purpose for the orchestrator"}, {"id": "work", "type": "agent", "position": {"x": 220, "y": 80}, "instructions": "...", "agent": {"backend": "codex"}, "session_mode": "agent_decides", "execution_mode": "prefer_subagent", "branch_mode": "auto", "max_attempts": 3, "max_context_questions": 10}, {"id": "end", "type": "end", "position": {"x": 480, "y": 80}, "branch_mode": "auto"}], "connections": [{"id": "begin", "source": "start", "target": "work"}, {"id": "finish", "source": "work", "target": "end"}], "max_parallel": 4, "max_transitions": 100}) + "\nStart may contain an optional prompt string describing the workflow purpose; Polybridge supplies it to orchestrator decisions alongside the runtime user request. Set routing_mode to explicit. Ordinary nodes choose exactly one outgoing path. For parallel execution use structural parallel_start and parallel_end nodes sharing parallel_group_id. Parallel start defaults to branch_selection all. Set branch_selection orchestrator and optional selection_guidance when applicability should be chosen for each group invocation. Selection chooses one or more branch entries and records a reason explaining selections and exclusions; every configured branch must reach its matching end. Branches may contain multiple steps and properly nested parallel groups. Do not create Join nodes. Conditions for choosing a group belong on incoming alternatives; split outgoing instructions describe branch purpose. Applicability selection is available only on Orchestrator selects groups; an empty selection is forbidden, so skipping a whole group uses an incoming alternative. Retry arrows return to an earlier ancestor step; Polybridge infers loops from topology, so do not set a backward flag. Put explicit failure/retry and success/continue conditions on arrows. A retry connection may set max_retries to a nonnegative integer: this caps actual traversals of that arrow across the entire run; 0 disables retry, and an absent value adds no edge cap. Node max_attempts and max_transitions still apply and may stop earlier. A retry is selected exclusively and must stay inside its parallel region. Agent nodes may set optional:true only inside a safe parallel branch with an actually selected required sibling and no required successor before convergence. Optional steps still execute; only definitive failures or exhausted available candidates bypass to that convergence with failure evidence. Do not make sequential steps or all branches optional. Agent roles are planning, implementation, review and task; supply custom step instructions, while Polybridge adds the role guidance and result protocol. Request: " + self.run().get("builder_turn_prompt", self.run()["prompt"])
         prompt += "\n" + BUILDER_LAYOUT_GUIDANCE
-        prompt += "\nRun workflow nodes (type workflow) reference a saved workflow by workflow_ref.workflow_id. Preserve any existing Run workflow nodes exactly as supplied: keep their workflow_ref, orchestrator_mode, max_attempts, timeout_seconds, optional flag and instructions unchanged. Never author new Run workflow nodes, change their references, or convert them to agent nodes."
+        prompt += "\nRun workflow nodes (type workflow) reference a saved workflow by workflow_ref.workflow_id. Preserve any existing Run workflow nodes exactly as supplied: keep their workflow_ref, orchestrator_mode, child_session_policy, max_attempts, timeout_seconds, optional flag and instructions unchanged. Never author new Run workflow nodes, change their references, or convert them to agent nodes."
         if "editing_definition" in self.run():
             prompt += "\nRefine the current unsaved canvas below according to the request; it may be incomplete. Return the complete corrected workflow. Preserve existing node and connection IDs, agent settings, permissions and instructions unless the requested edit requires changing them. Preserve existing node positions exactly unless the user explicitly asks to move or rearrange existing nodes. Do not assign a revision or overwrite any saved definition. Read applicable repository AGENTS.md and skill files, especially skills specified in the request, and use their relevant guidance when refining the graph. You may read repository guidance and skills for context; only inspect files, do not implement the task or run the workflow. Current canvas:\n" + json.dumps(self.run()["editing_definition"])
         prompt += "\nPublish canvas progress after each logical edit using polybridge.apply_workflow_draft (or polybridge-ctl workflow-builder-apply), with definition and expected_draft_revision. This updates only your builder preview, never saved workflows. Read get_workflow_status(workflow_run_id=" + self.run()["workflow_run_id"] + ") for the current draft_revision when a revision conflicts, then read get_workflow_run_detail with view=builder_draft and follow next_cursor until has_more is false. Reassemble the complete draft, preserve concurrent edits, and reapply your changes using that latest draft_revision. Never retry with a stale canvas. Incomplete but render-safe graphs are allowed while building. If you applied any preview, the latest applied preview is authoritative and you may return a final summary; otherwise return the complete JSON definition. Current draft revision: " + str(self.run().get("draft_revision", 0)) + "\nCurrent draft:\n" + json.dumps(self.run().get("builder_draft", {}))

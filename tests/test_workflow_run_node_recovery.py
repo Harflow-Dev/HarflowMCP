@@ -22,7 +22,7 @@ def seed_parent(store, tmp_path, parent_name, *, stage, child_id=None, child_run
     definition = store.get(parent_name)
     tree = refs.resolve_dependencies(store, definition=definition)
     run = store.create_run(w.validate_definition(definition), "ORIGINAL PARENT REQUEST", tmp_path, permission_policy="saved_node", dependency_tree=tree)
-    token = {"id": uuid.uuid4().hex, "node_id": "call", "stack": [], "context": {}, "assignment_prompt": "Focused assignment for call", "input_result_refs": []}
+    token = {"id": uuid.uuid4().hex, "node_id": "call", "stack": [], "context": {}, "assignment_prompt": "Focused assignment for call", "input_result_refs": [], "child_session_mode": "fresh", "child_session_reason": "Independent invocation for recovery fixture"}
     activation = {"id": uuid.uuid4().hex, "node_id": "call", "role": "node", "status": "running", "tasks": [], "created_at": 0.0, "token": copy.deepcopy(token), "invocation": {"child_workflow_run_id": child_id or uuid.uuid4().hex, "stage": stage, "workflow_id": definition["nodes"][1]["workflow_ref"]["workflow_id"], "workflow_name": "child", "orchestrator_mode": "child", "timeout_seconds": None, "timeout_elapsed_seconds": 0}}
     token["execution_activation_id"] = activation["id"]
     def seed(r):
@@ -293,7 +293,10 @@ def _recover_policy(pick: str):
             retry = next((c for c in context["valid_continuations"] if c["kind"] == "retry_execution" and not c.get("reopen_child")), None)
             chosen = reopen if pick == "recover_child" and reopen else retry if retry else None
             if chosen:
-                return {"decision_id": context["decision_id"], "action": "continue", "reason": "Reassign the child", "next": [{"continuation_id": chosen["continuation_id"], "prompt": "Focused assignment for call"}]}
+                assignment = {"continuation_id": chosen["continuation_id"], "prompt": "Focused assignment for call"}
+                if not chosen.get("reopen_child"):
+                    assignment.update(child_session_mode="fresh", child_session_reason="Use a new conversation for reassignment")
+                return {"decision_id": context["decision_id"], "action": "continue", "reason": "Reassign the child", "next": [assignment]}
         return workflow_policy(context, registry)
     return policy
 

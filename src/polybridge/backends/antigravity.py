@@ -333,6 +333,8 @@ class AntigravityBackend:
         # agy mints its conversation id itself and only discloses it on the first stream line;
         # --conversation with a fresh id is just the not-found case (a new conversation, measured).
         chooses_session_id=False,
+        # Measured: --conversation with an unknown ID creates a Fresh conversation.
+        resume_may_start_fresh=True,
         # No --max-turns on agy 1.2.14.
         supports_turn_cap=False,
         # Only token counts, no dollar cost (measured).
