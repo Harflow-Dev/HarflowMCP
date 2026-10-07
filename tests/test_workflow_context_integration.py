@@ -143,6 +143,16 @@ def test_new_saved_definitions_optimize_and_legacy_requires_upgrade(storage):
         w.validate_definition({**graph(), "context_delivery": "unknown_v2"})
 
 
+@pytest.mark.parametrize("value", [[], {}, ["legacy"], {"mode": "legacy"}, None, True, 1, "unknown_v2"])
+def test_invalid_context_delivery_is_clean_validation_error(storage, value):
+    definition = {**graph(), "context_delivery": value}
+    with pytest.raises(w.WorkflowError, match="context_delivery"):
+        w.validate_definition(definition)
+    with pytest.raises(w.WorkflowError, match="context_delivery"):
+        storage.save("invalid", definition)
+    assert not (storage.definitions / "invalid.json").exists()
+
+
 async def test_supervisor_restart_bootstraps_retained_session(storage, tmp_path):
     import asyncio
     class QuestionRegistry(ContextRegistry):

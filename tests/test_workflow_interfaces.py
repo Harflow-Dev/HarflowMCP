@@ -336,3 +336,15 @@ def test_removed_github_helpers_are_unknown_commands(capsys):
             ctl.main([command, '--json'])
         assert exc.value.code == 2
         assert json.loads(capsys.readouterr().out)['error']
+
+
+@pytest.mark.parametrize("value", [[], {}])
+def test_cli_context_delivery_type_error_is_validation_result(tmp_path, monkeypatch, capsys, value):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    definition = tmp_path / "input.json"
+    definition.write_text(json.dumps({"name": "draft", "context_delivery": value}))
+    assert ctl.main(["workflow-validate", "--definition", str(definition), "--json"]) == 0
+    result = json.loads(capsys.readouterr().out)["result"]
+    assert result["valid"] is False
+    assert "context_delivery" in result["error"]
+    assert not (tmp_path / ".polybridge").exists()

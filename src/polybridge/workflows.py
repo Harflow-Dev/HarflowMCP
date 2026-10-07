@@ -187,7 +187,8 @@ def validate_definition(raw: dict[str, Any]) -> dict[str, Any]:
     d = copy.deepcopy(raw)
     d["name"] = _workflow_name(d.get("name"))
     d["schema_version"] = SCHEMA_VERSION
-    if d.get("context_delivery", "legacy") not in {"legacy", "optimized_v1"}:
+    context_delivery = d.get("context_delivery", "legacy")
+    if not isinstance(context_delivery, str) or context_delivery not in {"legacy", "optimized_v1"}:
         raise WorkflowError("context_delivery must be legacy or optimized_v1")
     if d.get("routing_mode") not in (None, "explicit"):
         raise WorkflowError("Invalid routing_mode")
