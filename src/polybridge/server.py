@@ -1303,7 +1303,10 @@ async def workflow_builder(name: str, prompt: str, repo_path: str | None = None,
     convergence uses the frozen selected membership, including singleton selections.
     Preserve existing node positions exactly unless the user explicitly asks to move or rearrange them.
     Preserve any supplied Run workflow nodes exactly (workflow_ref, orchestrator_mode,
-    attempts, timeout, optional); never author new Run workflow references.
+    child_session_policy, attempts, timeout, optional); never author new Run workflow references.
+    Child session policy is agent_decides (default), fresh, or resume, and is inactive in
+    Current mode. Resume reuses only the latest completed compatible invocation in the
+    immediate parent run, with fresh workflow state; explicit Resume never falls back Fresh.
     The canvas expands automatically; there is no fixed right or bottom boundary.
     """
     if agent is None:
