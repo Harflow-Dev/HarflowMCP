@@ -11,7 +11,8 @@ this process owns; `takeover` / `takeover-attach` are the human-only takeover (`
 and `resume` fork a process that owns the new task until it settles (`detached.py`). `backends`
 reports the registered backends and whether each binary is on PATH (`backends.is_installed`) — no
 `--version` probe, no subprocess. Every command prints one versioned JSON document
-(`"v": 6`, `CTL_JSON_VERSION`) with `--json`. v6 adds native execution
+(`"v": 7`, `CTL_JSON_VERSION`) with `--json`. v7 adds separate human Monitor workflow
+cancellation eligibility and refusal metadata. v6 adds native execution
 preference, presentation, availability and frozen scheduling metadata. v5 adds Run workflow node presentation
 metadata: parent/root run links, orchestrator mode and session owner, input source,
 tree settling and suspended-via-root flags, per-execution child invocation status,
@@ -38,7 +39,7 @@ from .tasks import default_log_dir
 # Bumped to 2 when `status`/`list`'s snapshot/brief documents gained `resume_command` (Monitor
 # piece 3/3). `setup` and the event log are separate contracts and stay at v1 — see CLAUDE.md's
 # "The Monitor app is a consumer of three frozen contracts".
-CTL_JSON_VERSION = 6
+CTL_JSON_VERSION = 7
 
 # How long `cancel`/`takeover` stay alive for a failing `.sig` write to be retried before exiting —
 # the lease (60 s) is what a later recovery waits for anyway.
@@ -129,7 +130,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     run_p = sub.add_parser("run", help="start a task, owned by a detached process until it settles")
     run_p.add_argument("--backend", default=None)
     run_p.add_argument("--workflow", default=None)
-    run_p.add_argument("--monitor", action="store_true", help="Human Monitor-owned workflow interaction")
+    run_p.add_argument("--monitor", action="store_true", help="Verified human Monitor workflow interaction")
     run_p.add_argument("--repo", required=True)
     run_p.add_argument("--freedom", default=None)
     run_p.add_argument("--prompt", required=True)
@@ -203,7 +204,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
             reason_group.add_argument("--reason-file", help="UTF-8 recovery reason file")
             wp.add_argument("--additional-attempts", type=int, default=0)
         if action in {"start", "pause", "resume", "recover", "cancel"}:
-            wp.add_argument("--monitor", action="store_true", help="Human Monitor-owned workflow interaction")
+            wp.add_argument("--monitor", action="store_true", help="Verified human Monitor workflow interaction")
         if action == "resume":
             wp.add_argument("--decision-id")
             wp.add_argument("--allow-optional-review-skip", action="store_true", help="Explicitly permit skipping the current eligible optional review refusal; requires its current decision ID and answer")
@@ -713,12 +714,17 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
             return await server.get_workflow_run_detail(args.workflow_run_id, args.view, args.cursor)
         if action == "status" and args.monitor_view:
             from .workflow_responses import monitor, monitor_snapshot
+            from .workflow_cancellation import monitor_projection
+            from .workflows import WorkflowStore
             if args.snapshot:
                 if await server._bounded_workflow_caller() is not None:
                     raise ValueError("Monitor snapshots are only available to the local Monitor")
                 run = None if args.cursor else await server._workflow_call("status", run_id=args.workflow_run_id, _bounded_read=True)
+                if run is not None:
+                    run = await asyncio.to_thread(monitor_projection, WorkflowStore(), run)
                 return monitor_snapshot(run, args.workflow_run_id, default_log_dir().parent / "monitor_snapshots", args.cursor)
-            return monitor(await server._workflow_call("status", run_id=args.workflow_run_id, _bounded_read=True))
+            run = await server._workflow_call("status", run_id=args.workflow_run_id, _bounded_read=True)
+            return monitor(await asyncio.to_thread(monitor_projection, WorkflowStore(), run))
         if action == "wait":
             return await server._wait_workflow_full(args.workflow_run_id, args.timeout_seconds)
         if action == "resume":
@@ -726,7 +732,7 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
             if args.monitor:
                 return await server._workflow_call("resume", run_id=args.workflow_run_id, instructions=instructions, additional_attempts=args.additional_attempts, decision_id=args.decision_id, allow_optional_review_skip=args.allow_optional_review_skip, interaction_owner="monitor")
             return await server._workflow_call("resume", run_id=args.workflow_run_id, instructions=instructions, additional_attempts=args.additional_attempts, decision_id=args.decision_id, allow_optional_review_skip=args.allow_optional_review_skip)
-        return await server._workflow_call(action, run_id=args.workflow_run_id, **({"interaction_owner": "monitor"} if getattr(args, "monitor", False) and action != "cancel" else {}))
+        return await server._workflow_call(action, run_id=args.workflow_run_id, **({"interaction_owner": "monitor"} if getattr(args, "monitor", False) else {}))
     try:
         result = asyncio.run(invoke())
     except Exception as exc:

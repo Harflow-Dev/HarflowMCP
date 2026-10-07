@@ -148,7 +148,7 @@ class WorkflowTree:
             control = self.held.pop(key, False)
             self.release_slot(control=control)
 
-    async def cancel_descendants(self, run_id: str, registry: Any, *, include_self: bool = False) -> None:
+    async def cancel_descendants(self, run_id: str, registry: Any, *, include_self: bool = False) -> dict[str, Any]:
         """Cancel live descendants; a child without live work settles cancelled."""
         # Only persisted invocation edges establish descendants. Retained history
         # can be arbitrarily large and contains unrelated trees.
@@ -193,7 +193,7 @@ class WorkflowTree:
             for child_id in reversed(linked):
                 if child_id not in visited:
                     stack.append((child_id, False))
-        settled = {}
+        settled, errors = {}, []
         for current_id in ordered:
             observed = records[current_id]
             live = list(dict.fromkeys(t.get('transport_task_id', t['task_id']) for a in observed.get('activations', []) for t in a.get('tasks', []) if t.get('status') in {'running', 'reserved', 'uncertain'}))
@@ -204,14 +204,19 @@ class WorkflowTree:
                 # sibling task is still live. Signal the tasks, preserve outcome.
                 for task_id in live:
                     try:
-                        await registry.cancel_cascade(task_id, workflow_control=True)
-                    except Exception:
-                        pass
+                        outcome = await registry.cancel_cascade(task_id, workflow_control=True)
+                        from .workflow_cancellation import cascade_error
+                        error = cascade_error(outcome)
+                        if error:
+                            errors.append({"workflow_run_id": current_id, "task_id": task_id, "error": error})
+                    except Exception as exc:
+                        errors.append({"workflow_run_id": current_id, "task_id": task_id, "error": str(exc)[:2000]})
             if selected and observed.get('status') not in _w().TERMINAL:
                 status = 'cancelling' if live or not descendants_settled else 'cancelled'
                 self.store.update_run(current_id, lambda r, status=status: r.update(status=status) if r['status'] not in _w().TERMINAL else None, 'tree_cancel_propagated' if status == 'cancelling' else 'tree_cancelled', {'root': run_id})
                 records[current_id] = self.store.get_run(current_id)
             settled[current_id] = not live and descendants_settled and records[current_id].get('status') in _w().TERMINAL
+        return {"unresolved_runs": sorted(unresolved), "errors": errors}
 
 
 def tree_write_strength(run: dict[str, Any], dispatch_freedom: str) -> bool:
