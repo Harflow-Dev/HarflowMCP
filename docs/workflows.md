@@ -5,6 +5,46 @@ workflow context, and checklist. At each stage it selects a valid continuation a
 assignment for the next agent. Polybridge validates, dispatches, and durably records the decision.
 Conditions are instructions to the orchestrator, not code executed by Polybridge.
 
+## Context delivery
+
+New Monitor-authored definitions set `context_delivery: "optimized_v1"`. Existing definitions
+without that field retain legacy full-context delivery; editing or opening them does not migrate
+their policy. Set the field explicitly to opt a saved definition in.
+
+Optimized delivery separates the stable workflow bootstrap from current checkpoint state.
+A Fresh session receives bootstrap context. A compatible resumed orchestrator receives a delta
+only after a validated acknowledgement of its prior context in the same session and workflow scope.
+Missing or stale acknowledgements, incompatible sessions and fallback candidates receive bootstrap
+context again. Context acknowledgement does not replace validation against durable workflow state.
+
+Headless workers receive bounded evidence previews and immutable assigned-input references.
+The assigned-input CLI/MCP reader returns lossless pages only for references persisted on that
+worker's execution; it does not grant access to unrelated executions or workflow controls.
+Use MCP `read_workflow_assigned_input(workflow_run_id, execution_id, ...)` or
+`polybridge-ctl workflow-assigned-input <own-run-id> <input-execution-id>`;
+for linked child evidence, supply `source_run_id` or `--source-run` respectively.
+Pass each `next_cursor` back as `cursor` or `--cursor` until it is null, concatenate the
+`chunk` strings, then decode the complete JSON. Pages default to 16,000 characters and
+allow at most 32,000; changed content invalidates its cursor and assigned digest.
+Workers can still ask their orchestrator for missing context when retrieval is unavailable.
+Native workers retain full delivery until their caller identity supports the assigned-input reader;
+the delivery metadata records that compatibility reason.
+
+The delivery target is 64 KiB per orchestrator or worker prompt. Required original instructions
+and assignments are preserved even when they exceed that target. Evidence previews share a bounded
+aggregate budget when authorized retrieval is available, and complete evidence remains available
+through assigned references. Evidence without a safe retrieval path stays inline with a recorded
+compatibility reason. The target
+is not a token limit and exceeding it is reported rather than silently cutting required text.
+
+The Monitor execution inspector shows bootstrap, delta or legacy delivery, bytes and characters,
+section sizes, acknowledged base revision, and any compatibility or target-overflow explanation.
+Reported model usage and dollar cost appear only when the harness supplies them. These measurements
+describe actual delivery and observed usage; they do not establish model token savings.
+
+Reproduce the deterministic fixtures and complete fake-harness workflow comparison using the
+[context benchmark guide](workflow-context-benchmarks.md). No model calls are made.
+
 ## Native subagent execution
 
 New agent nodes default to **Prefer orchestrator subagent**. Previously saved nodes without an

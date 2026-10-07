@@ -170,7 +170,7 @@ async def test_public_mcp_has_no_checklist_completion_mutation():
         "workflow_builder", "start_workflow", "list_workflow_runs", "list_workflow_run_page",
         "get_workflow_status", "wait_for_workflow", "pause_workflow",
         "resume_workflow", "cancel_workflow", "followup_workflow_builder", "apply_workflow_draft",
-        "recover_workflow", "inspect_workflow_node", "get_workflow_run_detail",
+        "recover_workflow", "inspect_workflow_node", "get_workflow_run_detail", "read_workflow_assigned_input",
     }
     for name in ("pause_workflow", "resume_workflow", "cancel_workflow"):
         assert not {"task_updates", "tasks", "completed_task_ids", "status", "completed"} & set(tools[name].input_schema["properties"])
@@ -336,3 +336,15 @@ def test_removed_github_helpers_are_unknown_commands(capsys):
             ctl.main([command, '--json'])
         assert exc.value.code == 2
         assert json.loads(capsys.readouterr().out)['error']
+
+
+@pytest.mark.parametrize("value", [[], {}])
+def test_cli_context_delivery_type_error_is_validation_result(tmp_path, monkeypatch, capsys, value):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    definition = tmp_path / "input.json"
+    definition.write_text(json.dumps({"name": "draft", "context_delivery": value}))
+    assert ctl.main(["workflow-validate", "--definition", str(definition), "--json"]) == 0
+    result = json.loads(capsys.readouterr().out)["result"]
+    assert result["valid"] is False
+    assert "context_delivery" in result["error"]
+    assert not (tmp_path / ".polybridge").exists()

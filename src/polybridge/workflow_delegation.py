@@ -91,6 +91,8 @@ def normalize_decision(run: dict[str, Any], node: dict[str, Any], token: dict[st
             warnings.append(f"Ignored {path}.{key}")
             obj.pop(key)
     allowed = {"decision_id", "action", "reason", "next", "question", "task_updates", "requests"}
+    if run.get("definition", {}).get("context_delivery") == "optimized_v1":
+        allowed.add("context_ack")
     if clarification:
         allowed = {"decision_id", "action", "reason", "question_id", "answer", "session_mode", "requests", "question", "next", "task_updates"}
     clean(value, allowed, "decision")
@@ -453,8 +455,12 @@ def inspect_decision(supervisor: Any, decision: dict[str, Any], checkpoint: dict
     """Run final-JSON inspection requests without granting workflow state authority."""
     w = _w()
     from .workflow_inspection import inspect_request
-    if set(decision) - {"decision_id", "action", "reason", "requests", "next", "task_updates"}:
-        raise w.WorkflowError("Unexpected inspection fields: " + ", ".join(sorted(set(decision) - {"decision_id", "action", "reason", "requests", "next", "task_updates"})))
+    run = supervisor.run()
+    allowed = {"decision_id", "action", "reason", "requests", "next", "task_updates"}
+    if run.get("definition", {}).get("context_delivery") == "optimized_v1":
+        allowed.add("context_ack")
+    if set(decision) - allowed:
+        raise w.WorkflowError("Unexpected inspection fields: " + ", ".join(sorted(set(decision) - allowed)))
     if decision.get("decision_id") != checkpoint["decision_id"] or decision.get("action") != "inspect" or decision.get("next") or decision.get("task_updates"):
         raise w.WorkflowError("Invalid inspection decision")
     requests = decision.get("requests")
@@ -647,7 +653,10 @@ def completion_evidence(run: dict[str, Any], node: dict[str, Any], token: dict[s
 
 def validate_decision(run: dict[str, Any], node: dict[str, Any], token: dict[str, Any], decision: dict[str, Any], execute: bool, *, root: Path | None = None) -> tuple[list[dict[str, Any]], dict[str, Any], str | None]:
     w = _w()
-    if set(decision) - {"decision_id", "action", "reason", "next", "question", "task_updates", "requests"}:
+    allowed = {"decision_id", "action", "reason", "next", "question", "task_updates", "requests"}
+    if run.get("definition", {}).get("context_delivery") == "optimized_v1":
+        allowed.add("context_ack")
+    if set(decision) - allowed:
         raise w.WorkflowError("Unexpected decision fields; permissions are owned by the saved workflow")
     if decision.get("decision_id") != token["decision_id"]:
         raise w.WorkflowError("Decision ID does not match this durable decision point")
@@ -808,7 +817,7 @@ async def decide(supervisor: Any, node: dict[str, Any], token: dict[str, Any], *
                 prompt += "\nCorrection: " + token["decision_error"]
             activation = supervisor._activation(node["id"], "orchestrator", copy.deepcopy(token))
             supervisor.update(lambda r: (next(t for t in r["pending"] if t["id"] == token["id"]).update(decision_attempts=token.get("decision_attempts", 0) + 1), next(a for a in r["activations"] if a["id"] == activation["id"]).update(decision_id=token["decision_id"])), "decision_attempt_reserved")
-            outcome = await supervisor._dispatch({"id": "orchestrator", "title": "Decision"}, prompt, "orchestrator", activation)
+            outcome = await supervisor._dispatch({"id": "orchestrator", "title": "Decision"}, prompt, "orchestrator", {**activation, "_decision_context": {**context, **({"correction": token["decision_error"]} if token.get("decision_error") else {})}})
             if not outcome:
                 supervisor.update(lambda r: next(a for a in r["activations"] if a["id"] == activation["id"]).update(status="failed"), "decision_interrupted")
                 return None
@@ -818,11 +827,15 @@ async def decide(supervisor: Any, node: dict[str, Any], token: dict[str, Any], *
                 decision, protocol_warnings = normalize_decision(run, node, token, decision, execute, root=supervisor.store.root)
                 if decision.get("action") == "inspect":
                     inspect_decision(supervisor, decision, token, activation["id"], protocol_warnings=protocol_warnings)
+                    from .workflow_prompt_delivery import accept_ack
+                    accept_ack(supervisor, activation["id"], decision)
                     continue
                 # Validate against fresh durable state, not the dispatch-time preview.
                 live = supervisor.run()
                 token = next(t for t in live["pending"] if t["id"] == token["id"])
                 selected, assignments, join = validate_decision(live, node, token, decision, execute, root=supervisor.store.root)
+                from .workflow_prompt_delivery import accept_ack
+                accept_ack(supervisor, activation["id"], decision)
                 completion_sources = {update["task_id"]: completion_evidence(live, node, token, update["task_id"])["id"] for update in decision.get("task_updates", []) if update["status"] == "completed"}
                 def accept(r: dict[str, Any]) -> None:
                     t = next(t for t in r["pending"] if t["id"] == token["id"])
@@ -1168,6 +1181,10 @@ async def execute_node(supervisor: Any, node: dict[str, Any], token: dict[str, A
         elif not execution.get("resume_question_id"):
             execution.pop("resume_task_id", None)
     supervisor.update(reserve_assignment, "node_assignment_reserved")
+    from .workflow_prompt_delivery import optimized, worker_input_refs
+    if optimized(run) and "authorized_input_refs" not in activation:
+        authorized = worker_input_refs(run, supervisor.store.root, token)
+        supervisor.update(lambda r: next(a for a in r["activations"] if a["id"] == activation["id"]).update(authorized_input_refs=authorized), "assigned_inputs_reserved")
     activation = next(a for a in supervisor.run()["activations"] if a["id"] == activation["id"])
     prompt = worker_prompt(run, node, token, root=supervisor.store.root)
     resolved = run.get("blocker_retry_authorizations", {}).get(token.get("retry_of_execution_id"), {})

@@ -189,6 +189,36 @@ async def test_native_worker_and_control_accounting_at_one_and_held_release(nati
     assert legacy.control_slots is None
 
 
+@pytest.mark.parametrize("adds_task", [True, False])
+async def test_native_dispatch_accounting_preserves_previous_attempt(native_setup, tmp_path, monkeypatch, adds_task):
+    from polybridge import workflow_native
+    storage, registry = native_setup
+    definition = w.validate_definition(native_graph())
+    run = storage.create_run(definition, "Review", tmp_path)
+    historical_accounting = {"total_bytes": 123, "compatibility_reasons": ["historical attempt"]}
+    activation = {"id": "execution", "node_id": "work", "role": "node", "status": "running", "tasks": [{"task_id": "previous", "status": "completed", "context_delivery": historical_accounting}]}
+    def seed(r):
+        r["status"] = "running"
+        r["activations"].append(copy.deepcopy(activation))
+    storage.update_run(run["workflow_run_id"], seed, "seed")
+    supervisor = w.WorkflowSupervisor(registry, storage)
+    supervisor.run_id = run["workflow_run_id"]
+
+    async def handled_dispatch(supervisor, node, prompt, activation):
+        if adds_task:
+            supervisor.update(lambda r: next(a for a in r["activations"] if a["id"] == activation["id"])["tasks"].append({"task_id": "new", "status": "completed"}), "native_reserved")
+        return True, {"status": "completed"}
+
+    monkeypatch.setattr(workflow_native, "dispatch_native", handled_dispatch)
+    prompt = "New native assignment"
+    await supervisor._dispatch(definition["nodes"][1], prompt, "node", activation)
+    attempts = next(a for a in supervisor.run()["activations"] if a["id"] == activation["id"])["tasks"]
+    assert attempts[0]["context_delivery"] == historical_accounting
+    assert len(attempts) == (2 if adds_task else 1)
+    if adds_task:
+        assert attempts[1]["context_delivery"]["total_bytes"] == len(prompt.encode())
+
+
 def test_adapter_rejects_stale_duplicate_and_wrong_result_identity():
     adapter = ClaudeNativeAdapter()
     state = {"assignment": "exact", "owner_session_id": "session", "expected_model": MODEL}

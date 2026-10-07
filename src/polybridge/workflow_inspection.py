@@ -33,6 +33,36 @@ def selected_task(activation: dict[str, Any], task_id: str | None) -> dict[str, 
     return task
 
 
+def make_assigned_input_ref(run: dict[str, Any], root: Any, execution_id: str, *, source_run_id: str | None = None, task_id: str | None = None) -> dict[str, Any]:
+    """Create the immutable authorization manifest from the reader's exact payload."""
+    target_id = source_run_id or run["workflow_run_id"]
+    target_run = run if target_id == run["workflow_run_id"] else _authorized_linked_run(run, root, target_id)
+    page = result_page(target_run, execution_id, task_id=task_id, limit=1)
+    return {"workflow_run_id": target_id, "execution_id": execution_id, "task_id": task_id, "content_sha256": page["content_sha256"], "total_characters": page["total_characters"], "encoding": "json"}
+
+
+def assigned_input_page(managed: tuple[dict[str, Any], dict[str, Any]] | None, root: Any, workflow_run_id: str, execution_id: str, *, source_run_id: str | None = None, task_id: str | None = None, cursor: str | None = None, limit: int = 16000) -> dict[str, Any]:
+    """Read only digest-bound immutable inputs assigned to this verified worker."""
+    if managed is None or managed[0].get("role") != "node":
+        raise ValueError("Assigned inputs require a verified workflow worker")
+    association, run = managed
+    if workflow_run_id != run["workflow_run_id"]:
+        raise ValueError("Assigned inputs belong to the caller's own workflow run")
+    activation = next((a for a in run.get("activations", []) if a.get("id") == association.get("activation_id") and a.get("role") == "node"), None)
+    if activation is None or activation.get("status") not in LIVE:
+        raise ValueError("Assigned inputs require an active worker activation")
+    target_id = source_run_id or workflow_run_id
+    refs = activation.get("authorized_input_refs", [])
+    reference = next((ref for ref in refs if isinstance(ref, dict) and ref.get("workflow_run_id") == target_id and ref.get("execution_id") == execution_id and ref.get("task_id") == task_id), None)
+    if reference is None or not isinstance(reference.get("content_sha256"), str):
+        raise ValueError("Input is not assigned to this worker activation")
+    target_run = run if target_id == workflow_run_id else _authorized_linked_run(run, root, target_id)
+    page = result_page(target_run, execution_id, task_id=task_id, cursor=cursor, limit=limit)
+    if page["content_sha256"] != reference["content_sha256"]:
+        raise ValueError("Assigned input content changed; reference is stale")
+    return page
+
+
 def result_page(run: dict[str, Any], execution_id: str, *, task_id: str | None = None, cursor: str | None = None, limit: int = 16000) -> dict[str, Any]:
     """Return lossless JSON text chunks, bound to execution, attempt, and immutable content."""
     if type(limit) is not int or not 1 <= limit <= 32000:

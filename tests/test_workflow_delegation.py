@@ -43,13 +43,31 @@ class Registry:
         self.policy = policy or default_decision
         self.outputs = outputs or {}
         self.tasks = {}
+        self.context_bootstraps = {}
+
+    def decode_context(self, prompt):
+        if "Context:\n" in prompt:
+            return json.JSONDecoder().raw_decode(prompt.split("Context:\n", 1)[1])[0]
+        try:
+            envelope = json.JSONDecoder().raw_decode(prompt)[0]
+        except (ValueError, TypeError):
+            return None
+        if not isinstance(envelope, dict) or "checkpoint" not in envelope or "delivery" not in envelope:
+            return None
+        scope = envelope["delivery"]["acknowledgement"]["scope"]
+        if "bootstrap" in envelope:
+            self.context_bootstraps[scope] = copy.deepcopy(envelope["bootstrap"]["context"])
+        return {**self.context_bootstraps[scope], **envelope["checkpoint"]}
 
     async def start(self, prompt, repo, **kwargs):
         self.calls.append((prompt, kwargs))
-        if "Context:\n" in prompt:
-            context = json.JSONDecoder().raw_decode(prompt.split("Context:\n", 1)[1])[0]
+        context = self.decode_context(prompt)
+        if context is not None:
             self.contexts.append(context)
             result = self.policy(context, self)
+            if prompt.startswith("{"):
+                envelope = json.JSONDecoder().raw_decode(prompt)[0]
+                result = {**result, "context_ack": copy.deepcopy(envelope["delivery"]["acknowledgement"])}
         else:
             nid = kwargs["title"].split(" · ")[-1]
             result = self.outputs.get(nid, {"status": "succeeded", "result": {"summary": "Done"}, "evidence": ["observed"]})
@@ -89,11 +107,11 @@ def storage(tmp_path, monkeypatch):
     return w.WorkflowStore(tmp_path)
 
 
-async def run_flow(storage, tmp_path, definition=None, registry=None, *, guided=False):
+async def run_flow(storage, tmp_path, definition=None, registry=None, *, guided=False, timeout_seconds=5):
     run = storage.create_run(w.validate_definition(definition or graph()), "ORIGINAL PRIVATE REQUEST", tmp_path)
     storage.update_run(run["workflow_run_id"], lambda current: current.update(runner_policy="guided") if guided else current.pop("runner_policy", None), "test_runner_policy")
     registry = registry or Registry(storage.root)
-    await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]), 5)
+    await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]), timeout_seconds)
     return storage.get_run(run["workflow_run_id"]), registry
 
 
