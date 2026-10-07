@@ -1359,3 +1359,44 @@ def test_explicit_task_page_loads_unindexed_parent_and_reports_blocker(tmp_path)
     assert page['related_headers'] == []
     assert page['catalog_state']['status'] == 'blocked'
     assert not page['counts_complete']
+
+
+def test_foreign_insertion_between_writer_prestamp_and_replacement_requires_discovery(tmp_path, monkeypatch):
+    store.write(tmp_path, record('known', title='original'))
+    store.list_page(tmp_path)
+    index = catalog.Catalog(tmp_path, store.RECORD_SUFFIX)
+    original_read = store.read
+    original_discover = catalog.Catalog._discover
+    inserted = False
+    discovery_calls = []
+
+    def foreign_during_guard(directory, identifier, *args, **kwargs):
+        nonlocal inserted
+        result = original_read(directory, identifier, *args, **kwargs)
+        if identifier == 'known' and not inserted:
+            inserted = True
+            temporary = directory / '.foreign-temp'
+            temporary.write_text(json.dumps(asdict(record('foreign', title='older process insertion'))))
+            os.replace(temporary, directory / 'foreign.meta.json')
+        return result
+
+    monkeypatch.setattr(store, 'read', foreign_during_guard)
+    assert store.write_landed(tmp_path, record('known', title='updated'))
+    monkeypatch.setattr(store, 'read', original_read)
+    # Inspect readiness before reconciliation: the writer has projected its own
+    # record, but the prestamp cannot account for this unrelated insertion.
+    with index.connect() as db:
+        assert index.state(db)['status'] == 'preparing'
+        assert db.execute("SELECT COUNT(*) FROM entries WHERE id='foreign'").fetchone()[0] == 0
+
+    def tracked_discovery(current, db):
+        discovery_calls.append(current.directory)
+        return original_discover(current, db)
+
+    monkeypatch.setattr(catalog.Catalog, '_discover', tracked_discovery)
+    assert not index.ready()
+    page = store.list_page(tmp_path)
+    assert discovery_calls
+    assert page['catalog_state']['status'] == 'ready'
+    assert {item['task_id'] for item in page['items']} == {'known', 'foreign'}
+    assert next(item for item in page['items'] if item['task_id'] == 'known')['title'] == 'updated'
