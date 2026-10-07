@@ -21,6 +21,7 @@ from mcp.types import INTERNAL_ERROR, INVALID_PARAMS
 
 from . import backends, control, identity, inbox, store
 from .backends import DEFAULT_BACKEND, DEFAULT_FREEDOM, FREEDOMS
+from .catalog import bounded_request
 from .events import EVENT_KINDS, events_path, read_page, read_recent
 from .tasks import (
     GIT_SAFE_CONFIG,
@@ -281,6 +282,7 @@ def _resolve_repo_path(repo_path: str) -> Path:
 
 async def _validate_repo_path(repo_path: str) -> Path:
     return await asyncio.to_thread(_resolve_repo_path, repo_path)
+
 
 
 @mcp.tool()
@@ -703,6 +705,7 @@ async def list_tasks(status: str | None = None, backend: str | None = None) -> l
 
 
 @mcp.tool()
+@bounded_request
 async def list_task_page(limit: int = 100, cursor: str | None = None, active_only: bool = False, session_id: str | None = None, task_ids: list[str] | None = None) -> dict[str, Any]:
     """Stable newest-first persisted task headers; inspect a task for reconciled status/output.
 
@@ -869,6 +872,7 @@ async def get_task_events(
 
 
 @mcp.tool()
+@bounded_request
 async def get_task_event_page(
     task_id: str, limit: int = 100, cursor: str | None = None,
     kinds: list[str] | None = None,
@@ -898,11 +902,12 @@ async def get_task_event_page(
             pending = await asyncio.to_thread(workflow_inspection.page_indexing_response, _reg().log_dir)
             return {"task_id": task_id, "events": [], "has_more": False,
                     "next_cursor": None, "indexing": pending["bootstrap_pending"],
-                    **{key: pending[key] for key in ("bootstrap_pending", "history_incomplete", "authority_incomplete", "counts_complete", "note") if key in pending}}
+                    **{key: pending[key] for key in ("bootstrap_pending", "history_incomplete", "authority_incomplete", "counts_complete", "note", "catalog_state") if key in pending}}
         workflow_inspection.guard_task_read(task_id, managed)
-        from .catalog import METADATA_BYTES
+        from .catalog import METADATA_BYTES, Catalog
+        budget = Catalog(_reg().log_dir, store.RECORD_SUFFIX)
         record = await asyncio.to_thread(store.read, _reg().log_dir, task_id,
-                                         include_prompt=False, metadata_byte_limit=METADATA_BYTES)
+                                         include_prompt=False, metadata_byte_limit=METADATA_BYTES, metadata_budget=budget)
         if _reg().get(task_id) is None and record is None:
             raise ValueError(f"unknown task_id: {task_id}")
         page = await asyncio.to_thread(read_cursor_page, events_path(_reg().log_dir, task_id),
@@ -1041,6 +1046,7 @@ def _guard_saved_workflow_authority(caller: Any, definition: dict[str, Any]) -> 
     guard_saved_workflow_authority(caller, definition)
 
 
+@bounded_request
 async def _workflow_call(action: str, **kwargs: Any) -> Any:
     from . import workflows
     bounded_read = kwargs.pop("_bounded_read", False)
@@ -1128,7 +1134,13 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
             if not ready:
                 return page_indexing_response(_reg().log_dir)
         elif bounded_read and action in {"status", "detail", "list"}:
-            managed = await _bounded_managed_workflow_reader()
+            from .workflow_inspection import managed_page_reader, page_indexing_response
+            ready, managed = await asyncio.to_thread(managed_page_reader, _reg().log_dir)
+            if not ready:
+                pending = await asyncio.to_thread(page_indexing_response, _reg().log_dir)
+                if action == 'list':
+                    pending['workflows'] = []
+                return pending
         else:
             managed = await _managed_workflow_reader()
         if managed is not None:

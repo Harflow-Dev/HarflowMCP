@@ -234,4 +234,6 @@ async def test_server_event_page_caps_direct_metadata_read(tmp_path, monkeypatch
         return object()
     monkeypatch.setattr(store, 'read', bounded)
     await server.get_task_event_page('task-1')
-    assert seen == [{'include_prompt': False, 'metadata_byte_limit': METADATA_BYTES}]
+    assert len(seen) == 1
+    assert seen[0]['include_prompt'] is False and seen[0]['metadata_byte_limit'] == METADATA_BYTES
+    assert seen[0]['metadata_budget'].metadata_limit == 8 * 1024 * 1024

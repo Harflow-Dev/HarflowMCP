@@ -612,7 +612,7 @@ def validate_selection(definition: dict[str, Any], node: dict[str, Any], selecte
     return join_id
 
 
-def _write(path: Path, value: Any) -> None:
+def _write(path: Path, value: Any) -> os.stat_result:
     temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
         with temp.open("x", encoding="utf-8") as f:
@@ -620,12 +620,14 @@ def _write(path: Path, value: Any) -> None:
             json.dump(value, f, ensure_ascii=False)
             f.flush()
             os.fsync(f.fileno())
+            written_source = os.fstat(f.fileno())
         os.replace(temp, path)
         fd = os.open(path.parent, os.O_RDONLY)
         try:
             os.fsync(fd)
         finally:
             os.close(fd)
+        return written_source
     finally:
         temp.unlink(missing_ok=True)
 
@@ -741,19 +743,23 @@ class WorkflowStore:
 
     def get_run(self, run_id: str, *, metadata_byte_limit: int | None = None, metadata_budget: Any = None) -> dict[str, Any]:
         path = self.runs / f"{_identifier(run_id)}.json"
+        from .catalog import source_identity
+        captured_source = source_identity(path.stat())
         if metadata_byte_limit is None:
             run = json.loads(path.read_text())
         else:
             from .bounded_io import read_json
             run = read_json(path, metadata_byte_limit, budget=metadata_budget)
         run["settling"] = any(t.get("status") in {"reserved", "running", "uncertain"} for a in run["activations"] for t in a["tasks"])
-        if metadata_byte_limit is None and (self.runs / '.listing.sqlite3').exists():
+        if metadata_byte_limit is None and (self.runs / '.listing.v7.sqlite3').exists():
             from .catalog import Catalog
             catalog = Catalog(self.runs, '.json')
             with catalog.connect() as db:
                 placeholder = db.execute("SELECT json_extract(payload,'$.needs_direct_lookup') FROM entries WHERE id=?", (run_id,)).fetchone()
-            if placeholder and placeholder[0]:
-                catalog.record(self._catalog_run_header(run), float(run['created_at']), run.get('status') not in TERMINAL, run_id)
+            if placeholder and placeholder[0] and captured_source == source_identity(path.stat()):
+                header = self._catalog_run_header(run)
+                header['_source_identity'] = captured_source
+                catalog.record(header, float(run['created_at']), run.get('status') not in TERMINAL, run_id)
         return run
 
     def list_runs(self, *, strict: bool = False) -> list[dict[str, Any]]:
@@ -784,9 +790,13 @@ class WorkflowStore:
         from .catalog import bound_header
         return bound_header(result)
 
-    def _index_run(self, run: dict[str, Any], *, previous_directory_mtime: int | None = None) -> None:
+    def _index_run(self, run: dict[str, Any], *, previous_directory_mtime: int | None = None, written_source: Any = None) -> None:
         from .catalog import Catalog
-        Catalog(self.runs, '.json').record(self._catalog_run_header(run), float(run['created_at']), run.get('status') not in TERMINAL, run['workflow_run_id'], previous_directory_mtime=previous_directory_mtime)
+        header = self._catalog_run_header(run)
+        if written_source is not None:
+            from .catalog import source_identity
+            header['_source_identity'] = source_identity(written_source)
+        Catalog(self.runs, '.json').record(header, float(run['created_at']), run.get('status') not in TERMINAL, run['workflow_run_id'], previous_directory_mtime=previous_directory_mtime)
 
     def _ownership_catalog(self):
         from .catalog import Catalog
@@ -858,7 +868,8 @@ class WorkflowStore:
         observed = self.get_run(run_id)
         root_id = (observed.get("parent_link") or {}).get("root_workflow_run_id") or run_id
         # All tree mutations serialize with the human cancellation eligibility check.
-        with self.lock(f"tree-mutation:{root_id}"), self.lock(f"run:{run_id}"):
+        from .catalog import catalog_lock, Catalog
+        with self.lock(f"tree-mutation:{root_id}"), self.lock(f"run:{run_id}"), catalog_lock(self.runs):
             run = self.get_run(run_id)
             if event in {"dispatch_reserved", "native_reserved", "invocation_reserved", "child_decision_reopened"}:
                 root = run if root_id == run_id else self.get_run(root_id)
@@ -879,7 +890,8 @@ class WorkflowStore:
             run.pop("can_cancel_from_monitor", None)
             run.pop("monitor_cancel_reason", None)
             previous_directory_mtime = self.runs.stat().st_mtime_ns
-            _write(self.runs / f"{run_id}.json", run)
+            Catalog(self.runs, '.json').invalidate(run_id)
+            written_source = _write(self.runs / f"{run_id}.json", run)
             for activation in run.get("activations", []):
                 for task in activation.get("tasks", []):
                     receipt = {"workflow_run_id": run_id, "workflow_node_id": activation.get('node_id'), "workflow_execution_id": activation.get('id'), "workflow_role": activation.get('role'), "workflow_name": run.get('name'), "workflow_status": run.get('status'), "execution_contract": run.get('execution_contract'), "interaction_owner": run.get('interaction_owner', 'caller'), "root_workflow_run_id": (run.get('parent_link') or {}).get('root_workflow_run_id', run_id)}
@@ -890,7 +902,7 @@ class WorkflowStore:
                 f.write(json.dumps({"sequence": run["sequence"], "time": run["updated_at"], "event": event, "detail": detail}) + "\n")
                 f.flush()
                 os.fsync(f.fileno())
-            self._index_run(run, previous_directory_mtime=previous_directory_mtime)
+            self._index_run(run, previous_directory_mtime=previous_directory_mtime, written_source=written_source)
             run["settling"] = any(t.get("status") in {"reserved", "running", "uncertain"} for a in run["activations"] for t in a["tasks"])
             return run
 
@@ -920,9 +932,12 @@ class WorkflowStore:
         run.update(retry_counts={}, retry_grants={})
         if dependency_tree is not None:
             run["dependency_tree"] = copy.deepcopy(dependency_tree)
-        previous_directory_mtime = self.runs.stat().st_mtime_ns
-        _write(self.runs / f"{rid}.json", run)
-        self._index_run(run, previous_directory_mtime=previous_directory_mtime)
+        from .catalog import catalog_lock, Catalog
+        with catalog_lock(self.runs):
+            previous_directory_mtime = self.runs.stat().st_mtime_ns
+            Catalog(self.runs, '.json').invalidate(rid)
+            written_source = _write(self.runs / f"{rid}.json", run)
+            self._index_run(run, previous_directory_mtime=previous_directory_mtime, written_source=written_source)
         return run
 
     def control(self, run_id: str, action: str, instructions: str | None = None, additional_attempts: int = 0, *, decision_id: str | None = None, allow_optional_review_skip: bool = False, interaction_owner: str | None = None, _internal: bool = False, _delivery: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1816,7 +1831,7 @@ class CheckoutLease:
                 if (source.st_mtime_ns, source.st_size) != (row[1], row[2]):
                     with self.store.lock(f'run:{run_id}'):
                         refreshed = self.store.get_run(run_id, metadata_byte_limit=4 * 1024 * 1024, metadata_budget=budget)
-                        self.store._index_run(refreshed, previous_directory_mtime=self.store.runs.stat().st_mtime_ns)
+                        self.store._index_run(refreshed, previous_directory_mtime=self.store.runs.stat().st_mtime_ns, written_source=source)
                     return {"workflow_run_id": run_id, "task_id": "ownership_refreshed"}
             except (OSError, ValueError, TypeError):
                 return {"workflow_run_id": run_id, "task_id": "ownership_uncertain"}

@@ -132,7 +132,7 @@ def test_removed_run_prunes_checkout_ownership_after_bounded_bootstrap(storage, 
     ready(storage)
     (storage.runs / f"{run['workflow_run_id']}.json").unlink()
     lease = w.CheckoutLease(storage, str(tmp_path), True)
-    assert lease._orphan_owner() is not None
+    # Verified suffix discovery can prune a removed source without a decode batch.
     assert lease._orphan_owner() is None
     with storage._ownership_catalog().connect() as db:
         assert db.execute('SELECT count(*) FROM checkout_tasks').fetchone() == (0,)

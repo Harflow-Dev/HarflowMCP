@@ -3,9 +3,15 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import heapq
+import fcntl
+import threading
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
+from functools import wraps
 import json
 import logging
+import os
 import math
 import sqlite3
 from pathlib import Path
@@ -18,6 +24,88 @@ BOOTSTRAP_LIMIT = 100
 METADATA_BYTES = 4 * 1024 * 1024
 METADATA_BATCH_BYTES = 8 * 1024 * 1024
 
+
+
+@dataclass
+class MetadataBudget:
+    metadata_bytes: int = 0
+    metadata_decodes: int = 0
+    metadata_limit: int = METADATA_BATCH_BYTES
+
+
+_request_budget: ContextVar[MetadataBudget | None] = ContextVar('catalog_request_budget', default=None)
+
+
+@contextmanager
+def metadata_request():
+    if _request_budget.get() is not None:
+        yield
+        return
+    token = _request_budget.set(MetadataBudget())
+    try:
+        yield
+    finally:
+        _request_budget.reset(token)
+
+
+def bounded_request(function):
+    """Share the indexing budget through nested async readers and asyncio.to_thread."""
+    @wraps(function)
+    async def wrapped(*args, **kwargs):
+        with metadata_request():
+            return await function(*args, **kwargs)
+    return wrapped
+
+
+def source_identity(source):
+    return (source.st_mtime_ns, source.st_size, getattr(source, 'st_ino', 0), getattr(source, 'st_dev', 0))
+
+
+class DeferredRead(Exception):
+    """The request budget is exhausted; leave this source queued for the next read."""
+
+
+_locks: dict[str, tuple[threading.RLock, threading.local]] = {}
+_locks_guard = threading.Lock()
+
+
+@contextmanager
+def catalog_lock(directory: Path):
+    """Stable process/thread lock; nested projections retain the writer's outer lock."""
+    directory.mkdir(parents=True, exist_ok=True)
+    key = str(directory.resolve())
+    with _locks_guard:
+        mutex, local = _locks.setdefault(key, (threading.RLock(), threading.local()))
+    with mutex:
+        depth = getattr(local, 'depth', 0)
+        if not depth:
+            local.handle = (directory / '.listing.lock').open('a+b')
+            fcntl.flock(local.handle.fileno(), fcntl.LOCK_EX)
+        local.depth = depth + 1
+        try:
+            yield
+        finally:
+            local.depth -= 1
+            if not local.depth:
+                fcntl.flock(local.handle.fileno(), fcntl.LOCK_UN)
+                local.handle.close()
+
+
+class CatalogConnection(sqlite3.Connection):
+    def __exit__(self, *args):
+        try:
+            return super().__exit__(*args)
+        finally:
+            self.close()
+
+    def close(self):
+        try:
+            super().close()
+        finally:
+            lock = getattr(self, '_catalog_lock', None)
+            if lock is not None:
+                self._catalog_lock = None
+                lock.__exit__(None, None, None)
 
 def bound_header(header: dict[str, Any]) -> dict[str, Any]:
     """A header is at most 2 KiB; full content remains on the direct detail route."""
@@ -46,40 +134,121 @@ def bound_header(header: dict[str, Any]) -> dict[str, Any]:
 class Catalog:
     def __init__(self, directory: Path, suffix: str):
         self.directory, self.suffix = directory, suffix
-        self.metadata_bytes = 0
-        self.metadata_limit = METADATA_BATCH_BYTES
+        self._budget = _request_budget.get() or MetadataBudget()
         self.identity = hashlib.sha256(str(directory.resolve()).encode()).hexdigest()[:16]
 
+    @property
+    def metadata_bytes(self):
+        return self._budget.metadata_bytes
+
+    @metadata_bytes.setter
+    def metadata_bytes(self, value):
+        self._budget.metadata_bytes = value
+
+    @property
+    def metadata_decodes(self):
+        return self._budget.metadata_decodes
+
+    @metadata_decodes.setter
+    def metadata_decodes(self, value):
+        self._budget.metadata_decodes = value
+
+    @property
+    def metadata_limit(self):
+        return self._budget.metadata_limit
+
+    @metadata_limit.setter
+    def metadata_limit(self, value):
+        self._budget.metadata_limit = value
+
+    def share_budget(self, other: Catalog):
+        self._budget = other._budget
+
+    def state(self, db: sqlite3.Connection | None = None) -> dict[str, Any]:
+        if db is None:
+            with self.connect() as connection:
+                self._discover(connection)
+                return self.state(connection)
+        pending = db.execute('SELECT COUNT(*) FROM pending').fetchone()[0]
+        blocked = db.execute("SELECT COUNT(*) FROM entries WHERE json_extract(payload,'$.needs_direct_lookup')=1").fetchone()[0]
+        values = dict(db.execute('SELECT key,value FROM state'))
+        complete = values.get('complete') == '1' and values.get('directory_mtime') == str(self.directory.stat().st_mtime_ns)
+        status = 'blocked' if blocked else 'preparing' if pending or not complete else 'ready'
+        result = {'status': status, 'source': 'task_catalog' if self.suffix == '.meta.json' else 'workflow_catalog',
+                  'pending_records': pending, 'blocked_records': blocked}
+        if blocked:
+            result['blocker_types'] = [row[0] for row in db.execute("SELECT DISTINCT COALESCE(json_extract(payload,'$.index_blocker'),'direct_inspection') FROM entries WHERE json_extract(payload,'$.needs_direct_lookup')=1 LIMIT 10")]
+        if status != 'ready':
+            result['reason'] = 'Metadata or caller identity requires direct inspection' if blocked else 'Preparing bounded metadata index'
+        return result
+
     def ready(self) -> bool:
+        return self.state()['status'] == 'ready'
+
+    def invalidate(self, identifier: str) -> None:
+        """Commit before replacing metadata, so a killed writer cannot leave ready authority."""
         with self.connect() as db:
-            state = dict(db.execute('SELECT key,value FROM state'))
-            blocked = db.execute("SELECT 1 FROM entries WHERE json_extract(payload,'$.needs_direct_lookup')=1 LIMIT 1").fetchone()
-        return not blocked and state.get('complete') == '1' and state.get('directory_mtime') == str(self.directory.stat().st_mtime_ns)
+            db.execute('INSERT OR IGNORE INTO pending VALUES (?)', (identifier,))
+            db.execute("DELETE FROM state WHERE key='complete'")
 
     def _load_bounded(self, identifier: str, loader):
         path = self.directory / (identifier + self.suffix)
         try:
-            size = path.stat().st_size
+            initial_source = path.stat()
+            size = initial_source.st_size
         except FileNotFoundError:
             return None
         def placeholder():
             key = 'task_id' if self.suffix == '.meta.json' else 'workflow_run_id'
             return {key: identifier, 'status': 'unknown', 'needs_direct_lookup': True,
-                    'note': 'metadata exceeds listing read budget; inspect directly'}, 0.0, True
-        if size > METADATA_BYTES or self.metadata_bytes + size > METADATA_BATCH_BYTES:
+                    'index_blocker': 'oversized_metadata', 'note': 'metadata exceeds listing read budget; inspect directly'}, 0.0, True
+        if size > METADATA_BYTES:
             return placeholder()
+        if self.metadata_decodes >= BOOTSTRAP_LIMIT or self.metadata_bytes + size > self.metadata_limit:
+            raise DeferredRead()
         if getattr(loader, 'bounded_metadata', False):
             from .bounded_io import ReadLimit
             try:
-                return loader(identifier, _metadata_budget=self)
+                value = loader(identifier, _metadata_budget=self)
             except ReadLimit:
-                return placeholder()
-        self.metadata_bytes += size
-        return loader(identifier)
+                # The opened file may have grown since stat. Only a per-record breach
+                # is persistent; aggregate exhaustion must be retried automatically.
+                if path.stat().st_size > METADATA_BYTES:
+                    return placeholder()
+                raise DeferredRead() from None
+        else:
+            self.metadata_decodes += 1
+            self.metadata_bytes += size
+            value = loader(identifier)
+        if source_identity(initial_source) != source_identity(path.stat()):
+            raise DeferredRead()
+        if value is not None:
+            value[0]['_source_identity'] = source_identity(initial_source)
+        return value
 
     def connect(self) -> sqlite3.Connection:
-        self.directory.mkdir(parents=True, exist_ok=True)
-        db = sqlite3.connect(self.directory / '.listing.sqlite3', timeout=10)
+        lock = catalog_lock(self.directory)
+        lock.__enter__()
+        db = None
+        try:
+            db = self._connect_locked()
+            db._catalog_lock = lock
+            return db
+        except BaseException:
+            if db is not None:
+                db.close()
+            lock.__exit__(None, None, None)
+            raise
+
+    def _connect_locked(self) -> sqlite3.Connection:
+        db = sqlite3.connect(self.directory / '.listing.v7.sqlite3', timeout=10, factory=CatalogConnection)
+        try:
+            return self._initialize(db)
+        except BaseException:
+            db.close()
+            raise
+
+    def _initialize(self, db: sqlite3.Connection) -> sqlite3.Connection:
         db.execute('PRAGMA journal_mode=PERSIST')
         db.execute('CREATE TABLE IF NOT EXISTS entries (id TEXT PRIMARY KEY, stamp REAL NOT NULL, active INTEGER NOT NULL, session TEXT, payload TEXT NOT NULL)')
         db.execute('CREATE INDEX IF NOT EXISTS chronology ON entries(stamp DESC,id DESC)')
@@ -90,21 +259,24 @@ class Catalog:
         db.execute('CREATE INDEX IF NOT EXISTS caller_pid ON callers(pid)')
         db.execute('CREATE INDEX IF NOT EXISTS caller_pgid ON callers(pgid)')
         db.execute('CREATE TABLE IF NOT EXISTS associations (id TEXT PRIMARY KEY,payload TEXT NOT NULL)')
-        db.execute('CREATE TABLE IF NOT EXISTS sources (id TEXT PRIMARY KEY,mtime INTEGER,size INTEGER)')
+        db.execute('CREATE TABLE IF NOT EXISTS sources (id TEXT PRIMARY KEY,mtime INTEGER,size INTEGER,inode INTEGER,device INTEGER)')
+        db.execute('CREATE TABLE IF NOT EXISTS pending (id TEXT PRIMARY KEY)')
         db.execute('CREATE TABLE IF NOT EXISTS seen (id TEXT PRIMARY KEY,generation INTEGER NOT NULL)')
         db.execute('CREATE TABLE IF NOT EXISTS checkout_tasks (id TEXT PRIMARY KEY,run_id TEXT NOT NULL,repo TEXT NOT NULL,payload TEXT NOT NULL)')
         db.execute('CREATE INDEX IF NOT EXISTS checkout_repo ON checkout_tasks(repo)')
         db.execute('CREATE INDEX IF NOT EXISTS checkout_run ON checkout_tasks(run_id)')
         version = db.execute("SELECT value FROM state WHERE key='schema_version'").fetchone()
-        if version != ('6',):
+        if version != ('7',):
             db.execute('DELETE FROM checkout_tasks')
             db.execute('DELETE FROM entries')
             db.execute('DELETE FROM callers')
             db.execute('DELETE FROM associations')
-            db.execute('DELETE FROM sources')
+            db.execute('DROP TABLE sources')
+            db.execute('CREATE TABLE sources (id TEXT PRIMARY KEY,mtime INTEGER,size INTEGER,inode INTEGER,device INTEGER)')
+            db.execute('DELETE FROM pending')
             db.execute('DELETE FROM seen')
             db.execute('DELETE FROM state')
-            db.execute("INSERT INTO state VALUES ('schema_version','6')")
+            db.execute("INSERT INTO state VALUES ('schema_version','7')")
         # Build only after invalidating old derivative headers. The partial index
         # makes warm authority readiness independent of retained history size.
         db.execute("CREATE INDEX IF NOT EXISTS incomplete_headers ON entries(id) WHERE json_extract(payload,'$.needs_direct_lookup')=1")
@@ -114,6 +286,13 @@ class Catalog:
 
     def _put(self, db: sqlite3.Connection, header: dict[str, Any], stamp: float, active: bool, identifier: str) -> None:
         header = dict(header)
+        expected_source = header.pop('_source_identity', None)
+        if expected_source is not None:
+            try:
+                if tuple(expected_source) != source_identity((self.directory / (identifier + self.suffix)).stat()):
+                    raise DeferredRead()
+            except FileNotFoundError:
+                raise DeferredRead() from None
         checkout = header.pop('_checkout', [])
         db.execute('DELETE FROM checkout_tasks WHERE run_id=?', (identifier,))
         for task in checkout:
@@ -124,6 +303,7 @@ class Catalog:
             db.execute('INSERT OR REPLACE INTO checkout_tasks VALUES (?,?,?,?)', (task['task_id'], identifier, task['repo_path'], encoded))
         caller = header.pop('_caller', None)
         associations = header.pop('_associations', {})
+        db.execute("DELETE FROM associations WHERE json_extract(payload,'$.workflow_run_id')=?", (identifier,))
         for task_id, association in associations.items():
             db.execute('INSERT OR REPLACE INTO associations VALUES (?,?)', (task_id, json.dumps(association, separators=(',', ':'))))
         if caller is not None:
@@ -142,7 +322,7 @@ class Catalog:
                            (identifier, caller.get('pid'), caller.get('pgid'), int(terminal), encoded))
             else:
                 db.execute('DELETE FROM callers WHERE id=?', (identifier,))
-                header.update(status='unknown', needs_direct_lookup=True, note='caller identity exceeds bounded index; direct inspection required')
+                header.update(status='unknown', needs_direct_lookup=True, index_blocker='unsupported_caller_identity', note='caller identity exceeds bounded index; direct inspection required')
                 active = True
         session_id = header.get('session_id')
         header = bound_header(header)
@@ -152,39 +332,39 @@ class Catalog:
         db.execute('INSERT OR REPLACE INTO seen VALUES (?,?)', (identifier, int(generation[0]) if generation else 0))
         try:
             source = (self.directory / f'{identifier}{self.suffix}').stat()
-            db.execute('INSERT OR REPLACE INTO sources VALUES (?,?,?)', (identifier, source.st_mtime_ns, source.st_size))
+            db.execute('INSERT OR REPLACE INTO sources VALUES (?,?,?,?,?)', (identifier, *(tuple(expected_source) if expected_source is not None else source_identity(source))))
+            db.execute('DELETE FROM pending WHERE id=?', (identifier,))
         except OSError:
             pass
 
     def _changed(self, db: sqlite3.Connection, identifier: str) -> bool:
-        row = db.execute('SELECT mtime,size FROM sources WHERE id=?', (identifier,)).fetchone()
+        row = db.execute('SELECT mtime,size,inode,device FROM sources WHERE id=?', (identifier,)).fetchone()
         try:
             source = (self.directory / f'{identifier}{self.suffix}').stat()
             placeholder = db.execute("SELECT json_extract(payload,'$.needs_direct_lookup') FROM entries WHERE id=?", (identifier,)).fetchone()
-            return row != (source.st_mtime_ns, source.st_size) or bool(placeholder and placeholder[0] and source.st_size <= METADATA_BYTES)
+            return row != (source.st_mtime_ns, source.st_size, getattr(source, 'st_ino', 0), getattr(source, 'st_dev', 0))
         except FileNotFoundError:
             return True
 
     def _remove(self, db: sqlite3.Connection, identifier: str) -> None:
         db.execute('DELETE FROM checkout_tasks WHERE run_id=?', (identifier,))
         db.execute("DELETE FROM associations WHERE json_extract(payload,'$.workflow_run_id')=?", (identifier,))
-        for table in ('entries', 'callers', 'associations', 'sources', 'seen'):
+        for table in ('entries', 'callers', 'associations', 'sources', 'seen', 'pending'):
             db.execute(f'DELETE FROM {table} WHERE id=?', (identifier,))
 
     def _acknowledge_directory(self, db: sqlite3.Connection, previous_directory_mtime: int | None) -> None:
-        state = dict(db.execute('SELECT key,value FROM state'))
-        current = str(self.directory.stat().st_mtime_ns)
-        if state.get('directory_mtime') == str(previous_directory_mtime) or state.get('directory_mtime') == current:
-            db.execute('INSERT OR REPLACE INTO state VALUES (?,?)', ('directory_mtime', current))
-        else:
-            db.execute("DELETE FROM state WHERE key IN ('complete','after')")
+        # Older processes do not honor our lock. A matching-file replacement may
+        # have overlapped this projection, so only discovery can acknowledge a
+        # changed namespace. Keep the prior verified stamp and queued work.
+        if dict(db.execute('SELECT key,value FROM state')).get('directory_mtime') != str(self.directory.stat().st_mtime_ns):
+            db.execute("DELETE FROM state WHERE key='complete'")
 
     def record(self, header: dict[str, Any], stamp: float, active: bool, identifier: str, *, previous_directory_mtime: int | None = None) -> None:
         try:
             with self.connect() as db:
                 self._put(db, header, stamp, active, identifier)
                 self._acknowledge_directory(db, previous_directory_mtime)
-        except (OSError, sqlite3.Error):
+        except (OSError, sqlite3.Error, DeferredRead):
             logging.getLogger(__name__).warning('Listing catalog update unavailable', exc_info=True)
 
     def remove(self, identifier: str, *, previous_directory_mtime: int | None = None) -> None:
@@ -202,7 +382,13 @@ class Catalog:
                 if row is not None and not self._changed(db, identifier):
                     result.append(json.loads(row[0]))
                 else:
-                    value = self._load_bounded(identifier, loader)
+                    try:
+                        value = self._load_bounded(identifier, loader)
+                    except DeferredRead:
+                        db.execute('INSERT OR IGNORE INTO pending VALUES (?)', (identifier,))
+                        key = 'task_id' if self.suffix == '.meta.json' else 'workflow_run_id'
+                        result.append({key: identifier, 'status': 'unknown', 'indexing': True})
+                        continue
                     if value is not None:
                         header, stamp, active = value
                         self._put(db, header, stamp, active, identifier)
@@ -211,43 +397,62 @@ class Catalog:
                         self._remove(db, identifier)
         return result
 
-    def bootstrap(self, db: sqlite3.Connection, loader: Callable[[str], tuple[dict[str, Any], float, bool] | None]) -> bool:
-        state = dict(db.execute('SELECT key,value FROM state'))
+    def _discover(self, db: sqlite3.Connection) -> None:
+        """Stream changed discovery into SQLite; unrelated churn never resets pending work."""
         directory_mtime = str(self.directory.stat().st_mtime_ns)
+        state = dict(db.execute('SELECT key,value FROM state'))
         if state.get('complete') == '1' and state.get('directory_mtime') == directory_mtime:
-            return False
-        if state.get('directory_mtime') != directory_mtime:
-            db.execute("DELETE FROM state WHERE key IN ('complete','after')")
-            state.pop('after', None)
-            state['scan_generation'] = str(int(state.get('scan_generation', '0')) + 1)
-            db.execute('INSERT OR REPLACE INTO state VALUES (?,?)', ('scan_generation', state['scan_generation']))
-        after = state.get('after', '')
-        # Filename discovery uses bounded memory; at most 100 metadata files decode.
-        paths = heapq.nsmallest(BOOTSTRAP_LIMIT + 1, (p.name for p in self.directory.iterdir() if p.name.endswith(self.suffix) and p.name > after))
-        for name in paths[:BOOTSTRAP_LIMIT]:
-            identifier = name[:-len(self.suffix)]
-            db.execute('INSERT OR REPLACE INTO seen VALUES (?,?)', (identifier, int(state.get('scan_generation', '0'))))
-            if db.execute('SELECT 1 FROM entries WHERE id=?', (identifier,)).fetchone() is None or self._changed(db, identifier):
+            return
+        generation = int((db.execute("SELECT value FROM state WHERE key='scan_generation'").fetchone() or ('0',))[0]) + 1
+        db.execute("INSERT OR REPLACE INTO state VALUES ('scan_generation',?)", (str(generation),))
+        with os.scandir(self.directory) as paths:
+            for path in paths:
+                if not path.name.endswith(self.suffix):
+                    continue
+                identifier = path.name[:-len(self.suffix)]
+                db.execute('INSERT OR REPLACE INTO seen VALUES (?,?)', (identifier, generation))
+                if self._changed(db, identifier):
+                    db.execute('INSERT OR IGNORE INTO pending VALUES (?)', (identifier,))
+        # Uncooperative writers may not take our advisory lock. Never prune or
+        # claim readiness from a discovery snapshot changed while enumerating.
+        if str(self.directory.stat().st_mtime_ns) != directory_mtime:
+            db.execute("DELETE FROM state WHERE key='complete'")
+            return
+        db.execute("INSERT OR REPLACE INTO state VALUES ('directory_mtime',?)", (directory_mtime,))
+        # Only a completed discovery pass authorizes pruning missing metadata.
+        stale = db.execute('SELECT id FROM sources WHERE id NOT IN (SELECT id FROM seen WHERE generation=?)', (generation,))
+        while rows := stale.fetchmany(100):
+            for (identifier,) in rows:
+                self._remove(db, identifier)
+        db.execute('DELETE FROM pending WHERE id NOT IN (SELECT id FROM seen WHERE generation=?)', (generation,))
+        db.execute("INSERT OR REPLACE INTO state VALUES ('complete','1')")
+
+    def bootstrap(self, db: sqlite3.Connection, loader: Callable[[str], tuple[dict[str, Any], float, bool] | None]) -> bool:
+        self._discover(db)
+        identifiers = db.execute('SELECT id FROM pending ORDER BY id LIMIT ?', (BOOTSTRAP_LIMIT,)).fetchall()
+        for (identifier,) in identifiers:
+            try:
+                value = self._load_bounded(identifier, loader)
+            except DeferredRead:
+                break
+            except (OSError, ValueError, KeyError, TypeError):
+                logging.getLogger(__name__).warning('Unreadable listing record %s', identifier)
+                value = ({'task_id' if self.suffix == '.meta.json' else 'workflow_run_id': identifier,
+                          'status': 'unknown', 'needs_direct_lookup': True,
+                          'index_blocker': 'unreadable_metadata', 'note': 'Metadata is unreadable; inspect directly'}, 0.0, True)
+            if value is None and (self.directory / (identifier + self.suffix)).exists():
+                key = 'task_id' if self.suffix == '.meta.json' else 'workflow_run_id'
+                value = ({key: identifier, 'status': 'unknown', 'needs_direct_lookup': True,
+                          'index_blocker': 'unreadable_metadata', 'note': 'Metadata is unreadable; inspect directly'}, 0.0, True)
+            if value is not None:
                 try:
-                    value = self._load_bounded(identifier, loader)
-                    if value is not None:
-                        header, stamp, active = value
-                        self._put(db, header, stamp, active, identifier)
-                except (OSError, ValueError, KeyError, TypeError):
-                    logging.getLogger(__name__).warning('Skipping unreadable listing record %s', name)
-                    self._remove(db, identifier)
-            db.execute('INSERT OR REPLACE INTO state VALUES (?,?)', ('after', name))
-        pending = len(paths) > BOOTSTRAP_LIMIT
-        if not pending:
-            generation = int(state.get('scan_generation', '0'))
-            stale = 'SELECT id FROM entries WHERE id NOT IN (SELECT id FROM seen WHERE generation=?)'
-            db.execute(f"DELETE FROM checkout_tasks WHERE run_id IN ({stale})", (generation,))
-            db.execute(f"DELETE FROM associations WHERE json_extract(payload,'$.workflow_run_id') IN ({stale})", (generation,))
-            for table in ('callers', 'sources', 'entries'):
-                db.execute(f'DELETE FROM {table} WHERE id NOT IN (SELECT id FROM seen WHERE generation=?)', (generation,))
-            db.execute('INSERT OR REPLACE INTO state VALUES (?,?)', ('complete', '1'))
-        db.execute('INSERT OR REPLACE INTO state VALUES (?,?)', ('directory_mtime', directory_mtime))
-        return pending
+                    self._put(db, *value, identifier)
+                except DeferredRead:
+                    continue
+            else:
+                self._remove(db, identifier)
+        state = self.state(db)
+        return bool(state['pending_records']) or state['status'] == 'preparing'
 
     def page(self, loader: Callable[[str], tuple[dict[str, Any], float, bool] | None], *, limit: int = PAGE_LIMIT,
              cursor: str | None = None, active_only: bool = False, session_id: str | None = None) -> dict[str, Any]:
@@ -281,7 +486,7 @@ class Catalog:
             counts = {'total_active_count': active_count, 'total_active_root_count': root_counts[0], 'total_attention_root_count': root_counts[1], 'counts_complete': not pending and not incomplete}
             if pending and not active_only:
                 counts.update(total_active_count=None, total_active_root_count=None, total_attention_root_count=None)
-                return {'items': [], 'next_cursor': None, 'has_more': False, 'bootstrap_pending': True, **counts}
+                return {'items': [], 'next_cursor': None, 'has_more': False, 'bootstrap_pending': True, 'history_incomplete': incomplete, 'catalog_state': self.state(db), **counts}
             if active_only:
                 conditions.append('active=1')
             if boundary is not None:
@@ -293,8 +498,11 @@ class Catalog:
             for identifier, stamp, payload in rows[:limit]:
                 previous = last
                 last = (identifier, stamp)
-                if self._changed(db, identifier):
-                    value = self._load_bounded(identifier, loader)
+                if self._changed(db, identifier) and self.metadata_decodes < BOOTSTRAP_LIMIT:
+                    try:
+                        value = self._load_bounded(identifier, loader)
+                    except DeferredRead:
+                        break
                     if value is None:
                         self._remove(db, identifier)
                         continue
@@ -319,4 +527,4 @@ class Catalog:
             counts.update(total_active_root_count=refreshed_roots[0], total_attention_root_count=refreshed_roots[1])
             if pending or incomplete:
                 counts.update(total_active_count=None, total_active_root_count=None, total_attention_root_count=None)
-            return {'items': items, 'next_cursor': following, 'has_more': more, 'bootstrap_pending': pending, 'history_incomplete': incomplete, **counts}
+            return {'items': items, 'next_cursor': following, 'has_more': more, 'bootstrap_pending': pending, 'history_incomplete': incomplete, 'catalog_state': self.state(db), **counts}

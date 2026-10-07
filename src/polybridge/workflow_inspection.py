@@ -134,7 +134,10 @@ def managed_page_reader(log_dir: Any) -> tuple[bool, tuple[dict[str, Any], dict[
     from . import lineage, store
     from .catalog import Catalog
     from .workflows import WorkflowStore
-    if not Catalog(log_dir, store.RECORD_SUFFIX).ready():
+    task_catalog = Catalog(log_dir, store.RECORD_SUFFIX)
+    with task_catalog.connect() as db:
+        db.execute("DELETE FROM state WHERE key='authority_preparation'")
+    if not task_catalog.ready():
         store.bootstrap_catalog(log_dir)
         # Do not combine a bootstrap decode batch with managed ownership decoding.
         return False, None
@@ -149,7 +152,12 @@ def managed_page_reader(log_dir: Any) -> tuple[bool, tuple[dict[str, Any], dict[
         # Missing ownership is not evidence that a verified agent is unmanaged.
         # Resolve only through the bounded run catalog, never list_runs().
         if not storage._ownership_catalog().ready():
-            storage.list_run_page()
+            page = storage.list_run_page()
+            preparation = page.get('catalog_state', storage._ownership_catalog().state())
+            if preparation['status'] == 'ready':
+                preparation.update(status='preparing', source='caller_authority', reason='Validating workflow caller ownership after metadata indexing')
+            with task_catalog.connect() as db:
+                db.execute("INSERT OR REPLACE INTO state VALUES ('authority_preparation',?)", (json.dumps(preparation),))
             return False, None
         queue, visited, association = [(detection.caller.record.task_id, set())], set(), None
         with storage._ownership_catalog().connect() as ownership_db, Catalog(log_dir, store.RECORD_SUFFIX).connect() as task_db:
@@ -172,12 +180,40 @@ def managed_page_reader(log_dir: Any) -> tuple[bool, tuple[dict[str, Any], dict[
                 raise ValueError('Workflow caller ownership ancestry exceeds its bounded limit')
         if association is None:
             return True, None
-        run = storage.get_run(association['workflow_run_id'], metadata_byte_limit=4 * 1024 * 1024)
     else:
-        association = storage.task_owner(detection.caller.record.task_id, strict=True, metadata_byte_limit=4 * 1024 * 1024)
-        if association is None:
-            raise ValueError('Workflow task ownership is unavailable')
-        run = storage.get_run(association['workflow_run_id'], metadata_byte_limit=4 * 1024 * 1024)
+        from .bounded_io import read_receipt
+        receipt_value = read_receipt(receipt)
+        association = {'workflow_run_id': receipt_value['workflow_run_id']}
+    # Decode once, with the same aggregate budget as the subsequent page reader.
+    # Receipt verification must not hide a second unbudgeted run decode.
+    from .catalog import DeferredRead
+    budget = Catalog(storage.runs, '.json')
+    budget.share_budget(task_catalog)
+    def load_run(identifier, *, _metadata_budget=None):
+        run_value = storage.get_run(identifier, metadata_byte_limit=4 * 1024 * 1024, metadata_budget=_metadata_budget)
+        return run_value, float(run_value['created_at']), run_value.get('status') not in {'completed', 'failed', 'cancelled'}
+    load_run.bounded_metadata = True
+    try:
+        loaded = budget._load_bounded(association['workflow_run_id'], load_run)
+    except DeferredRead:
+        preparation = {'status': 'preparing', 'source': 'caller_authority', 'reason': 'Preparing bounded workflow ownership metadata', 'pending_records': 1, 'blocked_records': 0}
+        with task_catalog.connect() as db:
+            db.execute("INSERT OR REPLACE INTO state VALUES ('authority_preparation',?)", (json.dumps(preparation),))
+        return False, None
+    if loaded is None:
+        raise ValueError('Workflow ownership run is unavailable')
+    run = loaded[0]
+    if run.get('needs_direct_lookup'):
+        preparation = {'status': 'blocked', 'source': 'caller_authority', 'reason': 'Workflow ownership metadata exceeds per-record read limit', 'pending_records': 0, 'blocked_records': 1, 'blocker_types': ['oversized_metadata']}
+        with task_catalog.connect() as db:
+            db.execute("INSERT OR REPLACE INTO state VALUES ('authority_preparation',?)", (json.dumps(preparation),))
+        return False, None
+    run.pop('_source_identity', None)
+    if receipt.exists():
+        matched = next((activation for activation in run.get('activations', []) if any(task.get('task_id') == detection.caller.record.task_id for task in activation.get('tasks', []))), None)
+        if matched is None:
+            raise ValueError('Workflow ownership receipt no longer matches its run')
+        association = {'workflow_run_id': run['workflow_run_id'], 'workflow_node_id': matched['node_id'], 'workflow_role': matched['role'], 'node_id': matched['node_id'], 'role': matched['role'], 'activation_id': matched['id'], 'execution_contract': run.get('execution_contract'), 'status': run['status']}
     return True, (association, run) if association.get('role') == 'builder' or run.get('execution_contract') == 'delegation' else None
 
 
@@ -185,13 +221,21 @@ def page_indexing_response(log_dir: Any) -> dict[str, Any]:
     """No identifiers are exposed while bounded caller authority is incomplete."""
     from .catalog import Catalog
     from . import store
-    with Catalog(log_dir, store.RECORD_SUFFIX).connect() as db:
-        incomplete = db.execute("SELECT 1 FROM entries WHERE json_extract(payload,'$.needs_direct_lookup')=1 LIMIT 1").fetchone() is not None
+    state = Catalog(log_dir, store.RECORD_SUFFIX).state()
+    if state['status'] == 'ready':
+        with Catalog(log_dir, store.RECORD_SUFFIX).connect() as db:
+            saved = db.execute("SELECT value FROM state WHERE key='authority_preparation'").fetchone()
+        if saved:
+            state = json.loads(saved[0])
+        else:
+            state.update(status='preparing', source='caller_authority', reason='Validating workflow caller ownership after metadata indexing')
+    incomplete = state['status'] == 'blocked'
     result = {'items': [], 'related_headers': [], 'next_cursor': None, 'has_more': False,
-              'bootstrap_pending': not incomplete, 'history_incomplete': incomplete,
-              'authority_incomplete': incomplete, 'counts_complete': False}
+              'bootstrap_pending': state['status'] == 'preparing', 'history_incomplete': incomplete,
+              'authority_incomplete': incomplete, 'counts_complete': False,
+              'catalog_state': state}
     if incomplete:
-        result['note'] = 'Task metadata exceeds bounded authority indexing; inspect known tasks with direct status before loading history.'
+        result['note'] = state['reason']
     return result
 
 

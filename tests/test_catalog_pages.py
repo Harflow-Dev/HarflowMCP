@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+from pathlib import Path
 from dataclasses import asdict, replace
 from types import SimpleNamespace
 
@@ -176,8 +177,7 @@ def test_nested_caller_inherits_workflow_authority_without_historical_scans(tmp_
     monkeypatch.setattr(lineage, 'detect_catalog_caller', lambda logdir: original(logdir, environ={}, getpid=lambda: 40, getsid=lambda pid: 40, process_table=lambda: {40: 30, 30: 20, 20: 1, 1: 0}, check=lambda value: 'alive'))
     monkeypatch.setattr(store, 'read_all', lambda *a, **k: pytest.fail('legacy task scan'))
     monkeypatch.setattr(storage, 'list_runs', lambda *a, **k: pytest.fail('legacy workflow scan'))
-    assert managed_page_reader(directory)[0] is False
-    assert managed_page_reader(directory)[0] is False
+    # Already-projected metadata needs no artificial bootstrap barrier.
     ready, managed = managed_page_reader(directory)
     assert ready and managed[0]['role'] == 'node'
     assert managed[0]['activation_id'] == 'execution'
@@ -395,7 +395,11 @@ def test_listing_metadata_batch_budget_bounds_decoding(tmp_path):
         return {'task_id': identifier, 'status': 'completed'}, float(int(identifier)), False
     page = Catalog(tmp_path, '.meta.json').page(load)
     assert len(calls) * size <= METADATA_BATCH_BYTES
-    assert page['history_incomplete'] and not page['counts_complete']
+    assert page['bootstrap_pending'] and not page['history_incomplete']
+    assert page['catalog_state']['status'] == 'preparing' and not page['counts_complete']
+    assert page['items'] == []
+    final = Catalog(tmp_path, '.meta.json').page(load)
+    assert not final['bootstrap_pending'] and final['catalog_state']['status'] == 'ready'
 
 
 def test_oversized_run_header_defers_decode_until_selected_detail(tmp_path, monkeypatch):
@@ -447,8 +451,9 @@ def test_batch_budget_placeholder_refresh_restores_creation_order_automatically(
     def load(identifier):
         return {'task_id': identifier, 'status': 'completed'}, float(int(identifier) + 1), False
     first = Catalog(tmp_path, '.meta.json').page(load)
-    assert first['history_incomplete']
-    assert first['items'][0]['task_id'] == '1'
+    assert first['bootstrap_pending'] and not first['history_incomplete']
+    assert first['items'] == []
+    assert first['catalog_state']['pending_records'] == 1
     Catalog(tmp_path, '.meta.json').page(load)  # Normal refresh, no direct inspection.
     final = Catalog(tmp_path, '.meta.json').page(load)
     assert not final['history_incomplete']
@@ -494,8 +499,9 @@ def test_actual_opened_metadata_bytes_respect_batch_budget_when_path_stat_is_sta
     load.bounded_metadata = True
     page = catalog.page(load)
     assert catalog.metadata_bytes <= METADATA_BATCH_BYTES
-    assert page['history_incomplete']
-    assert sum(bool(item.get('needs_direct_lookup')) for item in page['items']) == 1
+    assert page['bootstrap_pending'] and not page['history_incomplete']
+    assert page['catalog_state']['pending_records'] == 1
+    assert page['items'] == []
 
 
 def test_cached_caller_projection_omits_large_nonidentity_fields_and_refuses_oversized_identity(tmp_path):
@@ -542,7 +548,8 @@ def test_many_legacy_receipt_decorations_share_one_workflow_metadata_budget(tmp_
     monkeypatch.setattr(bounded_io, 'read_json', measured)
     page = store.list_page(tmp_path / 'tasks')
     assert sum(consumed) <= METADATA_BATCH_BYTES
-    assert page['ownership_incomplete'] and page['history_incomplete'] and not page['counts_complete']
+    assert page['bootstrap_pending'] and not page.get('ownership_incomplete', False)
+    assert page['catalog_state']['status'] == 'preparing' and not page['counts_complete']
 
 
 @pytest.mark.parametrize('backend,title,current_start,expected_state', [
@@ -580,8 +587,9 @@ async def test_selected_workflow_polling_never_scans_retained_task_history(tmp_p
     monkeypatch.setattr(workflows, 'WorkflowStore', lambda **kwargs: storage)
     monkeypatch.setattr(storage, 'get_run', lambda identifier, **kwargs: {'workflow_run_id': identifier, 'status': 'completed', 'definition': {}})
     for _ in range(3):
-        with pytest.raises(Exception, match='indexing is incomplete'):
-            await server._workflow_call('status', run_id='selected', _bounded_read=True)
+        pending = await server._workflow_call('status', run_id='selected', _bounded_read=True)
+        assert pending['catalog_state']['status'] == 'preparing'
+        assert 'workflow_run_id' not in pending
     for _ in range(4):
         assert (await server._workflow_call('status', run_id='selected', _bounded_read=True))['workflow_run_id'] == 'selected'
         assert (await server._workflow_call('detail', run_id='selected', view='definition', _bounded_read=True))['chunk'] == '{}'
@@ -651,7 +659,7 @@ def test_schema_three_cache_rebuild_is_bounded_without_decoding_old_headers(tmp_
     page = store.list_page(directory)
     assert page['bootstrap_pending'] and len(reads) == 100
     with index.connect() as db:
-        assert db.execute("SELECT value FROM state WHERE key='schema_version'").fetchone() == ('6',)
+        assert db.execute("SELECT value FROM state WHERE key='schema_version'").fetchone() == ('7',)
         assert db.execute("SELECT count(*) FROM entries WHERE id LIKE 'old%'").fetchone() == (0,)
     assert originals == {p.name: p.read_bytes() for p in directory.glob('*.meta.json')}
 
@@ -673,8 +681,10 @@ def test_monitor_definition_list_uses_bounded_authority_but_public_first_read_is
     assert json.loads(capsys.readouterr().out)['result']['workflows'] == [{'name': 'saved'}]
     assert legacy.await_count == 1
     for _ in range(3):
-        assert ctl.main(['workflow-list', '--monitor-view', '--json']) != 0
-        assert 'indexing is incomplete' in capsys.readouterr().out
+        assert ctl.main(['workflow-list', '--monitor-view', '--json']) == 0
+        pending = json.loads(capsys.readouterr().out)['result']
+        assert pending['catalog_state']['status'] == 'preparing'
+        assert pending['workflows'] == []
     for _ in range(4):
         assert ctl.main(['workflow-list', '--monitor-view', '--json']) == 0
         assert json.loads(capsys.readouterr().out)['result']['workflows'] == [{'name': 'saved'}]
@@ -706,3 +716,281 @@ async def test_public_definition_list_does_not_require_catalog_bootstrap(tmp_pat
     monkeypatch.setattr(workflows, 'WorkflowStore', lambda **kwargs: storage)
     monkeypatch.setattr(storage, 'list', lambda: [{'name': 'public'}])
     assert await server.list_workflows() == [{'name': 'public'}]
+
+
+def test_discovery_queue_survives_unrelated_churn_and_new_earlier_names(tmp_path, monkeypatch):
+    legacy_tasks(tmp_path, 350)
+    calls, original = [], store.read
+    monkeypatch.setattr(store, 'read', lambda *a, **k: (calls.append(a[1]), original(*a, **k))[1])
+    for number, expected in enumerate((100, 100, 100, 51)):
+        calls.clear()
+        (tmp_path / f'churn{number}.jsonl').write_text('noise')
+        (tmp_path / f'.temporary{number}').write_text('noise')
+        if number == 1:
+            (tmp_path / '000-earlier.meta.json').write_text(json.dumps(asdict(record('000-earlier'))))
+        page = store.list_page(tmp_path)
+        assert len(calls) == expected
+        assert page['bootstrap_pending'] == (number < 3)
+    assert catalog.Catalog(tmp_path, store.RECORD_SUFFIX).ready()
+    assert len(set(calls)) == 51
+
+
+def test_warm_catalog_readiness_does_not_enumerate_unchanged_history(tmp_path, monkeypatch):
+    legacy_tasks(tmp_path, 2)
+    store.list_page(tmp_path)
+    index = catalog.Catalog(tmp_path, store.RECORD_SUFFIX)
+    assert index.ready()
+    monkeypatch.setattr(os, 'scandir', lambda *a: pytest.fail('warm discovery scan'))
+    assert index.ready()
+    assert not store.list_page(tmp_path)['bootstrap_pending']
+
+
+def test_replaced_same_size_and_mtime_metadata_is_reindexed(tmp_path):
+    import os
+    old = record('replace')
+    store.write(tmp_path, old)
+    store.list_page(tmp_path)
+    path = tmp_path / 'replace.meta.json'
+    stat = path.stat()
+    replacement = tmp_path / '.replacement'
+    raw = path.read_text().replace('Completed', 'Different')
+    replacement.write_text(raw)
+    os.utime(replacement, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    os.replace(replacement, path)
+    index = catalog.Catalog(tmp_path, store.RECORD_SUFFIX)
+    assert not index.ready()
+    assert store.list_page(tmp_path)['catalog_state']['status'] == 'ready'
+    with index.connect() as db:
+        assert db.execute('SELECT inode FROM sources WHERE id=?', ('replace',)).fetchone()[0] == path.stat().st_ino
+
+
+def test_projection_failure_retains_committed_invalidation_and_recovers(tmp_path, monkeypatch):
+    import sqlite3
+    store.write(tmp_path, record('interrupted'))
+    store.list_page(tmp_path)
+    original = catalog.Catalog._put
+    monkeypatch.setattr(catalog.Catalog, '_put', lambda *a, **k: (_ for _ in ()).throw(sqlite3.OperationalError('interrupted projection')))
+    assert store.write_landed(tmp_path, replace(record('interrupted'), title='updated'))
+    assert not catalog.Catalog(tmp_path, store.RECORD_SUFFIX).ready()
+    monkeypatch.setattr(catalog.Catalog, '_put', original)
+    page = store.list_page(tmp_path)
+    assert page['catalog_state']['status'] == 'ready'
+    assert page['items'][0]['title'] == 'updated'
+
+
+def test_changed_discovery_snapshot_does_not_prune_or_claim_ready(tmp_path, monkeypatch):
+    store.write(tmp_path, record('removed'))
+    store.write(tmp_path, record('retained'))
+    store.list_page(tmp_path)
+    (tmp_path / 'removed.meta.json').unlink()
+    original = catalog.Catalog._changed
+    def changing(index, db, identifier):
+        (tmp_path / 'arriving.meta.json').write_text(json.dumps(asdict(record('arriving'))))
+        return original(index, db, identifier)
+    monkeypatch.setattr(catalog.Catalog, '_changed', changing)
+    index = catalog.Catalog(tmp_path, store.RECORD_SUFFIX)
+    assert not index.ready()
+    with index.connect() as db:
+        assert db.execute("SELECT 1 FROM entries WHERE id='removed'").fetchone()
+    monkeypatch.setattr(catalog.Catalog, '_changed', original)
+    page = store.list_page(tmp_path)
+    assert page['catalog_state']['status'] == 'ready'
+    assert {item['task_id'] for item in page['items']} == {'arriving', 'retained'}
+
+
+def test_unsupported_caller_identity_is_persistent_without_redecode(tmp_path, monkeypatch):
+    task = replace(record('blocked'), markers=['x' * 9000])
+    store.write(tmp_path, task)
+    calls, original = [], store.read
+    monkeypatch.setattr(store, 'read', lambda *a, **k: (calls.append(a[1]), original(*a, **k))[1])
+    for number in range(3):
+        (tmp_path / f'{number}.jsonl').write_text('noise')
+        page = store.list_page(tmp_path)
+        assert page['catalog_state']['status'] == 'blocked'
+        assert not page['bootstrap_pending']
+    assert not calls
+    store.write(tmp_path, record('blocked'))
+    assert store.list_page(tmp_path)['catalog_state']['status'] == 'ready'
+
+
+def test_old_live_catalog_schema_is_untouched_and_old_writer_replacement_recovers(tmp_path):
+    import sqlite3
+    legacy = tmp_path / '.listing.sqlite3'
+    with sqlite3.connect(legacy) as db:
+        db.execute('CREATE TABLE sources(id TEXT PRIMARY KEY,mtime INTEGER,size INTEGER)')
+        db.execute('CREATE TABLE state(key TEXT PRIMARY KEY,value TEXT)')
+        db.execute("INSERT INTO state VALUES ('schema_version','6')")
+    store.write(tmp_path, record('oldwriter', title='first'))
+    store.list_page(tmp_path)
+    # Simulate a still-running old process: authoritative atomic replacement and
+    # its original derivative schema remain usable during the rolling install.
+    path = tmp_path / 'oldwriter.meta.json'
+    temporary = tmp_path / '.oldwriter-temp'
+    temporary.write_text(json.dumps(asdict(record('oldwriter', title='second'))))
+    os.replace(temporary, path)
+    with sqlite3.connect(legacy) as db:
+        db.execute('INSERT INTO sources VALUES (?,?,?)', ('oldwriter', path.stat().st_mtime_ns, path.stat().st_size))
+        assert db.execute("SELECT value FROM state WHERE key='schema_version'").fetchone() == ('6',)
+    page = store.list_page(tmp_path)
+    assert page['items'][0]['title'] == 'second'
+    assert page['catalog_state']['status'] == 'ready'
+
+
+def test_catalog_reader_waits_for_supported_writer_projection(tmp_path, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    store.write(tmp_path, record('serialized', status='running'))
+    store.list_page(tmp_path)
+    entered, release = threading.Event(), threading.Event()
+    original = catalog.Catalog.record
+    def held(index, *args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        return original(index, *args, **kwargs)
+    monkeypatch.setattr(catalog.Catalog, 'record', held)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        writer = pool.submit(store.write_landed, tmp_path, record('serialized', title='terminal'))
+        assert entered.wait(5)
+        reader = pool.submit(store.list_page, tmp_path)
+        assert not reader.done()
+        release.set()
+        assert writer.result(timeout=5)
+        page = reader.result(timeout=5)
+    assert page['catalog_state']['status'] == 'ready'
+    assert page['items'][0]['title'] == 'terminal'
+    assert page['items'][0]['status'] == 'completed'
+
+
+def test_foreign_writer_overlapping_projection_cannot_acknowledge_stale_header(tmp_path, monkeypatch):
+    store.write(tmp_path, record('overlap', title='initial'))
+    store.list_page(tmp_path)
+    original = catalog.Catalog.record
+    def overlapping(index, header, *args, **kwargs):
+        path = tmp_path / 'overlap.meta.json'
+        foreign = tmp_path / '.foreign-temp'
+        foreign.write_text(json.dumps(asdict(record('overlap', title='foreign'))))
+        os.replace(foreign, path)
+        return original(index, header, *args, **kwargs)
+    monkeypatch.setattr(catalog.Catalog, 'record', overlapping)
+    assert store.write_landed(tmp_path, record('overlap', title='newwriter'))
+    assert not catalog.Catalog(tmp_path, store.RECORD_SUFFIX).ready()
+    monkeypatch.setattr(catalog.Catalog, 'record', original)
+    page = store.list_page(tmp_path)
+    assert page['items'][0]['title'] == 'foreign'
+    assert page['catalog_state']['status'] == 'ready'
+
+
+def test_catalog_advisory_lock_coordinates_a_separate_writer_process(tmp_path):
+    import subprocess
+    import sys
+    from concurrent.futures import ThreadPoolExecutor
+    store.write(tmp_path, record('processwriter', title='old'))
+    store.list_page(tmp_path)
+    script = '''
+import json, os, sys
+from pathlib import Path
+from polybridge import catalog, store
+root = Path(sys.argv[1])
+with catalog.catalog_lock(root):
+    index = catalog.Catalog(root, store.RECORD_SUFFIX)
+    index.invalidate('processwriter')
+    path = root / 'processwriter.meta.json'
+    payload = json.loads(path.read_text())
+    payload['title'] = 'new'
+    temporary = root / '.processwriter-temp'
+    temporary.write_text(json.dumps(payload))
+    os.replace(temporary, path)
+    print('metadata_replaced', flush=True)
+    sys.stdin.readline()
+    header, stamp, active = store.listing_header(store.read(root, 'processwriter'))
+    index.record(header, stamp, active, 'processwriter')
+'''
+    child = subprocess.Popen([sys.executable, '-c', script, str(tmp_path)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        assert child.stdout.readline().strip() == 'metadata_replaced'
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            reader = pool.submit(store.list_page, tmp_path)
+            assert not reader.done()
+            child.stdin.write('finish\n')
+            child.stdin.flush()
+            page = reader.result(timeout=5)
+        assert child.wait(timeout=5) == 0, child.stderr.read()
+        assert page['catalog_state']['status'] == 'ready'
+        assert page['items'][0]['title'] == 'new'
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.communicate(timeout=5)
+
+
+def test_stale_selected_snapshot_cannot_stamp_a_newer_task_source(tmp_path, monkeypatch):
+    from polybridge.backends import Accumulator
+    stale = record('repair', title='old')
+    store.write(tmp_path, stale)
+    store.list_page(tmp_path)
+    store.write(tmp_path, replace(stale, title='new'))
+    monkeypatch.setattr(store, '_resolve', lambda *a, **k: ('completed', 'Completed', Accumulator(), [], False))
+    store.snapshot(tmp_path, stale)
+    page = store.list_page(tmp_path)
+    assert page['items'][0]['title'] == 'new'
+    assert page['catalog_state']['status'] == 'ready'
+
+
+def test_direct_workflow_repair_retains_the_source_identity_it_decoded(tmp_path, monkeypatch):
+    storage = workflows.WorkflowStore(tmp_path)
+    run = storage.create_run(definition(), 'old', tmp_path)
+    identifier = run['workflow_run_id']
+    run['large_legacy_field'] = 'x' * (catalog.METADATA_BYTES + 1)
+    path = storage.runs / f'{identifier}.json'
+    path.write_text(json.dumps(run))
+    assert storage.list_run_page()['catalog_state']['status'] == 'blocked'
+    original = catalog.Catalog.record
+    def replace_during_repair(index, header, *args, **kwargs):
+        newer = dict(run)
+        newer.pop('large_legacy_field')
+        newer['name'] = 'new'
+        temporary = storage.runs / '.newer-run'
+        temporary.write_text(json.dumps(newer))
+        os.replace(temporary, path)
+        return original(index, header, *args, **kwargs)
+    monkeypatch.setattr(catalog.Catalog, 'record', replace_during_repair)
+    assert storage.get_run(identifier)['name'] == run['name']
+    assert not storage._ownership_catalog().ready()
+    monkeypatch.setattr(catalog.Catalog, 'record', original)
+    page = storage.list_run_page()
+    assert page['items'][0]['name'] == 'new'
+    assert page['catalog_state']['status'] == 'ready'
+
+
+def test_managed_ownership_decode_and_page_share_one_aggregate_budget(tmp_path, monkeypatch):
+    from polybridge import bounded_io
+    directory = tmp_path / 'tasks'
+    storage = workflows.WorkflowStore(tmp_path)
+    run = storage.create_run(definition(), 'x' * (3 * 1024 * 1024), tmp_path)
+    storage.update_run(run['workflow_run_id'], lambda value: value.update(activations=[{'id': 'execution', 'node_id': 'work', 'role': 'orchestrator', 'status': 'completed', 'tasks': [{'task_id': 'caller', 'status': 'completed'}]}]), 'seed')
+    task = record('caller')
+    store.write(directory, task)
+    store.list_page(directory)
+    monkeypatch.setattr(lineage, 'detect_catalog_caller', lambda *a, **k: SimpleNamespace(caller=SimpleNamespace(record=task), undecidable=None))
+    original_read = bounded_io.read_json
+    consumed, run_reads = [], []
+    def measured(path, limit, *, budget=None):
+        result = original_read(path, limit, budget=budget)
+        if path.name.endswith('.meta.json') or path.parent == storage.runs:
+            assert budget is not None
+            consumed.append(path.stat().st_size)
+            if path.parent == storage.runs:
+                run_reads.append(path.name)
+        return result
+    monkeypatch.setattr(bounded_io, 'read_json', measured)
+    with catalog.metadata_request():
+        ready, managed = managed_page_reader(directory)
+        assert ready and managed[0]['role'] == 'orchestrator'
+        for number in range(100):
+            historical = record(f'new{number:03}', prompt='x' * (100 * 1024))
+            (directory / f'{historical.task_id}.meta.json').write_text(json.dumps(asdict(historical)))
+        page = store.list_page(directory)
+        assert page['bootstrap_pending']
+        assert sum(consumed) <= catalog.METADATA_BATCH_BYTES
+        assert len(consumed) <= catalog.BOOTSTRAP_LIMIT
+        assert run_reads == [f"{run['workflow_run_id']}.json"]

@@ -82,6 +82,10 @@ including standalone and embedded task views. Monitor offers Cancel for its own 
 and idle caller-owned workflows; linked child views route cancellation to the root.
 See [workflow interaction and recovery](docs/workflows.md) for eligibility and cancellation outcomes.
 
+History indexing recovers automatically while Monitor retains loaded content. New activity panels
+fade into place, and actionable workflow loading errors appear in a dismissible top notification
+with retained details. See [Monitor history and notifications](docs/workflows.md#monitor-history-and-notifications).
+
 After updating your checkout, reinstall the CLI with `uv tool install . --force --no-cache` and
 rebuild Monitor, then repeat the copy and open commands above so the installed app and runner stay in sync.
 
@@ -140,6 +144,8 @@ Call `list_backends` to check installation and actual enforcement capabilities. 
 its own installation, authentication, and model access; Polybridge does not provide these accounts.
 
 Before assigning a harness to a node, read [harness permissions and setup](docs/harness-permissions.md).
+For refusals, missing tools or macOS Git cache diagnostics, follow the
+[headless troubleshooting steps](docs/harness-permissions.md#troubleshooting-a-headless-refusal).
 It covers all five harnesses, setup for each node type, build/test and MCP approvals, network access,
 and common headless permission refusals.
 

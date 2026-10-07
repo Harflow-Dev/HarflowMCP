@@ -27,6 +27,19 @@ vendor documentation; the Vibe example explicitly covers the locally inspected *
 `./install.sh` registers **Polybridge as an MCP server in supported clients**. That enables clients
 to call Polybridge; it does not provision the services, accounts, or approvals used by workers.
 
+### Before the first workflow run
+
+- Check each node and fallback in its actual working directory: confirm effective global,
+  project/local, profile and managed configuration. Multi-repository workflows may start above
+  the individual checkouts, where their project rules are not loaded.
+- Match the assignment's exact read/build/test commands, output directories and service tools
+  to its saved access and network settings. Preserve existing deny/ask rules when adding allowances.
+- Check binary resolution, dependency availability and credentials through the launching service's
+  environment; for login-shell commands, confirm the shell's resolved PATH too.
+- Verify a fresh small task with the same harness, version, directory, access and execution mode.
+  Inspect structured denials and actual output before starting the full workflow. Model-backed
+  checks can incur charges; use isolated no-model probes where available.
+
 ## Choose access for the node's work
 
 | Node or control role | Default access | Setup needed for its assignment |
@@ -107,10 +120,11 @@ such as `.claude/settings.json` and `.claude/settings.local.json`. `CLAUDE_CONFI
 global settings. Read/review nodes may need read Bash permissions; implementation nodes need exact
 test/build commands. A publishing node may additionally need `gh` or service-specific MCP permissions.
 
-For a repository that uses `uv run pytest`, a scoped permission addition is
-`"Bash(uv run pytest:*)"` in `permissions.allow`. Merge it with existing rules, inspect the range of
-arguments it permits, and retain applicable denies. Do not bundle an allowed command with unrelated
-commands: the combined shell request can still require approval.
+For a repository that uses `uv run pytest`, start with the exact rule
+`"Bash(uv run pytest)"` in `permissions.allow`. If the assignment needs selected test arguments,
+inspect that range before using `"Bash(uv run pytest *)"`. Merge additions with existing rules;
+retain deny and ask rules. A matching deny or ask takes precedence over an allow, regardless of
+specificity. Compound commands still need approval for their individual operations.
 [Claude permission documentation](https://code.claude.com/docs/en/permissions).
 
 ### Codex
@@ -243,15 +257,72 @@ use a disposable checkout and verify
 one reversible edit and its test. Check the structured result, denial/warning evidence, and actual
 outputs. Repeat for any service tool the real assignment requires, with its intended authorization.
 
-| Symptom | What to check |
-| --- | --- |
-| Binary missing, login/provider/quota error | Server/service PATH; complete harness auth; provider/model access and quota. |
-| Approval refused or auto-denied | Exact tool/command and effective global/project/profile rules; correct setup and verify it in a fresh smoke task. |
-| Git command works directly but fails with `-C` | Working directory and prefix matching; use direct commands or a scoped path/subcommand rule. |
-| Network/dependency failure | Saved network option, backend support, environment reachability, credentials, and dependency preparation. |
-| Invalid node/candidate settings | Implementation access, unsupported model/effort/turn cap, or incompatible network request. |
-| Completed with warnings or no expected output | Inspect denials and actual changes: Vibe/agy can exit cleanly after a refusal; completion alone proves no edit/test success. |
-| Malformed worker result / run needs attention | Inspect execution evidence and required structured output; fix the cause before retry or recovery. |
+## Troubleshooting a headless refusal
+
+Capture the execution ID, harness version, requested access/network settings, working directory,
+exact tool input, exit code, stderr, and structured denial/result before changing configuration.
+Inspect the effective rules in the process that launches the worker; an interactive terminal can
+have different settings and credentials. Avoid copying credential values into logs or reports.
+
+| Symptom | Evidence and likely cause | Scoped remedy | Verification |
+| --- | --- | --- | --- |
+| A rule works in one checkout but not a workflow | Compare node working directory and loaded global/project/local/profile sources. A multi-repository parent may start outside each repository. | Put the minimum rule in the effective authorized scope, or start the assignment in its intended checkout. A file-access grant does not load another directory's project settings. | Fresh task in the same directory and execution mode; confirm the loaded setting sources. |
+| Bash needs approval despite edit access | Compare the exact command, wrapper, arguments, deny/ask rules and compound operations. Accept-edits does not approve every shell tool. | Add an exact required build/test rule, preserving deny/ask entries. Do not approve every Bash operation or raise access simply to hide a refusal. | Verify both the intended command and an adjacent disallowed command in an isolated fixture. |
+| Direct Git works but `git -C ...` fails | The command prefix or path differs. Vibe has additional version-specific checks described above. | Use direct Git in the assigned checkout; inspect a specific directory grant only if another checkout is authorized. | Run the actual read command in that directory and inspect denial evidence. |
+| Plan, screenshot or scratch output cannot be written | Check target path, writable roots and protected configuration paths. A command allow rule does not grant filesystem access. | Use `PB_TASK_SCRATCH` for temporary assignment output, or an explicitly authorized output directory. Keep plans out of protected settings directories. | One reversible file creation in the intended directory under the same access, followed by cleanup. |
+| Tool missing or wrong SDK/JDK selected | Compare service PATH, absolute binary, version and login-shell resolution. Startup files can replace environment values. | Select the required installed tool or provide the required environment through supported harness configuration. Avoid a blanket `env *` allowance. | Repeat the same command through the worker's shell and record its resolved path and version. |
+| Dependency or network operation fails | Separate sandbox denial, DNS/connection failure, HTTP authorization and provider/API failure. | Prepare dependencies locally or enable the saved node's network setting when authorized and supported; repair destination credentials separately. | Check the intended endpoint without exposing secrets; then run the required dependency operation. |
+| Login, provider or publishing authentication fails | Identify which process/service owns credentials and whether its provider/model is supported. | Complete that harness's login or service credential setup; retain repository scope and tool approvals. | Read-only authenticated status check in the same environment, then the authorized operation. |
+| MCP call asks or is unavailable | Distinguish unregistered server, server authentication, tool allow policy and server failure. | Register/authenticate the server, then approve only its required tools. Bash/network settings do not approve MCP. | Read-only tool call in a fresh session, inspecting the server response and denial status. |
+| Completed with warnings but output is absent | Inspect tool denials, actual changes and checks. Some harnesses can exit cleanly after refusal. | Fix the specific underlying cause; do not treat narration or completion status as proof of edits. | Verify the resulting files and final checks after any retry. |
+| Run needs attention after a refusal or malformed result | Inspect the settled execution and the run's currently allowed controls. Settings changes do not settle ambiguous dispatches. | Use the explicit caller-authorized [control and recovery](workflows.md#control-and-recovery) action appropriate to the state. | Confirm settlement and the new execution result; do not duplicate an uncertain worker. |
+
+For Claude, use `/status` and `/permissions` to identify effective sources and rules. Configuration
+location and trust behavior are version-dependent; consult the current
+[settings documentation](https://code.claude.com/docs/en/settings) rather than assuming a rule
+saved in a sibling directory applies. Do not assume an environment assignment or `cd` wrapper
+always prevents matching: current permission handling examines wrappers and compound commands.
+
+On 7 October 2026, **Claude Code 2.1.292** was checked with an isolated localhost fake API and
+`python3 --version`. Exact and wildcard Bash allows ran the command; a matching deny or ask
+overrode the wildcard allow and was refused without interactive approval. These probes made no
+paid model calls, changed no personal settings, and establish command-rule behavior, not that
+every build command or project configuration is ready.
+
+### macOS Git shim warning under read-only Codex
+
+An xcrun cache diagnostic on stderr can coexist with a successful Git command. On 7 October
+2026, **Codex CLI 0.160.1**, **macOS 26.6.2**, and **Xcode 26.6.0** were measured with the
+explicit `:read-only` sandbox profile and no model requests:
+
+| Probe | Exit | Observed stderr / resolution |
+| --- | --- | --- |
+| `/usr/bin/git --version` | 0 | `couldn't create cache file '/tmp/xcrun_db-...' (errno=Operation not permitted)`, plus confstr/cache and Xcode event-stream diagnostics. |
+| Selected Xcode's `usr/bin/git --version` | 0 | Empty stderr; same `git version 2.50.1 (Apple Git-155)`. |
+| `/bin/zsh -lc 'command -v git; git --version'` with existing startup configuration | 0 | Resolved selected Xcode Git; empty stderr. |
+| Same login shell with an empty isolated `ZDOTDIR` | 0 | Resolved `/usr/bin/git`; reproduced cache diagnostics. |
+
+The shim attempts cache writes denied by this read-only profile. Direct selected-Xcode Git is
+an observed workaround for the measured command. Discover its path with `xcode-select -p`
+outside the sandbox, then invoke that executable directly under the same sandbox. Verify the
+actual intended Git operation too; this measurement does not certify every Git subcommand.
+Do not broaden filesystem writes just to suppress this warning. Login-shell PATH can override
+the launch environment, so verify `command -v git` in the actual shell before changing PATH.
+
+Reproduce without a model call or personal configuration changes:
+
+```bash
+python3 scripts/probe-macos-git-sandbox.py
+```
+
+The script uses temporary Codex configuration and repository directories, bounds each process,
+and prints versions, exit codes and captured diagnostics as JSON. Run it outside an existing
+sandbox: nested sandbox installation may itself be refused. In this installed CLI,
+`codex sandbox -P :read-only -- ...` requires a permission profile; there is no `macos` subcommand.
+
+Warning reproduction with exit 0 does not prove worker failure or explain a refusal. Collect the
+real execution's structured tool/result record before attributing a failed run to xcrun, and
+preserve the run's recovery and caller-authority requirements.
 
 Changing harness settings does not raise a saved node's access or automatically make an old refused
 execution retryable. Follow [workflow control and recovery](workflows.md#control-and-recovery) for

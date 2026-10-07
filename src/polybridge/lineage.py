@@ -447,9 +447,10 @@ def detect_catalog_caller(log_dir: Path, *, environ: Mapping[str, str] | None = 
         if table is None or own_pid not in table or sid is None:
             return Detection(None, 'Process ancestry/session cannot be checked')
         chain = ancestors(own_pid, table)[:100]
-        with Catalog(log_dir, store.RECORD_SUFFIX).connect() as db:
-            complete = db.execute("SELECT value FROM state WHERE key='complete'").fetchone()
-            if complete != ('1',):
+        index = Catalog(log_dir, store.RECORD_SUFFIX)
+        with index.connect() as db:
+            index._discover(db)
+            if index.state(db)['status'] != 'ready':
                 return Detection(None, 'Task catalog bootstrap is incomplete')
             placeholders = ','.join('?' for _ in chain) or 'NULL'
             rows = db.execute(f'SELECT payload FROM callers WHERE terminal=0 AND (pgid=? OR pid IN ({placeholders}) OR id=?) LIMIT 101', (sid, *chain, env.get(ENV_TASK_ID, ''))).fetchall()
