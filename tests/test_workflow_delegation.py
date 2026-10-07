@@ -107,11 +107,11 @@ def storage(tmp_path, monkeypatch):
     return w.WorkflowStore(tmp_path)
 
 
-async def run_flow(storage, tmp_path, definition=None, registry=None, *, guided=False):
+async def run_flow(storage, tmp_path, definition=None, registry=None, *, guided=False, timeout_seconds=5):
     run = storage.create_run(w.validate_definition(definition or graph()), "ORIGINAL PRIVATE REQUEST", tmp_path)
     storage.update_run(run["workflow_run_id"], lambda current: current.update(runner_policy="guided") if guided else current.pop("runner_policy", None), "test_runner_policy")
     registry = registry or Registry(storage.root)
-    await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]), 5)
+    await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]), timeout_seconds)
     return storage.get_run(run["workflow_run_id"]), registry
 
 

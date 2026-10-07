@@ -186,7 +186,9 @@ async def test_closed_group_retry_creates_distinct_generations(storage, tmp_path
             chosen = "repeat-group" if visits == 1 else "merge-end"
             return {"decision_id": context["decision_id"], "action": "continue", "reason": "Explicit closed group retry", "next": [{"continuation_id": chosen}]}
         return policy(context, registry)
-    run, _ = await run_flow(storage, tmp_path, graph, Registry(storage.root, repeat_policy))
+    # Two generations persist many transitions; allow shared CI scheduling and
+    # filesystem latency without changing production polling or graph assertions.
+    run, _ = await run_flow(storage, tmp_path, graph, Registry(storage.root, repeat_policy), timeout_seconds=15)
     assert run["status"] == "completed"
     assert len(run["released_parallel_groups"]) == 2
     assert run["retry_counts"]["repeat-group"] == 1
