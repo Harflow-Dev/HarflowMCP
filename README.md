@@ -49,6 +49,8 @@ When a run needs input, its caller supplies the answer. Monitor-started runs exp
 in the app; MCP-started runs return it to the calling tool.
 
 See [workflow mechanics, contracts, and recovery](docs/workflows.md) for the full model and diagrams.
+Monitor shows children beneath their parent and as regular workflow entries, with shared navigation; see
+[Monitor navigation and layout](docs/workflows.md#monitor-history-and-notifications).
 
 ## Get started
 
