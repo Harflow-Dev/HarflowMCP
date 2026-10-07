@@ -619,6 +619,7 @@ async def test_bounded_selected_read_preserves_managed_owner_authority(tmp_path,
 
 
 def test_placeholder_readiness_uses_partial_index_and_tracks_updates(tmp_path):
+    (tmp_path / 'oversized.meta.json').write_text('{}')
     index = catalog.Catalog(tmp_path, store.RECORD_SUFFIX)
     with index.connect() as db:
         db.execute("INSERT OR REPLACE INTO state VALUES ('complete','1')")
@@ -659,7 +660,7 @@ def test_schema_three_cache_rebuild_is_bounded_without_decoding_old_headers(tmp_
     page = store.list_page(directory)
     assert page['bootstrap_pending'] and len(reads) == 100
     with index.connect() as db:
-        assert db.execute("SELECT value FROM state WHERE key='schema_version'").fetchone() == ('7',)
+        assert db.execute("SELECT value FROM state WHERE key='schema_version'").fetchone() == ('8',)
         assert db.execute("SELECT count(*) FROM entries WHERE id LIKE 'old%'").fetchone() == (0,)
     assert originals == {p.name: p.read_bytes() for p in directory.glob('*.meta.json')}
 
@@ -1400,3 +1401,132 @@ def test_foreign_insertion_between_writer_prestamp_and_replacement_requires_disc
     assert page['catalog_state']['status'] == 'ready'
     assert {item['task_id'] for item in page['items']} == {'known', 'foreign'}
     assert next(item for item in page['items'] if item['task_id'] == 'known')['title'] == 'updated'
+
+
+def test_removal_after_projection_validation_cannot_commit_source_less_authority(tmp_path, monkeypatch):
+    path = tmp_path / 'removed.meta.json'
+    path.write_text('{}')
+    index = catalog.Catalog(tmp_path, '.meta.json')
+    original_bound = catalog.bound_header
+    removed = False
+    def remove_during_projection(header):
+        nonlocal removed
+        result = original_bound(header)
+        if not removed:
+            removed = True
+            path.unlink()
+        return result
+    def load(identifier):
+        return {'task_id': identifier, 'status': 'completed',
+                '_caller': asdict(record(identifier)),
+                '_associations': {'worker': {'workflow_run_id': identifier}},
+                '_checkout': [{'task_id': 'worker', 'repo_path': '/repo'}]}, 1, False
+    monkeypatch.setattr(catalog, 'bound_header', remove_during_projection)
+    first = index.page(load)
+    assert first['items'] == []
+    assert first['bootstrap_pending']
+    assert first['catalog_state']['status'] == 'preparing'
+    with index.connect() as db:
+        for table in ('entries', 'callers', 'associations', 'checkout_tasks', 'sources'):
+            assert db.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0] == 0
+    recovered = catalog.Catalog(tmp_path, '.meta.json').page(load)
+    assert recovered['items'] == []
+    assert recovered['catalog_state']['status'] == 'ready'
+
+
+def test_verified_discovery_prunes_preexisting_source_less_projections(tmp_path):
+    path = tmp_path / 'orphan.meta.json'
+    path.write_text('{}')
+    index = catalog.Catalog(tmp_path, '.meta.json')
+    def load(identifier):
+        return {'task_id': identifier, 'status': 'completed',
+                '_caller': asdict(record(identifier)),
+                '_associations': {'worker': {'workflow_run_id': identifier}},
+                '_checkout': [{'task_id': 'worker', 'repo_path': '/repo'}]}, 1, False
+    assert index.page(load)['catalog_state']['status'] == 'ready'
+    # Reproduce the durable derivative state left by the earlier projection race.
+    with index.connect() as db:
+        db.execute('DELETE FROM sources')
+    path.unlink()
+    assert index.ready()
+    with index.connect() as db:
+        for table in ('entries', 'callers', 'associations', 'checkout_tasks', 'sources'):
+            assert db.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0] == 0
+    page = catalog.Catalog(tmp_path, '.meta.json').page(load)
+    assert page['items'] == []
+    assert page['catalog_state']['status'] == 'ready'
+    with index.connect() as db:
+        for table in ('entries', 'callers', 'associations', 'checkout_tasks', 'sources'):
+            assert db.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0] == 0
+
+
+def test_upgrade_rebuilds_previously_acknowledged_source_less_authority(tmp_path):
+    orphan = tmp_path / 'orphan.meta.json'
+    survivor = tmp_path / 'retained.meta.json'
+    orphan.write_text('{}')
+    survivor.write_text('{}')
+    original = survivor.read_bytes()
+    index = catalog.Catalog(tmp_path, '.meta.json')
+    calls = []
+    def load(identifier):
+        calls.append(identifier)
+        return {'task_id': identifier, 'status': 'completed',
+                '_caller': asdict(record(identifier)),
+                '_associations': {f'{identifier}-worker': {'workflow_run_id': identifier}},
+                '_checkout': [{'task_id': f'{identifier}-worker', 'repo_path': '/repo'}]}, 1, False
+    assert index.page(load)['catalog_state']['status'] == 'ready'
+    orphan.unlink()
+    with index.connect() as db:
+        # Old code could acknowledge this missing namespace while orphaned
+        # entries/callers survived because no sources row existed to prune.
+        db.execute("DELETE FROM sources WHERE id='orphan'")
+        db.execute("INSERT OR REPLACE INTO state VALUES ('complete','1')")
+        db.execute("INSERT OR REPLACE INTO state VALUES ('directory_mtime',?)", (str(tmp_path.stat().st_mtime_ns),))
+        db.execute("INSERT OR REPLACE INTO state VALUES ('schema_version','7')")
+    calls.clear()
+    upgraded = catalog.Catalog(tmp_path, '.meta.json')
+    assert not upgraded.ready()
+    assert not calls
+    with upgraded.connect() as db:
+        for table in ('entries', 'callers', 'associations', 'checkout_tasks', 'sources'):
+            assert db.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0] == 0
+        assert db.execute("SELECT value FROM state WHERE key='schema_version'").fetchone() == ('8',)
+    page = upgraded.page(load)
+    assert page['catalog_state']['status'] == 'ready'
+    assert [item['task_id'] for item in page['items']] == ['retained']
+    assert calls == ['retained']
+    assert survivor.read_bytes() == original
+
+
+def test_live_schema_seven_runtime_cannot_reset_schema_eight_discovery_progress(tmp_path, monkeypatch):
+    import sqlite3
+    legacy_tasks(tmp_path, 205)
+    originals = {path.name: path.read_bytes() for path in tmp_path.glob('*.meta.json')}
+    legacy = tmp_path / '.listing.v7.sqlite3'
+    with sqlite3.connect(legacy) as db:
+        db.execute('CREATE TABLE state(key TEXT PRIMARY KEY,value TEXT)')
+        db.execute("INSERT INTO state VALUES ('schema_version','7')")
+        db.execute("INSERT INTO state VALUES ('legacy_runtime','preserved')")
+    original_read = store.read
+    calls = []
+    monkeypatch.setattr(store, 'read', lambda *args, **kwargs: (calls.append(args[1]), original_read(*args, **kwargs))[1])
+    for expected in (100, 100, 5):
+        calls.clear()
+        page = store.list_page(tmp_path)
+        assert len(calls) == expected
+        assert page['bootstrap_pending'] == (expected == 100)
+        # Model the old initializer reconnecting between new-version requests.
+        # A shared filename would rebuild these tables back to schema 7 and
+        # erase the new persistent discovery queue on every iteration.
+        with sqlite3.connect(legacy) as db:
+            version = db.execute("SELECT value FROM state WHERE key='schema_version'").fetchone()
+            if version != ('7',):
+                tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                for table in ('entries', 'callers', 'associations', 'checkout_tasks', 'sources', 'pending', 'seen', 'state'):
+                    if table in tables:
+                        db.execute(f'DELETE FROM {table}')
+                db.execute("INSERT INTO state VALUES ('schema_version','7')")
+            assert db.execute("SELECT value FROM state WHERE key='legacy_runtime'").fetchone() == ('preserved',)
+    assert page['catalog_state']['status'] == 'ready'
+    assert (tmp_path / '.listing.v8.sqlite3').exists()
+    assert originals == {path.name: path.read_bytes() for path in tmp_path.glob('*.meta.json')}

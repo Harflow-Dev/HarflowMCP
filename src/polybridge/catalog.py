@@ -311,7 +311,7 @@ class Catalog:
             raise
 
     def _connect_locked(self) -> sqlite3.Connection:
-        db = sqlite3.connect(self.directory / '.listing.v7.sqlite3', timeout=10, factory=CatalogConnection)
+        db = sqlite3.connect(self.directory / '.listing.v8.sqlite3', timeout=10, factory=CatalogConnection)
         try:
             return self._initialize(db)
         except BaseException:
@@ -336,7 +336,9 @@ class Catalog:
         db.execute('CREATE INDEX IF NOT EXISTS checkout_repo ON checkout_tasks(repo)')
         db.execute('CREATE INDEX IF NOT EXISTS checkout_run ON checkout_tasks(run_id)')
         version = db.execute("SELECT value FROM state WHERE key='schema_version'").fetchone()
-        if version != ('7',):
+        # Version 8 invalidates authority from older non-atomic projections,
+        # including source-less orphans already acknowledged by discovery.
+        if version != ('8',):
             db.execute('DELETE FROM checkout_tasks')
             db.execute('DELETE FROM entries')
             db.execute('DELETE FROM callers')
@@ -346,7 +348,7 @@ class Catalog:
             db.execute('DELETE FROM pending')
             db.execute('DELETE FROM seen')
             db.execute('DELETE FROM state')
-            db.execute("INSERT INTO state VALUES ('schema_version','7')")
+            db.execute("INSERT INTO state VALUES ('schema_version','8')")
         # Build only after invalidating old derivative headers. The partial index
         # makes warm authority readiness independent of retained history size.
         db.execute("CREATE INDEX IF NOT EXISTS incomplete_headers ON entries(id) WHERE json_extract(payload,'$.needs_direct_lookup')=1")
@@ -355,6 +357,18 @@ class Catalog:
         return db
 
     def _put(self, db: sqlite3.Connection, header: dict[str, Any], stamp: float, active: bool, identifier: str) -> None:
+        # A legacy writer can remove or replace metadata despite our advisory
+        # lock. Publish all derivative authority only after final validation.
+        db.execute('SAVEPOINT metadata_projection')
+        try:
+            self._put_projection(db, header, stamp, active, identifier)
+        except BaseException:
+            db.execute('ROLLBACK TO metadata_projection')
+            db.execute('RELEASE metadata_projection')
+            raise
+        db.execute('RELEASE metadata_projection')
+
+    def _put_projection(self, db: sqlite3.Connection, header: dict[str, Any], stamp: float, active: bool, identifier: str) -> None:
         header = dict(header)
         expected_source = header.pop('_source_identity', None)
         if expected_source is not None:
@@ -402,10 +416,12 @@ class Catalog:
         db.execute('INSERT OR REPLACE INTO seen VALUES (?,?)', (identifier, int(generation[0]) if generation else 0))
         try:
             source = (self.directory / f'{identifier}{self.suffix}').stat()
+            if expected_source is not None and tuple(expected_source) != source_identity(source):
+                raise DeferredRead()
             db.execute('INSERT OR REPLACE INTO sources VALUES (?,?,?,?,?)', (identifier, *(tuple(expected_source) if expected_source is not None else source_identity(source))))
             db.execute('DELETE FROM pending WHERE id=?', (identifier,))
         except OSError:
-            pass
+            raise DeferredRead() from None
 
     def _changed(self, db: sqlite3.Connection, identifier: str) -> bool:
         row = db.execute('SELECT mtime,size,inode,device FROM sources WHERE id=?', (identifier,)).fetchone()
@@ -519,7 +535,14 @@ class Catalog:
             return
         db.execute("INSERT OR REPLACE INTO state VALUES ('directory_mtime',?)", (directory_mtime,))
         # Only a completed discovery pass authorizes pruning missing metadata.
-        stale = db.execute('SELECT id FROM sources WHERE id NOT IN (SELECT id FROM seen WHERE generation=?)', (generation,))
+        # Older interrupted projections may have authority but no source row.
+        # Reconcile every projection namespace against the verified discovery.
+        stale = db.execute("""WITH projected AS (
+            SELECT id FROM sources UNION SELECT id FROM entries UNION SELECT id FROM callers
+            UNION SELECT run_id AS id FROM checkout_tasks
+            UNION SELECT json_extract(payload,'$.workflow_run_id') AS id FROM associations
+        ) SELECT id FROM projected WHERE id IS NOT NULL
+          AND id NOT IN (SELECT id FROM seen WHERE generation=?)""", (generation,))
         while rows := stale.fetchmany(100):
             for (identifier,) in rows:
                 self._remove(db, identifier)

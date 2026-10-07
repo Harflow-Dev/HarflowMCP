@@ -751,7 +751,7 @@ class WorkflowStore:
             from .bounded_io import read_json
             run = read_json(path, metadata_byte_limit, budget=metadata_budget)
         run["settling"] = any(t.get("status") in {"reserved", "running", "uncertain"} for a in run["activations"] for t in a["tasks"])
-        if metadata_byte_limit is None and (self.runs / '.listing.v7.sqlite3').exists():
+        if metadata_byte_limit is None and (self.runs / '.listing.v8.sqlite3').exists():
             from .catalog import Catalog
             catalog = Catalog(self.runs, '.json')
             with catalog.connect() as db:
