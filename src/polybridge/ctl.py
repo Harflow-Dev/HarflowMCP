@@ -161,6 +161,8 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     workflow_parsers = []
     for action in ("validate", "list", "list-page", "get", "save", "delete", "build", "start", "list-runs", "status", "detail", "wait", "pause", "resume", "cancel", "builder-followup", "builder-apply", "inspect", "assigned-input", "recover", "migrate", "abandon-dispatch"):
         wp = sub.add_parser("workflow-" + action, help=action + " workflows")
+        if action in {"save", "validate"}:
+            wp.description = "Workflow nodes accept child_session_policy agent_decides (default), fresh, or resume in Child orchestrator mode. Resume requires the latest completed compatible invocation in the immediate parent run and never silently starts Fresh. Current mode retains its existing session owner."
         wp.add_argument("--json", action="store_true")
         if action in {"get", "save", "delete", "build", "start"}:
             wp.add_argument("name")

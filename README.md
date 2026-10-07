@@ -49,6 +49,9 @@ When a run needs input, its caller supplies the answer. Monitor-started runs exp
 in the app; MCP-started runs return it to the calling tool.
 
 See [workflow mechanics, contracts, and recovery](docs/workflows.md) for the full model and diagrams.
+Run workflow nodes in Child mode offer [Fresh, Resume, or Agent decides](docs/workflows.md#run-workflow-nodes)
+for the orchestrator conversation, defaulting to Agent decides with fresh execution state on every invocation. Explicit Resume
+requires the latest compatible completed invocation in the same parent run and never silently starts Fresh.
 New Monitor workflows use [bounded context delivery](docs/workflows.md#context-delivery):
 acknowledged orchestrator resumes receive deltas, and headless workers retrieve assigned evidence
 in pages. The execution inspector reports delivered bytes and available model usage separately.

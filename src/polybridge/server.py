@@ -1264,7 +1264,11 @@ async def save_workflow(name: str, definition: dict[str, Any], expected_revision
     Parallel execution uses paired parallel_start/parallel_end nodes with shared
     parallel_group_id. Every branch reaches its matching end; nesting is supported.
     A Run workflow node (type "workflow") references a saved workflow by
-    workflow_ref.workflow_id with orchestrator_mode child or current; its whole
+    workflow_ref.workflow_id with orchestrator_mode child or current.
+    Child mode supports child_session_policy agent_decides (default), fresh, or
+    resume. Resume inherits only the latest completed compatible child
+    conversation in this immediate parent run, with fresh workflow state; an
+    unavailable explicit Resume fails closed. Current mode retains its owner. The whole
     dependency tree is resolved and pinned at save, so missing references, cycles
     (reported as A > B > C > A) and nesting beyond four levels are refused before
     anything is written. Agent callers may save only access and network settings

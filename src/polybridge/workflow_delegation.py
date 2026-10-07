@@ -116,7 +116,7 @@ def normalize_decision(run: dict[str, Any], node: dict[str, Any], token: dict[st
         for index, entry in enumerate(value["next"]):
             if not isinstance(entry, dict):
                 continue
-            clean(entry, {"continuation_id", "prompt", "assigned_task_ids", "additional_result_refs", "session_mode", "resume_task_id", "branch_assignments", "selection_reason"}, f"next[{index}]")
+            clean(entry, {"continuation_id", "prompt", "assigned_task_ids", "additional_result_refs", "session_mode", "resume_task_id", "branch_assignments", "selection_reason", "child_session_mode", "child_session_ref", "child_session_reason"}, f"next[{index}]")
             choice = choices.get(entry.get("continuation_id"))
             if choice and not choice["requires_prompt"]:
                 for key in ("assigned_task_ids", "additional_result_refs"):
@@ -146,7 +146,7 @@ def decision_prompt(context: dict[str, Any]) -> str:
         "failed": {**base, "action": "failed"},
         "complete": {**base, "action": "complete"},
     }
-    return ("You are the workflow orchestrator. Own the objective and checklist, and delegate focused assignments. Polybridge owns state and dispatch. Ordinary tools remain available under configured access. Return ONLY one JSON object. Every action MUST include the issued decision_id, an action, and a nonempty reason explaining the judgment, including complete and inspect. Do not return bare action strings. Use the action-specific examples below; omit fields belonging to other actions. Structural continuations accept ONLY continuation_id, except a continuation with branch_continuations entering Parallel start requires branch_assignments using the issued executable/structural entry shape. All branches requires every issued branch; Orchestrator selects requires one or more selected branch entries and a nonempty selection_reason explaining both selections and exclusions. Each executable branch receives its own focused assignment; do not select downstream nodes independently. Executable continuations require prompt; optional additional_result_refs and assigned_task_ids are arrays of issued result/task IDs. For Resume use session_mode resume and an issued resume_task_id; Fresh omits resume_task_id. Fixed Resume without a retained session boots Fresh. Agent decides may also choose session_mode continue_previous: Polybridge resumes a compatible single serial predecessor or boots Fresh; each fallback boots Fresh. Agent decides defaults Fresh when session_mode is omitted only if no compatible session is available; when a session is available choose Fresh or Resume explicitly. retry_execution explicitly consumes a node attempt, not an edge. skip_optional_review is a caller-authorized discard of the current settled optional review refusal: select only its issued skip_optional continuation with continuation_id and a reason, without assignments or task_updates. It preserves refusal evidence and cannot approve denied tools, alter permissions, retry the reviewer, or certify review success. Before caller authorization, request needs_input with the recommendation to proceed without the optional reviewer. An ordinary caller answer never authorizes discard: the caller must explicitly resume with allow_optional_review_skip=true at the issued input decision_id. Failed required results require an issued retry or recovery path, failure, or input. A planning result with no_checklist_needed is a proposal: judge its checklist_reason and either continue or explicitly select its issued retry_execution to request checklist tasks within the attempt budget. Complete only at End after every branch settles. Inspect exactly one page of a settled execution; inspection does not consume decision attempts. Optional task_updates are accepted for non-inspection actions and must obey checklist authority. Examples:\n" + json.dumps(examples) + "\nContext:\n" + json.dumps(context))
+    return ("You are the workflow orchestrator. Own the objective and checklist, and delegate focused assignments. Polybridge owns state and dispatch. Ordinary tools remain available under configured access. Return ONLY one JSON object. Every action MUST include the issued decision_id, an action, and a nonempty reason explaining the judgment, including complete and inspect. Do not return bare action strings. Use the action-specific examples below; omit fields belonging to other actions. Structural continuations accept ONLY continuation_id, except a continuation with branch_continuations entering Parallel start requires branch_assignments using the issued executable/structural entry shape. All branches requires every issued branch; Orchestrator selects requires one or more selected branch entries and a nonempty selection_reason explaining both selections and exclusions. Each executable branch receives its own focused assignment; do not select downstream nodes independently. Executable continuations require prompt; optional additional_result_refs and assigned_task_ids are arrays of issued result/task IDs. For Resume use session_mode resume and an issued resume_task_id; Fresh omits resume_task_id. For agent nodes only, fixed Resume without a retained session boots Fresh. Run workflow Child mode defaults child_session_policy to agent_decides: fixed Resume never falls back Fresh. Agent decides requires child_session_mode fresh or resume and a nonempty child_session_reason; resume also requires an issued child_session_ref. Do not use session_mode or resume_task_id for workflow nodes. Current mode and suspended-child recovery do not choose child sessions. Agent decides may also choose session_mode continue_previous: Polybridge resumes a compatible single serial predecessor or boots Fresh; each fallback boots Fresh. For agent nodes only, Agent decides defaults Fresh when session_mode is omitted only if no compatible session is available; when a session is available choose Fresh or Resume explicitly. retry_execution explicitly consumes a node attempt, not an edge. skip_optional_review is a caller-authorized discard of the current settled optional review refusal: select only its issued skip_optional continuation with continuation_id and a reason, without assignments or task_updates. It preserves refusal evidence and cannot approve denied tools, alter permissions, retry the reviewer, or certify review success. Before caller authorization, request needs_input with the recommendation to proceed without the optional reviewer. An ordinary caller answer never authorizes discard: the caller must explicitly resume with allow_optional_review_skip=true at the issued input decision_id. Failed required results require an issued retry or recovery path, failure, or input. A planning result with no_checklist_needed is a proposal: judge its checklist_reason and either continue or explicitly select its issued retry_execution to request checklist tasks within the attempt budget. Complete only at End after every branch settles. Inspect exactly one page of a settled execution; inspection does not consume decision attempts. Optional task_updates are accepted for non-inspection actions and must obey checklist authority. Examples:\n" + json.dumps(examples) + "\nContext:\n" + json.dumps(context))
 
 
 def settled(activation: dict[str, Any]) -> bool:
@@ -555,6 +555,13 @@ def continuations(run: dict[str, Any], node: dict[str, Any], token: dict[str, An
                 choices.append({"continuation_id": "recover:" + activation["id"], "node_id": target["id"], "kind": "retry_execution", "requires_prompt": True, "execution_id": activation["id"], "recovery_from_checkpoint": True})
     for choice in choices:
         target = next(n for n in run["definition"]["nodes"] if n["id"] == choice["node_id"])
+        if target["type"] == "workflow" and choice["requires_prompt"]:
+            # Direct execution after convergence and retry choices have the
+            # same child assignment contract as an incoming graph edge.
+            tree = run.get("dependency_tree") or {}
+            workflow_id = target["workflow_ref"]["workflow_id"]
+            pinned = tree.get("workflows", {}).get(workflow_id) or {}
+            choice["workflow"] = {"workflow_id": workflow_id, "name": pinned.get("name", target.get("workflow_name", "")), "revision": pinned.get("revision"), "orchestrator_mode": target.get("orchestrator_mode", "child"), "access": tree.get("access", {}).get(workflow_id)}
         if target["type"] == "workflow" and choice["requires_prompt"] and "attempts_remaining" not in choice:
             # Workflow targets skip candidate checks; only the attempt budget applies.
             from .workflow_execution_policy import attempts_used
@@ -563,6 +570,11 @@ def continuations(run: dict[str, Any], node: dict[str, Any], token: dict[str, An
                 budget_token = {**budget_token, "retry_of_execution_id": choice["execution_id"]}
             used = attempts_used(run, target, budget_token)
             choice["attempts_remaining"] = max(0, target["max_attempts"] + run.get("attempt_grants", {}).get(target["id"], 0) - used)
+        if target["type"] == "workflow" and choice["requires_prompt"] and not choice.get("reopen_child"):
+            choice["child_session_policy"] = target.get("child_session_policy", "agent_decides") if target.get("orchestrator_mode", "child") == "child" else "inactive"
+            if target.get("orchestrator_mode", "child") == "child":
+                from .workflow_child_sessions import offer
+                choice.update(offer(w.WorkflowStore(root), run, target, exclude_execution_id=token.get("execution_activation_id") if execute else None))
         if target["type"] == "agent" and choice["requires_prompt"]:
             from .workflow_execution_policy import attempts_used
             budget_token = token if choice["kind"] == "execute" else {}
@@ -599,7 +611,7 @@ def decision_context(run: dict[str, Any], node: dict[str, Any], token: dict[str,
     w = _w()
     graph = []
     for n in run["definition"]["nodes"]:
-        description = {k: copy.deepcopy(n[k]) for k in ("id", "title", "type", "role", "instructions", "optional", "agent", "session_mode", "max_attempts", "max_context_questions", "timeout_seconds", "require_technical_plan", "require_tasks", "parallel_group_id", "join_id") if k in n}
+        description = {k: copy.deepcopy(n[k]) for k in ("id", "title", "type", "role", "instructions", "optional", "agent", "session_mode", "child_session_policy", "max_attempts", "max_context_questions", "timeout_seconds", "require_technical_plan", "require_tasks", "parallel_group_id", "join_id") if k in n}
         if n["type"] == "agent":
             description["effective_freedom"] = w.run_effective_freedom(run, n)
             description["effective_network"] = False if run.get("network") is False else n.get("network", run.get("network"))
@@ -701,6 +713,8 @@ def validate_decision(run: dict[str, Any], node: dict[str, Any], token: dict[str
             raise w.WorkflowError("Required failed branch needs recovery before Parallel end; retry execution, choose a recovery path, fail, or request input")
         if target["type"] == "workflow":
             allowed = {"continuation_id", "prompt", "assigned_task_ids", "additional_result_refs"}
+            if c["requires_prompt"] and target.get("orchestrator_mode", "child") == "child" and not c.get("reopen_child"):
+                allowed.update({"child_session_mode", "child_session_ref", "child_session_reason"})
         else:
             allowed = {"continuation_id", "prompt", "assigned_task_ids", "additional_result_refs", "session_mode", "resume_task_id"} if c["requires_prompt"] else {"continuation_id"}
         if "branch_continuations" in c:
@@ -734,6 +748,28 @@ def validate_decision(run: dict[str, Any], node: dict[str, Any], token: dict[str
         if c["requires_prompt"] and target["type"] == "workflow":
             if entry.get("session_mode") or entry.get("resume_task_id"):
                 raise w.WorkflowError("Run workflow continuations refuse session_mode and resume_task_id")
+            if target.get("orchestrator_mode", "child") == "child" and not c.get("reopen_child"):
+                policy = target.get("child_session_policy", "agent_decides")
+                mode = entry.get("child_session_mode", policy)
+                if policy == "agent_decides":
+                    if mode not in {"fresh", "resume"} or not isinstance(entry.get("child_session_reason"), str) or not entry["child_session_reason"].strip():
+                        raise w.WorkflowError("Child Agent decides requires child_session_mode fresh or resume and a nonempty child_session_reason")
+                elif mode != policy:
+                    raise w.WorkflowError("Assignment cannot override the fixed child session policy")
+                if mode == "resume":
+                    sessions = c.get("eligible_sessions", [])
+                    ref = entry.get("child_session_ref")
+                    if policy == "agent_decides" and ref not in {session["session_ref"] for session in sessions}:
+                        raise w.WorkflowError("Child Resume requires an issued compatible child_session_ref")
+                    if ref is not None and ref not in {session["session_ref"] for session in sessions}:
+                        raise w.WorkflowError("Child Resume reference is unavailable or incompatible")
+                    if not sessions:
+                        raise w.WorkflowError("Child Resume unavailable: " + c.get("unavailable_reason", "No eligible previous invocation"))
+                    assignment["child_session_ref"] = ref or sessions[0]["session_ref"]
+                elif "child_session_ref" in entry:
+                    raise w.WorkflowError("Fresh child assignments cannot select child_session_ref")
+                assignment["child_session_mode"] = mode
+                assignment["child_session_reason"] = entry.get("child_session_reason", "Saved child session policy: " + policy)
         elif c["requires_prompt"]:
             target = next(n for n in run["definition"]["nodes"] if n["id"] == c["node_id"])
             mode = entry.get("session_mode", target["session_mode"])
@@ -891,6 +927,8 @@ async def decide(supervisor: Any, node: dict[str, Any], token: dict[str, Any], *
                             source = next(item for item in r["activations"] if item["id"] == old_id)
                             t["input_result_refs"] = list(dict.fromkeys(source.get("input_result_refs", []) + t.get("input_result_refs", []) + [old_id]))
                         elif retry_id:
+                            for key in ("child_session_mode", "child_session_ref", "child_session_reason"):
+                                t.pop(key, None)
                             old_id = assignments[retry_id].get("recovery_execution_id", t.get("execution_activation_id"))
                             if assignments[retry_id].get("recovery_execution_id"):
                                 t["recovery_return_checkpoint"] = {k: copy.deepcopy(v) for k, v in t.items() if k not in {"selected_connections", "selected_join_id", "assignments", "accepted_decision_id", "decision_id", "decision_attempts", "decision_error"}}

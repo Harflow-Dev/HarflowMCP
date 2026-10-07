@@ -112,6 +112,8 @@ async def test_concurrent_exclusive_winner_is_adopted_only_for_same_invocation(s
     if not matching_owner:
         winner['parent_link']['execution_id'] = 'another-invocation'
     def link(temp, final):
+        # The competing publisher must retain the durable selected binding.
+        winner['child_session_selection'] = json.loads(temp.read_text())['child_session_selection']
         final.write_text(json.dumps(winner), encoding='utf-8')
         os.chmod(final, 0o600)
         return original_link(temp, final)

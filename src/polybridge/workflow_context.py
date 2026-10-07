@@ -54,7 +54,7 @@ def acknowledged_receipt(receipt: dict[str, Any], ack: Any) -> dict[str, Any] | 
 def compact_recent_decisions(decisions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Retain judgments and continuation identities, never old assignments."""
     retained = ("decision_id", "action", "reason", "node_id", "activation_id", "selected_join_id", "task_updates", "question", "question_id", "answer", "protocol_warnings", "outcome", "status")
-    entry_keys = ("continuation_id", "session_mode", "resume_task_id", "assigned_task_ids", "additional_result_refs", "selection_reason", "reason")
+    entry_keys = ("continuation_id", "session_mode", "resume_task_id", "assigned_task_ids", "additional_result_refs", "selection_reason", "reason", "child_session_mode", "child_session_ref", "child_session_reason")
     def entry(value: dict[str, Any]) -> dict[str, Any]:
         result = {key: copy.deepcopy(value[key]) for key in entry_keys if key in value}
         if isinstance(value.get("branch_assignments"), list):
@@ -90,9 +90,16 @@ def _guidance(context: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         examples["continue"] = {**base, "action": "continue", "next": [{"continuation_id": "issued continuation ID"}]}
     else:
         examples["complete"] = {**base, "action": "complete"}
-    if any(choice.get("requires_prompt") for choice in choices):
+    if any(choice.get("requires_prompt") and "workflow" not in choice for choice in choices):
         text += " Fresh omits resume_task_id. Resume requires an issued compatible resume_task_id. Agent decides must explicitly choose Fresh or Resume when a compatible session exists; continue_previous resumes a compatible single serial predecessor or boots Fresh. Fixed Resume without retained session and each fallback boot Fresh."
         examples["agent_continue"] = {**base, "action": "continue", "next": [{"continuation_id": "issued executable ID", "prompt": "Focused assignment", "session_mode": "fresh"}]}
+    workflow_choices = choices + [branch for choice in choices for branch in choice.get("branch_continuations", [])]
+    if any(choice.get("child_session_policy") not in {None, "inactive"} for choice in workflow_choices if isinstance(choice, dict)):
+        text += " Run workflow Child conversations default child_session_policy to agent_decides, separate from worker sessions. Fixed Child Resume never falls back Fresh. Child Agent decides requires child_session_mode fresh or resume and nonempty child_session_reason; Resume also requires an issued child_session_ref. Current mode and suspended-child recovery do not choose child sessions. Never use session_mode or resume_task_id on workflow continuations."
+        child_entry = {"continuation_id": "issued child continuation ID", "prompt": "New child assignment"}
+        if any(isinstance(choice, dict) and choice.get("child_session_policy") == "agent_decides" for choice in workflow_choices):
+            child_entry.update(child_session_mode="fresh", child_session_reason="Explain the conversation choice")
+        examples["child_continue"] = {**base, "action": "continue", "next": [child_entry]}
     if any(choice.get("branch_continuations") for choice in choices):
         text += " A continuation entering Parallel start requires branch_assignments in the issued entry shape: all branches requires every issued branch; orchestrator selection requires one or more entries and selection_reason explaining selections and exclusions. Give each executable branch its own assignment; do not select downstream nodes independently."
     if context.get("inspections_remaining", 0) > 0 and context.get("settled_executions"):

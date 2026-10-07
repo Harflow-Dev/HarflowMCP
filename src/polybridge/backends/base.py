@@ -198,6 +198,14 @@ class Capabilities(NamedTuple):
     many messages landed, exactly one further result settles the run. Default False so the
     folding semantics stay the behaviour of every backend that does not say otherwise."""
 
+    resume_may_start_fresh: bool = False
+    """Whether an unavailable conversation can silently create a new one on resume.
+
+    Such a CLI cannot provide strict conversation inheritance without an
+    authoritative session-existence check. Ordinary task resume retains its
+    existing backend behavior; strict child workflow reuse refuses it upfront.
+    """
+
     def as_dict(self) -> dict[str, Any]:
         # `_asdict()` does not recurse into a nested NamedTuple — it would serialize as a bare
         # JSON list and lose its field names — so each nested block is expanded explicitly.

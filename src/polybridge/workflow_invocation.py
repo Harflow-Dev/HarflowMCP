@@ -357,6 +357,11 @@ def child_run_record(store: Any, parent_run: dict[str, Any], activation: dict[st
             child["orchestrator_config"] = copy.deepcopy(owner.get("definition", {}).get("orchestrator", {}))
         except (OSError, ValueError, KeyError):
             child["orchestrator_config"] = copy.deepcopy(parent_run.get("definition", {}).get("orchestrator", {}))
+    selection = invocation.get("child_session_selection")
+    if selection:
+        child["child_session_selection"] = copy.deepcopy(selection)
+        if mode == "child" and selection.get("selected_mode") == "resume":
+            child["inherited_orchestrator_binding"] = copy.deepcopy(selection)
     return child
 
 
@@ -404,6 +409,10 @@ def invocation_outcome(kind: str, child: dict[str, Any] | None, invocation: dict
         {k: task.get(k) for k in ("id", "title", "status")} for task in (child or {}).get("tasks", [])[:200]
     ]
     child_outcome["permission_evidence"] = collect_permission_evidence(child) if child else []
+    if invocation.get("child_session_selection"):
+        child_outcome["child_session_selection"] = copy.deepcopy(invocation["child_session_selection"])
+    if invocation.get("child_session_refusal"):
+        child_outcome["child_session_refusal"] = invocation["child_session_refusal"]
     failure_kind = None
     status = "succeeded" if kind == "completed" else "failed" if kind in {"timeout", "runtime", "child_failed"} else "blocked"
     if kind != "completed":
@@ -710,6 +719,13 @@ def derive_invocation_activation(store: Any, run: dict[str, Any], activation: di
         activation["status"] = "uncertain"
         activation["result_error"] = "Child run does not match this invocation"
         return
+    selection = invocation.get("child_session_selection")
+    if selection and (child.get("child_session_selection") != selection or (selection.get("selected_mode") == "resume" and child.get("inherited_orchestrator_binding") != selection)):
+        activation["status"] = "uncertain"
+        activation["result_error"] = "Child session binding does not match its persisted parent selection"
+        if run.get("status") not in _w().TERMINAL and run.get("status") != "cancelling":
+            run.update(status="needs_attention", attention_reason=activation["result_error"])
+        return
     if child.get("status") in _w().TERMINAL and not child_settled(child, store=store):
         activation["status"] = "uncertain"
         activation["result_error"] = "Child descendants or dispatches have not confirmed settlement"
@@ -793,8 +809,20 @@ async def run_child(supervisor: Any, node: dict[str, Any], token: dict[str, Any]
         _settle_invocation(supervisor, node, token, activation, outcome, invocation)
         return
     if existing is None:
+        # The durable parent choice precedes publication. A restart must reuse
+        # exactly this choice rather than recomputing a different source.
+        from .workflow_child_sessions import select
+        try:
+            selection = select(store, supervisor.run(), node, activation, token)
+        except w.WorkflowError as exc:
+            invocation["child_session_refusal"] = str(exc)
+            supervisor.update(lambda r: next(a for a in r["activations"] if a["id"] == activation["id"]).update(invocation=copy.deepcopy(invocation)), "child_session_refused", str(exc))
+            supervisor.attention(str(exc))
+            return
+        invocation["child_session_selection"] = selection
         invocation["inputs"] = invocation_inputs(run, token, root=store.root)
         invocation["assignment"] = token.get("assignment_prompt", "")
+        supervisor.update(lambda r: next(a for a in r["activations"] if a["id"] == activation["id"]).update(invocation=copy.deepcopy(invocation)), "child_session_selected", selection)
         child = child_run_record(store, run, activation, node, invocation)
         try:
             write_child_run(store, child)
@@ -805,6 +833,9 @@ async def run_child(supervisor: Any, node: dict[str, Any], token: dict[str, Any]
                 outcome = invocation_outcome("uncertain", existing, invocation, node, failure_reason="Existing child run does not match this invocation")
                 _settle_invocation(supervisor, node, token, activation, outcome, invocation)
                 return
+            if existing.get("child_session_selection") != selection or (selection.get("selected_mode") == "resume" and existing.get("inherited_orchestrator_binding") != selection):
+                supervisor.attention("Published child session binding does not match its durable parent selection")
+                return
         invocation["stage"] = "created"
         supervisor.update(lambda r: next(a for a in r["activations"] if a["id"] == activation["id"]).update(invocation=copy.deepcopy(invocation)), "child_created", {"child_workflow_run_id": child_id})
     else:
@@ -812,6 +843,10 @@ async def run_child(supervisor: Any, node: dict[str, Any], token: dict[str, Any]
         if link.get("execution_id") != activation["id"] or link.get("workflow_run_id") != run["workflow_run_id"]:
             outcome = invocation_outcome("uncertain", existing, invocation, node, failure_reason="Existing child run does not match this invocation")
             _settle_invocation(supervisor, node, token, activation, outcome, invocation)
+            return
+        selection = invocation.get("child_session_selection")
+        if selection and (existing.get("child_session_selection") != selection or (selection.get("selected_mode") == "resume" and existing.get("inherited_orchestrator_binding") != selection)):
+            supervisor.attention("Published child session binding does not match its durable parent selection")
             return
         supervisor.update(lambda r: next(a for a in r["activations"] if a["id"] == activation["id"]).update(invocation=copy.deepcopy(invocation)), "child_adopted", {"child_workflow_run_id": child_id})
 
@@ -907,6 +942,8 @@ async def run_child(supervisor: Any, node: dict[str, Any], token: dict[str, Any]
     child_final = None
     try:
         child_final = store.get_run(child_id)
+        if child_final.get("child_session_refusal"):
+            invocation["child_session_refusal"] = child_final["child_session_refusal"]
     except (OSError, ValueError, KeyError):
         child_final = None
     if timed_out and not invocation.get("timeout_confirmed"):
