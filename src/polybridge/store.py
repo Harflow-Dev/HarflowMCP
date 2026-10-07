@@ -390,7 +390,10 @@ def list_page(log_dir: Path, *, limit: int = 100, cursor: str | None = None, act
         db.execute("UPDATE entries SET active=1,payload=json_set(payload,'$.needs_reconciliation',json('true'),'$.observed_exit',json('false'),'$.persisted_status',json_extract(payload,'$.status'),'$.status','running') WHERE id IN (SELECT id FROM callers WHERE terminal=0) AND json_type(payload,'$.needs_reconciliation') IS NULL")
     if task_ids is not None:
         identifiers = [validate_task_id(identifier) for identifier in task_ids]
-        page = {'items': catalog.headers(identifiers, load), 'next_cursor': None, 'has_more': False, 'bootstrap_pending': False}
+        page = catalog.header_page(identifiers, load)
+        if page['bootstrap_pending']:
+            page['related_headers'] = []
+            return page
     else:
         page = catalog.page(load, limit=limit, cursor=cursor, active_only=active_only, session_id=session_id)
     from .workflows import WorkflowStore

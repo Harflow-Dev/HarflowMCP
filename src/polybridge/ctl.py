@@ -810,7 +810,7 @@ def _main(argv: list[str] | None = None) -> int:
             result['items'] = filter_task_reads(result['items'], managed)
             result['related_headers'] = filter_task_reads(result.get('related_headers', []), managed)
             if managed is not None:
-                result['total_active_count'] = sum(item.get('status') not in store.TERMINAL_RECORD_STATUSES for item in result['items'])
+                result['total_active_count'] = None if result.get('bootstrap_pending') or result.get('counts_complete') is False else sum(item.get('status') not in store.TERMINAL_RECORD_STATUSES for item in result['items'])
                 result.pop('total_active_root_count', None)
                 result.pop('total_attention_root_count', None)
                 result.update(next_cursor=None, has_more=False)

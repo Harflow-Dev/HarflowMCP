@@ -826,7 +826,7 @@ class WorkflowStore:
         catalog = Catalog(self.runs, '.json')
         if run_ids is not None:
             identifiers = [_identifier(identifier) for identifier in run_ids]
-            return {'items': catalog.headers(identifiers, load), 'next_cursor': None, 'has_more': False, 'bootstrap_pending': False}
+            return catalog.header_page(identifiers, load)
         return catalog.page(load, limit=limit, cursor=cursor, active_only=active_only)
 
     def get_run_header(self, run_id: str, *, _catalog: Any = None) -> dict[str, Any]:
@@ -838,7 +838,10 @@ class WorkflowStore:
                 return None
             return self._catalog_run_header(run), float(run['created_at']), run.get('status') not in TERMINAL
         load.bounded_metadata = True
-        headers = (_catalog or Catalog(self.runs, '.json')).headers([_identifier(run_id)], load)
+        catalog = _catalog or Catalog(self.runs, '.json')
+        headers = catalog.headers([_identifier(run_id)], load)
+        if catalog.deferred_headers:
+            return {'workflow_run_id': run_id, 'indexing': True, 'catalog_state': catalog.requested_preparation()}
         if not headers:
             raise FileNotFoundError(f'Workflow run unavailable: {run_id}')
         return headers[0]
@@ -855,6 +858,8 @@ class WorkflowStore:
             try:
                 header = self.get_run_header(identifier, _catalog=catalog)
             except (OSError, ValueError, KeyError):
+                continue
+            if header.get('indexing'):
                 continue
             size = len(json.dumps(header, ensure_ascii=True).encode())
             if used + size > byte_budget:

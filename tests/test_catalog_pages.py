@@ -994,3 +994,128 @@ def test_managed_ownership_decode_and_page_share_one_aggregate_budget(tmp_path, 
         assert sum(consumed) <= catalog.METADATA_BATCH_BYTES
         assert len(consumed) <= catalog.BOOTSTRAP_LIMIT
         assert run_reads == [f"{run['workflow_run_id']}.json"]
+
+
+def test_active_page_cursor_does_not_skip_a_byte_budget_deferred_row(tmp_path):
+    sizes = 1024 * 1024
+    index = catalog.Catalog(tmp_path, '.meta.json')
+    for number, identifier in enumerate(('a', 'b', 'c'), start=1):
+        (tmp_path / f'{identifier}.meta.json').write_bytes(b' ' * sizes)
+        index.record({'task_id': identifier, 'status': 'running'}, number, True, identifier)
+    def load(identifier):
+        return {'task_id': identifier, 'status': 'running'}, float(ord(identifier) - ord('a') + 1), True
+    assert not catalog.Catalog(tmp_path, '.meta.json').page(load, active_only=True)['bootstrap_pending']
+    # These source rewrites do not change the directory namespace. One refresh fits
+    # the remainder; the following row must stay after the returned cursor.
+    for identifier in ('a', 'b'):
+        (tmp_path / f'{identifier}.meta.json').write_bytes(b'x' * sizes)
+    index = catalog.Catalog(tmp_path, '.meta.json')
+    index.metadata_bytes = catalog.METADATA_BATCH_BYTES - sizes - 10
+    first = index.page(load, active_only=True)
+    assert [item['task_id'] for item in first['items']] == ['c', 'b']
+    assert first['bootstrap_pending'] and first['catalog_state']['status'] == 'preparing'
+    boundary = json.loads(base64.urlsafe_b64decode(first['next_cursor']))
+    assert boundary['id'] == 'b'
+    second = catalog.Catalog(tmp_path, '.meta.json').page(load, active_only=True, cursor=first['next_cursor'])
+    assert [item['task_id'] for item in second['items']] == ['a']
+
+
+def test_active_page_never_publishes_a_changed_row_after_decode_budget_is_exhausted(tmp_path):
+    index = catalog.Catalog(tmp_path, '.meta.json')
+    path = tmp_path / 'changed.meta.json'
+    path.write_text('old')
+    index.record({'task_id': 'changed', 'status': 'running', 'title': 'old'}, 1, True, 'changed')
+    def load(identifier):
+        return {'task_id': identifier, 'status': 'completed', 'title': 'new'}, 1, False
+    catalog.Catalog(tmp_path, '.meta.json').page(load, active_only=True)
+    path.write_text('new')
+    index = catalog.Catalog(tmp_path, '.meta.json')
+    index.metadata_decodes = catalog.BOOTSTRAP_LIMIT
+    deferred = index.page(load, active_only=True)
+    assert deferred['items'] == []
+    assert deferred['bootstrap_pending'] and deferred['catalog_state']['status'] == 'preparing'
+    assert not deferred['counts_complete']
+
+
+@pytest.mark.parametrize('kind', ['tasks', 'runs'])
+def test_explicit_changed_headers_defer_neutrally_after_one_ownership_decode(tmp_path, kind):
+    from polybridge.bounded_io import read_json
+    directory = tmp_path / 'tasks'
+    if kind == 'tasks':
+        identifiers = [f'changed{number:03}' for number in range(100)]
+        for identifier in identifiers:
+            store.write(directory, record(identifier, title='old'))
+        query = lambda: store.list_page(directory, task_ids=identifiers)
+        paths = [directory / f'{identifier}.meta.json' for identifier in identifiers]
+        change = lambda payload: payload.update(title='new')
+    else:
+        storage = workflows.WorkflowStore(tmp_path)
+        runs = [storage.create_run(definition(), 'request', tmp_path) for _ in range(100)]
+        identifiers = [run['workflow_run_id'] for run in runs]
+        query = lambda: storage.list_run_page(run_ids=identifiers)
+        paths = [storage.runs / f'{identifier}.json' for identifier in identifiers]
+        change = lambda payload: payload.update(name='new')
+    assert len(query()['items']) == 100
+    for path in paths:
+        payload = json.loads(path.read_text())
+        change(payload)
+        path.write_text(json.dumps(payload))
+    ownership = tmp_path / 'owned.json'
+    ownership.write_text('{}')
+    with catalog.metadata_request():
+        budget = catalog.Catalog(tmp_path, '.authority')
+        read_json(ownership, catalog.METADATA_BYTES, budget=budget)
+        first = query()
+        assert budget.metadata_decodes == catalog.BOOTSTRAP_LIMIT
+        assert first['bootstrap_pending'] and first['catalog_state']['status'] == 'preparing'
+        assert first['catalog_state']['pending_records'] == 1
+        assert first['items'] == []
+        assert not first['counts_complete']
+    second = query()
+    assert not second['bootstrap_pending']
+    assert len(second['items']) == 100
+    key = 'title' if kind == 'tasks' else 'name'
+    assert all(item[key] == 'new' for item in second['items'])
+    assert all(item['status'] != 'unknown' for item in second['items'])
+
+
+@pytest.mark.parametrize('transport', ['server', 'cli'])
+async def test_managed_explicit_header_deferral_keeps_counts_unavailable_and_recovers(tmp_path, monkeypatch, capsys, transport):
+    directory = tmp_path / 'tasks'
+    storage = workflows.WorkflowStore(tmp_path)
+    run = storage.create_run(definition(), 'request', tmp_path)
+    identifiers = [f'member{number:03}' for number in range(100)]
+    storage.update_run(run['workflow_run_id'], lambda value: value.update(activations=[
+        {'id': 'orchestrator', 'node_id': 'orchestrator', 'role': 'orchestrator', 'status': 'completed', 'tasks': [{'task_id': 'caller', 'status': 'completed'}]},
+        {'id': 'execution', 'node_id': 'work', 'role': 'node', 'status': 'completed', 'node_result': {'status': 'succeeded', 'result': {}, 'evidence': []}, 'tasks': [{'task_id': identifier, 'status': 'completed'} for identifier in identifiers]}
+    ]), 'seed')
+    caller = record('caller')
+    store.write(directory, caller)
+    for identifier in identifiers:
+        store.write(directory, record(identifier, title='old'))
+    store.list_page(directory)
+    monkeypatch.setattr(lineage, 'detect_catalog_caller', lambda *a, **k: SimpleNamespace(caller=SimpleNamespace(record=caller), undecidable=None))
+    monkeypatch.setattr(server, '_reg', lambda: SimpleNamespace(log_dir=directory))
+    monkeypatch.setattr(ctl, 'default_log_dir', lambda: directory)
+    for identifier in identifiers:
+        path = directory / f'{identifier}.meta.json'
+        payload = json.loads(path.read_text())
+        payload['title'] = 'new'
+        path.write_text(json.dumps(payload))
+    async def query():
+        if transport == 'server':
+            return await server.list_task_page(task_ids=identifiers)
+        assert ctl.main(['task-list-page', '--task-ids', ','.join(identifiers), '--json']) == 0
+        return json.loads(capsys.readouterr().out)['result']
+    first = await query()
+    assert first['bootstrap_pending'] and first['catalog_state']['status'] == 'preparing'
+    assert first['items'] == [] and first['total_active_count'] is None
+    assert not first['counts_complete']
+    # One read processes the queued last source; the following read establishes
+    # caller ownership using the fresh projection and returns the full requested set.
+    await query()
+    recovered = await query()
+    assert not recovered['bootstrap_pending']
+    assert len(recovered['items']) == 100
+    assert all(item['title'] == 'new' and item['status'] == 'completed' for item in recovered['items'])
+    assert recovered['total_active_count'] == 0

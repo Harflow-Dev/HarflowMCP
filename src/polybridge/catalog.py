@@ -135,6 +135,7 @@ class Catalog:
     def __init__(self, directory: Path, suffix: str):
         self.directory, self.suffix = directory, suffix
         self._budget = _request_budget.get() or MetadataBudget()
+        self.deferred_headers: set[str] = set()
         self.identity = hashlib.sha256(str(directory.resolve()).encode()).hexdigest()[:16]
 
     @property
@@ -376,6 +377,7 @@ class Catalog:
         if len(identifiers) > PAGE_LIMIT:
             raise ValueError('At most 100 identifiers may be requested')
         result = []
+        self.deferred_headers = set()
         with self.connect() as db:
             for identifier in dict.fromkeys(identifiers):
                 row = db.execute('SELECT payload FROM entries WHERE id=?', (identifier,)).fetchone()
@@ -384,18 +386,31 @@ class Catalog:
                 else:
                     try:
                         value = self._load_bounded(identifier, loader)
+                        if value is not None:
+                            header, stamp, active = value
+                            self._put(db, header, stamp, active, identifier)
+                            result.append(bound_header({key: value for key, value in header.items() if not key.startswith('_')}))
+                        else:
+                            self._remove(db, identifier)
                     except DeferredRead:
                         db.execute('INSERT OR IGNORE INTO pending VALUES (?)', (identifier,))
-                        key = 'task_id' if self.suffix == '.meta.json' else 'workflow_run_id'
-                        result.append({key: identifier, 'status': 'unknown', 'indexing': True})
-                        continue
-                    if value is not None:
-                        header, stamp, active = value
-                        self._put(db, header, stamp, active, identifier)
-                        result.append(bound_header({key: value for key, value in header.items() if not key.startswith('_')}))
-                    else:
-                        self._remove(db, identifier)
+                        self.deferred_headers.add(identifier)
+                        # Budget exhaustion is not evidence of an unknown task outcome.
+                        # Omit this source until a later read refreshes its projection.
+
         return result
+
+    def requested_preparation(self) -> dict[str, Any]:
+        return {'status': 'preparing', 'source': 'task_catalog' if self.suffix == '.meta.json' else 'workflow_catalog',
+                'reason': 'Preparing requested metadata headers', 'pending_records': len(self.deferred_headers), 'blocked_records': 0}
+
+    def header_page(self, identifiers: list[str], loader) -> dict[str, Any]:
+        headers = self.headers(identifiers, loader)
+        pending = bool(self.deferred_headers)
+        page = {'items': [] if pending else headers, 'next_cursor': None, 'has_more': False, 'bootstrap_pending': pending}
+        if pending:
+            page.update(catalog_state=self.requested_preparation(), counts_complete=False, history_incomplete=False)
+        return page
 
     def _discover(self, db: sqlite3.Connection) -> None:
         """Stream changed discovery into SQLite; unrelated churn never resets pending work."""
@@ -498,19 +513,22 @@ class Catalog:
             for identifier, stamp, payload in rows[:limit]:
                 previous = last
                 last = (identifier, stamp)
-                if self._changed(db, identifier) and self.metadata_decodes < BOOTSTRAP_LIMIT:
+                if self._changed(db, identifier):
                     try:
                         value = self._load_bounded(identifier, loader)
+                        if value is None:
+                            self._remove(db, identifier)
+                            continue
+                        header, actual_stamp, active = value
+                        self._put(db, header, actual_stamp, active, identifier)
+                        if active_only and not active:
+                            continue
+                        payload = db.execute('SELECT payload FROM entries WHERE id=?', (identifier,)).fetchone()[0]
                     except DeferredRead:
+                        db.execute('INSERT OR IGNORE INTO pending VALUES (?)', (identifier,))
+                        pending = True
+                        last = previous
                         break
-                    if value is None:
-                        self._remove(db, identifier)
-                        continue
-                    header, actual_stamp, active = value
-                    self._put(db, header, actual_stamp, active, identifier)
-                    if active_only and not active:
-                        continue
-                    payload = db.execute('SELECT payload FROM entries WHERE id=?', (identifier,)).fetchone()[0]
                 size = len(payload.encode())
                 if used + size > ROW_BYTES:
                     last = previous
@@ -519,12 +537,12 @@ class Catalog:
                 used += size
                 last = (identifier, stamp)
             more = len(rows) > len(items)
-            following = None
+            following = cursor if pending and more and last is None else None
             if more and last is not None:
                 following = base64.urlsafe_b64encode(json.dumps({'version': 1, 'scope': scope, 'id': last[0], 'stamp': last[1]}, separators=(',', ':')).encode()).decode()
             counts['total_active_count'] = db.execute('SELECT COUNT(*) FROM entries' + base + (' AND active=1' if count_values else ' WHERE active=1'), count_values).fetchone()[0]
             refreshed_roots = db.execute("SELECT COUNT(*),COALESCE(SUM(json_extract(payload,'$.status') IN ('needs_attention','needs_input')),0) FROM entries WHERE active=1 AND json_extract(payload,'$.parent_workflow_run_id') IS NULL").fetchone()
             counts.update(total_active_root_count=refreshed_roots[0], total_attention_root_count=refreshed_roots[1])
             if pending or incomplete:
-                counts.update(total_active_count=None, total_active_root_count=None, total_attention_root_count=None)
+                counts.update(counts_complete=False, total_active_count=None, total_active_root_count=None, total_attention_root_count=None)
             return {'items': items, 'next_cursor': following, 'has_more': more, 'bootstrap_pending': pending, 'history_incomplete': incomplete, 'catalog_state': self.state(db), **counts}

@@ -709,7 +709,8 @@ async def list_tasks(status: str | None = None, backend: str | None = None) -> l
 async def list_task_page(limit: int = 100, cursor: str | None = None, active_only: bool = False, session_id: str | None = None, task_ids: list[str] | None = None) -> dict[str, Any]:
     """Stable newest-first persisted task headers; inspect a task for reconciled status/output.
 
-    bootstrap_pending indicates bounded legacy indexing is still loading chronology.
+    bootstrap_pending indicates bounded indexing or requested-header refresh is preparing.
+    Preserve loaded headers and cursors while catalog_state reports preparing.
     Active-only pages are a separate inventory and do not reorder history cursors.
     """
     try:
@@ -721,7 +722,7 @@ async def list_task_page(limit: int = 100, cursor: str | None = None, active_onl
         from .workflow_inspection import filter_task_reads
         visible = filter_task_reads(page['items'], managed)
         if managed is not None:
-            page['total_active_count'] = sum(item.get('status') not in store.TERMINAL_RECORD_STATUSES for item in visible)
+            page['total_active_count'] = None if page.get('bootstrap_pending') or page.get('counts_complete') is False else sum(item.get('status') not in store.TERMINAL_RECORD_STATUSES for item in visible)
             page.pop('total_active_root_count', None)
             page.pop('total_attention_root_count', None)
             page.update(next_cursor=None, has_more=False)
@@ -1358,7 +1359,11 @@ async def list_workflow_runs(offset: int = 0, limit: int = 10) -> dict[str, Any]
 
 @mcp.tool()
 async def list_workflow_run_page(limit: int = 100, cursor: str | None = None, active_only: bool = False, related_run_id: str | None = None, run_ids: list[str] | None = None) -> dict[str, Any]:
-    """Stable newest-first run headers, with bounded ancestor/session-owner lookups."""
+    """Stable newest-first run headers, with bounded ancestor/session-owner lookups.
+
+    A deferred explicit run_ids batch returns an empty preparing page; preserve loaded headers
+    and retry the read rather than interpreting a budget limit as an unknown run outcome.
+    """
     return await _workflow_call('list_run_page', limit=limit, cursor=cursor, active_only=active_only, related_run_id=related_run_id, run_ids=run_ids)
 
 
