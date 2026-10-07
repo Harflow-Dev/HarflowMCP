@@ -396,7 +396,11 @@ eligible references and availability reasons in its continuation contract, and m
 `child_session_mode: fresh|resume` with a nonempty `child_session_reason`; Resume also requires an
 issued `child_session_ref`. It cannot supply arbitrary session IDs or change saved permissions.
 The selected mode, reason and source are persisted before child publication and checked again
-before dispatch. A refused or ambiguous resume does not trigger a fresh or fallback-harness launch.
+before dispatch. After a supervisor crash, a completed first Resume turn owned by this child can restore
+its session only when its persisted lineage, checkpoint, configuration and exit receipt match. Recovery
+re-asks the checkpoint with a full bootstrap and checks the restored conversation again under the
+session lock; foreign or ambiguous successor turns still block it. A refused or ambiguous resume
+does not trigger a fresh or fallback-harness launch.
 Monitor invocation details show the requested policy, selected behavior, source and refusal reason.
 
 This policy uses the saved child's headless orchestrator and the selected backend's retained-session

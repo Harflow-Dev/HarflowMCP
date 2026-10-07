@@ -397,3 +397,67 @@ async def test_successor_between_workflow_validation_and_lock_never_spawns(store
     attempt = next(t for a in final["activations"] for t in a["tasks"])
     assert attempt["status"] == "not_started" and attempt["session_mode"] == "resume"
     assert "successor" in final["child_session_refusal"]
+
+@pytest.mark.parametrize("mutation", [None, "repeat", "failed", "unknown", "model", "parent", "checkpoint", "foreign", "race"])
+async def test_completed_first_resume_crash_reconciles_owned_binding(store, source, monkeypatch, mutation):
+    class Crash(BaseException):
+        pass
+    original_update = store.update_run
+    def crash_before_session(run_id, mutator, event, *args, **kwargs):
+        if event == "session_recorded":
+            raise Crash()
+        return original_update(run_id, mutator, event, *args, **kwargs)
+    monkeypatch.setattr(store, "update_run", crash_before_session)
+    registry = ReuseRegistry(store.root, source[-1])
+    with pytest.raises(Crash):
+        await execute_new_child(store, source, registry)
+    monkeypatch.setattr(store, "update_run", original_update)
+    child_id = source[4]["invocation"]["child_workflow_run_id"]
+    child = store.get_run(child_id)
+    activation = child["activations"][-1]
+    attempt = activation["tasks"][-1]
+    own = tasks.read(store.root / "tasks", attempt["task_id"])
+    if mutation == "failed":
+        tasks.write(store.root / "tasks", replace(own, status="failed", exit_code=1))
+    elif mutation == "unknown":
+        tasks.write(store.root / "tasks", replace(own, exit_code=None))
+    elif mutation == "model":
+        tasks.write(store.root / "tasks", replace(own, model="different"))
+    elif mutation == "parent":
+        tasks.write(store.root / "tasks", replace(own, parent_task_id="foreign"))
+    elif mutation == "checkpoint":
+        activation["decision_id"] = "different"
+        write_run(store, child)
+    elif mutation == "repeat":
+        monkeypatch.setattr(store, "update_run", crash_before_session)
+        with pytest.raises(Crash):
+            await w.WorkflowSupervisor(registry, store).execute(child_id)
+        monkeypatch.setattr(store, "update_run", original_update)
+        own = tasks.read(store.root / "tasks", store.get_run(child_id)["activations"][-1]["tasks"][-1]["task_id"])
+    elif mutation == "foreign":
+        tasks.write(store.root / "tasks", replace(own, task_id=uuid.uuid4().hex, parent_task_id=own.task_id))
+    if mutation == "race":
+        from polybridge.tasks import TaskRegistry
+        actual = TaskRegistry(log_dir=store.root / "tasks")
+        async def no_caller():
+            return None
+        monkeypatch.setattr(actual, "_mutation_caller", no_caller)
+        async def no_spawn(*args, **kwargs):
+            raise AssertionError("Recovered inherited session must refuse before spawn")
+        monkeypatch.setattr(actual, "_spawn", no_spawn)
+        async def racing_resume(previous, prompt, **kwargs):
+            assert kwargs["require_unchanged_session"] is True
+            tasks.write(store.root / "tasks", replace(own, task_id=uuid.uuid4().hex, parent_task_id=own.task_id, session_id=None))
+            return await actual.resume_record(own, prompt, **kwargs)
+        monkeypatch.setattr(registry, "resume", racing_resume)
+    resumed = w.WorkflowSupervisor(registry, store)
+    await asyncio.wait_for(resumed.execute(child_id), 15)
+    final = store.get_run(child_id)
+    if mutation not in {None, "repeat"}:
+        assert final["status"] == "needs_attention"
+        assert len(registry.resumes) == 1
+    else:
+        assert final["status"] == "completed", final.get("attention_reason")
+        assert registry.resumes[2 if mutation == "repeat" else 1][0] == own.task_id
+        assert "NEW CHILD WORKFLOW INVOCATION" in registry.resumes[1][1]
+        assert all(t["session_mode"] == "resume" for a in final["activations"] if a["role"] == "orchestrator" for t in a["tasks"])

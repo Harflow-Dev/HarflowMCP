@@ -16,7 +16,7 @@ def _hash(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def offer(store: Any, run: dict[str, Any], node: dict[str, Any], exclude_execution_id: str | None = None) -> dict[str, Any]:
+def offer(store: Any, run: dict[str, Any], node: dict[str, Any], exclude_execution_id: str | None = None, *, _recovered_successors: set[str] | None = None) -> dict[str, Any]:
     """Issue one opaque reference, or a precise refusal; never search past a visit."""
     from . import backends, store as tasks
     from .workflow_invocation import child_settled
@@ -58,7 +58,7 @@ def offer(store: Any, run: dict[str, Any], node: dict[str, Any], exclude_executi
         record = tasks.read(store.root / "tasks", binding.get("task_id", "")) if binding.get("task_id") else None
         if record is None or record.status != "completed" or tasks.outcome_unobserved(record) or not record.session_id or binding.get("session_id") != record.session_id:
             return refuse("Latest child orchestrator session is missing or its outcome is unconfirmed")
-        if tasks.session_successor_task_ids(store.root / "tasks", record.task_id, record.session_id):
+        if tasks.session_successor_task_ids(store.root / "tasks", record.task_id, record.session_id) != (_recovered_successors or set()):
             return refuse("Latest child conversation was advanced by successor tasks after its completed invocation")
         owners = [attempt for activation in child.get("activations", []) if activation.get("role") == "orchestrator" for attempt in activation.get("tasks", []) if attempt.get("task_id") == record.task_id]
         if len(owners) != 1 or owners[0].get("status") != "completed" or "orchestrator:" + _candidate_key(owners[0].get("candidate", {})) != binding.get("candidate"):
@@ -161,3 +161,63 @@ def validate_inherited(store: Any, child: dict[str, Any]) -> None:
     selected = select(store, parent, node, activation, activation.get("token", {}))
     if selected != binding:
         raise WorkflowError("Inherited child orchestrator binding does not match the parent selection")
+
+
+async def _recover_first_turn(supervisor: Any) -> None:
+    """Restore only the proven first inherited turn, never exempt foreign writes."""
+    from . import control, store as tasks
+    from .workflows import _candidate_key
+    child = supervisor.run()
+    inherited = child.get("inherited_orchestrator_binding")
+    if not inherited or (child.get("sessions", {}).get("orchestrator") and not child.get("recovered_inherited_turn")):
+        return
+    if child.get("recovered_inherited_turn"):
+        supervisor.update(lambda run: (run["sessions"].pop("orchestrator", None), run.pop("recovered_inherited_turn", None)), "inherited_recovery_revalidation")
+    pending = {token.get("decision_id"): token for token in child.get("pending", []) if token.get("decision_id")}
+    attempts = [(activation, attempt) for activation in child.get("activations", []) if activation.get("role") == "orchestrator" for attempt in activation.get("tasks", []) if attempt.get("status") != "not_started"]
+    if not attempts:
+        return
+    source_task = inherited["source_task_id"]
+    owned = set()
+    for owned_activation, owned_attempt in attempts:
+        receipt = tasks.read(supervisor.store.root / "tasks", owned_attempt["task_id"])
+        if owned_attempt.get("status") != "completed" or owned_attempt.get("session_mode") != "resume" or owned_attempt.get("resume_task_id") != source_task or receipt is None or receipt.parent_task_id != source_task or receipt.status != "completed" or tasks.outcome_unobserved(receipt) or receipt.session_id != inherited["source_session_id"]:
+            return
+        expected = inherited["candidate"]
+        if owned_attempt.get("candidate") != expected or (receipt.backend, receipt.model, receipt.reasoning_effort, receipt.max_turns, receipt.freedom, receipt.network, str(Path(receipt.repo_path).resolve())) != (expected["backend"], expected.get("model"), expected.get("reasoning_effort"), expected.get("max_turns"), "read_only", child.get("network"), str(Path(child["repo_path"]).resolve())):
+            return
+        owned.add(receipt.task_id)
+        source_task = receipt.task_id
+    activation, attempt = attempts[-1]
+    checkpoint = pending.get(activation.get("decision_id"))
+    candidate = inherited["candidate"]
+    if not checkpoint or activation.get("token", {}).get("id") != checkpoint["id"] or activation.get("token", {}).get("decision_id") != checkpoint["decision_id"] or attempt.get("status") != "completed" or attempt.get("session_mode") != "resume" or attempt.get("candidate") != candidate:
+        return
+    sid = inherited["source_session_id"]
+    async with control.session_lock(supervisor.store.root / "tasks", sid, timeout=10):
+        record = tasks.read(supervisor.store.root / "tasks", attempt["task_id"])
+        if record is None or record.status != "completed" or tasks.outcome_unobserved(record) or record.parent_task_id != attempt.get("resume_task_id") or record.session_id != sid:
+            return
+        if (record.backend, record.model, record.reasoning_effort, record.max_turns, record.freedom, record.network, str(Path(record.repo_path).resolve())) != (candidate["backend"], candidate.get("model"), candidate.get("reasoning_effort"), candidate.get("max_turns"), "read_only", child.get("network"), str(Path(child["repo_path"]).resolve())):
+            return
+        if sid in tasks.live_session_ids(supervisor.store.root / "tasks") or tasks.session_successor_task_ids(supervisor.store.root / "tasks", record.task_id, sid):
+            return
+        link = child["parent_link"]
+        parent = supervisor.store.get_run(link["workflow_run_id"])
+        owner = next(a for a in parent["activations"] if a["id"] == link["execution_id"])
+        node = next(n for n in parent["definition"]["nodes"] if n["id"] == link["node_id"])
+        if owner.get("invocation", {}).get("child_session_selection") != inherited:
+            return
+        offered = offer(supervisor.store, parent, node, owner["id"], _recovered_successors=owned)
+        if not offered["eligible_sessions"] or offered["eligible_sessions"][0]["compatibility_fingerprint"] != inherited["compatibility_fingerprint"]:
+            return
+        binding = {"candidate": "orchestrator:" + _candidate_key(candidate), "task_id": record.task_id, "session_id": sid}
+        supervisor.update(lambda run: (run["sessions"].__setitem__("orchestrator", binding), run.update(recovered_inherited_turn=True)), "inherited_turn_recovered")
+
+
+async def recover_first_turn(supervisor: Any) -> None:
+    """Malformed or missing recovery evidence retains ordinary strict refusal."""
+    try:
+        await _recover_first_turn(supervisor)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, StopIteration):
+        return

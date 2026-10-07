@@ -2030,7 +2030,10 @@ class WorkflowSupervisor:
                 previous = {"task_id": source["task_id"], "candidate": key + ":" + _candidate_key(source["candidate"]), "session_id": source.get("result", {}).get("session_id")}
         persistent_orchestrator = role == "orchestrator" and run.get("runner_policy") == "guided"
         inherited = run.get("inherited_orchestrator_binding") if role == "orchestrator" and orchestrator_override is None and not run.get("sessions", {}).get("orchestrator") else None
-        strict_child_resume = inherited is not None
+        recovered_inherited_turn = role == "orchestrator" and run.get("recovered_inherited_turn") is True
+        strict_child_resume = inherited is not None or recovered_inherited_turn
+        if recovered_inherited_turn:
+            inherited = {**run["inherited_orchestrator_binding"], "binding": copy.deepcopy(previous)}
         def child_resume_refused(reason: str) -> None:
             self.update(lambda r: r.update(child_session_refusal=reason), "child_session_resume_refused", reason)
             link = run.get("parent_link") or {}
@@ -2044,7 +2047,8 @@ class WorkflowSupervisor:
         if strict_child_resume:
             from .workflow_child_sessions import validate_inherited
             try:
-                validate_inherited(self.store, run)
+                if not recovered_inherited_turn:
+                    validate_inherited(self.store, run)
             except (WorkflowError, OSError, ValueError, KeyError, TypeError) as exc:
                 child_resume_refused("Child Resume refused: " + str(exc))
                 return None
@@ -2341,6 +2345,8 @@ class WorkflowSupervisor:
                     self.store.update_run(owner_id, record_owner_session, "session_recorded", {"child_workflow_run_id": run["workflow_run_id"], "task_id": task_id})
                 else:
                     self.update(lambda r: r["sessions"].__setitem__(key, {"candidate": identity, "task_id": task_id, "session_id": snapshot.get("session_id")}), "session_recorded", key)
+                if recovered_inherited_turn:
+                    self.update(lambda r: r.pop("recovered_inherited_turn", None), "inherited_recovery_continued")
                 return snapshot
             except DispatchNotStarted as exc:
                 self._task_update(activation["id"], task_id, {"status": "not_started"})
@@ -2768,6 +2774,8 @@ class WorkflowSupervisor:
             timed = any(t.get("status") == "uncertain" and t.get("timeout_deadline") is not None for a in self.run()["activations"] for t in a["tasks"])
             self.attention("Supervisor interrupted during a timed node: persisted timeout deadline requires process reconciliation; no worker or timer replayed" if timed else "Supervisor interrupted: reconcile observed task results before continuing; dispatches were not replayed")
             return False
+        from .workflow_child_sessions import recover_first_turn
+        await recover_first_turn(self)
         return True
 
     async def execute(self, run_id: str) -> None:
