@@ -58,6 +58,8 @@ def offer(store: Any, run: dict[str, Any], node: dict[str, Any], exclude_executi
         record = tasks.read(store.root / "tasks", binding.get("task_id", "")) if binding.get("task_id") else None
         if record is None or record.status != "completed" or tasks.outcome_unobserved(record) or not record.session_id or binding.get("session_id") != record.session_id:
             return refuse("Latest child orchestrator session is missing or its outcome is unconfirmed")
+        if tasks.session_successor_task_ids(store.root / "tasks", record.task_id, record.session_id):
+            return refuse("Latest child conversation was advanced by successor tasks after its completed invocation")
         owners = [attempt for activation in child.get("activations", []) if activation.get("role") == "orchestrator" for attempt in activation.get("tasks", []) if attempt.get("task_id") == record.task_id]
         if len(owners) != 1 or owners[0].get("status") != "completed" or "orchestrator:" + _candidate_key(owners[0].get("candidate", {})) != binding.get("candidate"):
             return refuse("Latest child session is not owned by its completed orchestrator dispatch")

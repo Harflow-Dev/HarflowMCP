@@ -378,7 +378,11 @@ conclusively settled. A newer failed, active, uncertain or incompatible invocati
 the engine does not search past it for an older conversation. The pinned child revision and
 content, repository, saved orchestrator candidates, actual source harness/model/effort, access,
 network policy, retained task/session and CLI resume support must remain compatible. Existing
-cross-process session and takeover locks remain authoritative at dispatch. Reuse requires an explicitly
+cross-process session and takeover locks remain authoritative at dispatch. Any outside resume after the
+selected source invalidates reuse, even if it has completed or never disclosed a session ID. The engine
+checks conversation history again inside the session lock before launch, and retains successor evidence
+while the workflow checkpoint is pinned. Unproven conversation branches also require Fresh.
+Reuse requires an explicitly
 pinned model and, for harnesses that support effort selection, an explicitly pinned reasoning effort.
 Unknown ambient defaults cannot establish compatibility; harnesses that cannot pin these settings
 must use Fresh. Antigravity Child Resume is unavailable because its CLI can create a new

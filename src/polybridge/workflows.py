@@ -2223,12 +2223,12 @@ class WorkflowSupervisor:
                     if use_resume:
                         parent = self.registry.get(previous["task_id"])
                         if parent:
-                            task = await self.registry.resume(parent, dispatch_prompt, max_turns=candidate.get("max_turns"), network=network, task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder")
+                            task = await self.registry.resume(parent, dispatch_prompt, max_turns=candidate.get("max_turns"), network=network, task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder", **({"require_unchanged_session": True} if strict_child_resume else {}))
                         else:
                             record = task_store.read(self.registry._log_dir, previous["task_id"])
                             if record is None:
                                 raise SessionUnknownError("Previous resume session is unavailable")
-                            task = await self.registry.resume_record(record, dispatch_prompt, max_turns=candidate.get("max_turns"), network=network, task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder")
+                            task = await self.registry.resume_record(record, dispatch_prompt, max_turns=candidate.get("max_turns"), network=network, task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder", **({"require_unchanged_session": True} if strict_child_resume else {}))
                     else:
                         if role == "builder":
                             latest = self.run()

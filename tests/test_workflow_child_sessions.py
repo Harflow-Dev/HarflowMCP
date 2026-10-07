@@ -154,7 +154,7 @@ class ReuseRegistry(TreeRegistry):
         task = await super().resume(previous, prompt, **kwargs)
         task.result["session_id"] = previous.result["session_id"]
         record = tasks.read(self._log_dir, task.task_id)
-        record = replace(record, session_id=task.result["session_id"])
+        record = replace(record, session_id=task.result["session_id"], parent_task_id=previous.task_id)
         tasks.write(self._log_dir, record)
         return task
 
@@ -346,3 +346,54 @@ def test_harness_that_may_start_fresh_cannot_launch_child_resume(store, source, 
     assert not offered["eligible_sessions"] and "may start a Fresh" in offered["unavailable_reason"]
     with pytest.raises(w.WorkflowError, match="strict Child Resume is unsupported"):
         selection(store, source)
+
+
+@pytest.mark.parametrize("undisclosed", [False, True])
+def test_completed_external_resume_invalidates_offered_and_saved_source(store, source, undisclosed):
+    parent, node, _, _, current, record = source
+    selected = selection(store, source)
+    current["invocation"]["child_session_selection"] = selected
+    tasks.write(store.root / "tasks", replace(record, task_id="external-successor", parent_task_id=record.task_id, session_id=None if undisclosed else record.session_id))
+    assert record.session_id not in tasks.live_session_ids(store.root / "tasks")
+    offered = reuse.offer(store, parent, node, current["id"])
+    assert offered["eligible_sessions"] == [] and "successor" in offered["unavailable_reason"]
+    with pytest.raises(w.WorkflowError, match="successor"):
+        selection(store, source)
+    # Recovery retains the selected source instead of recomputing Fresh.
+    assert current["invocation"]["child_session_selection"] == selected
+
+
+async def test_successor_between_workflow_validation_and_lock_never_spawns(store, source, monkeypatch):
+    from contextlib import asynccontextmanager
+    from polybridge import control
+    from polybridge.tasks import TaskRegistry
+    record = source[-1]
+    actual = TaskRegistry(log_dir=store.root / "tasks")
+    async def no_caller():
+        return None
+    monkeypatch.setattr(actual, "_mutation_caller", no_caller)
+    spawns = []
+    async def no_spawn(*args, **kwargs):
+        spawns.append(kwargs)
+        raise AssertionError("Strict child resume must refuse before spawn")
+    monkeypatch.setattr(actual, "_spawn", no_spawn)
+    original_lock = control.session_lock
+    @asynccontextmanager
+    async def inject(log_dir, session_id, **kwargs):
+        async with original_lock(log_dir, session_id, **kwargs):
+            tasks.write(log_dir, replace(record, task_id="external-successor", parent_task_id=record.task_id, session_id=None))
+            yield
+    monkeypatch.setattr(control, "session_lock", inject)
+    class LockedRegistry(ReuseRegistry):
+        async def resume(self, previous, prompt, **kwargs):
+            self.resumes.append((previous.task_id, prompt))
+            assert kwargs["require_unchanged_session"] is True
+            return await actual.resume_record(record, prompt, **kwargs)
+    registry = LockedRegistry(store.root, record)
+    final = await execute_new_child(store, source, registry)
+    assert final["status"] == "needs_attention"
+    assert spawns == [] and registry.dispatches == [] and final["sessions"] == {}
+    assert len(registry.resumes) == 1
+    attempt = next(t for a in final["activations"] for t in a["tasks"])
+    assert attempt["status"] == "not_started" and attempt["session_mode"] == "resume"
+    assert "successor" in final["child_session_refusal"]
