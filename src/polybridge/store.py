@@ -379,7 +379,7 @@ def _project_indexed_status(header: dict[str, Any], record: TaskRecord) -> bool:
 
 
 def list_page(log_dir: Path, *, limit: int = 100, cursor: str | None = None, active_only: bool = False, session_id: str | None = None, task_ids: list[str] | None = None) -> dict[str, Any]:
-    from .catalog import Catalog, DeferredRead
+    from .catalog import Catalog, DeferredRead, apply_read_state
     def load(identifier: str, *, _metadata_budget=None):
         record = read(log_dir, identifier, include_prompt=False, metadata_byte_limit=4 * 1024 * 1024, metadata_budget=_metadata_budget)
         return listing_header(record) if record is not None else None
@@ -410,7 +410,7 @@ def list_page(log_dir: Path, *, limit: int = 100, cursor: str | None = None, act
                 from .workflows import WorkflowStore
                 header = workflow_storage.get_run_header(receipt['workflow_run_id'], _catalog=workflow_catalog)
                 if header.get('indexing'):
-                    page.update(bootstrap_pending=True, counts_complete=False, total_active_count=None, total_active_root_count=None, total_attention_root_count=None, catalog_state=workflow_catalog.state())
+                    apply_read_state(page, header['catalog_state'])
                     continue
                 if header.get('needs_direct_lookup'):
                     page.update(ownership_incomplete=True, history_incomplete=True, counts_complete=False, total_active_count=None, total_active_root_count=None, total_attention_root_count=None)
@@ -462,21 +462,25 @@ def list_page(log_dir: Path, *, limit: int = 100, cursor: str | None = None, act
                 continue
             visited.add(identifier)
             row = db.execute('SELECT payload FROM entries WHERE id=?', (identifier,)).fetchone()
-            if row is None or not record_path(log_dir, identifier).exists():
+            if not record_path(log_dir, identifier).exists():
                 continue
-            if catalog._changed(db, identifier):
-                try:
+            try:
+                if row is None or catalog._changed(db, identifier):
                     value = catalog._load_bounded(identifier, load)
-                except DeferredRead:
-                    page.update(bootstrap_pending=True, counts_complete=False, catalog_state=catalog.state(db))
-                    break
-                if value is None:
-                    catalog._remove(db, identifier)
-                    continue
-                header, stamp, active = value
-                catalog._put(db, header, stamp, active, identifier)
-                row = db.execute('SELECT payload FROM entries WHERE id=?', (identifier,)).fetchone()
+                    if value is None:
+                        catalog._remove(db, identifier)
+                        continue
+                    header, stamp, active = value
+                    catalog._put(db, header, stamp, active, identifier)
+                    row = db.execute('SELECT payload FROM entries WHERE id=?', (identifier,)).fetchone()
+            except DeferredRead:
+                db.execute('INSERT OR IGNORE INTO pending VALUES (?)', (identifier,))
+                apply_read_state(page, catalog.state(db))
+                break
             header = json.loads(row[0])
+            if header.get('needs_direct_lookup'):
+                apply_read_state(page, catalog.state(db))
+                continue
             try:
                 from .bounded_io import read_receipt
                 receipt = read_receipt(log_dir.parent / 'workflow-owners' / f'{identifier}.json')

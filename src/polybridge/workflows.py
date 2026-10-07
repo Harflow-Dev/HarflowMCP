@@ -840,16 +840,16 @@ class WorkflowStore:
         load.bounded_metadata = True
         catalog = _catalog or Catalog(self.runs, '.json')
         headers = catalog.headers([_identifier(run_id)], load)
-        if catalog.deferred_headers:
+        if catalog.deferred_headers or catalog.blocked_headers:
             return {'workflow_run_id': run_id, 'indexing': True, 'catalog_state': catalog.requested_preparation()}
         if not headers:
             raise FileNotFoundError(f'Workflow run unavailable: {run_id}')
         return headers[0]
 
     def related_run_headers(self, run_ids: list[str], *, byte_budget: int = 64 * 1024) -> list[dict[str, Any]]:
-        from .catalog import Catalog
+        from .catalog import Catalog, RelatedHeaders, merge_read_state
         catalog = Catalog(self.runs, '.json')
-        result, seen, queue, used = [], set(), list(run_ids), 0
+        result, seen, queue, used = RelatedHeaders(), set(), list(run_ids), 0
         while queue and len(seen) < 32:
             identifier = queue.pop(0)
             if identifier in seen:
@@ -860,6 +860,8 @@ class WorkflowStore:
             except (OSError, ValueError, KeyError):
                 continue
             if header.get('indexing'):
+                state = header['catalog_state']
+                result.catalog_state = merge_read_state(result.catalog_state, state)
                 continue
             size = len(json.dumps(header, ensure_ascii=True).encode())
             if used + size > byte_budget:

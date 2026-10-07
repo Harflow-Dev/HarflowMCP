@@ -89,6 +89,40 @@ def source_identity(source):
     return (source.st_mtime_ns, source.st_size, getattr(source, 'st_ino', 0), getattr(source, 'st_dev', 0))
 
 
+def merge_read_state(previous: dict[str, Any] | None, state: dict[str, Any]) -> dict[str, Any]:
+    """Persistent failures win presentation; deferred work survives other sources."""
+    if not previous or previous.get('status') == 'ready':
+        return dict(state)
+    chosen = previous if previous.get('status') == 'blocked' and state['status'] != 'blocked' else state
+    result = dict(chosen)
+    for key in ('pending_records', 'blocked_records'):
+        result[key] = max(previous.get(key, 0), state.get(key, 0))
+    blockers = sorted(set(previous.get('blocker_types', []) + state.get('blocker_types', [])))
+    if blockers:
+        result['blocker_types'] = blockers[:10]
+    return result
+
+
+def apply_read_state(page: dict[str, Any], state: dict[str, Any]) -> None:
+    """Keep incomplete read projections neutral, with persistent blockers winning."""
+    if state['status'] == 'ready':
+        return
+    previous = page.get('catalog_state', {})
+    merged = merge_read_state(previous, state)
+    page['catalog_state'] = merged
+    pending = merged['status'] == 'preparing' or bool(merged.get('pending_records')) or bool(previous) and page.get('bootstrap_pending', False)
+    page.update(bootstrap_pending=bool(pending), counts_complete=False,
+                history_incomplete=page.get('history_incomplete', False) or merged['status'] == 'blocked')
+    for key in ('total_active_count', 'total_active_root_count', 'total_attention_root_count'):
+        if key in page:
+            page[key] = None
+
+
+class RelatedHeaders(list):
+    """Compact ancestry plus the readiness of every requested source."""
+    catalog_state: dict[str, Any] | None = None
+
+
 class DeferredRead(Exception):
     """The request budget is exhausted; leave this source queued for the next read."""
 
@@ -413,18 +447,27 @@ class Catalog:
             raise ValueError('At most 100 identifiers may be requested')
         result = []
         self.deferred_headers = set()
+        self.blocked_headers = {}
         with self.connect() as db:
             for identifier in dict.fromkeys(identifiers):
                 row = db.execute('SELECT payload FROM entries WHERE id=?', (identifier,)).fetchone()
                 if row is not None and not self._changed(db, identifier):
-                    result.append(json.loads(row[0]))
+                    header = json.loads(row[0])
+                    if header.get('needs_direct_lookup'):
+                        self.blocked_headers[identifier] = header.get('index_blocker', 'direct_inspection')
+                    else:
+                        result.append(header)
                 else:
                     try:
                         value = self._load_bounded(identifier, loader)
                         if value is not None:
                             header, stamp, active = value
                             self._put(db, header, stamp, active, identifier)
-                            result.append(bound_header({key: value for key, value in header.items() if not key.startswith('_')}))
+                            projected = json.loads(db.execute('SELECT payload FROM entries WHERE id=?', (identifier,)).fetchone()[0])
+                            if projected.get('needs_direct_lookup'):
+                                self.blocked_headers[identifier] = projected.get('index_blocker', 'direct_inspection')
+                            else:
+                                result.append(projected)
                         else:
                             self._remove(db, identifier)
                     except DeferredRead:
@@ -436,15 +479,21 @@ class Catalog:
         return result
 
     def requested_preparation(self) -> dict[str, Any]:
-        return {'status': 'preparing', 'source': 'task_catalog' if self.suffix == '.meta.json' else 'workflow_catalog',
-                'reason': 'Preparing requested metadata headers', 'pending_records': len(self.deferred_headers), 'blocked_records': 0}
+        blocked = getattr(self, 'blocked_headers', {})
+        state = {'status': 'blocked' if blocked else 'preparing',
+                 'source': 'task_catalog' if self.suffix == '.meta.json' else 'workflow_catalog',
+                 'reason': 'Metadata or caller identity requires direct inspection' if blocked else 'Preparing requested metadata headers',
+                 'pending_records': len(self.deferred_headers), 'blocked_records': len(blocked)}
+        if blocked:
+            state['blocker_types'] = sorted(set(blocked.values()))
+        return state
 
     def header_page(self, identifiers: list[str], loader) -> dict[str, Any]:
         headers = self.headers(identifiers, loader)
-        pending = bool(self.deferred_headers)
+        pending = bool(self.deferred_headers or self.blocked_headers)
         page = {'items': [] if pending else headers, 'next_cursor': None, 'has_more': False, 'bootstrap_pending': pending}
         if pending:
-            page.update(catalog_state=self.requested_preparation(), counts_complete=False, history_incomplete=False)
+            apply_read_state(page, self.requested_preparation())
         return page
 
     def _discover(self, db: sqlite3.Connection) -> None:

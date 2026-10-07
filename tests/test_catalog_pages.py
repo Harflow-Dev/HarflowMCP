@@ -1187,3 +1187,175 @@ async def test_concurrent_caller_preparation_survives_worker_hops_without_shared
     assert blocked['items'] == preparing['items'] == []
     with catalog.Catalog(directory, store.RECORD_SUFFIX).connect() as db:
         assert db.execute("SELECT 1 FROM state WHERE key='authority_preparation'").fetchone() is None
+
+
+@pytest.mark.parametrize('kind', ['task', 'workflow'])
+def test_explicit_oversized_headers_are_blocked_without_unknown_rows(tmp_path, kind):
+    if kind == 'task':
+        directory = tmp_path / 'tasks'
+        store.write(directory, record('selected'))
+        path = directory / 'selected.meta.json'
+        read_page = lambda: store.list_page(directory, task_ids=['selected'])
+    else:
+        storage = workflows.WorkflowStore(tmp_path)
+        run = storage.create_run(definition(), 'Selected', tmp_path)
+        identifier = run['workflow_run_id']
+        path = storage.runs / f'{identifier}.json'
+        read_page = lambda: storage.list_run_page(run_ids=[identifier])
+    original = path.read_text()
+    payload = json.loads(original)
+    payload['prompt'] = 'x' * (catalog.METADATA_BYTES + 1)
+    path.write_text(json.dumps(payload))
+    for _ in range(2):
+        page = read_page()
+        assert page['items'] == []
+        assert not page['bootstrap_pending'] and not page['counts_complete']
+        assert page['catalog_state']['status'] == 'blocked'
+        assert page['catalog_state']['blocker_types'] == ['oversized_metadata']
+        assert page['history_incomplete']
+    path.write_text(original)
+    assert len(read_page()['items']) == 1
+
+
+def large_ancestry(storage, tmp_path):
+    runs = [storage.create_run(definition(), str(i), tmp_path) for i in range(3)]
+    for i, run in enumerate(runs):
+        if i < 2:
+            run['parent_link'] = {'workflow_run_id': runs[i + 1]['workflow_run_id']}
+        run['large_legacy_field'] = 'x' * (3 * 1024 * 1024)
+        (storage.runs / f"{run['workflow_run_id']}.json").write_text(json.dumps(run))
+    return [run['workflow_run_id'] for run in runs]
+
+
+def test_workflow_ancestry_budget_preparation_recovers_next_request(tmp_path):
+    storage = workflows.WorkflowStore(tmp_path)
+    identifiers = large_ancestry(storage, tmp_path)
+    with catalog.metadata_request():
+        budget = catalog._request_budget.get()
+        headers = storage.related_run_headers(identifiers[:1])
+        assert budget.metadata_bytes <= catalog.METADATA_BATCH_BYTES
+    assert len(headers) == 2
+    assert headers.catalog_state['status'] == 'preparing'
+    with catalog.metadata_request():
+        budget = catalog._request_budget.get()
+        recovered = storage.related_run_headers(identifiers[:1])
+        assert budget.metadata_bytes <= catalog.METADATA_BATCH_BYTES
+    assert [header['workflow_run_id'] for header in recovered] == identifiers
+    assert recovered.catalog_state is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('route', ['related', 'page'])
+async def test_workflow_related_transport_retries_deferred_ancestry(tmp_path, monkeypatch, route):
+    human_authority(monkeypatch)
+    directory = tmp_path / 'tasks'
+    directory.mkdir()
+    monkeypatch.setattr(server, '_reg', lambda: SimpleNamespace(log_dir=directory))
+    storage = workflows.WorkflowStore(tmp_path)
+    identifiers = large_ancestry(storage, tmp_path)
+    monkeypatch.setattr(workflows, 'WorkflowStore', lambda: storage)
+    request = {'related_run_id': identifiers[0]} if route == 'related' else {'run_ids': identifiers[:1]}
+    page = await server.list_workflow_run_page(**request)
+    assert len(page['related_headers']) == (2 if route == 'related' else 1)
+    assert page['bootstrap_pending'] and not page['counts_complete']
+    assert page['catalog_state']['status'] == 'preparing'
+    recovered = await server.list_workflow_run_page(**request)
+    assert len(recovered['related_headers']) == (3 if route == 'related' else 2)
+    assert not recovered['bootstrap_pending']
+
+
+@pytest.mark.asyncio
+async def test_workflow_page_propagates_blocked_parent_headers(tmp_path, monkeypatch):
+    human_authority(monkeypatch)
+    storage = workflows.WorkflowStore(tmp_path)
+    parent = storage.create_run(definition(), 'Parent', tmp_path)
+    child = storage.create_run(definition(), 'Child', tmp_path)
+    identifier = child['workflow_run_id']
+    child['parent_link'] = {'workflow_run_id': parent['workflow_run_id']}
+    (storage.runs / f"{identifier}.json").write_text(json.dumps(child))
+    parent['large_legacy_field'] = 'x' * (catalog.METADATA_BYTES + 1)
+    (storage.runs / f"{parent['workflow_run_id']}.json").write_text(json.dumps(parent))
+    directory = tmp_path / 'tasks'
+    directory.mkdir()
+    monkeypatch.setattr(server, '_reg', lambda: SimpleNamespace(log_dir=directory))
+    monkeypatch.setattr(workflows, 'WorkflowStore', lambda: storage)
+    for _ in range(2):
+        page = await server.list_workflow_run_page(run_ids=[identifier])
+        assert page['items'][0]['workflow_run_id'] == identifier
+        assert page['related_headers'] == []
+        assert page['catalog_state']['status'] == 'blocked'
+        assert not page['bootstrap_pending'] and not page['counts_complete']
+
+
+def test_task_page_blocked_receipt_and_ancestor_never_publish_unknown_authority(tmp_path):
+    storage = workflows.WorkflowStore(tmp_path)
+    run = storage.create_run(definition(), 'Workflow', tmp_path)
+    directory = tmp_path / 'tasks'
+    store.write(directory, record('parent'))
+    store.write(directory, record('child', parent_task_id='parent'))
+    (storage.owners / 'child.json').write_text(json.dumps({'workflow_run_id': run['workflow_run_id']}))
+    run['large_legacy_field'] = 'x' * (catalog.METADATA_BYTES + 1)
+    (storage.runs / f"{run['workflow_run_id']}.json").write_text(json.dumps(run))
+    payload = asdict(record('parent', prompt='x' * (catalog.METADATA_BYTES + 1)))
+    (directory / 'parent.meta.json').write_text(json.dumps(payload))
+    for _ in range(2):
+        page = store.list_page(directory, task_ids=['child'])
+        assert 'workflow_status' not in page['items'][0]
+        assert page['related_headers'] == []
+        assert page['catalog_state']['status'] == 'blocked'
+        assert not page['counts_complete'] and not page['bootstrap_pending']
+
+
+def test_explicit_unsupported_caller_first_projection_is_blocked(tmp_path):
+    directory = tmp_path / 'tasks'
+    directory.mkdir()
+    (directory / 'unsupported.meta.json').write_text(json.dumps(asdict(record('unsupported', markers=['x' * 5000]))))
+    page = store.list_page(directory, task_ids=['unsupported'])
+    assert page['items'] == []
+    assert page['catalog_state']['status'] == 'blocked'
+    assert page['catalog_state']['blocker_types'] == ['unsupported_caller_identity']
+
+
+def test_mixed_read_states_preserve_retry_without_hiding_persistent_blocker():
+    blocked = {'status': 'blocked', 'source': 'task_catalog', 'pending_records': 0, 'blocked_records': 1, 'blocker_types': ['oversized_metadata']}
+    preparing = {'status': 'preparing', 'source': 'workflow_catalog', 'pending_records': 1, 'blocked_records': 0}
+    for states in ((blocked, preparing, blocked), (preparing, blocked, blocked)):
+        page = {'bootstrap_pending': False, 'total_active_count': 4}
+        for state in states:
+            catalog.apply_read_state(page, state)
+        assert page['catalog_state']['status'] == 'blocked'
+        assert page['catalog_state']['pending_records'] == 1
+        assert page['bootstrap_pending'] and page['total_active_count'] is None
+    pure_blocked = {'bootstrap_pending': False}
+    catalog.apply_read_state(pure_blocked, blocked)
+    assert not pure_blocked['bootstrap_pending']
+
+
+def test_blocked_ancestry_seed_does_not_hide_other_seed_budget_recovery(tmp_path):
+    storage = workflows.WorkflowStore(tmp_path)
+    blocked = storage.create_run(definition(), 'Blocked', tmp_path)
+    blocked['large_legacy_field'] = 'x' * (catalog.METADATA_BYTES + 1)
+    (storage.runs / f"{blocked['workflow_run_id']}.json").write_text(json.dumps(blocked))
+    chain = large_ancestry(storage, tmp_path)
+    seeds = [blocked['workflow_run_id'], chain[0]]
+    with catalog.metadata_request():
+        first = storage.related_run_headers(seeds)
+    assert len(first) == 2
+    assert first.catalog_state['status'] == 'blocked'
+    assert first.catalog_state['pending_records'] == 1
+    with catalog.metadata_request():
+        recovered = storage.related_run_headers(seeds)
+    assert len(recovered) == 3
+    assert recovered.catalog_state['status'] == 'blocked'
+    assert recovered.catalog_state['pending_records'] == 0
+
+
+def test_explicit_task_page_loads_unindexed_parent_and_reports_blocker(tmp_path):
+    directory = tmp_path / 'tasks'
+    store.write(directory, record('child', parent_task_id='legacy-parent'))
+    parent = record('legacy-parent', prompt='x' * (catalog.METADATA_BYTES + 1))
+    (directory / 'legacy-parent.meta.json').write_text(json.dumps(asdict(parent)))
+    page = store.list_page(directory, task_ids=['child'])
+    assert page['related_headers'] == []
+    assert page['catalog_state']['status'] == 'blocked'
+    assert not page['counts_complete']

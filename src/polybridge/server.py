@@ -1201,12 +1201,19 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
             related_id = kwargs.pop('related_run_id', None)
             if related_id is not None:
                 related = await asyncio.to_thread(store_.related_run_headers, [related_id])
-                return {'items': [], 'next_cursor': None, 'has_more': False, 'bootstrap_pending': False, 'related_headers': related}
+                page = {'items': [], 'next_cursor': None, 'has_more': False, 'bootstrap_pending': False, 'related_headers': related}
+                from .catalog import apply_read_state
+                if related.catalog_state:
+                    apply_read_state(page, related.catalog_state)
+                return page
             page = await asyncio.to_thread(store_.list_run_page, **kwargs)
             ids = [item[key] for item in page['items'] for key in ('parent_workflow_run_id', 'orchestrator_session_owner_run_id') if item.get(key)]
             import json
             budget = min(64 * 1024, max(0, 256 * 1024 - len(json.dumps(page, ensure_ascii=True).encode()) - 2048))
             page['related_headers'] = await asyncio.to_thread(store_.related_run_headers, ids, byte_budget=budget)
+            from .catalog import apply_read_state
+            if page['related_headers'].catalog_state:
+                apply_read_state(page, page['related_headers'].catalog_state)
             return page
         if action == "get":
             return await asyncio.to_thread(store_.get, kwargs["name"])
@@ -1361,8 +1368,9 @@ async def list_workflow_runs(offset: int = 0, limit: int = 10) -> dict[str, Any]
 async def list_workflow_run_page(limit: int = 100, cursor: str | None = None, active_only: bool = False, related_run_id: str | None = None, run_ids: list[str] | None = None) -> dict[str, Any]:
     """Stable newest-first run headers, with bounded ancestor/session-owner lookups.
 
-    A deferred explicit run_ids batch returns an empty preparing page; preserve loaded headers
-    and retry the read rather than interpreting a budget limit as an unknown run outcome.
+    Deferred explicit run_ids and ancestor reads report preparation; preserve loaded headers
+    and retry the read. Oversized or unsupported metadata reports blocked diagnostics with
+    incomplete counts, without publishing unknown placeholder outcomes.
     """
     return await _workflow_call('list_run_page', limit=limit, cursor=cursor, active_only=active_only, related_run_id=related_run_id, run_ids=run_ids)
 
