@@ -1087,6 +1087,10 @@ Batch arrivals fade together. Notifications use a 200 ms slide/fade; Reduce Moti
 movement and shows arriving panels immediately. Existing activity follow/scroll and expansion
 state stay attached to the conversation.
 
+Long workflow details stay within the window's available space. Run diagnostics and the
+inspector scroll independently so updates do not push the header, sidebar or canvas outside
+the window; split-pane dividers remain adjustable.
+
 For harness refusals and environment failures, use the
 [headless troubleshooting guide](harness-permissions.md#troubleshooting-a-headless-refusal)
 before an explicit workflow recovery action.

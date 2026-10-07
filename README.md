@@ -84,7 +84,8 @@ See [workflow interaction and recovery](docs/workflows.md) for eligibility and c
 
 History indexing recovers automatically while Monitor retains loaded content. New activity panels
 fade into place, and actionable workflow loading errors appear in a dismissible top notification
-with retained details. See [Monitor history and notifications](docs/workflows.md#monitor-history-and-notifications).
+with retained details. Long workflow details scroll within the window without displacing its
+header or sidebar. See [Monitor history and notifications](docs/workflows.md#monitor-history-and-notifications).
 
 After updating your checkout, reinstall the CLI with `uv tool install . --force --no-cache` and
 rebuild Monitor, then repeat the copy and open commands above so the installed app and runner stay in sync.
@@ -186,7 +187,7 @@ PB_CLI_INTEGRATION=1 uv run pytest -m cli_integration   # Real CLIs with isolate
 uv run mcp dev src/polybridge/server.py                 # MCP Inspector
 ```
 
-For Monitor, run `swift test` in each package under `macos/`, then
+For Monitor, run `swift test --no-parallel` in each package under `macos/`, then
 `swiftformat macos && swiftlint lint` and `./macos/build-app.sh`.
 
 Read [the workflow guide](docs/workflows.md) for definitions and execution contracts, and
