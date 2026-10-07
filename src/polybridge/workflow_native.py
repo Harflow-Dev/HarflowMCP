@@ -140,6 +140,11 @@ async def dispatch_native(supervisor: Any, node: dict[str, Any], assignment: str
             supervisor._task_update(transport_id, transport_id, {"dispatch_stage": "spawn_requested"})
             parent = supervisor.registry.get(record.task_id)
             prompt = native.prompt(assignment, nonce)
+            from .workflow_context import account_legacy_prompt
+            from .workflow_prompt_delivery import delivery_metadata
+            accounting = account_legacy_prompt(prompt, role="native_control", checkpoint=activation["id"], session_mode="resume", classification="native_control")
+            accounting["compatibility_reasons"] = ["native controller retains full assignment"]
+            supervisor._task_update(transport_id, transport_id, {"context_delivery": delivery_metadata({}, accounting)})
             if parent is not None:
                 task = await supervisor.registry.resume(parent, prompt, task_id=transport_id, display_prompt=f"Native subagent: {node.get('title', node['id'])}", native_subagent=True, max_turns=candidate.get("max_turns"))
             else:
@@ -163,7 +168,7 @@ async def dispatch_native(supervisor: Any, node: dict[str, Any], assignment: str
             if snapshot.get("permission_denials") and "result" in state:
                 state["result"]["permission_denials"] = merge_denials(state["result"].get("permission_denials", []), snapshot["permission_denials"])
                 supervisor._task_update(activation["id"], execution_id, {"result": state["result"]})
-            supervisor._task_update(transport_id, transport_id, {"status": snapshot["status"], "result": snapshot, "finished_at": time.time()})
+            supervisor._task_update(transport_id, transport_id, {"status": snapshot["status"], "result": snapshot, "finished_at": time.time(), "prompt_usage": {"usage": snapshot.get("usage"), "cost_usd": snapshot.get("total_cost_usd")}})
             supervisor.update(lambda r: next(a for a in r["activations"] if a["id"] == transport_id).update(status=snapshot["status"]), "native_control_settled")
             # Some harnesses flush authoritative native evidence only at exit.
             # Read it off the event loop, then persist through the same path as

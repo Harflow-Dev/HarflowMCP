@@ -26,7 +26,15 @@ if "quota-fixture" in sys.argv:
     emit({"type": "turn.failed", "error": {"message": "You have hit your usage limit", "code": "usage_limit_reached"}})
     sys.exit(1)
 if "workflow orchestrator" in prompt:
-    context = json.JSONDecoder().raw_decode(prompt.split("Context:\n", 1)[1])[0]
+    envelope = None
+    if prompt.startswith('{'):
+        envelope = json.loads(prompt)
+        retained = Path(os.environ['HOME']) / ('fake-context-' + session + '.json')
+        if 'bootstrap' in envelope:
+            retained.write_text(json.dumps(envelope['bootstrap']['context']))
+        context = {**json.loads(retained.read_text()), **envelope['checkpoint']}
+    else:
+        context = json.JSONDecoder().raw_decode(prompt.split("Context:\n", 1)[1])[0]
     choices = context["valid_continuations"]
     loop = "E2E_LOOP" in context.get("original_request", "")
     backward = [c for c in choices if c.get("connection", {}).get("backward")]
@@ -55,6 +63,8 @@ if "workflow orchestrator" in prompt:
         answer = {"decision_id": context["decision_id"], "action": "continue", "next": next_steps, "reason": "Fixture routing decision"}
         if stage["node_id"] == "implement" and stage["phase"] == "routing":
             answer["task_updates"] = [{"task_id": t["id"], "status": "completed", "reason": "Implementation fixture supplied evidence"} for t in context.get("checklist", [])]
+    if envelope is not None:
+        answer['context_ack'] = envelope['delivery']['acknowledgement']
 elif "E2E_ASK" in prompt and "resume" not in sys.argv:
     answer = {"status": "asking", "result": {"question": "Which conventions should I use?", "context": "Need implementation context"}, "evidence": []}
 elif "E2E_PLANNING" in prompt:

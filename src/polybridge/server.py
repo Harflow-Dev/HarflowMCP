@@ -1059,7 +1059,7 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
                 raise ValueError("Only a verified human Monitor caller can claim monitor interaction ownership: " + refusal[1])
         if action in {"pause", "resume", "recover"}:
             kwargs.setdefault("interaction_owner", "caller")
-        if action not in {"list", "list_runs", "list_run_page", "get_run_header", "get", "status", "inspect", "detail"}:
+        if action not in {"list", "list_runs", "list_run_page", "get_run_header", "get", "status", "inspect", "assigned_input", "detail"}:
             from .workflow_hooks import refuse_managed
             caller = await _verified_workflow_caller()
             if caller is not None:
@@ -1144,6 +1144,9 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
                 return pending
         else:
             managed = await _managed_workflow_reader()
+        if action == "assigned_input":
+            from .workflow_inspection import assigned_input_page
+            return await asyncio.to_thread(assigned_input_page, managed, workflows.WorkflowStore().root, kwargs["run_id"], kwargs["execution_id"], source_run_id=kwargs.get("source_run_id"), task_id=kwargs.get("task_id"), cursor=kwargs.get("cursor"), limit=kwargs.get("limit", 16000))
         if managed is not None:
             association, owned_run = managed
             if action in {'list_run_page', 'get_run_header'}:
@@ -1253,6 +1256,10 @@ async def get_workflow(name: str) -> dict[str, Any]:
 async def save_workflow(name: str, definition: dict[str, Any], expected_revision: int | None = None) -> dict[str, Any]:
     """Validate and save an explicit workflow; expected_revision protects concurrent edits.
 
+    context_delivery is legacy or optimized_v1. New definitions default to optimized_v1;
+    existing definitions retain their saved policy (or legacy) unless explicitly changed.
+    Optimized delivery uses session-bound acknowledgements and assigned evidence retrieval,
+    with a 64 KiB target that never silently cuts required constraints.
     Set routing_mode="explicit". Ordinary nodes choose exactly one outgoing path.
     Parallel execution uses paired parallel_start/parallel_end nodes with shared
     parallel_group_id. Every branch reaches its matching end; nesting is supported.
@@ -1461,6 +1468,21 @@ async def resume_workflow(workflow_run_id: str, instructions: str | None = None,
     """
     from .workflow_responses import compact
     return compact(await _workflow_call("resume", run_id=workflow_run_id, instructions=instructions, additional_attempts=additional_attempts, decision_id=decision_id, allow_optional_review_skip=allow_optional_review_skip))
+
+
+@mcp.tool()
+async def read_workflow_assigned_input(workflow_run_id: str, execution_id: str, source_run_id: str | None = None, task_id: str | None = None, cursor: str | None = None, limit: int = 16000) -> dict[str, Any]:
+    """Read an immutable input explicitly assigned to your active worker activation.
+
+    Only verified managed workers may use this tool. Inputs are authorized by the persisted
+    activation allowlist and content digest, including linked child inputs with a verified
+    parent chain. Live, uncertain, unrelated, revoked, or changed inputs are refused.
+    Concatenate lossless JSON chunk fields until next_cursor is null, then decode JSON.
+    Return next_cursor as cursor; limit counts characters (default 16000, maximum 32000).
+    workflow_run_id is your own run; source_run_id optionally names a linked child run.
+    This does not grant general workflow inspection authority.
+    """
+    return await _workflow_call("assigned_input", run_id=workflow_run_id, execution_id=execution_id, source_run_id=source_run_id, task_id=task_id, cursor=cursor, limit=limit)
 
 
 @mcp.tool()

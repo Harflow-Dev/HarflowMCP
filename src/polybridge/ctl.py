@@ -159,12 +159,12 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     edits.add_argument("--remove")
 
     workflow_parsers = []
-    for action in ("validate", "list", "list-page", "get", "save", "delete", "build", "start", "list-runs", "status", "detail", "wait", "pause", "resume", "cancel", "builder-followup", "builder-apply", "inspect", "recover", "migrate", "abandon-dispatch"):
+    for action in ("validate", "list", "list-page", "get", "save", "delete", "build", "start", "list-runs", "status", "detail", "wait", "pause", "resume", "cancel", "builder-followup", "builder-apply", "inspect", "assigned-input", "recover", "migrate", "abandon-dispatch"):
         wp = sub.add_parser("workflow-" + action, help=action + " workflows")
         wp.add_argument("--json", action="store_true")
         if action in {"get", "save", "delete", "build", "start"}:
             wp.add_argument("name")
-        if action in {"status", "detail", "wait", "pause", "resume", "cancel", "builder-followup", "inspect", "recover", "abandon-dispatch"}:
+        if action in {"status", "detail", "wait", "pause", "resume", "cancel", "builder-followup", "inspect", "assigned-input", "recover", "abandon-dispatch"}:
             wp.add_argument("workflow_run_id")
         if action == "list":
             wp.add_argument("--monitor-view", action="store_true")
@@ -181,6 +181,12 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
             wp.add_argument("task_id")
             wp.add_argument("--reason", required=True)
             wp.add_argument("--confirm-no-process", action="store_true", required=True)
+        if action == "assigned-input":
+            wp.add_argument("execution_id")
+            wp.add_argument("--source-run", dest="source_run_id")
+            wp.add_argument("--task-id")
+            wp.add_argument("--cursor")
+            wp.add_argument("--limit", type=int, default=16000)
         if action == "inspect":
             wp.add_argument("execution_id")
             wp.add_argument("--task-id")
@@ -665,6 +671,8 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
             if refusal is not None:
                 raise ValueError("Only a verified human may abandon an uncertain dispatch: " + refusal[1])
             return await asyncio.to_thread(WorkflowStore().abandon_dispatch, args.workflow_run_id, args.execution_id, args.task_id, args.reason, args.confirm_no_process)
+        if action == "assigned-input":
+            return await server.read_workflow_assigned_input(args.workflow_run_id, args.execution_id, args.source_run_id, args.task_id, args.cursor, args.limit)
         if action == "inspect":
             return await server.inspect_workflow_node(args.workflow_run_id, args.execution_id, args.task_id, args.view, args.cursor, args.limit, args.before_seq, args.after_seq)
         if action == "recover":

@@ -187,6 +187,8 @@ def validate_definition(raw: dict[str, Any]) -> dict[str, Any]:
     d = copy.deepcopy(raw)
     d["name"] = _workflow_name(d.get("name"))
     d["schema_version"] = SCHEMA_VERSION
+    if d.get("context_delivery", "legacy") not in {"legacy", "optimized_v1"}:
+        raise WorkflowError("context_delivery must be legacy or optimized_v1")
     if d.get("routing_mode") not in (None, "explicit"):
         raise WorkflowError("Invalid routing_mode")
     d.setdefault("description", "")
@@ -696,6 +698,8 @@ class WorkflowStore:
             with self.lock(f"definition:{name}"):
                 path = self.definitions / f"{_workflow_name(name)}.json"
                 old = json.loads(path.read_text()) if path.exists() else None
+                if "context_delivery" not in definition:
+                    d["context_delivery"] = old.get("context_delivery", "legacy") if old else "optimized_v1"
                 # New authoring prefers native execution. Existing nodes whose
                 # historical definition omitted this field retain Headless.
                 old_nodes = {n["id"]: n for n in (old or {}).get("nodes", [])}
@@ -1953,11 +1957,16 @@ class WorkflowSupervisor:
         self.registry = registry
         self.store = storage
         self.run_id = ""
+        # Deliberately process-local: restart requires a positively observed bootstrap.
+        self.context_baselines: dict[str, dict[str, Any]] = {}
         self.decision_lock = asyncio.Lock()
         self.checkout_leases: dict[str, Any] = {}
         # A shared tree bounds harness turns, leases and session locks across the
         # whole run tree; a supervisor without one (builder) gets a no-op budget.
         self.tree = tree if tree is not None else WorkflowTree(storage, permits=None)
+        if not hasattr(self.tree, "context_baselines"):
+            self.tree.context_baselines = {}
+        self.context_baselines = self.tree.context_baselines
         # Pooled checkout leases are tree-wide: every supervisor in the tree joins
         # the same descriptor so a child never downgrades the root's protection.
         self.checkout_leases = self.tree.leases
@@ -1977,10 +1986,19 @@ class WorkflowSupervisor:
 
     async def _dispatch(self, node: dict[str, Any], prompt: str, role: str, activation: dict[str, Any]) -> dict[str, Any] | None:
         from .tasks import SessionUnknownError, SessionBusyError, RepoUnavailableError
+        decision_context = activation.get("_decision_context")
         if role == "node" and node.get("execution_mode") == "prefer_subagent":
             from .workflow_native import dispatch_native
             handled, outcome = await dispatch_native(self, node, prompt, activation)
             if handled:
+                # Native controller turns have their own contract, with no context ack.
+                self.context_baselines.clear()
+                from .workflow_context import account_legacy_prompt
+                from .workflow_prompt_delivery import delivery_metadata
+                accounting = account_legacy_prompt(prompt, role=role, checkpoint=activation.get("id"))
+                accounting["compatibility_reasons"] = ["native worker retains full inputs: assigned reader identity unavailable"]
+                for task in next(a for a in self.run()["activations"] if a["id"] == activation["id"])["tasks"]:
+                    self._task_update(activation["id"], task["task_id"], {"context_delivery": delivery_metadata({}, accounting)})
                 return outcome
         run = self.run()
         config = node.get("agent", run["definition"]["orchestrator"])
@@ -2064,6 +2082,40 @@ class WorkflowSupervisor:
                 detail = "correcting the previous decision" if checkpoint.get("decision_error") else "choosing the next step"
                 display_prompt = f"Workflow checkpoint: {label} — {detail}."
             use_resume = (persistent_orchestrator or role == "node" and node.get("session_mode") == "resume" or role == "builder" and run.get("builder_followup")) and previous.get("candidate") == identity
+            from .workflow_context import account_legacy_prompt, render_decision_context
+            from .workflow_prompt_delivery import delivery_metadata, optimized, render_worker_inputs
+            dispatch_prompt = prompt
+            receipt: dict[str, Any] = {}
+            classification = "protocol_repair" if activation.get("protocol_repair_of") or (decision_context or {}).get("correction") else "fallback" if candidate_position else "normal"
+            if classification == "normal" and (decision_context or {}).get("inspection_results"):
+                classification = "inspection"
+            if optimized(run) and role == "orchestrator" and decision_context is not None:
+                owner_id = orchestrator_override[0] if orchestrator_override else run["workflow_run_id"]
+                owner_prefix = owner_id + ":" + identity
+                session_owner = owner_prefix + ":" + str(previous.get("session_id") if use_resume else task_id)
+                baseline = self.context_baselines.pop(session_owner, None)
+                from .workflow_prompt_delivery import orchestrator_input_manifests
+                manifests = orchestrator_input_manifests(run, decision_context)
+                rendered = render_decision_context(decision_context, session_owner=session_owner, scope=run["workflow_run_id"], baseline=baseline if use_resume else None, force_bootstrap=classification in {"protocol_repair", "fallback"}, classification=classification, evidence_manifests=manifests)
+                dispatch_prompt, receipt, accounting = rendered.prompt, rendered.receipt, rendered.accounting
+                receipt["owner_prefix"] = owner_prefix
+            elif optimized(run) and role == "node":
+                dispatch_prompt, accounting = render_worker_inputs(prompt, run, node, activation, root=self.store.root)
+            else:
+                accounting = account_legacy_prompt(prompt, role=role, checkpoint=activation.get("decision_id", activation.get("id")), classification=classification)
+                if optimized(run):
+                    accounting["compatibility_reasons"] = ["special turn retains complete legacy context"]
+                    accounting["classification"] = "clarification" if role == "orchestrator" else classification
+                if role == "orchestrator":
+                    # A legacy Current-mode child can share an optimized parent's
+                    # session. Its unacknowledged scope must invalidate that base.
+                    owner_id = orchestrator_override[0] if orchestrator_override else run["workflow_run_id"]
+                    self.context_baselines.pop(owner_id + ":" + identity + ":" + str(previous.get("session_id")), None)
+            accounting["session_mode"] = "resume" if use_resume else "fresh"
+            accounting["checkpoint"] = (decision_context or {}).get("decision_id") or activation.get("decision_id") or activation["id"]
+            if candidate_position:
+                accounting["classification"] = "fallback"
+            context_delivery = delivery_metadata(receipt, accounting)
             # The slot covers exactly one candidate attempt: acquired just before
             # the reservation is written, released on every exit from the attempt.
             # An uncertain attempt keeps its slot until reconciliation.
@@ -2073,6 +2125,7 @@ class WorkflowSupervisor:
             except DispatchNotStarted:
                 return None
             reservation = {"task_id": task_id, "candidate": candidate, "status": "reserved", "dispatch_stage": "preparing", "reserved_at": time.time(), "freedom": freedom, "assignment_prompt": display_prompt, "repo_path": run["repo_path"], "network": network, "session_mode": "resume" if use_resume else "fresh", "resume_task_id": previous.get("task_id") if use_resume else None, "execution_kind": "headless", "execution_fallback_reason": activation.get("execution_fallback_reason")}
+            reservation["context_delivery"] = context_delivery
             reservation["harness_metadata"] = {"requested": copy.deepcopy(candidate), "effective": {"backend": candidate["backend"], "model": candidate.get("model"), "reasoning_effort": candidate.get("reasoning_effort"), "freedom": freedom, "settings_source": "explicit_launch_arguments", "default_model": "unknown" if not candidate.get("model") else None, "provider_identity": "unknown"}, "observed": None, "provenance": "validated_launch_configuration", "verification_status": "configured_not_observed"}
             def reserve(r: dict[str, Any]) -> None:
                 a = next(a for a in r["activations"] if a["id"] == activation["id"])
@@ -2108,10 +2161,15 @@ class WorkflowSupervisor:
                     capability_stage = "spawn"
                     timeout_deadline = time.time() + node["timeout_seconds"] if role == "node" and node.get("timeout_seconds") else None
                     self._task_update(activation["id"], task_id, {"dispatch_stage": "spawn_requested", **({"timeout_deadline": timeout_deadline} if timeout_deadline is not None else {})})
-                    dispatch_prompt = prompt
                     if role == "node" and freedom != "read_only":
                         from . import scratch
                         dispatch_prompt += "\nTask scratch directory (absolute): " + str(scratch.directory(self.registry._log_dir, task_id).resolve()) + "\nUse this directory for temporary artifacts outside the repository; artifacts are retained with task records."
+                        extra = len(dispatch_prompt.encode()) - context_delivery["total_bytes"]
+                        context_delivery["total_bytes"] = context_delivery["serialized_bytes"] = len(dispatch_prompt.encode())
+                        context_delivery["total_characters"] = context_delivery["serialized_characters"] = len(dispatch_prompt)
+                        context_delivery["budget_overflow_bytes"] = max(0, len(dispatch_prompt.encode()) - context_delivery["budget_bytes"])
+                        context_delivery["sections"]["scratch_guidance"] = {"bytes": extra, "characters": len(dispatch_prompt) - accounting["serialized_characters"]}
+                        self._task_update(activation["id"], task_id, {"context_delivery": context_delivery})
                     if use_resume:
                         parent = self.registry.get(previous["task_id"])
                         if parent:
@@ -2125,6 +2183,12 @@ class WorkflowSupervisor:
                         if role == "builder":
                             latest = self.run()
                             dispatch_prompt += "\nLatest authoritative builder preview, revision " + str(latest.get("draft_revision", 0)) + ":\n" + json.dumps(latest.get("builder_draft", {}))
+                            extra = len(dispatch_prompt.encode()) - context_delivery["total_bytes"]
+                            context_delivery["sections"]["builder_preview"] = {"bytes": extra, "characters": len(dispatch_prompt) - context_delivery["total_characters"]}
+                            context_delivery["total_bytes"] = context_delivery["serialized_bytes"] = len(dispatch_prompt.encode())
+                            context_delivery["total_characters"] = context_delivery["serialized_characters"] = len(dispatch_prompt)
+                            context_delivery["budget_overflow_bytes"] = max(0, len(dispatch_prompt.encode()) - context_delivery["budget_bytes"])
+                            self._task_update(activation["id"], task_id, {"context_delivery": context_delivery})
                         task = await self.registry.start(dispatch_prompt, Path(run["repo_path"]), backend=backend, freedom=freedom, network=network, model=candidate.get("model"), reasoning_effort=candidate.get("reasoning_effort"), max_turns=candidate.get("max_turns"), task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder", title=f"{run['name']} · {node.get('title', key)}")
                     self.update(lambda r: r.pop("checkout_wait", None), "checkout_acquired")
                     self._task_update(activation["id"], task_id, {"status": "running", "dispatch_stage": "spawn_confirmed", **({"timeout_deadline": timeout_deadline} if timeout_deadline is not None else {})})
@@ -2181,7 +2245,7 @@ class WorkflowSupervisor:
                         if callable(notice):
                             notice(task.task_id, "Node timed out after " + str(node["timeout_seconds"]) + " seconds; attempt stopped before fallback")
                         snapshot = {**snapshot, "status": "failed", "failure_kind": "timeout", "timeout_seconds": node["timeout_seconds"], "summary": "Node timed out after " + str(node["timeout_seconds"]) + " seconds", "timed_out": True}
-                self._task_update(activation["id"], task_id, {"status": snapshot["status"], "result": snapshot, "finished_at": time.time(), "harness_metadata": observed_harness_metadata(snapshot, reservation["harness_metadata"])})
+                self._task_update(activation["id"], task_id, {"status": snapshot["status"], "result": snapshot, "finished_at": time.time(), "harness_metadata": observed_harness_metadata(snapshot, reservation["harness_metadata"]), "prompt_usage": {"usage": snapshot.get("usage"), "cost_usd": snapshot.get("total_cost_usd")}})
                 if snapshot.get("timed_out"):
                     previous = {}
                     if candidate != candidates[-1]:

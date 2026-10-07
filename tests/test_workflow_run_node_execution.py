@@ -134,9 +134,9 @@ class SessionRegistry(TreeRegistry):
         task = await super().start(prompt, repo, **kwargs)
         if resumed_session:
             task.result["session_id"] = resumed_session
-        if "Context:\n" in prompt and "Decision" in kwargs.get("title", ""):
+        context = self.decode_context(prompt)
+        if context is not None and "Decision" in kwargs.get("title", ""):
             run_name = kwargs["title"].split(" · ")[0]
-            context = json.JSONDecoder().raw_decode(prompt.split("Context:\n", 1)[1])[0]
             if context.get("workflow_scope"):
                 run_name = context["workflow_scope"]["workflow_name"]
             self.orchestrator_sessions.setdefault(run_name, []).append({"task_id": task.task_id, "session_id": task.result["session_id"]})
@@ -240,8 +240,8 @@ async def test_child_mode_decision_context_shows_pinned_workflow_metadata(two_le
             super().__init__(root)
             self.parent_contexts = []
         async def start(self, prompt, repo, **kwargs):
-            if "Context:\n" in prompt:
-                context = json.JSONDecoder().raw_decode(prompt.split("Context:\n", 1)[1])[0]
+            context = self.decode_context(prompt)
+            if context is not None:
                 if context["workflow_run_id"] not in {c["workflow_run_id"] for c in self.parent_contexts} or context["current_stage"]["node_id"] == "start":
                     self.parent_contexts.append(context)
             return await super().start(prompt, repo, **kwargs)
@@ -306,8 +306,8 @@ async def test_current_mode_workflow_scope_in_child_context(two_level, tmp_path)
             super().__init__(root)
             self.scopes = []
         async def start(self, prompt, repo, **kwargs):
-            if "Context:\n" in prompt:
-                context = json.JSONDecoder().raw_decode(prompt.split("Context:\n", 1)[1])[0]
+            context = self.decode_context(prompt)
+            if context is not None:
                 if context.get("workflow_scope"):
                     self.scopes.append(context["workflow_scope"])
             return await super().start(prompt, repo, **kwargs)

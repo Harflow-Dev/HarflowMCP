@@ -43,13 +43,31 @@ class Registry:
         self.policy = policy or default_decision
         self.outputs = outputs or {}
         self.tasks = {}
+        self.context_bootstraps = {}
+
+    def decode_context(self, prompt):
+        if "Context:\n" in prompt:
+            return json.JSONDecoder().raw_decode(prompt.split("Context:\n", 1)[1])[0]
+        try:
+            envelope = json.JSONDecoder().raw_decode(prompt)[0]
+        except (ValueError, TypeError):
+            return None
+        if not isinstance(envelope, dict) or "checkpoint" not in envelope or "delivery" not in envelope:
+            return None
+        scope = envelope["delivery"]["acknowledgement"]["scope"]
+        if "bootstrap" in envelope:
+            self.context_bootstraps[scope] = copy.deepcopy(envelope["bootstrap"]["context"])
+        return {**self.context_bootstraps[scope], **envelope["checkpoint"]}
 
     async def start(self, prompt, repo, **kwargs):
         self.calls.append((prompt, kwargs))
-        if "Context:\n" in prompt:
-            context = json.JSONDecoder().raw_decode(prompt.split("Context:\n", 1)[1])[0]
+        context = self.decode_context(prompt)
+        if context is not None:
             self.contexts.append(context)
             result = self.policy(context, self)
+            if prompt.startswith("{"):
+                envelope = json.JSONDecoder().raw_decode(prompt)[0]
+                result = {**result, "context_ack": copy.deepcopy(envelope["delivery"]["acknowledgement"])}
         else:
             nid = kwargs["title"].split(" · ")[-1]
             result = self.outputs.get(nid, {"status": "succeeded", "result": {"summary": "Done"}, "evidence": ["observed"]})

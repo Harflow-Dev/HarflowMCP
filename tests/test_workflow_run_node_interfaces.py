@@ -214,18 +214,42 @@ def test_inspection_of_grandchild_returns_requested_boundary(store, tmp_path):
     assert "grandchild evidence" in json.dumps(page)
 
 
-async def test_successor_worker_receives_complete_child_result_in_runtime_prompt(store, tmp_path):
+@pytest.mark.parametrize('delivery', ['legacy', 'optimized_v1'])
+async def test_successor_worker_receives_complete_child_result_inline_or_by_reference(store, tmp_path, delivery):
     definition = store.get('parent')
-    definition['nodes'].insert(-1, {'id': 'consume', 'type': 'agent', 'role': 'task', 'instructions': 'Consume predecessor evidence', 'agent': {'backend': 'codex'}})
+    definition['context_delivery'] = delivery
+    definition['nodes'].insert(-1, {'id': 'consume', 'type': 'agent', 'role': 'task', 'instructions': 'Consume predecessor evidence', 'execution_mode': 'headless', 'agent': {'backend': 'codex'}})
     definition['connections'][-1]['target'] = 'consume'
     definition['connections'].append({'id': 'consumed', 'source': 'consume', 'target': 'end'})
     store.save('parent', definition, definition['revision'])
     big = 'Complete child evidence ' * 4000
-    registry = TreeRegistry(store.root, outputs={'work': {'status': 'succeeded', 'result': {'summary': big}, 'evidence': []}})
+    class ReadingRegistry(TreeRegistry):
+        retrieved = False
+        async def start(self, prompt, repo, **kwargs):
+            if delivery == 'optimized_v1' and kwargs.get('title', '').endswith(' · consume'):
+                current = next(r for r in store.list_runs() if r['name'] == 'parent' and r['status'] == 'running')
+                activation = next(a for a in current['activations'] if a['role'] == 'node' and a['node_id'] == 'consume')
+                leaf = next(ref for ref in activation['authorized_input_refs'] if ref['workflow_run_id'] != current['workflow_run_id'])
+                chunks, cursor = [], None
+                while True:
+                    page = workflow_inspection.assigned_input_page(({'role': 'node', 'activation_id': activation['id']}, current), store.root, current['workflow_run_id'], leaf['execution_id'], source_run_id=leaf['workflow_run_id'], cursor=cursor)
+                    assert page['content_sha256'] == leaf['content_sha256']
+                    chunks.append(page['chunk'])
+                    cursor = page['next_cursor']
+                    if cursor is None:
+                        break
+                assert json.loads(''.join(chunks))['node_result']['result']['summary'] == big
+                self.retrieved = True
+            return await super().start(prompt, repo, **kwargs)
+    registry = ReadingRegistry(store.root, outputs={'work': {'status': 'succeeded', 'result': {'summary': big}, 'evidence': []}})
     run, _ = await run_tree(store, tmp_path, 'parent', registry)
     assert run['status'] == 'completed', run.get('attention_reason')
     prompt = next(call['prompt'] for call in registry.dispatches if call['label'] == 'consume')
-    assert big in prompt
+    if delivery == 'legacy':
+        assert big in prompt
+    else:
+        assert big not in prompt and registry.retrieved
+        assert 'child_retrieval' in prompt
     assert len(big) > inv.INVOCATION_PREVIEW_BUDGET
 
 

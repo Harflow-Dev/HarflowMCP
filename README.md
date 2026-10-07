@@ -49,6 +49,9 @@ When a run needs input, its caller supplies the answer. Monitor-started runs exp
 in the app; MCP-started runs return it to the calling tool.
 
 See [workflow mechanics, contracts, and recovery](docs/workflows.md) for the full model and diagrams.
+New Monitor workflows use [bounded context delivery](docs/workflows.md#context-delivery):
+acknowledged orchestrator resumes receive deltas, and headless workers retrieve assigned evidence
+in pages. The execution inspector reports delivered bytes and available model usage separately.
 Monitor shows children beneath their parent and as regular workflow entries, with shared navigation; see
 [Monitor navigation and layout](docs/workflows.md#monitor-history-and-notifications).
 
