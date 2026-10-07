@@ -1016,6 +1016,10 @@ orchestrator sessions. The overview focuses on live
 activity; full decoded results remain in individual task details. Workflow tasks cannot
 be taken over while their parent run is active, suspended or still settling.
 
+Parallel activity columns keep a 420-point minimum reading width. Small groups expand
+to fill the available space; larger groups scroll horizontally instead of squeezing
+agent chats, including in fullscreen.
+
 ### Recordless dispatch reconciliation
 
 Reservations record whether Polybridge is still preparing or has requested a spawn. A restart
@@ -1100,6 +1104,21 @@ state stay attached to the conversation.
 Long workflow details stay within the window's available space. Run diagnostics and the
 inspector scroll independently so updates do not push the header, sidebar or canvas outside
 the window; split-pane dividers remain adjustable.
+
+Child workflow shortcuts sit beneath their parent workflow, alongside its task nodes. Each child
+also keeps its own workflow entry with its actual nodes; both entries select the same real child run. Both entries reflect the child workflow's current status, so a completed
+launcher turn does not make a still-running child appear finished. Selecting either shows the
+actual child workflow and its tasks; their selection highlights share the child run identity.
+Sidebar selections and inspector open actions show the exact child run in the existing window.
+The workflow inspector uses left-aligned child links, groups repeated invocations by saved
+workflow identity, and keeps individual run targets distinct. Repeated-run groups start collapsed;
+disclosure changes use the sidebar animation and preserve the chosen state during polling.
+
+Parallel cells retain at least six recent activity rows and use spare cell height to show more
+recent history. Older rows leave the recent view only when space is needed. **Show all** reveals
+the complete history and suspends follow-live; it does not resize the cell.
+Canvas zoom controls share a consistent height. The workflow editor bounds its canvas to its
+pane so the left edge remains reachable without changing saved node positions.
 
 For harness refusals and environment failures, use the
 [headless troubleshooting guide](harness-permissions.md#troubleshooting-a-headless-refusal)
