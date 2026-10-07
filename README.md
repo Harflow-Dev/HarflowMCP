@@ -82,7 +82,9 @@ including standalone and embedded task views. Monitor offers Cancel for its own 
 and idle caller-owned workflows; linked child views route cancellation to the root.
 See [workflow interaction and recovery](docs/workflows.md) for eligibility and cancellation outcomes.
 
-History indexing recovers automatically while Monitor retains loaded content. New activity panels
+History indexing recovers automatically while Monitor retains loaded content. Blocked histories
+show recovery guidance and Retry; damaged derivative catalogs are rebuilt before metadata saves.
+New activity panels
 fade into place, and actionable workflow loading errors appear in a dismissible top notification
 with retained details. Long workflow details scroll within the window without displacing its
 header or sidebar. See [Monitor history and notifications](docs/workflows.md#monitor-history-and-notifications).

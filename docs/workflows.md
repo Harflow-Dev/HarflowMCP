@@ -1073,6 +1073,16 @@ distinguish `ready`, `preparing`, and `blocked`; preparation includes its source
 progress, while persistent blocks retain actionable diagnostics. Pending caller authority
 does not expose new workflow identifiers or complete counts.
 
+A blocked first page shows available placeholders, the reported blocker and **Retry tasks**
+instead of remaining on a loading skeleton. Retrying refreshes reads; it does not grant access
+or rerun tasks. If deferred work remains alongside a persistent blocker, bounded preparation
+continues while the recovery guidance stays visible.
+
+A damaged derivative SQLite catalog is rebuilt under the catalog lock before task or workflow
+metadata is saved. Historical JSON records remain authoritative and are not rewritten by the
+rebuild. If rebuilding or committing invalidation fails, the save is refused and logged so stale
+caller authority cannot be published as ready.
+
 Actionable workflow browsing/loading errors appear in one top notification over the existing
 layout. The newest incident replaces the displayed one; repeating the same polling failure does
 not restart its timer. Dismiss with the × button, or let eight seconds of active display elapse.

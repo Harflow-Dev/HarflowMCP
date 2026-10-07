@@ -881,12 +881,15 @@ def test_foreign_writer_overlapping_projection_cannot_acknowledge_stale_header(t
     assert page['catalog_state']['status'] == 'ready'
 
 
-def test_catalog_advisory_lock_coordinates_a_separate_writer_process(tmp_path):
+@pytest.mark.parametrize('corrupted_cache', [False, True])
+def test_catalog_advisory_lock_coordinates_a_separate_writer_process(tmp_path, corrupted_cache):
     import subprocess
     import sys
     from concurrent.futures import ThreadPoolExecutor
     store.write(tmp_path, record('processwriter', title='old'))
     store.list_page(tmp_path)
+    if corrupted_cache:
+        corrupt_derivative(tmp_path)
     script = '''
 import json, os, sys
 from pathlib import Path
@@ -1530,3 +1533,150 @@ def test_live_schema_seven_runtime_cannot_reset_schema_eight_discovery_progress(
     assert page['catalog_state']['status'] == 'ready'
     assert (tmp_path / '.listing.v8.sqlite3').exists()
     assert originals == {path.name: path.read_bytes() for path in tmp_path.glob('*.meta.json')}
+
+
+def corrupt_derivative(directory):
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / '.listing.v8.sqlite3').write_bytes(b'corrupt derivative database' * 20)
+
+
+@pytest.mark.parametrize('operation', ['task_create', 'task_terminal', 'workflow_create', 'workflow_update'])
+def test_corrupt_derivative_does_not_prevent_authoritative_metadata_writes(tmp_path, operation):
+    if operation.startswith('task'):
+        directory = tmp_path / 'tasks'
+        store.write(directory, record('historical'))
+        historical = (directory / 'historical.meta.json').read_bytes()
+        if operation == 'task_terminal':
+            store.write(directory, record('target', status='running'))
+        corrupt_derivative(directory)
+        assert store.write_landed(directory, record('target', title='persisted terminal'))
+        payload = json.loads((directory / 'target.meta.json').read_text())
+        assert payload['status'] == 'completed' and payload['title'] == 'persisted terminal'
+        assert (directory / 'historical.meta.json').read_bytes() == historical
+    else:
+        storage = workflows.WorkflowStore(tmp_path)
+        historical_run = storage.create_run(definition(), 'Historical', tmp_path)
+        historical_path = storage.runs / f"{historical_run['workflow_run_id']}.json"
+        historical = historical_path.read_bytes()
+        if operation == 'workflow_update':
+            target = storage.create_run(definition(), 'Target', tmp_path)
+        corrupt_derivative(storage.runs)
+        if operation == 'workflow_create':
+            target = storage.create_run(definition(), 'Created after corruption', tmp_path)
+        else:
+            target = storage.update_run(target['workflow_run_id'], lambda run: run.update(status='completed'), 'finished')
+        payload = json.loads((storage.runs / f"{target['workflow_run_id']}.json").read_text())
+        assert payload['status'] == ('starting' if operation == 'workflow_create' else 'completed')
+        assert historical_path.read_bytes() == historical
+
+
+def test_cache_recovery_commits_invalidation_before_interrupted_projection(tmp_path, monkeypatch):
+    import sqlite3
+    store.write(tmp_path, record('interrupted', title='original'))
+    corrupt_derivative(tmp_path)
+    original = catalog.Catalog._put
+    monkeypatch.setattr(catalog.Catalog, '_put', lambda *args, **kwargs: (_ for _ in ()).throw(sqlite3.OperationalError('interrupted projection')))
+    assert store.write_landed(tmp_path, record('interrupted', title='updated'))
+    index = catalog.Catalog(tmp_path, store.RECORD_SUFFIX)
+    assert not index.ready()
+    with index.connect() as db:
+        assert db.execute('SELECT COUNT(*) FROM entries').fetchone()[0] == 0
+        assert db.execute('SELECT COUNT(*) FROM callers').fetchone()[0] == 0
+        assert db.execute('SELECT id FROM pending').fetchall() == [('interrupted',)]
+    monkeypatch.setattr(catalog.Catalog, '_put', original)
+    page = store.list_page(tmp_path)
+    assert page['catalog_state']['status'] == 'ready'
+    assert page['items'][0]['title'] == 'updated'
+
+
+def test_invalidation_transaction_error_rebuilds_cache_before_metadata_replace(tmp_path):
+    store.write(tmp_path, record('target', status='running'))
+    index = catalog.Catalog(tmp_path, store.RECORD_SUFFIX)
+    with index.connect() as db:
+        db.execute("CREATE TRIGGER broken_invalidation BEFORE INSERT ON pending BEGIN SELECT RAISE(ABORT,'broken derivative invalidation'); END")
+    assert store.write_landed(tmp_path, record('target', title='terminal saved'))
+    assert json.loads((tmp_path / 'target.meta.json').read_text())['title'] == 'terminal saved'
+    with index.connect() as db:
+        assert db.execute("SELECT name FROM sqlite_master WHERE name='broken_invalidation'").fetchone() is None
+
+
+def test_derivative_recovery_only_removes_current_cache_and_sidecars(tmp_path):
+    store.write(tmp_path, record('historical'))
+    historical = (tmp_path / 'historical.meta.json').read_bytes()
+    preserved = {}
+    for name in ('.listing.sqlite3', '.listing.v7.sqlite3', '.listing.v7.sqlite3-journal', 'unrelated.tmp'):
+        path = tmp_path / name
+        path.write_bytes(b'preserve this unrelated source')
+        preserved[path] = path.read_bytes()
+    corrupt_derivative(tmp_path)
+    corrupt_sidecar = b'corrupt derivative sidecar' * 20
+    for suffix in ('-journal', '-wal', '-shm'):
+        (tmp_path / f'.listing.v8.sqlite3{suffix}').write_bytes(corrupt_sidecar)
+    assert store.write_landed(tmp_path, record('target'))
+    assert historical == (tmp_path / 'historical.meta.json').read_bytes()
+    assert all(path.read_bytes() == original for path, original in preserved.items())
+    for suffix in ('-journal', '-wal', '-shm'):
+        path = tmp_path / f'.listing.v8.sqlite3{suffix}'
+        assert not path.exists() or path.read_bytes() != corrupt_sidecar
+
+
+@pytest.mark.parametrize('failure', ['remove', 'initialize', 'invalidate'])
+def test_failed_derivative_recovery_preserves_authoritative_metadata(tmp_path, monkeypatch, failure):
+    import sqlite3
+    store.write(tmp_path, record('target', status='running', title='original'))
+    path = tmp_path / 'target.meta.json'
+    original = path.read_bytes()
+    attempts = []
+    if failure == 'invalidate':
+        def failed_invalidation(self, identifier):
+            attempts.append(identifier)
+            raise sqlite3.OperationalError('persistent invalidation failure')
+        monkeypatch.setattr(catalog.Catalog, '_invalidate_locked', failed_invalidation)
+    else:
+        corrupt_derivative(tmp_path)
+        if failure == 'remove':
+            def failed_remove(self):
+                attempts.append('remove')
+                raise PermissionError('cannot remove unusable derivative')
+            monkeypatch.setattr(catalog.Catalog, '_discard_derivative_locked', failed_remove)
+        else:
+            def failed_initialize(self, db):
+                attempts.append('initialize')
+                raise sqlite3.OperationalError('persistent cache initialization failure')
+            monkeypatch.setattr(catalog.Catalog, '_initialize', failed_initialize)
+    assert not store.write_landed(tmp_path, record('target', title='must not publish'))
+    assert path.read_bytes() == original
+    assert 1 <= len(attempts) <= 4
+
+
+def test_corrupt_cache_does_not_bypass_existing_terminal_guard(tmp_path):
+    store.write(tmp_path, record('terminal', title='final'))
+    path = tmp_path / 'terminal.meta.json'
+    original = path.read_bytes()
+    corrupt_derivative(tmp_path)
+    assert not store.write_landed(tmp_path, record('terminal', status='running', title='stale'))
+    assert path.read_bytes() == original
+
+
+def test_catalog_reader_waits_for_locked_cache_recovery(tmp_path, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    store.write(tmp_path, record('target', status='running'))
+    corrupt_derivative(tmp_path)
+    original = catalog.Catalog._discard_derivative_locked
+    entered, release = threading.Event(), threading.Event()
+    def held_recovery(self):
+        entered.set()
+        assert release.wait(5)
+        return original(self)
+    monkeypatch.setattr(catalog.Catalog, '_discard_derivative_locked', held_recovery)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        writer = pool.submit(store.write_landed, tmp_path, record('target', title='recovered terminal'))
+        assert entered.wait(5)
+        reader = pool.submit(store.list_page, tmp_path)
+        assert not reader.done()
+        release.set()
+        assert writer.result(timeout=5)
+        page = reader.result(timeout=5)
+    assert page['catalog_state']['status'] == 'ready'
+    assert page['items'][0]['title'] == 'recovered terminal'

@@ -249,7 +249,20 @@ class Catalog:
         return self.state()['status'] == 'ready'
 
     def invalidate(self, identifier: str) -> None:
-        """Commit before replacing metadata, so a killed writer cannot leave ready authority."""
+        """Repair derivative failures and commit invalidation before replacing metadata."""
+        with catalog_lock(self.directory):
+            try:
+                self._invalidate_locked(identifier)
+            except sqlite3.Error:
+                logging.getLogger(__name__).warning('Rebuilding catalog after invalidation transaction failure', exc_info=True)
+                try:
+                    self._discard_derivative_locked()
+                    self._invalidate_locked(identifier)
+                except (OSError, sqlite3.Error):
+                    logging.getLogger(__name__).error('Catalog invalidation recovery failed; metadata replacement refused', exc_info=True)
+                    raise
+
+    def _invalidate_locked(self, identifier: str) -> None:
         with self.connect() as db:
             db.execute('INSERT OR IGNORE INTO pending VALUES (?)', (identifier,))
             db.execute("DELETE FROM state WHERE key='complete'")
@@ -301,7 +314,18 @@ class Catalog:
         lock.__enter__()
         db = None
         try:
-            db = self._connect_locked()
+            try:
+                db = self._connect_locked()
+            except sqlite3.Error:
+                # The failed handle is closed by _connect_locked. All supported
+                # readers/writers share this lock, including sidecar recovery.
+                logging.getLogger(__name__).warning('Rebuilding unusable derivative catalog', exc_info=True)
+                try:
+                    self._discard_derivative_locked()
+                    db = self._connect_locked()
+                except (OSError, sqlite3.Error):
+                    logging.getLogger(__name__).error('Derivative catalog recovery failed; authority unavailable', exc_info=True)
+                    raise
             db._catalog_lock = lock
             return db
         except BaseException:
@@ -309,6 +333,18 @@ class Catalog:
                 db.close()
             lock.__exit__(None, None, None)
             raise
+
+    def _discard_derivative_locked(self) -> None:
+        """Drop only this derivative namespace, never metadata or older catalogs."""
+        database = self.directory / '.listing.v8.sqlite3'
+        for suffix in ('', '-journal', '-wal', '-shm'):
+            Path(str(database) + suffix).unlink(missing_ok=True)
+        # Make the removal durable before any authoritative replacement starts.
+        descriptor = os.open(self.directory, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
 
     def _connect_locked(self) -> sqlite3.Connection:
         db = sqlite3.connect(self.directory / '.listing.v8.sqlite3', timeout=10, factory=CatalogConnection)
