@@ -776,6 +776,7 @@ again when the request arrives; stale views are refused without taking over call
 An unverifiable supervisor identity also prevents cancellation. Descendant eligibility checks use
 bounded record sizes, a shared metadata budget, and run-count/nesting limits; if the complete tree
 cannot be verified within those limits, Cancel remains unavailable with an explanation.
+The workflow header keeps the refusal reason visible, including guidance for inspecting known runs.
 Cancel cascades through linked children and their tasks. Child views offer **Open root to cancel**
 so the scope is clear. While cancellation settles, the Monitor shows **Cancelling**; errors remain
 visible and the run is refreshed. If a task owner is still settling a cascaded descendant, the
