@@ -234,3 +234,147 @@ def test_cascade_owner_still_settling_is_unresolved():
     from polybridge.workflow_cancellation import cascade_error
     assert "lineage-only-child" in cascade_error({"owner_still_settling": ["lineage-only-child"]})
     assert cascade_error({"owner_still_settling": []}) == ""
+
+
+@pytest.mark.parametrize("owner", ["monitor", "caller"])
+@pytest.mark.parametrize("supervisor_state", ["alive", "dead", "undecidable"])
+def test_monitor_projection_matches_supervisor_identity_control_gate(run_store, monkeypatch, owner, supervisor_state):
+    from polybridge import identity
+    from polybridge.workflow_cancellation import monitor_projection
+    storage, rid = run_store
+    storage.update_run(rid, lambda r: r.update(interaction_owner=owner, supervisor_identity={"pid": 123}), "fixture")
+    monkeypatch.setattr(identity, "identity_check", lambda _: supervisor_state)
+    projected = monitor_projection(storage, storage.get_run(rid))
+    assert projected["can_cancel_from_monitor"] is (supervisor_state != "undecidable")
+    if supervisor_state == "undecidable":
+        assert projected["monitor_cancel_reason"] == "Supervisor identity is uncertain; cannot cancel"
+        with pytest.raises(w.WorkflowError, match=projected["monitor_cancel_reason"]):
+            storage.control(rid, "cancel", interaction_owner="monitor")
+    else:
+        assert projected["monitor_cancel_reason"] == ""
+        assert storage.control(rid, "cancel", interaction_owner="monitor")["status"] == "cancelling"
+
+
+def cancellation_tree(store, rid, *, breadth=1, levels=2, child_bytes=0):
+    """Persist only linked children; terminal history remains subject to activity checks."""
+    root = store.get_run(rid)
+    records = {rid: root}
+    for depth in range(1, levels):
+        parents = [run for run in list(records.values()) if run.get("test_depth", 0) == depth - 1]
+        for parent in parents:
+            parent["activations"] = []
+            for index in range(breadth):
+                child_id = f"child-{depth}-{parent['workflow_run_id']}-{index}"
+                execution_id = f"invocation-{index}"
+                parent["activations"].append({"id": execution_id, "role": "node", "node_id": "start", "status": "completed", "tasks": [],
+                    "invocation": {"stage": "settled", "child_workflow_run_id": child_id}})
+                child = {"workflow_run_id": child_id, "status": "completed", "created_at": 1, "test_depth": depth, "activations": [],
+                    "parent_link": {"workflow_run_id": parent["workflow_run_id"], "root_workflow_run_id": rid, "execution_id": execution_id}}
+                if child_bytes:
+                    child["summary"] = "x" * child_bytes
+                records[child_id] = child
+    for identifier, record in records.items():
+        w._write(store.runs / f"{identifier}.json", record)
+    return root, records
+
+
+def cancellation_read_spy(store, monkeypatch):
+    reads = []
+    real_read = store.get_run
+    def read(identifier, **kwargs):
+        reads.append((identifier, kwargs))
+        return real_read(identifier, **kwargs)
+    monkeypatch.setattr(store, "get_run", read)
+    return reads
+
+
+def test_cancellation_descendant_reads_use_shared_bounded_metadata_budget(run_store, monkeypatch):
+    storage, rid = run_store
+    root, _ = cancellation_tree(storage, rid, breadth=2)
+    reads = cancellation_read_spy(storage, monkeypatch)
+    assert eligibility(storage, root) == (True, "")
+    assert len(reads) == 2
+    assert all(kwargs.get("metadata_byte_limit") == 4 * 1024 * 1024 for _, kwargs in reads)
+    budget = reads[0][1]["metadata_budget"]
+    assert all(kwargs["metadata_budget"] is budget for _, kwargs in reads)
+    assert budget.metadata_limit == 8 * 1024 * 1024
+    assert 0 < budget.metadata_bytes <= budget.metadata_limit
+
+
+def test_cancellation_descendant_breadth_has_a_read_cap(run_store, monkeypatch):
+    storage, rid = run_store
+    root, _ = cancellation_tree(storage, rid, breadth=101)
+    reads = cancellation_read_spy(storage, monkeypatch)
+    allowed, reason = eligibility(storage, root)
+    assert not allowed
+    assert "descendant count" in reason
+    assert len(reads) == 100
+
+
+def test_cancellation_descendant_depth_has_a_read_cap(run_store, monkeypatch):
+    storage, rid = run_store
+    root, _ = cancellation_tree(storage, rid, levels=5)
+    reads = cancellation_read_spy(storage, monkeypatch)
+    allowed, reason = eligibility(storage, root)
+    assert not allowed
+    assert "nesting depth" in reason
+    assert len(reads) == 3
+
+
+def test_cancellation_oversized_descendant_fails_closed(run_store, monkeypatch):
+    storage, rid = run_store
+    root, _ = cancellation_tree(storage, rid, child_bytes=4 * 1024 * 1024)
+    reads = cancellation_read_spy(storage, monkeypatch)
+    allowed, reason = eligibility(storage, root)
+    assert not allowed
+    assert "bounded metadata budget" in reason
+    assert len(reads) == 1
+    assert reads[0][1]["metadata_budget"].metadata_bytes == 0
+
+
+def test_cancellation_descendant_metadata_has_an_aggregate_budget(run_store, monkeypatch):
+    storage, rid = run_store
+    root, _ = cancellation_tree(storage, rid, breadth=3, child_bytes=3 * 1024 * 1024)
+    reads = cancellation_read_spy(storage, monkeypatch)
+    allowed, reason = eligibility(storage, root)
+    assert not allowed
+    assert "bounded metadata budget" in reason
+    assert len(reads) == 3
+    budget = reads[0][1]["metadata_budget"]
+    assert 6 * 1024 * 1024 < budget.metadata_bytes < 8 * 1024 * 1024
+
+
+def test_cancellation_terminal_descendant_still_checks_active_tasks(run_store):
+    storage, rid = run_store
+    root, records = cancellation_tree(storage, rid)
+    child = next(record for identifier, record in records.items() if identifier != rid)
+    child["activations"] = [{"id": "unfinished", "role": "node", "status": "running", "tasks": [{"task_id": "worker", "status": "running"}]}]
+    w._write(storage.runs / f"{child['workflow_run_id']}.json", child)
+    assert eligibility(storage, root)[0] is False
+
+
+@pytest.mark.parametrize("breadth,levels", [(100, 2), (1, 4)])
+def test_cancellation_tree_at_limits_remains_eligible(run_store, breadth, levels):
+    storage, rid = run_store
+    root, _ = cancellation_tree(storage, rid, breadth=breadth, levels=levels)
+    assert eligibility(storage, root) == (True, "")
+
+
+@pytest.mark.parametrize("malformation", ["json", "object_shape", "run_id", "parent_link"])
+def test_cancellation_bounded_descendant_read_rejects_malformed_records(run_store, malformation):
+    storage, rid = run_store
+    root, records = cancellation_tree(storage, rid)
+    child_id = next(identifier for identifier in records if identifier != rid)
+    child = records[child_id]
+    path = storage.runs / f"{child_id}.json"
+    if malformation == "json":
+        path.write_text("invalid JSON")
+    elif malformation == "object_shape":
+        path.write_text("[]")
+    else:
+        if malformation == "run_id":
+            child["workflow_run_id"] = "unrelated-child"
+        else:
+            child["parent_link"]["execution_id"] = "unrelated-execution"
+        w._write(path, child)
+    assert eligibility(storage, root)[0] is False

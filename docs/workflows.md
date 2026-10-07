@@ -773,6 +773,9 @@ is separate from that ownership: Monitor-started root runs offer Cancel while ac
 Caller-owned root runs offer Cancel only at an idle paused, input, attention, or stuck checkpoint,
 with no active or unresolved tasks or nested workflow execution. The runner checks eligibility
 again when the request arrives; stale views are refused without taking over caller interaction.
+An unverifiable supervisor identity also prevents cancellation. Descendant eligibility checks use
+bounded record sizes, a shared metadata budget, and run-count/nesting limits; if the complete tree
+cannot be verified within those limits, Cancel remains unavailable with an explanation.
 Cancel cascades through linked children and their tasks. Child views offer **Open root to cancel**
 so the scope is clear. While cancellation settles, the Monitor shows **Cancelling**; errors remain
 visible and the run is refreshed. If a task owner is still settling a cascaded descendant, the
