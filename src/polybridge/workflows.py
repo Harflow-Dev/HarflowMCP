@@ -1990,6 +1990,7 @@ class WorkflowSupervisor:
         decision_context = activation.get("_decision_context")
         if role == "node" and node.get("execution_mode") == "prefer_subagent":
             from .workflow_native import dispatch_native
+            existing_task_ids = {task["task_id"] for a in self.run()["activations"] if a["id"] == activation["id"] for task in a["tasks"]}
             handled, outcome = await dispatch_native(self, node, prompt, activation)
             if handled:
                 # Native controller turns have their own contract, with no context ack.
@@ -1999,7 +2000,8 @@ class WorkflowSupervisor:
                 accounting = account_legacy_prompt(prompt, role=role, checkpoint=activation.get("id"))
                 accounting["compatibility_reasons"] = ["native worker retains full inputs: assigned reader identity unavailable"]
                 for task in next(a for a in self.run()["activations"] if a["id"] == activation["id"])["tasks"]:
-                    self._task_update(activation["id"], task["task_id"], {"context_delivery": delivery_metadata({}, accounting)})
+                    if task["task_id"] not in existing_task_ids:
+                        self._task_update(activation["id"], task["task_id"], {"context_delivery": delivery_metadata({}, accounting)})
                 return outcome
         run = self.run()
         config = node.get("agent", run["definition"]["orchestrator"])
