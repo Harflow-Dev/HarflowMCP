@@ -31,9 +31,37 @@ class MetadataBudget:
     metadata_bytes: int = 0
     metadata_decodes: int = 0
     metadata_limit: int = METADATA_BATCH_BYTES
+    authority_preparation: dict[str, Any] | None = None
+    authority_directory: str | None = None
 
 
 _request_budget: ContextVar[MetadataBudget | None] = ContextVar('catalog_request_budget', default=None)
+
+
+_unscoped_authority_preparation: ContextVar[tuple[str | None, dict[str, Any] | None] | None] = ContextVar('unscoped_authority_preparation', default=None)
+
+
+def set_authority_preparation(state: dict[str, Any] | None, directory: Path | None = None) -> None:
+    """Update the request object shared with to_thread, never a shared catalog row."""
+    value = dict(state) if state is not None else None
+    scope = str(directory.resolve()) if directory is not None else None
+    budget = _request_budget.get()
+    if budget is not None:
+        budget.authority_preparation = value
+        budget.authority_directory = scope
+    else:
+        _unscoped_authority_preparation.set((scope, value))
+
+
+def get_authority_preparation(directory: Path | None = None) -> dict[str, Any] | None:
+    budget = _request_budget.get()
+    if budget is not None:
+        scope, state = budget.authority_directory, budget.authority_preparation
+    else:
+        scope, state = _unscoped_authority_preparation.get() or (None, None)
+    if directory is not None and scope != str(directory.resolve()):
+        return None
+    return dict(state) if state is not None else None
 
 
 @contextmanager
@@ -214,14 +242,21 @@ class Catalog:
             except ReadLimit:
                 # The opened file may have grown since stat. Only a per-record breach
                 # is persistent; aggregate exhaustion must be retried automatically.
-                if path.stat().st_size > METADATA_BYTES:
-                    return placeholder()
+                try:
+                    if path.stat().st_size > METADATA_BYTES:
+                        return placeholder()
+                except FileNotFoundError:
+                    raise DeferredRead() from None
                 raise DeferredRead() from None
         else:
             self.metadata_decodes += 1
             self.metadata_bytes += size
             value = loader(identifier)
-        if source_identity(initial_source) != source_identity(path.stat()):
+        try:
+            final_source = path.stat()
+        except FileNotFoundError:
+            raise DeferredRead() from None
+        if source_identity(initial_source) != source_identity(final_source):
             raise DeferredRead()
         if value is not None:
             value[0]['_source_identity'] = source_identity(initial_source)

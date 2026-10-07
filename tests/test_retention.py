@@ -776,3 +776,35 @@ def test_a_failed_artifact_delete_keeps_the_record_for_a_later_sweep(
     stats = retention.sweep(log_dir, 30, datetime.now(timezone.utc))
     assert stats["deleted_tasks"] == 1
     assert not stream.exists() and store.read(log_dir, record.task_id) is None
+
+
+def test_supported_retention_removal_waits_for_catalog_decode_before_unlinking(tmp_path):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from polybridge.catalog import Catalog
+    task = make_record(status='completed', exit_code=0)
+    store.write(tmp_path, task)
+    path = store.record_path(tmp_path, task.task_id)
+    entered, release = threading.Event(), threading.Event()
+    def load(identifier):
+        entered.set()
+        assert release.wait(5)
+        persisted = store.read(tmp_path, identifier)
+        assert persisted is not None
+        return store.listing_header(persisted)
+    # Make the header require a real metadata decode inside the reader's catalog lock.
+    payload = json.loads(path.read_text())
+    payload['title'] = 'refresh'
+    path.write_text(json.dumps(payload))
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        reader = pool.submit(Catalog(tmp_path, store.RECORD_SUFFIX).header_page, [task.task_id], load)
+        assert entered.wait(5)
+        removal = pool.submit(retention._delete_task_files, tmp_path, task.task_id)
+        assert not removal.done() and path.exists()
+        release.set()
+        read_page = reader.result(timeout=5)
+        assert read_page['items'][0]['title'] == 'refresh'
+        assert removal.result(timeout=5)
+    assert not path.exists()
+    recovered = store.list_page(tmp_path)
+    assert recovered['items'] == [] and recovered['catalog_state']['status'] == 'ready'

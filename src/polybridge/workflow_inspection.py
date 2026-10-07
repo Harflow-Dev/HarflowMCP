@@ -132,11 +132,10 @@ def decorate_tasks(entries: list[dict[str, Any]], log_dir: Any) -> list[dict[str
 def managed_page_reader(log_dir: Any) -> tuple[bool, tuple[dict[str, Any], dict[str, Any]] | None]:
     """Prepare bounded caller index, then preserve managed read authority without scans."""
     from . import lineage, store
-    from .catalog import Catalog
+    from .catalog import Catalog, set_authority_preparation
     from .workflows import WorkflowStore
     task_catalog = Catalog(log_dir, store.RECORD_SUFFIX)
-    with task_catalog.connect() as db:
-        db.execute("DELETE FROM state WHERE key='authority_preparation'")
+    set_authority_preparation(None, log_dir)
     if not task_catalog.ready():
         store.bootstrap_catalog(log_dir)
         # Do not combine a bootstrap decode batch with managed ownership decoding.
@@ -156,8 +155,7 @@ def managed_page_reader(log_dir: Any) -> tuple[bool, tuple[dict[str, Any], dict[
             preparation = page.get('catalog_state', storage._ownership_catalog().state())
             if preparation['status'] == 'ready':
                 preparation.update(status='preparing', source='caller_authority', reason='Validating workflow caller ownership after metadata indexing')
-            with task_catalog.connect() as db:
-                db.execute("INSERT OR REPLACE INTO state VALUES ('authority_preparation',?)", (json.dumps(preparation),))
+            set_authority_preparation(preparation, log_dir)
             return False, None
         queue, visited, association = [(detection.caller.record.task_id, set())], set(), None
         with storage._ownership_catalog().connect() as ownership_db, Catalog(log_dir, store.RECORD_SUFFIX).connect() as task_db:
@@ -197,16 +195,14 @@ def managed_page_reader(log_dir: Any) -> tuple[bool, tuple[dict[str, Any], dict[
         loaded = budget._load_bounded(association['workflow_run_id'], load_run)
     except DeferredRead:
         preparation = {'status': 'preparing', 'source': 'caller_authority', 'reason': 'Preparing bounded workflow ownership metadata', 'pending_records': 1, 'blocked_records': 0}
-        with task_catalog.connect() as db:
-            db.execute("INSERT OR REPLACE INTO state VALUES ('authority_preparation',?)", (json.dumps(preparation),))
+        set_authority_preparation(preparation, log_dir)
         return False, None
     if loaded is None:
         raise ValueError('Workflow ownership run is unavailable')
     run = loaded[0]
     if run.get('needs_direct_lookup'):
         preparation = {'status': 'blocked', 'source': 'caller_authority', 'reason': 'Workflow ownership metadata exceeds per-record read limit', 'pending_records': 0, 'blocked_records': 1, 'blocker_types': ['oversized_metadata']}
-        with task_catalog.connect() as db:
-            db.execute("INSERT OR REPLACE INTO state VALUES ('authority_preparation',?)", (json.dumps(preparation),))
+        set_authority_preparation(preparation, log_dir)
         return False, None
     run.pop('_source_identity', None)
     if receipt.exists():
@@ -219,14 +215,13 @@ def managed_page_reader(log_dir: Any) -> tuple[bool, tuple[dict[str, Any], dict[
 
 def page_indexing_response(log_dir: Any) -> dict[str, Any]:
     """No identifiers are exposed while bounded caller authority is incomplete."""
-    from .catalog import Catalog
+    from .catalog import Catalog, get_authority_preparation
     from . import store
     state = Catalog(log_dir, store.RECORD_SUFFIX).state()
     if state['status'] == 'ready':
-        with Catalog(log_dir, store.RECORD_SUFFIX).connect() as db:
-            saved = db.execute("SELECT value FROM state WHERE key='authority_preparation'").fetchone()
+        saved = get_authority_preparation(log_dir)
         if saved:
-            state = json.loads(saved[0])
+            state = saved
         else:
             state.update(status='preparing', source='caller_authority', reason='Validating workflow caller ownership after metadata indexing')
     incomplete = state['status'] == 'blocked'

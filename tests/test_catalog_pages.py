@@ -1119,3 +1119,71 @@ async def test_managed_explicit_header_deferral_keeps_counts_unavailable_and_rec
     assert len(recovered['items']) == 100
     assert all(item['title'] == 'new' and item['status'] == 'completed' for item in recovered['items'])
     assert recovered['total_active_count'] == 0
+
+
+@pytest.mark.parametrize('read_kind', ['page', 'headers'])
+def test_metadata_disappearing_during_decode_defers_without_a_listing_error(tmp_path, read_kind):
+    path = tmp_path / 'disappearing.meta.json'
+    path.write_text('{}')
+    index = catalog.Catalog(tmp_path, '.meta.json')
+    def load(identifier):
+        path.unlink()
+        return {'task_id': identifier, 'status': 'completed'}, 1, False
+    first = index.page(load) if read_kind == 'page' else index.header_page(['disappearing'], load)
+    assert first['items'] == []
+    assert first['bootstrap_pending'] and first['catalog_state']['status'] == 'preparing'
+    recovered = catalog.Catalog(tmp_path, '.meta.json').page(load)
+    assert recovered['items'] == [] and not recovered['bootstrap_pending']
+    assert recovered['catalog_state']['status'] == 'ready'
+
+
+async def test_concurrent_caller_preparation_survives_worker_hops_without_shared_diagnostics(tmp_path, monkeypatch):
+    import asyncio
+    from contextvars import ContextVar
+    from polybridge.bounded_io import read_json
+    from polybridge.workflow_inspection import page_indexing_response
+    directory = tmp_path / 'tasks'
+    storage = workflows.WorkflowStore(tmp_path)
+    callers = {name: record(name) for name in ('blocked-caller', 'preparing-caller')}
+    for name, caller in callers.items():
+        prompt = 'x' * catalog.METADATA_BYTES if name == 'blocked-caller' else 'request'
+        run = storage.create_run(definition(), prompt, tmp_path)
+        storage.update_run(run['workflow_run_id'], lambda value, name=name: value.update(activations=[
+            {'id': 'orchestrator', 'node_id': 'orchestrator', 'role': 'orchestrator', 'status': 'completed', 'tasks': [{'task_id': name, 'status': 'completed'}]}
+        ]), 'seed')
+        store.write(directory, caller)
+    store.list_page(directory)
+    request_caller = ContextVar('request_caller')
+    monkeypatch.setattr(lineage, 'detect_catalog_caller', lambda *a, **k: SimpleNamespace(caller=SimpleNamespace(record=callers[request_caller.get()]), undecidable=None))
+    prior_metadata = tmp_path / 'prior-metadata.json'
+    prior_metadata.write_text('"' + 'x' * (2 * 1024 * 1024 - 2) + '"')
+    blocked_prepared, other_done = asyncio.Event(), asyncio.Event()
+    async def blocked_request():
+        with catalog.metadata_request():
+            request_caller.set('blocked-caller')
+            assert await asyncio.to_thread(managed_page_reader, directory) == (False, None)
+            blocked_prepared.set()
+            await asyncio.wait_for(other_done.wait(), timeout=5)
+            # The response runs in another worker, as server._workflow_call does.
+            return await asyncio.to_thread(page_indexing_response, directory)
+    async def preparing_request():
+        await asyncio.wait_for(blocked_prepared.wait(), timeout=5)
+        with catalog.metadata_request():
+            request_caller.set('preparing-caller')
+            budget = catalog.Catalog(directory, store.RECORD_SUFFIX)
+            for _ in range(4):
+                await asyncio.to_thread(read_json, prior_metadata, catalog.METADATA_BYTES, budget=budget)
+            assert await asyncio.to_thread(managed_page_reader, directory) == (False, None)
+            result = await asyncio.to_thread(page_indexing_response, directory)
+            other_done.set()
+            return result
+    blocked, preparing = await asyncio.gather(blocked_request(), preparing_request())
+    assert blocked['catalog_state']['status'] == 'blocked'
+    assert blocked['catalog_state']['source'] == 'caller_authority'
+    assert blocked['catalog_state']['blocker_types'] == ['oversized_metadata']
+    assert blocked['authority_incomplete'] and not blocked['bootstrap_pending']
+    assert preparing['catalog_state']['status'] == 'preparing'
+    assert preparing['bootstrap_pending'] and not preparing['authority_incomplete']
+    assert blocked['items'] == preparing['items'] == []
+    with catalog.Catalog(directory, store.RECORD_SUFFIX).connect() as db:
+        assert db.execute("SELECT 1 FROM state WHERE key='authority_preparation'").fetchone() is None
