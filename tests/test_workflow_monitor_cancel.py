@@ -186,3 +186,51 @@ def test_empty_child_waiting_under_paused_root_is_idle(run_store):
 def test_missing_or_invalid_cascade_outcome_fails_closed(outcome):
     from polybridge.workflow_cancellation import cascade_error
     assert cascade_error(outcome) == "Cancellation transport returned no verifiable outcome"
+
+
+@pytest.mark.parametrize("owner_still_settling", [[], ["lineage-only-child"]])
+async def test_tracked_task_settlement_requires_cascade_descendant_owner_settlement(run_store, monkeypatch, owner_still_settling):
+    """A lineage descendant has no workflow activation for reconciliation to inspect."""
+    storage, rid = run_store
+    tracked_id = "tracked-worker"
+    storage.update_run(rid, lambda r: r.update(status="cancelling", activations=[{
+        "id": "tracked-execution", "node_id": "start", "role": "orchestrator", "status": "running",
+        "tasks": [{"task_id": tracked_id, "status": "running"}],
+    }]), "fixture")
+
+    class Registry:
+        calls = []
+        async def cancel_cascade(self, task_id, **kwargs):
+            self.calls.append(task_id)
+            # The named workflow task has settled, while its lineage-only child's
+            # owner may still be recording the cancellation outcome.
+            w.task_store.write(storage.root / "tasks", w.task_store.TaskRecord(
+                task_id=task_id, backend="codex", session_id="tracked-session", repo_path=str(storage.root),
+                started_at="2026-10-07T00:00:00Z", status="cancelled", exit_code=-15,
+            ))
+            return {"cancelled_descendants": [task_id], "owner_still_settling": owner_still_settling,
+                    "sigkill_survivors": [], "not_signalled": [], "not_recorded": [],
+                    "cascade_incomplete": False, "unconverged": []}
+
+    registry = Registry()
+    supervisor = w.WorkflowSupervisor(registry, storage)
+    # Enter the active owner's cancellation loop directly; the real final
+    # reconciliation still consumes the task record written by cancel_cascade.
+    async def already_reconciled():
+        return True
+    monkeypatch.setattr(supervisor, "reconcile", already_reconciled)
+    await supervisor.execute(rid)
+    result = storage.get_run(rid)
+    assert registry.calls == [tracked_id]
+    assert result["activations"][0]["tasks"][0]["status"] == "cancelled"
+    assert result["settling"] is False
+    assert result["status"] == ("needs_attention" if owner_still_settling else "cancelled")
+    if owner_still_settling:
+        assert "owner_still_settling" in result["attention_reason"]
+        assert "lineage-only-child" in result["attention_reason"]
+
+
+def test_cascade_owner_still_settling_is_unresolved():
+    from polybridge.workflow_cancellation import cascade_error
+    assert "lineage-only-child" in cascade_error({"owner_still_settling": ["lineage-only-child"]})
+    assert cascade_error({"owner_still_settling": []}) == ""

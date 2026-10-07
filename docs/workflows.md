@@ -775,7 +775,9 @@ with no active or unresolved tasks or nested workflow execution. The runner chec
 again when the request arrives; stale views are refused without taking over caller interaction.
 Cancel cascades through linked children and their tasks. Child views offer **Open root to cancel**
 so the scope is clear. While cancellation settles, the Monitor shows **Cancelling**; errors remain
-visible and the run is refreshed. Monitor terminal continuation is offered only after the workflow
+visible and the run is refreshed. If a task owner is still settling a cascaded descendant, the
+workflow records `needs_attention` rather than reporting cancellation complete.
+Monitor terminal continuation is offered only after the workflow
 has completed its valid End traversal, never while a node is still participating in execution.
 
 Resume of `needs_input` includes the exact published `input_decision_id` as `decision_id` (CLI

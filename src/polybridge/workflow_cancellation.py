@@ -70,7 +70,7 @@ def cascade_error(outcome: Any) -> str:
     """Keep task cancellation transport refusals visible to workflow controls."""
     if not isinstance(outcome, dict):
         return "Cancellation transport returned no verifiable outcome"
-    problems = {key: outcome[key] for key in ("sigkill_survivors", "not_signalled", "not_recorded", "unconverged", "cascade_incomplete") if outcome.get(key)}
+    problems = {key: outcome[key] for key in ("sigkill_survivors", "owner_still_settling", "not_signalled", "not_recorded", "unconverged", "cascade_incomplete") if outcome.get(key)}
     if not problems:
         return ""
     import json
