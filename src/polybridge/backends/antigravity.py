@@ -291,6 +291,11 @@ def _tool_command(parameters: dict[str, Any]) -> str | None:
 
 class AntigravityBackend:
     @staticmethod
+    def workflow_stderr_blocks_availability_failure(diagnostic: str) -> bool:
+        from .workflow_diagnostics import stderr_blocks_availability
+        return stderr_blocks_availability(diagnostic)
+
+    @staticmethod
     def workflow_stderr_availability_failure(diagnostic: str) -> str | None:
         from .workflow_diagnostics import stderr_availability
         return stderr_availability(diagnostic)
@@ -305,8 +310,10 @@ class AntigravityBackend:
         result = event.get("result")
         if event.get("event") != "result" or not isinstance(result, dict) or result.get("status") != "ERROR" or result.get("denied_actions"):
             return None
+        if AntigravityBackend.usage_limit_diagnostic(event):
+            return None
         error = result.get("error")
-        codes = {"insufficient_quota", "model_not_found", "rate_limit_exceeded", "usage_limit_reached"}
+        codes = {"model_not_found"}
         outages = {"overloaded_error", "api_connection_error", "APITimeoutError", "APIConnectionError", "service_unavailable"}
         if isinstance(error, dict):
             if any(type(error.get(key)) is int and error[key] in {401, 403} for key in ("status", "status_code", "statusCode")):
@@ -320,11 +327,21 @@ class AntigravityBackend:
         elif isinstance(error, str):
             if re.match(r"(?i)^(?:API[ _]Error|Provider[ _]Error|HTTP[ _]Error)\s*:?\s*(?:HTTP\s*)?(?:401|403)\b", error):
                 return None
-            if re.search(r"\b(?:insufficient_quota|model_not_found|rate_limit_exceeded|usage_limit_reached)\b", error):
+            if re.search(r"\bmodel_not_found\b", error):
                 return "backend availability rejected"
             if re.match(r"(?i)^(?:API[ _]Error|Provider[ _]Error|HTTP[ _]Error)\s*:?\s*(?:HTTP\s*)?(?:500|502|503|504|529)\b", error):
                 return "provider server unavailable"
         return None
+
+    @staticmethod
+    def usage_limit_diagnostic(event: dict[str, Any]) -> dict[str, Any] | None:
+        from .workflow_diagnostics import usage_limit
+        return usage_limit(event, envelope='error', claude=False, agy=True)
+
+    @staticmethod
+    def stderr_usage_limit_diagnostic(line: str) -> dict[str, Any] | None:
+        from .workflow_diagnostics import stderr_usage_limit
+        return stderr_usage_limit(line, claude=False)
 
     name = "antigravity"
     mcp_approval = AntigravityApproval()
@@ -708,6 +725,10 @@ class AntigravityBackend:
         )
 
     def ingest(self, event: dict[str, Any], acc: Accumulator) -> None:
+        diagnostic = self.usage_limit_diagnostic(event)
+        if diagnostic is not None and acc.failure_diagnostic is None:
+            acc.failure_diagnostic = diagnostic
+            acc.error_result_seen = True
         if not isinstance(event, dict):
             return
         kind = event.get("event")
@@ -902,6 +923,8 @@ class AntigravityBackend:
         return events
 
     def classify(self, acc: Accumulator, exit_code: int | None) -> Status:
+        if acc.failure_diagnostic is not None:
+            return "failed"
         # A result reporting an error is a real failure (the CLI exits 1 on an ERROR result).
         if acc.is_error or acc.error_result_seen:
             return "failed"

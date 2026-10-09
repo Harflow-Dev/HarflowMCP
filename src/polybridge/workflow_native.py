@@ -157,6 +157,10 @@ async def _dispatch_native_one(supervisor: Any, node: dict[str, Any], assignment
                         if update["status"] != "completed":
                             result.update(execution_failure=update.get("summary", "Native child failed"), blocked_failure=True, optional_failure_eligible=False)
                         result["observed_model"] = update.get("observed_model")
+                        if update.get("failure_diagnostic"):
+                            result["failure_diagnostic"] = copy.deepcopy(update["failure_diagnostic"])
+                            if update["failure_diagnostic"].get("category") == "usage_limit":
+                                result["blocked_failure"] = False
                         if update.get("permission_denials"):
                             result["permission_denials"] = copy.deepcopy(update["permission_denials"])
                         state["result"] = result
@@ -192,6 +196,11 @@ async def _dispatch_native_one(supervisor: Any, node: dict[str, Any], assignment
             deadline = time.monotonic() + node["timeout_seconds"] if node.get("timeout_seconds") else None
             cancel_requested = False
             while not task.done.is_set():
+                live_snapshot = task.snapshot()
+                diagnostic = live_snapshot.get("failure_diagnostic") or {}
+                if diagnostic.get("category") == "usage_limit" and diagnostic.get("settlement") == "needs_attention":
+                    supervisor._task_update(transport_id, transport_id, {"status": "uncertain", "result": live_snapshot})
+                    raise RuntimeError("Usage-limited native owner remains unsettled; reconcile child ownership before replacement")
                 import asyncio
                 if not cancel_requested and (supervisor.run()["status"] == "cancelling" or deadline is not None and time.monotonic() >= deadline):
                     # Individual cancellation is unavailable. Root/timeout cancellation

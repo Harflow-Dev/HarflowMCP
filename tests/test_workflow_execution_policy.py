@@ -211,7 +211,7 @@ async def test_serial_resume_outage_fallback_is_fresh(storage, tmp_path):
         async def resume(self, previous, prompt, **kwargs):
             task = await super().resume(previous, prompt, **kwargs)
             if 'Assignment:\n' in prompt and 'Focused assignment for second' in prompt:
-                task.result.update(status='failed', stderr_tail=['usage_limit_reached'], summary='usage limit reached')
+                task.result.update(status='failed', stderr_tail=['API Error: service unavailable'], summary='service unavailable')
             return task
     run, _ = await run_flow(storage, tmp_path, definition, OutageRegistry(storage.root), guided=True)
     assert run['status'] == 'completed'

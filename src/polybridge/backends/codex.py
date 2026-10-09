@@ -261,14 +261,19 @@ class UnsafeInvocationError(RuntimeError):
 
 class CodexBackend:
     @staticmethod
+    def workflow_stderr_blocks_availability_failure(diagnostic: str) -> bool:
+        from .workflow_diagnostics import stderr_blocks_availability
+        return stderr_blocks_availability(diagnostic)
+
+    @staticmethod
     def workflow_stderr_availability_failure(diagnostic: str) -> str | None:
         from .workflow_diagnostics import stderr_availability
-        return stderr_availability(diagnostic, quota_patterns=('(?im)^.*(?:usage_limit_reached|insufficient_quota|model_not_found|rate_limit_exceeded).*$',))
+        return stderr_availability(diagnostic, model_patterns=(r"(?im)^.*\bmodel_not_found\b.*$",))
 
     @staticmethod
     def workflow_availability_failure(event: dict[str, Any]) -> str | None:
         from .workflow_diagnostics import provider_error
-        return provider_error(event, event_type="turn.failed", quota_reason="codex availability rejected")
+        return provider_error(event, event_type="turn.failed", model_reason="codex model unavailable")
 
     @staticmethod
     def workflow_failure_diagnostic(event: dict[str, Any]) -> str | None:
@@ -276,6 +281,24 @@ class CodexBackend:
         if event.get("type") == "turn.failed" and isinstance(error, dict) and isinstance(error.get("message"), str):
             return error["message"]
         return None
+
+    @staticmethod
+    def usage_limit_diagnostic(event: dict[str, Any]) -> dict[str, Any] | None:
+        from .workflow_diagnostics import usage_limit
+        if event.get("type") not in {"turn.failed", "error"}:
+            return None
+        error = event.get("error")
+        if isinstance(error, dict):
+            info = error.get("codex_error_info")
+            code = info if isinstance(info, str) else info.get("code") if isinstance(info, dict) else None
+            if code is not None:
+                event = {**event, "error": {**error, "code": code}}
+        return usage_limit(event, envelope=event["type"])
+
+    @staticmethod
+    def stderr_usage_limit_diagnostic(line: str) -> dict[str, Any] | None:
+        from .workflow_diagnostics import stderr_usage_limit
+        return stderr_usage_limit(line, claude=False)
 
     name = "codex"
     mcp_approval = CodexApproval()
@@ -754,6 +777,10 @@ class CodexBackend:
         )
 
     def ingest(self, event: dict[str, Any], acc: Accumulator) -> None:
+        diagnostic = self.usage_limit_diagnostic(event)
+        if diagnostic is not None and acc.failure_diagnostic is None:
+            acc.failure_diagnostic = diagnostic
+            acc.error_result_seen = True
         event_type = event.get("type")
 
         if event_type == "thread.started":
@@ -1007,6 +1034,8 @@ class CodexBackend:
         return [self.binary, "-c", "check_for_update_on_startup=false", "resume", session_id]
 
     def classify(self, acc: Accumulator, exit_code: int | None) -> Status:
+        if acc.failure_diagnostic is not None:
+            return "failed"
         # No terminal success/failure event exists, so the exit code is the authority and the closing
         # message is only corroboration. That makes an *observed* zero exit mandatory here: with
         # `exit_code is None` (a recovered run nothing saw exit) an `agent_message` proves the agent

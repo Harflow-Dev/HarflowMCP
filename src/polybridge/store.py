@@ -70,6 +70,7 @@ class TaskRecord:
     unknown keys and defaults missing ones, so no migration is needed."""
     parent_task_id: str | None = None
     stderr_tail: list[str] = field(default_factory=list)
+    failure_diagnostic: dict[str, Any] | None = None
     workflow_builder: bool = False
     prompt: str = ""
     prompt_source: str | None = None
@@ -644,12 +645,20 @@ def _resolve(
         )
 
     state, tail = replay_log(log_dir, record.task_id, record.backend)
+    if record.failure_diagnostic is not None:
+        state.failure_diagnostic = record.failure_diagnostic
     if record.input_after_result is not None and state.result_count <= record.input_after_result:
         # A message was written to the run after its last result in this stream, so a turn is
         # still owed: the replay alone cannot see that (the bridge's writes are not in the agent's
         # stdout), and an earlier success must not be read as the outcome.
         state.turn_open = True
     alive = unobserved and record_process_alive(record)
+
+    if alive and state.failure_diagnostic is not None and identity.identity_check(record.owner) != "alive":
+        state.failure_diagnostic = {**state.failure_diagnostic, "settlement": "needs_attention"}
+        note = "Recovered usage-limit failure needs attention: the process remains alive but its owning server cannot be verified. Reconcile or cancel it before dispatching a replacement."
+        state.notices.append(note)
+        return ("running", note, state, tail, False)
 
     if alive and record.status in TERMINAL_RECORD_STATUSES:
         owned = identity.identity_check(record.owner) == "alive"
@@ -719,6 +728,8 @@ def _resolve(
             tail,
             False,
         )
+    if state.failure_diagnostic is not None and not alive:
+        return "failed", "Recovered confirmed usage-limit failure.", state, tail, False
     if state.terminal is not None or state.saw_final_message:
         # `record.exit_code` is passed through as-is, None included. Substituting 0 here used to
         # make every backend look as though it had exited cleanly, so a recovered run carrying a
@@ -857,6 +868,7 @@ def snapshot(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
         "lineage_detected": record.lineage_detected,
         "live_input": record.live_input,
         "summary": state.summary,
+        "failure_diagnostic": state.failure_diagnostic,
         "is_error": state.is_error,
         "total_cost_usd": state.total_cost_usd,
         "num_turns": state.num_turns,
@@ -894,7 +906,7 @@ def brief(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
     stream replayed, which a listing should not pay for — and they are stream detail, which is what
     `snapshot` is for. Uses `detail=False`, so a settled, observed task costs no replay here either.
     """
-    status, _, _, _, owned = _resolve(log_dir, record, detail=False)
+    status, _, state, _, owned = _resolve(log_dir, record, detail=False)
     return {
         "task_id": record.task_id,
         "workflow_builder": record.workflow_builder,
@@ -915,6 +927,7 @@ def brief(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
         "lineage_detected": record.lineage_detected,
         "live_input": record.live_input,
         "notices": list(record.bridge_notices),
+        "failure_diagnostic": state.failure_diagnostic or record.failure_diagnostic,
         "owner": record.owner,
         "owned_by_live_server": owned if status == "running" else None,
         "recovered": True,

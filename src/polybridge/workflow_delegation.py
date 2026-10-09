@@ -116,7 +116,7 @@ def normalize_decision(run: dict[str, Any], node: dict[str, Any], token: dict[st
         for index, entry in enumerate(value["next"]):
             if not isinstance(entry, dict):
                 continue
-            clean(entry, {"continuation_id", "prompt", "assigned_task_ids", "additional_result_refs", "session_mode", "resume_task_id", "branch_assignments", "selection_reason", "child_session_mode", "child_session_ref", "child_session_reason"}, f"next[{index}]")
+            clean(entry, {"continuation_id", "prompt", "assigned_task_ids", "additional_result_refs", "session_mode", "resume_task_id", "candidate_id", "branch_assignments", "selection_reason", "child_session_mode", "child_session_ref", "child_session_reason"}, f"next[{index}]")
             choice = choices.get(entry.get("continuation_id"))
             if choice and not choice["requires_prompt"]:
                 for key in ("assigned_task_ids", "additional_result_refs"):
@@ -146,7 +146,7 @@ def decision_prompt(context: dict[str, Any]) -> str:
         "failed": {**base, "action": "failed"},
         "complete": {**base, "action": "complete"},
     }
-    return ("You are the workflow orchestrator. Own the objective and checklist, and delegate focused assignments. Polybridge owns state and dispatch. Ordinary tools remain available under configured access. Return ONLY one JSON object. Every action MUST include the issued decision_id, an action, and a nonempty reason explaining the judgment, including complete and inspect. Do not return bare action strings. Use the action-specific examples below; omit fields belonging to other actions. Structural continuations accept ONLY continuation_id, except a continuation with branch_continuations entering Parallel start requires branch_assignments using the issued executable/structural entry shape. All branches requires every issued branch; Orchestrator selects requires one or more selected branch entries and a nonempty selection_reason explaining both selections and exclusions. Each executable branch receives its own focused assignment; do not select downstream nodes independently. Executable continuations require prompt; optional additional_result_refs and assigned_task_ids are arrays of issued result/task IDs. For Resume use session_mode resume and an issued resume_task_id; Fresh omits resume_task_id. For agent nodes only, fixed Resume without a retained session boots Fresh. Run workflow Child mode defaults child_session_policy to agent_decides: fixed Resume never falls back Fresh. Agent decides requires child_session_mode fresh or resume and a nonempty child_session_reason; resume also requires an issued child_session_ref. Do not use session_mode or resume_task_id for workflow nodes. Current mode and suspended-child recovery do not choose child sessions. Agent decides may also choose session_mode continue_previous: Polybridge resumes a compatible single serial predecessor or boots Fresh; each fallback boots Fresh. For agent nodes only, Agent decides defaults Fresh when session_mode is omitted only if no compatible session is available; when a session is available choose Fresh or Resume explicitly. retry_execution explicitly consumes a node attempt, not an edge. skip_optional_review is a caller-authorized discard of the current settled optional review refusal: select only its issued skip_optional continuation with continuation_id and a reason, without assignments or task_updates. It preserves refusal evidence and cannot approve denied tools, alter permissions, retry the reviewer, or certify review success. Before caller authorization, request needs_input with the recommendation to proceed without the optional reviewer. An ordinary caller answer never authorizes discard: the caller must explicitly resume with allow_optional_review_skip=true at the issued input decision_id. Failed required results require an issued retry or recovery path, failure, or input. A planning result with no_checklist_needed is a proposal: judge its checklist_reason and either continue or explicitly select its issued retry_execution to request checklist tasks within the attempt budget. Complete only at End after every branch settles. Inspect exactly one page of a settled execution; inspection does not consume decision attempts. Optional task_updates are accepted for non-inspection actions and must obey checklist authority. Examples:\n" + json.dumps(examples) + "\nContext:\n" + json.dumps(context))
+    return ("You are the workflow orchestrator. Own the objective and checklist, and delegate focused assignments. Polybridge owns state and dispatch. Ordinary tools remain available under configured access. Return ONLY one JSON object. Every action MUST include the issued decision_id, an action, and a nonempty reason explaining the judgment, including complete and inspect. Do not return bare action strings. Use the action-specific examples below; omit fields belonging to other actions. Structural continuations accept ONLY continuation_id, except a continuation with branch_continuations entering Parallel start requires branch_assignments using the issued executable/structural entry shape. All branches requires every issued branch; Orchestrator selects requires one or more selected branch entries and a nonempty selection_reason explaining both selections and exclusions. Each executable branch receives its own focused assignment; do not select downstream nodes independently. Executable continuations require prompt; optional additional_result_refs and assigned_task_ids are arrays of issued result/task IDs. For Resume use session_mode resume and an issued resume_task_id; Fresh omits resume_task_id. For agent nodes only, fixed Resume without a retained session boots Fresh. Run workflow Child mode defaults child_session_policy to agent_decides: fixed Resume never falls back Fresh. Agent decides requires child_session_mode fresh or resume and a nonempty child_session_reason; resume also requires an issued child_session_ref. Do not use session_mode or resume_task_id for workflow nodes. Current mode and suspended-child recovery do not choose child sessions. Agent decides may also choose session_mode continue_previous: Polybridge resumes a compatible single serial predecessor or boots Fresh; each fallback boots Fresh. For agent nodes only, Agent decides defaults Fresh when session_mode is omitted only if no compatible session is available; when a session is available choose Fresh or Resume explicitly. retry_execution explicitly consumes a node attempt, not an edge. skip_optional_review is a caller-authorized discard of the current settled optional review refusal: select only its issued skip_optional continuation with continuation_id and a reason, without assignments or task_updates. It preserves refusal evidence and cannot approve denied tools, alter permissions, retry the reviewer, or certify review success. Before caller authorization, request needs_input with the recommendation to proceed without the optional reviewer. An ordinary caller answer never authorizes discard: the caller must explicitly resume with allow_optional_review_skip=true at the issued input decision_id. Failed required results require an issued retry or recovery path, failure, or input. A planning result with no_checklist_needed is a proposal: judge its checklist_reason and either continue or explicitly select its issued retry_execution to request checklist tasks within the attempt budget. Complete only at End after every branch settles. Inspect exactly one page of a settled execution; inspection does not consume decision attempts. When a worker reaches a usage_limit, either choose an issued configured candidate yourself or request needs_input offering the caller pause_workflow, cancel_workflow, or a configured fallback choice for that node. Include its node identity and candidate choices in the question. A caller answer returns to this preserved decision; dispatch still requires your explicit candidate_id selection. When recovering a usage_limit worker failure, select an issued retry_execution and its explicit candidate_id from available_candidates, using a Fresh session. Do not infer recovery approval from ordinary caller prose. Optional task_updates are accepted for non-inspection actions and must obey checklist authority. Examples:\n" + json.dumps(examples) + "\nContext:\n" + json.dumps(context))
 
 
 def settled(activation: dict[str, Any]) -> bool:
@@ -555,6 +555,10 @@ def continuations(run: dict[str, Any], node: dict[str, Any], token: dict[str, An
                 choices.append({"continuation_id": "recover:" + activation["id"], "node_id": target["id"], "kind": "retry_execution", "requires_prompt": True, "execution_id": activation["id"], "recovery_from_checkpoint": True})
     for choice in choices:
         target = next(n for n in run["definition"]["nodes"] if n["id"] == choice["node_id"])
+        source = next((a for a in run["activations"] if a["id"] == choice.get("execution_id")), None)
+        if choice["kind"] == "retry_execution" and target["type"] == "agent" and source and source.get("node_result", {}).get("result", {}).get("failure_kind") == "usage_limit":
+            choice["available_candidates"] = [{"candidate_id": w._candidate_key(c), "candidate": {k: v for k, v in c.items() if k != "fallbacks"}} for c in [target["agent"]] + target["agent"].get("fallbacks", []) if target["id"] + ":" + w._candidate_key(c) not in run.get("suppressed_candidates", [])]
+            choice["usage_limit_recovery"] = True
         if target["type"] == "workflow" and choice["requires_prompt"]:
             # Direct execution after convergence and retry choices have the
             # same child assignment contract as an incoming graph edge.
@@ -717,6 +721,8 @@ def validate_decision(run: dict[str, Any], node: dict[str, Any], token: dict[str
                 allowed.update({"child_session_mode", "child_session_ref", "child_session_reason"})
         else:
             allowed = {"continuation_id", "prompt", "assigned_task_ids", "additional_result_refs", "session_mode", "resume_task_id"} if c["requires_prompt"] else {"continuation_id"}
+        if c.get("usage_limit_recovery"):
+            allowed.add("candidate_id")
         if "branch_continuations" in c:
             allowed.add("branch_assignments")
             if c.get("branch_selection") == "orchestrator":
@@ -738,6 +744,13 @@ def validate_decision(run: dict[str, Any], node: dict[str, Any], token: dict[str
             raise w.WorkflowError("additional_result_refs must be unique execution IDs")
         result_inputs(run, refs, preview=False)
         assignment = {"assignment_prompt": entry.get("prompt", ""), "assigned_task_ids": assigned, "additional_result_refs": refs}
+        if c.get("usage_limit_recovery"):
+            candidate_choice = next((candidate for candidate in c["available_candidates"] if candidate["candidate_id"] == entry.get("candidate_id")), None)
+            if candidate_choice is None:
+                raise w.WorkflowError("Usage-limit retry requires an issued candidate_id")
+            if entry.get("session_mode", "fresh") != "fresh":
+                raise w.WorkflowError("Usage-limit retry requires a Fresh session")
+            assignment["execution_candidate"] = copy.deepcopy(candidate_choice["candidate"])
         if c.get("recovery_from_checkpoint"):
             assignment["recovery_execution_id"] = c["execution_id"]
             assignment["recovery_node_id"] = c["node_id"]
@@ -787,7 +800,7 @@ def validate_decision(run: dict[str, Any], node: dict[str, Any], token: dict[str
                 mode = "fresh"
             if mode not in {"fresh", "resume"}:
                 raise w.WorkflowError("agent_decides requires explicit session_mode fresh or resume")
-            if target["session_mode"] not in {"agent_decides", "continue_previous"} and mode != target["session_mode"] and not token.get("requires_assignment") and not (target["session_mode"] == "resume" and mode == "fresh" and not c["available_sessions"]):
+            if target["session_mode"] not in {"agent_decides", "continue_previous"} and mode != target["session_mode"] and not token.get("requires_assignment") and not c.get("usage_limit_recovery") and not (target["session_mode"] == "resume" and mode == "fresh" and not c["available_sessions"]):
                 raise w.WorkflowError("Assignment cannot override the node's fixed session mode")
             if token.get("requires_assignment") and mode != "fresh":
                 raise w.WorkflowError("Unavailable Resume requires an explicit Fresh reassignment")
@@ -957,6 +970,8 @@ async def decide(supervisor: Any, node: dict[str, Any], token: dict[str, Any], *
                         else:
                             r.update(status="failed", failure_reason=decision["reason"], failed_decision_id=t["decision_id"])
                     else:
+                        if source and source.get("node_result", {}).get("result", {}).get("failure_kind") == "usage_limit":
+                            r["worker_usage_recovery"] = {"node_id": source["node_id"], "execution_id": source["id"], "decision_id": t["decision_id"], "failure_diagnostic": copy.deepcopy(source["node_result"]["result"].get("failure_diagnostic", {}))}
                         r.update(status="needs_input", input_question=decision["question"], input_decision_id=t["decision_id"], attention_reason=decision["reason"], optional_review_skip_available=bool(not execute and source and optional_review_refusal_join(r, node, source, t)))
                     for update in decision.get("task_updates", []):
                         item = next(x for x in r["tasks"] if x["id"] == update["task_id"])
@@ -983,7 +998,7 @@ async def decide(supervisor: Any, node: dict[str, Any], token: dict[str, Any], *
 def normalize_result(node: dict[str, Any], outcome: dict[str, Any], assigned_ids: list[str], *, guided: bool = False) -> dict[str, Any]:
     w = _w()
     if outcome.get("execution_failure"):
-        return {"status": "blocked" if outcome.get("blocked_failure") else "failed", "result": {"failure_kind": "timeout" if outcome.get("timed_out") else "harness", "reason": outcome["execution_failure"]}, "evidence": [{k: copy.deepcopy(outcome[k]) for k in ("task_id", "status", "stderr_tail", "permission_denials", "candidates", "timeout_seconds", "timed_out") if k in outcome}]}
+        return {"status": "blocked" if outcome.get("blocked_failure") else "failed", "result": {"failure_kind": "usage_limit" if w.usage_limit(outcome) else "timeout" if outcome.get("timed_out") else "harness", "reason": outcome["execution_failure"], **({"failure_diagnostic": copy.deepcopy(outcome["failure_diagnostic"])} if w.usage_limit(outcome) else {})}, "evidence": [{k: copy.deepcopy(outcome[k]) for k in ("task_id", "status", "stderr_tail", "permission_denials", "candidates", "timeout_seconds", "timed_out", "failure_diagnostic") if k in outcome}]}
     value = parse_contract(outcome.get("summary") or "", guided=guided)
     if value.get("status") not in {"succeeded", "failed", "blocked", "asking"} or not isinstance(value.get("result"), dict) or not isinstance(value.get("evidence"), list):
         raise w.WorkflowError("Worker requires {status:succeeded|failed|blocked|asking,result:object,evidence:array}")
@@ -1249,7 +1264,7 @@ async def execute_node(supervisor: Any, node: dict[str, Any], token: dict[str, A
         unsafe = bool(failed.get("permission_denials")) or bool(failed.get("outcome_unknown")) or failed.get("status") != "failed"
         if unsafe:
             supervisor.attention("Recovered task requires inspection before continuing")
-        outcome = {**failed, "execution_failure": f"Recovered task ended {failed.get('status', 'failed')}", "blocked_failure": unsafe, "optional_failure_eligible": not unsafe}
+        outcome = {**failed, "execution_failure": f"Recovered task ended {failed.get('status', 'failed')}", "blocked_failure": unsafe, "optional_failure_eligible": not unsafe and not w.usage_limit(failed)}
     elif not outcome:
         if question_id:
             outcome = await clarification.continue_worker(supervisor, node, token, activation["id"], question_id)

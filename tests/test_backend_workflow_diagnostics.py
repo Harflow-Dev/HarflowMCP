@@ -53,10 +53,11 @@ def test_backend_seam_controls_availability_and_diagnostics(tmp_path, monkeypatc
     assert w.failure_diagnostic(snapshot, "request") == "adapter startup diagnostic"
 
 
-def test_codex_rate_limit_status_preserves_quota_fallback():
+def test_codex_rate_limit_status_requires_explicit_usage_recovery():
     from polybridge.backends.codex import CodexBackend
     event = {"type": "turn.failed", "error": {"code": "rate_limit_exceeded", "status": 429}}
-    assert CodexBackend.workflow_availability_failure(event) == "codex availability rejected"
+    assert CodexBackend.workflow_availability_failure(event) is None
+    assert CodexBackend.usage_limit_diagnostic(event)["category"] == "usage_limit"
     for status in (400, 401, 403):
         event["error"]["status"] = status
         assert CodexBackend.workflow_availability_failure(event) is None
@@ -71,7 +72,7 @@ def test_failed_stream_diagnostics_use_bounded_shared_tail(tmp_path, monkeypatch
     path.write_bytes((b'{"type":"assistant","text":"' + b'x' * 1000 + b'"}\n') * 4000 + b'{"native":"error"}\n')
     class Adapter:
         workflow_stderr_availability_failure = staticmethod(lambda text: None)
-        workflow_availability_failure = staticmethod(lambda event: "late quota" if event.get("native") == "error" else None)
+        workflow_availability_failure = staticmethod(lambda event: "late outage" if event.get("native") == "error" else None)
         workflow_failure_diagnostic = staticmethod(lambda event: "late diagnostic" if event.get("native") == "error" else None)
     monkeypatch.setitem(w.backends.BACKENDS, "bounded-harness", Adapter())
     original = Path.open
@@ -90,7 +91,7 @@ def test_failed_stream_diagnostics_use_bounded_shared_tail(tmp_path, monkeypatch
             yield Reader()
     monkeypatch.setattr(Path, "open", tracked_open)
     snapshot = {"status": "failed", "backend": "bounded-harness", "raw_stream_log": str(path)}
-    assert w.availability_failure(snapshot) == "late quota"
+    assert w.availability_failure(snapshot) == "late outage"
     assert w.failure_diagnostic(snapshot, "Request") == "late diagnostic"
     assert sum(reads) <= 512 * 1024
     assert len(reads) == 2
@@ -102,9 +103,9 @@ def test_bounded_stream_cache_refreshes_after_log_growth(tmp_path):
     path.write_text('{"type":"assistant"}\n')
     assert stream_events(path) == ({"type": "assistant"},)
     with path.open("a") as stream:
-        stream.write('{"type":"turn.failed","error":{"code":"rate_limit_exceeded"}}\n')
+        stream.write('{"type":"turn.failed","error":{"code":"model_not_found"}}\n')
     assert stream_events(path)[-1]["type"] == "turn.failed"
-    assert w.availability_failure({"status": "failed", "backend": "codex", "raw_stream_log": str(path)}) == "codex availability rejected"
+    assert w.availability_failure({"status": "failed", "backend": "codex", "raw_stream_log": str(path)}) == "codex model unavailable"
 
 
 def test_bounded_stream_skips_oversized_entry_preserves_terminal_error(tmp_path):
@@ -119,12 +120,12 @@ def test_bounded_stream_skips_oversized_entry_preserves_terminal_error(tmp_path)
 def test_small_dense_stream_keeps_terminal_error_after_event_cap(tmp_path):
     from polybridge.backends.workflow_diagnostics import stream_events, STREAM_WINDOW_EVENTS, STREAM_WINDOW_BYTES
     path = tmp_path / "dense.jsonl"
-    path.write_bytes(b'{"type":"assistant"}\n' * 700 + b'{"type":"turn.failed","error":{"code":"rate_limit_exceeded"}}\n')
+    path.write_bytes(b'{"type":"assistant"}\n' * 700 + b'{"type":"turn.failed","error":{"code":"model_not_found"}}\n')
     assert path.stat().st_size < STREAM_WINDOW_BYTES
     events = stream_events(path)
     assert len(events) == 2 * STREAM_WINDOW_EVENTS
     assert events[-1]["type"] == "turn.failed"
-    assert w.availability_failure({"status": "failed", "backend": "codex", "raw_stream_log": str(path)}) == "codex availability rejected"
+    assert w.availability_failure({"status": "failed", "backend": "codex", "raw_stream_log": str(path)}) == "codex model unavailable"
 
 
 def test_small_stream_event_windows_do_not_duplicate_overlap(tmp_path):

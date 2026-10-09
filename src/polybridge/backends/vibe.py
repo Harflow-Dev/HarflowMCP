@@ -336,14 +336,29 @@ class VibeBackend:
         return None
 
     @staticmethod
+    def workflow_stderr_blocks_availability_failure(diagnostic: str) -> bool:
+        from .workflow_diagnostics import stderr_blocks_availability
+        return stderr_blocks_availability(diagnostic)
+
+    @staticmethod
     def workflow_stderr_availability_failure(diagnostic: str) -> str | None:
         from .workflow_diagnostics import stderr_availability
-        return stderr_availability(diagnostic, quota_patterns=('(?im)^.*(?:insufficient_quota|model_not_found|rate_limit_exceeded).*$',))
+        return stderr_availability(diagnostic, model_patterns=(r"(?im)^.*\bmodel_not_found\b.*$",))
 
     @staticmethod
     def workflow_availability_failure(event: dict[str, Any]) -> str | None:
         from .workflow_diagnostics import provider_error
         return provider_error(event, event_type="error")
+
+    @staticmethod
+    def usage_limit_diagnostic(event: dict[str, Any]) -> dict[str, Any] | None:
+        from .workflow_diagnostics import usage_limit
+        return usage_limit(event, envelope='error', claude=False, agy=False)
+
+    @staticmethod
+    def stderr_usage_limit_diagnostic(line: str) -> dict[str, Any] | None:
+        from .workflow_diagnostics import stderr_usage_limit
+        return stderr_usage_limit(line, claude=False)
 
     name = "vibe"
     mcp_approval = VibeApproval()
@@ -633,6 +648,10 @@ class VibeBackend:
         )
 
     def ingest(self, event: dict[str, Any], acc: Accumulator) -> None:
+        diagnostic = self.usage_limit_diagnostic(event)
+        if diagnostic is not None and acc.failure_diagnostic is None:
+            acc.failure_diagnostic = diagnostic
+            acc.error_result_seen = True
         session_id = event.get("sessionId")
         if acc.session_id is None and isinstance(session_id, str) and session_id:
             acc.session_id = session_id
@@ -879,6 +898,8 @@ class VibeBackend:
         return [self.binary, "--trust", "--workdir", str(repo_path), "--resume", session_id]
 
     def classify(self, acc: Accumulator, exit_code: int | None) -> Status:
+        if acc.failure_diagnostic is not None:
+            return "failed"
         # No terminal event exists, so the exit code is the authority and the closing message is
         # only corroboration — the same shape as codex, and for the same reason an *observed* zero
         # exit is mandatory: with `exit_code is None` (a recovered run nothing saw exit) neither a

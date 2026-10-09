@@ -11,7 +11,8 @@ this process owns; `takeover` / `takeover-attach` are the human-only takeover (`
 and `resume` fork a process that owns the new task until it settles (`detached.py`). `backends`
 reports the registered backends and whether each binary is on PATH (`backends.is_installed`) — no
 `--version` probe, no subprocess. Every command prints one versioned JSON document
-(`"v": 8`, `CTL_JSON_VERSION`) with `--json`. v8 adds pinned owner permissions,
+(`"v": 9`, `CTL_JSON_VERSION`) with `--json`. v9 adds durable task usage-limit
+diagnostics and workflow recovery choices. v8 adds pinned owner permissions,
 launch previews and preview hash guards. v7 adds separate human Monitor workflow
 cancellation eligibility and refusal metadata. v6 adds native execution
 preference, presentation, availability and frozen scheduling metadata. v5 adds Run workflow node presentation
@@ -40,7 +41,7 @@ from .tasks import default_log_dir
 # Bumped to 2 when `status`/`list`'s snapshot/brief documents gained `resume_command` (Monitor
 # piece 3/3). `setup` and the event log are separate contracts and stay at v1 — see CLAUDE.md's
 # "The Monitor app is a consumer of three frozen contracts".
-CTL_JSON_VERSION = 8
+CTL_JSON_VERSION = 9
 
 # How long `cancel`/`takeover` stay alive for a failing `.sig` write to be retried before exiting —
 # the lease (60 s) is what a later recovery waits for anyway.

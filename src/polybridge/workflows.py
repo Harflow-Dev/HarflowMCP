@@ -1154,11 +1154,26 @@ class WorkflowStore:
                 if any(a["status"] in {"reserved", "uncertain", "running"} and not a.get("invocation") or any(t["status"] in {"reserved", "uncertain", "running"} for t in a["tasks"]) for a in r["activations"]):
                     raise WorkflowError("Unresolved dispatches must be reconciled before resume")
                 answered_executions: set[str] = set()
-                if r["status"] == "needs_input":
+                usage_recovery_answer = False
+                if r["status"] == "needs_input" or (r.get("orchestrator_usage_recovery") or r.get("worker_usage_recovery")):
                     if not isinstance(instructions, str) or not instructions.strip():
                         raise WorkflowError("Resuming needs_input requires an answer or reason")
                     if decision_id != r.get("input_decision_id"):
                         raise WorkflowError("Resuming needs_input requires the current input decision_id")
+                    recovery = r.get("orchestrator_usage_recovery")
+                    if recovery:
+                        usage_recovery_answer = True
+                        choice = next((c for c in recovery["choices"] if instructions.strip().lower() == c["answer"]), None)
+                        if choice is None:
+                            raise WorkflowError("Usage-limit recovery requires an exact offered recovery answer; cancel to stop")
+                        if choice["answer"] == "retry_current":
+                            role = recovery.get("role", "builder" if r.get("kind") == "builder" else "orchestrator")
+                            identity = role + ":" + _candidate_key(choice["candidate"])
+                            r["suppressed_candidates"] = [c for c in r["suppressed_candidates"] if c != identity]
+                            r["suppressed_capability_candidates"] = [c for c in r.get("suppressed_capability_candidates", []) if c != identity]
+                        r["orchestrator_recovery_candidate"] = copy.deepcopy(choice["candidate"])
+                        r.setdefault("usage_recovery_history", []).append({**copy.deepcopy(recovery), "accepted_answer": choice["answer"], "accepted_at": time.time()})
+                        r.pop("orchestrator_usage_recovery", None)
                     # The latest accepted answer replaces consent at this checkpoint.
                     # Keep grants for other checkpoints; receipt replay returns above
                     # without revoking a previously delivered answer's authorization.
@@ -1190,8 +1205,10 @@ class WorkflowStore:
                 r.pop("input_question", None)
                 r.pop("input_decision_id", None)
                 r.pop("optional_review_skip_available", None)
+                r.pop("worker_usage_recovery", None)
                 r.pop("failure_reason", None)
-                r["suppressed_candidates"] = []
+                if not usage_recovery_answer:
+                    r["suppressed_candidates"] = []
                 exhausted_edges = r.pop("exhausted_retry_edges", [])
                 if additional_attempts:
                     _positive(additional_attempts, "additional_attempts")
@@ -1210,7 +1227,7 @@ class WorkflowStore:
                         r.setdefault("retry_grants", {})[edge_id] = prior + additional_attempts
                         control_detail["retry_grants"][edge_id] = {"additional": additional_attempts, "previous": prior, "total": prior + additional_attempts}
             else:
-                if action == "pause" and r["status"] in {"cancelling", "needs_input"}:
+                if action == "pause" and (r["status"] == "cancelling" or r["status"] == "needs_input" and not (r.get("orchestrator_usage_recovery") or r.get("worker_usage_recovery"))):
                     return
                 r["status"] = "paused" if action == "pause" else "cancelling"
                 if instructions:
@@ -1301,7 +1318,7 @@ class WorkflowStore:
         return result
 
     def reconcile_run(self, run_id: str) -> dict[str, Any]:
-        """Recover only outcomes positively recorded by their original task owner."""
+        """Recover recorded outcomes, or authoritative quota failures after confirmed death."""
         def reconcile(r: dict[str, Any]) -> None:
             for activation in r["activations"]:
                 for task in activation["tasks"]:
@@ -1775,12 +1792,31 @@ def failure_diagnostic(snapshot: dict[str, Any], prompt: str) -> str:
     return ""
 
 
+def usage_limit(snapshot: dict[str, Any]) -> dict[str, Any] | None:
+    """Backend-owned evidence remains authoritative after restart and partial output."""
+    diagnostic = snapshot.get("failure_diagnostic")
+    return diagnostic if isinstance(diagnostic, dict) and diagnostic.get("category") == "usage_limit" else None
+
+
 def availability_failure(snapshot: dict[str, Any]) -> str | None:
     """Only process diagnostics, never summaries or tool output, authorize fallback."""
     if snapshot.get("status") != "failed" or snapshot.get("outcome_unknown") or snapshot.get("permission_denials"):
         return None
+    if usage_limit(snapshot):
+        return None  # Usage limits require an explicit recovery decision.
     diagnostic = "\n".join(snapshot.get("stderr_tail", []))
     adapter = backends.BACKENDS.get(snapshot.get("backend"))
+    stderr_veto = getattr(adapter, "workflow_stderr_blocks_availability_failure", None)
+    if stderr_veto and stderr_veto(diagnostic):
+        return None
+    stream = snapshot.get("raw_stream_log")
+    events = ()
+    if stream:
+        from .backends.workflow_diagnostics import stream_events
+        events = stream_events(stream)
+        quota_hook = getattr(adapter, "usage_limit_diagnostic", None)
+        if quota_hook and any(quota_hook(event) is not None for event in events):
+            return None  # A legacy artifact cannot hide quota behind a different outage event.
     stderr_hook = getattr(adapter, "workflow_stderr_availability_failure", None)
     if stderr_hook:
         reason = stderr_hook(diagnostic)
@@ -1788,11 +1824,9 @@ def availability_failure(snapshot: dict[str, Any]) -> str | None:
             return reason
     # Inspect only authoritative top-level protocol envelopes. Assistant messages,
     # tool payloads and summaries can contain arbitrary text and are never evidence.
-    stream = snapshot.get("raw_stream_log")
     classify = getattr(adapter, "workflow_availability_failure", None)
-    if stream and classify:
-        from .backends.workflow_diagnostics import stream_events
-        for event in stream_events(stream):
+    if events and classify:
+        for event in events:
             reason = classify(event)
             if reason:
                 return reason
@@ -1806,8 +1840,13 @@ def task_liveness(log_dir: Path, record: Any) -> dict[str, Any]:
     verdict, reason = identity.check_detail(identity.task_identity(record.pid, record.start_time, record.markers))
     # An authoritative exit receipt proves the managed process has settled.
     alive = False if observed else {"alive": True, "dead": False}.get(verdict)
-    status, note, _, _ = task_store.resolve_status(log_dir, record, detail=False)
-    return {"process_alive": alive, "outcome_known": observed, "resolved_status": status, "reason": reason or note}
+    status, note, state, _ = task_store.resolve_status(log_dir, record, detail=False)
+    # A provider rejection already establishes this failure's cause. Once the
+    # process is positively dead, a missing owner exit receipt does not make that
+    # cause unknown. Generic reconstructed failures and uncertain/live processes
+    # still require reconciliation before any replacement can be considered.
+    quota_settled = alive is False and status == "failed" and usage_limit({"failure_diagnostic": getattr(state, "failure_diagnostic", None)}) is not None
+    return {"process_alive": alive, "outcome_known": observed or quota_settled, "resolved_status": status, "reason": reason or note}
 
 
 def observed_harness_metadata(snapshot: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
@@ -2023,6 +2062,72 @@ class WorkflowSupervisor:
                 r["attention_reason"] = reason
         self.update(set_status, "needs_attention", reason)
 
+    def _usage_limit_outcome(self, snapshot: dict[str, Any], node: dict[str, Any], role: str, activation: dict[str, Any], candidate: dict[str, Any], candidates: list[dict[str, Any]], *, selection_failure: tuple[dict[str, Any], str] | None = None, recovered_task_id: str | None = None) -> dict[str, Any] | None:
+        diagnostic = usage_limit(snapshot)
+        assert diagnostic is not None
+        if snapshot.get("status") != "failed" or snapshot.get("outcome_unknown"):
+            self.attention("Usage-limited process settlement requires reconciliation; no replacement dispatched")
+            return None
+        reason = diagnostic.get("reason", "Provider usage limit reached")
+        if "reset_at" in diagnostic:
+            reason += " Provider-supplied reset: " + str(diagnostic["reset_at"])
+        if role == "node":
+            return {**snapshot, "execution_failure": reason, "optional_failure_eligible": False}
+        config = node.get("agent", self.run()["definition"]["orchestrator"])
+        if role == "orchestrator" and getattr(self, "orchestrator_override", None):
+            config = self.orchestrator_override[1]
+        candidates = [config] + config.get("fallbacks", [])
+        suppressed = self.run().get("suppressed_candidates", [])
+        if selection_failure:
+            suppressed = [*suppressed, role + ":" + _candidate_key(selection_failure[0])]
+        choices = [{"answer": "fallback" if i == 0 else f"fallback:{i + 1}", "candidate": {k: v for k, v in c.items() if k != "fallbacks"}} for i, c in enumerate(candidates) if _candidate_key(c) != _candidate_key(candidate) and role + ":" + _candidate_key(c) not in suppressed]
+        # Number choices after filtering, so the first offered answer is always fallback.
+        for i, choice in enumerate(choices):
+            choice["answer"] = "fallback" if i == 0 else f"fallback:{i + 1}"
+        current = next((c for c in candidates if _candidate_key(c) == _candidate_key(candidate)), None)
+        if current:
+            choices.append({"answer": "retry_current", "candidate": {k: v for k, v in current.items() if k != "fallbacks"}})
+        token = activation.get("token") or {}
+        decision_id = activation.get("decision_id") or token.get("decision_id") or uuid.uuid4().hex
+        question = ("Workflow builder" if role == "builder" else "Orchestrator") + " reached a provider usage limit: " + reason + ". "
+        if choices:
+            question += "Resume with the exact answer " + "; ".join(choice["answer"] + " to start Fresh with " + _candidate_key(choice["candidate"]) for choice in choices) + ", or pause_workflow to wait, or cancel_workflow to stop."
+        else:
+            question += "No configured recovery candidate is eligible. Use pause_workflow to wait or cancel_workflow to stop; no replacement is authorized."
+        if selection_failure:
+            question = "Selected recovery candidate unavailable: " + selection_failure[1] + ". " + question
+        def checkpoint(r: dict[str, Any]) -> None:
+            if recovered_task_id:
+                for prior in r["activations"]:
+                    for task in prior["tasks"]:
+                        if task["task_id"] == recovered_task_id:
+                            task["usage_recovery_checkpointed"] = True
+            if selection_failure:
+                r.pop("orchestrator_recovery_candidate", None)
+                identity = role + ":" + _candidate_key(selection_failure[0])
+                if identity not in r["suppressed_candidates"]:
+                    r["suppressed_candidates"].append(identity)
+                r["usage_recovery_history"][-1]["selection_failure"] = selection_failure[1]
+            r.update(status="needs_input", input_question=question, input_decision_id=decision_id, attention_reason=reason, orchestrator_usage_recovery={"decision_id": decision_id, "role": role, "failure_diagnostic": copy.deepcopy(diagnostic), "failed_candidate": copy.deepcopy(candidate), "choices": choices, "token_id": token.get("id")})
+            r.get("sessions", {}).pop(role, None)
+        self.update(checkpoint, "usage_limit_recovery_required", {"role": role, "diagnostic": diagnostic})
+        self.context_baselines.clear()
+        return None
+
+    def _retry_usage_recovery_choice(self, node: dict[str, Any], role: str, activation: dict[str, Any], candidate: dict[str, Any], reason: str, *, recovered_task_id: str | None = None) -> bool:
+        """Reissue consent only after a selected control attempt is positively settled."""
+        run = self.run()
+        if role == "node" or not run.get("orchestrator_recovery_candidate"):
+            return False
+        history = run.get("usage_recovery_history", [])
+        if not history:
+            return False
+        original = history[-1]
+        checkpoint = {**activation, "decision_id": uuid.uuid4().hex,
+                      "token": {"id": original.get("token_id")}}
+        self._usage_limit_outcome({"status": "failed", "failure_diagnostic": original["failure_diagnostic"]}, node, role, checkpoint, original["failed_candidate"], [], selection_failure=(candidate, reason), recovered_task_id=recovered_task_id)
+        return True
+
     async def _dispatch(self, node: dict[str, Any], prompt: str, role: str, activation: dict[str, Any]) -> dict[str, Any] | None:
         from .tasks import SessionUnknownError, SessionBusyError, RepoUnavailableError
         decision_context = activation.get("_decision_context")
@@ -2030,6 +2135,7 @@ class WorkflowSupervisor:
         config = node.get("agent", run["definition"]["orchestrator"])
         candidates = [config] + config.get("fallbacks", [])
         key = node["id"] if role == "node" else role
+        selected_candidate = activation.get("execution_candidate") or (activation.get("token") or {}).get("execution_candidate") if role == "node" else run.get("orchestrator_recovery_candidate")
         previous = run["sessions"].get(key, {})
         orchestrator_override = getattr(self, "orchestrator_override", None)
         if role == "orchestrator" and orchestrator_override is not None:
@@ -2042,6 +2148,14 @@ class WorkflowSupervisor:
                 previous = self.store.get_run(owner_id).get("sessions", {}).get("orchestrator", {})
             except (OSError, ValueError, KeyError):
                 previous = {}
+        if selected_candidate:
+            selected = next((c for c in candidates if _candidate_key(c) == _candidate_key(selected_candidate)), None)
+            if selected is None:
+                if self._retry_usage_recovery_choice(node, role, activation, selected_candidate, "Recovery candidate is no longer configured"):
+                    return None
+                self.attention("Recovery candidate is no longer configured")
+                return None
+            candidates = [selected]
         if role == "node" and activation.get("resume_task_id"):
             source = next((t for a in run["activations"] if (a["node_id"] == node["id"] or activation.get("continue_previous")) and a["role"] == "node" for t in a["tasks"] if t["task_id"] == activation["resume_task_id"]), None)
             if source:
@@ -2078,6 +2192,21 @@ class WorkflowSupervisor:
             prompt = reset_scope + prompt
             if decision_context is not None:
                 decision_context = {**decision_context, "conversation_reset": reset_scope.strip()}
+        if role != "node":
+            # A recovered control failure belongs to its pending decision. Restore
+            # the caller checkpoint before launching another primary control turn.
+            recovered = next((task for prior in reversed(run["activations"]) if prior["role"] == role
+                              for task in reversed(prior["tasks"])
+                              if task.get("liveness", {}).get("outcome_known") and not task.get("usage_recovery_checkpointed")
+                              and task.get("status") == "failed" and usage_limit(task.get("result", {}))), None)
+            if recovered and selected_candidate:
+                if _candidate_key(recovered["candidate"]) == _candidate_key(selected_candidate) and self._retry_usage_recovery_choice(node, role, activation, selected_candidate, usage_limit(recovered["result"]).get("reason", "Provider usage limit reached"), recovered_task_id=recovered["task_id"]):
+                    return None
+            elif recovered:
+                if strict_child_resume:
+                    child_resume_refused("Child Resume reached a recovered usage limit; explicit Fresh child selection required")
+                    return None
+                return self._usage_limit_outcome(recovered["result"], node, role, activation, recovered["candidate"], candidates, recovered_task_id=recovered["task_id"])
         if (persistent_orchestrator or role == "builder" and run.get("builder_followup")) and previous.get("task_id"):
             parent = self.registry.get(previous["task_id"])
             record = task_store.read(self.registry._log_dir, previous["task_id"])
@@ -2092,6 +2221,11 @@ class WorkflowSupervisor:
                     child_resume_refused("Child Resume refused: retained orchestrator session is unavailable")
                     return None
                 previous = {}  # Fresh bootstrap is safe before any reservation or spawn.
+        if selected_candidate:
+            if strict_child_resume:
+                child_resume_refused("Child fixed Resume cannot use a Fresh usage-limit fallback; select an explicit Fresh child invocation")
+                return None
+            previous = {}  # Explicit recovery always starts Fresh.
         preferred = previous.get("candidate")
         if preferred and (persistent_orchestrator or role == "node" and node.get("session_mode") == "resume" or role == "builder" and run.get("builder_followup")):
             candidates.sort(key=lambda c: key + ":" + _candidate_key(c) != preferred)
@@ -2115,6 +2249,13 @@ class WorkflowSupervisor:
                 candidate_position += 1
                 continue
             observed = next((t.get("result") for t in reversed(activation["tasks"]) if _candidate_key(t.get("candidate", {})) == _candidate_key(candidate) and t.get("result")), None)
+            if observed and usage_limit(observed):
+                if observed.get("status") == "failed" and not observed.get("outcome_unknown") and self._retry_usage_recovery_choice(node, role, activation, candidate, usage_limit(observed).get("reason", "Provider usage limit reached")):
+                    return None
+                if strict_child_resume:
+                    child_resume_refused("Child Resume reached a usage limit; explicit Fresh child selection required")
+                    return None
+                return self._usage_limit_outcome(observed, node, role, activation, candidate, candidates)
             if observed and observed.get("timed_out") and not observed.get("outcome_unknown"):
                 if strict_child_resume:
                     child_resume_refused("Child Resume timed out; explicit Fresh selection required")
@@ -2154,6 +2295,8 @@ class WorkflowSupervisor:
                     for task in next(a for a in self.run()["activations"] if a["id"] == activation["id"])["tasks"]:
                         if task["task_id"] not in existing_task_ids:
                             self._task_update(activation["id"], task["task_id"], {"context_delivery": delivery_metadata({}, accounting)})
+                    if outcome and usage_limit(outcome):
+                        return self._usage_limit_outcome(outcome, node, role, activation, candidate, candidates)
                     return outcome
 
             run = self.run()
@@ -2294,6 +2437,13 @@ class WorkflowSupervisor:
                     timeout_at = time.monotonic() + max(0, timeout_deadline - time.time()) if timeout_deadline is not None else None
                     timed_out = False
                     while not task.done.is_set():
+                        live_snapshot = task.snapshot()
+                        live_limit = usage_limit(live_snapshot)
+                        if live_limit and live_limit.get("settlement") == "needs_attention":
+                            slot_uncertain = True
+                            self._task_update(activation["id"], task_id, {"status": "uncertain", "result": live_snapshot, "error": "Usage-limited process identity or settlement remains uncertain"})
+                            self.attention("Usage-limited process requires reconciliation; no replacement dispatched")
+                            return None
                         if timeout_at is not None and time.monotonic() >= timeout_at:
                             self._task_update(activation["id"], task_id, {"timeout_requested_at": time.time()})
                             try:
@@ -2357,6 +2507,13 @@ class WorkflowSupervisor:
                         candidate_position += 1
                         continue  # Cancellation settled before a Fresh fallback is dispatched.
                     return {**snapshot, "execution_failure": snapshot["summary"], "optional_failure_eligible": True}
+                if usage_limit(snapshot):
+                    if snapshot.get("status") == "failed" and not snapshot.get("outcome_unknown") and self._retry_usage_recovery_choice(node, role, activation, candidate, usage_limit(snapshot).get("reason", "Provider usage limit reached")):
+                        return None
+                    if strict_child_resume:
+                        child_resume_refused("Child Resume reached a usage limit; explicit Fresh child selection required")
+                        return None
+                    return self._usage_limit_outcome(snapshot, node, role, activation, candidate, candidates)
                 reason = availability_failure(snapshot)
                 if reason:
                     if strict_child_resume:
@@ -2380,6 +2537,8 @@ class WorkflowSupervisor:
                         return {**snapshot, "execution_failure": reason, "blocked_failure": bool(unsafe), "optional_failure_eligible": not unsafe}
                     if role == "node" and snapshot["status"] == "failed" and not snapshot.get("permission_denials") and optional_failure_join(self.run(), node, activation.get("token") or {}):
                         return {"optional_failure": reason, "failure_evidence": _bounded(snapshot)}
+                    if snapshot["status"] == "failed" and not snapshot.get("outcome_unknown") and not snapshot.get("permission_denials") and self._retry_usage_recovery_choice(node, role, activation, candidate, reason):
+                        return None
                     self.attention(reason)
                     return None
                 if role == "orchestrator" and orchestrator_override is not None:
@@ -2390,6 +2549,8 @@ class WorkflowSupervisor:
                     self.store.update_run(owner_id, record_owner_session, "session_recorded", {"child_workflow_run_id": run["workflow_run_id"], "task_id": task_id})
                 else:
                     self.update(lambda r: r["sessions"].__setitem__(key, {"candidate": identity, "task_id": task_id, "session_id": snapshot.get("session_id")}), "session_recorded", key)
+                if role in {"orchestrator", "builder"} and selected_candidate:
+                    self.update(lambda r: r.pop("orchestrator_recovery_candidate", None), "usage_recovery_dispatched")
                 if recovered_inherited_turn:
                     self.update(lambda r: r.pop("recovered_inherited_turn", None), "inherited_recovery_continued")
                 return snapshot
@@ -2400,11 +2561,15 @@ class WorkflowSupervisor:
                     if all(t["status"] == "not_started" for t in current["tasks"]):
                         current["status"] = "not_started"
                 self.update(not_started, "dispatch_not_started")
+                if self._retry_usage_recovery_choice(node, role, activation, candidate, str(exc)):
+                    return None
                 if "wait exhausted" in str(exc):
                     self.attention(str(exc))
                 return None
             except backends.NestedDispatchRefused as exc:
                 self._task_update(activation["id"], task_id, {"status": "not_started", "error": str(exc)})
+                if self._retry_usage_recovery_choice(node, role, activation, candidate, str(exc)):
+                    return None
                 self.attention(f"Dispatch configuration refused: {exc}")
                 return None
             except backends.UnsupportedCapability as exc:
@@ -2432,6 +2597,8 @@ class WorkflowSupervisor:
                     activation = next(a for a in self.run()["activations"] if a["id"] == activation["id"])
                     previous = {}
                     continue
+                if self._retry_usage_recovery_choice(node, role, activation, candidate, str(exc)):
+                    return None
                 if strict_child_resume:
                     child_resume_refused(f"Child Resume configuration refused: {exc}")
                 else:
@@ -2446,6 +2613,8 @@ class WorkflowSupervisor:
                 if not_started:
                     self.update(lambda r: next(a for a in r["activations"] if a["id"] == activation["id"]).update(status="not_started") if all(t["status"] == "not_started" for a in r["activations"] if a["id"] == activation["id"] for t in a["tasks"]) else None, "dispatch_not_started")
                 reason = f"Dispatch {task_id} did not start: {exc}" if not_started else f"Dispatch {task_id} requires reconciliation: {exc}"
+                if not_started and self._retry_usage_recovery_choice(node, role, activation, candidate, reason):
+                    return None
                 if strict_child_resume:
                     child_resume_refused(reason)
                 else:
@@ -2459,6 +2628,8 @@ class WorkflowSupervisor:
                 else:
                     self.tree.release_slot(control=role != "node")
         reason = f"All agents unavailable for {key}"
+        if selected_candidate and self._retry_usage_recovery_choice(node, role, activation, selected_candidate, reason):
+            return None
         if role == "node" and run.get("execution_contract") == "delegation":
             if capability_refused:
                 self.attention(reason)

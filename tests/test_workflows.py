@@ -170,7 +170,7 @@ async def test_failed_tests_are_not_availability(storage, tmp_path):
 async def test_ordered_availability_fallback(storage, tmp_path):
     d = definition()
     d["nodes"][1]["agent"]["fallbacks"] = [{"backend": "claude"}, {"backend": "codex", "model": "second"}]
-    run, registry = await execute(storage, tmp_path, d, [{"summary": "", "status": "failed", "backend": "codex", "stderr": ["rate_limit_exceeded"]}, {"summary": "", "status": "failed", "backend": "claude", "stderr": ["You've hit your limit"]}, "success"])
+    run, registry = await execute(storage, tmp_path, d, [{"summary": "", "status": "failed", "backend": "codex", "stderr": ["model_not_found"]}, {"summary": "", "status": "failed", "backend": "claude", "stderr": ["API Error: 503 Service unavailable"]}, "success"])
     assert run["status"] == "completed"
     assert len(registry.calls) == 3
     assert len(run["activations"]) == 1
@@ -262,15 +262,15 @@ async def test_checkout_writer_waits_for_shared_readers(storage):
 def test_stdout_availability_envelopes_only(storage):
     log = storage.root / "stream.log"
     snapshot = {"status": "failed", "backend": "codex", "raw_stream_log": str(log)}
-    log.write_text(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "usage_limit_reached"}}) + "\n")
+    log.write_text(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "model_not_found"}}) + "\n")
     assert w.availability_failure(snapshot) is None
-    log.write_text(json.dumps({"type": "turn.failed", "error": {"code": "usage_limit_reached"}}) + "\n")
+    log.write_text(json.dumps({"type": "turn.failed", "error": {"code": "model_not_found"}}) + "\n")
     assert w.availability_failure(snapshot)
     snapshot["backend"] = "claude"
     log.write_text(json.dumps({"type": "rate_limit_event", "rate_limit_info": {"status": "allowed_warning"}}) + "\n")
     assert w.availability_failure(snapshot) is None
     log.write_text(json.dumps({"type": "rate_limit_event", "rate_limit_info": {"status": "rejected"}}) + "\n")
-    assert w.availability_failure(snapshot)
+    assert w.availability_failure(snapshot) is None
 
 
 async def test_lease_blocks_orphaned_writer(storage, tmp_path):
@@ -578,7 +578,7 @@ async def test_fallback_keeps_effective_access_ceiling(storage, tmp_path):
     graph["nodes"][1]["agent"]["fallbacks"] = [{"backend": "claude"}]
     run = storage.create_run(w.validate_definition(graph), "task", tmp_path, freedom="publish")
     registry = FakeRegistry(storage.root, [
-        {"summary": "", "backend": "codex", "status": "failed", "stderr": ["usage_limit_reached"]},
+        {"summary": "", "backend": "codex", "status": "failed", "stderr": ["model_not_found"]},
         {"summary": "done", "backend": "claude"},
     ])
     await w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"])
@@ -2071,7 +2071,7 @@ async def test_run_owned_checkout_lease_allows_parallel_dispatch_and_keeps_exclu
         pass
 
 
-@pytest.mark.parametrize("error,expected", [("insufficient_quota", True), ({"code": "rate_limit_exceeded"}, True), ("API Error: 503 Service unavailable", True), ({"status_code": 503}, True), ("Test failed: expected HTTP 503", False), ("permission denied", False)])
+@pytest.mark.parametrize("error,expected", [("insufficient_quota", False), ({"code": "rate_limit_exceeded"}, False), ("model_not_found", True), ("API Error: 503 Service unavailable", True), ({"status_code": 503}, True), ("Test failed: expected HTTP 503", False), ("permission denied", False)])
 def test_antigravity_terminal_provider_error_fallback(tmp_path, error, expected):
     # Synthetic protocol fixtures: no live quota request is used by this test.
     stream = tmp_path / "agy.jsonl"
@@ -2161,3 +2161,26 @@ async def test_checkout_rechecks_orphan_under_acquired_lock(storage, tmp_path, m
     with lease.path.open("a") as descriptor:
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         fcntl.flock(descriptor, fcntl.LOCK_UN)
+
+
+@pytest.mark.parametrize('backend,stderr', [('claude', "You've hit your limit"), ('codex', 'rate_limit_exceeded'), ('opencode', 'insufficient_quota'), ('vibe', 'rate_limit_exceeded'), ('antigravity', 'usage_limit_reached')])
+async def test_unsupported_quota_stderr_does_not_dispatch_workflow_fallback(storage, tmp_path, backend, stderr):
+    graph = definition()
+    graph['nodes'][1]['agent']['fallbacks'] = [{'backend': 'claude'}]
+    run, registry = await execute(storage, tmp_path, graph, [{'summary': '', 'status': 'failed', 'backend': backend, 'stderr': [stderr]}, 'unauthorized fallback'])
+    assert run['status'] == 'needs_attention'
+    assert len(registry.calls) == 1
+
+
+@pytest.mark.parametrize('backend', ['claude', 'codex', 'opencode', 'vibe', 'antigravity'])
+@pytest.mark.parametrize('quota_first', [True, False])
+@pytest.mark.parametrize('availability_line', ['API Error: 503 Service unavailable', 'API Error: provider timed out', 'model_not_found'])
+async def test_multiline_plain_quota_with_outage_cannot_dispatch_fallback(storage, tmp_path, backend, quota_first, availability_line):
+    graph = definition()
+    graph['nodes'][1]['agent']['fallbacks'] = [{'backend': 'claude'}]
+    lines = ['rate_limit_exceeded', availability_line]
+    if not quota_first:
+        lines.reverse()
+    run, registry = await execute(storage, tmp_path, graph, [{'summary': '', 'status': 'failed', 'backend': backend, 'stderr': lines}, 'unauthorized fallback'])
+    assert run['status'] == 'needs_attention'
+    assert len(registry.calls) == 1

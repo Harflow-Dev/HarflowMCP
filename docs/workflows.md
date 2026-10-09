@@ -90,8 +90,9 @@ Network enforcement depends on the harness; a request to disable it is not an en
 These permissions also apply to the orchestrator itself, which is instructed to coordinate.
 Permissions remain fixed for that owner session across optional branches and retries. Preview
 changes invalidate Run until the summary refreshes; the start request verifies its preview hash.
-The CLI JSON contract is v8 for permission previews and pinned owner contracts; the Monitor
-continues decoding supported historical versions. The inspector retains the pinned contracts. Historical runs never acquire expanded permissions.
+The CLI JSON contract is v9 for task failure diagnostics; v8 introduced permission previews
+and pinned owner contracts. The Monitor continues decoding supported historical versions.
+The inspector retains the pinned contracts. Historical runs never acquire expanded permissions.
 
 CLI callers can inspect the same plan with `polybridge-ctl workflow-preview NAME --repo PATH --json`. Pass its `preview_hash` to `workflow-start --expected-preview-hash HASH` to reject
 a changed definition or permission plan before launch. MCP callers use `preview_workflow_run`
@@ -647,7 +648,8 @@ to perform the review uses worker `status: blocked` and does not require a revie
 
 Fallback candidates are ordered and may include different backends or different models on the
 same backend. Polybridge advances only after a confirmed availability failure: missing binary,
-unavailable model, or a recognized quota/rate-limit rejection. Unsupported configuration is a
+unavailable model, or a recognized provider outage. Usage limits use the explicit recovery path
+below. Unsupported configuration is a
 validation error. Failed tests, generic crashes, or an agent saying it is unavailable do
 not automatically authorize a switch. An explicitly configured timeout permits a fallback only
 after cancellation has confirmed settlement.
@@ -656,6 +658,60 @@ Each candidate is tried at most once within an activation. Switching candidate d
 an extra graph activation. The last working candidate remains selected for later activations;
 unavailable candidates remain suppressed until explicitly retried. Every attempted candidate and
 the switch reason are recorded.
+
+### Usage-limit recovery
+
+Claude, Codex, opencode, Vibe, and Antigravity interpret their own authoritative usage-limit
+signals. A confirmed rejection remains a failure even after useful progress or an earlier
+successful turn. Warnings, assistant/tool prose, and silence do not establish a usage limit.
+Unsupported signal shapes remain unverified; Polybridge does not guess a reset time.
+
+Usage limits never authorize automatic availability fallback, including older stderr and stream
+quota forms. Verified provider envelopes and error-prefixed stderr produce structured recovery
+diagnostics. Unsupported plain quota text remains a task failure requiring attention; it does
+not grant a replacement launch. A quota signal vetoes automatic availability fallback across
+the failed-process artifact: another stderr line or stream envelope carrying a transport,
+outage, or missing-model signal cannot bypass it, regardless of order. Warnings and quoted prose do not become quota evidence. Model unavailability and provider
+outages retain availability fallback behavior when no quota signal accompanies them.
+
+Task snapshots expose `failure_diagnostic` with category `usage_limit`, a reason, evidence source,
+and optional provider-supplied `reset_at` (a finite epoch number or a valid ISO timestamp
+with date, time, and timezone; other values are omitted). Its reason is a generic provider-rejection explanation;
+raw error text is not copied into diagnostic reasons, notices, or caller recovery questions.
+The diagnostic is retained with partial output and
+session identity. Monitor keeps it in task notices and workflow recovery state after a notification
+is dismissed.
+
+Polybridge stops forwarding input and reports queued messages as undelivered. It allows five
+seconds for the affected process to exit before termination. The owning server uses its retained
+child-process handle, as it does for local cancellation; a CLI changing its process title does not
+prevent settlement. Recovered cross-process control still requires verified process identity. A
+replacement cannot start until process ownership and settlement are established. Uncertain
+recovered ownership requires attention rather than a duplicate dispatch. After a server restart,
+a retained authoritative usage-limit diagnostic plus confirmed process death establishes a
+failed outcome even if the owner never persisted its exit receipt. Worker recovery returns to
+the orchestrator; control recovery restores the caller question before another control turn.
+
+For a settled worker limit, the orchestrator receives the failure and eligible configured
+candidates. Polybridge does not automatically launch the next candidate. The orchestrator must
+explicitly choose an issued `retry_execution` continuation and its `candidate_id` from
+`available_candidates`, using a Fresh session within the existing attempt budget. It may instead
+ask the caller to pause, cancel, or continue with a fallback for the affected node. The caller's
+answer returns to the orchestrator, which still must select the issued candidate explicitly.
+
+If the orchestrator itself reaches its limit, the workflow asks its caller whether to pause,
+cancel, retry the configured current harness after its limit resets, or continue with an eligible configured fallback. Recovery preserves the pending decision, checkpoints,
+and completed workers. An approved fallback orchestrator starts a fresh conversation with restored
+workflow context; it does not repeat completed work or broaden permissions.
+Resume with the current `input_decision_id` and the exact answer offered in the question:
+`fallback` selects its first eligible candidate, and `fallback:2` selects its second when offered.
+`retry_current` explicitly retries the limited configured harness in a Fresh session; it is available
+even when no fallback is configured. It clears suppression only for that chosen harness. Reset
+timestamps are informational and never schedule a retry. Other answers do not authorize a launch.
+Use the existing cancel control to stop.
+The existing pause control retains the question and decision ID. Resuming a paused usage-limit
+checkpoint still requires that decision ID and an explicit recovery answer; pause never approves
+a fallback implicitly.
 
 Existing edits remain in place. Fallback waits for the previous process to settle and receives
 known prior results. Ambiguous execution or side effects require attention. Exhausting the
@@ -1159,8 +1215,10 @@ attempts. Resume or recovery remains a separate explicit action.
 
 ### Monitor polling and complete detail retrieval
 
-The ctl JSON contract is version 7; this version adds Monitor cancellation eligibility and refusal
-metadata. The matching Monitor accepts versions 1–7. Reinstall the CLI and rebuild the app together.
+The ctl JSON contract is version 9; this version adds durable task usage-limit diagnostics and
+workflow recovery choices. Version 8 added owner permission plans and guarded launch previews;
+version 7 added Monitor cancellation eligibility and refusal metadata. The matching Monitor accepts
+versions 1–9. Reinstall the CLI and rebuild the app together.
 
 Monitor polls `workflow-status RUN_ID --monitor-view --json` for bounded metadata and content
 digests. On initial loading, it captures one coherent transport snapshot using
@@ -1186,6 +1244,9 @@ full response contract. Snapshot transport is a local Monitor-only CLI operation
 cannot use it to bypass settled-node inspection or access another run.
 
 ### Monitor history and notifications
+
+Sidebar search and the harness filter remain below the native window titlebar in windowed and
+full-screen layouts. These controls remain fixed while workflow and task history scrolls.
 
 Transient catalog preparation retries through Monitor's normal two-second read polling. It does
 not restart workflows, retry executions, or change permissions. Loaded definitions, history,

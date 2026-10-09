@@ -23,6 +23,8 @@ workflow from an MCP client or the command line.
   and follow the technical plan and checklist as the run progresses.
 - **Keep progress durable.** Polybridge saves workflow definitions, drafts, decisions, assignments,
   and results locally. Bounded retries and explicit recovery retain completed work.
+  Confirmed usage limits preserve diagnostics and return recovery decisions to the orchestrator
+  or caller; see [usage-limit recovery](docs/workflows.md#usage-limit-recovery).
 
 For example, a feature workflow can use Claude to plan, Codex to implement, Claude and Vibe to
 review independently in parallel, and Codex to run the final checks. Conditions on the arrows

@@ -22,8 +22,8 @@ def emit(value):
 prompt = sys.argv[-1]
 session = sys.argv[-2] if "resume" in sys.argv else uuid.uuid4().hex
 emit({"type": "thread.started", "thread_id": session})
-if "quota-fixture" in sys.argv:
-    emit({"type": "turn.failed", "error": {"message": "You have hit your usage limit", "code": "usage_limit_reached"}})
+if "outage-fixture" in sys.argv:
+    emit({"type": "turn.failed", "error": {"message": "Provider service unavailable", "code": "service_unavailable"}})
     sys.exit(1)
 if "workflow orchestrator" in prompt:
     envelope = None
@@ -100,7 +100,7 @@ def workflow_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         if success:
             assert result.returncode == 0, (result.stdout, result.stderr)
         document = json.loads(result.stdout)
-        assert document["v"] == 8
+        assert document["v"] == 9
         return document.get("result", document)
 
     return invoke, home
@@ -109,7 +109,7 @@ def workflow_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 def _definition(name: str, *, loop: bool = False, fallback: bool = False) -> dict:
     candidate = {"backend": "codex"}
     if fallback:
-        candidate.update(model="quota-fixture", fallbacks=[{"backend": "codex", "model": "available-fixture"}])
+        candidate.update(model="outage-fixture", fallbacks=[{"backend": "codex", "model": "available-fixture"}])
     nodes = [
         {"id": "start", "type": "start"},
         {"id": "plan", "type": "agent", "role": "planning", "instructions": "E2E_PLANNING", "agent": {"backend": "codex"}, "freedom": "read_only"},
@@ -185,7 +185,7 @@ def test_cli_availability_fallback_keeps_one_activation(workflow_cli, tmp_path, 
     assert run["status"] == "completed", run.get("attention_reason")
     attempts = [a for a in run["activations"] if a["node_id"] == "implement" and a["role"] == "node"]
     assert len(attempts) == 1
-    assert [t["candidate"]["model"] for t in attempts[0]["tasks"]] == ["quota-fixture", "available-fixture"]
+    assert [t["candidate"]["model"] for t in attempts[0]["tasks"]] == ["outage-fixture", "available-fixture"]
 
 
 def _question_definition(name: str, *, parallel: bool = False) -> dict:

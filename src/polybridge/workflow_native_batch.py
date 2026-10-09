@@ -141,6 +141,10 @@ async def _execute(requests: list[dict[str, Any]]) -> list[tuple[bool, dict[str,
                         result = {"task_id": execution_id, "status": update["status"], "summary": update.get("summary", ""), "execution_kind": "native_subagent", "native_child_id": state.get("native_child_id"), "parent_task_id": transport_id, "observed_model": update.get("observed_model")}
                         if update["status"] != "completed":
                             result.update(execution_failure=update.get("summary", "Native child failed"), blocked_failure=True, optional_failure_eligible=False)
+                        if update.get("failure_diagnostic"):
+                            result["failure_diagnostic"] = copy.deepcopy(update["failure_diagnostic"])
+                            if update["failure_diagnostic"].get("category") == "usage_limit":
+                                result["blocked_failure"] = False
                         if update.get("permission_denials"):
                             result["permission_denials"] = copy.deepcopy(update["permission_denials"])
                         state["result"] = result
@@ -173,6 +177,11 @@ async def _execute(requests: list[dict[str, Any]]) -> list[tuple[bool, dict[str,
             deadline = min(deadlines, default=None)
             cancelled = False
             while not task.done.is_set():
+                live_snapshot = task.snapshot()
+                diagnostic = live_snapshot.get("failure_diagnostic") or {}
+                if diagnostic.get("category") == "usage_limit" and diagnostic.get("settlement") == "needs_attention":
+                    supervisor._task_update(transport_id, transport_id, {"status": "uncertain", "result": live_snapshot})
+                    raise RuntimeError("Usage-limited native owner remains unsettled; reconcile child ownership before replacement")
                 if not cancelled and (supervisor.run()["status"] == "cancelling" or deadline is not None and time.monotonic() >= deadline):
                     cancelled = True
                     await supervisor.registry.cancel_cascade(transport_id, workflow_control=True)

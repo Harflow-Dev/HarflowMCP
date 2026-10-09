@@ -238,3 +238,94 @@ def test_incomplete_child_failure_evidence_stays_uncertain(tmp_path, monkeypatch
     with pytest.raises(ValueError):
         adapter.finalize("nonce", state)
     assert not state.get("terminal")
+
+
+@pytest.mark.parametrize('code', ['usage_limit_reached', 'insufficient_quota', 'rate_limit_exceeded', 'rate_limit_error'])
+@pytest.mark.parametrize('object_form', [False, True])
+def test_native_usage_limit_requires_typed_correlated_error(tmp_path, monkeypatch, code, object_form):
+    failed_rollouts(tmp_path, monkeypatch)
+    child_file = next((tmp_path / 'sessions').glob(f'*/*/*/*-{CHILD}.jsonl'))
+    records = [json.loads(line) for line in child_file.read_text().splitlines()]
+    records[-1]['payload']['error']['codex_error_info'] = {'code': code} if object_form else code
+    child_file.write_text('\n'.join(json.dumps(record) for record in records) + '\n')
+    state = {'owner_session_id':PARENT, 'assignment':'assignment', 'expected_repo':str(tmp_path)}
+    adapter = CodexNativeAdapter()
+    for event in lifecycle():
+        adapter.observe(event, 'nonce', state)
+    diagnostic = adapter.finalize('nonce', state)[-1]['failure_diagnostic']
+    assert diagnostic['category'] == 'usage_limit'
+    assert diagnostic['source'] == 'native:codex_error_info'
+
+
+@pytest.mark.parametrize('code', ['model_not_found', 'api_connection_error', 'other_error', None])
+def test_native_other_error_or_quota_prose_does_not_become_usage_evidence(tmp_path, monkeypatch, code):
+    failed_rollouts(tmp_path, monkeypatch)
+    child_file = next((tmp_path / 'sessions').glob(f'*/*/*/*-{CHILD}.jsonl'))
+    records = [json.loads(line) for line in child_file.read_text().splitlines()]
+    records[-1]['payload']['error']['codex_error_info'] = code
+    records[-1]['payload']['error']['message'] = 'fixture native child API failure rate_limit_error'
+    child_file.write_text('\n'.join(json.dumps(record) for record in records) + '\n')
+    # Keep the owning notification and child error byte-identical while testing
+    # that even correlated provider prose is not a typed quota code.
+    parent_file = next((tmp_path / 'sessions').glob(f'*/*/*/*-{PARENT}.jsonl'))
+    parent_records = [json.loads(line) for line in parent_file.read_text().splitlines()]
+    for record in parent_records:
+        payload = record.get('payload', {})
+        for item in payload.get('content', []) if isinstance(payload.get('content'), list) else []:
+            if isinstance(item.get('text'), str):
+                item['text'] = item['text'].replace('fixture native child API failure', 'fixture native child API failure rate_limit_error')
+    parent_file.write_text('\n'.join(json.dumps(record) for record in parent_records) + '\n')
+    state = {'owner_session_id': PARENT, 'assignment': 'assignment', 'expected_repo': str(tmp_path)}
+    adapter = CodexNativeAdapter()
+    for event in lifecycle():
+        adapter.observe(event, 'nonce', state)
+    if code is None:
+        with pytest.raises(ValueError, match='error terminal is incomplete'):
+            adapter.finalize('nonce', state)
+        assert not state.get('terminal')
+    else:
+        update = adapter.finalize('nonce', state)[-1]
+        assert update['status'] == 'failed'
+        assert 'failure_diagnostic' not in update
+
+
+@pytest.mark.parametrize('mutation', ['missing_notification', 'foreign_child', 'foreign_turn', 'late_notification', 'conflicting_report'])
+def test_native_quota_does_not_bypass_correlated_failure_requirements(tmp_path, monkeypatch, mutation):
+    failed_rollouts(tmp_path, monkeypatch, mutation)
+    child_file = next((tmp_path / 'sessions').glob(f'*/*/*/*-{CHILD}.jsonl'))
+    records = [json.loads(line) for line in child_file.read_text().splitlines()]
+    records[-1]['payload']['error']['codex_error_info'] = 'rate_limit_error'
+    child_file.write_text('\n'.join(json.dumps(record) for record in records) + '\n')
+    state = {'owner_session_id': PARENT, 'assignment': 'assignment', 'expected_repo': str(tmp_path)}
+    adapter = CodexNativeAdapter()
+    for event in lifecycle():
+        adapter.observe(event, 'nonce', state)
+    with pytest.raises(ValueError):
+        adapter.finalize('nonce', state)
+    assert not state.get('terminal')
+
+
+def test_native_usage_diagnostic_reason_does_not_copy_provider_credentials(tmp_path, monkeypatch):
+    from polybridge.backends.workflow_diagnostics import USAGE_LIMIT_REASON
+    failed_rollouts(tmp_path, monkeypatch)
+    secret_message = 'fixture native child API failure Authorization: Bearer synthetic-private-token Cookie: synthetic-session'
+    child_file = next((tmp_path / 'sessions').glob(f'*/*/*/*-{CHILD}.jsonl'))
+    records = [json.loads(line) for line in child_file.read_text().splitlines()]
+    records[-1]['payload']['error'].update(codex_error_info='rate_limit_error', message=secret_message)
+    child_file.write_text('\n'.join(json.dumps(record) for record in records) + '\n')
+    parent_file = next((tmp_path / 'sessions').glob(f'*/*/*/*-{PARENT}.jsonl'))
+    records = [json.loads(line) for line in parent_file.read_text().splitlines()]
+    for record in records:
+        payload = record.get('payload', {})
+        for item in payload.get('content', []) if isinstance(payload.get('content'), list) else []:
+            if isinstance(item.get('text'), str):
+                item['text'] = item['text'].replace('fixture native child API failure', secret_message)
+    parent_file.write_text('\n'.join(json.dumps(record) for record in records) + '\n')
+    state = {'owner_session_id': PARENT, 'assignment': 'assignment', 'expected_repo': str(tmp_path)}
+    adapter = CodexNativeAdapter()
+    for event in lifecycle():
+        adapter.observe(event, 'nonce', state)
+    update = adapter.finalize('nonce', state)[-1]
+    assert update['failure_diagnostic'] == {'category': 'usage_limit', 'reason': USAGE_LIMIT_REASON, 'source': 'native:codex_error_info'}
+    assert 'synthetic-private-token' not in json.dumps(update['failure_diagnostic'])
+    assert 'synthetic-session' not in json.dumps(update['observed_metadata'])

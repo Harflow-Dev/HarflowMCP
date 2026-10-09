@@ -284,6 +284,7 @@ class Enforcement:
 class Accumulator:
     """The normalised picture of a run, filled in by whichever backend produced the stream."""
 
+    failure_diagnostic: dict[str, Any] | None = None
     session_id: str | None = None
     summary: str | None = None
     is_error: bool | None = None
@@ -370,6 +371,10 @@ class Backend(Protocol):
     capabilities: Capabilities
     mcp_approval: MCPApprovalPolicy
 
+    def usage_limit_diagnostic(self, event: dict[str, Any]) -> dict[str, Any] | None: ...
+
+    def stderr_usage_limit_diagnostic(self, line: str) -> dict[str, Any] | None: ...
+
     def build_start_argv(
         self,
         prompt: str,
@@ -431,6 +436,26 @@ class Backend(Protocol):
     def ingest(self, event: dict[str, Any], acc: Accumulator) -> None:
         """Fold one stream event into the normalised view."""
         ...
+
+    def usage_limit_diagnostic(self, event: dict[str, Any]) -> dict[str, Any] | None:
+        """Recognize an authoritative terminal quota rejection, never assistant/tool prose.
+
+        Returns category, reason, source, and optional provider-supplied reset_at. Ingest latches
+        the first diagnostic so later success cannot erase it. Unknown signal shapes return None.
+        """
+        ...
+
+    def stderr_usage_limit_diagnostic(self, line: str) -> dict[str, Any] | None:
+        """Recognize a harness-owned stderr quota diagnostic, or None when unverified."""
+        ...
+
+    def workflow_stderr_blocks_availability_failure(self, diagnostic: str) -> bool:
+        """Veto automatic availability fallback for an entire failed-process artifact.
+
+        This does not assert a structured terminal failure. A backend may recognize
+        unsupported plain quota forms conservatively while rejecting warnings/prose.
+        """
+        return False
 
     def normalize(self, event: dict[str, Any], acc: Accumulator) -> list[dict[str, Any]]:
         """Translate one stream event into zero or more monitor events for `<task_id>.events.jsonl`.
