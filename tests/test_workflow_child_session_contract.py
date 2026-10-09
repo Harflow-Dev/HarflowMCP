@@ -14,7 +14,10 @@ def setup_run(storage, tmp_path, policy="agent_decides", mode="child"):
     definition = parent_graph(child["workflow_id"], mode=mode)
     if policy is not None:
         definition["nodes"][1]["child_session_policy"] = policy
-    run = storage.create_run(w.validate_definition(definition), "Request", tmp_path)
+    from polybridge.workflow_references import resolve_dependencies
+    definition = w.validate_definition(definition)
+    tree = resolve_dependencies(storage, definition=definition)
+    run = storage.create_run(definition, "Request", tmp_path, dependency_tree=tree)
     run["runner_policy"] = "guided"
     node = run["definition"]["nodes"][0]
     token = {"id": "checkpoint", "decision_id": "decision", "node_id": "start", "stack": []}

@@ -11,7 +11,8 @@ this process owns; `takeover` / `takeover-attach` are the human-only takeover (`
 and `resume` fork a process that owns the new task until it settles (`detached.py`). `backends`
 reports the registered backends and whether each binary is on PATH (`backends.is_installed`) — no
 `--version` probe, no subprocess. Every command prints one versioned JSON document
-(`"v": 7`, `CTL_JSON_VERSION`) with `--json`. v7 adds separate human Monitor workflow
+(`"v": 8`, `CTL_JSON_VERSION`) with `--json`. v8 adds pinned owner permissions,
+launch previews and preview hash guards. v7 adds separate human Monitor workflow
 cancellation eligibility and refusal metadata. v6 adds native execution
 preference, presentation, availability and frozen scheduling metadata. v5 adds Run workflow node presentation
 metadata: parent/root run links, orchestrator mode and session owner, input source,
@@ -39,7 +40,7 @@ from .tasks import default_log_dir
 # Bumped to 2 when `status`/`list`'s snapshot/brief documents gained `resume_command` (Monitor
 # piece 3/3). `setup` and the event log are separate contracts and stay at v1 — see CLAUDE.md's
 # "The Monitor app is a consumer of three frozen contracts".
-CTL_JSON_VERSION = 7
+CTL_JSON_VERSION = 8
 
 # How long `cancel`/`takeover` stay alive for a failing `.sig` write to be retried before exiting —
 # the lease (60 s) is what a later recovery waits for anyway.
@@ -159,14 +160,14 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     edits.add_argument("--remove")
 
     workflow_parsers = []
-    for action in ("validate", "list", "list-page", "get", "save", "delete", "build", "start", "list-runs", "status", "detail", "wait", "pause", "resume", "cancel", "builder-followup", "builder-apply", "inspect", "assigned-input", "recover", "migrate", "abandon-dispatch"):
+    for action in ("validate", "list", "list-page", "get", "save", "delete", "build", "preview", "start", "list-runs", "status", "detail", "wait", "pause", "resume", "cancel", "builder-followup", "builder-apply", "inspect", "assigned-input", "recover", "migrate", "abandon-dispatch"):
         wp = sub.add_parser("workflow-" + action, help=action + " workflows")
         if action in {"save", "validate"}:
             wp.description = "Workflow nodes accept child_session_policy agent_decides (default), fresh, or resume in Child orchestrator mode. Resume requires the latest completed compatible invocation in the immediate parent run and never silently starts Fresh. Current mode retains its existing session owner."
         if action == "build":
             wp.description = "Generate or refine an unsaved workflow proposal. Preserve supplied Run workflow references and settings, including child_session_policy: agent_decides (default), fresh, or resume in Child mode; inactive in Current mode. Resume requires the latest completed compatible invocation in the immediate parent run with fresh workflow state and never silently starts Fresh. Never author new Run workflow references."
         wp.add_argument("--json", action="store_true")
-        if action in {"get", "save", "delete", "build", "start"}:
+        if action in {"get", "save", "delete", "build", "preview", "start"}:
             wp.add_argument("name")
         if action in {"status", "detail", "wait", "pause", "resume", "cancel", "builder-followup", "inspect", "assigned-input", "recover", "abandon-dispatch"}:
             wp.add_argument("workflow_run_id")
@@ -229,9 +230,9 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
             wp.add_argument("--definition", required=True, help="JSON file, or - for stdin")
             if action == "save":
                 wp.add_argument("--expected-revision", type=int)
-        if action in {"start", "build"}:
-            wp.add_argument("--repo", required=action == "start")
-            prompt_group = wp.add_mutually_exclusive_group(required=True)
+        if action in {"start", "build", "preview"}:
+            wp.add_argument("--repo", required=action in {"start", "preview"})
+            prompt_group = wp.add_mutually_exclusive_group(required=action != "preview")
             prompt_group.add_argument("--prompt")
             prompt_group.add_argument("--prompt-file", help="UTF-8 prompt file")
             wp.add_argument("--backend", required=action == "build")
@@ -247,8 +248,11 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
                 source_group.add_argument("--source", help="JSON saved name/revision/baseline metadata")
                 source_group.add_argument("--source-file", help="Saved name/revision/baseline metadata JSON file")
             else:
-                wp.add_argument("--freedom", default=None, choices=("read_only", "write_in_repo", "publish", "unrestricted"))
+                if action == "start":
+                    wp.add_argument("--freedom", default=None, choices=("read_only", "write_in_repo", "publish", "unrestricted"))
                 wp.add_argument("--network", choices=("true", "false"))
+                if action == "start":
+                    wp.add_argument("--expected-preview-hash")
         if action == "wait":
             wp.add_argument("--timeout-seconds", type=int, default=30)
         if action == "resume":
@@ -708,10 +712,12 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
         if action == "save":
             raw = sys.stdin.read() if args.definition == "-" else Path(args.definition).read_text()
             return await server.save_workflow(args.name, json.loads(raw), args.expected_revision)
-        if action in {"start", "build"}:
-            prompt = _workflow_prompt(args)
+        if action in {"start", "build", "preview"}:
+            prompt = _workflow_prompt(args) if action != "preview" else ""
             candidate = {k: v for k, v in {"backend": args.backend, "model": args.model,
                          "reasoning_effort": args.reasoning_effort, "max_turns": args.max_turns}.items() if v is not None}
+            if action == "preview":
+                return await server._workflow_call("preview", name=args.name, repo_path=args.repo, overrides=candidate or None, network=_network(args.network))
             if action == "build":
                 definition = json.loads(args.definition_json) if args.definition_json else None
                 if args.definition:
@@ -720,9 +726,10 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
                 if args.source_file:
                     source = json.loads(Path(args.source_file).read_text())
                 return await server.workflow_builder(args.name, prompt, args.repo, candidate, json.loads(args.fallbacks), definition, source)
+            preview_guard = {"expected_preview_hash": args.expected_preview_hash} if getattr(args, "expected_preview_hash", None) is not None else {}
             if args.monitor:
-                return await server._workflow_call("start", name=args.name, prompt=prompt, repo_path=args.repo, overrides=candidate or None, freedom=args.freedom, network=_network(args.network), interaction_owner="monitor")
-            return await server._workflow_call("start", name=args.name, prompt=prompt, repo_path=args.repo, overrides=candidate or None, freedom=args.freedom, network=_network(args.network))
+                return await server._workflow_call("start", name=args.name, prompt=prompt, repo_path=args.repo, overrides=candidate or None, freedom=args.freedom, network=_network(args.network), interaction_owner="monitor", **preview_guard)
+            return await server._workflow_call("start", name=args.name, prompt=prompt, repo_path=args.repo, overrides=candidate or None, freedom=args.freedom, network=_network(args.network), **preview_guard)
         if action == "wait":
             return await server._wait_workflow_full(args.workflow_run_id, args.timeout_seconds)
         if action == "resume":

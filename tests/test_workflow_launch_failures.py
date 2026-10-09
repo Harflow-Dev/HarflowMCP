@@ -7,6 +7,8 @@ from test_workflows import definition
 @pytest.fixture
 def store(tmp_path, monkeypatch):
     monkeypatch.setattr(w.backends, "is_installed", lambda _: True)
+    # This suite counts supervisor spawns, independently of adapter certification.
+    monkeypatch.setattr(w.backends, "version", lambda _: None)
     return w.WorkflowStore(tmp_path)
 
 

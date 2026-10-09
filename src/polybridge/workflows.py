@@ -187,7 +187,7 @@ def validate_definition(raw: dict[str, Any]) -> dict[str, Any]:
     d = copy.deepcopy(raw)
     d["name"] = _workflow_name(d.get("name"))
     d["schema_version"] = SCHEMA_VERSION
-    context_delivery = d.get("context_delivery", "legacy")
+    context_delivery = d.get("context_delivery", "optimized_v1")
     if not isinstance(context_delivery, str) or context_delivery not in {"legacy", "optimized_v1"}:
         raise WorkflowError("context_delivery must be legacy or optimized_v1")
     if d.get("routing_mode") not in (None, "explicit"):
@@ -702,8 +702,9 @@ class WorkflowStore:
             with self.lock(f"definition:{name}"):
                 path = self.definitions / f"{_workflow_name(name)}.json"
                 old = json.loads(path.read_text()) if path.exists() else None
-                if "context_delivery" not in definition:
-                    d["context_delivery"] = old.get("context_delivery", "legacy") if old else "optimized_v1"
+                # Saving an authored definition always adopts bounded delivery.
+                # Historical run snapshots keep their original delivery contract.
+                d["context_delivery"] = "optimized_v1"
                 # New authoring prefers native execution. Existing nodes whose
                 # historical definition omitted this field retain Headless.
                 old_nodes = {n["id"]: n for n in (old or {}).get("nodes", [])}
@@ -886,7 +887,7 @@ class WorkflowStore:
         from .catalog import catalog_lock, Catalog
         with self.lock(f"tree-mutation:{root_id}"), self.lock(f"run:{run_id}"), catalog_lock(self.runs):
             run = self.get_run(run_id)
-            if event in {"dispatch_reserved", "native_reserved", "invocation_reserved", "child_decision_reopened"}:
+            if event in {"dispatch_reserved", "native_reserved", "native_batch_reserved", "invocation_reserved", "child_decision_reopened"}:
                 root = run if root_id == run_id else self.get_run(root_id)
                 runnable = {"running", "building"} if run.get("kind") == "builder" else {"running"}
                 if root.get("status") not in runnable or event != "child_decision_reopened" and run.get("status") not in runnable:
@@ -921,7 +922,7 @@ class WorkflowStore:
             run["settling"] = any(t.get("status") in {"reserved", "running", "uncertain"} for a in run["activations"] for t in a["tasks"])
             return run
 
-    def create_run(self, definition: dict[str, Any], prompt: str, repo_path: Path, *, freedom: str = "write_in_repo", network: bool | None = None, kind: str = "workflow", permission_policy: str = "legacy_ceiling", caller: Any = None, dependency_tree: dict[str, Any] | None = None) -> dict[str, Any]:
+    def create_run(self, definition: dict[str, Any], prompt: str, repo_path: Path, *, freedom: str = "write_in_repo", network: bool | None = None, kind: str = "workflow", permission_policy: str = "legacy_ceiling", caller: Any = None, dependency_tree: dict[str, Any] | None = None, owner_contracts: dict[str, Any] | None = None) -> dict[str, Any]:
         if permission_policy not in {"saved_node", "legacy_ceiling"}:
             raise WorkflowError("Unknown workflow permission policy")
         if freedom not in FREEDOMS:
@@ -939,6 +940,9 @@ class WorkflowStore:
         run["definition_hash"] = hashlib.sha256(json.dumps(definition, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         from .workflow_native import scheduling_policy
         run["scheduling_policy"] = scheduling_policy(definition, dependency_tree)
+        if kind == "workflow":
+            from .workflow_native_policy import plan_owner_contracts
+            run["owner_contracts"] = copy.deepcopy(owner_contracts) if owner_contracts is not None else plan_owner_contracts(definition, dependency_tree, freedom=freedom, network=network, permission_policy=permission_policy)
         run["tasks"] = []
         if kind == "workflow":
             run["execution_contract"] = "delegation"
@@ -1423,7 +1427,7 @@ def _launch(storage: WorkflowStore, run_id: str) -> None:
             output.close()
 
 
-async def start_workflow(name: str, prompt: str, repo_path: Path, *, overrides: dict[str, Any] | None = None, freedom: str | None = None, network: bool | None = None, root: Path | None = None, interaction_owner: str = "caller", definition_snapshot: dict[str, Any] | None = None, dependency_tree: dict[str, Any] | None = None, _verified_caller: Any = _CALLER_UNSET) -> dict[str, Any]:
+async def start_workflow(name: str, prompt: str, repo_path: Path, *, overrides: dict[str, Any] | None = None, freedom: str | None = None, network: bool | None = None, root: Path | None = None, interaction_owner: str = "caller", definition_snapshot: dict[str, Any] | None = None, dependency_tree: dict[str, Any] | None = None, expected_preview_hash: str | None = None, _verified_caller: Any = _CALLER_UNSET) -> dict[str, Any]:
     if interaction_owner not in {"caller", "monitor"}:
         raise WorkflowError("Invalid interaction owner")
     if not isinstance(prompt, str) or not prompt.strip():
@@ -1451,16 +1455,45 @@ async def start_workflow(name: str, prompt: str, repo_path: Path, *, overrides: 
         raise WorkflowError("Resolved dependency tree does not match the starting definition")
     if root_entry["definition_sha256"] != definition_sha256(definition):
         raise WorkflowError("Resolved dependency tree does not match the starting definition")
+    # New runs always use bounded context, including older saved dependencies.
+    dependency_tree = copy.deepcopy(dependency_tree)
+    for entry in dependency_tree.get("workflows", {}).values():
+        entry["definition"]["context_delivery"] = "optimized_v1"
+        entry["definition_sha256"] = definition_sha256(entry["definition"])
+    from .workflow_native_policy import digest, plan_owner_contracts
+    contracts = plan_owner_contracts(definition, dependency_tree, network=network)
+    preview_hash = digest({"definition": definition, "dependency_tree": dependency_tree, "repo_path": str(Path(repo_path).resolve()), "network": network, "owner_contracts": contracts})
+    if expected_preview_hash is not None and preview_hash != expected_preview_hash:
+        raise WorkflowError("Workflow launch preview changed; refresh permissions before starting")
     caller = await _capture_caller(storage, None, _verified_caller)
-    run = storage.create_run(definition, prompt, repo_path, freedom="unrestricted", network=network, permission_policy="saved_node", caller=caller, dependency_tree=dependency_tree)
-    storage.update_run(run["workflow_run_id"], lambda r: r.update(interaction_owner=interaction_owner), "interaction_owner")
+    run = storage.create_run(definition, prompt, repo_path, freedom="unrestricted", network=network, permission_policy="saved_node", caller=caller, dependency_tree=dependency_tree, owner_contracts=contracts)
+    storage.update_run(run["workflow_run_id"], lambda r: r.update(interaction_owner=interaction_owner, preview_hash=preview_hash), "interaction_owner")
     _launch(storage, run["workflow_run_id"])
+    run["preview_hash"] = preview_hash
     return run
+
+
+def preview_workflow_run(name: str, repo_path: Path, *, overrides: dict[str, Any] | None = None, network: bool | None = None, root: Path | None = None) -> dict[str, Any]:
+    """Read-only launch permissions and compatibility for the same pinned launch inputs."""
+    from .workflow_references import definition_sha256, resolve_dependencies
+    from .workflow_native_policy import digest, plan_owner_contracts, orchestrator_contract
+    if not Path(repo_path).is_dir():
+        raise WorkflowError("Repository directory does not exist")
+    storage = WorkflowStore(root)
+    definition = launch_definition(storage.get(name), overrides)
+    tree = resolve_dependencies(storage, definition=definition, substitute_name=name)
+    for entry in tree["workflows"].values():
+        entry["definition"]["context_delivery"] = "optimized_v1"
+        entry["definition_sha256"] = definition_sha256(entry["definition"])
+    contracts = plan_owner_contracts(definition, tree, network=network)
+    preview_hash = digest({"definition": definition, "dependency_tree": tree, "repo_path": str(Path(repo_path).resolve()), "network": network, "owner_contracts": contracts})
+    return {"name": name, "definition_hash": definition_sha256(definition), "preview_hash": preview_hash, "owner_contracts": contracts, "effective_owner_contract": orchestrator_contract({"definition": definition, "owner_contracts": contracts}), "disclosure": "The orchestrator receives these permissions so its native children can perform their work."}
 
 
 def launch_definition(definition: dict[str, Any], overrides: dict[str, Any] | None) -> dict[str, Any]:
     """Apply root orchestrator settings before pinning and authority checks."""
     definition = copy.deepcopy(definition)
+    definition["context_delivery"] = "optimized_v1"
     if overrides:
         if overrides.get("backend", definition["orchestrator"]["backend"]) != definition["orchestrator"]["backend"]:
             for setting in ("model", "reasoning_effort", "max_turns"):
@@ -1993,21 +2026,6 @@ class WorkflowSupervisor:
     async def _dispatch(self, node: dict[str, Any], prompt: str, role: str, activation: dict[str, Any]) -> dict[str, Any] | None:
         from .tasks import SessionUnknownError, SessionBusyError, RepoUnavailableError
         decision_context = activation.get("_decision_context")
-        if role == "node" and node.get("execution_mode") == "prefer_subagent":
-            from .workflow_native import dispatch_native
-            existing_task_ids = {task["task_id"] for a in self.run()["activations"] if a["id"] == activation["id"] for task in a["tasks"]}
-            handled, outcome = await dispatch_native(self, node, prompt, activation)
-            if handled:
-                # Native controller turns have their own contract, with no context ack.
-                self.context_baselines.clear()
-                from .workflow_context import account_legacy_prompt
-                from .workflow_prompt_delivery import delivery_metadata
-                accounting = account_legacy_prompt(prompt, role=role, checkpoint=activation.get("id"))
-                accounting["compatibility_reasons"] = ["native worker retains full inputs: assigned reader identity unavailable"]
-                for task in next(a for a in self.run()["activations"] if a["id"] == activation["id"])["tasks"]:
-                    if task["task_id"] not in existing_task_ids:
-                        self._task_update(activation["id"], task["task_id"], {"context_delivery": delivery_metadata({}, accounting)})
-                return outcome
         run = self.run()
         config = node.get("agent", run["definition"]["orchestrator"])
         candidates = [config] + config.get("fallbacks", [])
@@ -2064,7 +2082,11 @@ class WorkflowSupervisor:
             parent = self.registry.get(previous["task_id"])
             record = task_store.read(self.registry._log_dir, previous["task_id"])
             retained = parent.snapshot() if parent is not None else None
-            compatible = (retained is not None and retained.get("status") == "completed" and retained.get("session_id")) or (record is not None and record.status == "completed" and record.session_id and record.freedom == "read_only" and record.repo_path == run["repo_path"])
+            from .workflow_native_policy import orchestrator_contract
+            source_candidate = next((c for c in candidates if key + ":" + _candidate_key(c) == previous.get("candidate")), candidates[0])
+            owner_run = self.store.get_run(orchestrator_override[0]) if role == "orchestrator" and orchestrator_override else run
+            contract = orchestrator_contract(owner_run, source_candidate) if role == "orchestrator" else {"freedom": "read_only", "network": run.get("network")}
+            compatible = record is not None and record.status == "completed" and record.session_id and record.freedom == contract["freedom"] and record.network == contract["network"] and record.repo_path == run["repo_path"]
             if not compatible:
                 if strict_child_resume:
                     child_resume_refused("Child Resume refused: retained orchestrator session is unavailable")
@@ -2118,15 +2140,38 @@ class WorkflowSupervisor:
                 self.update(lambda r: r["suppressed_candidates"].append(identity), "candidate_unavailable", {"candidate": candidate, "reason": "binary missing"})
                 candidate_position += 1
                 continue
+            if role == "node" and node.get("execution_mode") == "prefer_subagent":
+                from .workflow_native import dispatch_native
+                existing_task_ids = {task["task_id"] for a in self.run()["activations"] if a["id"] == activation["id"] for task in a["tasks"]}
+                handled, outcome = await dispatch_native(self, {**node, "agent": candidate}, prompt, activation)
+                if handled:
+                    # Native controller turns have their own contract, with no context ack.
+                    self.context_baselines.clear()
+                    from .workflow_context import account_legacy_prompt
+                    from .workflow_prompt_delivery import delivery_metadata
+                    accounting = account_legacy_prompt(prompt, role=role, checkpoint=activation.get("id"))
+                    accounting["compatibility_reasons"] = ["native worker retains full inputs: assigned reader identity unavailable"]
+                    for task in next(a for a in self.run()["activations"] if a["id"] == activation["id"])["tasks"]:
+                        if task["task_id"] not in existing_task_ids:
+                            self._task_update(activation["id"], task["task_id"], {"context_delivery": delivery_metadata({}, accounting)})
+                    return outcome
+
             run = self.run()
             if not self.tree.tree_running(run):
                 return None
             try:
                 freedom = "read_only" if role != "node" else run_effective_freedom(run, node)
+                if role == "orchestrator":
+                    from .workflow_native_policy import orchestrator_contract
+                    owner_run = self.store.get_run(orchestrator_override[0]) if orchestrator_override else run
+                    owner_contract = orchestrator_contract(owner_run, candidate)
+                    freedom = owner_contract["freedom"]
             except WorkflowError as exc:
                 self.attention(f"Dispatch configuration refused: {exc}")
                 return None
             network = False if run["network"] is False else node.get("network", run["network"])
+            if role == "orchestrator":
+                network = owner_contract["network"]
             task_id = uuid.uuid4().hex
             display_prompt = run.get("builder_turn_prompt", run["prompt"]) if role == "builder" else activation.get("turn_prompt", activation.get("assignment_prompt", run["prompt"]))
             if role == "orchestrator" and run.get("runner_policy") == "guided" and any(t.get("status") != "not_started" for a in run["activations"] if a["role"] == "orchestrator" for t in a["tasks"]):

@@ -20,7 +20,9 @@ pytestmark = [
 
 
 @contextmanager
-def fake_api(repo):
+def fake_api(repo, batch=False):
+    seen_children = set()
+    gate = threading.Event()
     requests = []
 
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -43,20 +45,28 @@ def fake_api(repo):
                                       if isinstance(block, dict) and block.get("type") == "text"
                                       and "Agent arguments:\n" in block.get("text", "")), None)
             agent_arguments = json.loads(parent_assignment.split("Agent arguments:\n", 1)[1]) if parent_assignment else None
-            parent_tool_id = "toolu_" + agent_arguments["description"] if agent_arguments else None
+            parent_tool_id = "toolu_" + agent_arguments["description"] if isinstance(agent_arguments, dict) else None
+            if batch and child:
+                seen_children.add("first" if "SENTINEL first" in json.dumps(body) else "second")
+                if len(seen_children) == 2:
+                    gate.set()
+                assert gate.wait(10), "Claude foreground children did not overlap"
             if child and not results:
                 blocks = [
                     {"type": "tool_use", "id": "child-write", "name": "Write", "input": {"file_path": str(repo / "forbidden"), "content": "bad"}},
                     {"type": "tool_use", "id": "child-edit", "name": "Edit", "input": {"file_path": str(repo / "input.txt"), "old_string": "fixture", "new_string": "bad"}},
                     {"type": "tool_use", "id": "child-bash", "name": "Bash", "input": {"command": "touch forbidden-shell"}},
+                    {"type": "tool_use", "id": "child-outside", "name": "Write", "input": {"file_path": str(repo.parent / (repo.name + "-outside")), "content": "forbidden"}},
                     {"type": "tool_use", "id": "child-read", "name": "Read", "input": {"file_path": str(repo / "input.txt")}},
                 ]
             elif child:
                 blocks = [{"type": "text", "text": "CHILD_RESULT_SENTINEL"}]
-            elif agent_arguments and not any(block.get("tool_use_id") == parent_tool_id for block in results):
+            elif isinstance(agent_arguments, list) and not any(block.get("tool_use_id", "").startswith("toolu_batch") for block in results):
+                blocks = [{"type": "tool_use", "id": "toolu_" + a["description"], "name": "Agent", "input": a} for a in agent_arguments]
+            elif isinstance(agent_arguments, dict) and not any(block.get("tool_use_id") == parent_tool_id for block in results):
                 blocks = [{"type": "tool_use", "id": parent_tool_id, "name": "Agent", "input": agent_arguments}]
             else:
-                blocks = [{"type": "text", "text": "PARENT_RESULT_SENTINEL"}]
+                blocks = [{"type": "text", "text": json.dumps({"native_dispatch_nonces": [a["description"] for a in agent_arguments], "settled": True}) if isinstance(agent_arguments, list) else "PARENT_RESULT_SENTINEL"}]
             events = [("message_start", {"type": "message_start", "message": {
                 "id": f"msg_{len(requests)}", "type": "message", "role": "assistant", "content": [],
                 "model": "claude-sonnet-4-6", "stop_reason": None, "stop_sequence": None,
@@ -97,14 +107,14 @@ def fake_api(repo):
         thread.join(timeout=2)
 
 
-@pytest.mark.parametrize("max_turns,child_cap", [(None, None), (100, None), (100, 1)])
-def test_real_claude_read_only_native_child_activity_eof_and_resume(tmp_path, max_turns, child_cap):
+@pytest.mark.parametrize("max_turns,child_cap,freedom", [(None, None, "read_only"), (100, None, "read_only"), (100, 1, "read_only"), (100, None, "write_in_repo")])
+def test_real_claude_read_only_native_child_activity_eof_and_resume(tmp_path, max_turns, child_cap, freedom):
     executable = shutil.which("claude")
     if not executable:
         pytest.skip("Claude CLI not installed")
     version = subprocess.run([executable, "--version"], capture_output=True, text=True, check=True).stdout.strip()
-    if not version.startswith("2.1.290 "):
-        pytest.skip(f"native certification is pinned to Claude 2.1.290; found {version}")
+    if not version.startswith("2.1.295 "):
+        pytest.skip(f"native certification is pinned to Claude 2.1.295; found {version}")
     (tmp_path / "input.txt").write_text("fixture")
     session = str(uuid.uuid4())
     with fake_api(tmp_path) as (url, requests):
@@ -118,10 +128,10 @@ def test_real_claude_read_only_native_child_activity_eof_and_resume(tmp_path, ma
             builder = backend.build_resume_argv if resume else backend.build_start_argv
             invocation = adapter.configure(builder(
                 adapter.prompt("Return CHILD_RESULT_SENTINEL", nonce), repo=tmp_path,
-                freedom="read_only", session_id=session, model="claude-sonnet-4-6",
+                freedom=freedom, session_id=session, model="claude-sonnet-4-6",
                 max_turns=max_turns, reasoning_effort=None,
-            ))
-            backend.assert_safe(invocation, "read_only")
+            ), {"freedom": freedom})
+            backend.assert_safe(invocation, freedom)
             assert json.loads(invocation.argv[invocation.argv.index("--agents") + 1])[PROFILE_NAME]["maxTurns"] == 100
             if max_turns:
                 assert invocation.argv[invocation.argv.index("--max-turns") + 1] == "100"
@@ -136,7 +146,7 @@ def test_real_claude_read_only_native_child_activity_eof_and_resume(tmp_path, ma
             assert result.returncode == 0, result.stderr.decode()
             return [json.loads(line) for line in result.stdout.decode().splitlines() if line.startswith("{")]
         def verify_adapter_observation(events, nonce):
-            state = {"owner_session_id": session, "assignment": "Return CHILD_RESULT_SENTINEL"}
+            state = {"owner_session_id": session, "assignment": "Return CHILD_RESULT_SENTINEL", "owner_freedom": freedom}
             updates = [update for event in events for update in adapter.observe(event, nonce, state)]
             assert next(update for update in updates if update["native_update"] == "started")["native_child_id"]
             settled = next(update for update in updates if update["native_update"] == "settled")
@@ -155,8 +165,9 @@ def test_real_claude_read_only_native_child_activity_eof_and_resume(tmp_path, ma
                            for e in events if e.get("type") == "assistant" and e.get("parent_tool_use_id"))
             child_requests = [r for r in requests if PROFILE[PROFILE_NAME]["prompt"] in json.dumps(r.get("system", []))]
             assert len(child_requests) == 1
-            assert not (tmp_path / "forbidden").exists() and not (tmp_path / "forbidden-shell").exists()
-            assert (tmp_path / "input.txt").read_text() == "fixture"
+            assert (tmp_path / "forbidden").exists() == (freedom == "write_in_repo")
+            assert not (tmp_path / "forbidden-shell").exists()
+            assert (tmp_path / "input.txt").read_text() == ("bad" if freedom == "write_in_repo" else "fixture")
             return
         verify_adapter_observation(events, "PB_NODE_NONCE_FIRST")
         (tmp_path / "native-events.jsonl").write_text("\n".join(json.dumps(e) for e in events))
@@ -174,13 +185,15 @@ def test_real_claude_read_only_native_child_activity_eof_and_resume(tmp_path, ma
         assert "CHILD_RESULT_SENTINEL" in json.dumps(child_events)
         child_results = [b for e in child_events for b in e.get("message", {}).get("content", []) if b.get("type") == "tool_result"]
         for tool_id in ("child-write", "child-edit", "child-bash"):
-            assert next(b for b in child_results if b["tool_use_id"] == tool_id)["is_error"] is True
+            assert next(b for b in child_results if b["tool_use_id"] == tool_id).get("is_error", False) == (freedom == "read_only" or tool_id == "child-bash")
+        assert next(b for b in child_results if b["tool_use_id"] == "child-outside").get("is_error", False)
+        assert not (tmp_path.parent / (tmp_path.name + "-outside")).exists()
         assert not next(b for b in child_results if b["tool_use_id"] == "child-read").get("is_error", False)
-        assert not (tmp_path / "forbidden").exists() and not (tmp_path / "forbidden-shell").exists()
-        assert (tmp_path / "input.txt").read_text() == "fixture"
+        assert (tmp_path / "forbidden").exists() == (freedom == "write_in_repo") and not (tmp_path / "forbidden-shell").exists()
+        assert (tmp_path / "input.txt").read_text() == ("bad" if freedom == "write_in_repo" else "fixture")
         child_requests = [r for r in requests if PROFILE[PROFILE_NAME]["prompt"] in json.dumps(r.get("system", []))]
         assert child_requests
-        assert {t["name"] for t in child_requests[0]["tools"]} == {"Read", "Glob", "Grep"}
+        assert {t["name"] for t in child_requests[0]["tools"]} == ({"Read", "Glob", "Grep", "Write", "Edit"} if freedom == "write_in_repo" else {"Read", "Glob", "Grep"})
         assert events[-1]["type"] == "result" and events[-1]["is_error"] is False
         assert events[-1]["subagent_stats"]["completed"] == 1
         resumed = run(True, "PB_NODE_NONCE_SECOND")
@@ -196,3 +209,29 @@ def test_real_claude_read_only_native_child_activity_eof_and_resume(tmp_path, ma
         assert any(e.get("parent_tool_use_id") == "toolu_PB_NODE_NONCE_SECOND" for e in resumed)
         assert resumed[-1]["type"] == "result" and resumed[-1]["session_id"] == session
         assert resumed[-1]["is_error"] is False
+
+
+def test_real_claude_parallel_foreground_batch(tmp_path):
+    executable = shutil.which("claude")
+    if not executable or not subprocess.run([executable, "--version"], capture_output=True, text=True).stdout.startswith("2.1.295 "):
+        pytest.skip("Requires certified CLI")
+    (tmp_path / "input.txt").write_text("fixture")
+    entries = [{"assignment": "Return CHILD_RESULT_SENTINEL " + name, "nonce": "batch_" + name} for name in ["first", "second"]]
+    session = str(uuid.uuid4())
+    with fake_api(tmp_path, batch=True) as (url, requests):
+        env = {key: value for key, value in os.environ.items() if not key.startswith(("ANTHROPIC_", "CLAUDE_", "AWS_", "GOOGLE_")) and key != "CLAUDECODE"}
+        env.update(HOME=str(tmp_path / "home"), CLAUDE_CONFIG_DIR=str(tmp_path / "config"), ANTHROPIC_API_KEY="fake-local-key", ANTHROPIC_BASE_URL=url, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1")
+        backend, adapter = ClaudeBackend(), ClaudeNativeAdapter()
+        invocation = adapter.configure(backend.build_start_argv(adapter.prompt_batch(entries), repo=tmp_path, freedom="read_only", session_id=session, model="claude-sonnet-4-6", max_turns=100, reasoning_effort=None))
+        backend.assert_safe(invocation, "read_only")
+        result = subprocess.run(invocation.argv, input=invocation.initial_input, cwd=tmp_path, env=env, capture_output=True, timeout=35)
+        assert result.returncode == 0, result.stderr.decode()
+        events = [json.loads(line) for line in result.stdout.decode().splitlines() if line.startswith("{")]
+        children = []
+        for entry in entries:
+            state = {"owner_session_id": session, "assignment": entry["assignment"], "batch_entries": entries}
+            updates = [u for event in events for u in adapter.observe(event, entry["nonce"], state)]
+            assert next(u for u in updates if u["native_update"] == "settled")["status"] == "completed"
+            children.append(state["native_child_id"])
+        assert len(set(children)) == 2
+        assert not (tmp_path / "forbidden").exists()

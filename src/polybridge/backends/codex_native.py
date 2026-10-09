@@ -1,4 +1,4 @@
-"""Pinned Codex foreground read-only native child execution.
+"""Pinned Codex native read-only and repository-write execution.
 
 The exec stream omits child lifecycle and tool activity. Child evidence comes
 from correlated CLI rollouts, never inferred from argv or parent narration.
@@ -15,7 +15,7 @@ from typing import Any
 
 from .base import Invocation
 
-CERTIFIED_VERSION = "0.160.1"
+CERTIFIED_VERSION = "0.162.0"
 CERTIFIED_MODEL = "gpt-6.1-sol"
 PROFILE_PATH = str(Path(__file__).with_suffix(".toml").resolve())
 # Use the complete certified table; observed child configuration is still required
@@ -26,6 +26,21 @@ NATIVE_PAIRS = (
     'agents={max_concurrent_threads_per_session=1,max_depth=1,default={config_file=' + json.dumps(PROFILE_PATH) + ',description="Polybridge inherited read-only worker"}}',
 )
 NATIVE_ARGS = [token for pair in NATIVE_PAIRS for token in ("-c", pair)]
+
+
+def native_args(settings: dict[str, Any] | None = None) -> list[str]:
+    settings = settings or {}
+    freedom = settings.get("freedom", "read_only")
+    if freedom not in {"read_only", "write_in_repo"} or settings.get("network") is True:
+        from .codex import UnsafeInvocationError
+        raise UnsafeInvocationError("Uncertified native child access")
+    size = settings.get("batch_size", 1)
+    if not isinstance(size, int) or isinstance(size, bool) or not 1 <= size <= 16:
+        from .codex import UnsafeInvocationError
+        raise UnsafeInvocationError("Invalid native batch size")
+    profile = PROFILE_PATH if freedom == "read_only" else str(Path(__file__).with_name("codex_native_write.toml").resolve())
+    return [token for pair in NATIVE_PAIRS for token in ("-c", pair.replace(PROFILE_PATH, profile).replace("max_concurrent_threads_per_session=1", f"max_concurrent_threads_per_session={size}"))]
+
 
 
 def validate_native(invocation: Invocation, freedom: str) -> Invocation:
@@ -39,14 +54,16 @@ def validate_native(invocation: Invocation, freedom: str) -> Invocation:
     index = argv.index("--")
     if index and argv[index - 1] == "resume":
         index -= 1
-    if freedom != "read_only" or argv[index-len(NATIVE_ARGS):index] != NATIVE_ARGS:
+    args = native_args(invocation.native_settings)
+    if freedom not in {"read_only", "write_in_repo"} or (invocation.native_settings or {}).get("freedom", "read_only") != freedom or argv[index-len(args):index] != args:
         raise UnsafeInvocationError("Native invocation needs the exact certified read-only configuration")
-    del argv[index-len(NATIVE_ARGS):index]
+    del argv[index-len(args):index]
     # Ordinary validator rejects every additional native override after stripping.
     if "-m" not in argv or argv[argv.index("-m") + 1] != CERTIFIED_MODEL:
         raise UnsafeInvocationError("Native invocation requires the certified explicit model")
-    if any(pair.startswith("model_reasoning_effort=") for pair in argv[:argv.index("--")]):
-        raise UnsafeInvocationError("Native effort overrides are not certified")
+    efforts = [pair.split("=", 1)[1] for pair in argv[:argv.index("--")] if pair.startswith("model_reasoning_effort=")]
+    if efforts and (len(efforts) != 1 or json.loads(efforts[0]) != "high"):
+        raise UnsafeInvocationError("Native effort is certified only for inherited default or high")
     return replace(invocation, argv=argv, native_subagent=False)
 
 
@@ -89,50 +106,60 @@ def child_configuration(child_id: str, state: dict[str, Any]) -> dict[str, Any]:
     if not expected_repo or context.get("cwd") != expected_repo or meta.get("cwd") != expected_repo:
         raise ValueError("Native child repository differs from its owning workflow")
     sandbox = context.get("sandbox_policy", {})
-    if context.get("model") != CERTIFIED_MODEL or context.get("approval_policy") != "never" or sandbox.get("type") != "read-only" or sandbox.get("network_access", False) is not False:
+    if context.get("model") != CERTIFIED_MODEL or context.get("approval_policy") != "never" or sandbox.get("type") != ("workspace-write" if state.get("expected_freedom") == "write_in_repo" else "read-only") or sandbox.get("network_access", False) is not False:
         raise ValueError("Native child model or access differs from certified configuration")
     return {"model": context["model"], "approval_policy": context["approval_policy"], "sandbox_policy": sandbox, "network_access": False, "repo_path": expected_repo, "cli_version": meta["cli_version"], "parent_session_id": spawn["parent_thread_id"], "depth": spawn["depth"], "settings_source": "codex_child_rollout"}
 
 
 class CodexNativeAdapter:
     activity_level = "limited"
+    supports_parallel = True
+    max_batch_size = 16
 
-    def configure(self, invocation: Invocation) -> Invocation:
+    def configure(self, invocation: Invocation, settings: dict[str, Any] | None = None) -> Invocation:
         argv = list(invocation.argv)
         index = argv.index("--")
         if argv[index - 1] == "resume":
             index -= 1
-        argv[index:index] = NATIVE_ARGS
-        return replace(invocation, argv=argv, native_subagent=True)
+        argv[index:index] = native_args(settings)
+        return replace(invocation, argv=argv, native_subagent=True, native_settings=settings)
 
     def eligible(self, parent: Any, candidate: dict[str, Any], settings: dict[str, Any]) -> str | None:
         from . import get, version
-        measured = version(get(parent.backend))
+        measured = settings["backend_version"] if "backend_version" in settings else version(get(parent.backend))
         if measured != f"codex-cli {CERTIFIED_VERSION}":
             return f"Native execution is certified only for Codex CLI {CERTIFIED_VERSION}"
-        if parent.freedom != "read_only" or settings["freedom"] != "read_only":
-            return "Only read-only native workers are certified"
+        if parent.freedom not in {"read_only", "write_in_repo"} or settings["freedom"] not in {"read_only", "write_in_repo"}:
+            return "Only read-only and repository-write native workers are certified"
+        if settings["freedom"] != parent.freedom:
+            return "Native worker inherits its owning orchestrator access exactly"
         if parent.network != settings["network"] or parent.network is True:
             return "Native worker must inherit its owning orchestrator blocked network request"
         if parent.model != CERTIFIED_MODEL or candidate.get("model") != parent.model:
             return f"Native execution requires the inherited explicit model {CERTIFIED_MODEL}"
-        if parent.reasoning_effort is not None or candidate.get("reasoning_effort") is not None:
-            return "Native effort overrides are not certified"
+        if parent.reasoning_effort not in {None, "high"} or parent.reasoning_effort != candidate.get("reasoning_effort"):
+            return "Native worker must inherit its owning orchestrator effort"
         if parent.max_turns is not None or candidate.get("max_turns") is not None:
             return "Codex does not support turn caps"
         return None
 
-    def prompt(self, assignment: str, nonce: str) -> str:
-        args = self.spawn_arguments(assignment, nonce)
+    def prompt(self, assignment: str, nonce: str, settings: dict[str, Any] | None = None) -> str:
+        args = self.spawn_arguments(assignment, nonce, settings)
         return "Polybridge issued one native assignment. Invoke collaboration.spawn_agent exactly once using the exact Spawn arguments below. Do not dispatch any other work or override model, effort or fork settings. Call collaboration.wait_agent until the child has completed, then return ONLY " + json.dumps({"native_dispatch_nonce": nonce, "settled": True}) + ". Do not return a workflow decision. The CLI closes the settled child runtime when this control process exits.\nSpawn arguments:\n" + json.dumps(args)
 
-    @staticmethod
-    def spawn_arguments(assignment: str, nonce: str) -> dict[str, str]:
-        return {"task_name": "pb_" + nonce.replace("-", "_").lower(), "message": CodexNativeAdapter.child_prompt(assignment, nonce), "fork_turns": "none"}
+    def prompt_batch(self, entries: list[dict[str, Any]]) -> str:
+        arguments = [self.spawn_arguments(e["assignment"], e["nonce"], e.get("settings")) for e in entries]
+        ack = {"native_dispatch_nonces": [e["nonce"] for e in entries], "settled": True}
+        return "Polybridge issued a native batch. Invoke collaboration.spawn_agent once for EACH exact argument object below, starting all children before waiting. Never dispatch additional work or override settings. Use collaboration.wait_agent until every child settles, then return ONLY " + json.dumps(ack) + ". Do not return a workflow decision.\nSpawn arguments:\n" + json.dumps(arguments)
 
     @staticmethod
-    def child_prompt(assignment: str, nonce: str) -> str:
-        return f"Polybridge native assignment nonce: {nonce}\nExecute only this assignment, read-only. Do not delegate, start workflows, or run other agents. Return only the requested worker JSON envelope.\n\n{assignment}"
+    def spawn_arguments(assignment: str, nonce: str, settings: dict[str, Any] | None = None) -> dict[str, str]:
+        return {"task_name": "pb_" + nonce.replace("-", "_").lower(), "message": CodexNativeAdapter.child_prompt(assignment, nonce, settings), "fork_turns": "none"}
+
+    @staticmethod
+    def child_prompt(assignment: str, nonce: str, settings: dict[str, Any] | None = None) -> str:
+        access = "with repository write access" if (settings or {}).get("freedom") == "write_in_repo" else "read-only"
+        return f"Polybridge native assignment nonce: {nonce}\nExecute only this assignment, {access}. Do not delegate, start workflows, or run other agents. Return only the requested worker JSON envelope.\n\n{assignment}"
 
     def observe(self, event: dict[str, Any], nonce: str, state: dict[str, Any]) -> list[dict[str, Any]]:
         # This installed CLI exposes child activity in rollouts, not exec JSONL.
@@ -152,9 +179,14 @@ class CodexNativeAdapter:
                 ack = json.loads(event["item"].get("text", ""))
             except (ValueError, TypeError):
                 return []
-            if ack == {"native_dispatch_nonce": nonce, "settled": True}:
+            if ack == self.acknowledgement(nonce, state):
                 state["ack"] = True
         return []
+
+    @staticmethod
+    def acknowledgement(nonce: str, state: dict[str, Any]) -> dict[str, Any]:
+        entries = state.get("batch_entries")
+        return {"native_dispatch_nonces": [e["nonce"] for e in entries], "settled": True} if entries else {"native_dispatch_nonce": nonce, "settled": True}
 
     def finalize(self, nonce: str, state: dict[str, Any]) -> list[dict[str, Any]]:
         """Verify persisted evidence only after the control process has exited."""
@@ -168,7 +200,7 @@ class CodexNativeAdapter:
         meta = next((r["payload"] for r in records if r.get("type") == "session_meta"), {})
         if meta.get("id") != state["owner_session_id"] or meta.get("cli_version") != CERTIFIED_VERSION:
             _fail(state, "Uncertified native parent provenance")
-        expected = self.spawn_arguments(state["assignment"], nonce)
+        expected = self.spawn_arguments(state["assignment"], nonce, state.get("native_settings"))
         matches = []
         for record in records:
             payload = record.get("payload", {})
@@ -186,11 +218,16 @@ class CodexNativeAdapter:
         call_id = spawn.get("call_id")
         if not turn or not call_id:
             _fail(state, "Native assignment lacks owning turn and tool identities")
-        calls = [r["payload"] for r in records if r.get("type") == "response_item" and r["payload"].get("type") == "function_call" and r["payload"].get("internal_chat_message_metadata_passthrough", {}).get("turn_id") == turn and r["payload"].get("namespace") == "collaboration"]
-        if any(c.get("name") not in {"spawn_agent", "wait_agent"} for c in calls) or sum(c.get("name") == "spawn_agent" for c in calls) != 1 or not any(c.get("name") == "wait_agent" for c in calls):
+        calls = [r["payload"] for r in records if r.get("type") == "response_item" and r["payload"].get("type") in {"function_call", "custom_tool_call"} and r["payload"].get("internal_chat_message_metadata_passthrough", {}).get("turn_id") == turn]
+        if any(c.get("type") != "function_call" or c.get("namespace") != "collaboration" for c in calls):
+            _fail(state, "Unexpected parent tool during native control turn")
+        entries = state.get("batch_entries") or [{"assignment": state["assignment"], "nonce": nonce, "settings": state.get("native_settings")}]
+        expected_calls = [self.spawn_arguments(e["assignment"], e["nonce"], e.get("settings")) for e in entries]
+        actual_calls = [json.loads(c.get("arguments", "{}")) for c in calls if c.get("name") == "spawn_agent"]
+        if any(c.get("name") not in {"spawn_agent", "wait_agent"} for c in calls) or len(actual_calls) != len(expected_calls) or any(actual_calls.count(c) != 1 for c in expected_calls) or not any(c.get("name") == "wait_agent" for c in calls):
             _fail(state, "Unexpected or missing native child lifecycle calls")
         activities = [r["payload"]["item"] for r in records if r.get("type") == "event_msg" and r["payload"].get("type") == "item_completed" and r["payload"].get("turn_id") == turn and r["payload"].get("thread_id") == state["owner_session_id"] and r["payload"].get("item", {}).get("type") == "SubAgentActivity"]
-        started = [a for a in activities if a.get("kind") == "started"]
+        started = [a for a in activities if a.get("kind") == "started" and a.get("id") == call_id]
         if len(started) != 1 or started[0].get("id") != call_id:
             _fail(state, "Native launch acknowledgement does not match one child")
         child, path = started[0].get("agent_thread_id"), started[0].get("agent_path")
@@ -233,7 +270,7 @@ class CodexNativeAdapter:
             completion_ack = json.loads(parent_completions[0][1].get("last_agent_message", ""))
         except (ValueError, TypeError):
             completion_ack = None
-        if completion_ack != {"native_dispatch_nonce": nonce, "settled": True}:
+        if completion_ack != self.acknowledgement(nonce, state):
             _fail(state, "Owning turn terminal acknowledgement does not match its assignment")
         metadata = child_configuration(child, state)
         parent_contexts = [r["payload"] for r in records if r.get("type") == "turn_context" and r["payload"].get("turn_id") == turn]
@@ -242,12 +279,14 @@ class CodexNativeAdapter:
             _fail(state, "Missing or ambiguous owning turn configuration")
         context = parent_contexts[0]
         sandbox = context.get("sandbox_policy", {})
-        if context.get("model") != CERTIFIED_MODEL or context.get("approval_policy") != "never" or context.get("cwd") != state.get("expected_repo") or sandbox.get("type") != "read-only" or sandbox.get("network_access", False) is not False:
+        if context.get("model") != CERTIFIED_MODEL or context.get("approval_policy") != "never" or context.get("cwd") != state.get("expected_repo") or sandbox.get("type") != ("workspace-write" if state.get("owner_freedom", state.get("expected_freedom")) == "write_in_repo" else "read-only") or sandbox.get("network_access", False) is not False:
             _fail(state, "Owning turn model or access differs from certified configuration")
         # The certified explicit model defaults to low. The parent omits that
         # implicit default from its context while a child records the resolved value.
         if len(child_contexts) != 1 or (context.get("effort") or "low") != (child_contexts[0].get("effort") or "low"):
             _fail(state, "Native effort did not inherit its owning turn")
+        if "expected_reasoning_effort" in state and (child_contexts[0].get("effort") or "low") != (state["expected_reasoning_effort"] or "low"):
+            _fail(state, "Native child effort differs from its requested effort")
         metadata["reasoning_effort"] = child_contexts[0].get("effort")
         metadata["model_provider"] = child_meta["model_provider"]
         metadata["cleanup_source"] = "settled_child_and_control_process_exit"

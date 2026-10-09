@@ -223,6 +223,9 @@ def test_actual_source_fallback_is_pinned(store, source):
     child["dependency_tree"] = subtree(parent["dependency_tree"], workflow_id)
     child["sessions"]["orchestrator"]["candidate"] = "orchestrator:" + w._candidate_key(fallback)
     child["activations"][0]["tasks"][0]["candidate"] = fallback
+    from polybridge.workflow_native_policy import plan_owner_contracts, child_contracts
+    parent["owner_contracts"] = plan_owner_contracts(parent["definition"], parent["dependency_tree"], network=parent.get("network"))
+    child["owner_contracts"] = child_contracts(parent, workflow_id)
     tasks.write(store.root / "tasks", replace(record, model=fallback["model"], reasoning_effort=fallback["reasoning_effort"]))
     write_run(store, child)
     assert reuse.select(store, parent, node, current, current["token"])["candidate"] == fallback
@@ -311,6 +314,9 @@ def test_unknown_ambient_configuration_is_not_compatible(store, source, field):
     child["dependency_tree"] = subtree(parent["dependency_tree"], workflow_id)
     child["sessions"]["orchestrator"]["candidate"] = "orchestrator:" + w._candidate_key(definition["orchestrator"])
     child["activations"][0]["tasks"][0]["candidate"] = copy.deepcopy(definition["orchestrator"])
+    from polybridge.workflow_native_policy import plan_owner_contracts, child_contracts
+    parent["owner_contracts"] = plan_owner_contracts(parent["definition"], parent["dependency_tree"], network=parent.get("network"))
+    child["owner_contracts"] = child_contracts(parent, workflow_id)
     tasks.write(store.root / "tasks", replace(record, **{field: None}))
     write_run(store, child)
     offered = reuse.offer(store, parent, node, current["id"])

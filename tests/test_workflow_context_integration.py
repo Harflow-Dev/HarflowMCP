@@ -127,15 +127,20 @@ async def test_fallback_is_fresh_bootstrap(storage, tmp_path):
     assert len([activation for activation in run["activations"] if activation["role"] == "node"]) == 1
 
 
-def test_new_saved_definitions_optimize_and_legacy_requires_upgrade(storage):
+def test_saved_definitions_always_optimize_and_historical_runs_keep_legacy(storage):
     saved = storage.save("new", graph())
     assert saved["context_delivery"] == "optimized_v1"
     old_graph = graph()
     old_graph["context_delivery"] = "legacy"
     old = storage.save("old", old_graph)
+    assert old["context_delivery"] == "optimized_v1"
+    historical = {"definition": {**graph(), "context_delivery": "legacy"}}
+    from polybridge.workflow_prompt_delivery import optimized
+    assert not optimized(historical)
+    assert not optimized({"definition": graph()})
     raw = graph()
     updated = storage.save("old", raw, old["revision"])
-    assert updated["context_delivery"] == "legacy"
+    assert updated["context_delivery"] == "optimized_v1"
     raw["context_delivery"] = "optimized_v1"
     upgraded = storage.save("old", raw, updated["revision"])
     assert upgraded["context_delivery"] == "optimized_v1"

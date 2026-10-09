@@ -27,7 +27,7 @@ def native_events(nonce, assignment, session):
     def event(kind, **fields):
         return {"type": kind, "session_id": session, **fields}
     return [
-        event("system", subtype="init", claude_code_version="2.1.290", permissionMode="plan"),
+        event("system", subtype="init", claude_code_version="2.1.295", permissionMode="plan"),
         event("assistant", message={"content": [{"type": "tool_use", "id": "tool-child", "name": "Agent", "input": {"description": nonce, "prompt": assignment, "subagent_type": "pb-node", "run_in_background": False}}]}),
         event("system", subtype="task_started", task_id="native-child", tool_use_id="tool-child", description=nonce, prompt=assignment, subagent_type="pb-node", is_backgrounded=False, task_type="local_agent"),
         event("assistant", parent_tool_use_id="tool-child", message={"content": [{"type": "text", "text": "Child progress"}]}),
@@ -77,7 +77,7 @@ class NativeRegistry(Registry):
 @pytest.fixture
 def native_setup(tmp_path, monkeypatch):
     monkeypatch.setattr(w.backends, "is_installed", lambda b: True)
-    monkeypatch.setattr(w.backends, "version", lambda b: "2.1.290 (Claude Code)")
+    monkeypatch.setattr(w.backends, "version", lambda b: "2.1.295 (Claude Code)")
     storage = w.WorkflowStore(tmp_path)
     registry = NativeRegistry(tmp_path)
     return storage, registry
@@ -324,16 +324,21 @@ def test_native_cap_exhaustion_cannot_complete_even_with_tool_completed():
 async def test_authoritative_observer_failure_does_not_stop_parent_stdout_drain(tmp_path):
     from types import SimpleNamespace
     from test_cancel import make_task
-    from polybridge.tasks import _drain_stdout
+    from polybridge.tasks import _drain_stdout, TaskRegistry
     task = make_task(tmp_path, "transport")
     reader = asyncio.StreamReader()
     reader.feed_data((json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "First"}]}}) + "\n" + json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "Second"}]}}) + "\n").encode())
     reader.feed_eof()
-    task.proc = SimpleNamespace(stdout=reader)
+    async def wait():
+        return 0
+    task.proc = SimpleNamespace(stdout=reader, returncode=0, wait=wait)
     def fail(_):
         raise OSError("authoritative storage failed")
-    registry = SimpleNamespace(_workflow_native_observers={"transport": fail})
+    registry = TaskRegistry(log_dir=tmp_path, owner={"pid": 1, "start_time": None, "markers": []}, open_monitor=False)
+    registry._workflow_native_observers = {"transport": fail}
     await _drain_stdout(task, registry)
+    await task.termination
+    assert task.cancel_requested
     assert registry._workflow_native_failures["transport"] == "authoritative storage failed"
     assert "transport" not in registry._workflow_native_observers
     assert task.drain_failed is False
@@ -515,3 +520,32 @@ async def test_native_transport_direct_cancel_and_takeover_are_refused(native_se
         refuse_takeover(tmp_path / "tasks", "transport")
     assert await registry.cancel_cascade("transport", workflow_control=True) == {"cancelled": True}
     assert calls == ["transport"]
+
+
+@pytest.mark.parametrize("tool", ["Write", "Edit", "Read", "Bash"])
+@pytest.mark.parametrize("after_settlement", [False, True])
+def test_native_control_rejects_parent_tools(tool, after_settlement):
+    adapter = ClaudeNativeAdapter()
+    state = {"assignment": "exact", "owner_session_id": "session", "expected_model": MODEL, "owner_freedom": "write_in_repo", "expected_freedom": "read_only"}
+    for event in native_events("nonce", "exact", "session")[1:(5 if after_settlement else 3)]:
+        adapter.observe(event, "nonce", state)
+    with pytest.raises(ValueError, match="Unexpected parent tool"):
+        adapter.observe({"type": "assistant", "session_id": "session", "message": {"content": [{"type": "tool_use", "id": "untracked", "name": tool, "input": {}}]}}, "nonce", state)
+    assert state["invalid"]
+
+
+async def test_parent_tool_requires_reconciliation_without_headless_duplicate(native_setup, tmp_path, monkeypatch):
+    storage, registry = native_setup
+    original = native_events
+    def unexpected(*args):
+        events = original(*args)
+        events.insert(1, {"type": "assistant", "session_id": args[2], "message": {"content": [{"type": "tool_use", "id": "write", "name": "Write", "input": {}}]}})
+        return events
+    monkeypatch.setattr("test_workflow_native.native_events", unexpected)
+    run = storage.create_run(w.validate_definition(native_graph()), "Review", tmp_path)
+    await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]), 5)
+    observed = storage.get_run(run["workflow_run_id"])
+    assert observed["status"] == "needs_attention"
+    workers = [t for a in observed["activations"] if a["role"] == "node" for t in a["tasks"]]
+    assert len(workers) == 1 and workers[0]["status"] == "uncertain"
+    assert workers[0]["execution_kind"] == "native_subagent"

@@ -86,6 +86,7 @@ class WorkflowTree:
     def __init__(self, store: Any, root_run_id: str | None = None, permits: int | None = None, scheduling_policy: str = "legacy"):
         self.store = store
         self.root_run_id = root_run_id or ""
+        self.worker_capacity = max(1, int(permits)) if permits is not None else None
         self.slots = TreeSlots(permits) if permits is not None else None
         self.control_slots = TreeSlots(1) if scheduling_policy == "native_workers_plus_control_v1" else None
         self.scheduling_policy = scheduling_policy
@@ -350,13 +351,23 @@ def child_run_record(store: Any, parent_run: dict[str, Any], activation: dict[st
         "interaction_owner": parent_run.get("interaction_owner", "caller"),
         "invocation_inputs": invocation.get("inputs", []),
     }
+    if parent_run.get("owner_contracts") is not None:
+        child["scheduling_policy"] = parent_run.get("scheduling_policy", "legacy")
+        child["permission_policy"] = parent_run.get("permission_policy", "legacy_ceiling")
+        if child["permission_policy"] == "legacy_ceiling":
+            child["freedom"] = parent_run.get("freedom", "write_in_repo")
     if owner_id is not None:
         child["orchestrator_session_owner_run_id"] = owner_id
         try:
             owner = store.get_run(owner_id)
             child["orchestrator_config"] = copy.deepcopy(owner.get("definition", {}).get("orchestrator", {}))
+            if owner.get("owner_contracts") is not None:
+                child["owner_contracts"] = copy.deepcopy(owner["owner_contracts"])
         except (OSError, ValueError, KeyError):
             child["orchestrator_config"] = copy.deepcopy(parent_run.get("definition", {}).get("orchestrator", {}))
+    elif parent_run.get("owner_contracts") is not None:
+        from .workflow_native_policy import child_contracts
+        child["owner_contracts"] = child_contracts(parent_run, workflow_id)
     selection = invocation.get("child_session_selection")
     if selection:
         child["child_session_selection"] = copy.deepcopy(selection)

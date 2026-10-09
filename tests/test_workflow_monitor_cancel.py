@@ -89,7 +89,8 @@ def test_child_reservation_cannot_race_root_cancel(run_store):
     assert not eligibility(storage, child)[0]
 
 
-def test_descendant_reservation_serializes_with_cancel(run_store, monkeypatch):
+@pytest.mark.parametrize("reservation_event", ["native_reserved", "native_batch_reserved"])
+def test_descendant_reservation_serializes_with_cancel(run_store, monkeypatch, reservation_event):
     from concurrent.futures import ThreadPoolExecutor
     from threading import Event
     from polybridge import workflow_cancellation
@@ -107,7 +108,7 @@ def test_descendant_reservation_serializes_with_cancel(run_store, monkeypatch):
     def reserve():
         reservation_started.set()
         with pytest.raises(w.DispatchNotStarted):
-            storage.update_run("child", lambda r: r.update(status="running"), "native_reserved")
+            storage.update_run("child", lambda r: r.update(status="running"), reservation_event)
     with ThreadPoolExecutor(max_workers=2) as pool:
         cancellation = pool.submit(storage.control, rid, "cancel", interaction_owner="monitor")
         assert gate_entered.wait(5)

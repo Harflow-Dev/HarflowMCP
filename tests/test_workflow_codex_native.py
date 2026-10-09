@@ -51,7 +51,7 @@ class CodexRegistry(Registry):
         assignment = args["message"].split("\n\n", 1)[1]
         child = f"00000000-0000-0000-0000-{100 + len(self.native_calls):012d}"
         self.monkeypatch.setattr(fixtures, "CHILD", child)
-        native_rollouts(self._log_dir.parent, self.monkeypatch, nonce, assignment, self.mutation)
+        native_rollouts(self._log_dir.parent, self.monkeypatch, nonce, assignment, self.mutation, effort=kwargs.get("native_settings", {}).get("reasoning_effort") or "low")
         # The worker result is distinct from the parent's dispatch acknowledgement.
         directory = self._log_dir.parent / "sessions" / "2026" / "10" / "06"
         child_file = next(directory.glob(f"*-{child}.jsonl"))
@@ -77,7 +77,7 @@ class CodexRegistry(Registry):
 @pytest.fixture
 def setup(tmp_path, monkeypatch):
     monkeypatch.setattr(backends, "is_installed", lambda _: True)
-    monkeypatch.setattr(backends, "version", lambda _: "codex-cli 0.160.1")
+    monkeypatch.setattr(backends, "version", lambda _: "codex-cli 0.162.0")
     # Exercise conformance even while production activation awaits CLI certification.
     monkeypatch.setattr(type(backends.get("codex")), "native_subagent_adapter", property(lambda _: CodexNativeAdapter()), raising=False)
     return w.WorkflowStore(tmp_path), CodexRegistry(tmp_path, monkeypatch)

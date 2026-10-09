@@ -48,7 +48,8 @@ to call Polybridge; it does not provision the services, accounts, or approvals u
 | Review | `read_only` | Diff/source reads; if review includes tests, allow their commands and necessary output paths. |
 | Implementation | `write_in_repo` | Edits, exact build/test commands, writable outputs, and dependency access where required. `read_only` is invalid. |
 | Task | `publish` | Match the actual action: use `read_only` for inspection or `write_in_repo` for local edits; retain `publish` when external mutation is needed. |
-| Orchestrator / workflow builder | `read_only` | Reasoning, repository inspection, and explicitly permitted context tools. They do not inherit a worker's higher access. |
+| Orchestrator | Pinned per-owner contract | Compatible same-harness native node candidates, including fallbacks and Current-mode descendants, determine the required access. The disclosed permissions also apply to the orchestrator itself. Child-mode owners receive separate contracts; historical runs retain their original permissions. |
+| Workflow builder | `read_only` | Reasoning, repository inspection, and explicitly permitted context tools. |
 | Start / End / Parallel boundaries | None | Structural nodes launch no worker and have no harness permission setup. |
 | Run workflow | Child definition | Each child agent uses its saved access; nested invocation cannot raise it. |
 

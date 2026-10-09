@@ -7,9 +7,11 @@ Conditions are instructions to the orchestrator, not code executed by Polybridge
 
 ## Context delivery
 
-New Monitor-authored definitions set `context_delivery: "optimized_v1"`. Existing definitions
-without that field retain legacy full-context delivery; editing or opening them does not migrate
-their policy. Set the field explicitly to opt a saved definition in.
+All newly saved definitions and new workflow runs use bounded context delivery
+(`context_delivery: "optimized_v1"`), including new runs from older definitions. Monitor has no
+context-delivery selector. Existing runs retain their pinned policy when continued or resumed;
+opening an older definition does not rewrite its recorded runs. Legacy input remains accepted
+for compatibility, but new runs normalize it to bounded delivery.
 
 Optimized delivery separates the stable workflow bootstrap from current checkpoint state.
 A Fresh session receives bootstrap context. A compatible resumed orchestrator receives a delta
@@ -52,8 +54,8 @@ execution preference retain **Headless** execution. **Prefer orchestrator subage
 use a native child of the workflow's owning orchestrator when the harness and all requested node
 settings are compatible. It does not adopt the interactive chat that started the workflow.
 Unsupported combinations use headless execution before launch; the execution inspector records why.
-A native preference cannot raise access, enable network, change models, or silently replace Resume
-with Fresh. A missing native launch acknowledgement or an uncertain child outcome requires attention,
+A native preference cannot exceed the saved node access or run permission ceiling, silently
+enable network, change models, or replace Resume with Fresh. A missing native launch acknowledgement or an uncertain child outcome requires attention,
 not a second headless worker.
 
 Native executions have their own workflow execution identity and activity. The Monitor labels them
@@ -77,44 +79,66 @@ Native support is certified per harness version and settings. Availability does 
 role, permission level, session mode, model, or parallel configuration is supported. The runner
 reports the actual execution mode rather than assuming that a preference was honored.
 
-The initial adapter supports **Claude Code 2.1.290**, root sequential workflows, Fresh child
-execution, `read_only` access, the exact inherited `claude-sonnet-4-6` model, and the
-default 100-turn cap on both the parent turn and child profile. The child profile
-permits Read, Glob, and Grep; it cannot run shell commands, edit files, or delegate further.
-Effort overrides, other turn caps, child Resume, parallel/nested native execution and other Claude versions
-use Headless with an explanation. Native implementation nodes therefore
-remain Headless. The parent turn retains plan mode, applies a scoped setting disabling automatic
-permission classification, and adds no tool approval allowlist.
+Before a new run, Polybridge pins permissions for each owning orchestrator candidate. Only
+compatible native node candidates with the same harness contribute, including matching fallback
+candidates. Current-mode child workflows contribute recursively to that same owner; Child-mode
+workflows receive separate owner contracts. A mismatched Headless worker never expands its owner's
+access. Primary/fallback order is preserved: a matching fallback does not skip an available primary.
 
-The native CLI certification test uses an isolated localhost fake API with the real executable:
-`PB_CLI_INTEGRATION=1 uv run pytest tests/test_claude_native_subagent_cli.py`. It makes no paid model
-requests. This proves the tested CLI transport and permission behavior; it does not measure model
-quality or guarantee that an arbitrary assignment will succeed.
+The Run sheet shows access, the network request, contributing nodes and Headless fallback reasons.
+Network enforcement depends on the harness; a request to disable it is not an enforced block.
+These permissions also apply to the orchestrator itself, which is instructed to coordinate.
+Permissions remain fixed for that owner session across optional branches and retries. Preview
+changes invalidate Run until the summary refreshes; the start request verifies its preview hash.
+The CLI JSON contract is v8 for permission previews and pinned owner contracts; the Monitor
+continues decoding supported historical versions. The inspector retains the pinned contracts. Historical runs never acquire expanded permissions.
 
-The Codex adapter supports **Codex CLI 0.160.1**, root sequential workflows, Fresh child
-execution, `read_only` access, and the exact inherited **gpt-6.1-sol** model. Both parent and
-worker must omit effort overrides and turn caps; Codex does not support turn caps. Network
-must remain blocked. The worker uses Codex's native tools under its inherited read-only
-sandbox and approval policy. A pinned default-agent profile prevents ambient roles from
-replacing its model, and a thread limit blocks further delegation. This matches Claude's workflow
-behavior and access boundary, rather than its narrower Read/Glob/Grep tool set.
+CLI callers can inspect the same plan with `polybridge-ctl workflow-preview NAME --repo PATH --json`. Pass its `preview_hash` to `workflow-start --expected-preview-hash HASH` to reject
+a changed definition or permission plan before launch. MCP callers use `preview_workflow_run`
+and `start_workflow(expected_preview_hash=...)`.
 
-Codex child activity is **limited**: its exec JSON stream does not expose the child's complete
-lifecycle or tool activity. After the owning control process exits successfully, Polybridge
-verifies correlated parent and child session logs, the completed worker result, configuration,
-and dispatch acknowledgement before advancing the workflow. Verified child runtime errors are
-recorded as failed executions. Live child tool activity is not available. Missing, conflicting,
-or oversized evidence requires attention without a duplicate
-Headless dispatch. Child Resume, individual cancellation, takeover, write-capable workers,
-parallel/nested execution, other models, and other CLI versions remain unsupported.
+| Configuration | Claude Code 2.1.295 | Codex CLI 0.162.0 |
+| --- | --- | --- |
+| Certified model | `claude-sonnet-4-6`, inherited exactly | `gpt-6.1-sol`, inherited exactly |
+| Child access | Read-only or repository file edits; read-only child can narrow a write owner | Read-only or repository writes; child must match owner access |
+| Tools | Read/Glob/Grep; write profile adds Write/Edit, denies Bash and out-of-repository writes | Native tools under observed sandbox and approval policy `never` |
+| Effort | Omitted | Omitted or inherited `high` |
+| Turn cap | 100 on owner and child | Unsupported |
+| Network | Same request as owner; CLI does not provide OS network confinement | Blocked on owner and child |
+| Sessions | Fresh; agent-decides can select Fresh | Fresh; agent-decides can select Fresh |
+| Parallel/nested | Bounded parallel native batches and nested workflow owners | Bounded parallel native batches and nested workflow owners |
+| Activity | Correlated child activity, labeled limited | Persisted child lifecycle/results; live child tool activity unavailable |
+| Child Resume/individual Stop/takeover | Unsupported | Unsupported |
 
-The Codex certification command is
-`PB_CLI_INTEGRATION=1 uv run pytest tests/test_codex_native_subagent_cli.py`.
-It uses the real pinned CLI with an isolated localhost fake API and makes no paid model calls.
+Native implementation nodes can edit files within the certified access configuration. Unsupported
+models, settings or child-session recovery requests use Headless before launch with a concrete
+reason. Codex's child sandbox inherits its owner's access even with a narrower child profile: a
+read-only node under a repository-write owner therefore uses Headless. Neither adapter silently
+drops the node's settings or treats a parent acknowledgement as worker success.
 
-opencode, Vibe, and Antigravity do not yet have native adapters; their nodes run Headless even
-when Prefer orchestrator subagent is selected, with a visible fallback reason. Each additional
-adapter needs verified launch, settlement, inherited settings, activity, and recovery behavior.
+Parallel launches use one control turn for a bounded batch of compatible siblings. Different
+child configurations or timeout policies serialize as separate batches. Aggregate parent
+permission denials remain control-turn evidence; child results contain only correlated denials. The root tree's worker budget and adapter
+batch limits apply even when a nested workflow requests a larger local limit. Control turns
+sharing a session serialize; native workers cannot delegate further. Native control turns
+accept only their expected delegation and wait calls; unexpected parent tools require
+reconciliation. A batch with unresolved
+child ownership cannot advance siblings or retry as Headless.
+
+Certification uses real executables against isolated localhost fake APIs, without paid model calls:
+
+```bash
+PB_CLI_INTEGRATION=1 uv run pytest tests/test_claude_native_subagent_cli.py tests/test_codex_native_subagent_cli.py
+```
+
+The fixtures cover successful results, parent-session resume, child permissions and failures,
+Codex inherited effort, and overlapping native batches. They prove the tested transport and
+permission behavior, not model quality or success on an arbitrary assignment.
+
+Vibe, OpenCode and Antigravity remain Headless with visible reasons. Native adapter follow-ups are
+tracked in [Vibe #32](https://github.com/hainayanda/Polybridge/issues/32),
+[OpenCode #33](https://github.com/hainayanda/Polybridge/issues/33) and
+[Antigravity #34](https://github.com/hainayanda/Polybridge/issues/34).
 
 ## How the runner works
 
@@ -951,8 +975,10 @@ Definitions live under `~/.polybridge/workflows/`. Immutable run snapshots, task
 decisions, and control history live under `~/.polybridge/workflow-runs/`. Ordinary agent streams
 remain under `~/.polybridge/tasks/` and use the existing event format.
 
-The orchestrator recommends decisions; it cannot grant additional node permissions. Builder and
-orchestrator agents run read-only, and workers retain the run's permission limits. Existing backend
+The orchestrator recommends decisions; it cannot grant additional node permissions. Builder agents
+remain read-only. New workflow orchestrators use their pinned per-owner permission contracts,
+expanded only for compatible native node candidates with matching harnesses. Workers retain the
+run's permission limits, and historical runs keep their original orchestrator contracts. Existing backend
 enforcement caveats still apply: a workflow does not create an OS sandbox for a backend that lacks
 one. Inspect each task's enforcement report.
 

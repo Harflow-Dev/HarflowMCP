@@ -96,8 +96,17 @@ def offer(store: Any, run: dict[str, Any], node: dict[str, Any], exclude_executi
         candidate = next((copy.deepcopy(c) for c in candidates if "orchestrator:" + _candidate_key(c) == binding.get("candidate")), None)
         if candidate is None or (record.backend, record.model, record.reasoning_effort, record.max_turns) != (candidate["backend"], candidate.get("model"), candidate.get("reasoning_effort"), candidate.get("max_turns")):
             return refuse("Latest child actual orchestrator candidate or launch configuration changed")
-        network = False if run.get("network") is False else run.get("network")
-        if record.freedom != "read_only" or record.network != network or str(Path(record.repo_path).resolve()) != str(Path(run["repo_path"]).resolve()):
+        from .workflow_native_policy import child_contracts, orchestrator_contract
+        target_contracts = child_contracts(run, node["workflow_ref"]["workflow_id"])
+        target = {"definition": definition, "network": run.get("network")}
+        if target_contracts is not None:
+            target["owner_contracts"] = target_contracts
+        contract = orchestrator_contract(target, candidate)
+        source_contract = orchestrator_contract(child, candidate)
+        if (contract["freedom"], contract["network"]) != (source_contract["freedom"], source_contract["network"]):
+            return refuse("Latest child pinned owner permissions changed")
+        freedom, network = contract["freedom"], contract["network"]
+        if record.freedom != freedom or record.network != network or str(Path(record.repo_path).resolve()) != str(Path(run["repo_path"]).resolve()):
             return refuse("Latest child orchestrator access, network, or repository is incompatible")
         backend = backends.get(candidate["backend"])
         if backend.capabilities.resume_may_start_fresh:
@@ -110,9 +119,9 @@ def offer(store: Any, run: dict[str, Any], node: dict[str, Any], exclude_executi
             return refuse("Latest child reasoning effort is unknown: conversation reuse requires explicit saved effort")
         if not backends.is_installed(backend):
             return refuse("Latest child orchestrator CLI is unavailable")
-        launch = backend.build_resume_argv("Validate child orchestrator resume", repo=Path(run["repo_path"]), freedom="read_only", session_id=record.session_id, model=record.model, max_turns=record.max_turns, reasoning_effort=record.reasoning_effort, network=network)
-        backend.assert_safe(launch, "read_only", network)
-        fingerprint = _hash({"definition_hash": digest, "dependency_tree": expected_tree, "revision": child["revision"], "repo_path": str(Path(run["repo_path"]).resolve()), "candidate": candidate, "freedom": "read_only", "network": network, "parent_run_id": run["workflow_run_id"], "node_id": node["id"], "source_execution_id": source["id"], "source_child_workflow_run_id": child["workflow_run_id"], "source_task_id": record.task_id, "source_session_id": record.session_id})
+        launch = backend.build_resume_argv("Validate child orchestrator resume", repo=Path(run["repo_path"]), freedom=freedom, session_id=record.session_id, model=record.model, max_turns=record.max_turns, reasoning_effort=record.reasoning_effort, network=network)
+        backend.assert_safe(launch, freedom, network)
+        fingerprint = _hash({"definition_hash": digest, "dependency_tree": expected_tree, "revision": child["revision"], "repo_path": str(Path(run["repo_path"]).resolve()), "candidate": candidate, "freedom": freedom, "network": network, "parent_run_id": run["workflow_run_id"], "node_id": node["id"], "source_execution_id": source["id"], "source_child_workflow_run_id": child["workflow_run_id"], "source_task_id": record.task_id, "source_session_id": record.session_id})
         selection = {"session_ref": "child-session:" + fingerprint, "compatibility_fingerprint": fingerprint, "source_execution_id": source["id"], "source_child_workflow_run_id": child["workflow_run_id"], "source_task_id": record.task_id, "source_session_id": record.session_id, "candidate": candidate, "binding": copy.deepcopy(binding)}
         return {"eligible_sessions": [selection], "unavailable_reason": ""}
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
@@ -184,13 +193,17 @@ async def _recover_first_turn(supervisor: Any) -> None:
         if owned_attempt.get("status") != "completed" or owned_attempt.get("session_mode") != "resume" or owned_attempt.get("resume_task_id") != source_task or receipt is None or receipt.parent_task_id != source_task or receipt.status != "completed" or tasks.outcome_unobserved(receipt) or receipt.session_id != inherited["source_session_id"]:
             return
         expected = inherited["candidate"]
-        if owned_attempt.get("candidate") != expected or (receipt.backend, receipt.model, receipt.reasoning_effort, receipt.max_turns, receipt.freedom, receipt.network, str(Path(receipt.repo_path).resolve())) != (expected["backend"], expected.get("model"), expected.get("reasoning_effort"), expected.get("max_turns"), "read_only", child.get("network"), str(Path(child["repo_path"]).resolve())):
+        from .workflow_native_policy import orchestrator_contract
+        contract = orchestrator_contract(child, expected)
+        if owned_attempt.get("candidate") != expected or (receipt.backend, receipt.model, receipt.reasoning_effort, receipt.max_turns, receipt.freedom, receipt.network, str(Path(receipt.repo_path).resolve())) != (expected["backend"], expected.get("model"), expected.get("reasoning_effort"), expected.get("max_turns"), contract["freedom"], contract["network"], str(Path(child["repo_path"]).resolve())):
             return
         owned.add(receipt.task_id)
         source_task = receipt.task_id
     activation, attempt = attempts[-1]
     checkpoint = pending.get(activation.get("decision_id"))
     candidate = inherited["candidate"]
+    from .workflow_native_policy import orchestrator_contract
+    contract = orchestrator_contract(child, candidate)
     if not checkpoint or activation.get("token", {}).get("id") != checkpoint["id"] or activation.get("token", {}).get("decision_id") != checkpoint["decision_id"] or attempt.get("status") != "completed" or attempt.get("session_mode") != "resume" or attempt.get("candidate") != candidate:
         return
     sid = inherited["source_session_id"]
@@ -198,7 +211,7 @@ async def _recover_first_turn(supervisor: Any) -> None:
         record = tasks.read(supervisor.store.root / "tasks", attempt["task_id"])
         if record is None or record.status != "completed" or tasks.outcome_unobserved(record) or record.parent_task_id != attempt.get("resume_task_id") or record.session_id != sid:
             return
-        if (record.backend, record.model, record.reasoning_effort, record.max_turns, record.freedom, record.network, str(Path(record.repo_path).resolve())) != (candidate["backend"], candidate.get("model"), candidate.get("reasoning_effort"), candidate.get("max_turns"), "read_only", child.get("network"), str(Path(child["repo_path"]).resolve())):
+        if (record.backend, record.model, record.reasoning_effort, record.max_turns, record.freedom, record.network, str(Path(record.repo_path).resolve())) != (candidate["backend"], candidate.get("model"), candidate.get("reasoning_effort"), candidate.get("max_turns"), contract["freedom"], contract["network"], str(Path(child["repo_path"]).resolve())):
             return
         if sid in tasks.live_session_ids(supervisor.store.root / "tasks") or tasks.session_successor_task_ids(supervisor.store.root / "tasks", record.task_id, sid):
             return

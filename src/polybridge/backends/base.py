@@ -50,6 +50,7 @@ class Invocation:
     initial_input: bytes | None = None
     scratch_directory: str | None = None
     native_subagent: bool = False
+    native_settings: dict[str, Any] | None = None
 
     @property
     def live_input(self) -> bool:

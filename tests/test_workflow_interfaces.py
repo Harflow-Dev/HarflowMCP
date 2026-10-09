@@ -23,6 +23,22 @@ async def test_workflow_rejects_task_only_options():
         await server.start_task("do it", "/tmp/repo", workflow="review", group="team")
 
 
+@pytest.mark.parametrize("action,extra", [("preview", []), ("start", ["--prompt", "Go", "--expected-preview-hash", "pinned-plan"])])
+def test_cli_launch_preview_and_guard_forwarding(monkeypatch, capsys, action, extra):
+    observed = {}
+    async def invoke(received_action, **kwargs):
+        observed.update(action=received_action, **kwargs)
+        return {"preview_hash": "pinned-plan"}
+    monkeypatch.setattr(server, "_workflow_call", invoke)
+    assert ctl.main(["workflow-" + action, "review", "--repo", "/tmp/repo", "--model", "model", "--json", *extra]) == 0
+    assert observed["action"] == action
+    assert observed["overrides"] == {"model": "model"}
+    if action == "preview":
+        assert "prompt" not in observed and "expected_preview_hash" not in observed
+    else:
+        assert observed["expected_preview_hash"] == "pinned-plan"
+
+
 def test_cli_workflow_start_envelope(monkeypatch, capsys):
     observed = {}
     async def start(action, **kwargs):
@@ -30,7 +46,7 @@ def test_cli_workflow_start_envelope(monkeypatch, capsys):
         return {"workflow_run_id": "run-1", "status": "pending"}
     monkeypatch.setattr(server, "_workflow_call", start)
     assert ctl.main(["run", "--workflow", "review", "--repo", "/tmp/repo", "--prompt", "do it", "--json"]) == 0
-    assert json.loads(capsys.readouterr().out) == {"v": 7, "result": {"workflow_run_id": "run-1", "status": "pending"}}
+    assert json.loads(capsys.readouterr().out) == {"v": 8, "result": {"workflow_run_id": "run-1", "status": "pending"}}
     assert observed == {"name": "review", "overrides": None, "network": None, "freedom": None, "prompt": "do it", "repo_path": "/tmp/repo"}
 
 
@@ -168,7 +184,7 @@ async def test_public_mcp_has_no_checklist_completion_mutation():
     # orchestrator decision can supply task_updates to change the run checklist.
     assert set(name for name in tools if "workflow" in name) == {
         "list_workflows", "get_workflow", "save_workflow", "delete_workflow",
-        "workflow_builder", "start_workflow", "list_workflow_runs", "list_workflow_run_page",
+        "workflow_builder", "preview_workflow_run", "start_workflow", "list_workflow_runs", "list_workflow_run_page",
         "get_workflow_status", "wait_for_workflow", "pause_workflow",
         "resume_workflow", "cancel_workflow", "followup_workflow_builder", "apply_workflow_draft",
         "recover_workflow", "inspect_workflow_node", "get_workflow_run_detail", "read_workflow_assigned_input",

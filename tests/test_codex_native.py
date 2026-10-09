@@ -53,7 +53,7 @@ def write_rollout(tmp_path, monkeypatch, **context_overrides):
     directory = tmp_path / "sessions" / "2026" / "10" / "06"
     directory.mkdir(parents=True, exist_ok=True)
     context = {"model": "gpt-6.1-sol", "approval_policy": "never", "sandbox_policy": {"type": "read-only"}, "cwd": str(tmp_path), **context_overrides}
-    meta = {"id": CHILD, "cli_version": "0.160.1", "model_provider": "local", "cwd": str(tmp_path), "source": {"subagent": {"thread_spawn": {"parent_thread_id": PARENT, "depth": 1}}}}
+    meta = {"id": CHILD, "cli_version": "0.162.0", "model_provider": "local", "cwd": str(tmp_path), "source": {"subagent": {"thread_spawn": {"parent_thread_id": PARENT, "depth": 1}}}}
     file = directory / f"rollout-2026-10-06T00-00-00-{CHILD}.jsonl"
     file.write_text("\n".join(json.dumps({"type": kind, "payload": payload}) for kind, payload in [("session_meta", meta), ("turn_context", context)]) + "\n")
     return file
@@ -87,7 +87,7 @@ def test_foreign_parent_is_rejected():
 
 def test_eligibility_uses_real_cli_version_shape(monkeypatch):
     from polybridge import backends
-    monkeypatch.setattr(backends, "version", lambda _: "codex-cli 0.160.1")
+    monkeypatch.setattr(backends, "version", lambda _: "codex-cli 0.162.0")
     parent = SimpleNamespace(backend="codex", freedom="read_only", network=None, model="gpt-6.1-sol", reasoning_effort=None, max_turns=None)
     candidate = {"model": parent.model}
     settings = {"freedom": "read_only", "network": None}
@@ -96,10 +96,10 @@ def test_eligibility_uses_real_cli_version_shape(monkeypatch):
     assert "effort" in adapter.eligible(parent, {**candidate, "reasoning_effort": "low"}, settings)
     assert "turn caps" in adapter.eligible(parent, {**candidate, "max_turns": 100}, settings)
     monkeypatch.setattr(backends, "version", lambda _: "codex-cli 0.160.2")
-    assert "0.160.1" in adapter.eligible(parent, candidate, settings)
+    assert "0.162.0" in adapter.eligible(parent, candidate, settings)
 
 
-def native_rollouts(tmp_path, monkeypatch, nonce="nonce", assignment="assignment", mutation=None):
+def native_rollouts(tmp_path, monkeypatch, nonce="nonce", assignment="assignment", mutation=None, effort="medium"):
     adapter = CodexNativeAdapter()
     args = adapter.spawn_arguments(assignment, nonce)
     path = "/root/" + args["task_name"]
@@ -109,7 +109,7 @@ def native_rollouts(tmp_path, monkeypatch, nonce="nonce", assignment="assignment
     child_file = write_rollout(tmp_path, monkeypatch)
     child_records = [json.loads(line) for line in child_file.read_text().splitlines()]
     child_records[0]["payload"]["source"]["subagent"]["thread_spawn"]["agent_path"] = path
-    child_records[1]["payload"].update(effort="medium")
+    child_records[1]["payload"].update(effort=effort)
     child_records.append(record("event_msg", type="task_complete", last_agent_message='{"status":"succeeded"}'))
     if mutation == "missing_child_complete":
         child_records.pop()
@@ -119,8 +119,8 @@ def native_rollouts(tmp_path, monkeypatch, nonce="nonce", assignment="assignment
         child_records[0]["payload"]["model_provider"] = "foreign"
     child_file.write_text("\n".join(json.dumps(r) for r in child_records) + "\n")
     records = [
-        record("session_meta", id=PARENT, cli_version="0.160.1", model_provider="local"),
-        record("turn_context", turn_id=turn, effort="medium", model="gpt-6.1-sol", cwd=str(tmp_path), approval_policy="never", sandbox_policy={"type": "read-only"}),
+        record("session_meta", id=PARENT, cli_version="0.162.0", model_provider="local"),
+        record("turn_context", turn_id=turn, effort=effort, model="gpt-6.1-sol", cwd=str(tmp_path), approval_policy="never", sandbox_policy={"type": "read-only"}),
         record("response_item", type="function_call", namespace="collaboration", name="spawn_agent", call_id="spawn", arguments=json.dumps(args), internal_chat_message_metadata_passthrough={"turn_id": turn}),
         record("event_msg", type="item_completed", thread_id=PARENT, turn_id=turn, item={"type": "SubAgentActivity", "id": "spawn", "kind": "started", "agent_thread_id": CHILD, "agent_path": path}),
         record("response_item", type="function_call_output", call_id="spawn", output=json.dumps({"task_name": path})),
@@ -144,6 +144,8 @@ def native_rollouts(tmp_path, monkeypatch, nonce="nonce", assignment="assignment
         records[1]["payload"]["sandbox_policy"] = {"type": "danger-full-access"}
     elif mutation == "unexpected_collaboration":
         records[5]["payload"]["name"] = "followup_task"
+    elif mutation in {"parent_shell", "parent_patch"}:
+        records.insert(3, record("response_item", type="function_call" if mutation == "parent_shell" else "custom_tool_call", namespace="functions", name="exec_command" if mutation == "parent_shell" else "apply_patch", call_id="untracked", arguments="{}", internal_chat_message_metadata_passthrough={"turn_id": turn}))
     parent_file = child_file.with_name(f"rollout-parent-{PARENT}.jsonl")
     parent_file.write_text("\n".join(json.dumps(r) for r in records) + "\n")
 
@@ -169,7 +171,7 @@ def test_stream_requires_correlated_rollout_terminal_and_parent_ack(tmp_path, mo
     assert adapter.finalize("nonce", state) == []
 
 
-@pytest.mark.parametrize("mutation", ["nonce", "foreign", "extra_spawn", "missing_terminal", "early_ack", "wrong_output", "missing_child_complete", "effort", "provider", "parent_access", "unexpected_collaboration"])
+@pytest.mark.parametrize("mutation", ["nonce", "foreign", "extra_spawn", "missing_terminal", "early_ack", "wrong_output", "missing_child_complete", "effort", "provider", "parent_access", "unexpected_collaboration", "parent_shell", "parent_patch"])
 def test_native_lifecycle_rejects_uncorrelated_or_incomplete_evidence(tmp_path, monkeypatch, mutation):
     native_rollouts(tmp_path, monkeypatch, mutation=mutation)
     state = {"owner_session_id": PARENT, "assignment": "assignment", "expected_repo": str(tmp_path)}

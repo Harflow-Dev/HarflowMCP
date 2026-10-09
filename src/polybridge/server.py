@@ -1050,6 +1050,13 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
         from .workflow_reads import READ_ACTIONS, call
         if action in READ_ACTIONS:
             return await call(action, directory=_reg().log_dir, reader=_managed_workflow_reader, _bounded_read=bounded_read, **kwargs)
+        if action == "preview":
+            caller = await _verified_workflow_caller()
+            if caller is not None:
+                from .workflow_hooks import refuse_managed
+                refuse_managed(_reg().log_dir, caller.record.task_id)
+            kwargs["repo_path"] = await _validate_repo_path(kwargs["repo_path"])
+            return await asyncio.to_thread(workflows.preview_workflow_run, **kwargs)
         if action in {"pause", "resume", "recover"}:
             kwargs.setdefault("interaction_owner", "caller")
         if action not in {"list", "list_runs", "list_run_page", "get_run_header", "get", "status", "inspect", "assigned_input", "detail"}:
@@ -1084,11 +1091,15 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
                     # its saved freedom with the run's network, and an orchestrator only
                     # for the root and definitions reached through Child-mode edges.
                     tree = kwargs["dependency_tree"]
-                    child_reached = {edge["to"] for edge in tree.get("edges", []) if edge.get("orchestrator_mode", "child") == "child"}
+                    from .workflow_native_policy import plan_owner_contracts
+                    owner_plan = await asyncio.to_thread(plan_owner_contracts, kwargs["definition_snapshot"], tree, network=kwargs.get("network"))
                     network = kwargs.get("network")
                     for ident, entry in tree.get("workflows", {}).items():
                         definition = entry["definition"]
-                        configs = [(definition["orchestrator"], "read_only", network)] if ident == tree["root_workflow_id"] or ident in child_reached else []
+                        configs = []
+                        owner = owner_plan["owners"].get(ident)
+                        if owner is not None:
+                            configs.extend(({key: value for key, value in contract["candidate"].items() if key != "fallbacks"}, contract["freedom"], contract["network"]) for contract in owner["candidates"].values())
                         configs.extend((n["agent"], workflows.effective_freedom(n, "unrestricted", permission_policy="saved_node"), False if network is False else n.get("network", network)) for n in definition["nodes"] if n["type"] == "agent")
                         for config, freedom, node_network in configs:
                             for candidate in [config, *config.get("fallbacks", [])]:
@@ -1167,9 +1178,9 @@ async def get_workflow(name: str) -> dict[str, Any]:
 async def save_workflow(name: str, definition: dict[str, Any], expected_revision: int | None = None) -> dict[str, Any]:
     """Validate and save an explicit workflow; expected_revision protects concurrent edits.
 
-    context_delivery is legacy or optimized_v1. New definitions default to optimized_v1;
-    existing definitions retain their saved policy (or legacy) unless explicitly changed.
-    Optimized delivery uses session-bound acknowledgements and assigned evidence retrieval,
+    Every save normalizes context_delivery to optimized_v1, including omitted or legacy
+    values. Historical runs retain their pinned delivery policy. Bounded delivery uses
+    session-bound acknowledgements and assigned evidence retrieval,
     with a 64 KiB target that never silently cuts required constraints.
     Set routing_mode="explicit". Ordinary nodes choose exactly one outgoing path.
     Parallel execution uses paired parallel_start/parallel_end nodes with shared
@@ -1259,7 +1270,18 @@ async def apply_workflow_draft(definition: dict[str, Any], expected_draft_revisi
 
 
 @mcp.tool()
-async def start_workflow(name: str, prompt: str, repo_path: str, overrides: dict[str, Any] | None = None, freedom: str | None = None, network: StrictBool | None = None) -> dict[str, Any]:
+async def preview_workflow_run(name: str, repo_path: str, overrides: dict[str, Any] | None = None, network: StrictBool | None = None) -> dict[str, Any]:
+    """Preview native ownership, inherited permissions and fallback reasons without launching.
+
+    The orchestrator receives the permissions required by compatible native
+    children. Supply preview_hash as expected_preview_hash when starting to
+    refuse changed workflow, launch settings or compatibility evidence.
+    """
+    return await _workflow_call("preview", name=name, repo_path=repo_path, overrides=overrides, network=network)
+
+
+@mcp.tool()
+async def start_workflow(name: str, prompt: str, repo_path: str, overrides: dict[str, Any] | None = None, freedom: str | None = None, network: StrictBool | None = None, expected_preview_hash: str | None = None) -> dict[str, Any]:
     """Start a durable workflow run; returns workflow_run_id rather than task_id.
 
     The complete dependency tree of any Run workflow node is resolved and pinned
@@ -1268,7 +1290,7 @@ async def start_workflow(name: str, prompt: str, repo_path: str, overrides: dict
     public controls apply to the root run id only.
     """
     from .workflow_responses import compact
-    return compact(await _workflow_call("start", name=name, prompt=prompt, repo_path=repo_path, overrides=overrides, freedom=freedom, network=network))
+    return compact(await _workflow_call("start", name=name, prompt=prompt, repo_path=repo_path, overrides=overrides, freedom=freedom, network=network, expected_preview_hash=expected_preview_hash))
 
 
 @mcp.tool()
@@ -1353,10 +1375,11 @@ async def wait_for_workflow(workflow_run_id: str, timeout_seconds: int = 30) -> 
 
 @mcp.tool()
 async def get_workflow_run_detail(workflow_run_id: str, view: str, cursor: str | None = None, limit: int = 8000) -> dict[str, Any]:
-    """Losslessly read executions, decisions, checklist, technical_plan, definition, builder_draft, generated_definition, question, reason or wait_reason.
+    """Losslessly read executions, decisions, checklist, technical_plan, definition, owner_contracts, builder_draft, generated_definition, question, reason or wait_reason.
 
-    Concatenate chunk fields then decode JSON. Cursors bind content, run and view; changed
-    content requires restarting. Managed orchestrators use settled node inspection for executions.
+    owner_contracts contains the pinned per-owner permission plan. Concatenate chunk fields
+    then decode JSON. Cursors bind content, run and view; changed content requires restarting.
+    Managed orchestrators use settled node inspection for executions.
     """
     return await _workflow_call("detail", run_id=workflow_run_id, view=view, cursor=cursor, limit=limit)
 

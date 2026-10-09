@@ -41,8 +41,9 @@ results. A worker can ask the orchestrator for missing context, then continue it
 branches, and persists progress. Only the orchestrator updates checklist state. The agents keep
 their own tools; internal workflow routing does not depend on agents calling Polybridge's MCP.
 
-**Prefer orchestrator subagent** supports certified fresh, sequential, read-only Claude and Codex
-workers. Other settings use Headless with an explanation; see the
+**Prefer orchestrator subagent** supports certified fresh Claude and Codex workers, including
+repository edits and bounded parallel batches. The Run summary discloses the permissions also
+given to their owning orchestrator. Other settings use Headless with an explanation; see the
 [supported versions and restrictions](docs/workflows.md#native-subagent-execution).
 
 When a run needs input, its caller supplies the answer. Monitor-started runs expose that interaction
@@ -52,7 +53,7 @@ See [workflow mechanics, contracts, and recovery](docs/workflows.md) for the ful
 Run workflow nodes in Child mode offer [Fresh, Resume, or Agent decides](docs/workflows.md#run-workflow-nodes)
 for the orchestrator conversation, defaulting to Agent decides with fresh execution state on every invocation. Explicit Resume
 requires the latest compatible completed invocation in the same parent run and never silently starts Fresh.
-New Monitor workflows use [bounded context delivery](docs/workflows.md#context-delivery):
+New workflow runs use [bounded context delivery](docs/workflows.md#context-delivery):
 acknowledged orchestrator resumes receive deltas, and headless workers retrieve assigned evidence
 in pages. The execution inspector reports delivered bytes and available model usage separately.
 Monitor shows children beneath their parent and as regular workflow entries, with shared navigation; see

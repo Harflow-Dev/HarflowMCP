@@ -226,7 +226,7 @@ async def test_successor_worker_receives_complete_child_result_inline_or_by_refe
     class ReadingRegistry(TreeRegistry):
         retrieved = False
         async def start(self, prompt, repo, **kwargs):
-            if delivery == 'optimized_v1' and kwargs.get('title', '').endswith(' · consume'):
+            if kwargs.get('title', '').endswith(' · consume'):
                 current = next(r for r in store.list_runs() if r['name'] == 'parent' and r['status'] == 'running')
                 activation = next(a for a in current['activations'] if a['role'] == 'node' and a['node_id'] == 'consume')
                 leaf = next(ref for ref in activation['authorized_input_refs'] if ref['workflow_run_id'] != current['workflow_run_id'])
@@ -245,11 +245,9 @@ async def test_successor_worker_receives_complete_child_result_inline_or_by_refe
     run, _ = await run_tree(store, tmp_path, 'parent', registry)
     assert run['status'] == 'completed', run.get('attention_reason')
     prompt = next(call['prompt'] for call in registry.dispatches if call['label'] == 'consume')
-    if delivery == 'legacy':
-        assert big in prompt
-    else:
-        assert big not in prompt and registry.retrieved
-        assert 'child_retrieval' in prompt
+    assert run['definition']['context_delivery'] == 'optimized_v1'
+    assert big not in prompt and registry.retrieved
+    assert 'child_retrieval' in prompt
     assert len(big) > inv.INVOCATION_PREVIEW_BUDGET
 
 

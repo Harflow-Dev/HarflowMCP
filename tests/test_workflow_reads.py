@@ -35,7 +35,7 @@ assert not any(name == 'mcp' or name.startswith('mcp.') for name in sys.modules)
     environment.pop('PB_TASK_ID', None)
     result = subprocess.run([sys.executable, '-c', code, json.dumps(command)], env=environment, capture_output=True, text=True, timeout=20)
     assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout)['v'] == 7
+    assert json.loads(result.stdout)['v'] == 8
 
 
 @pytest.mark.parametrize('role', ['builder', 'orchestrator', 'node'])
