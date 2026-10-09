@@ -191,6 +191,13 @@ shows the canvas above the same agent activity columns used by Parallel. Paralle
 those columns. Highlighting comes from recorded task state. Agent names and colored dots identify
 backends; vendor logos are unnecessary.
 
+Both Parallel and the workflow's activity pane load and update detailed feeds only for visible
+columns. Never-visited columns stay lightweight; visited columns retain their last activity snapshot,
+pagination and reading state while off screen, without activity subscriptions. Returning columns
+show that snapshot immediately and refresh in the background. Off-screen tasks still contribute to
+group status and current action targets. Retained snapshots are cleared when the window closes;
+memory grows with visited columns and loaded history.
+
 Task detail headers wrap the task title across the pane and show the repository beneath it.
 Status and actions share a toolbar in the main window, standalone task window, and embedded workflow task view.
 
@@ -1198,9 +1205,13 @@ The workflow inspector uses left-aligned child links, groups repeated invocation
 workflow identity, and keeps individual run targets distinct. Repeated-run groups start collapsed;
 disclosure changes use the sidebar animation and preserve the chosen state during polling.
 
-Parallel cells retain at least six recent activity rows and use spare cell height to show more
-recent history. Older rows leave the recent view only when space is needed. **Show all** reveals
-the complete history and suspends follow-live; it does not resize the cell.
+Task detail, Parallel, and the workflow activity pane start at recent activity. Scrolling toward
+the top automatically reveals older loaded rows and requests bounded older event pages. There
+is no Show all or Load more button. Reading position and tool disclosures survive loading and
+Parallel viewport departures; only visible columns initiate older-page requests. Errors pause
+automatic loading and expose **Retry older activity**. Scrolling back to the latest activity
+resumes live following. Short feeds pause automatic filling after one additional history load;
+scroll upward or change a tool disclosure to request more.
 Canvas zoom controls share a consistent height. The workflow editor bounds its canvas to its
 pane so the left edge remains reachable without changing saved node positions.
 
@@ -1211,8 +1222,11 @@ before an explicit workflow recovery action.
 ### Bounded task, execution and activity history
 
 Monitor loads recent task and workflow headers in pages of 100, separately from live active
-updates. **Load more** requests one older page; ordinary refreshes merge by stable identity and
-retain loaded pages. Direct ID lookup can reveal an execution outside the loaded page, including
+updates. Scrolling to the bottom of the sidebar automatically requests older pages. Task and
+workflow history each allow one request at a time; loading pauses on errors or blocked indexing,
+with an explicit **Retry** action. Search and backend filters still apply locally to loaded history;
+scrolling can bring more matching rows into that history. Ordinary refreshes merge by stable identity
+and retain loaded pages. Direct ID lookup can reveal an execution outside the loaded page, including
 its ancestor and orchestrator session-owner headers. Root-tree totals do not depend on which
 historical page is visible. Loading, indexing, retry and end states remain explicit.
 
@@ -1229,8 +1243,10 @@ projection cannot leave stale authority ready. Derivative schema upgrades rebuil
 without rewriting historical metadata.
 
 Activity initially reads the newest 100 events and tails new events from that boundary.
-**Load more** reads one older byte window, with a 1 MiB scan ceiling and the existing response
-byte ceilings. Cursors bind file identity and snapshot integrity; replacement or truncation
+Approaching within 200 points of the oldest visible activity automatically reads one older
+byte window, with a 1 MiB scan ceiling and the existing response byte ceilings. Each conversation
+allows one older-history operation at a time. Loaded rows are revealed in batches of up to 100
+before another event page is requested. Cursors bind file identity and snapshot integrity; replacement or truncation
 requires a fresh generation. Loaded pages retain tool-call/result pairing across boundaries and
 preserve the scroll anchor when older events prepend. Deliberate selection or filter changes
 reset paging. `get_task_event_page` exposes the bounded cursor reader to MCP callers; existing
@@ -1240,6 +1256,12 @@ can yield an empty page with a continuation, so callers must use `has_more`, not
 Cumulative summary accounting is independent of the loaded activity window. Background scans
 process bounded chunks and retain compact counts and edit identities instead of raw history.
 Unloaded conversation members and unfinished summary bootstrap are labelled incomplete.
+Initial summary scans and initial activity reads share a budget of four background jobs across
+Monitor windows. Activity and summary work for one stream can occupy two slots. Additional
+work waits while its view remains subscribed; leaving a view
+cancels its queued work without disrupting another view's shared stream. A long initial summary
+scan holds one slot until it finishes. This bounds concurrent startup work rather than limiting
+the group's task count or changing which columns are resident.
 These bounds address large-history loading; they do not establish the cause of the reported
 intermittent Monitor stall. The remaining observations and investigation are recorded in
 [stall investigation](drafts/monitor-performance-feedback.md).

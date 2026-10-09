@@ -1012,26 +1012,16 @@ async def _managed_workflow_reader() -> tuple[dict[str, Any], dict[str, Any]] | 
 
 async def _bounded_workflow_caller():
     """Verify Monitor transport callers without replaying retained task metadata."""
-    from . import lineage
-    from .catalog import Catalog
-    directory = _reg().log_dir
-    if not Catalog(directory, store.RECORD_SUFFIX).ready():
-        await asyncio.to_thread(store.bootstrap_catalog, directory)
-        raise MCPError(INVALID_PARAMS, "Workflow caller authority indexing is incomplete; retry after bounded indexing progresses")
-    detection = await asyncio.to_thread(lineage.detect_catalog_caller, directory)
-    if detection.undecidable is not None:
-        raise MCPError(INVALID_PARAMS, "Workflow caller authority is undecidable: " + str(detection.undecidable))
-    return detection.caller
+    from .workflow_reads import bounded_caller
+    try:
+        return await bounded_caller(_reg().log_dir)
+    except ValueError as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
 
 
 def _managed_run_summary(run: dict[str, Any]) -> dict[str, Any]:
-    """Expose routing state without bypassing settled-only result inspection."""
-    keys = ("workflow_run_id", "name", "kind", "status", "definition", "revision", "prompt", "execution_contract", "tasks", "checklist_disposition", "decisions", "transitions", "settling", "input_question", "input_decision_id", "interaction_owner", "reason", "instructions", "created_at", "updated_at")
-    summary = {key: run[key] for key in keys if key in run}
-    if isinstance(run.get("technical_plan"), str):
-        summary.update(technical_plan=run["technical_plan"][:16000], technical_plan_truncated=len(run["technical_plan"]) > 16000, technical_plan_execution_id=run.get("technical_plan_execution_id"))
-    summary["activations"] = [{key: activation[key] for key in ("id", "node_id", "role", "status", "created_at", "finished_at") if key in activation} | {"tasks": [{"task_id": task["task_id"], "status": task["status"]} for task in activation.get("tasks", [])]} for activation in run.get("activations", [])]
-    return summary
+    from .workflow_reads import managed_run_summary
+    return managed_run_summary(run)
 
 
 async def _guard_task_read(task_id: str) -> None:
@@ -1057,6 +1047,9 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
             refusal = await asyncio.to_thread(caller_refusal, _reg().log_dir)
             if refusal is not None:
                 raise ValueError("Only a verified human Monitor caller can claim monitor interaction ownership: " + refusal[1])
+        from .workflow_reads import READ_ACTIONS, call
+        if action in READ_ACTIONS:
+            return await call(action, directory=_reg().log_dir, reader=_managed_workflow_reader, _bounded_read=bounded_read, **kwargs)
         if action in {"pause", "resume", "recover"}:
             kwargs.setdefault("interaction_owner", "caller")
         if action not in {"list", "list_runs", "list_run_page", "get_run_header", "get", "status", "inspect", "assigned_input", "detail"}:
@@ -1129,97 +1122,21 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
             return await workflows.build_workflow(**kwargs, _verified_caller=caller)
         if action == "builder_followup":
             return await workflows.followup_workflow_builder(**kwargs)
-        if action in {'list_run_page', 'get_run_header'}:
-            from .workflow_inspection import managed_page_reader, page_indexing_response
-            ready, managed = await asyncio.to_thread(managed_page_reader, _reg().log_dir)
-            if not ready:
-                return page_indexing_response(_reg().log_dir)
-        elif bounded_read and action in {"status", "detail", "list"}:
-            from .workflow_inspection import managed_page_reader, page_indexing_response
-            ready, managed = await asyncio.to_thread(managed_page_reader, _reg().log_dir)
-            if not ready:
-                pending = await asyncio.to_thread(page_indexing_response, _reg().log_dir)
-                if action == 'list':
-                    pending['workflows'] = []
-                return pending
-        else:
-            managed = await _managed_workflow_reader()
+        managed = await _managed_workflow_reader()
         if action == "assigned_input":
             from .workflow_inspection import assigned_input_page
             return await asyncio.to_thread(assigned_input_page, managed, workflows.WorkflowStore().root, kwargs["run_id"], kwargs["execution_id"], source_run_id=kwargs.get("source_run_id"), task_id=kwargs.get("task_id"), cursor=kwargs.get("cursor"), limit=kwargs.get("limit", 16000))
         if managed is not None:
             association, owned_run = managed
-            if action in {'list_run_page', 'get_run_header'}:
-                if association['role'] not in {'builder', 'orchestrator'}:
-                    raise ValueError('Worker nodes cannot inspect workflow context')
-                if action == 'get_run_header' and kwargs['run_id'] != owned_run['workflow_run_id']:
-                    raise ValueError('Managed callers may only inspect their own workflow run')
-                from .workflow_responses import compact
-                header = compact(owned_run)
-                if action == 'get_run_header':
-                    return header
-                active = owned_run.get('status') not in workflows.TERMINAL
-                return {'items': [header] if not kwargs.get('active_only') or active else [], 'next_cursor': None, 'has_more': False, 'bootstrap_pending': False, 'total_active_count': int(active), 'related_headers': []}
             if association["role"] == "builder":
-                if action in {"status", "inspect", "detail"} and kwargs["run_id"] != owned_run["workflow_run_id"]:
+                if action == "inspect" and kwargs["run_id"] != owned_run["workflow_run_id"]:
                     raise ValueError("Builders may only inspect their own workflow run")
-                if action == "status":
-                    from .workflow_responses import compact
-                    return compact(owned_run)
-                if action == "detail" and kwargs["view"] in {"builder_draft", "generated_definition"}:
-                    from .workflow_responses import detail
-                    return detail(owned_run, kwargs["view"], kwargs.get("cursor"), kwargs.get("limit", 8000))
-                if action == "list_runs":
-                    from .workflow_responses import compact
-                    return [compact(owned_run)]
                 raise ValueError("Builders may only inspect their own draft and builder run")
             if association["role"] != "orchestrator":
                 raise ValueError("Worker nodes cannot inspect workflow context")
-            if action in {"status", "inspect", "detail"} and kwargs["run_id"] != owned_run["workflow_run_id"]:
+            if action == "inspect" and kwargs["run_id"] != owned_run["workflow_run_id"]:
                 raise ValueError("Orchestrators may only inspect their own workflow run")
-            if action == "get":
-                if kwargs["name"] != owned_run["name"]:
-                    raise ValueError("Orchestrators may only inspect their current workflow graph")
-                return owned_run["definition"]
-            if action == "list":
-                return [owned_run["definition"]]
-            if action == "list_runs":
-                return [_managed_run_summary(owned_run)]
-            if action == "detail":
-                from .workflow_responses import PUBLIC_VIEWS
-                if kwargs["view"] == "executions" or kwargs["view"] not in PUBLIC_VIEWS:
-                    raise ValueError("Use inspect_workflow_node for settled execution details")
-                from .workflow_responses import detail
-                return detail(owned_run, kwargs["view"], kwargs.get("cursor"), kwargs.get("limit", 8000))
-            if action == "status":
-                return _managed_run_summary(owned_run)
         store_ = workflows.WorkflowStore()
-        if action == "list":
-            return await asyncio.to_thread(store_.list)
-        if action == "list_runs":
-            return await asyncio.to_thread(store_.list_runs)
-        if action == 'get_run_header':
-            return await asyncio.to_thread(store_.get_run_header, kwargs['run_id'])
-        if action == 'list_run_page':
-            related_id = kwargs.pop('related_run_id', None)
-            if related_id is not None:
-                related = await asyncio.to_thread(store_.related_run_headers, [related_id])
-                page = {'items': [], 'next_cursor': None, 'has_more': False, 'bootstrap_pending': False, 'related_headers': related}
-                from .catalog import apply_read_state
-                if related.catalog_state:
-                    apply_read_state(page, related.catalog_state)
-                return page
-            page = await asyncio.to_thread(store_.list_run_page, **kwargs)
-            ids = [item[key] for item in page['items'] for key in ('parent_workflow_run_id', 'orchestrator_session_owner_run_id') if item.get(key)]
-            import json
-            budget = min(64 * 1024, max(0, 256 * 1024 - len(json.dumps(page, ensure_ascii=True).encode()) - 2048))
-            page['related_headers'] = await asyncio.to_thread(store_.related_run_headers, ids, byte_budget=budget)
-            from .catalog import apply_read_state
-            if page['related_headers'].catalog_state:
-                apply_read_state(page, page['related_headers'].catalog_state)
-            return page
-        if action == "get":
-            return await asyncio.to_thread(store_.get, kwargs["name"])
         if action == "save":
             return await asyncio.to_thread(store_.save, kwargs["name"], kwargs["definition"], kwargs.get("expected_revision"), authority_guard=guard_tree)
         if action == "delete":
@@ -1229,12 +1146,6 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
             run = await asyncio.to_thread(store_.get_run, kwargs["run_id"])
             request = {key: value for key, value in kwargs.items() if key != "run_id"}
             return await asyncio.to_thread(inspect_request, run, store_.root, request)
-        if action == "detail":
-            from .workflow_responses import detail
-            run = await asyncio.to_thread(store_.get_run, kwargs["run_id"])
-            return detail(run, kwargs["view"], kwargs.get("cursor"), kwargs.get("limit", 8000))
-        if action == "status":
-            return await asyncio.to_thread(store_.get_run, kwargs["run_id"])
         return await asyncio.to_thread(store_.control, action=action, **kwargs)
     except (ValueError, KeyError, OSError, backends.UnsupportedCapability) as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from None

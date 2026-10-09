@@ -86,9 +86,10 @@ async def test_workflow_mutation_refuses_managed_caller(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("action,key", [("list", "workflows"), ("list-runs", "runs")])
 def test_cli_workflow_collections_are_result_objects(action, key, monkeypatch, capsys):
-    async def invoke(action):
+    from polybridge import workflow_reads
+    async def invoke(action, **kwargs):
         return [{"name": "review"}]
-    monkeypatch.setattr(server, "_workflow_call", invoke)
+    monkeypatch.setattr(workflow_reads, "call", invoke)
     assert ctl.main(["workflow-" + action, "--json"]) == 0
     result = json.loads(capsys.readouterr().out)["result"]
     assert result[key][0]["name"] == "review"

@@ -667,6 +667,11 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
                     error = str(exc)
             from .backends.native import available as native_available
             return {"valid": error is None, "native_subagents_available": native_available(), "definition": canonical, **({"dependencies": dependencies} if dependencies is not None else {}), **({"error": error} if error is not None else {})}
+        if action in {"list", "list-runs", "list-page", "get", "status", "detail"}:
+            from .read_metrics import span
+            with span("import"):
+                from .workflow_reads import cli_read
+            return await cli_read(action, args, default_log_dir())
         from . import server
         if action == "abandon-dispatch":
             from .workflows import WorkflowStore
@@ -698,18 +703,8 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
         if action == "builder-apply":
             raw = sys.stdin.read() if args.definition == "-" else Path(args.definition).read_text()
             return await server.apply_workflow_draft(json.loads(raw), args.expected_draft_revision)
-        if action == 'list-page':
-            return await server.list_workflow_run_page(args.limit, args.cursor, args.active_only, args.related_run_id, args.run_ids.split(',') if args.run_ids is not None else None)
-        if action in {"list", "list-runs"}:
-            entries = await server._workflow_call(action.replace("-", "_"), **({"_bounded_read": True} if action == "list" and args.monitor_view else {}))
-            if isinstance(entries, dict) and 'catalog_state' in entries:
-                return entries
-            if action == "list-runs":
-                from .workflow_responses import history_page
-                return history_page(entries, args.offset, args.limit)
-            return {"workflows" if action == "list" else "runs": entries}
-        if action in {"get", "delete"}:
-            return await server._workflow_call(action, name=args.name)
+        if action == "delete":
+            return await server._workflow_call("delete", name=args.name)
         if action == "save":
             raw = sys.stdin.read() if args.definition == "-" else Path(args.definition).read_text()
             return await server.save_workflow(args.name, json.loads(raw), args.expected_revision)
@@ -728,33 +723,6 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
             if args.monitor:
                 return await server._workflow_call("start", name=args.name, prompt=prompt, repo_path=args.repo, overrides=candidate or None, freedom=args.freedom, network=_network(args.network), interaction_owner="monitor")
             return await server._workflow_call("start", name=args.name, prompt=prompt, repo_path=args.repo, overrides=candidate or None, freedom=args.freedom, network=_network(args.network))
-        if action == "detail":
-            if args.monitor_view:
-                from .workflow_responses import monitor_detail
-                if await server._bounded_workflow_caller() is not None:
-                    raise ValueError("Monitor detail snapshots are only available to the local Monitor")
-                run = None if args.cursor else await server._workflow_call("status", run_id=args.workflow_run_id, _bounded_read=True)
-                if run is not None and run.get('catalog_state', {}).get('status') in {'preparing', 'blocked'}:
-                    return run
-                return monitor_detail(run, args.workflow_run_id, args.view, default_log_dir().parent / "monitor_snapshots", args.cursor)
-            return await server.get_workflow_run_detail(args.workflow_run_id, args.view, args.cursor)
-        if action == "status" and args.monitor_view:
-            from .workflow_responses import monitor, monitor_snapshot
-            from .workflow_cancellation import monitor_projection
-            from .workflows import WorkflowStore
-            if args.snapshot:
-                if await server._bounded_workflow_caller() is not None:
-                    raise ValueError("Monitor snapshots are only available to the local Monitor")
-                run = None if args.cursor else await server._workflow_call("status", run_id=args.workflow_run_id, _bounded_read=True)
-                if run is not None and run.get('catalog_state', {}).get('status') in {'preparing', 'blocked'}:
-                    return run
-                if run is not None:
-                    run = await asyncio.to_thread(monitor_projection, WorkflowStore(), run)
-                return monitor_snapshot(run, args.workflow_run_id, default_log_dir().parent / "monitor_snapshots", args.cursor)
-            run = await server._workflow_call("status", run_id=args.workflow_run_id, _bounded_read=True)
-            if run.get('catalog_state', {}).get('status') in {'preparing', 'blocked'}:
-                return run
-            return monitor(await asyncio.to_thread(monitor_projection, WorkflowStore(), run))
         if action == "wait":
             return await server._wait_workflow_full(args.workflow_run_id, args.timeout_seconds)
         if action == "resume":
@@ -767,10 +735,10 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
         result = asyncio.run(invoke())
     except Exception as exc:
         return _fail(args, "workflow_error", str(exc))
-    if args.json:
-        print(json.dumps({"v": CTL_JSON_VERSION, "result": result}))
-    else:
-        print(json.dumps(result, indent=2))
+    from .read_metrics import span
+    with span("serialization"):
+        output = json.dumps({"v": CTL_JSON_VERSION, "result": result}) if args.json else json.dumps(result, indent=2)
+    print(output)
     return 0
 
 

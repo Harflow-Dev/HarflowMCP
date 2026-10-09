@@ -666,7 +666,8 @@ def test_schema_three_cache_rebuild_is_bounded_without_decoding_old_headers(tmp_
 
 
 def test_monitor_definition_list_uses_bounded_authority_but_public_first_read_is_unchanged(tmp_path, monkeypatch, capsys):
-    from unittest.mock import AsyncMock
+    from unittest.mock import Mock
+    from polybridge import workflow_inspection
     human_authority(monkeypatch)
     directory = tmp_path / 'tasks'
     legacy_tasks(directory, 250)
@@ -675,12 +676,12 @@ def test_monitor_definition_list_uses_bounded_authority_but_public_first_read_is
     storage = workflows.WorkflowStore(root=tmp_path)
     monkeypatch.setattr(workflows, 'WorkflowStore', lambda **kwargs: storage)
     monkeypatch.setattr(storage, 'list', lambda: [{'name': 'saved'}])
-    legacy = AsyncMock(return_value=None)
-    monkeypatch.setattr(server, '_managed_workflow_reader', legacy)
+    legacy = Mock(return_value=None)
+    monkeypatch.setattr(workflow_inspection, 'managed_reader', legacy)
     # Ordinary CLI still succeeds on the first call with a cold task catalog.
     assert ctl.main(['workflow-list', '--json']) == 0
     assert json.loads(capsys.readouterr().out)['result']['workflows'] == [{'name': 'saved'}]
-    assert legacy.await_count == 1
+    assert legacy.call_count == 1
     for _ in range(3):
         assert ctl.main(['workflow-list', '--monitor-view', '--json']) == 0
         pending = json.loads(capsys.readouterr().out)['result']
@@ -689,7 +690,7 @@ def test_monitor_definition_list_uses_bounded_authority_but_public_first_read_is
     for _ in range(4):
         assert ctl.main(['workflow-list', '--monitor-view', '--json']) == 0
         assert json.loads(capsys.readouterr().out)['result']['workflows'] == [{'name': 'saved'}]
-    assert legacy.await_count == 1
+    assert legacy.call_count == 1
     monkeypatch.setenv(lineage.ENV_TASK_ID, 'unknown-task')
     assert ctl.main(['workflow-list', '--monitor-view', '--json']) != 0
     assert 'cannot be verified' in capsys.readouterr().out

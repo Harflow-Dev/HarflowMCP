@@ -90,6 +90,9 @@ including standalone and embedded task views. Monitor offers Cancel for its own 
 and idle caller-owned workflows; linked child views route cancellation to the root.
 See [workflow interaction and recovery](docs/workflows.md) for eligibility and cancellation outcomes.
 
+Older sidebar history loads automatically when you scroll to the bottom.
+Initial activity reads and summary scans share a four-job loading limit; large Parallel groups
+retain complete membership while queued feeds prepare in order.
 History indexing recovers automatically while Monitor retains loaded content. Blocked histories
 show recovery guidance and Retry; damaged derivative catalogs are rebuilt before metadata saves.
 New activity panels
@@ -199,6 +202,15 @@ uv run mcp dev src/polybridge/server.py                 # MCP Inspector
 
 For Monitor, run `swift test --no-parallel` in each package under `macos/`, then
 `swiftformat macos && swiftlint lint` and `./macos/build-app.sh`.
+
+For isolated, no-model loading measurements and opt-in timing instrumentation, see
+[Monitor performance baselines](docs/monitor-performance.md).
+Workflow listing, status, and detail CLI reads share the MCP read implementation and avoid
+initializing the MCP server; their permissions and versioned responses are unchanged.
+Parallel and workflow activity columns render lazily. Only visible columns update activity; visited
+columns retain their last snapshot and reading position until the group window closes. Returning
+columns show that snapshot immediately while refreshing in the background.
+Activity history loads automatically as you scroll toward older entries, with explicit retry on errors.
 
 Read [the workflow guide](docs/workflows.md) for definitions and execution contracts, and
 [contributor notes](CLAUDE.md) for architecture and harness behavior.

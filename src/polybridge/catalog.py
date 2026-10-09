@@ -17,6 +17,8 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Callable
 
+from .read_metrics import span
+
 PAGE_LIMIT = 100
 PAGE_BYTES = 256 * 1024
 ROW_BYTES = 128 * 1024  # Reserve the other half for ownership/ancestor metadata.
@@ -585,6 +587,7 @@ class Catalog:
         db.execute('DELETE FROM pending WHERE id NOT IN (SELECT id FROM seen WHERE generation=?)', (generation,))
         db.execute("INSERT OR REPLACE INTO state VALUES ('complete','1')")
 
+    @span("catalog")
     def bootstrap(self, db: sqlite3.Connection, loader: Callable[[str], tuple[dict[str, Any], float, bool] | None]) -> bool:
         self._discover(db)
         identifiers = db.execute('SELECT id FROM pending ORDER BY id LIMIT ?', (BOOTSTRAP_LIMIT,)).fetchall()
