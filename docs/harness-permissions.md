@@ -27,6 +27,12 @@ vendor documentation; the Vibe example explicitly covers the locally inspected *
 `./install.sh` registers **Polybridge as an MCP server in supported clients**. That enables clients
 to call Polybridge; it does not provision the services, accounts, or approvals used by workers.
 
+In Monitor, Settings → General shows command-line tool resolution. The Location field remains a
+draft until Return or **Apply** commits it, trimming surrounding whitespace. **Detect** clears the
+saved override and refreshes resolution. Agents run with your login-shell PATH; **Environment
+details** contains the full explanation, including exclusion of `PB_*` variables and
+`PB_OPEN_MONITOR=0`.
+
 ### Before the first workflow run
 
 - Check each node and fallback in its actual working directory: confirm effective global,

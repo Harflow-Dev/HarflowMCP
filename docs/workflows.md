@@ -64,7 +64,7 @@ Limited activity is labeled explicitly. Parent process liveness and a quiet acti
 prove whether a child is running; the runner uses correlated harness lifecycle evidence.
 A node advances only after confirmed child settlement and a valid structured worker result.
 
-A subagent has no independent **Take over** action. Stop and Resume are available only when the
+A subagent has no independent **Take over in terminal** action. Stop and Resume are available only when the
 adapter supports those operations on that individual child. Parent takeover is refused while
 children remain unresolved. Cancellation and timeout must settle the child before retry or fallback;
 an unresolved child continues to protect its checkout even after its supervisor exits.
@@ -955,6 +955,15 @@ workflow records `needs_attention` rather than reporting cancellation complete.
 Monitor terminal continuation is offered only after the workflow
 has completed its valid End traversal, never while a node is still participating in execution.
 
+In the Monitor, the eligible recovery options for a Monitor-owned, non-builder run first open in a
+nonblocking floating panel over the run panes; the underlying workflow stays interactive and its
+layout is unchanged whether the panel is open, dismissed or reopened. Closing the panel keeps any
+typed instructions and the extra-attempts selection, and the honest eligible status badge in the run
+header reopens it. Automatic opening happens once per run during that screen's lifetime; later
+attention checkpoints on the same run use the badge to reopen. Recovery commands, decisions, and
+ownership semantics are unchanged. Caller-owned, child, and builder surfaces retain their existing
+status and diagnostics without exposing these recovery controls.
+
 Resume of `needs_input` includes the exact published `input_decision_id` as `decision_id` (CLI
 `--decision-id`) and the answer in `instructions`, preventing stale answers from being applied to a
 later question. Monitor CLI controls also include `--monitor`. The caller's original request
@@ -1048,7 +1057,7 @@ New canvases start with Start → Plan → Implementation → Review → End in 
 
 With the canvas focused, use ⌘C and ⌘V to copy and paste selected nodes. Pasted nodes get new IDs and an offset; connections within the selected group are copied. Existing Start/End nodes are skipped so terminal nodes stay unique. Text fields retain their normal copy/paste behavior.
 
-With the canvas focused, press ⌘Z repeatedly to undo earlier edits. A full node drag is one undo step. Text fields retain their normal text undo. **Discard Changes**, beside Save, restores the saved workflow (or the starter for a new workflow) and clears its unsaved draft. Discard and canvas undo are unavailable while an agent is editing.
+With the canvas focused, press ⌘Z repeatedly to undo earlier edits. A full node drag is one undo step. Text fields retain their normal text undo. **Discard**, beside Save, restores the saved workflow (or the starter for a new workflow) and clears its unsaved draft. Discard and canvas undo are unavailable while an agent is editing.
 
 ## Edit the current canvas with an agent
 
@@ -1281,7 +1290,10 @@ state stay attached to the conversation.
 
 Long workflow details stay within the window's available space. Run diagnostics and the
 inspector scroll independently so updates do not push the header, sidebar or canvas outside
-the window; split-pane dividers remain adjustable.
+the window; split-pane dividers remain adjustable. Scrollable Monitor surfaces with their own
+native scroll view present thin app-local overlay scrollbars that fade at rest, even when the
+system scrollbar preference is legacy; native hover expansion is unchanged. Sidebar selection
+uses the theme's pale highlight; scrolling, selection and keyboard behaviour are unchanged.
 
 Child workflow shortcuts sit beneath their parent workflow, alongside its task nodes. Each child
 also keeps its own workflow entry with its actual nodes; both entries select the same real child run. Both entries reflect the child workflow's current status, so a completed
@@ -1309,13 +1321,16 @@ before an explicit workflow recovery action.
 ### Bounded task, execution and activity history
 
 Monitor loads recent task and workflow headers in pages of 100, separately from live active
-updates. Scrolling to the bottom of the sidebar automatically requests older pages. Task and
+updates. Scrolling to the bottom of the sidebar automatically requests older pages, and a
+**Load older** control per source requests the next page manually while more history exists.
+Task and
 workflow history each allow one request at a time; loading pauses on errors or blocked indexing,
 with an explicit **Retry** action. Search and backend filters still apply locally to loaded history;
 scrolling can bring more matching rows into that history. Ordinary refreshes merge by stable identity
 and retain loaded pages. Direct ID lookup can reveal an execution outside the loaded page, including
 its ancestor and orchestrator session-owner headers. Root-tree totals do not depend on which
-historical page is visible. Loading, indexing, retry and end states remain explicit.
+historical page is visible. Loading, indexing and retry states remain explicit; exhausted history
+simply ends without an end-of-history row.
 
 `task-list-page` and `workflow-list-page` use opaque chronology cursors rather than shifting
 array offsets. Existing listing callers retain their original interfaces. A compact local catalog
