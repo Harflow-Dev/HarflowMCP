@@ -95,6 +95,7 @@ including standalone and embedded task views. Monitor offers Cancel for its own 
 and idle caller-owned workflows; linked child views route cancellation to the root.
 See [workflow interaction and recovery](docs/workflows.md) for eligibility and cancellation outcomes.
 
+The File menu offers **Create Workflow…** and **Run Workflow…**; Run opens a saved-workflow chooser before configuration and execution and replaces an open New Session sheet. **Settings…** is available from the application menu with ⌘,.
 The sidebar has a fixed **New session** button (⌘N) above search and the compact backend filter.
 Expand **Advanced** in New session for the existing model, reasoning-effort and turn-limit options
 supported by the selected agent.

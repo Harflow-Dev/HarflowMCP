@@ -224,6 +224,12 @@ shows the canvas above the same agent activity columns used by Parallel. Paralle
 those columns. Highlighting comes from recorded task state. Agent names and colored dots identify
 backends; vendor logos are unnecessary.
 
+Use **File → Create Workflow…** (⇧⌘N) to open a new editor, or **File → Run Workflow…** (⇧⌘R) to choose a saved workflow and review its existing launch settings. Opening the chooser does not start execution. **Polybridge Monitor → Settings…** (⌘,) opens settings.
+
+New Session and Run Workflow share one sheet: invoking either command replaces the other open sheet.
+
+Canvas connections show lines and arrowheads without condition badges; select a connection to inspect or edit its condition. Routes reserve a straight approach at destination arrowheads and separate incoming bends where space permits. The component bar accepts dragging **Run workflow**, alongside the other offered node types. Builder activity stays within its own pane beside the sidebar during resizing. Saved workflow rows have additional vertical padding, and single-line follow-up text is centered in its composer.
+
 Both Parallel and the workflow's activity pane load and update detailed feeds only for visible
 columns. Never-visited columns stay lightweight; visited columns retain their last activity snapshot,
 pagination and reading state while off screen, without activity subscriptions. Returning columns
