@@ -60,7 +60,8 @@ requires the latest compatible completed invocation in the same parent run and n
 New workflow runs use [bounded context delivery](docs/workflows.md#context-delivery):
 acknowledged orchestrator resumes receive deltas, and headless workers retrieve assigned evidence
 in pages. The execution inspector reports delivered bytes and available model usage separately.
-Monitor shows children beneath their parent and as regular workflow entries, with shared navigation; see
+Monitor keeps workflow headers and builder activity within the window's content area during resizing.
+It shows children beneath their parent and as regular workflow entries, with shared navigation; see
 [Monitor navigation and layout](docs/workflows.md#monitor-history-and-notifications).
 
 ## Get started

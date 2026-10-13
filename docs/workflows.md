@@ -1268,8 +1268,10 @@ cannot use it to bypass settled-node inspection or access another run.
 
 ### Monitor history and notifications
 
-Sidebar search and the harness filter remain below the native window titlebar in windowed and
-full-screen layouts. These controls remain fixed while workflow and task history scrolls.
+The sidebar's New session button, search and harness filter, and the workflow header remain below
+the native window titlebar in windowed and full-screen layouts. Workflow headers and builder
+activity use the available pane size when the window is resized. Sidebar controls remain fixed
+while workflow and task history scrolls.
 
 Transient catalog preparation retries through Monitor's normal two-second read polling. It does
 not restart workflows, retry executions, or change permissions. Loaded definitions, history,
