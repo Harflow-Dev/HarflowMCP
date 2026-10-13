@@ -228,7 +228,14 @@ Use **File → Create Workflow…** (⇧⌘N) to open a new editor, or **File �
 
 New Session and Run Workflow share one sheet: invoking either command replaces the other open sheet.
 
-Canvas connections show lines and arrowheads without condition badges; select a connection to inspect or edit its condition. Routes reserve a straight approach at destination arrowheads and separate incoming bends where space permits. The component bar accepts dragging **Run workflow**, alongside the other offered node types. Builder activity stays within its own pane beside the sidebar during resizing. Saved workflow rows have additional vertical padding, and single-line follow-up text is centered in its composer.
+Canvas connections show lines and arrowheads without condition badges; select a connection to inspect or edit its condition.
+Routes prefer short nearby grid corridors and keep bends and crossings away from arrowheads where
+possible. They prefer separate lanes when space allows, permit same-direction segments to share a
+tight corridor, and discourage opposing segments from overlapping. They avoid unnecessary detours
+around the source node; backward connections can still need a loop to reach the destination's input.
+These are routing preferences when space is constrained, rather than a requirement to widen every
+incoming connection. Drawing and hover hit-testing use the same routes, including after moving nodes.
+The component bar accepts dragging **Run workflow**, alongside the other offered node types. Builder activity stays within its own pane beside the sidebar during resizing. Saved workflow rows have additional vertical padding, and single-line follow-up text is centered in its composer.
 
 Both Parallel and the workflow's activity pane load and update detailed feeds only for visible
 columns. Never-visited columns stay lightweight; visited columns retain their last activity snapshot,
