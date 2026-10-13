@@ -99,6 +99,34 @@ async def test_a_live_invocation_is_spawned_on_a_pipe_carrying_its_prompt(
     assert events[1]["text"] == "hello there"
 
 
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "  repeated  spaces\tand tabs  ",
+        "first\r\nsecond\n\nfourth",
+    ],
+)
+async def test_live_initial_prompt_preserves_whitespace_in_transport_and_event(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prompt: str
+) -> None:
+    """JSON framing must preserve prompt text while carrying it to the live process."""
+    sink = tmp_path / "stdin.txt"
+    backend = _CatDouble(sink)
+    monkeypatch.setitem(backends.BACKENDS, backend.name, backend)
+    registry = TaskRegistry(log_dir=tmp_path / "streams", owner=OWNER)
+
+    task = await registry.start(prompt, tmp_path, backend=backend)
+    await task.done.wait()
+
+    assert json.loads(sink.read_text())["message"]["content"][0]["text"] == prompt
+    user_events = [
+        event
+        for event in _events(registry.log_dir, task.task_id)
+        if event["kind"] == "user_message"
+    ]
+    assert [event["text"] for event in user_events] == [prompt]
+
+
 async def test_a_devnull_invocation_never_gets_a_pipe(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -659,6 +659,64 @@ async def test_resume_forwards_network_through_both_server_branches(
     assert "sandbox_workspace_write.network_access=true" in captured["argv"]
 
 
+async def test_resume_preserves_followup_prompt_bytes_through_transport_and_record(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Resume must deliver the caller's text byte-for-byte, including intentional whitespace.
+
+    This covers the server-to-registry handoff, the backend's separated prompt transport, and the
+    successor record. A summary or display field may be shortened elsewhere, but the assignment
+    sent to the agent and retained for the resumed task is the submitted string.
+    """
+    prompt = "  keep  these\tcolumns\r\nwith\nblank\n\nlines  "
+    captured: dict = {}
+
+    async def fake_spawn(invocation, **kwargs):
+        captured.update(invocation=invocation, prompt=kwargs["prompt"])
+        task = Task(
+            task_id="resumed-whitespace",
+            backend=kwargs["backend"].name,
+            session_id=kwargs.get("session_id"),
+            repo_path=kwargs["repo_path"],
+            prompt=kwargs["prompt"],
+            max_turns=kwargs.get("max_turns"),
+            log_path=server._reg().log_dir / "resumed-whitespace.jsonl",
+            started_at=datetime.now(timezone.utc),
+            freedom=kwargs.get("freedom", "write_in_repo"),
+            network=kwargs.get("network"),
+        )
+        server._reg()._tasks[task.task_id] = task
+        server._reg().persist(task)
+        return task
+
+    monkeypatch.setattr(server._reg(), "_spawn", fake_spawn)
+    parent = Task(
+        task_id="whitespace-parent",
+        backend="codex",
+        session_id="thread-whitespace",
+        repo_path=git_repo,
+        prompt="original",
+        max_turns=None,
+        log_path=server._reg().log_dir / "whitespace-parent.jsonl",
+        started_at=datetime.now(timezone.utc),
+        freedom="write_in_repo",
+    )
+    parent.status = "completed"
+    parent.done.set()
+    server._reg()._tasks[parent.task_id] = parent
+    server._reg().persist(parent)
+
+    result = await call("resume_task", task_id=parent.task_id, followup_prompt=prompt)
+
+    assert captured["prompt"] == prompt
+    invocation = captured["invocation"]
+    assert invocation.initial_input is None
+    assert invocation.argv[invocation.argv.index("--") + 2] == prompt
+    record = store.read(server._reg().log_dir, result.structured_content["task_id"])
+    assert record is not None
+    assert record.prompt == prompt
+
+
 # --- send_message (live input) ------------------------------------------------------------------
 
 

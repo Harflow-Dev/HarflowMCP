@@ -33,7 +33,9 @@ explain when to move forward or return for fixes.
 ## How it works
 
 The **orchestrator** owns your original request, workflow context, and checklist. It chooses among
-valid next steps and writes a focused assignment for each worker.
+valid next steps and writes a focused assignment for each worker. Assignments and answers travel
+verbatim — write them in plain prose with spaces and word boundaries intact, never compressed to
+save tokens; see [context delivery](docs/workflows.md#context-delivery).
 
 **Worker nodes** receive their own instructions, the assignment, and relevant results. Planning
 returns both a technical plan and tasks; implementation, review, and test steps return structured
@@ -215,8 +217,9 @@ PB_CLI_INTEGRATION=1 uv run pytest -m cli_integration   # Real CLIs with isolate
 uv run mcp dev src/polybridge/server.py                 # MCP Inspector
 ```
 
-For Monitor, run `swift test --no-parallel` in each package under `macos/`, then
-`swiftformat macos && swiftlint lint` and `./macos/build-app.sh`.
+For Monitor, enable the synthetic benchmarks with `PB_NATIVE_BENCHMARK=1` and `PB_NATIVE_SIDEBAR_BENCHMARK=1` and run the guarded Swift Testing runner — `python3 scripts/test-swift-package.py
+--package <package> --mode suites` for `MainWindowFeature` and `--mode aggregate` for every other
+package under `macos/` — then `swiftformat macos && swiftlint lint` and `./macos/build-app.sh`.
 
 For isolated, no-model loading measurements and opt-in timing instrumentation, see
 [Monitor performance baselines](docs/monitor-performance.md).
@@ -226,6 +229,9 @@ Parallel and workflow activity columns render lazily. Only visible columns updat
 columns retain their last snapshot and reading position until the group window closes. Returning
 columns show that snapshot immediately while refreshing in the background.
 Activity history loads automatically as you scroll toward older entries, with explicit retry on errors.
+Scrolling upward pauses live follow; scrolling down near the latest activity resumes it.
+Activity uses an owned native table with measured row heights and retained reading anchors; see
+[the activity scrolling guide](docs/monitor-performance.md#owned-native-activity-scrolling).
 
 Read [the workflow guide](docs/workflows.md) for definitions and execution contracts, and
 [contributor notes](CLAUDE.md) for architecture and harness behavior.

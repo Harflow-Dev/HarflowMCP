@@ -39,6 +39,14 @@ through assigned references. Evidence without a safe retrieval path stays inline
 compatibility reason. The target
 is not a token limit and exceeding it is reported rather than silently cutting required text.
 
+Assignments, prompts and answers are stored and delivered verbatim, so write them in plain prose:
+preserve spaces and word boundaries, and never concatenate words to shrink the payload — compressed
+text reaches the agent exactly as written, and nothing downstream restores it. Blank or
+all-whitespace prompts are rejected rather than trimmed into shape. Status `recent_activity` lines
+are the one deliberate exception: they collapse whitespace and truncate to stay short, but they are
+display summaries only — the stored event log and every delivered message keep the original text
+intact.
+
 The Monitor execution inspector shows bootstrap, delta or legacy delivery, bytes and characters,
 section sizes, acknowledged base revision, and any compatibility or target-overflow explanation.
 Reported model usage and dollar cost appear only when the harness supplies them. These measurements
