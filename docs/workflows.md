@@ -235,6 +235,11 @@ tight corridor, and discourage opposing segments from overlapping. They avoid un
 around the source node; backward connections can still need a loop to reach the destination's input.
 These are routing preferences when space is constrained, rather than a requirement to widen every
 incoming connection. Drawing and hover hit-testing use the same routes, including after moving nodes.
+While nodes move, provisional connections follow their current ports; obstacle-aware routes settle
+when the latest layout is ready, keeping interaction responsive.
+Parallel runs use a two-line content header with vertical padding: the title, then agent totals
+and status counts followed by access, repository, and start-time details;
+View prompt and Cancel all remain in the window toolbar.
 The component bar accepts dragging **Run workflow**, alongside the other offered node types. Builder activity stays within its own pane beside the sidebar during resizing. Saved workflow rows have additional vertical padding, and single-line follow-up text is centered in its composer.
 
 Both Parallel and the workflow's activity pane load and update detailed feeds only for visible
