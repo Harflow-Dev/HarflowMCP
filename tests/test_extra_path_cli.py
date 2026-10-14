@@ -186,12 +186,16 @@ def run_cli(fixture, grants, *, session=None, network=False, fork=None, file_ope
     api.fork = fork
     api.finished.clear()
     q = lambda path: shlex.quote(str(path))
+    outside_source = paths["unrelated"] / (api.nonce + "_source")
+    outside_source.write_text("outside source")
     api.commands = [("repo", "touch " + q(paths["repo"] / api.nonce)),
                     ("grant", "touch " + q(paths["grant"] / api.nonce)),
                     ("unrelated", "touch " + q(paths["unrelated"] / api.nonce)),
                     ("sibling", "touch " + q(fixture.tmp / (api.nonce + "_sibling"))),
                     ("escape", "touch " + q(paths["grant"] / "escape" / api.nonce)),
-                    ("network", "curl -sS --max-time 2 " + shlex.quote(api.url + "/health"))]
+                    ("network", "curl -sS --max-time 2 " + shlex.quote(api.url + "/health")),
+                    ("hardlink_repo", "ln " + q(outside_source) + " " + q(paths["repo"] / (api.nonce + "_link"))),
+                    ("hardlink_grant", "ln " + q(outside_source) + " " + q(paths["grant"] / (api.nonce + "_link")))]
     if file_operations:
         replacement = paths["repo"] / "replacement"
         replacement.write_text("replacement")
@@ -214,13 +218,15 @@ def run_cli(fixture, grants, *, session=None, network=False, fork=None, file_ope
     events = [json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")]
     assert events[-1]["type"] == "turn.completed", result.stdout
     assert api.results(), "actual tool outputs missing"
+    assert outside_source.read_text() == "outside source"
+    assert outside_source.stat().st_nlink == 1
     return next(event["thread_id"] for event in events if event["type"] == "thread.started"), api.results()
 
 
 def assert_bounded(results, *, directory=True, network=False):
     assert results["repo"]["exit_code"] == 0
     assert results["grant"]["exit_code"] == (0 if directory else 1)
-    for label in ("unrelated", "sibling", "escape"):
+    for label in ("unrelated", "sibling", "escape", "hardlink_repo", "hardlink_grant"):
         assert results[label]["exit_code"] == 1, results[label]
         assert "Operation not permitted" in results[label]["output"], results[label]
     assert results["network"]["exit_code"] == (0 if network else 7), results["network"]

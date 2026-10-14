@@ -433,9 +433,10 @@ class CodexBackend(ExtraPathsUnsupported):
                                  for path in protected):
                 raise UnsafeInvocationError("writable authority overlaps the qualified CLI launcher")
 
-        from ..runtime_paths import assert_runtime_outside_writes
+        from ..runtime_paths import assert_runtime_outside_writes, assert_single_link_writable_files
         try:
             assert_runtime_outside_writes(scopes)
+            assert_single_link_writable_files(scopes)
         except (ValueError, OSError, RuntimeError) as exc:
             raise UnsafeInvocationError(str(exc)) from exc
 

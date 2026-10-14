@@ -14,8 +14,7 @@ repository, scratch directory and extra grants must not overlap the selected
 launcher, its resolved executable or any intermediate symlink or lexical ancestor.
 These checks precede the version probe and repeat at final validation. Executables
 with multiple hardlinks are rejected even when the requested grant is elsewhere:
-this conservatively prevents writable indirect aliases without scanning granted
-directory trees. The same effective authority also cannot overlap the server's
+this conservatively prevents writable indirect launcher aliases. The same effective authority also cannot overlap the server's
 PATH directories (including empty/relative and absent higher-priority helper
 namespaces), selected helper/backend executable chains or targets, Python prefixes,
 import search roots or server package code. Discovered selected script containers
@@ -31,6 +30,23 @@ Selected server helpers with multiple hardlinks are refused on mutable filesyste
 a filesystem reported read-only by `statvfs` is exempt from that alias refusal,
 because a hardlink alias cannot cross filesystems. Direct overlap still rejects.
 The Codex launcher itself retains its unconditional single-hardlink requirement.
+Every effective writable repository, task scratch and directory grant is also
+scanned, and every exact-file grant checked, for existing multiply-linked regular
+files. All such files reject the request, even when their aliases are wholly
+inside writable scopes. This conservative rule prevents an existing writable
+hardlink from overwriting a source outside the sandbox boundary, including imported
+server code. Actual isolated CLI probes demonstrated that existing aliases in
+repository, directory and exact-file scopes can overwrite outside source files;
+creating new cross-boundary hardlinks into a repository or grant was OS-denied
+with both network settings. The check does not inspect arbitrary protected inode
+graphs. Overlapping scopes are deduplicated, directory symlinks are not followed,
+and in-scope targets are visited through their direct names. Child metadata and
+directory opens use retained parent descriptors, preventing ancestor substitution
+from redirecting traversal; observed directory paths are rechecked before acceptance. Inaccessible or
+unstable entries, directory cycles, more than 100,000 metadata visits, depth over
+128, or a traversal exceeding 10 seconds fail closed. The enclosing worker's
+20-second budget also applies. These checks repeat at final validation; they
+cannot freeze a concurrently mutated filesystem or interrupt a blocked syscall.
 A server running from a source checkout therefore cannot grant writable authority
 over its own source/import root; use an installed server for bounded tasks there.
 Path resolution,

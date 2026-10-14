@@ -576,3 +576,43 @@ def test_virtualenv_external_python_installation_refused_before_probe(qualified,
     repo.mkdir()
     with pytest.raises(UnsafeInvocationError, match='runtime'):
         qualified.with_extra_writable_paths(build(qualified, repo), normalize_paths([str(site)]), 'write_in_repo')
+
+
+@pytest.mark.parametrize('scope', ['repo', 'scratch', 'directory', 'file'])
+def test_existing_writable_hardlink_refused_before_version(qualified, monkeypatch, tmp_path, scope):
+    import os
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    grant = tmp_path / 'grant'
+    grant.mkdir()
+    scratch = tmp_path / 'scratch'
+    scratch.mkdir()
+    source = tmp_path / 'outside-source.py'
+    source.write_text('original')
+    target = {'repo': repo, 'scratch': scratch, 'directory': grant, 'file': grant}[scope] / 'alias.py'
+    os.link(source, target)
+    grants = normalize_paths([str(target if scope == 'file' else grant)])
+    invocation = build(qualified, repo)
+    if scope == 'scratch':
+        invocation = qualified.with_writable_directory(invocation, scratch, 'write_in_repo')
+    calls = []
+    monkeypatch.setattr(backends, 'version', lambda *args, **kwargs: calls.append(1) or EXTRA_PATHS_VERSION)
+    with pytest.raises(UnsafeInvocationError, match='multiply-linked'):
+        qualified.with_extra_writable_paths(invocation, grants, 'write_in_repo')
+    assert calls == []
+    assert source.read_text() == 'original'
+
+
+def test_final_revalidation_rejects_new_writable_file_alias(qualified, tmp_path):
+    import os
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    grant = tmp_path / 'grant'
+    grant.mkdir()
+    source = tmp_path / 'outside.py'
+    source.write_text('x')
+    grants = normalize_paths([str(grant)])
+    invocation = qualified.with_extra_writable_paths(build(qualified, repo), grants, 'write_in_repo')
+    os.link(source, repo / 'later-alias.py')
+    with pytest.raises(UnsafeInvocationError, match='multiply-linked'):
+        qualified.assert_extra_writable_paths(invocation, grants, 'write_in_repo')

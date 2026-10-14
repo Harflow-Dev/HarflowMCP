@@ -134,3 +134,106 @@ def assert_runtime_outside_writes(scopes: list[tuple[Path, str]]) -> None:
         info = scope.stat()
         if (info.st_dev, info.st_ino) in linked_inodes:
             raise ValueError('writable authority overlaps protected server runtime executable hardlink')
+
+
+# Bounds cover the combined, deduplicated effective authority per validation.
+WRITABLE_SCAN_MAX_ENTRIES = 100_000
+WRITABLE_SCAN_MAX_DEPTH = 128
+WRITABLE_SCAN_SECONDS = 10.0
+
+
+def assert_single_link_writable_files(scopes: list[tuple[Path, str]]) -> None:
+    """Refuse pre-existing aliases to files outside the sandbox's writable roots.
+
+    The OS denies new cross-boundary hardlinks, but an existing writable alias can
+    mutate its read-only source inode. Conservatively reject every regular file
+    with multiple links, even when all aliases might be inside authorized roots.
+    Directory symlinks are never followed; their in-scope targets are scanned by
+    their direct names. Errors and exhausted traversal bounds refuse authority.
+    """
+    import stat
+    import time
+
+    deadline = time.monotonic() + WRITABLE_SCAN_SECONDS
+    entries = 0
+    roots = []
+    for path, kind in sorted(set(scopes), key=lambda item: len(item[0].parts)):
+        if any(parent_kind == 'directory' and path.is_relative_to(parent)
+               for parent, parent_kind in roots):
+            continue
+        roots.append((path, kind))
+    seen_directories = set()
+
+    observed_directories = []
+    observed_roots = []
+
+    def check(info, depth):
+        nonlocal entries
+        entries += 1
+        if entries > WRITABLE_SCAN_MAX_ENTRIES or depth > WRITABLE_SCAN_MAX_DEPTH:
+            raise ValueError('writable hardlink scan exceeds entry or depth bound')
+        if time.monotonic() > deadline:
+            raise ValueError('writable hardlink scan exceeds time budget')
+        if stat.S_ISREG(info.st_mode) and info.st_nlink != 1:
+            raise ValueError('existing multiply-linked regular files in writable authority are not supported')
+
+    def identity(info):
+        return info.st_dev, info.st_ino
+
+    def visit(parent_fd, name, path, depth, expected_kind=None):
+        info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        check(info, depth)
+        if expected_kind is not None and not (
+            stat.S_ISDIR(info.st_mode) if expected_kind == 'directory' else stat.S_ISREG(info.st_mode)
+        ):
+            raise ValueError('writable scope type changed during hardlink scan')
+        if expected_kind is not None:
+            observed_roots.append((path, identity(info)))
+        if not stat.S_ISDIR(info.st_mode):
+            return
+        inode = identity(info)
+        if inode in seen_directories:
+            raise ValueError('writable hardlink scan encountered a directory cycle')
+        seen_directories.add(inode)
+        fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+        try:
+            if identity(os.fstat(fd)) != inode:
+                raise ValueError('writable directory identity changed during hardlink scan')
+            observed_directories.append((path, inode))
+            # Ancestor descriptors remain open while descendants are traversed.
+            # Every stat/open is anchored to the same parent as its enumeration.
+            with os.scandir(fd) as children:
+                for child in children:
+                    visit(fd, child.name, path / child.name, depth + 1)
+            if identity(os.stat(name, dir_fd=parent_fd, follow_symlinks=False)) != inode:
+                raise ValueError('writable directory identity changed during hardlink scan')
+        finally:
+            os.close(fd)
+
+    try:
+        for path, kind in roots:
+            # Canonical scope ancestors must also be opened without following a
+            # concurrently substituted symlink. Close each ancestor after opening
+            # the next one; the resulting parent descriptor anchors this root.
+            if len(path.parts) > WRITABLE_SCAN_MAX_DEPTH:
+                raise ValueError('writable hardlink scan exceeds entry or depth bound')
+            fd = os.open(path.anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                for part in path.parts[1:-1]:
+                    if time.monotonic() > deadline:
+                        raise ValueError('writable hardlink scan exceeds time budget')
+                    next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                    os.close(fd)
+                    fd = next_fd
+                visit(fd, path.name, path, 0, kind)
+            finally:
+                os.close(fd)
+        # Descriptor traversal cannot accidentally scan a replacement elsewhere.
+        # Also refuse a renamed/replaced lexical tree before accepting authority.
+        for path, inode in observed_directories + observed_roots:
+            if time.monotonic() > deadline:
+                raise ValueError('writable hardlink scan exceeds time budget')
+            if path.resolve(strict=True) != path or identity(path.lstat()) != inode:
+                raise ValueError('writable directory identity changed during hardlink scan')
+    except OSError as exc:
+        raise ValueError('writable hardlink scan requires accessible, stable entries') from exc
