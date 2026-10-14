@@ -177,6 +177,10 @@ Use `get_task_status(task_id, brief=true)` or
 [`list_tasks(limit=50, group="review")`](docs/compact-task-reads.md) for bounded overviews.
 Full status and the existing unpaged list remain available.
 
+[`start_task(..., notify="builds")` and `subscribe`](docs/task-notifications.md) deliver bounded
+completion webhooks to administrator-configured destinations after observed durable settlement.
+Receivers deduplicate event IDs; delivery pauses while servers are down. This does not add
+restart-safe task supervision.
 
 Settled task status includes a persisted best-effort `outcome`: starting and terminal Git
 observations, committed changes, local upstream comparison, and available structured build/test

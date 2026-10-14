@@ -105,6 +105,8 @@ class TaskRecord:
     commit yet, or the probe failed or timed out."""
     git_baseline: dict[str, Any] | None = None
     outcome: dict[str, Any] | None = None
+    terminal_summary: str | None = None
+    """Bounded terminal display summary for notifications without replaying raw logs."""
     start_dirty: bool | None = None
     """Whether `git status --porcelain` was non-empty at spawn — None if the probe failed, timed
     out, or predates this field."""

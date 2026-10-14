@@ -1966,6 +1966,8 @@ class TaskRegistry:
                 start_dirty=task.start_dirty,
                 git_baseline=task.git_baseline,
                 outcome=task.outcome,
+                terminal_summary=(task.acc.summary.encode('utf-8')[:4096].decode('utf-8', errors='ignore')
+                                  if task.finished_at and isinstance(task.acc.summary, str) else None),
                 spawned_by=task.spawned_by,
                 root_task_id=task.root_task_id,
                 depth=task.depth,

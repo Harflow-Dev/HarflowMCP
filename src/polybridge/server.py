@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import unicodedata
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -142,7 +143,19 @@ def _reg() -> TaskRegistry:
     if _registry is None:
         _registry = TaskRegistry()
         _registry.start_maintenance()
+        _start_notification_worker(_registry)
     return _registry
+
+
+def _start_notification_worker(registry: TaskRegistry) -> None:
+    if os.environ.get('PB_NOTIFY_DESTINATIONS') and getattr(registry, '_notification_worker', None) is None:
+        from .notifications import worker
+        registry._notification_worker = asyncio.create_task(worker(registry.log_dir), name='pb-notifications')
+
+
+async def _notification_authority() -> None:
+    if await _verified_workflow_caller() is not None:
+        raise MCPError(INVALID_PARAMS, 'Completion subscriptions require a direct caller; delegated tasks cannot authorize server network egress')
 
 
 def _backend(name: str):
@@ -310,6 +323,7 @@ async def start_task(
     title: str | None = None,
     workflow: str | None = None,
     auto_continue: StrictInt = 0,
+    notify: str | None = None,
 ) -> dict[str, Any]:
     """Dispatch a coding task to a headless agent and return immediately.
 
@@ -368,6 +382,9 @@ async def start_task(
             Cancellation, permission denial, usage limits and workflow-owned tasks are excluded.
             Automatic continuation across server death is not promised.
 
+        notify: Configured destination alias, direct callers only. Intent is durable before spawn.
+            Receivers must deduplicate stable IDs; retries resume only while a server is active.
+
     Returns the new task_id and its starting state. The run continues in the background; poll
     get_task_status or call wait_for_task to follow it.
 
@@ -382,6 +399,16 @@ async def start_task(
     """
     if not prompt or not prompt.strip():
         raise MCPError(INVALID_PARAMS, "prompt must be a non-empty string")
+
+    if notify is not None:
+        await _notification_authority()
+        from .notifications import preflight
+        try:
+            preflight(notify)
+        except ValueError as exc:
+            raise MCPError(INVALID_PARAMS, str(exc)) from None
+        if workflow is not None:
+            raise MCPError(INVALID_PARAMS, 'notify is for standalone task dispatch; workflow notifications are unavailable')
 
     from .task_continuation import validate_budget
     try:
@@ -414,6 +441,16 @@ async def start_task(
     normalized_title = _normalize_title(title)
     path = await _validate_repo_path(repo_path)
 
+    notification = None
+    reserved_id = None
+    if notify is not None:
+        from .notifications import subscribe as register
+        reserved_id = str(uuid.uuid4())
+        # Commit intent before spawning so a crash cannot strand a started task without opt-in.
+        try:
+            notification = await asyncio.to_thread(register, _reg().log_dir, reserved_id, notify, reservation=True)
+        except Exception:
+            raise MCPError(INTERNAL_ERROR, 'Notification reservation failed; no task was started') from None
     try:
         task = await _reg().start(
             prompt,
@@ -427,12 +464,73 @@ async def start_task(
             group=group,
             title=normalized_title,
             auto_continue=auto_continue,
+            **({'task_id': reserved_id} if reserved_id is not None else {}),
         )
-    except backends.UnsupportedCapability as exc:
+    except Exception as exc:
+        if reserved_id is not None:
+            from .notifications import discard_unstarted
+            if _reg().get(reserved_id) is None:
+                try:
+                    await asyncio.to_thread(discard_unstarted, _reg().log_dir, reserved_id)
+                except Exception:
+                    log.warning('Notification reservation cleanup unavailable for task %s', reserved_id)
+            raise MCPError(INVALID_PARAMS, f'Dispatch did not return normally; inspect task_id {reserved_id} and its notification state before retrying') from None
+        if not isinstance(exc, backends.UnsupportedCapability):
+            raise
         # Covers `NestedDispatchRefused` too — it subclasses `UnsupportedCapability`, and this cap
         # is only ever checked once a caller was actually detected inside `_reg().start`.
         raise MCPError(INVALID_PARAMS, str(exc)) from None
-    return task.brief() | {"enforcement": task.enforcement}
+    result = task.brief() | {"enforcement": task.enforcement}
+    if notification is not None:
+        result['notification'] = notification
+        _start_notification_worker(_reg())
+    return result
+
+
+@mcp.tool()
+async def subscribe(task_id: str, notify: str) -> dict[str, Any]:
+    """Durably subscribe to one task's observed terminal settlement using a configured alias.
+
+    Direct callers only. The server administrator configures PB_NOTIFY_DESTINATIONS; caller URLs
+    and secrets are refused. Repeated task/alias subscriptions share a stable event ID. Delivery
+    retries at most six times and can duplicate after a crash: receivers must deduplicate IDs.
+    Pending delivery resumes while a configured server is active, not while every server is down.
+    Delivery failure never changes task execution. See docs/task-notifications.md.
+    """
+    await _notification_authority()
+    await _guard_task_read(task_id)
+    from . import notifications
+    try:
+        record = await asyncio.to_thread(store.read, _reg().log_dir, task_id, include_prompt=False, metadata_byte_limit=262144)
+        if record is None:
+            raise ValueError('Unknown or unavailable task record')
+        result = await asyncio.to_thread(notifications.subscribe, _reg().log_dir, task_id, notify)
+        _start_notification_worker(_reg())
+        return result
+    except ValueError as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+
+@mcp.tool()
+async def get_task_notifications(task_id: str) -> list[dict[str, Any]]:
+    """Read bounded subscription delivery states; this never establishes task success."""
+    await _notification_authority()
+    from .notifications import status
+    try:
+        return await asyncio.to_thread(status, _reg().log_dir, task_id)
+    except ValueError as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+
+@mcp.tool()
+async def unsubscribe(task_id: str, notify: str | None = None) -> list[dict[str, Any]]:
+    """Stop future attempts for a task/alias (or all aliases); in-flight requests may finish."""
+    await _notification_authority()
+    from .notifications import unsubscribe as remove
+    try:
+        return await asyncio.to_thread(remove, _reg().log_dir, task_id, notify)
+    except ValueError as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
 
 
 @mcp.tool()

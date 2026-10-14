@@ -133,6 +133,8 @@ def sweep(log_dir: Path, days: int, now: datetime) -> dict[str, int]:
     # checkpoint is pinned; otherwise pruning only the external successor would
     # make the old checkpoint appear unchanged again.
     protected = set(pinned)
+    from .notifications import pinned_tasks
+    protected.update(pinned_tasks(log_dir))
     for reservation_path in log_dir.glob('*.continuation.json'):
         try:
             if reservation_path.stat().st_size > 4096:
@@ -405,6 +407,13 @@ def _delete_task(
                 fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 stats["kept_locked"] += 1
+                return
+
+            # Subscription insertion takes this same task lock before SQLite.
+            # Recheck after the initial sweep snapshot, before catalog locks/deletion.
+            from .notifications import pinned_tasks
+            if task_id in pinned_tasks(log_dir):
+                stats['kept_locked'] += 1
                 return
 
             with _retention_catalog_locks(log_dir):
