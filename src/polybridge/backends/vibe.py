@@ -273,6 +273,12 @@ class UnsafeInvocationError(RuntimeError):
 
 
 class VibeBackend(ExtraPathsUnsupported):
+    def execution_configuration_namespaces(self, repo):
+        from .config_namespaces import environment_path, project_namespaces
+        home = Path.home()
+        return {'external': (home / '.vibe', environment_path('VIBE_HOME', home / '.vibe'), home / '.agents/skills'),
+                'project': project_namespaces(repo, ('.vibe', '.agents/skills'))}
+
     @staticmethod
     def workflow_observed_metadata(snapshot: dict[str, Any]) -> dict[str, Any] | None:
         """Read Vibe's own session config snapshot, never worker self-report text."""

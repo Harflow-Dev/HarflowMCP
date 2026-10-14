@@ -17,6 +17,8 @@ def qualified(monkeypatch, tmp_path_factory):
     # Exercise the real executable fingerprint without requiring an installed CLI.
     # The version probe is stubbed below; invoking the stand-in would fail loudly.
     monkeypatch.setattr('polybridge.backends.codex_config._mdm_absence', lambda: ('managed_preferences_absent',))
+    from test_execution_config import isolate_configuration_environment
+    isolate_configuration_environment(monkeypatch, tmp_path_factory.mktemp('backend-home'))
     monkeypatch.setenv('CODEX_HOME', str(tmp_path_factory.mktemp('qualified-config')))
     launcher = tmp_path_factory.mktemp('qualified-launcher') / 'codex'
     launcher.write_bytes(b'\x7fELF-native-fixture')
@@ -631,3 +633,15 @@ def test_native_alias_binding_rejects_executable_substitution(qualified, monkeyp
     for binary in ('codex',str(repo/'codex'),str(target)):
         with pytest.raises(UnsafeInvocationError):
             qualified.assert_extra_writable_paths(replace(invocation,argv=[binary,*invocation.argv[1:]]),grants,'write_in_repo')
+
+
+def test_other_backend_config_grant_refused_before_version_and_ordinary_unchanged(qualified,monkeypatch,tmp_path):
+    config=tmp_path/'claude-config';config.mkdir()
+    settings=config/'settings.json';settings.write_text('{}')
+    monkeypatch.setenv('CLAUDE_CONFIG_DIR',str(config))
+    monkeypatch.setattr(backends,'version',lambda *args,**kwargs: pytest.fail('unqualified config reached version'))
+    repo=tmp_path/'repo';repo.mkdir()
+    with pytest.raises(UnsafeInvocationError,match='execution configuration namespace'):
+        qualified.with_extra_writable_paths(build(qualified,repo),normalize_paths([str(settings)]),'write_in_repo')
+    plain=build(qualified,repo)
+    assert qualified.with_extra_writable_paths(plain,(),'write_in_repo') is plain

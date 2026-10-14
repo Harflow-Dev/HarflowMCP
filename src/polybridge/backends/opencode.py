@@ -191,6 +191,30 @@ class UnsafeInvocationError(RuntimeError):
 
 
 class OpencodeBackend(ExtraPathsUnsupported):
+    def execution_configuration_namespaces(self, repo):
+        import os
+        import pwd
+        from .config_namespaces import environment_path, project_namespaces
+        if os.environ.get('OPENCODE_CONFIG_CONTENT'):
+            raise ValueError('inline backend execution configuration is not qualified')
+        home = environment_path('OPENCODE_TEST_HOME', Path.home())
+        roots = [Path.home() / '.config/opencode', Path.home() / '.local/share/opencode',
+                 Path.home() / '.cache/opencode', Path.home() / '.local/state/opencode',
+                 home / '.config/opencode', home / '.local/share/opencode',
+                 home / '.cache/opencode', home / '.local/state/opencode',
+                 environment_path('XDG_CONFIG_HOME', home / '.config') / 'opencode',
+                 environment_path('XDG_DATA_HOME', home / '.local/share') / 'opencode',
+                 environment_path('XDG_CACHE_HOME', home / '.cache') / 'opencode',
+                 environment_path('XDG_STATE_HOME', home / '.local/state') / 'opencode']
+        roots.extend((Path('/Library/Application Support/opencode'), Path('/etc/opencode'),
+                      Path('/etc/xdg/opencode'), Path('/Library/Managed Preferences/ai.opencode.managed.plist'),
+                      Path('/Library/Managed Preferences') / pwd.getpwuid(os.getuid()).pw_name / 'ai.opencode.managed.plist'))
+        for name in ('OPENCODE_CONFIG', 'OPENCODE_CONFIG_DIR', 'OPENCODE_TUI_CONFIG', 'OPENCODE_TEST_MANAGED_CONFIG_DIR'):
+            configured = environment_path(name)
+            if configured is not None:
+                roots.append(configured)
+        return {'external': tuple(roots), 'project': project_namespaces(repo, ('opencode.json', 'opencode.jsonc', '.opencode'))}
+
     @staticmethod
     def workflow_stderr_blocks_availability_failure(diagnostic: str) -> bool:
         from .workflow_diagnostics import stderr_blocks_availability

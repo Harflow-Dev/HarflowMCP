@@ -163,7 +163,7 @@ def certified(tmp_path):
     paths["file"] = tmp_path / "exact-file"
     paths["file"].write_text("original")
     env = {key: value for key, value in os.environ.items()
-           if not key.startswith(("CODEX", "OPENAI", "ANTHROPIC", "PB_"))}
+           if not key.startswith(("CODEX", "OPENAI", "ANTHROPIC", "CLAUDE", "OPENCODE", "VIBE", "XDG_", "PB_"))}
     # Expose only the certified native launchers and native commands needed by
     # the OS-boundary probes; ambient registered script backends are unsupported.
     native_bin = tmp_path / 'native-bin'

@@ -356,10 +356,15 @@ class CodexBackend(ExtraPathsUnsupported):
         from .codex_native import CodexNativeAdapter
         return CodexNativeAdapter()
 
+    def execution_configuration_namespaces(self, repo):
+        # The dedicated configuration qualifier owns Codex TOML, roles, hooks,
+        # plugins and managed preference inputs; preserve its typed profile.
+        return {"external": (), "project": ()}
+
     def extra_path_support(self) -> dict[str, Any]:
         return {"supported": True, "platforms": ["darwin"], "versions": [EXTRA_PATHS_VERSION],
                 "freedoms": ["write_in_repo", "publish"], "network": [False, True],
-                "native_subagent": False, "runtime": "absolute nonempty PATH; native selected helpers and registered backend launchers", "configuration": "notify, hooks, MCP and plugins disabled; no project config", "certification": EXTRA_PATHS_CERTIFICATION}
+                "native_subagent": False, "runtime": "absolute nonempty PATH; native selected helpers and registered backend launchers", "configuration": "notify, hooks, MCP and plugins disabled; no Codex project config; other-backend external namespaces protected and existing configuration unsupported; inherited repository configuration authority unchanged", "certification": EXTRA_PATHS_CERTIFICATION}
 
     def _extra_path_runtime(self):
         import shutil
@@ -440,6 +445,14 @@ class CodexBackend(ExtraPathsUnsupported):
         except (ValueError, OSError, RuntimeError) as exc:
             raise UnsafeInvocationError(str(exc)) from exc
 
+    def _assert_execution_configuration(self, invocation, grants):
+        from ..execution_config import assert_execution_config_outside_writes
+        repo = Path(invocation.argv[invocation.argv.index('-C') + 1]).resolve(strict=True)
+        try:
+            assert_execution_config_outside_writes(repo, grants, invocation.scratch_directory)
+        except (ValueError, OSError, RuntimeError) as exc:
+            raise UnsafeInvocationError(str(exc)) from exc
+
     def _extra_path_configuration(self, invocation, grants):
         from .codex_config import qualify_configuration
         repo = Path(invocation.argv[invocation.argv.index('-C') + 1]).resolve(strict=True)
@@ -463,6 +476,7 @@ class CodexBackend(ExtraPathsUnsupported):
         self.assert_safe(invocation, freedom, network)
         configuration = self._extra_path_configuration(invocation, grants)
         before = self._extra_path_runtime()
+        self._assert_execution_configuration(invocation, grants)
         self._assert_launcher_outside_writes(invocation, grants, before)
         # Probe and execute the same PATH-selected absolute alias. A relative PATH
         # entry would otherwise select a different binary under the agent repo cwd.
@@ -508,6 +522,7 @@ class CodexBackend(ExtraPathsUnsupported):
                 raise UnsafeInvocationError("CLI runtime identity changed or was not qualified")
         self.assert_safe(invocation, freedom, network)
         if grants:
+            self._assert_execution_configuration(invocation, grants)
             self._assert_launcher_outside_writes(invocation, grants, invocation.extra_path_runtime)
 
     def extra_path_enforcement(self, enforcement, grants, repo):

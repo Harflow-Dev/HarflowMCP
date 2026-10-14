@@ -319,6 +319,14 @@ class UnsafeInvocationError(RuntimeError):
 
 
 class ClaudeBackend(ExtraPathsUnsupported):
+    def execution_configuration_namespaces(self, repo):
+        from .config_namespaces import environment_path, project_namespaces
+        home = Path.home()
+        root = environment_path('CLAUDE_CONFIG_DIR', home / '.claude')
+        return {'external': (home / '.claude', home / '.claude.json', root, Path(str(root) + '.json'),
+                Path('/Library/Application Support/ClaudeCode'), Path('/etc/claude-code')),
+                'project': project_namespaces(repo, ('.claude', '.mcp.json'))}
+
     @staticmethod
     def workflow_observed_metadata(snapshot: dict[str, Any]) -> dict[str, Any] | None:
         path = snapshot.get("raw_stream_log")

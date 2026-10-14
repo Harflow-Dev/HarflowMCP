@@ -419,7 +419,9 @@ async def start_task(
             missing/special paths, filesystem roots and canonical duplicates are errors. Only
             version-qualified configurations in capabilities.extra_writable_paths are supported;
             other harnesses/configurations reject the request. The certified bounded mode clears
-            ambient writable roots and excludes implicit temporary roots. Grants permit reads
+            ambient writable roots and excludes implicit temporary roots. Known external execution
+            configuration namespaces of all registered backends remain protected; existing unsupported
+            inputs reject requests. Inherited repository configuration authority gains no new exclusions. Grants permit reads
             as well as writes, never publication. Omission inherits a detected owner's grants;
             nested requests cannot widen them. Saved grants and path identities carry through
             resume/continuation; replacement requires a new authorized task. Workflows and
@@ -559,7 +561,9 @@ async def preview_task_permissions(
     owner caps as start_task. Returns requested/effective typed paths, certification and truthful
     enforcement. The preview is an observation, not a reservation: launch revalidates paths and
     configuration. Extra grants never authorize publication. Workflow/native-adapter grants and
-    unverified harness configurations are unavailable; see docs/extra-writable-paths.md.
+    unverified harness configurations are unavailable. Known external backend execution configuration
+    is protected; unsupported existing inputs reject requests. Existing repository configuration
+    authority retains its baseline limits; see docs/extra-writable-paths.md.
     """
     chosen = _backend(backend or DEFAULT_BACKEND)
     access = freedom if freedom is not None else DEFAULT_FREEDOM

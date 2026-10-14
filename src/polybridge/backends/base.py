@@ -379,6 +379,9 @@ class NestedDispatchRefused(UnsupportedCapability):
 class ExtraPathsUnsupported:
     """Default fail-closed seam for harnesses without bounded-path certification."""
 
+    def execution_configuration_namespaces(self, repo):
+        raise UnsupportedCapability("backend execution configuration namespaces are not qualified")
+
     def extra_path_support(self) -> dict[str, Any]:
         return {"supported": False, "certification": None, "reason": "bounded writable paths are not certified for this backend"}
 
@@ -411,6 +414,7 @@ class Backend(Protocol):
     capabilities: Capabilities
     mcp_approval: MCPApprovalPolicy
 
+    def execution_configuration_namespaces(self, repo: Path) -> dict[str, Any]: ...
     def extra_path_support(self) -> dict[str, Any]: ...
     def with_extra_writable_paths(self, invocation, grants, freedom, network=None) -> Invocation: ...
     def assert_extra_writable_paths(self, invocation, grants, freedom, network=None) -> None: ...

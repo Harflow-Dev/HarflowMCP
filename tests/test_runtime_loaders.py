@@ -11,6 +11,8 @@ from polybridge import runtime_loaders, runtime_paths
 def isolated_configuration(monkeypatch, tmp_path_factory):
     # Synthetic loader fixtures must reach loader qualification independently
     # of the developer's active plugins or platform-managed preferences.
+    from test_execution_config import isolate_configuration_environment
+    isolate_configuration_environment(monkeypatch, tmp_path_factory.mktemp('backend-home'))
     monkeypatch.setenv('CODEX_HOME', str(tmp_path_factory.mktemp('loader-config')))
     monkeypatch.setattr('polybridge.backends.codex_config._mdm_absence',
                         lambda: ('managed_preferences_absent',))

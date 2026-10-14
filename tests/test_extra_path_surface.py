@@ -19,6 +19,8 @@ def separate_bridge_state(monkeypatch, tmp_path_factory):
 @pytest.fixture
 def qualified(monkeypatch, fake_backend_clis, tmp_path_factory):
     monkeypatch.setattr('polybridge.backends.codex_config._mdm_absence', lambda: ('managed_preferences_absent',))
+    from test_execution_config import isolate_configuration_environment
+    isolate_configuration_environment(monkeypatch, tmp_path_factory.mktemp('backend-home'))
     monkeypatch.setenv("CODEX_HOME", str(tmp_path_factory.mktemp("qualified-config")))
     launcher = tmp_path_factory.mktemp('native-launcher') / 'codex'
     launcher.write_bytes(b'\x7fELF-native-fixture'); launcher.chmod(0o755)

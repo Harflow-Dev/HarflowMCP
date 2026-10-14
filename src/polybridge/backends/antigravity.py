@@ -291,6 +291,11 @@ def _tool_command(parameters: dict[str, Any]) -> str | None:
 
 
 class AntigravityBackend(ExtraPathsUnsupported):
+    def execution_configuration_namespaces(self, repo):
+        from .config_namespaces import project_namespaces
+        return {'external': (Path.home() / '.gemini', Path('/etc/antigravity')),
+                'project': project_namespaces(repo, ('.gemini', '.antigravity'))}
+
     @staticmethod
     def workflow_stderr_blocks_availability_failure(diagnostic: str) -> bool:
         from .workflow_diagnostics import stderr_blocks_availability
