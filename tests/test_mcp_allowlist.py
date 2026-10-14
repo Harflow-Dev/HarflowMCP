@@ -1,5 +1,8 @@
+import asyncio
+import gc
 import json
 import os
+import warnings
 from pathlib import Path
 
 import pytest
@@ -109,6 +112,64 @@ def test_cli_read_and_write_human_guard(home, monkeypatch, capsys):
     assert ctl.main(['mcp-allowlist','--backend','codex','--remove','polybridge/*','--json']) != 0
     assert json.loads(capsys.readouterr().out)['error']['code'] == 'human_only'
     assert rules.config_path('codex').read_bytes() == before
+
+
+@pytest.mark.parametrize('notification_source', ['environment', 'database'])
+def test_cli_allowlist_without_loop_defers_notification_worker(
+    home, monkeypatch, capsys, notification_source,
+):
+    from polybridge import ctl, notifications, server, takeover
+    from polybridge.tasks import TaskRegistry
+
+    registry = TaskRegistry(log_dir=home / '.polybridge' / 'tasks')
+    monkeypatch.setattr(server, '_registry', None)
+    monkeypatch.setattr(server, 'TaskRegistry', lambda: registry)
+    monkeypatch.delenv('PB_NOTIFY_DESTINATIONS', raising=False)
+    if notification_source == 'environment':
+        monkeypatch.setenv('PB_NOTIFY_DESTINATIONS', json.dumps({
+            'hook': {'url': 'https://example.com/hook'},
+        }))
+    else:
+        database = registry.log_dir.parent / 'notifications.sqlite3'
+        database.parent.mkdir(parents=True, exist_ok=True)
+        database.touch()
+    monkeypatch.setattr(takeover, 'caller_refusal', lambda *args: None)
+    result = {'entries': ['polybridge/*'], 'detail': 'updated'}
+    monkeypatch.setattr(rules, 'edit', lambda *args, **kwargs: result)
+    started = []
+
+    async def worker(logs):
+        started.append(logs)
+        await asyncio.Future()
+
+    monkeypatch.setattr(notifications, 'worker', worker)
+    gc.collect()  # Flush unrelated objects before checking this synchronous call.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        assert ctl.main([
+            'mcp-allowlist', '--backend', 'codex', '--allow', 'polybridge/*', '--json',
+        ]) == 0
+        gc.collect()
+    assert json.loads(capsys.readouterr().out)['result'] == result
+    assert [str(item.message) for item in caught] == []
+    assert server._registry is registry
+    assert getattr(registry, '_notification_worker', None) is None
+    assert started == []
+
+    async def later_startup():
+        server._start_notification_worker(registry)
+        first = registry._notification_worker
+        try:
+            server._start_notification_worker(registry)
+            await asyncio.sleep(0)
+            assert registry._notification_worker is first
+            assert started == [registry.log_dir]
+        finally:
+            first.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await first
+
+    asyncio.run(later_startup())
 
 
 def test_opencode_v2_refuses_mutation(home, monkeypatch):

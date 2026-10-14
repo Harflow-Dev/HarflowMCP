@@ -71,8 +71,10 @@ Status reads use an existing database read-only, without initializing or changin
 storage; an absent database returns an empty list and does not start a worker.
 
 Workers resume when a server opens its task registry if destinations are configured
-or a notification database already exists. Cleanup continues after destination
-configuration is removed, releasing expired task pins and aging out final receipts.
+or a notification database already exists, within a running event loop. Synchronous
+CLI commands that open the registry do not start a notification worker. Cleanup
+continues after destination configuration is removed, releasing expired task pins
+and aging out final receipts.
 Delivery still requires the alias to be present in the current configuration. A
 configless installation without a notification database starts no worker and creates
 no database. A stopped server cannot send notifications. This does not make task
