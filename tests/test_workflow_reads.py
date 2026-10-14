@@ -156,3 +156,41 @@ async def test_verified_human_reads_real_saved_definition(monkeypatch, tmp_path,
     monkeypatch.setattr(lineage, 'detect_caller_detail', lambda _: detection)
     monkeypatch.setattr(lineage, 'detect_catalog_caller', lambda _: detection)
     assert await workflow_reads.call('list', directory=directory, _bounded_read=bounded) == [saved]
+
+
+async def test_managed_orchestrator_goal_history_is_only_paged(tmp_path):
+    history = [{'revision': i + 1, 'goal': 'é' * 32768, 'created_at': i} for i in range(16)]
+    run = {'workflow_run_id': 'owned', 'name': 'feature', 'kind': 'workflow',
+           'status': 'paused', 'goal': history[-1]['goal'], 'goal_revision': 16,
+           'goal_history': history, 'goal_assessment': {'revision': 16, 'status': 'unmet'},
+           'parent_goal': {'workflow_run_id': 'parent', 'revision': 2, 'goal': 'parent constraint'},
+           'definition': {}, 'activations': [], 'tasks': [], 'execution_contract': 'delegation'}
+    async def reader():
+        return ({'role': 'orchestrator'}, run)
+    for action in ('status', 'list_runs'):
+        result = await workflow_reads.call(action, directory=tmp_path, reader=reader,
+                                           **({'run_id': 'owned'} if action == 'status' else {}))
+        summary = result if action == 'status' else result[0]
+        assert 'goal_history' not in summary
+        for key in ('goal', 'goal_revision', 'goal_assessment', 'parent_goal'):
+            assert summary[key] == run[key]
+    chunks = []
+    cursor = None
+    while True:
+        page = await workflow_reads.call('detail', directory=tmp_path, reader=reader,
+                                        run_id='owned', view='goal_history', cursor=cursor, limit=8000)
+        assert len(page['chunk']) <= 8000
+        chunks.append(page['chunk'])
+        cursor = page['next_cursor']
+        if cursor is None:
+            break
+    assert len(chunks) > 1
+    assert json.loads(''.join(chunks)) == history
+
+
+async def test_goal_history_detail_does_not_expand_worker_authority(tmp_path):
+    async def reader():
+        return ({'role': 'node'}, {'workflow_run_id': 'owned'})
+    with pytest.raises(ValueError, match='Worker nodes cannot inspect workflow context'):
+        await workflow_reads.call('detail', directory=tmp_path, reader=reader,
+                                  run_id='owned', view='goal_history')

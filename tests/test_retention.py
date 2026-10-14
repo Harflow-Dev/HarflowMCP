@@ -33,6 +33,47 @@ def make_record(**overrides) -> store.TaskRecord:
     return store.TaskRecord(**(base | overrides))
 
 
+@pytest.mark.parametrize('case', ['recent', 'deeper', 'expired', 'failed', 'locked'])
+def test_continuation_original_assignment_survives_retained_members(tmp_path, monkeypatch, case):
+    from types import SimpleNamespace
+    from polybridge.task_continuation import context
+    log_dir = tmp_path / 'tasks'
+    log_dir.mkdir()
+    now = datetime.now(timezone.utc)
+    root = make_record(task_id='root', session_id='root-session', prompt='Original assignment', output_drained=True)
+    child = make_record(task_id='child', session_id='child-session', continuation_of_task_id='root',
+        chain_root_task_id='root', output_drained=True,
+        finished_at=_iso(now - timedelta(days=1 if case == 'recent' else 40)))
+    records = [root, child]
+    if case == 'deeper':
+        records.append(make_record(task_id='grandchild', session_id='grandchild-session',
+            continuation_of_task_id='child', chain_root_task_id='root', output_drained=True,
+            finished_at=_iso(now - timedelta(days=1))))
+    for record in records:
+        assert store.write_landed(log_dir, record)
+    original_delete = retention._delete_task_files
+    if case == 'failed':
+        monkeypatch.setattr(retention, '_delete_task_files', lambda directory, identifier:
+            False if identifier == 'child' else original_delete(directory, identifier))
+    lock_fd = None
+    try:
+        if case == 'locked':
+            lock_fd = os.open(log_dir / 'child.lock', os.O_CREAT | os.O_RDWR, 0o600)
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        stats = retention.sweep(log_dir, 30, now)
+        if case == 'expired':
+            assert stats['deleted_tasks'] == 2
+            assert store.read(log_dir, 'root') is None
+        else:
+            assert store.read(log_dir, 'root') is not None
+            retained = store.read(log_dir, 'grandchild' if case == 'deeper' else 'child')
+            assert retained is not None
+            assert 'Original assignment' in context(SimpleNamespace(log_dir=log_dir, get=lambda _: None), retained, None, None)
+    finally:
+        if lock_fd is not None:
+            os.close(lock_fd)
+
+
 # --- retention_days --------------------------------------------------------------------------
 
 

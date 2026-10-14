@@ -304,6 +304,72 @@ async def test_cancel_waits_for_inflight_spawn_then_blocks_successors(tmp_path, 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('end_to_end', [False, True])
+async def test_cancel_waits_for_other_process_first_manual_reservation(tmp_path, monkeypatch, end_to_end):
+    import asyncio
+    import sys
+    from polybridge import control
+    from polybridge.task_continuation import stop_chain
+    from polybridge.tasks import TaskRegistry
+    source = record(tmp_path)  # No automatic budget or reservation yet.
+    lock = control.session_lock_path(tmp_path, 'continuation-' + source.task_id)
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    reservation = tmp_path / f'{source.task_id}.continuation.json'
+    script = '''import fcntl,json,sys
+from dataclasses import replace
+from pathlib import Path
+from polybridge import store
+with open(sys.argv[1], 'a') as lock:
+ fcntl.flock(lock, fcntl.LOCK_EX)
+ print('locked', flush=True)
+ sys.stdin.readline()
+ with open(sys.argv[2], 'w') as file: json.dump({'task_id':'d'*32,'state':'started'},file)
+ directory = Path(sys.argv[2]).parent
+ source = store.read(directory, 'a'*32)
+ assert store.write_landed(directory, replace(source, task_id='d'*32, continuation_of_task_id=source.task_id, chain_root_task_id=source.task_id))
+'''
+    proc = await asyncio.create_subprocess_exec(sys.executable, '-c', script, str(lock), str(reservation),
+        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE)
+    try:
+        assert await proc.stdout.readline() == b'locked\n'
+        registry = TaskRegistry(log_dir=tmp_path, open_monitor=False) if end_to_end else Registry(tmp_path)
+        observed_targets = []
+        if end_to_end:
+            triage = registry._triage_target
+            def observe_target(identifier):
+                observed_targets.append(identifier)
+                return triage(identifier)
+            monkeypatch.setattr(registry, '_triage_target', observe_target)
+            assert registry._cascade_targets(source.task_id, []) == {source.task_id}
+        cancellation = asyncio.create_task(registry.cancel_cascade(source.task_id) if end_to_end
+                                           else stop_chain(registry, source.task_id))
+        await asyncio.sleep(0.05)
+        assert not cancellation.done()
+        proc.stdin.write(b'continue\n')
+        await proc.stdin.drain()
+        await proc.wait()
+        result = await cancellation
+        assert (tmp_path / f'{source.task_id}.continuation-stopped.json').exists()
+        assert 'd' * 32 in TaskRegistry._cascade_targets(SimpleNamespace(_log_dir=tmp_path), source.task_id, [])
+        if end_to_end:
+            assert set(observed_targets) == {source.task_id, 'd' * 32}
+            assert result['rounds'] == 2
+            assert not result['cascade_incomplete']
+    finally:
+        if proc.returncode is None:
+            proc.kill()
+            await proc.wait()
+
+
+@pytest.mark.asyncio
+async def test_cancel_ordinary_task_does_not_create_chain_stop(tmp_path):
+    from polybridge.task_continuation import stop_chain
+    source = record(tmp_path)
+    await stop_chain(Registry(tmp_path), source.task_id)
+    assert not (tmp_path / f'{source.task_id}.continuation-stopped.json').exists()
+
+
+@pytest.mark.asyncio
 async def test_fake_executable_certifies_fresh_cap_successor_and_durable_drain(tmp_path, monkeypatch):
     import asyncio
     import sys

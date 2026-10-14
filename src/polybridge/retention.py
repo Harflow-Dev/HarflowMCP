@@ -189,7 +189,11 @@ def sweep(log_dir: Path, days: int, now: datetime) -> dict[str, int]:
 
     _sweep_temp_files(log_dir, by_id, statuses, now, stats)
 
-    for record in records:
+    # Original assignments are needed by every retained fresh-session member.
+    # Delete dependants first so fully expired chains can still disappear in one
+    # sweep; actual records remaining after failed/locked deletions protect roots.
+    continuation_roots = {r.chain_root_task_id for r in records if r.chain_root_task_id}
+    for record in sorted(records, key=lambda r: r.task_id in continuation_roots):
         if record.task_id in pinned:
             continue
         if statuses.get(record.task_id) not in store.TERMINAL_RECORD_STATUSES:
@@ -349,7 +353,7 @@ def _has_fresh_descendant(
         if child_id in snapshot_ids:
             continue
         child = store.read(log_dir, child_id)
-        if child is None or {child.parent_task_id, child.continuation_of_task_id, child.spawned_by} & family:
+        if child is None or {child.parent_task_id, child.continuation_of_task_id, child.chain_root_task_id, child.spawned_by} & family:
             return True
     return False
 
@@ -380,6 +384,7 @@ def _delete_task(
     sessions = sorted(
         {by_id[m].session_id for m in family if m in by_id and by_id[m].session_id}
     )
+    sessions.append('continuation-' + (record.chain_root_task_id or task_id))
     with contextlib.ExitStack() as locks:
         for session_id in sessions:
             try:
@@ -410,6 +415,12 @@ def _delete_task(
                     return
 
                 if _has_fresh_descendant(log_dir, family, by_id.keys()):
+                    stats["kept_live_descendant"] += 1
+                    return
+
+                if any(member.task_id != task_id and member.chain_root_task_id == task_id
+                       and store.record_path(log_dir, member.task_id).exists()
+                       for member in by_id.values()):
                     stats["kept_live_descendant"] += 1
                     return
 

@@ -40,8 +40,8 @@ async def bounded_caller(directory: Path):
 
 
 def managed_run_summary(run: dict[str, Any]) -> dict[str, Any]:
-    """Expose routing state without bypassing settled-only result inspection."""
-    keys = ("workflow_run_id", "name", "kind", "status", "goal", "goal_revision", "goal_history", "goal_assessment", "goal_replanning_required", "parent_goal", "definition", "revision", "prompt", "execution_contract", "tasks", "checklist_disposition", "decisions", "transitions", "settling", "input_question", "input_decision_id", "interaction_owner", "reason", "instructions", "created_at", "updated_at")
+    """Expose current routing state; goal history remains in paged detail reads."""
+    keys = ("workflow_run_id", "name", "kind", "status", "goal", "goal_revision", "goal_assessment", "goal_replanning_required", "parent_goal", "definition", "revision", "prompt", "execution_contract", "tasks", "checklist_disposition", "decisions", "transitions", "settling", "input_question", "input_decision_id", "interaction_owner", "reason", "instructions", "created_at", "updated_at")
     summary = {key: run[key] for key in keys if key in run}
     if isinstance(run.get("technical_plan"), str):
         summary.update(technical_plan=run["technical_plan"][:16000], technical_plan_truncated=len(run["technical_plan"]) > 16000, technical_plan_execution_id=run.get("technical_plan_execution_id"))

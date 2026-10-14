@@ -1458,6 +1458,9 @@ and are limited to 64 KiB UTF-8. Omitting the goal retains the existing completi
 contract. A goal adds constraints; it never grants permissions.
 
 Run reads retain `goal`, `goal_revision`, `goal_history` and `goal_assessment`.
+Managed orchestrator status and run-list summaries include the current goal, revision
+and assessment; retained goal history is available through the paged `goal_history`
+detail view rather than repeated in each summary.
 Monitor retrieves the potentially large goal, history and assessment through paged
 detail views. At End, the orchestrator must explicitly assess the current revision
 as `satisfied`, `unmet` or `unverifiable`, with a reason and issued settled execution

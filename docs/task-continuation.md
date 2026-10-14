@@ -19,3 +19,5 @@ different follow-up text or notes are rejected instead of silently dropped. `lis
 `capabilities.supports_auto_continue`; unsupported automatic settings are rejected before spawn.
 
 Cancelling the initial task also reaches active successors through continuation edges. Cancellation serializes with an in-flight reservation and persists a stopped-chain marker before returning; pending or later successors cannot restart that chain. Start a new task explicitly when you want to begin work again after cancelling an automatic chain. Detached CLI owners remain alive until all queued continuation launches and their subprocesses settle.
+
+Retention preserves the original chain assignment while any successor record remains, including settled successors still within retention and records whose cleanup is locked or failed. Fully expired chains are reclaimed once their successor records have been removed.
