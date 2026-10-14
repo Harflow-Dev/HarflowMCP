@@ -21,7 +21,9 @@ workflow from an MCP client or the command line.
 - **Mix harnesses within one run.** Choose each step's model, effort, access level, session policy,
   and ordered fallback agents. Use the strengths of different agents without changing clients.
 - **Let an agent refine your canvas.** Start with a graph or generate one from a prompt, then chat
-  with a builder agent and inspect its proposed changes before applying them.
+  with a builder agent and inspect its proposed changes before applying them. Builder guidance keeps
+  steps focused on task logic; Polybridge manages runtime recovery and user questions.
+  See [workflow authoring guidance](docs/workflows.md#workflow-authoring-guidance).
 - **See what is happening.** Watch active nodes and agent activity, inspect execution history,
   and follow the technical plan and checklist as the run progresses.
 - **Keep progress durable.** Polybridge saves workflow definitions, drafts, decisions, assignments,

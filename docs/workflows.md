@@ -1135,6 +1135,34 @@ expected_draft_revision)` or `workflow-builder-apply --definition draft.json
 it accepts no caller-supplied run or task identity. Final proposals still require explicit Apply
 and Save in the editor.
 
+## Workflow authoring guidance
+
+Creation, canvas edits and follow-up builder turns share concise authoring guidance. Describe each
+node's task responsibility and required evidence, and each connection's task-specific condition.
+Polybridge supplies shared role instructions and the result protocol; do not repeat them in nodes.
+Polybridge also manages runtime retries, budget enforcement, configured fallback dispatch and user
+interaction. Put requested limits and fallback candidates in existing configuration fields, such as
+`max_attempts`, `max_retries`, `max_transitions` and `fallbacks`, instead of adding runtime-recovery
+branches or repeated instructions.
+
+Task revision loops remain useful: review findings can return to implementation for rework. End
+means intentional workflow termination. Ask clarification or approval questions through the existing
+runtime interaction, including orchestrator `needs_input`, without routing to End to wait for a user.
+Editing preserves legitimate task branches, revision loops, intentional End paths and existing IDs,
+settings and instructions except where the requested edit requires changes. Existing workflows are
+not automatically rewritten by this guidance.
+
+For a manual authoring check, create a workflow with this request: “Plan, implement and review a
+change. Ask for approval before implementation. Allow two implementation attempts and two review
+rework traversals, cap the workflow at 20 transitions, and configure Claude as Codex's fallback.”
+Inspect the generated graph and instructions: requested limits and candidates should use configuration,
+review findings should have a task rework path, and approval should use runtime interaction rather than
+an End branch. End should represent completion or another intentional termination. Then edit the
+canvas to add a test step and follow up to refine its evidence requirements; check that the same
+principles hold and existing unrelated IDs, settings, revision loops and End paths remain intact.
+Offline prompt and graph tests verify guidance delivery and graph handling, not model compliance;
+this manual check requires a real builder run and is not part of automated validation.
+
 ## Limit an inferred retry arrow
 
 Select an arrow returning to an earlier step, enable **Limit retries**, and choose **Max retries**.
