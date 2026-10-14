@@ -233,8 +233,9 @@ Routes prefer short nearby grid corridors and keep bends and crossings away from
 possible. They prefer separate lanes when space allows, permit same-direction segments to share a
 tight corridor, and discourage opposing segments from overlapping. Connections into the same
 destination can join a shared trunk when its approach is clear; each incoming branch keeps its
-condition and selection. Hovering a shared section prefers the selected connection, with a stable
-choice when none is selected. Select an incoming branch to inspect another condition. Selected and
+condition and selection. Hovering or clicking a shared section prefers the selected connection;
+otherwise it prefers a connection with a condition, then uses a stable choice. Select an incoming
+branch to inspect another condition. Selected and
 traversed connections remain visible above ordinary shared strokes. They avoid unnecessary detours
 around the source node; backward connections can still need a loop to reach the destination's input.
 These are routing preferences when space is constrained, rather than a requirement to widen every
