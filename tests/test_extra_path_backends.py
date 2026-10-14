@@ -16,6 +16,8 @@ def build(backend, repo, freedom='write_in_repo', network=None, resume=False):
 def qualified(monkeypatch, tmp_path_factory):
     # Exercise the real executable fingerprint without requiring an installed CLI.
     # The version probe is stubbed below; invoking the stand-in would fail loudly.
+    monkeypatch.setattr('polybridge.backends.codex_config._mdm_absence', lambda: ('managed_preferences_absent',))
+    monkeypatch.setenv('CODEX_HOME', str(tmp_path_factory.mktemp('qualified-config')))
     launcher = tmp_path_factory.mktemp('qualified-launcher') / 'codex'
     launcher.write_text('#!/bin/sh\nexit 99\n')
     launcher.chmod(0o755)
@@ -192,6 +194,8 @@ from polybridge.backends.codex import CodexBackend, UnsafeInvocationError
 import polybridge.backends.codex as codex
 import polybridge.runtime_loaders as loaders
 loaders.qualify_loaders = lambda paths: (set(paths), set())
+import polybridge.backends.codex_config as config
+config._mdm_absence = lambda: ('managed_preferences_absent',)
 import polybridge.backends as registry
 # Explicit stand-in version transport: preserve the bound executable under test.
 registry.version = lambda backend, executable=None: subprocess.run([executable, '--version'], capture_output=True, text=True, check=True).stdout.strip()
@@ -223,7 +227,7 @@ except UnsafeInvocationError:
 else:
     raise AssertionError('legacy executable allowance changed')
 '''
-    env = {**os.environ, 'PYTHONPATH': str(Path(__file__).resolve().parents[1] / 'src')}
+    env = {**os.environ, 'CODEX_HOME': str(tmp_path / 'empty-codex-home'), 'PYTHONPATH': str(Path(__file__).resolve().parents[1] / 'src')}
     result = subprocess.run([sys.executable, '-c', script, str(server), str(repo)], env=env, capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
 
@@ -623,4 +627,28 @@ def test_final_revalidation_rejects_new_writable_file_alias(qualified, tmp_path)
     invocation = qualified.with_extra_writable_paths(build(qualified, repo), grants, 'write_in_repo')
     os.link(source, repo / 'later-alias.py')
     with pytest.raises(UnsafeInvocationError, match='multiply-linked'):
+        qualified.assert_extra_writable_paths(invocation, grants, 'write_in_repo')
+
+
+def test_active_configuration_refused_before_version_probe(qualified, monkeypatch, tmp_path):
+    from pathlib import Path
+    home = Path(__import__('os').environ['CODEX_HOME'])
+    (home / 'config.toml').write_text('notify=["secret-command"]')
+    calls = []
+    monkeypatch.setattr(backends, 'version', lambda *args, **kwargs: calls.append(1) or EXTRA_PATHS_VERSION)
+    with pytest.raises(UnsafeInvocationError, match='disabled'):
+        qualified.with_extra_writable_paths(build(qualified, tmp_path), normalize_paths([str(tmp_path)]), 'write_in_repo')
+    assert not calls
+    assert qualified.with_extra_writable_paths(build(qualified, tmp_path), (), 'write_in_repo').extra_path_configuration is None
+
+
+def test_configuration_changed_before_final_refused(qualified, tmp_path):
+    from pathlib import Path
+    home = Path(__import__('os').environ['CODEX_HOME'])
+    config = home / 'config.toml'
+    config.write_text('model="first"')
+    grants = normalize_paths([str(tmp_path)])
+    invocation = qualified.with_extra_writable_paths(build(qualified, tmp_path), grants, 'write_in_repo')
+    config.write_text('model="second"')
+    with pytest.raises(UnsafeInvocationError, match='configuration changed'):
         qualified.assert_extra_writable_paths(invocation, grants, 'write_in_repo')

@@ -12,7 +12,9 @@ from polybridge.extra_paths import normalize_paths
 
 
 @pytest.fixture
-def qualified(monkeypatch, fake_backend_clis):
+def qualified(monkeypatch, fake_backend_clis, tmp_path_factory):
+    monkeypatch.setattr('polybridge.backends.codex_config._mdm_absence', lambda: ('managed_preferences_absent',))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path_factory.mktemp("qualified-config")))
     # Qualification still resolves/fingerprints a CLI, even with its version stubbed.
     monkeypatch.setattr(backends, 'version', lambda backend, **kwargs: EXTRA_PATHS_VERSION)
     monkeypatch.setattr('polybridge.backends.codex.sys.platform', 'darwin')

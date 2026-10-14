@@ -359,7 +359,7 @@ class CodexBackend(ExtraPathsUnsupported):
     def extra_path_support(self) -> dict[str, Any]:
         return {"supported": True, "platforms": ["darwin"], "versions": [EXTRA_PATHS_VERSION],
                 "freedoms": ["write_in_repo", "publish"], "network": [False, True],
-                "native_subagent": False, "certification": EXTRA_PATHS_CERTIFICATION}
+                "native_subagent": False, "configuration": "notify, hooks, MCP and plugins disabled; no project config", "certification": EXTRA_PATHS_CERTIFICATION}
 
     def _extra_path_runtime(self):
         import shutil
@@ -440,6 +440,17 @@ class CodexBackend(ExtraPathsUnsupported):
         except (ValueError, OSError, RuntimeError) as exc:
             raise UnsafeInvocationError(str(exc)) from exc
 
+    def _extra_path_configuration(self, invocation, grants):
+        from .codex_config import qualify_configuration
+        repo = Path(invocation.argv[invocation.argv.index('-C') + 1]).resolve(strict=True)
+        scopes = [(repo, 'directory'), *((Path(g.path), g.kind) for g in grants)]
+        if invocation.scratch_directory:
+            scopes.append((Path(invocation.scratch_directory).resolve(strict=True), 'directory'))
+        try:
+            return qualify_configuration(repo, scopes, [(Path(g.path), g.kind) for g in grants])
+        except (ValueError, OSError, RuntimeError) as exc:
+            raise UnsafeInvocationError(str(exc)) from exc
+
     def qualify_extra_writable_paths(self, invocation, grants, freedom, network=None):
         """Fresh qualification per request; callers run this bounded probe off the event loop."""
         if not grants:
@@ -450,6 +461,7 @@ class CodexBackend(ExtraPathsUnsupported):
         from . import version
         self._validate_extra_paths(invocation, grants, freedom, network)
         self.assert_safe(invocation, freedom, network)
+        configuration = self._extra_path_configuration(invocation, grants)
         before = self._extra_path_runtime()
         self._assert_launcher_outside_writes(invocation, grants, before)
         # Probe and execute the same PATH-selected absolute alias. A relative PATH
@@ -458,7 +470,7 @@ class CodexBackend(ExtraPathsUnsupported):
             raise UnsupportedCapability("extra writable paths require macOS and " + EXTRA_PATHS_VERSION)
         if before != self._extra_path_runtime():
             raise UnsafeInvocationError("CLI runtime identity changed during qualification")
-        invocation = replace(invocation, extra_path_runtime=before)
+        invocation = replace(invocation, extra_path_runtime=before, extra_path_configuration=configuration)
         if not invocation.extra_writable_paths:
             invocation = self._decorate_extra_paths(invocation, grants, freedom, network)
         self.assert_extra_writable_paths(invocation, grants, freedom, network)
@@ -490,6 +502,8 @@ class CodexBackend(ExtraPathsUnsupported):
             raise UnsafeInvocationError("invocation extra writable paths differ from authorized grants")
         if grants:
             self._validate_extra_paths(invocation, grants, freedom, network)
+            if invocation.extra_path_configuration != self._extra_path_configuration(invocation, grants):
+                raise UnsafeInvocationError("Codex configuration changed or was not qualified")
             if invocation.extra_path_runtime != self._extra_path_runtime():
                 raise UnsafeInvocationError("CLI runtime identity changed or was not qualified")
         self.assert_safe(invocation, freedom, network)

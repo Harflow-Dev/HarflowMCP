@@ -15,6 +15,7 @@ import subprocess
 import sys
 import threading
 from types import SimpleNamespace
+from unittest.mock import patch
 import uuid
 
 import pytest
@@ -206,8 +207,10 @@ def run_cli(fixture, grants, *, session=None, network=False, fork=None, file_ope
     builder = backend.build_resume_argv if session else backend.build_start_argv
     invocation = builder(api.nonce, repo=paths["repo"], freedom="write_in_repo", session_id=session,
                          model="gpt-6.1-sol", reasoning_effort="low", max_turns=None, network=network)
-    invocation = backend.with_extra_writable_paths(invocation, grants, "write_in_repo", network)
-    backend.assert_extra_writable_paths(invocation, grants, "write_in_repo", network)
+    # Qualification must observe the same isolated configuration as execution.
+    with patch.dict(os.environ, fixture.env):
+        invocation = backend.with_extra_writable_paths(invocation, grants, "write_in_repo", network)
+        backend.assert_extra_writable_paths(invocation, grants, "write_in_repo", network)
     # Replace only executable resolution; every permission argument is production-owned.
     argv = [fixture.executable, *invocation.argv[1:]]
     result = subprocess.run(argv, cwd=paths["repo"], env=fixture.env, stdin=subprocess.DEVNULL,

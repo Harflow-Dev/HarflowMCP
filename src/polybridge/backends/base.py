@@ -52,6 +52,7 @@ class Invocation:
     # Request-local runtime observation, never persisted as grant authority. The execution
     # boundary refreshes it before any scratch allocation; final checks only inspect identity.
     extra_path_runtime: tuple[Any, ...] | None = None
+    extra_path_configuration: tuple[Any, ...] | None = None
     scratch_directory: str | None = None
     native_subagent: bool = False
     native_settings: dict[str, Any] | None = None

@@ -93,7 +93,7 @@ Measured **2026-10-14**, with isolated local fake APIs or installed permission
 engines without paid model calls for the certification. One separately authorized
 authenticated Antigravity check also confirmed its allowed and denied file-tool
 writes, with no observed quota error; its default model identity was not reported.
-Only qualified configurations are enabled.
+Only qualified configurations are enabled. Extra-path requests require notify, hooks, MCP servers and plugins to be absent or explicitly disabled, including referenced agent configuration files and profiles. Project `.codex/config.toml` files and symlinked project `.codex` directories are not qualified; direct grants inside project `.codex` are rejected. The pinned CLI preserves its native project `.codex` write exclusion for missing configurations even with repository or ancestor directory grants. Global `CODEX_HOME/config.toml` and referenced role files (including their symlink paths and missing global configuration namespace) must stay outside all writable scopes. Configuration is bounded, parsed without execution, and revalidated before launch. Known auxiliary hook/managed configuration files, effective macOS managed preference inputs, and nonempty plugin state are outside the qualified profile and reject requests; missing auxiliary and plugin namespaces remain protected. Empty plugin directories are permitted. This is a conservative supported profile, not a generic proof of every plugin or configuration graph. Ordinary requests without extra paths retain existing behavior.
 
 | Harness | Installed version | Evidence and coverage |
 | --- | --- | --- |
