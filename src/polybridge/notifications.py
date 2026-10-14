@@ -101,22 +101,29 @@ def subscribe(log_dir: Path, task_id: str, notify: str, *, reservation: bool = F
                        (str(uuid.uuid4()), task_id, notify, 'pending', now, now))
             return _public(db.execute('SELECT * FROM subscriptions WHERE task_id=? AND destination=?', (task_id, notify)).fetchone())
 
-def status(log_dir: Path, task_id: str) -> list[dict]:
-    store.validate_task_id(task_id)
+def _existing_db(log_dir: Path, mode: str):
+    """Open existing notification storage without initializing or recreating it."""
     path = Path(log_dir).parent / 'notifications.sqlite3'
     try:
         path.stat()
     except FileNotFoundError:
-        return []
-    # A status read must neither initialize storage nor recreate a deleted database.
+        return None
     try:
-        connection = sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True, timeout=2)
+        connection = sqlite3.connect(path.resolve().as_uri() + '?mode=' + mode, uri=True, timeout=2)
     except sqlite3.OperationalError:
         try:
             path.stat()
         except FileNotFoundError:
-            return []
+            return None
         raise
+    return connection
+
+
+def status(log_dir: Path, task_id: str) -> list[dict]:
+    store.validate_task_id(task_id)
+    connection = _existing_db(log_dir, 'ro')
+    if connection is None:
+        return []
     with closing(connection) as db:
         db.row_factory = sqlite3.Row
         return [_public(row) for row in db.execute('SELECT * FROM subscriptions WHERE task_id=? ORDER BY created LIMIT ?', (task_id, MAX_SUBSCRIPTIONS))]
@@ -136,7 +143,10 @@ def discard_unstarted(log_dir: Path, task_id: str) -> bool:
 
 def unsubscribe(log_dir: Path, task_id: str, destination: str | None = None) -> list[dict]:
     store.validate_task_id(task_id)
-    with _db(log_dir) as db:
+    connection = _existing_db(log_dir, 'rw')
+    if connection is None:
+        return []
+    with closing(connection) as db, db:
         db.execute("UPDATE subscriptions SET state='unsubscribed',updated=?,lease=NULL WHERE task_id=? AND (? IS NULL OR destination=?) AND state IN ('pending','retry','delivering')", (time.time(), task_id, destination, destination))
     return status(log_dir, task_id)
 

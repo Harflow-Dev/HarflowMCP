@@ -460,3 +460,41 @@ def test_transport_falls_back_when_address_family_unavailable(monkeypatch):
     assert families == [n.socket.AF_INET6, n.socket.AF_INET]
     assert len(sockets) == len(requests) == 1
     assert sockets[0].closed
+
+
+@pytest.mark.parametrize('destination', [None, 'hook'])
+def test_unsubscribe_absent_does_not_create_storage(tmp_path, monkeypatch, destination):
+    monkeypatch.delenv('PB_NOTIFY_DESTINATIONS', raising=False)
+    logs = tmp_path / 'missing' / 'tasks'
+    assert n.unsubscribe(logs, 'absent', destination) == []
+    assert not logs.parent.exists()
+
+
+def test_unsubscribe_database_removed_before_connect_is_not_recreated(setup, monkeypatch):
+    n.subscribe(setup, 'reserved', 'test', reservation=True)
+    path = setup.parent / 'notifications.sqlite3'
+    connect = sqlite3.connect
+    def remove_then_connect(*args, **kwargs):
+        path.unlink()
+        return connect(*args, **kwargs)
+    monkeypatch.setattr(sqlite3, 'connect', remove_then_connect)
+    assert n.unsubscribe(setup, 'reserved') == []
+    assert not path.exists()
+
+
+def test_unsubscribe_existing_connect_failure_is_not_hidden(setup, monkeypatch):
+    n.subscribe(setup, 'reserved', 'test', reservation=True)
+    def fail_connect(*args, **kwargs):
+        raise sqlite3.OperationalError('unavailable')
+    monkeypatch.setattr(sqlite3, 'connect', fail_connect)
+    with pytest.raises(sqlite3.OperationalError, match='unavailable'):
+        n.unsubscribe(setup, 'reserved')
+
+
+def test_unsubscribe_corrupt_database_is_not_initialized(setup):
+    path = setup.parent / 'notifications.sqlite3'
+    path.write_bytes(b'corrupt database')
+    before = path.read_bytes()
+    with pytest.raises(sqlite3.DatabaseError):
+        n.unsubscribe(setup, 'reserved')
+    assert path.read_bytes() == before

@@ -70,6 +70,8 @@ or dispatch remains uncertain, the error instead includes the reserved task ID
 for inspection before retrying.
 Status reads use an existing database read-only, without initializing or changing
 storage; an absent database returns an empty list and does not start a worker.
+Unsubscribing with no notification database also returns an empty list without
+initializing storage.
 
 Workers resume when a server opens its task registry if destinations are configured
 or a notification database already exists, within a running event loop. Synchronous

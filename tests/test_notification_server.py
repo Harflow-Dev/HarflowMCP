@@ -283,3 +283,16 @@ async def test_notification_status_absent_does_not_create_storage_or_worker(monk
     assert await server.get_task_notifications('absent') == []
     assert not (registry.log_dir.parent / 'notifications.sqlite3').exists()
     assert getattr(registry, '_notification_worker', None) is None
+
+
+async def test_unsubscribe_absent_does_not_create_storage_or_future_worker(monkeypatch):
+    registry = server._reg()
+    monkeypatch.delenv('PB_NOTIFY_DESTINATIONS', raising=False)
+    assert await server.unsubscribe('absent') == []
+    assert not (registry.log_dir.parent / 'notifications.sqlite3').exists()
+    monkeypatch.setattr(server, '_registry', None)
+    monkeypatch.setattr(server, 'TaskRegistry', lambda: registry)
+    monkeypatch.setattr(registry, 'start_maintenance', lambda: None)
+    assert server._reg() is registry
+    assert getattr(registry, '_notification_worker', None) is None
+    assert not (registry.log_dir.parent / 'notifications.sqlite3').exists()
