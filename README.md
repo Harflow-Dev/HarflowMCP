@@ -15,7 +15,8 @@ workflow from an MCP client or the command line.
 
 - **Design the workflow visually.** Connect Planning, Implementation, Review, and Task steps.
   Branch into parallel work, bring results back together, and route review findings into another pass.
-  Connections prefer compact grid routes and separate opposing directions where space allows.
+  Connections prefer compact grid routes, merge toward a shared destination when possible, and
+  separate opposing directions where space allows.
   Parallel runs use a padded two-line header with status counts before the other details.
 - **Mix harnesses within one run.** Choose each step's model, effort, access level, session policy,
   and ordered fallback agents. Use the strengths of different agents without changing clients.
