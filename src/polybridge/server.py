@@ -516,20 +516,22 @@ async def start_task(
             **({'task_id': reserved_id} if reserved_id is not None else {}),
         )
     except (Exception, asyncio.CancelledError) as exc:
+        not_started = getattr(exc, 'polybridge_not_started', False) is True
+        request_error = isinstance(exc, backends.UnsupportedCapability) or (isinstance(exc, ValueError) and not_started)
         if reserved_id is not None:
             from .notifications import discard_unstarted
             cleaned = False
-            if getattr(exc, 'polybridge_not_started', False) is True and _reg().get(reserved_id) is None:
+            if not_started and _reg().get(reserved_id) is None:
                 try:
                     cleaned = await _notification_io(discard_unstarted, _reg().log_dir, reserved_id)
                 except Exception:
                     log.warning('Notification reservation cleanup unavailable for task %s', reserved_id)
             if isinstance(exc, asyncio.CancelledError):
                 raise
-            if cleaned is True and _reg().get(reserved_id) is None and isinstance(exc, backends.UnsupportedCapability):
+            if cleaned is True and _reg().get(reserved_id) is None and request_error:
                 raise MCPError(INVALID_PARAMS, str(exc)) from None
             raise MCPError(INVALID_PARAMS, f'Dispatch did not return normally; inspect task_id {reserved_id} and its notification state before retrying') from None
-        if not isinstance(exc, backends.UnsupportedCapability):
+        if not request_error:
             raise
         # Covers `NestedDispatchRefused` too — it subclasses `UnsupportedCapability`, and this cap
         # is only ever checked once a caller was actually detected inside `_reg().start`.
@@ -941,6 +943,10 @@ async def resume_task(
     except (SessionBusyError, SessionUnknownError, RepoUnavailableError) as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
     except (backends.UnknownBackend, backends.UnsupportedCapability) as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+    except ValueError as exc:
+        if getattr(exc, 'polybridge_not_started', False) is not True:
+            raise
         raise MCPError(INVALID_PARAMS, str(exc)) from None
     return task.brief() | {"enforcement": task.enforcement}
 

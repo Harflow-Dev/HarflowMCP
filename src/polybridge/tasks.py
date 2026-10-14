@@ -1074,7 +1074,8 @@ class TaskRegistry:
         # Caller detection and the nested-dispatch caps run before the session lock — they are
         # read-only and must never block on, or be blocked by, another resume of this session.
         caller = await self._mutation_caller()
-        grants = self._resolve_extra_paths(caller, None, backend, parent)
+        with _before_spawn():
+            grants = self._resolve_extra_paths(caller, None, backend, parent)
         if grants and (native_subagent or workflow_builder):
             raise ValueError("Extra writable paths are unavailable to native workflows or workflow builders")
         spawned_by, root_task_id, depth, max_depth, lineage_detected = self._resolve_lineage(
@@ -2916,7 +2917,8 @@ class TaskRegistry:
 
         # Same ordering as `resume`: caller detection and the caps run before the session lock.
         caller = await self._mutation_caller()
-        grants = self._resolve_extra_paths(caller, None, backend, record)
+        with _before_spawn():
+            grants = self._resolve_extra_paths(caller, None, backend, record)
         if grants and (native_subagent or workflow_builder):
             raise ValueError("Extra writable paths are unavailable to native workflows or workflow builders")
         spawned_by, root_task_id, depth, max_depth, lineage_detected = self._resolve_lineage(

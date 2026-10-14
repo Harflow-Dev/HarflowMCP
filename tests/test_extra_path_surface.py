@@ -100,3 +100,108 @@ def test_nested_enforcement_rejects_legacy_temp_widening(git_repo, tmp_path, qua
     violation = nested_enforcement_violation(parent.as_dict(), backend.enforcement('write_in_repo'),
         parent_backend='codex', child_backend='codex', parent_repo=str(git_repo), child_repo=str(git_repo))
     assert violation[0] == 'writable_roots'
+
+
+@pytest.mark.parametrize('notify', [None, 'hook'])
+@pytest.mark.parametrize('invalid', ['relative', 'missing', 'duplicate', 'oversized'])
+async def test_start_invalid_grants_are_actionable_before_spawn(
+    git_repo, tmp_path, monkeypatch, fake_backend_clis, qualified, notify, invalid,
+):
+    from polybridge import notifications
+    monkeypatch.setenv('PB_NOTIFY_DESTINATIONS', json.dumps({'hook': {'url': 'https://example.com/hook'}}))
+    monkeypatch.setattr(server, '_start_notification_worker', lambda _: None)
+    registry = server._reg()
+    spawn = AsyncMock()
+    monkeypatch.setattr(registry, '_spawn', spawn)
+    requests = {'relative': ['relative'], 'missing': [str(tmp_path / 'missing')],
+                'duplicate': [str(tmp_path), str(tmp_path)], 'oversized': [str(tmp_path)] * 17}
+    messages = {'relative': 'absolute strings', 'missing': 'must exist',
+                'duplicate': 'duplicate canonical', 'oversized': 'at most 16'}
+    with pytest.raises(MCPError, match=messages[invalid]) as error:
+        await server.start_task('Build', str(git_repo), backend='codex',
+                                extra_writable_paths=requests[invalid], notify=notify)
+    assert error.value.code == -32602
+    spawn.assert_not_called()
+    assert not registry._tasks
+    assert not notifications.pinned_tasks(registry.log_dir)
+
+
+async def test_start_validation_cleanup_failure_preserves_reserved_identity(
+    git_repo, monkeypatch, fake_backend_clis, qualified,
+):
+    from polybridge import notifications
+    monkeypatch.setenv('PB_NOTIFY_DESTINATIONS', json.dumps({'hook': {'url': 'https://example.com/hook'}}))
+    monkeypatch.setattr(server, '_start_notification_worker', lambda _: None)
+    reserved = []
+    subscribe = notifications.subscribe
+    def reserve(*args, **kwargs):
+        reserved.append(args[1])
+        return subscribe(*args, **kwargs)
+    monkeypatch.setattr(notifications, 'subscribe', reserve)
+    monkeypatch.setattr(notifications, 'discard_unstarted', lambda *args: False)
+    with pytest.raises(MCPError, match='inspect task_id') as error:
+        await server.start_task('Build', str(git_repo), backend='codex',
+                                extra_writable_paths=['relative'], notify='hook')
+    assert reserved[0] in str(error.value)
+    assert notifications.status(server._reg().log_dir, reserved[0])[0]['state'] == 'pending'
+    assert not server._reg()._tasks
+
+
+@pytest.mark.parametrize('recovered', [False, True])
+@pytest.mark.parametrize('alter', ['replaced', 'deleted', 'certificate', 'enforcement'])
+async def test_resume_saved_authority_failure_is_actionable_before_spawn(
+    git_repo, tmp_path, monkeypatch, qualified, recovered, alter,
+):
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from polybridge import store
+    from polybridge.extra_paths import serialize_paths
+    registry = server._reg()
+    backend = backends.get('codex')
+    grant = tmp_path / 'exact'
+    grant.write_text('original')
+    grants = normalize_paths([str(grant)])
+    enforcement = backend.extra_path_enforcement(backend.enforcement('write_in_repo'), grants, git_repo).as_dict()
+    record = store.TaskRecord(task_id='parent', backend='codex', session_id='session',
+        repo_path=str(git_repo), started_at='2026-10-14T00:00:00Z', status='completed', exit_code=0,
+        extra_writable_paths=serialize_paths(grants), extra_path_certification=backend.extra_path_support()['certification'],
+        enforcement=enforcement)
+    if alter == 'replaced':
+        replacement = tmp_path / 'replacement'
+        replacement.write_text('new')
+        replacement.replace(grant)
+    elif alter == 'deleted':
+        grant.unlink()
+    elif alter == 'certificate':
+        record = replace(record, extra_path_certification='corrupt')
+    else:
+        record = replace(record, enforcement={})
+    saved = record.extra_writable_paths.copy()
+    if recovered:
+        store.write_landed(registry.log_dir, record)
+    else:
+        registry._tasks['parent'] = SimpleNamespace(**(record.__dict__ | {'repo_path': git_repo, 'finished': True}))
+    spawn = AsyncMock()
+    monkeypatch.setattr(registry, '_spawn', spawn)
+    with pytest.raises(MCPError, match='extra writable path') as error:
+        await server.resume_task('parent', 'Continue')
+    assert error.value.code == -32602
+    spawn.assert_not_called()
+    assert record.extra_writable_paths == saved
+    assert set(registry._tasks) == (set() if recovered else {'parent'})
+
+
+@pytest.mark.parametrize('recovered', [False, True])
+async def test_resume_unmarked_value_error_is_not_translated(git_repo, monkeypatch, recovered):
+    from types import SimpleNamespace
+    from polybridge import store
+    registry = server._reg()
+    record = store.TaskRecord(task_id='parent', backend='codex', session_id='session',
+        repo_path=str(git_repo), started_at='2026-10-14T00:00:00Z', status='completed', exit_code=0)
+    if recovered:
+        store.write_landed(registry.log_dir, record)
+    else:
+        registry._tasks['parent'] = SimpleNamespace(**(record.__dict__ | {'finished': True}))
+    monkeypatch.setattr(registry, 'resume_record' if recovered else 'resume', AsyncMock(side_effect=ValueError('late failure')))
+    with pytest.raises(ValueError, match='late failure'):
+        await server.resume_task('parent', 'Continue')

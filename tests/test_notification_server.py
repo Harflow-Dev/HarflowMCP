@@ -261,7 +261,7 @@ async def test_existing_database_cleanup_resumes_without_configuration(monkeypat
                 await worker
 
 
-@pytest.mark.parametrize('error_type', [OSError, backends.UnsupportedCapability])
+@pytest.mark.parametrize('error_type', [OSError, ValueError, backends.UnsupportedCapability])
 async def test_unmarked_start_error_keeps_reservation(configured, monkeypatch, git_repo, fake_backend_clis, error_type):
     seen = []
     async def reject(*args, **kwargs):
