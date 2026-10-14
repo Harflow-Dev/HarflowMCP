@@ -103,7 +103,7 @@ async def wait_for_tasks(
             if remaining <= 0:
                 raise asyncio.TimeoutError
             return await asyncio.wait_for(asyncio.to_thread(_recovered, registry.log_dir, task_id), remaining)
-        except (asyncio.TimeoutError, OSError, ValueError):
+        except (asyncio.TimeoutError, OSError, ValueError, TypeError):
             return unavailable()
 
     # Resolve the complete set before creating observers; no partial wait on missing ids.

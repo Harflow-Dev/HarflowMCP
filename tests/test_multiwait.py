@@ -248,6 +248,28 @@ async def test_corrupt_existing_metadata_is_unavailable():
     assert result['terminal_task_ids'] == []
 
 
+async def test_invalid_listing_header_field_is_unavailable_alongside_live_terminal(tmp_path):
+    record = store.TaskRecord(task_id="bad-header", backend="codex", session_id=None,
+                              repo_path=str(tmp_path), started_at=datetime.now(timezone.utc).isoformat(),
+                              status="completed", exit_code=0)
+    store.write(server._reg().log_dir, record)
+    path = store.record_path(server._reg().log_dir, "bad-header")
+    raw = json.loads(path.read_text())
+    # Valid JSON and a decodable TaskRecord, but listing_header requires a list here.
+    raw["bridge_notices"] = None
+    path.write_text(json.dumps(raw))
+    live = add_task("live-terminal", tmp_path, "completed")
+
+    result = await server.wait_for_tasks(["bad-header", "live-terminal"], "all", 0)
+
+    assert result["tasks"][0]["status"] == "unavailable"
+    assert result["tasks"][0]["status_source"] == "unavailable"
+    assert result["tasks"][1]["status"] == "completed"
+    assert result["terminal_task_ids"] == ["live-terminal"]
+    assert result["timed_out"]
+    assert live.done.is_set()
+
+
 async def test_missing_after_slow_metadata_is_rejected_before_reads(tmp_path, monkeypatch):
     live = add_task("live", tmp_path)
     registry = server._reg()
