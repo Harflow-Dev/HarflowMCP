@@ -47,6 +47,35 @@ def test_revision_preserves_evidence_and_invalidates_decisions(storage, tmp_path
         g.revise(storage, rid, "other", 1)
 
 
+@pytest.mark.parametrize("instructions", [None, "", "  Keep these spaces\r\nand this newline\n  "])
+def test_revision_keeps_caller_instructions_separate_from_replan(storage, tmp_path, instructions):
+    run = create(storage, tmp_path)
+    rid = run["workflow_run_id"]
+    def prepare(current):
+        current.update(status="paused", tasks=[{"id": "done", "status": "completed"}])
+        if instructions is None:
+            current.pop("instructions", None)
+        else:
+            current["instructions"] = instructions
+    storage.update_run(rid, prepare, "test")
+    g.revise(storage, rid, "new goal", 1)
+    reloaded_store = w.WorkflowStore(storage.root)
+    g.revise(reloaded_store, rid, "second goal", 2)
+    revised = reloaded_store.get_run(rid)
+    if instructions is None:
+        assert "instructions" not in revised
+    else:
+        assert revised["instructions"].encode("utf-8") == instructions.encode("utf-8")
+    assert revised["tasks"] == [{"id": "done", "status": "completed"}]
+    node = next(node for node in revised["definition"]["nodes"] if node["type"] == "start")
+    token = {"id": "test-token", "node_id": node["id"], "decision_id": "issued-test", "context": {}}
+    context = d.decision_context(revised, node, token, False, root=storage.root)
+    assert context["recovery_instructions"] == (instructions or "")
+    assert context["goal_replanning_required"] is True
+    assert context["goal_revision"] == 3
+    assert "before continuation or completion include goal_replan" in d.decision_prompt(context)
+
+
 @pytest.mark.parametrize("status", ["running", "completed", "failed", "needs_attention"])
 def test_revision_rejects_unsafe_checkpoint(storage, tmp_path, status):
     run = create(storage, tmp_path)

@@ -1480,8 +1480,10 @@ start a new run to continue with another goal. With bytes remaining, a proposed 
 that is too large is rejected while the editor retains its text. Recovered records
 already over these limits remain readable but cannot accept further revisions. Old routing
 assignments and assessments are invalidated; the next orchestrator decision must supply a nonempty
-`goal_replan` for the current revision before dispatch or completion. Nested runs
-refresh inherited goal constraints before scheduling while keeping their scoped
+`goal_replan` for the current revision before dispatch or completion.
+Goal revision preserves caller recovery instructions verbatim; the replanning requirement
+is carried separately in goal state and orchestrator guidance.
+Nested runs refresh inherited goal constraints before scheduling while keeping their scoped
 requests. Design-comparison plans must identify supplied references, screens,
 states and verification criteria, and request missing references.
 

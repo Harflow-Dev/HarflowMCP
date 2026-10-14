@@ -121,7 +121,6 @@ def revise(store: Any, run_id: str, goal: str, expected_revision: int, *, intera
             for key in ("selected_connections", "assignments", "accepted_decision_id", "decision_id", "decision_attempts", "decision_error", "assignment_prompt"):
                 token.pop(key, None)
             token["requires_assignment"] = True
-        run["instructions"] = run.get("instructions", "") + "\nThe caller revised the goal. Replan against the current goal while retaining completed work and its evidence."
         run["sessions"] = {}
     return store.update_run(run_id, change, "goal_revised", {"expected_revision": expected_revision})
 
