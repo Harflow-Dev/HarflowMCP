@@ -482,3 +482,54 @@ async def test_saved_authority_resolution_timeout_prevents_effects(tmp_path, mon
         assert not scratch.directory(registry.log_dir, 'child').exists()
     finally:
         release.set()
+
+
+async def test_abandoned_path_workers_keep_capacity_and_do_not_starve_shared_executor(tmp_path, monkeypatch, backend):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix='test-extra-path')
+    slots = threading.BoundedSemaphore(2)
+    release = threading.Event()
+    entered = [threading.Event(), threading.Event()]
+    monkeypatch.setattr(tasks, '_EXTRA_PATH_EXECUTOR', executor)
+    monkeypatch.setattr(tasks, '_EXTRA_PATH_SLOTS', slots)
+    monkeypatch.setattr(tasks, 'EXTRA_PATH_CHECK_BUDGET_SECONDS', .1)
+    def blocked(index):
+        entered[index].set()
+        assert release.wait(3)
+    pending = [asyncio.create_task(tasks._bounded_extra_path_check(blocked, i)) for i in range(2)]
+    try:
+        for _ in range(100):
+            if all(event.is_set() for event in entered): break
+            await asyncio.sleep(.001)
+        assert all(event.is_set() for event in entered)
+        for check in pending:
+            with pytest.raises(ValueError, match='timed out'):
+                await check
+        # Running futures survived waiter cancellation: neither slot may be reused.
+        assert not slots.acquire(blocking=False)
+        ran = threading.Event()
+        with pytest.raises(ValueError, match='capacity is exhausted'):
+            await tasks._bounded_extra_path_check(ran.set)
+        assert not ran.is_set()
+        from unittest.mock import AsyncMock
+        registry = tasks.TaskRegistry(log_dir=tmp_path/'logs', open_monitor=False)
+        monkeypatch.setattr(registry, '_mutation_caller', AsyncMock(return_value=None))
+        result = await registry.preview_permissions(tmp_path, backend=backend)
+        assert result['extra_writable_paths'] == []
+        capture = AsyncMock(return_value='ordinary-start')
+        monkeypatch.setattr(registry, '_spawn', capture)
+        assert await registry.start('Ordinary', tmp_path, backend=backend, extra_writable_paths=[]) == 'ordinary-start'
+        assert capture.call_args.kwargs['extra_path_grants'] == ()
+        assert await asyncio.wait_for(asyncio.to_thread(lambda: 'unrelated'), .5) == 'unrelated'
+    finally:
+        release.set()
+        # Joining is safe only after releasing the workers; do not leak blocked test threads.
+        await asyncio.to_thread(executor.shutdown, wait=True)
+        await asyncio.gather(*pending, return_exceptions=True)
+    # Both actual futures finished and returned their slots, even after asyncio timed out.
+    assert slots.acquire(blocking=False)
+    assert slots.acquire(blocking=False)
+    assert not slots.acquire(blocking=False)
+    slots.release()
+    slots.release()

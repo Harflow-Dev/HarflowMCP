@@ -14,7 +14,12 @@ saved-authority reads, runtime qualification and final identity checks run in wo
 threads with a 20-second budget per check, including executor queueing. Timeout
 refuses the request with an actionable validation error; no agent is launched and
 any pre-launch scratch is removed. A filesystem worker can finish after cancellation
-or timeout, but performs only authority reads and cannot dispatch an agent.
+or timeout, but performs only authority reads and cannot dispatch an agent. These
+checks use a dedicated executor capped at four outstanding workers. Timed-out
+workers retain their capacity until they actually finish; saturation refuses new
+checks explicitly and leaves the server's shared executor available to unrelated
+work. Python cannot interrupt a blocked filesystem syscall, so this budget does
+not guarantee immediate process shutdown while such a worker remains blocked.
 
 ```sh
 polybridge-ctl permission-preview --repo /absolute/repo --backend codex \

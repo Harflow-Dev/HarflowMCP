@@ -20,6 +20,9 @@ Three invariants keep the state machine honest:
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import threading
+from concurrent.futures import ThreadPoolExecutor
 import logging
 import os
 import signal
@@ -54,16 +57,36 @@ from .stream import parse_line
 log = logging.getLogger(__name__)
 
 EXTRA_PATH_CHECK_BUDGET_SECONDS = 20.0
+EXTRA_PATH_CHECK_WORKERS = 4
+_EXTRA_PATH_EXECUTOR = ThreadPoolExecutor(
+    max_workers=EXTRA_PATH_CHECK_WORKERS, thread_name_prefix="pb-extra-path"
+)
+_EXTRA_PATH_SLOTS = threading.BoundedSemaphore(EXTRA_PATH_CHECK_WORKERS)
 
 
 async def _bounded_extra_path_check(function, *args):
-    """Bound pure authority reads, including executor queueing; never permit on timeout.
+    """Bound pure authority reads independently from the server's shared executor.
 
-    A timed-out worker may finish later, so callbacks must not allocate or mutate task state.
+    Timeout cannot stop a filesystem syscall. Keep its slot occupied until the actual
+    concurrent future finishes, so abandoned workers cannot create an unbounded queue.
+    Callbacks must not allocate or mutate task state.
     """
+    slots = _EXTRA_PATH_SLOTS
+    if not slots.acquire(blocking=False):
+        raise ValueError(
+            "Extra writable path validation capacity is exhausted; "
+            "check filesystem availability and retry after outstanding checks finish"
+        )
+    try:
+        context = contextvars.copy_context()
+        worker = _EXTRA_PATH_EXECUTOR.submit(context.run, function, *args)
+    except BaseException:
+        slots.release()
+        raise
+    worker.add_done_callback(lambda _: slots.release())
     try:
         return await asyncio.wait_for(
-            asyncio.to_thread(function, *args), timeout=EXTRA_PATH_CHECK_BUDGET_SECONDS
+            asyncio.wrap_future(worker), timeout=EXTRA_PATH_CHECK_BUDGET_SECONDS
         )
     except TimeoutError as exc:
         raise ValueError(
@@ -948,10 +971,17 @@ class TaskRegistry:
             check_child_paths(owner, grants, Path(caller.record.repo_path))
         return grants
 
+    async def _resolve_extra_paths_async(self, caller, request, backend, source=None):
+        # Fresh ordinary calls carry no filesystem authority to inspect. Keep them
+        # available even if an unrelated mount has exhausted the bounded-check pool.
+        if caller is None and source is None and (request is None or (type(request) is list and not request)):
+            return ()
+        return await _bounded_extra_path_check(self._resolve_extra_paths, caller, request, backend, source)
+
     async def preview_permissions(self, repo_path: Path, *, backend: Backend, freedom: str = "write_in_repo", network: bool | None = None, extra_writable_paths: list[str] | None = None) -> dict[str, Any]:
         from .extra_paths import serialize_paths
         caller = await self._mutation_caller()
-        grants = await _bounded_extra_path_check(self._resolve_extra_paths, caller, extra_writable_paths, backend)
+        grants = await self._resolve_extra_paths_async(caller, extra_writable_paths, backend)
         invocation = backend.build_start_argv("Permission preview", repo=repo_path, freedom=freedom, session_id=str(uuid.uuid4()) if backend.capabilities.chooses_session_id else None, model=None, max_turns=None, reasoning_effort=None, network=network)
         invocation = await _bounded_extra_path_check(backend.qualify_extra_writable_paths, invocation, grants, freedom, network) if grants else invocation
         if grants:
@@ -996,7 +1026,7 @@ class TaskRegistry:
                 raise ValueError("Continuation source unavailable")
             if source is not None and (source.backend != backend.name or source.freedom != freedom or source.network != network or Path(source.repo_path) != repo_path or source.model != model or source.reasoning_effort != reasoning_effort):
                 raise ValueError("Continuation settings must match saved source authority")
-            grants = await _bounded_extra_path_check(self._resolve_extra_paths, caller, extra_writable_paths, backend, source)
+            grants = await self._resolve_extra_paths_async(caller, extra_writable_paths, backend, source)
             if grants and workflow_builder:
                 raise ValueError("Extra writable paths are unavailable to workflow builders")
             # Only some backends let us name the session up front. Where we can, knowing it immediately
@@ -1096,7 +1126,7 @@ class TaskRegistry:
         # read-only and must never block on, or be blocked by, another resume of this session.
         caller = await self._mutation_caller()
         with _before_spawn():
-            grants = await _bounded_extra_path_check(self._resolve_extra_paths, caller, None, backend, parent)
+            grants = await self._resolve_extra_paths_async(caller, None, backend, parent)
         if grants and (native_subagent or workflow_builder):
             raise ValueError("Extra writable paths are unavailable to native workflows or workflow builders")
         spawned_by, root_task_id, depth, max_depth, lineage_detected = self._resolve_lineage(
@@ -1609,7 +1639,7 @@ class TaskRegistry:
         await asyncio.to_thread(refuse_direct_message, self._log_dir, task.task_id)
         if has_extra_path_authority(task):
             caller = await self._mutation_caller()
-            await _bounded_extra_path_check(self._resolve_extra_paths, caller, None, get_backend(task.backend), task)
+            await self._resolve_extra_paths_async(caller, None, get_backend(task.backend), task)
         if not task.live_input:
             raise inbox.SendRefused(
                 f"task {task.task_id} was not started with live input, so it cannot take a message "
@@ -1647,7 +1677,7 @@ class TaskRegistry:
         record = await _bounded_extra_path_check(store.read, self._log_dir, task_id)
         if record is not None and has_extra_path_authority(record):
             caller = await self._mutation_caller()
-            await _bounded_extra_path_check(self._resolve_extra_paths, caller, None, get_backend(record.backend), record)
+            await self._resolve_extra_paths_async(caller, None, get_backend(record.backend), record)
         return await asyncio.to_thread(
             inbox.send_to_record, self._log_dir, task_id, text, by=self._owner
         )
@@ -2939,7 +2969,7 @@ class TaskRegistry:
         # Same ordering as `resume`: caller detection and the caps run before the session lock.
         caller = await self._mutation_caller()
         with _before_spawn():
-            grants = await _bounded_extra_path_check(self._resolve_extra_paths, caller, None, backend, record)
+            grants = await self._resolve_extra_paths_async(caller, None, backend, record)
         if grants and (native_subagent or workflow_builder):
             raise ValueError("Extra writable paths are unavailable to native workflows or workflow builders")
         spawned_by, root_task_id, depth, max_depth, lineage_detected = self._resolve_lineage(
