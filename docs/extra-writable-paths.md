@@ -9,7 +9,12 @@ observation; preview does not reserve authority.
 
 Installed-version qualification runs off the server event loop with a bounded
 deadline. Bounded-mode execution uses the qualified absolute executable path;
-runtime identity and path checks run again immediately before launch.
+runtime identity and path checks run again immediately before launch. Path resolution,
+saved-authority reads, runtime qualification and final identity checks run in worker
+threads with a 20-second budget per check, including executor queueing. Timeout
+refuses the request with an actionable validation error; no agent is launched and
+any pre-launch scratch is removed. A filesystem worker can finish after cancellation
+or timeout, but performs only authority reads and cannot dispatch an agent.
 
 ```sh
 polybridge-ctl permission-preview --repo /absolute/repo --backend codex \

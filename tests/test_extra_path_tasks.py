@@ -357,3 +357,128 @@ async def test_saved_markers_refuse_resume_and_takeover_before_mutation(tmp_path
 def test_legacy_saved_markers_keep_resume_authority(tmp_path, backend, markers):
     record = persisted_markers(tmp_path, markers)
     assert tasks.TaskRegistry(log_dir=tmp_path)._saved_extra_paths(record, backend) == ()
+
+
+@pytest.mark.parametrize('operation', ['start', 'preview'])
+async def test_slow_path_resolution_times_out_without_dispatch(tmp_path, monkeypatch, backend, operation):
+    import threading
+    from unittest.mock import AsyncMock
+    entered, release = threading.Event(), threading.Event()
+    registry = tasks.TaskRegistry(log_dir=tmp_path/'logs', open_monitor=False)
+    monkeypatch.setattr(registry, '_mutation_caller', AsyncMock(return_value=None))
+    def resolve(*args):
+        entered.set()
+        assert release.wait(3)
+        return ()
+    monkeypatch.setattr(registry, '_resolve_extra_paths', resolve)
+    monkeypatch.setattr(tasks, 'EXTRA_PATH_CHECK_BUDGET_SECONDS', .1)
+    spawn = AsyncMock(side_effect=AssertionError('must not launch'))
+    monkeypatch.setattr(tasks.asyncio, 'create_subprocess_exec', spawn)
+    kwargs = dict(backend=backend, extra_writable_paths=[str(tmp_path)])
+    pending = asyncio.create_task(registry.start('Task', tmp_path, **kwargs) if operation == 'start' else registry.preview_permissions(tmp_path, **kwargs))
+    try:
+        for _ in range(100):
+            if entered.is_set(): break
+            await asyncio.sleep(.001)
+        assert entered.is_set() and not pending.done()
+        # This timer must advance while the filesystem worker remains blocked.
+        await asyncio.sleep(.01)
+        assert not release.is_set()
+        with pytest.raises(ValueError, match='filesystem availability') as error:
+            await pending
+        if operation == 'start': assert error.value.polybridge_not_started
+        spawn.assert_not_awaited()
+        assert not registry.log_dir.exists()
+    finally:
+        release.set()
+
+
+@pytest.mark.parametrize('exit_mode', ['timeout', 'cancel'])
+async def test_final_path_validation_block_removes_scratch(tmp_path, monkeypatch, backend, exit_mode):
+    import threading
+    entered, release = threading.Event(), threading.Event()
+    registry = tasks.TaskRegistry(log_dir=tmp_path/'logs', open_monitor=False)
+    grants = normalize_paths([str(tmp_path)])
+    invocation = backend.with_extra_writable_paths(Invocation(['/bin/echo','{}']), grants, 'write_in_repo')
+    original = backend.assert_extra_writable_paths
+    calls = 0
+    def validate(*args):
+        nonlocal calls
+        calls += 1
+        # Qualification, initial validation, then validation after scratch allocation.
+        if calls == 3:
+            entered.set()
+            assert release.wait(3)
+        return original(*args)
+    monkeypatch.setattr(backend, 'assert_extra_writable_paths', validate)
+    monkeypatch.setattr(tasks, 'EXTRA_PATH_CHECK_BUDGET_SECONDS', .2)
+    monkeypatch.setattr(tasks, '_branch_disclosure_warranted', lambda _: False)
+    async def spawn(*args, **kwargs): raise AssertionError('must not launch')
+    monkeypatch.setattr(tasks.asyncio, 'create_subprocess_exec', spawn)
+    pending = asyncio.create_task(registry._spawn(invocation, extra_path_grants=grants, backend=backend, prompt='Task', repo_path=tmp_path, session_id=None, freedom='write_in_repo', max_turns=None, model=None, reasoning_effort=None, task_id='worker'))
+    try:
+        for _ in range(200):
+            if entered.is_set(): break
+            await asyncio.sleep(.002)
+        assert entered.is_set() and not pending.done()
+        assert scratch.directory(registry.log_dir, 'worker').exists()
+        await asyncio.sleep(.01)
+        if exit_mode == 'cancel': pending.cancel()
+        with pytest.raises(asyncio.CancelledError if exit_mode == 'cancel' else ValueError) as error:
+            await pending
+        assert error.value.polybridge_not_started
+        assert not scratch.directory(registry.log_dir, 'worker').exists()
+        assert registry.get('worker') is None
+        assert store.read(registry.log_dir, 'worker') is None
+    finally:
+        release.set()
+
+
+@pytest.mark.parametrize('operation', ['resume', 'resume_record', 'continuation', 'send_message', 'send_to_record'])
+async def test_saved_authority_resolution_timeout_prevents_effects(tmp_path, monkeypatch, backend, operation):
+    import threading
+    from unittest.mock import AsyncMock
+    entered, release = threading.Event(), threading.Event()
+    registry = tasks.TaskRegistry(log_dir=tmp_path/'logs', open_monitor=False)
+    record = replace(owner(tmp_path, normalize_paths([str(tmp_path)])), backend=backend.name)
+    store.write_landed(registry.log_dir, record)
+    parent = SimpleNamespace(**record.__dict__, record_landed=True)
+    parent.live_input = True
+    parent.repo_path = tmp_path
+    monkeypatch.setattr(registry, '_mutation_caller', AsyncMock(return_value=None))
+    def resolve(*args):
+        entered.set()
+        assert release.wait(3)
+        return ()
+    monkeypatch.setattr(registry, '_resolve_extra_paths', resolve)
+    monkeypatch.setattr(tasks, 'EXTRA_PATH_CHECK_BUDGET_SECONDS', .1)
+    spawn = AsyncMock(side_effect=AssertionError('must not spawn successor'))
+    monkeypatch.setattr(registry, '_spawn', spawn)
+    inbox_lock = AsyncMock(side_effect=AssertionError('must not mutate inbox'))
+    monkeypatch.setattr(tasks.inbox, 'lock_async', inbox_lock)
+    def inbox_send(*args, **kwargs): raise AssertionError('must not send recorded message')
+    monkeypatch.setattr(tasks.inbox, 'send_to_record', inbox_send)
+    if operation == 'resume': call = registry.resume(parent, 'Follow up', task_id='child')
+    elif operation == 'resume_record': call = registry.resume_record(record, 'Follow up', task_id='child')
+    elif operation == 'continuation':
+        call = registry.start('Follow up', tmp_path, backend=backend, freedom=record.freedom,
+                              continuation_of_task_id=record.task_id, task_id='child')
+    elif operation == 'send_message': call = registry.send_message(parent, 'Follow up')
+    else: call = registry.send_to_record(record.task_id, 'Follow up')
+    pending = asyncio.create_task(call)
+    try:
+        for _ in range(100):
+            if entered.is_set(): break
+            await asyncio.sleep(.001)
+        assert entered.is_set() and not pending.done()
+        await asyncio.sleep(.01)
+        with pytest.raises(ValueError, match='filesystem availability') as error:
+            await pending
+        if operation in ('resume', 'resume_record', 'continuation'):
+            assert error.value.polybridge_not_started
+        spawn.assert_not_awaited()
+        inbox_lock.assert_not_awaited()
+        assert store.read(registry.log_dir, 'child') is None
+        assert not scratch.directory(registry.log_dir, 'child').exists()
+    finally:
+        release.set()
