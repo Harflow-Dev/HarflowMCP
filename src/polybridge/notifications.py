@@ -104,13 +104,16 @@ def status(log_dir: Path, task_id: str) -> list[dict]:
         return [_public(row) for row in db.execute('SELECT * FROM subscriptions WHERE task_id=? ORDER BY created LIMIT ?', (task_id, MAX_SUBSCRIPTIONS))]
 
 
-def discard_unstarted(log_dir: Path, task_id: str) -> None:
-    """Release a rejected dispatch reservation only while no task record exists."""
+def discard_unstarted(log_dir: Path, task_id: str) -> bool:
+    """Confirm removal of an untouched reservation while no task record exists."""
     with control.record_lock_sync(log_dir, task_id):
         if store.record_path(log_dir, task_id).exists():
-            return
+            return False
         with _db(log_dir) as db:
-            db.execute("DELETE FROM subscriptions WHERE task_id=? AND state='pending' AND attempts=0 AND payload IS NULL", (task_id,))
+            db.execute('BEGIN IMMEDIATE')
+            removed = db.execute("DELETE FROM subscriptions WHERE task_id=? AND state='pending' AND attempts=0 AND payload IS NULL", (task_id,)).rowcount
+            remaining = db.execute('SELECT count(*) FROM subscriptions WHERE task_id=?', (task_id,)).fetchone()[0]
+            return removed > 0 and remaining == 0
 
 
 def unsubscribe(log_dir: Path, task_id: str, destination: str | None = None) -> list[dict]:

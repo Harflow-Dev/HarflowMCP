@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 from mcp import MCPError
 
-from polybridge import notifications, server, store
+from polybridge import backends, notifications, server, store
 
 
 @pytest.fixture
@@ -71,6 +71,53 @@ async def test_cleanup_failure_keeps_recovery_identity(configured, monkeypatch, 
         raise OSError('cannot spawn')
     monkeypatch.setattr(server._reg(), 'start', reject)
     monkeypatch.setattr(notifications, 'discard_unstarted', lambda *a: (_ for _ in ()).throw(OSError('disk error')))
+    with pytest.raises(MCPError, match='inspect task_id') as error:
+        await server.start_task('test', str(git_repo), backend='codex', notify='hook')
+    assert seen[0] in str(error.value)
+    assert notifications.status(server._reg().log_dir, seen[0])[0]['state'] == 'pending'
+
+
+async def test_vibe_large_whitespace_refusal_survives_cleanup(configured, monkeypatch, git_repo, fake_backend_clis):
+    seen = []
+    register = notifications.subscribe
+    def reserve(*args, **kwargs):
+        seen.append(args[1])
+        return register(*args, **kwargs)
+    monkeypatch.setattr(notifications, 'subscribe', reserve)
+    async def no_spawn(*args, **kwargs):
+        pytest.fail('capability refusal must happen before spawning a CLI')
+    monkeypatch.setattr(server._reg(), '_spawn', no_spawn)
+    with pytest.raises(MCPError, match='Vibe trims outer whitespace'):
+        await server.start_task(' ' + 'x' * (33 * 1024), str(git_repo), backend='vibe', notify='hook')
+    assert len(seen) == 1
+    assert server._reg().get(seen[0]) is None
+    assert not store.record_path(server._reg().log_dir, seen[0]).exists()
+    assert notifications.status(server._reg().log_dir, seen[0]) == []
+
+
+async def test_codex_turn_cap_refused_before_reservation(configured, monkeypatch, git_repo, fake_backend_clis):
+    monkeypatch.setattr(notifications, 'subscribe', lambda *a, **k: pytest.fail('reserved'))
+    with pytest.raises(MCPError, match='max_turns'):
+        await server.start_task('test', str(git_repo), backend='codex', max_turns=1, notify='hook')
+
+
+@pytest.mark.parametrize('uncertainty', ['cleanup_failure', 'unknown_result', 'durable', 'live'])
+async def test_capability_refusal_keeps_uncertain_identity(configured, monkeypatch, git_repo, fake_backend_clis, uncertainty):
+    seen = []
+    async def reject(*args, **kwargs):
+        task_id = kwargs['task_id']
+        seen.append(task_id)
+        if uncertainty == 'durable':
+            store.write(server._reg().log_dir, store.TaskRecord(task_id=task_id, backend='codex',
+                session_id=None, repo_path=str(git_repo), started_at='2026-10-14T00:00:00Z'))
+        elif uncertainty == 'live':
+            server._reg()._tasks[task_id] = object()
+        raise backends.UnsupportedCapability('specific refusal')
+    monkeypatch.setattr(server._reg(), 'start', reject)
+    if uncertainty == 'cleanup_failure':
+        monkeypatch.setattr(notifications, 'discard_unstarted', lambda *a: (_ for _ in ()).throw(OSError('disk error')))
+    elif uncertainty == 'unknown_result':
+        monkeypatch.setattr(notifications, 'discard_unstarted', lambda *a: None)
     with pytest.raises(MCPError, match='inspect task_id') as error:
         await server.start_task('test', str(git_repo), backend='codex', notify='hook')
     assert seen[0] in str(error.value)

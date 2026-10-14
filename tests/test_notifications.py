@@ -26,6 +26,30 @@ def record(logs, status='completed', exit_code=0, finished_at='2026-10-14T00:00:
     return r
 
 
+def test_discard_confirms_only_removed_reservation(setup):
+    assert n.discard_unstarted(setup, 'absent') is False
+    n.subscribe(setup, 'reserved', 'test', reservation=True)
+    assert n.discard_unstarted(setup, 'reserved') is True
+    assert n.status(setup, 'reserved') == []
+    assert n.discard_unstarted(setup, 'reserved') is False
+
+
+@pytest.mark.parametrize('change', ["state='retry'", 'attempts=1', "payload=X'01'"])
+def test_discard_retains_touched_reservation(setup, change):
+    n.subscribe(setup, 'reserved', 'test', reservation=True)
+    with n._db(setup) as db:
+        db.execute(f'UPDATE subscriptions SET {change}')
+    assert n.discard_unstarted(setup, 'reserved') is False
+    assert len(n.status(setup, 'reserved')) == 1
+
+
+def test_discard_retains_reservation_with_durable_record(setup):
+    r = record(setup)
+    n.subscribe(setup, r.task_id, 'test', reservation=True)
+    assert n.discard_unstarted(setup, r.task_id) is False
+    assert len(n.status(setup, r.task_id)) == 1
+
+
 @pytest.mark.parametrize('state', ['completed', 'failed', 'cancelled', 'timed_out'])
 def test_delivery(setup, monkeypatch, state):
     r = record(setup, state)

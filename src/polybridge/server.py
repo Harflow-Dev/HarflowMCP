@@ -469,11 +469,14 @@ async def start_task(
     except Exception as exc:
         if reserved_id is not None:
             from .notifications import discard_unstarted
+            cleaned = False
             if _reg().get(reserved_id) is None:
                 try:
-                    await asyncio.to_thread(discard_unstarted, _reg().log_dir, reserved_id)
+                    cleaned = await asyncio.to_thread(discard_unstarted, _reg().log_dir, reserved_id)
                 except Exception:
                     log.warning('Notification reservation cleanup unavailable for task %s', reserved_id)
+            if cleaned is True and _reg().get(reserved_id) is None and isinstance(exc, backends.UnsupportedCapability):
+                raise MCPError(INVALID_PARAMS, str(exc)) from None
             raise MCPError(INVALID_PARAMS, f'Dispatch did not return normally; inspect task_id {reserved_id} and its notification state before retrying') from None
         if not isinstance(exc, backends.UnsupportedCapability):
             raise
