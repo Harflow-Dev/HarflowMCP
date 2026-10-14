@@ -65,15 +65,21 @@ def assert_runtime_outside_writes(scopes: list[tuple[Path, str]]) -> None:
                 loader_executables.append(Path(selected))
     executables.append(Path(sys.executable))
     from .runtime_loaders import qualify_loaders
-    loader_files, loader_roots = qualify_loaders([*loader_executables, Path(sys.executable)])
-    for dependency in loader_files:
-        chain, _ = _chain(dependency)
-        components.update(chain)
-    executables.extend(path for path in loader_files if path.exists())
-    for root in loader_roots:
-        chain, canonical = _chain(root)
-        components.update(chain)
-        directories.extend((root, canonical))
+    def protect_loaders(paths):
+        # Interpreters discovered from shebangs need the same native dependency
+        # closure as initially selected helpers. Merely protecting their binary
+        # leaves mutable dylibs outside the interpreter container exposed.
+        loader_files, loader_roots = qualify_loaders(paths)
+        for dependency in loader_files:
+            chain, _ = _chain(dependency)
+            components.update(chain)
+        executables.extend(path for path in loader_files if path.exists())
+        for root in loader_roots:
+            chain, canonical = _chain(root)
+            components.update(chain)
+            directories.extend((root, canonical))
+
+    protect_loaders([*loader_executables, Path(sys.executable)])
     seen = set()
     while executables:
         executable = executables.pop()
@@ -113,6 +119,7 @@ def assert_runtime_outside_writes(scopes: list[tuple[Path, str]]) -> None:
             if not words or not Path(words[0]).is_absolute():
                 raise ValueError('server runtime interpreter must be absolute')
             interpreter = Path(words[0])
+            protect_loaders([interpreter])
             executables.append(interpreter)
             if interpreter.name == 'env':
                 args = words[1:]
@@ -126,6 +133,7 @@ def assert_runtime_outside_writes(scopes: list[tuple[Path, str]]) -> None:
                 selected = shutil.which(args[0])
                 if not selected:
                     raise ValueError('server runtime env interpreter is unavailable')
+                protect_loaders([Path(selected)])
                 executables.append(Path(selected))
         info = target.stat()
         linked_inodes.add((info.st_dev, info.st_ino))

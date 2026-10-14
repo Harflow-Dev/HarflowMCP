@@ -87,3 +87,44 @@ def test_truncated_thin_header_is_value_error(tmp_path):
     executable.write_bytes(b'\xcf\xfa\xed\xfe' + bytes(8))
     with pytest.raises(ValueError, match='truncated runtime Mach-O header'):
         runtime_loaders.qualify_loaders([executable])
+
+
+@pytest.mark.parametrize('env_shebang', [False, True])
+def test_discovered_interpreter_dependency_refused_before_version(tmp_path, monkeypatch, env_shebang):
+    from polybridge import backends
+    from polybridge.backends.codex import UnsafeInvocationError
+    from polybridge.extra_paths import normalize_paths
+
+    binaries = tmp_path / 'bin'
+    binaries.mkdir()
+    codex = image(binaries / 'codex')
+    node = image(binaries / 'node', [str(tmp_path / 'outside.dylib')])
+    dependency = image(tmp_path / 'outside.dylib')
+    script = binaries / 'vibe'
+    script.write_text('#!/usr/bin/env node\n' if env_shebang else f'#!{node}\n')
+    env = image(binaries / 'env')
+    original_chain = runtime_paths._chain
+    # Isolate the env launcher, while preserving all namespace and loader checks.
+    def chain(path):
+        if path == Path('/usr/bin/env'):
+            protected, target = original_chain(env)
+            return protected | {path}, target
+        return original_chain(path)
+    monkeypatch.setattr(runtime_paths, '_chain', chain)
+    original_qualify = runtime_loaders.qualify_loaders
+    monkeypatch.setattr(runtime_loaders, 'qualify_loaders',
+                        lambda paths: original_qualify([env if path == Path('/usr/bin/env') else path for path in paths]))
+    choices = {'codex': codex, 'vibe': script, 'node': node}
+    monkeypatch.setattr(runtime_paths.shutil, 'which', lambda name: str(choices[name]) if name in choices else None)
+    monkeypatch.setattr(runtime_paths.sys, 'executable', str(codex))
+    monkeypatch.setattr('polybridge.backends.codex.sys.platform', 'darwin')
+    calls = []
+    monkeypatch.setattr(backends, 'version', lambda *a, **kw: calls.append(1))
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    backend = backends.get('codex')
+    plain = backend.build_start_argv('task', repo=repo, freedom='write_in_repo', session_id=None,
+                                     model=None, max_turns=None, reasoning_effort=None)
+    with pytest.raises(UnsafeInvocationError, match='protected server runtime paths'):
+        backend.with_extra_writable_paths(plain, normalize_paths([str(dependency)]), 'write_in_repo')
+    assert calls == []

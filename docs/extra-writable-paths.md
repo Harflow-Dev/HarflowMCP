@@ -28,7 +28,9 @@ from poisoning unsandboxed repository probes, process checks, later version prob
 or Python imports. They are recomputed before probing and at final validation.
 Host execution also requires a bounded native Mach-O loader qualification. It
 protects discovered absolute, `@loader_path`, `@executable_path` and `@rpath`
-dependencies and lookup namespaces, including missing earlier candidates. Missing
+dependencies and lookup namespaces, including missing earlier candidates. Native
+interpreters discovered through absolute or `env` shebangs receive the same
+dependency qualification; script interpreter layouts fail closed. Missing
 system shared-cache names qualify only when an existing ancestor is independently
 observed on a read-only filesystem. Malformed, unresolved or unknown loader
 layouts, script host helpers and nonempty loader environment overrides reject
