@@ -226,6 +226,7 @@ async def test_slow_qualification_keeps_loop_responsive_and_cancels_before_scrat
         assert release.wait(3)
         return EXTRA_PATHS_VERSION
     monkeypatch.setattr(backends, 'version', probe)
+    monkeypatch.setattr(backend, '_assert_launcher_outside_writes', lambda *args: None)
     monkeypatch.setattr(backend, '_extra_path_runtime', lambda: ('/fixture',))
     monkeypatch.setattr('polybridge.backends.codex.sys.platform', 'darwin')
     registry = tasks.TaskRegistry(log_dir=tmp_path/'logs', open_monitor=False)
@@ -256,6 +257,7 @@ async def test_runtime_replaced_during_bookkeeping_refuses_and_cleans_scratch(tm
     backend = CodexBackend()
     runtime = ['/original']
     monkeypatch.setattr(backends, 'version', lambda _, **kwargs: EXTRA_PATHS_VERSION)
+    monkeypatch.setattr(backend, '_assert_launcher_outside_writes', lambda *args: None)
     monkeypatch.setattr(backend, '_extra_path_runtime', lambda: tuple(runtime))
     monkeypatch.setattr('polybridge.backends.codex.sys.platform', 'darwin')
     registry = tasks.TaskRegistry(log_dir=tmp_path/'logs', open_monitor=False)

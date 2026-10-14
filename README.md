@@ -175,7 +175,8 @@ returns a **`task_id`** immediately. Follow it with `get_task_status` or `wait_f
 grants on verified configurations. Inspect `preview_task_permissions` before launch;
 unsupported versions/configurations reject the request. The measured Codex mode clears
 ambient writable roots and excludes implicit temporary roots. Resume and continuation
-preserve saved scope; grants never authorize publication.
+preserve saved scope; grants never authorize publication. Writable scopes cannot overlap
+the Codex launcher chain; executables with multiple hardlinks are unsupported.
 
 [`wait_for_tasks`](docs/multi-task-waiting.md) observes any or all of up to 32 tasks in one
 bounded, read-only call. Timeout and caller disconnect leave execution untouched.

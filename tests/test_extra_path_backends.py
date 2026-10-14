@@ -13,9 +13,13 @@ def build(backend, repo, freedom='write_in_repo', network=None, resume=False):
 
 
 @pytest.fixture
-def qualified(monkeypatch, fake_backend_clis):
+def qualified(monkeypatch, tmp_path_factory):
     # Exercise the real executable fingerprint without requiring an installed CLI.
     # The version probe is stubbed below; invoking the stand-in would fail loudly.
+    launcher = tmp_path_factory.mktemp('qualified-launcher') / 'codex'
+    launcher.write_text('#!/bin/sh\nexit 99\n')
+    launcher.chmod(0o755)
+    monkeypatch.setenv('PATH', str(launcher.parent))
     monkeypatch.setattr('polybridge.backends.codex.sys.platform', 'darwin')
     monkeypatch.setattr(backends, 'version', lambda backend, **kwargs: EXTRA_PATHS_VERSION)
     return backends.get('codex')
@@ -115,6 +119,7 @@ def test_launch_rechecks_version_and_identity(qualified, monkeypatch, tmp_path):
 def test_one_probe_and_pure_final_runtime_check(qualified, monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(backends, 'version', lambda _, **kwargs: calls.append(1) or EXTRA_PATHS_VERSION)
+    monkeypatch.setattr(qualified, '_assert_launcher_outside_writes', lambda *args: None)
     runtime = ['/original']
     monkeypatch.setattr(qualified, '_extra_path_runtime', lambda: tuple(runtime))
     grants = normalize_paths([str(tmp_path)])
@@ -128,6 +133,7 @@ def test_one_probe_and_pure_final_runtime_check(qualified, monkeypatch, tmp_path
 
 
 def test_runtime_changed_during_version_probe_refused(qualified, monkeypatch, tmp_path):
+    monkeypatch.setattr(qualified, '_assert_launcher_outside_writes', lambda *args: None)
     runtime = ['/original']
     monkeypatch.setattr(qualified, '_extra_path_runtime', lambda: tuple(runtime))
     def probe(_, **kwargs):
@@ -215,6 +221,7 @@ else:
 
 
 def test_probe_uses_selected_absolute_binary_without_mutating_backend(qualified, monkeypatch, tmp_path):
+    monkeypatch.setattr(qualified, '_assert_launcher_outside_writes', lambda *args: None)
     selected = str(tmp_path / 'codex-alias')
     monkeypatch.setattr(qualified, '_extra_path_runtime', lambda: (selected,))
     observed = []
@@ -223,3 +230,98 @@ def test_probe_uses_selected_absolute_binary_without_mutating_backend(qualified,
     assert observed == [selected]
     assert invocation.argv[0] == selected
     assert qualified.binary == 'codex'
+
+
+@pytest.mark.parametrize('scope', ['alias', 'target', 'hop', 'repo', 'scratch', 'hardlink', 'direct', 'directory-link'])
+def test_launcher_overlap_refused_before_probe(qualified, monkeypatch, tmp_path, scope):
+    import os
+    root = tmp_path / 'launcher'
+    root.mkdir()
+    targetdir = root / 'targetdir'
+    targetdir.mkdir()
+    target = targetdir / 'executable'
+    target.write_text('#!/bin/sh\nexit 99\n')
+    target.chmod(0o755)
+    hopdir = root / 'hopdir'
+    hopdir.mkdir()
+    hop = hopdir / 'hop'
+    hop.symlink_to(target)
+    aliasdir = root / 'aliasdir'
+    aliasdir.mkdir()
+    alias = aliasdir / 'codex'
+    alias.symlink_to(hop)
+    if scope == 'direct':
+        alias.unlink()
+        alias.write_text('#!/bin/sh\nexit 99\n')
+        alias.chmod(0o755)
+    if scope == 'directory-link':
+        directory_alias = root / 'directory-alias'
+        directory_alias.symlink_to(aliasdir, target_is_directory=True)
+        monkeypatch.setenv('PATH', str(directory_alias))
+    else:
+        monkeypatch.setenv('PATH', str(aliasdir))
+    calls = []
+    monkeypatch.setattr(backends, 'version', lambda *args, **kwargs: calls.append(1) or EXTRA_PATHS_VERSION)
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    grant = tmp_path / 'grant'
+    grant.mkdir()
+    if scope in ('alias', 'target', 'hop'):
+        grant = {'alias': aliasdir, 'target': targetdir, 'hop': hopdir}[scope]
+    if scope == 'direct':
+        grant = alias
+    if scope == 'directory-link':
+        grant = root
+    if scope == 'repo':
+        repo = root
+    if scope == 'hardlink':
+        grant = tmp_path / 'linked-executable'
+        os.link(target, grant)
+    invocation = build(qualified, repo)
+    if scope == 'scratch':
+        invocation = qualified.with_writable_directory(invocation, hopdir, 'write_in_repo')
+    with pytest.raises(UnsafeInvocationError, match='launcher'):
+        qualified.with_extra_writable_paths(invocation, normalize_paths([str(grant)]), 'write_in_repo')
+    assert calls == []
+
+
+def test_final_revalidation_rejects_new_launcher_hardlink(qualified, tmp_path):
+    import os
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    grant = tmp_path / 'grant'
+    grant.mkdir()
+    grants = normalize_paths([str(grant)])
+    invocation = qualified.with_extra_writable_paths(build(qualified, repo), grants, 'write_in_repo')
+    os.link(invocation.extra_path_runtime[1], grant / 'indirect-hardlink')
+    with pytest.raises(UnsafeInvocationError, match='hardlinks'):
+        qualified.assert_extra_writable_paths(invocation, grants, 'write_in_repo')
+
+
+def test_final_revalidation_rejects_added_launcher_scratch(qualified, tmp_path):
+    from pathlib import Path
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    grants = normalize_paths([str(repo)])
+    invocation = qualified.with_extra_writable_paths(build(qualified, repo), grants, 'write_in_repo')
+    scratch = qualified.with_writable_directory(invocation, Path(invocation.extra_path_runtime[0]).parent, 'write_in_repo')
+    with pytest.raises(UnsafeInvocationError, match='overlaps'):
+        qualified.assert_extra_writable_paths(scratch, grants, 'write_in_repo')
+
+
+@pytest.mark.parametrize('relative', [False, True])
+def test_parent_directory_symlink_alias_overlap(qualified, monkeypatch, tmp_path, relative):
+    safe = tmp_path / 'safe' / 'bin'
+    safe.mkdir(parents=True)
+    executable = safe / 'codex'
+    executable.write_text('#!/bin/sh\nexit 99\n')
+    executable.chmod(0o755)
+    aliasdir = tmp_path / 'aliases'
+    aliasdir.mkdir()
+    (aliasdir / 'hop').symlink_to('../safe/bin' if relative else safe, target_is_directory=True)
+    monkeypatch.setenv('PATH', str(aliasdir / 'hop'))
+    monkeypatch.setattr(backends, 'version', lambda *args, **kwargs: pytest.fail('unsafe version probe'))
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    with pytest.raises(UnsafeInvocationError, match='overlaps'):
+        qualified.with_extra_writable_paths(build(qualified, repo), normalize_paths([str(aliasdir)]), 'write_in_repo')

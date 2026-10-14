@@ -383,6 +383,56 @@ class CodexBackend(ExtraPathsUnsupported):
             raise UnsupportedCapability("extra writable paths require macOS and " + EXTRA_PATHS_VERSION)
         revalidate_paths(grants)
 
+    def _assert_launcher_outside_writes(self, invocation, grants, runtime):
+        """Keep every launcher path outside the effective writable authority.
+
+        Walk symlinks component by component: resolving only the final target
+        hides writable intermediate links and directory aliases. A multiply
+        linked executable is refused instead of scanning arbitrarily large roots
+        for an indirect hardlink to its inode.
+        """
+        import os
+        selected = Path(runtime[0])
+        protected = set()
+        pending = list(selected.parts[1:])
+        current = Path(selected.anchor)
+        hops = 0
+        while pending:
+            part = pending.pop(0)
+            if part == '..':
+                current = current.parent
+                continue
+            if part == '.':
+                continue
+            current = current / part
+            protected.add(current)
+            if current.is_symlink():
+                hops += 1
+                if hops > 40:
+                    raise UnsafeInvocationError("CLI launcher symlink chain is not bounded")
+                target = Path(os.readlink(current))
+                if target.is_absolute():
+                    current = Path(target.anchor)
+                    pending = list(target.parts[1:]) + pending
+                else:
+                    current = current.parent
+                    pending = list(target.parts) + pending
+        target_info = current.stat()
+        if target_info.st_nlink != 1:
+            raise UnsafeInvocationError("CLI launcher hardlinks are not supported with extra writable paths")
+        # assert_safe has already established canonical option shape.
+        repo = Path(invocation.argv[invocation.argv.index('-C') + 1]).resolve(strict=True)
+        scopes = [(repo, 'directory')]
+        if invocation.scratch_directory:
+            scopes.append((Path(invocation.scratch_directory).resolve(strict=True), 'directory'))
+        scopes.extend((Path(grant.path), grant.kind) for grant in grants)
+        for scope, kind in scopes:
+            info = scope.stat()
+            same_inode = (info.st_dev, info.st_ino) == (target_info.st_dev, target_info.st_ino)
+            if same_inode or any(scope == path or (kind == 'directory' and scope in path.parents)
+                                 for path in protected):
+                raise UnsafeInvocationError("writable authority overlaps the qualified CLI launcher")
+
     def qualify_extra_writable_paths(self, invocation, grants, freedom, network=None):
         """Fresh qualification per request; callers run this bounded probe off the event loop."""
         if not grants:
@@ -394,6 +444,7 @@ class CodexBackend(ExtraPathsUnsupported):
         self._validate_extra_paths(invocation, grants, freedom, network)
         self.assert_safe(invocation, freedom, network)
         before = self._extra_path_runtime()
+        self._assert_launcher_outside_writes(invocation, grants, before)
         # Probe and execute the same PATH-selected absolute alias. A relative PATH
         # entry would otherwise select a different binary under the agent repo cwd.
         if version(self, executable=before[0]) != EXTRA_PATHS_VERSION:
@@ -435,6 +486,8 @@ class CodexBackend(ExtraPathsUnsupported):
             if invocation.extra_path_runtime != self._extra_path_runtime():
                 raise UnsafeInvocationError("CLI runtime identity changed or was not qualified")
         self.assert_safe(invocation, freedom, network)
+        if grants:
+            self._assert_launcher_outside_writes(invocation, grants, invocation.extra_path_runtime)
 
     def extra_path_enforcement(self, enforcement, grants, repo):
         if not grants:

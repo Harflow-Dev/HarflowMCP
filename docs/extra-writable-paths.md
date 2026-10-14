@@ -9,7 +9,13 @@ observation; preview does not reserve authority.
 
 Installed-version qualification runs off the server event loop with a bounded
 deadline. Bounded-mode execution uses the qualified absolute executable path;
-runtime identity and path checks run again immediately before launch. Path resolution,
+runtime identity and path checks run again immediately before launch. The effective
+repository, scratch directory and extra grants must not overlap the selected
+launcher, its resolved executable or any intermediate symlink or lexical ancestor.
+These checks precede the version probe and repeat at final validation. Executables
+with multiple hardlinks are rejected even when the requested grant is elsewhere:
+this conservatively prevents writable indirect aliases without scanning granted
+directory trees. Path resolution,
 saved-authority reads, runtime qualification and final identity checks run in worker
 threads with a 20-second budget per check, including executor queueing. Timeout
 refuses the request with an actionable validation error; no agent is launched and
