@@ -98,7 +98,8 @@ Network enforcement depends on the harness; a request to disable it is not an en
 These permissions also apply to the orchestrator itself, which is instructed to coordinate.
 Permissions remain fixed for that owner session across optional branches and retries. Preview
 changes invalidate Run until the summary refreshes; the start request verifies its preview hash.
-The CLI JSON contract is v9 for task failure diagnostics; v8 introduced permission previews
+The CLI JSON contract is v10 for bounded extra-path grant and capability/enforcement metadata;
+v9 added task failure diagnostics and v8 introduced permission previews
 and pinned owner contracts. The Monitor continues decoding supported historical versions.
 The inspector retains the pinned contracts. Historical runs never acquire expanded permissions.
 
@@ -1283,10 +1284,11 @@ attempts. Resume or recovery remains a separate explicit action.
 
 ### Monitor polling and complete detail retrieval
 
-The ctl JSON contract is version 9; this version adds durable task usage-limit diagnostics and
-workflow recovery choices. Version 8 added owner permission plans and guarded launch previews;
+The ctl JSON contract is version 10; this version adds bounded extra-path grants and their
+capability/enforcement metadata to task and backend documents. Version 9 added durable task
+usage-limit diagnostics and workflow recovery choices. Version 8 added owner permission plans and guarded launch previews;
 version 7 added Monitor cancellation eligibility and refusal metadata. The matching Monitor accepts
-versions 1–9. Reinstall the CLI and rebuild the app together.
+versions 1–10. Reinstall the CLI and rebuild the app together.
 
 Monitor polls `workflow-status RUN_ID --monitor-view --json` for bounded metadata and content
 digests. On initial loading, it captures one coherent transport snapshot using

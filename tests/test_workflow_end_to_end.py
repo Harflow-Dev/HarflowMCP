@@ -100,7 +100,7 @@ def workflow_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         if success:
             assert result.returncode == 0, (result.stdout, result.stderr)
         document = json.loads(result.stdout)
-        assert document["v"] == 9
+        assert document["v"] == 10
         return document.get("result", document)
 
     return invoke, home

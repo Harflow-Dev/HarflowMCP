@@ -63,7 +63,7 @@ def test_list_json_is_exactly_one_document(home: Path, capsys: pytest.CaptureFix
     lines = [line for line in out.splitlines() if line.strip()]
     assert len(lines) == 1
     doc = json.loads(lines[0])
-    assert doc["v"] == 9
+    assert doc["v"] == 10
     assert len(doc["tasks"]) == 1
     assert doc["tasks"][0]["task_id"] == "task-1"
     assert doc["tasks"][0]["owner"]["pid"] == 4242
@@ -76,7 +76,7 @@ def test_list_json_with_no_tasks_is_still_one_document(
 
     assert code == 0
     doc = json.loads(capsys.readouterr().out)
-    assert doc == {"v": 9, "tasks": []}
+    assert doc == {"v": 10, "tasks": []}
 
 
 def test_list_plain_table_names_its_columns(home: Path, capsys: pytest.CaptureFixture) -> None:
@@ -112,7 +112,7 @@ def test_a_bad_since_value_is_a_usage_error(home: Path, capsys: pytest.CaptureFi
     assert exc_info.value.code == 2
     captured = capsys.readouterr()
     doc = json.loads(captured.out)
-    assert doc["v"] == 9
+    assert doc["v"] == 10
     assert doc["error"]["code"] == "usage"
     assert captured.err.strip()
 
@@ -127,7 +127,7 @@ def test_status_json_for_a_known_task(home: Path, capsys: pytest.CaptureFixture)
     lines = [line for line in out.splitlines() if line.strip()]
     assert len(lines) == 1
     doc = json.loads(lines[0])
-    assert doc["v"] == 9
+    assert doc["v"] == 10
     assert doc["task"]["task_id"] == "task-1"
     assert doc["task"]["status"] == "completed"
 
@@ -139,7 +139,7 @@ def test_status_json_for_an_unknown_task(home: Path, capsys: pytest.CaptureFixtu
     captured = capsys.readouterr()
     doc = json.loads(captured.out)
     assert doc == {
-        "v": 9,
+        "v": 10,
         "error": {"code": "unknown_task", "message": "unknown task_id: no-such-task"},
     }
     assert "no-such-task" in captured.err
@@ -182,7 +182,7 @@ def test_bad_subcommand_with_json_still_emits_a_usage_document(
 
     assert exc_info.value.code == 2
     doc = json.loads(capsys.readouterr().out)
-    assert doc["v"] == 9
+    assert doc["v"] == 10
     assert doc["error"]["code"] == "usage"
 
 
@@ -278,7 +278,7 @@ def test_send_queues_a_message_in_the_inbox(
 
     assert code == 0
     doc = _one_doc(capsys)
-    assert doc["v"] == 9
+    assert doc["v"] == 10
     assert doc["result"]["status"] == "queued"
     messages, _ = inbox.read_new(_log_dir(home), "task-1", 0)
     assert [m["text"] for m in messages] == ["please also check the tests"]
@@ -352,7 +352,7 @@ def test_backends_json_reports_the_registry_in_order(
     assert ctl.main(["backends", "--json"]) == 0
 
     doc = _one_doc(capsys)
-    assert doc["v"] == 9
+    assert doc["v"] == 10
     assert [b["backend"] for b in doc["backends"]] == [
         "claude", "codex", "opencode", "vibe", "antigravity"
     ]
@@ -404,13 +404,13 @@ def test_backends_never_spawns_a_subprocess(
 
 
 @pytest.mark.parametrize("command", ["list", "status"])
-def test_v9_task_documents_preserve_usage_limit_diagnostics(home, capsys, command):
+def test_current_task_documents_preserve_usage_limit_diagnostics(home, capsys, command):
     diagnostic = {"category": "usage_limit", "reason": "Quota exhausted", "source": "stream:error", "reset_at": "2026-10-10T00:00:00Z", "settlement": "needs_attention"}
     store.write(_log_dir(home), make_record(status="failed", failure_diagnostic=diagnostic))
     args = [command, "--json"] if command == "list" else [command, "task-1", "--json"]
     assert ctl.main(args) == 0
     document = json.loads(capsys.readouterr().out)
-    assert document["v"] == 9
+    assert document["v"] == 10
     task = document["tasks"][0] if command == "list" else document["task"]
     assert task["failure_diagnostic"] == diagnostic
 
@@ -428,7 +428,7 @@ def test_compact_list_refuses_managed_callers_before_global_reads(home, monkeypa
     monkeypatch.setattr(store, 'list_page', forbidden)
     assert ctl.main(['task-list-compact', '--json']) == 1
     doc = _one_doc(capsys)
-    assert doc['v'] == 9
+    assert doc['v'] == 10
     assert doc['error']['code'] == 'invalid_params'
     assert 'direct callers' in doc['error']['message']
     assert 'task-list-page --task-ids' in doc['error']['message']
@@ -464,10 +464,26 @@ def test_compact_list_preserves_authority_preparing_response(home, monkeypatch, 
     monkeypatch.setattr(task_reads, 'list_tasks', lambda *a, **k: pytest.fail('global query while preparing'))
     assert ctl.main(['task-list-compact', '--json']) == 0
     doc = _one_doc(capsys)
-    assert doc['v'] == 9
+    assert doc['v'] == 10
     result = doc['result']
     assert result['items'] == []
     assert result['bootstrap_pending'] is True
     assert result['catalog_state']['status'] == 'preparing'
     assert result['counts_complete'] is False
     assert result['next_cursor'] is None and result['has_more'] is False
+
+
+def test_v10_status_document_exposes_bounded_path_authority(home, capsys):
+    grants = [{"path": "/outside/output", "kind": "directory"}]
+    enforcement = {"extra_writable_paths": grants, "extra_path_certification": "cert"}
+    store.write(_log_dir(home), make_record(extra_writable_paths=grants,
+        extra_path_certification="cert", enforcement=enforcement))
+    assert ctl.main(["status", "task-1", "--json"]) == 0
+    document = _one_doc(capsys)
+    assert document["v"] == 10
+    task = document["task"]
+    assert task["enforcement"]["extra_writable_paths"] == grants
+    assert task["enforcement"]["extra_path_certification"] == "cert"
+    assert task["extra_writable_paths"] == grants
+    assert task["extra_path_certification"] == "cert"
+    assert task["resume_command"] is None
