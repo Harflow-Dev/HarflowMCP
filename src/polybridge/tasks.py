@@ -27,11 +27,12 @@ import time
 import subprocess
 import sys
 import uuid
+from contextlib import contextmanager
 from collections import deque
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from typing import Any, Literal, NamedTuple
 
 from . import control, identity, inbox, lineage, retention, store
@@ -50,6 +51,20 @@ from .events import EVENTS_SUFFIX, EventLog, events_path
 from .stream import parse_line
 
 log = logging.getLogger(__name__)
+
+@contextmanager
+def _before_spawn() -> Iterator[None]:
+    """Mark failures only inside a boundary that cannot have created a process.
+
+    Cancellation during preflight is likewise safe to retry; cancellation in the subprocess
+    await is deliberately outside this boundary because process ownership is then uncertain.
+    """
+    try:
+        yield
+    except BaseException as exc:
+        exc.polybridge_not_started = True
+        raise
+
 
 Status = Literal["running", "completed", "failed", "timed_out", "cancelled"]
 
@@ -892,41 +907,42 @@ class TaskRegistry:
         chain_prompt: str | None = None,
     ) -> Task:
         """Dispatch a fresh session. Returns once the subprocess exists, not once it finishes."""
-        from .task_continuation import validate_budget
-        validate_budget(auto_continue)
-        if auto_continue and not backend.capabilities.supports_auto_continue:
-            raise ValueError(f"{backend.name} has no certified automatic continuation cutoff; use explicit continue_task")
-        # Only some backends let us name the session up front. Where we can, knowing it immediately
-        # means a resume works even if the run dies before saying anything.
-        session_id = str(uuid.uuid4()) if backend.capabilities.chooses_session_id else None
-        invocation = backend.build_start_argv(
-            prompt,
-            repo=repo_path,
-            freedom=freedom,  # type: ignore[arg-type]
-            session_id=session_id,
-            model=model,
-            max_turns=max_turns,
-            reasoning_effort=reasoning_effort,
-            network=network,
-        )
-
-        caller = await self._mutation_caller()
-        spawned_by, root_task_id, depth, max_depth, lineage_detected = self._resolve_lineage(
-            caller,
-            child_enforcement=backend.enforcement(freedom, network),  # type: ignore[arg-type]
-            child_backend=backend.name,
-            child_repo=repo_path,
-        )
-        if continuation_of_task_id is not None:
-            source = store.read(self._log_dir, continuation_of_task_id)
-            if source is None:
-                raise ValueError("Continuation source unavailable")
-            spawned_by, root_task_id, depth, max_depth, lineage_detected = (
-                source.spawned_by, source.root_task_id, source.depth, source.max_depth, source.lineage_detected
+        with _before_spawn():
+            from .task_continuation import validate_budget
+            validate_budget(auto_continue)
+            if auto_continue and not backend.capabilities.supports_auto_continue:
+                raise ValueError(f"{backend.name} has no certified automatic continuation cutoff; use explicit continue_task")
+            # Only some backends let us name the session up front. Where we can, knowing it immediately
+            # means a resume works even if the run dies before saying anything.
+            session_id = str(uuid.uuid4()) if backend.capabilities.chooses_session_id else None
+            invocation = backend.build_start_argv(
+                prompt,
+                repo=repo_path,
+                freedom=freedom,  # type: ignore[arg-type]
+                session_id=session_id,
+                model=model,
+                max_turns=max_turns,
+                reasoning_effort=reasoning_effort,
+                network=network,
             )
-        # An explicit group wins; otherwise it is inherited from the caller (never invented for a
-        # root task with none given).
-        resolved_group = group if group is not None else (caller.record.group if caller else None)
+
+            caller = await self._mutation_caller()
+            spawned_by, root_task_id, depth, max_depth, lineage_detected = self._resolve_lineage(
+                caller,
+                child_enforcement=backend.enforcement(freedom, network),  # type: ignore[arg-type]
+                child_backend=backend.name,
+                child_repo=repo_path,
+            )
+            if continuation_of_task_id is not None:
+                source = store.read(self._log_dir, continuation_of_task_id)
+                if source is None:
+                    raise ValueError("Continuation source unavailable")
+                spawned_by, root_task_id, depth, max_depth, lineage_detected = (
+                    source.spawned_by, source.root_task_id, source.depth, source.max_depth, source.lineage_detected
+                )
+            # An explicit group wins; otherwise it is inherited from the caller (never invented for a
+            # root task with none given).
+            resolved_group = group if group is not None else (caller.record.group if caller else None)
 
         return await self._spawn(
             invocation,
@@ -1126,115 +1142,114 @@ class TaskRegistry:
         # only ever run with the pipe it was built for (claude without a turn cap, and every
         # antigravity run, is live). Classic runs use DEVNULL or a backend-validated one-shot
         # prompt pipe which closes immediately at EOF, without a live-input pump.
-        backend.assert_safe(invocation, freedom, network)  # type: ignore[arg-type]
+        with _before_spawn():
+            backend.assert_safe(invocation, freedom, network)  # type: ignore[arg-type]
 
-        task_id = store.validate_task_id(task_id) if task_id else str(uuid.uuid4())
-        if self.get(task_id) is not None or store.read(self._log_dir, task_id) is not None:
-            exc = ValueError(f"task_id already exists: {task_id}")
-            exc.polybridge_not_started = True  # type: ignore[attr-defined]
-            raise exc
-        # A root task (no detected caller) is the root of its own dispatch chain.
-        root_task_id = root_task_id if root_task_id is not None else task_id
-        if max_depth is None:
-            max_depth = lineage.max_depth_default()
-        self._log_dir.mkdir(parents=True, exist_ok=True)
-        log_path = self._log_dir / f"{task_id}.jsonl"
+            task_id = store.validate_task_id(task_id) if task_id else str(uuid.uuid4())
+            if self.get(task_id) is not None or store.read(self._log_dir, task_id) is not None:
+                raise ValueError(f"task_id already exists: {task_id}")
+            # A root task (no detected caller) is the root of its own dispatch chain.
+            root_task_id = root_task_id if root_task_id is not None else task_id
+            if max_depth is None:
+                max_depth = lineage.max_depth_default()
+            self._log_dir.mkdir(parents=True, exist_ok=True)
+            log_path = self._log_dir / f"{task_id}.jsonl"
 
-        # Computed before the notice block, not at Task construction below: the branch
-        # disclosure keys on what this run's restrictions actually amount to, so it needs the
-        # block — and `backend.enforcement` is a pure synchronous call, so hoisting it
-        # introduces no await into the window between spawn and registration that the comment
-        # below guards. One computation serves the notice, the Task, and the record, so all
-        # three describe the same (freedom, network) pair.
-        enforcement = backend.enforcement(freedom, network)  # type: ignore[arg-type]
+            # Computed before the notice block, not at Task construction below: the branch
+            # disclosure keys on what this run's restrictions actually amount to, so it needs the
+            # block — and `backend.enforcement` is a pure synchronous call, so hoisting it
+            # introduces no await into the window between spawn and registration that the comment
+            # below guards. One computation serves the notice, the Task, and the record, so all
+            # three describe the same (freedom, network) pair.
+            enforcement = backend.enforcement(freedom, network)  # type: ignore[arg-type]
 
-        # Before the spawn, deliberately. Between `create_subprocess_exec` and the registration
-        # below there must be no await at all: one there could be cancelled — a client
-        # disconnecting mid-call — leaving a live agent no tool can reach, and it would hold the
-        # process's pipes unread meanwhile, which blocks the agent (drainers are load-bearing).
-        #
-        # The disclosure gate is checked *here*, not only inside the helper, so a run that is
-        # neither publish-authorized nor network-reachable does not pay a thread hop it has no
-        # use for — and cannot queue behind a saturated executor. The deadline inside the helper
-        # only starts once a worker picks the work up, so the wait for a worker is bounded out
-        # here instead, on the event loop, where it is observable.
-        publish_notice: str | None = None
-        if _branch_disclosure_warranted(enforcement):
-            try:
-                publish_notice = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        _publish_branch_notice, freedom, repo_path, enforcement
-                    ),
-                    timeout=GIT_PROBE_BUDGET_SECONDS * 2,
-                )
-            except (TimeoutError, asyncio.TimeoutError):
-                # Same rule as every other failure in this check: the dispatch proceeds and the
-                # caller is told the branch could not be determined.
-                publish_notice = _format_branch_notice(
-                    _branch_notice_templates(enforcement)[1], freedom, enforcement
-                )
-
-        # Where network=True was accepted by a backend with no barrier of its own to impose
-        # (enforcement.network_access stays "not_controlled"), acceptance must not silently
-        # read as "the network now works": the bridge says so itself, worded about what
-        # polybridge imposes rather than about reachability. Sync, so the no-await window below
-        # is untouched.
-        bridge_notices: list[str] = [publish_notice] if publish_notice else []
-        if network is True and enforcement.network_access == "not_controlled":
-            bridge_notices.append(_UNCONTROLLED_NETWORK_NOTICE)
-
-        # A second, independent `to_thread` hop from the branch-disclosure one above: this one is
-        # unconditional (every dispatch gets a baseline, regardless of freedom), so it needs its
-        # own bounded wait rather than piggybacking on a budget sized for a check some dispatches
-        # skip outright. Still strictly before the spawn, so it cannot introduce an await into the
-        # no-await window between `create_subprocess_exec` and registration below.
-        try:
-            from .task_outcomes import baseline
-            git_baseline = await asyncio.wait_for(
-                asyncio.to_thread(baseline, repo_path), timeout=GIT_BASELINE_BUDGET_SECONDS + 0.2
-            )
-            base_commit = git_baseline["head"]
-            observed_status = git_baseline["working_tree_status"]
-            start_dirty = bool(observed_status) if observed_status is not None else None
-        except Exception:
-            base_commit, start_dirty = None, None
-            git_baseline = None
-
-        # Allocate only after cancellable probes finish. No await occurs between this setup
-        # and the spawn attempt, so cancellation during git bookkeeping cannot orphan scratch.
-        task_scratch = None
-        try:
-            if freedom != "read_only":
-                from . import scratch
-                from dataclasses import replace
-                task_scratch = scratch.create(self._log_dir, task_id)
-                writable = getattr(backend, "with_writable_directory", None)
-                if writable is not None:
-                    invocation = writable(invocation, task_scratch, freedom)
-                    backend.assert_safe(invocation, freedom, network)
-                    enforcement = replace(enforcement, writable_roots=(*enforcement.writable_roots, str(task_scratch)))
-        except BaseException:
-            if task_scratch is not None:
+            # Before the spawn, deliberately. Between `create_subprocess_exec` and the registration
+            # below there must be no await at all: one there could be cancelled — a client
+            # disconnecting mid-call — leaving a live agent no tool can reach, and it would hold the
+            # process's pipes unread meanwhile, which blocks the agent (drainers are load-bearing).
+            #
+            # The disclosure gate is checked *here*, not only inside the helper, so a run that is
+            # neither publish-authorized nor network-reachable does not pay a thread hop it has no
+            # use for — and cannot queue behind a saturated executor. The deadline inside the helper
+            # only starts once a worker picks the work up, so the wait for a worker is bounded out
+            # here instead, on the event loop, where it is observable.
+            publish_notice: str | None = None
+            if _branch_disclosure_warranted(enforcement):
                 try:
-                    scratch.remove(self._log_dir, task_id)
-                except OSError:
-                    log.exception("task %s: could not clean scratch before spawn", task_id)
-            raise
+                    publish_notice = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            _publish_branch_notice, freedom, repo_path, enforcement
+                        ),
+                        timeout=GIT_PROBE_BUDGET_SECONDS * 2,
+                    )
+                except (TimeoutError, asyncio.TimeoutError):
+                    # Same rule as every other failure in this check: the dispatch proceeds and the
+                    # caller is told the branch could not be determined.
+                    publish_notice = _format_branch_notice(
+                        _branch_notice_templates(enforcement)[1], freedom, enforcement
+                    )
 
-        # So a nested polybridge server started by this agent (a codex/vibe MCP tool call, a
-        # claude/opencode subprocess) can find its way back to this task via
-        # `lineage.detect_caller`'s PB_TASK_ID method, when the environment survives that far.
-        # Built here, synchronously, so it introduces no await into the no-await window below.
-        spawn_env = {
-            **os.environ,
-            lineage.ENV_TASK_ID: task_id,
-            lineage.ENV_ROOT_TASK_ID: root_task_id,
-            lineage.ENV_DEPTH: str(depth),
-        }
+            # Where network=True was accepted by a backend with no barrier of its own to impose
+            # (enforcement.network_access stays "not_controlled"), acceptance must not silently
+            # read as "the network now works": the bridge says so itself, worded about what
+            # polybridge imposes rather than about reachability. Sync, so the no-await window below
+            # is untouched.
+            bridge_notices: list[str] = [publish_notice] if publish_notice else []
+            if network is True and enforcement.network_access == "not_controlled":
+                bridge_notices.append(_UNCONTROLLED_NETWORK_NOTICE)
 
-        spawn_env.pop("PB_TASK_SCRATCH", None)
-        if task_scratch is not None:
-            spawn_env["PB_TASK_SCRATCH"] = str(task_scratch)
+            # A second, independent `to_thread` hop from the branch-disclosure one above: this one is
+            # unconditional (every dispatch gets a baseline, regardless of freedom), so it needs its
+            # own bounded wait rather than piggybacking on a budget sized for a check some dispatches
+            # skip outright. Still strictly before the spawn, so it cannot introduce an await into the
+            # no-await window between `create_subprocess_exec` and registration below.
+            try:
+                from .task_outcomes import baseline
+                git_baseline = await asyncio.wait_for(
+                    asyncio.to_thread(baseline, repo_path), timeout=GIT_BASELINE_BUDGET_SECONDS + 0.2
+                )
+                base_commit = git_baseline["head"]
+                observed_status = git_baseline["working_tree_status"]
+                start_dirty = bool(observed_status) if observed_status is not None else None
+            except Exception:
+                base_commit, start_dirty = None, None
+                git_baseline = None
+
+            # Allocate only after cancellable probes finish. No await occurs between this setup
+            # and the spawn attempt, so cancellation during git bookkeeping cannot orphan scratch.
+            task_scratch = None
+            try:
+                if freedom != "read_only":
+                    from . import scratch
+                    from dataclasses import replace
+                    task_scratch = scratch.create(self._log_dir, task_id)
+                    writable = getattr(backend, "with_writable_directory", None)
+                    if writable is not None:
+                        invocation = writable(invocation, task_scratch, freedom)
+                        backend.assert_safe(invocation, freedom, network)
+                        enforcement = replace(enforcement, writable_roots=(*enforcement.writable_roots, str(task_scratch)))
+            except BaseException:
+                if task_scratch is not None:
+                    try:
+                        scratch.remove(self._log_dir, task_id)
+                    except OSError:
+                        log.exception("task %s: could not clean scratch before spawn", task_id)
+                raise
+
+            # So a nested polybridge server started by this agent (a codex/vibe MCP tool call, a
+            # claude/opencode subprocess) can find its way back to this task via
+            # `lineage.detect_caller`'s PB_TASK_ID method, when the environment survives that far.
+            # Built here, synchronously, so it introduces no await into the no-await window below.
+            spawn_env = {
+                **os.environ,
+                lineage.ENV_TASK_ID: task_id,
+                lineage.ENV_ROOT_TASK_ID: root_task_id,
+                lineage.ENV_DEPTH: str(depth),
+            }
+
+            spawn_env.pop("PB_TASK_SCRATCH", None)
+            if task_scratch is not None:
+                spawn_env["PB_TASK_SCRATCH"] = str(task_scratch)
 
         try:
             proc = await asyncio.create_subprocess_exec(

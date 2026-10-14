@@ -328,3 +328,104 @@ async def test_abandoned_drainer_does_not_establish_complete_evidence(tmp_path, 
     monkeypatch.setattr('polybridge.tasks.DRAIN_GRACE_SECONDS', 0.001)
     assert await _finish_draining(task) is False
     assert not task.output_drained
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('failure_point', ['argv', 'caller', 'lineage', 'assert_safe', 'scratch', 'writable_assert_safe', 'baseline_cancel'])
+async def test_real_registry_preflight_failure_retries_reserved_successor(tmp_path, monkeypatch, failure_point):
+    import asyncio
+    import sys
+    from polybridge.backends import Invocation
+    from polybridge.backends.claude import ClaudeBackend
+    from polybridge.tasks import TaskRegistry
+
+    counter = tmp_path / 'launches'
+    class FixtureBackend(ClaudeBackend):
+        def build_start_argv(self, prompt, **kwargs):
+            program = f"from pathlib import Path; p=Path({str(counter)!r}); p.write_text(str(int(p.read_text())+1) if p.exists() else '1')"
+            return Invocation([sys.executable, '-c', program])
+        def assert_safe(self, *args):
+            pass
+
+    backend = FixtureBackend()
+    registry = TaskRegistry(log_dir=tmp_path / 'tasks')
+    source = record(registry.log_dir)
+    registry._mutation_caller = AsyncMock(return_value=None)
+    monkeypatch.setattr('polybridge.task_continuation.get_backend', lambda name: backend)
+    monkeypatch.setattr('polybridge.workflow_hooks.refuse_managed', lambda *args: None)
+    with monkeypatch.context() as fault:
+        if failure_point == 'argv':
+            fault.setattr(backend, 'build_start_argv', lambda *a, **k: (_ for _ in ()).throw(ValueError('argv')))
+        elif failure_point == 'caller':
+            registry._mutation_caller = AsyncMock(side_effect=[None, asyncio.CancelledError()])
+        elif failure_point == 'lineage':
+            fault.setattr(registry, '_resolve_lineage', lambda *a, **k: (_ for _ in ()).throw(ValueError('lineage')))
+        elif failure_point == 'assert_safe':
+            fault.setattr(backend, 'assert_safe', lambda *a, **k: (_ for _ in ()).throw(ValueError('unsafe')))
+        elif failure_point == 'writable_assert_safe':
+            from unittest.mock import Mock
+            fault.setattr(backend, 'with_writable_directory', lambda invocation, *a: invocation, raising=False)
+            fault.setattr(backend, 'assert_safe', Mock(side_effect=[None, ValueError('unsafe writable invocation')]))
+        elif failure_point == 'scratch':
+            fault.setattr('polybridge.scratch.create', lambda *a: (_ for _ in ()).throw(OSError('scratch')))
+        else:
+            fault.setattr('polybridge.task_outcomes.baseline', lambda *a: (_ for _ in ()).throw(asyncio.CancelledError()))
+        with pytest.raises((ValueError, OSError, asyncio.CancelledError)):
+            await registry.continue_task(source.task_id)
+    reservation = json.loads((registry.log_dir / f'{source.task_id}.continuation.json').read_text())
+    assert reservation['state'] == 'not_started'
+    from polybridge.scratch import directory
+    assert not directory(registry.log_dir, reservation['task_id']).exists()
+    assert not counter.exists()
+    registry._mutation_caller = AsyncMock(return_value=None)
+    child = await registry.continue_task(source.task_id)
+    assert child.task_id == reservation['task_id']
+    await asyncio.wait_for(child.done.wait(), 5)
+    assert counter.read_text() == '1'
+    assert await registry.continue_task(source.task_id) is child
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('failure_point', ['spawn_cancel', 'spawn_uncertain', 'postspawn'])
+async def test_real_registry_ambiguous_launch_keeps_reservation(tmp_path, monkeypatch, failure_point):
+    import asyncio
+    import sys
+    from polybridge.backends import Invocation
+    from polybridge.backends.claude import ClaudeBackend
+    from polybridge.tasks import TaskRegistry
+
+    class FixtureBackend(ClaudeBackend):
+        def build_start_argv(self, prompt, **kwargs):
+            return Invocation([sys.executable, '-c', 'pass'])
+        def assert_safe(self, *args):
+            pass
+    backend = FixtureBackend()
+    registry = TaskRegistry(log_dir=tmp_path / 'tasks')
+    source = record(registry.log_dir)
+    registry._mutation_caller = AsyncMock(return_value=None)
+    monkeypatch.setattr('polybridge.task_continuation.get_backend', lambda name: backend)
+    monkeypatch.setattr('polybridge.workflow_hooks.refuse_managed', lambda *args: None)
+    real_spawn = asyncio.create_subprocess_exec
+    processes = []
+    async def spawn(*args, **kwargs):
+        if failure_point == 'spawn_cancel':
+            raise asyncio.CancelledError()
+        if failure_point == 'spawn_uncertain':
+            raise RuntimeError('uncertain transport')
+        proc = await real_spawn(*args, **kwargs)
+        processes.append(proc)
+        return proc
+    monkeypatch.setattr(asyncio, 'create_subprocess_exec', spawn)
+    if failure_point == 'postspawn':
+        monkeypatch.setattr(registry, 'persist', lambda task: (_ for _ in ()).throw(RuntimeError('postspawn')))
+    try:
+        with pytest.raises((RuntimeError, asyncio.CancelledError)):
+            await registry.continue_task(source.task_id)
+        reservation = json.loads((registry.log_dir / f'{source.task_id}.continuation.json').read_text())
+        assert reservation['state'] == 'reserved'
+        with pytest.raises(ValueError, match='unsettled'):
+            await registry.continue_task(source.task_id)
+        assert len(processes) == (1 if failure_point == 'postspawn' else 0)
+    finally:
+        for proc in processes:
+            await proc.communicate()
