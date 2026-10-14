@@ -33,8 +33,9 @@ visibility, or use status reads for known tasks. Compact filters are ANDed:
 - `--fields task_id,title,status`: requested compact fields. Identity and status
   uncertainty fields are always retained. Unknown fields and filters are errors.
 
-Limits are 1–100, default 50; filter strings are nonempty and at most 200 UTF-8
-bytes. Responses retain catalog readiness, incomplete-history and reconciliation
+Limits are 1–100, default 50. The group filter accepts nonblank strings of at
+most 128 characters, matching task creation (including Unicode). Other filter
+strings are nonempty and at most 200 UTF-8 bytes. Responses retain catalog readiness, incomplete-history and reconciliation
 metadata. They omit global active counts, which would be misleading for a filtered
 page. Status filters are indexed best-effort reads: a process can end without
 changing its metadata, and identity reconciliation runs after indexed selection.
@@ -55,9 +56,9 @@ New arrivals before the cursor do not shift the remaining history. This is keyse
 pagination, not a frozen snapshot of concurrent edits.
 
 Filters run in the durable catalog before task record materialization or event
-log reads. They apply to its bounded display headers (normally at most 200
-characters per title/group/repository); unusually long legacy values can be
-truncated or omitted there. Use full status for those task IDs rather than
+log reads. Group matches the exact creation label in a separate bounded index.
+Title and repository filters apply to bounded display headers (normally at most
+200 characters); unusually long legacy values can be truncated or omitted there. Use full status for those task IDs rather than
 assuming a filtered miss proves absence. Oversized or unsupported historical
 records retain direct-lookup and incomplete-history markers. Catalog bootstrap
 is bounded and may require repeated reads before results are ready.
@@ -72,3 +73,7 @@ UV_CACHE_DIR=/tmp/polybridge-uv-cache uv run pytest -q -s tests/test_task_reads.
 The warm-catalog run measured a 2,586-byte response in 0.008182 seconds on the
 implementation machine, with zero metadata reads and zero log reads. This is a
 local reproducibility sample, not a latency guarantee or a cold-bootstrap claim.
+
+Group matching uses a separate bounded index of the exact label, even when the
+displayed header is shortened. The v9 derivative catalog rebuilds existing history
+through the usual bounded bootstrap; retry while `bootstrap_pending` is true.

@@ -29,7 +29,8 @@ def test_brief_bounds_and_does_not_mutate_prose():
 
 @pytest.mark.parametrize('kw', [dict(limit=0), dict(limit=101), dict(fields=['prompt']),
     dict(since='yesterday'), dict(since='2026-01-01'), dict(status='success'),
-    dict(group='x' * 201), dict(backend='missing')])
+    dict(group='x' * 129), dict(group='😀' * 129), dict(group=' '),
+    dict(title_contains='é' * 101), dict(repo='é' * 101), dict(backend='missing')])
 def test_invalid_requests(tmp_path, kw):
     with pytest.raises(ValueError):
         task_reads.list_tasks(tmp_path, **kw)
@@ -144,3 +145,34 @@ async def test_mcp_compact_projection_and_page(tmp_path):
     store.write(server._reg().log_dir, record('history', group='review'))
     page = await server.list_tasks(group='review', limit=1, fields=['title'])
     assert page['items'][0]['task_id'] == 'history'
+
+
+@pytest.mark.parametrize('group', ['😀' * 51, '😀' * 128])
+async def test_unicode_group_producer_and_compact_readers_agree(tmp_path, monkeypatch, capsys, group):
+    from polybridge import ctl, server, workflow_inspection
+
+    # Validate the unchanged producer contract, then persist its exact label.
+    server._check_group(group)
+    log_dir = server._reg().log_dir
+    store.write(log_dir, record('unicode-group', group=group))
+    monkeypatch.setattr(workflow_inspection, 'managed_page_reader', lambda _: (True, None))
+    assert task_reads.list_tasks(log_dir, group=group)['items'][0]['task_id'] == 'unicode-group'
+    assert (await server.list_tasks(group=group, limit=1))['items'][0]['task_id'] == 'unicode-group'
+    monkeypatch.setattr(ctl, 'default_log_dir', lambda: log_dir)
+    monkeypatch.setattr(workflow_inspection, 'managed_page_reader', lambda _: (True, None))
+    assert ctl.main(['task-list-compact', '--json', '--group', group]) == 0
+    assert json.loads(capsys.readouterr().out)['result']['items'][0]['task_id'] == 'unicode-group'
+
+
+@pytest.mark.parametrize('group', ['x' * 129, '😀' * 129])
+async def test_oversized_group_rejected_by_mcp_and_cli(monkeypatch, capsys, group):
+    from polybridge import ctl, server, workflow_inspection
+    from polybridge.server import INVALID_PARAMS, MCPError
+
+    with pytest.raises(MCPError) as error:
+        await server.list_tasks(group=group, limit=1)
+    assert error.value.code == INVALID_PARAMS
+    monkeypatch.setattr(ctl, 'default_log_dir', lambda: server._reg().log_dir)
+    monkeypatch.setattr(workflow_inspection, 'managed_page_reader', lambda _: (True, None))
+    assert ctl.main(['task-list-compact', '--json', '--group', group]) == 1
+    assert json.loads(capsys.readouterr().out)['error']['code'] == 'invalid_params'

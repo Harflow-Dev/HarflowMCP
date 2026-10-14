@@ -338,7 +338,7 @@ class Catalog:
 
     def _discard_derivative_locked(self) -> None:
         """Drop only this derivative namespace, never metadata or older catalogs."""
-        database = self.directory / '.listing.v8.sqlite3'
+        database = self.directory / '.listing.v9.sqlite3'
         for suffix in ('', '-journal', '-wal', '-shm'):
             Path(str(database) + suffix).unlink(missing_ok=True)
         # Make the removal durable before any authoritative replacement starts.
@@ -349,7 +349,7 @@ class Catalog:
             os.close(descriptor)
 
     def _connect_locked(self) -> sqlite3.Connection:
-        db = sqlite3.connect(self.directory / '.listing.v8.sqlite3', timeout=10, factory=CatalogConnection)
+        db = sqlite3.connect(self.directory / '.listing.v9.sqlite3', timeout=10, factory=CatalogConnection)
         try:
             return self._initialize(db)
         except BaseException:
@@ -359,6 +359,8 @@ class Catalog:
     def _initialize(self, db: sqlite3.Connection) -> sqlite3.Connection:
         db.execute('PRAGMA journal_mode=PERSIST')
         db.execute('CREATE TABLE IF NOT EXISTS entries (id TEXT PRIMARY KEY, stamp REAL NOT NULL, active INTEGER NOT NULL, session TEXT, payload TEXT NOT NULL)')
+        db.execute('CREATE TABLE IF NOT EXISTS task_groups (id TEXT PRIMARY KEY, label TEXT NOT NULL)')
+        db.execute('CREATE INDEX IF NOT EXISTS task_group_label ON task_groups(label)')
         db.execute('CREATE INDEX IF NOT EXISTS chronology ON entries(stamp DESC,id DESC)')
         db.execute('CREATE INDEX IF NOT EXISTS active_chronology ON entries(active,stamp DESC,id DESC)')
         db.execute('CREATE INDEX IF NOT EXISTS session_chronology ON entries(session,stamp DESC,id DESC)')
@@ -374,9 +376,10 @@ class Catalog:
         db.execute('CREATE INDEX IF NOT EXISTS checkout_repo ON checkout_tasks(repo)')
         db.execute('CREATE INDEX IF NOT EXISTS checkout_run ON checkout_tasks(run_id)')
         version = db.execute("SELECT value FROM state WHERE key='schema_version'").fetchone()
-        # Version 8 invalidates authority from older non-atomic projections,
-        # including source-less orphans already acknowledged by discovery.
-        if version != ('8',):
+        # Version 9 adds lossless bounded group matching independently of display
+        # truncation. Older derivative projections rebuild through bounded discovery.
+        if version != ('9',):
+            db.execute('DELETE FROM task_groups')
             db.execute('DELETE FROM checkout_tasks')
             db.execute('DELETE FROM entries')
             db.execute('DELETE FROM callers')
@@ -386,7 +389,7 @@ class Catalog:
             db.execute('DELETE FROM pending')
             db.execute('DELETE FROM seen')
             db.execute('DELETE FROM state')
-            db.execute("INSERT INTO state VALUES ('schema_version','8')")
+            db.execute("INSERT INTO state VALUES ('schema_version','9')")
         # Build only after invalidating old derivative headers. The partial index
         # makes warm authority readiness independent of retained history size.
         db.execute("CREATE INDEX IF NOT EXISTS incomplete_headers ON entries(id) WHERE json_extract(payload,'$.needs_direct_lookup')=1")
@@ -446,6 +449,10 @@ class Catalog:
                 db.execute('DELETE FROM callers WHERE id=?', (identifier,))
                 header.update(status='unknown', needs_direct_lookup=True, index_blocker='unsupported_caller_identity', note='caller identity exceeds bounded index; direct inspection required')
                 active = True
+        group = header.get('group')
+        db.execute('DELETE FROM task_groups WHERE id=?', (identifier,))
+        if isinstance(group, str) and len(group) <= 128:
+            db.execute('INSERT INTO task_groups VALUES (?,?)', (identifier, group))
         session_id = header.get('session_id')
         header = bound_header(header)
         db.execute("INSERT INTO entries VALUES (?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET stamp=CASE WHEN json_extract(entries.payload,'$.needs_direct_lookup')=1 THEN excluded.stamp ELSE entries.stamp END,active=excluded.active,session=excluded.session,payload=excluded.payload",
@@ -473,7 +480,7 @@ class Catalog:
     def _remove(self, db: sqlite3.Connection, identifier: str) -> None:
         db.execute('DELETE FROM checkout_tasks WHERE run_id=?', (identifier,))
         db.execute("DELETE FROM associations WHERE json_extract(payload,'$.workflow_run_id')=?", (identifier,))
-        for table in ('entries', 'callers', 'associations', 'sources', 'seen', 'pending'):
+        for table in ('entries', 'callers', 'associations', 'sources', 'seen', 'pending', 'task_groups'):
             db.execute(f'DELETE FROM {table} WHERE id=?', (identifier,))
 
     def _acknowledge_directory(self, db: sqlite3.Connection, previous_directory_mtime: int | None) -> None:
@@ -576,7 +583,7 @@ class Catalog:
         # Older interrupted projections may have authority but no source row.
         # Reconcile every projection namespace against the verified discovery.
         stale = db.execute("""WITH projected AS (
-            SELECT id FROM sources UNION SELECT id FROM entries UNION SELECT id FROM callers
+            SELECT id FROM sources UNION SELECT id FROM entries UNION SELECT id FROM callers UNION SELECT id FROM task_groups
             UNION SELECT run_id AS id FROM checkout_tasks
             UNION SELECT json_extract(payload,'$.workflow_run_id') AS id FROM associations
         ) SELECT id FROM projected WHERE id IS NOT NULL
@@ -648,6 +655,9 @@ class Catalog:
             for key, value in filters.items():
                 if key == 'since':
                     conditions.append('stamp >= ?')
+                    values.append(value)
+                elif key == 'group':
+                    conditions.append('id IN (SELECT id FROM task_groups WHERE label=?)')
                     values.append(value)
                 elif key == 'title_contains':
                     conditions.append("instr(lower(COALESCE(json_extract(payload,'$.title'),'')),lower(?)) > 0")

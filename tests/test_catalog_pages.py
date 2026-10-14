@@ -660,7 +660,7 @@ def test_schema_three_cache_rebuild_is_bounded_without_decoding_old_headers(tmp_
     page = store.list_page(directory)
     assert page['bootstrap_pending'] and len(reads) == 100
     with index.connect() as db:
-        assert db.execute("SELECT value FROM state WHERE key='schema_version'").fetchone() == ('8',)
+        assert db.execute("SELECT value FROM state WHERE key='schema_version'").fetchone() == ('9',)
         assert db.execute("SELECT count(*) FROM entries WHERE id LIKE 'old%'").fetchone() == (0,)
     assert originals == {p.name: p.read_bytes() for p in directory.glob('*.meta.json')}
 
@@ -1494,7 +1494,7 @@ def test_upgrade_rebuilds_previously_acknowledged_source_less_authority(tmp_path
     with upgraded.connect() as db:
         for table in ('entries', 'callers', 'associations', 'checkout_tasks', 'sources'):
             assert db.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0] == 0
-        assert db.execute("SELECT value FROM state WHERE key='schema_version'").fetchone() == ('8',)
+        assert db.execute("SELECT value FROM state WHERE key='schema_version'").fetchone() == ('9',)
     page = upgraded.page(load)
     assert page['catalog_state']['status'] == 'ready'
     assert [item['task_id'] for item in page['items']] == ['retained']
@@ -1532,13 +1532,13 @@ def test_live_schema_seven_runtime_cannot_reset_schema_eight_discovery_progress(
                 db.execute("INSERT INTO state VALUES ('schema_version','7')")
             assert db.execute("SELECT value FROM state WHERE key='legacy_runtime'").fetchone() == ('preserved',)
     assert page['catalog_state']['status'] == 'ready'
-    assert (tmp_path / '.listing.v8.sqlite3').exists()
+    assert (tmp_path / '.listing.v9.sqlite3').exists()
     assert originals == {path.name: path.read_bytes() for path in tmp_path.glob('*.meta.json')}
 
 
 def corrupt_derivative(directory):
     directory.mkdir(parents=True, exist_ok=True)
-    (directory / '.listing.v8.sqlite3').write_bytes(b'corrupt derivative database' * 20)
+    (directory / '.listing.v9.sqlite3').write_bytes(b'corrupt derivative database' * 20)
 
 
 @pytest.mark.parametrize('operation', ['task_create', 'task_terminal', 'workflow_create', 'workflow_update'])
@@ -1612,12 +1612,12 @@ def test_derivative_recovery_only_removes_current_cache_and_sidecars(tmp_path):
     corrupt_derivative(tmp_path)
     corrupt_sidecar = b'corrupt derivative sidecar' * 20
     for suffix in ('-journal', '-wal', '-shm'):
-        (tmp_path / f'.listing.v8.sqlite3{suffix}').write_bytes(corrupt_sidecar)
+        (tmp_path / f'.listing.v9.sqlite3{suffix}').write_bytes(corrupt_sidecar)
     assert store.write_landed(tmp_path, record('target'))
     assert historical == (tmp_path / 'historical.meta.json').read_bytes()
     assert all(path.read_bytes() == original for path, original in preserved.items())
     for suffix in ('-journal', '-wal', '-shm'):
-        path = tmp_path / f'.listing.v8.sqlite3{suffix}'
+        path = tmp_path / f'.listing.v9.sqlite3{suffix}'
         assert not path.exists() or path.read_bytes() != corrupt_sidecar
 
 
@@ -1710,3 +1710,58 @@ def test_filtered_cursor_advances_past_refreshed_excluded_rows(tmp_path, exclude
     assert not second['has_more'] and second['next_cursor'] is None
     assert [item['task_id'] for item in first['items'] + second['items']] == [
         identifier for identifier in ('d', 'c', 'b', 'a') if identifier not in excluded]
+
+
+def test_unicode_group_index_preserves_exact_match_without_expanding_display(tmp_path):
+    group = '😀' * 128
+    identifier = '00000000-0000-0000-0000-000000000000'
+    task = record(identifier, group=group, parent_task_id=identifier,
+        root_task_id=identifier, continuation_of_task_id=identifier,
+        chain_root_task_id=identifier, spawned_by=identifier)
+    store.write(tmp_path, task)
+    index = catalog.Catalog(tmp_path, store.RECORD_SUFFIX)
+    def forbidden_loader(_):
+        pytest.fail('warm group filtering must not read task metadata')
+    page = index.page(forbidden_loader, filters={'group': group})
+    assert page['items'][0]['task_id'] == identifier
+    assert len(json.dumps(page['items'][0], ensure_ascii=True).encode()) <= 2048
+    shown = page['items'][0].get('group')
+    assert shown != group
+    if shown:
+        assert index.page(forbidden_loader, filters={'group': shown})['items'] == []
+    store.write(tmp_path, replace(task, group='changed'))
+    assert index.page(forbidden_loader, filters={'group': group})['items'] == []
+    assert index.page(forbidden_loader, filters={'group': 'changed'})['items'][0]['task_id'] == identifier
+    # An unreadable/unknown projection must clear the previous exact label.
+    index.record({'task_id': identifier, 'status': 'unknown'}, 1, True, identifier)
+    with index.connect() as db:
+        assert db.execute('SELECT * FROM task_groups').fetchall() == []
+    store.write(tmp_path, task)
+    index.remove(identifier)
+    with index.connect() as db:
+        assert db.execute('SELECT * FROM task_groups').fetchall() == []
+
+
+def test_v8_cache_preserved_while_v9_group_index_bootstraps_bounded(tmp_path, monkeypatch):
+    import sqlite3
+    directory = tmp_path / 'tasks'
+    legacy_tasks(directory, 205)
+    group = '😀' * 128
+    original = store.read(directory, 't0204')
+    # Write metadata directly to model pre-v9 persisted history.
+    (directory / 't0204.meta.json').write_text(json.dumps(asdict(replace(original, group=group))))
+    old_path = directory / '.listing.v8.sqlite3'
+    with sqlite3.connect(old_path) as db:
+        db.execute('CREATE TABLE state (key TEXT PRIMARY KEY, value TEXT)')
+        db.execute("INSERT INTO state VALUES ('schema_version','8')")
+    old_bytes = old_path.read_bytes()
+    reads = []
+    original_read = store.read
+    monkeypatch.setattr(store, 'read', lambda *a, **kw: (reads.append(a[1]), original_read(*a, **kw))[1])
+    for expected in (100, 100, 5):
+        reads.clear()
+        page = store.list_page(directory, filters={'group': group})
+        assert len(reads) == expected
+    assert page['items'][0]['task_id'] == 't0204'
+    assert old_path.read_bytes() == old_bytes
+    assert (directory / '.listing.v9.sqlite3').exists()

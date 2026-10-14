@@ -25,7 +25,10 @@ def validate_filters(filters: dict[str, Any]) -> dict[str, Any]:
     for key, value in filters.items():
         if value is None:
             continue
-        if not isinstance(value, str) or not value or len(value.encode()) > 200:
+        if key == 'group':
+            if not isinstance(value, str) or not value.strip() or len(value) > 128:
+                raise ValueError('group must be a nonblank string of at most 128 characters')
+        elif not isinstance(value, str) or not value or len(value.encode()) > 200:
             raise ValueError(f'{key} must be a nonempty string of at most 200 UTF-8 bytes')
         if key == 'since':
             try:
