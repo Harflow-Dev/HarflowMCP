@@ -1469,8 +1469,14 @@ not change the harness execution status. Git outcomes alone do not certify a goa
 at a paused or awaiting-input root checkpoint, only after the complete nested run
 tree is quiescent. The original interaction owner retains control; revisions reject
 stale versions and terminal runs. An omitted original goal has revision zero.
-Revision history and completed work remain intact. Old routing assignments and
-assessments are invalidated; the next orchestrator decision must supply a nonempty
+Revision history and completed work remain intact. Each run retains at most **64 goal revisions**, counting
+the initial supplied goal, and **1 MiB UTF-8 of cumulative goal text** across history.
+An edit that would exceed either limit is rejected atomically, preserving the current
+goal, history and assessment. Monitor disables revision when either budget is exhausted;
+start a new run to continue with another goal. With bytes remaining, a proposed goal
+that is too large is rejected while the editor retains its text. Recovered records
+already over these limits remain readable but cannot accept further revisions. Old routing
+assignments and assessments are invalidated; the next orchestrator decision must supply a nonempty
 `goal_replan` for the current revision before dispatch or completion. Nested runs
 refresh inherited goal constraints before scheduling while keeping their scoped
 requests. Design-comparison plans must identify supplied references, screens,

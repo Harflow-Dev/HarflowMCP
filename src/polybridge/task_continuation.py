@@ -127,7 +127,15 @@ async def continue_task(registry: Any, task_id: str, extra_prompt: str | None = 
             reservation = json.loads(reservation_bytes)
         if reservation:
             if reservation.get('request_fingerprint') != fingerprint:
-                raise ValueError('Continuation already reserved for a different caller request; use its successor for further work')
+                # Public manual recovery may take over a proven unlaunched automatic
+                # attempt. Match the complete reconstructed request, including legacy
+                # failure records which did not retain the automatic metadata flag.
+                automatic_fingerprint = hashlib.sha256(json.dumps({'prompt': prompt, 'automatic': True}, ensure_ascii=False).encode('utf-8')).hexdigest()
+                if (automatic or reservation.get('state') != 'not_started'
+                        or reservation.get('request_fingerprint') != automatic_fingerprint
+                        or registry.get(reservation['task_id']) is not None
+                        or store.read(registry.log_dir, reservation['task_id']) is not None):
+                    raise ValueError('Continuation already reserved for a different caller request; use its successor for further work')
             child = registry.get(reservation['task_id'])
             if child is not None:
                 return child

@@ -189,3 +189,64 @@ def test_unsettled_evidence_is_not_issued():
     run = {"goal_revision": 1, "activations": [{"id": "a", "role": "node", "status": "completed", "tasks": [{"status": "running"}], "node_result": {"status": "succeeded", "evidence": ["claimed"]}}]}
     with pytest.raises(w.WorkflowError, match="settled"):
         g.validate_assessment(run, {"revision": 1, "status": "satisfied", "reason": "done", "evidence_refs": ["a"]})
+
+
+def seed_history(storage, tmp_path, goals):
+    run = create(storage, tmp_path, goals[0])
+    return storage.update_run(run["workflow_run_id"], lambda r: r.update(
+        status="paused", goal=goals[-1], goal_revision=len(goals),
+        goal_history=[{"revision": i + 1, "goal": goal, "created_at": i} for i, goal in enumerate(goals)],
+        goal_assessment={"revision": len(goals), "status": "unmet"}, instructions="Retain caller prose",
+    ), "test")
+
+
+@pytest.mark.parametrize("goals, proposed", [
+    (["x"] * g.MAX_GOAL_REVISIONS, "new"),
+    (["é" * (g.MAX_GOAL_BYTES // 2)] * 16, "new"),
+    (["x" * g.MAX_GOAL_BYTES] * 15 + ["é" * (g.MAX_GOAL_BYTES // 2 - 1)], "éx"),
+])
+def test_history_budget_rejection_is_atomic(storage, tmp_path, goals, proposed):
+    run = seed_history(storage, tmp_path, goals)
+    before = storage.get_run(run["workflow_run_id"])
+    with pytest.raises(w.WorkflowError, match="history|revisions"):
+        g.revise(storage, run["workflow_run_id"], proposed, len(goals))
+    assert storage.get_run(run["workflow_run_id"]) == before
+
+
+def test_exact_multibyte_history_limit(storage, tmp_path):
+    goals = ["x" * g.MAX_GOAL_BYTES] * 15 + ["é" * (g.MAX_GOAL_BYTES // 2 - 1)]
+    run = seed_history(storage, tmp_path, goals)
+    assert g.revision_eligibility(storage, run)[0]
+    revised = g.revise(storage, run["workflow_run_id"], "é", 16)
+    assert sum(len(item["goal"].encode("utf-8")) for item in revised["goal_history"]) == g.MAX_GOAL_HISTORY_BYTES
+    allowed, reason = g.revision_eligibility(storage, revised)
+    assert not allowed and "1 MiB" in reason and "new run" in reason
+
+
+def test_concurrent_last_revision_and_stale_edit(storage, tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    run = seed_history(storage, tmp_path, ["x"] * (g.MAX_GOAL_REVISIONS - 1))
+    def attempt(goal):
+        try:
+            return g.revise(storage, run["workflow_run_id"], goal, 63)
+        except w.WorkflowError as error:
+            return str(error)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(attempt, ["first", "second"]))
+    assert len([result for result in results if isinstance(result, dict)]) == 1
+    assert any("stale" in result for result in results if isinstance(result, str))
+    recovered = w.WorkflowStore(storage.root).get_run(run["workflow_run_id"])
+    assert recovered["goal_revision"] == len(recovered["goal_history"]) == 64
+    assert g.revision_eligibility(storage, recovered) == (False, "Goal history reached 64 revisions; start a new run")
+
+
+@pytest.mark.parametrize("goals", [["x"] * 65, ["x" * g.MAX_GOAL_BYTES] * 17])
+def test_recovered_overlimit_goals_remain_readable(storage, tmp_path, goals):
+    run = seed_history(storage, tmp_path, goals)
+    recovered_store = w.WorkflowStore(storage.root)
+    recovered = recovered_store.get_run(run["workflow_run_id"])
+    assert recovered["goal_history"] == run["goal_history"]
+    assert not g.revision_eligibility(recovered_store, recovered)[0]
+    with pytest.raises(w.WorkflowError, match="new run"):
+        g.revise(recovered_store, run["workflow_run_id"], "new", len(goals))
+    assert recovered_store.get_run(run["workflow_run_id"]) == recovered

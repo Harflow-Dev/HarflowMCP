@@ -61,6 +61,7 @@ in the app; MCP-started runs return it to the calling tool.
 Give each workflow run an optional [explicit goal](docs/workflows.md#per-run-goals), independent
 of its saved purpose. Goals are preserved verbatim, assessed against execution evidence, and
 can be revised by the caller at a quiescent checkpoint without expanding permissions.
+Each run's goal history is bounded to 64 revisions and 1 MiB of UTF-8 goal text.
 
 For settled standalone tasks, [`continue_task`](docs/task-continuation.md) reconstructs context
 in a fresh session. Opt-in `auto_continue` bounds successors after supported turn-cap signals;

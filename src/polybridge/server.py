@@ -1392,6 +1392,8 @@ async def revise_workflow_goal(run_id: str, goal: str, expected_revision: Strict
     goal exists). Stale revisions, terminal runs and active nested/parallel work are rejected.
     The nonblank goal is preserved verbatim up to 64 KiB UTF-8. History and completed work remain;
     previous assessments are invalidated and replanning is required before further dispatch.
+    Each run retains at most 64 goal revisions (including the initial goal) and 1 MiB UTF-8
+    of cumulative goal text. Edits exceeding either bound are rejected; start a new run.
     """
     from .workflow_responses import compact
     return compact(await _workflow_call("revise_goal", run_id=run_id, goal=goal, expected_revision=expected_revision))

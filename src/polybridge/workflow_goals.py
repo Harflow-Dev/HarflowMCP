@@ -6,6 +6,22 @@ import time
 from typing import Any
 
 MAX_GOAL_BYTES = 64 * 1024
+MAX_GOAL_REVISIONS = 64
+MAX_GOAL_HISTORY_BYTES = 1024 * 1024
+
+
+def _history_budget(run: dict[str, Any], additional_goal: str | None = None) -> tuple[bool, str]:
+    history = run.get("goal_history", [])
+    # Count the revision too, so recovered records with incomplete history cannot
+    # regain an exhausted budget. Existing oversized records remain readable.
+    if max(len(history), run.get("goal_revision", 0)) >= MAX_GOAL_REVISIONS:
+        return False, "Goal history reached 64 revisions; start a new run"
+    size = sum(len(item["goal"].encode("utf-8")) for item in history)
+    if size >= MAX_GOAL_HISTORY_BYTES:
+        return False, "Goal history reached 1 MiB UTF-8; start a new run"
+    if additional_goal is not None and size + len(additional_goal.encode("utf-8")) > MAX_GOAL_HISTORY_BYTES:
+        return False, "Proposed goal exceeds the remaining 1 MiB UTF-8 history budget; use a smaller goal or start a new run"
+    return True, ""
 
 
 def validate_goal(goal: str | None) -> str | None:
@@ -94,6 +110,9 @@ def revise(store: Any, run_id: str, goal: str, expected_revision: int, *, intera
         allowed, reason = eligibility(store, {**run, "interaction_owner": "caller"})
         if not allowed:
             raise WorkflowError(reason)
+        allowed, reason = _history_budget(run, goal)
+        if not allowed:
+            raise WorkflowError(reason)
         revision = expected_revision + 1
         run.update(goal=goal, goal_revision=revision, goal_assessment=None, goal_replanning_required=True)
         run.setdefault("goal_history", []).append({"revision": revision, "goal": goal, "created_at": time.time()})
@@ -113,6 +132,9 @@ def revision_eligibility(store: Any, run: dict[str, Any]) -> tuple[bool, str]:
         return False, "Revise the root workflow goal"
     if run.get("status") not in {"paused", "needs_input"}:
         return False, "Goal revision requires a paused or awaiting-input checkpoint"
+    allowed, reason = _history_budget(run)
+    if not allowed:
+        return False, reason
     return eligibility(store, {**run, "interaction_owner": "caller"})
 
 

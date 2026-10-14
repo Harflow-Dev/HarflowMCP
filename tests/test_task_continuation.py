@@ -139,6 +139,62 @@ async def test_proven_not_started_can_retry_same_reserved_id(tmp_path, monkeypat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('legacy', [False, True])
+async def test_manual_recovers_failed_automatic_preflight_once(tmp_path, monkeypatch, legacy):
+    import asyncio
+    monkeypatch.setattr('polybridge.workflow_hooks.refuse_managed', lambda *args: None)
+    source = record(tmp_path, auto_continue=2)
+    registry = Registry(tmp_path)
+    done = asyncio.Event()
+    done.set()
+    registry.children[source.task_id] = SimpleNamespace(done=done, proc=None, cancel_requested=False,
+        acc=Accumulator(terminal={'subtype': 'error_max_turns'}), snapshot=lambda: {'summary': 'Stopped on cap'})
+    failure = OSError('no executable')
+    failure.polybridge_not_started = True
+    registry.start.side_effect = failure
+    with pytest.raises(OSError):
+        await continue_task(registry, source.task_id, automatic=True)
+    path = tmp_path / f'{source.task_id}.continuation.json'
+    reservation = json.loads(path.read_text())
+    assert reservation['state'] == 'not_started'
+    if not legacy:
+        reservation['automatic'] = True
+        path.write_text(json.dumps(reservation))
+    else:
+        assert 'automatic' not in reservation
+    registry.start.side_effect = registry.spawn
+    a, b = await asyncio.gather(continue_task(registry, source.task_id), continue_task(registry, source.task_id))
+    assert a is b
+    assert a.task_id == reservation['task_id']
+    assert registry.start.await_count == 2  # one failed preflight, one actual successor
+    assert registry.start.call_args.kwargs['auto_continue'] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('changed', ['prose', 'notes', 'uncertain', 'started', 'live_child', 'durable_child'])
+async def test_manual_cannot_take_over_different_or_launched_automatic_request(tmp_path, monkeypatch, changed):
+    import hashlib
+    monkeypatch.setattr('polybridge.workflow_hooks.refuse_managed', lambda *args: None)
+    source = record(tmp_path, auto_continue=2)
+    registry = Registry(tmp_path)
+    identifier = 'd' * 32
+    fingerprint = hashlib.sha256(json.dumps({'prompt': context(registry, source, None, None), 'automatic': True}, ensure_ascii=False).encode()).hexdigest()
+    state = 'reserved' if changed == 'uncertain' else 'started' if changed == 'started' else 'not_started'
+    (tmp_path / f'{source.task_id}.continuation.json').write_text(json.dumps({'task_id': identifier, 'state': state, 'request_fingerprint': fingerprint}))
+    if changed == 'live_child':
+        registry.children[identifier] = SimpleNamespace(task_id=identifier)
+    if changed == 'durable_child':
+        from dataclasses import replace
+        assert store.write_landed(tmp_path, replace(source, task_id=identifier))
+    notes = tmp_path / 'notes.txt'
+    notes.write_text('Additional notes')
+    with pytest.raises(ValueError, match='different caller request'):
+        await continue_task(registry, source.task_id, 'Changed prose' if changed == 'prose' else None,
+                            str(notes) if changed == 'notes' else None)
+    registry.start.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_uncertain_spawn_failure_cannot_repeat(tmp_path, monkeypatch):
     monkeypatch.setattr('polybridge.workflow_hooks.refuse_managed', lambda *args: None)
     source = record(tmp_path)

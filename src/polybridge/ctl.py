@@ -237,7 +237,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
             goal_group.add_argument("--goal", help="Verbatim nonblank run goal, up to 64 KiB UTF-8")
             goal_group.add_argument("--goal-file", help="UTF-8 run goal file, preserving spaces and line breaks")
         if action == "revise-goal":
-            wp.add_argument("--expected-revision", type=int, required=True, help="Current goal revision, or 0 when absent")
+            wp.add_argument("--expected-revision", type=int, required=True, help="Current goal revision, or 0 when absent; history is limited to 64 revisions and 1 MiB UTF-8 per run")
         if action == "resume":
             wp.add_argument("--decision-id")
             wp.add_argument("--allow-optional-review-skip", action="store_true", help="Explicitly permit skipping the current eligible optional review refusal; requires its current decision ID and answer")
