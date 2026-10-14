@@ -472,7 +472,7 @@ async def start_task(
         if reserved_id is not None:
             from .notifications import discard_unstarted
             cleaned = False
-            if _reg().get(reserved_id) is None:
+            if getattr(exc, 'polybridge_not_started', False) is True and _reg().get(reserved_id) is None:
                 try:
                     cleaned = await asyncio.to_thread(discard_unstarted, _reg().log_dir, reserved_id)
                 except Exception:

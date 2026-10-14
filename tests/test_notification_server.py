@@ -60,7 +60,9 @@ async def test_rejected_start_releases_reservation(configured, monkeypatch, git_
     seen = []
     async def reject(*args, **kwargs):
         seen.append(kwargs['task_id'])
-        raise OSError('cannot spawn')
+        exc = OSError('cannot spawn')
+        exc.polybridge_not_started = True
+        raise exc
     monkeypatch.setattr(server._reg(), 'start', reject)
     with pytest.raises(MCPError, match='inspect task_id'):
         await server.start_task('test', str(git_repo), backend='codex', notify='hook')
@@ -70,7 +72,9 @@ async def test_cleanup_failure_keeps_recovery_identity(configured, monkeypatch, 
     seen = []
     async def reject(*args, **kwargs):
         seen.append(kwargs['task_id'])
-        raise OSError('cannot spawn')
+        exc = OSError('cannot spawn')
+        exc.polybridge_not_started = True
+        raise exc
     monkeypatch.setattr(server._reg(), 'start', reject)
     monkeypatch.setattr(notifications, 'discard_unstarted', lambda *a: (_ for _ in ()).throw(OSError('disk error')))
     with pytest.raises(MCPError, match='inspect task_id') as error:
@@ -114,7 +118,9 @@ async def test_capability_refusal_keeps_uncertain_identity(configured, monkeypat
                 session_id=None, repo_path=str(git_repo), started_at='2026-10-14T00:00:00Z'))
         elif uncertainty == 'live':
             server._reg()._tasks[task_id] = object()
-        raise backends.UnsupportedCapability('specific refusal')
+        exc = backends.UnsupportedCapability('specific refusal')
+        exc.polybridge_not_started = True
+        raise exc
     monkeypatch.setattr(server._reg(), 'start', reject)
     if uncertainty == 'cleanup_failure':
         monkeypatch.setattr(notifications, 'discard_unstarted', lambda *a: (_ for _ in ()).throw(OSError('disk error')))
@@ -202,3 +208,55 @@ async def test_existing_database_cleanup_resumes_without_configuration(monkeypat
             worker.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await worker
+
+
+@pytest.mark.parametrize('error_type', [OSError, backends.UnsupportedCapability])
+async def test_unmarked_start_error_keeps_reservation(configured, monkeypatch, git_repo, fake_backend_clis, error_type):
+    seen = []
+    async def reject(*args, **kwargs):
+        seen.append(kwargs['task_id'])
+        raise error_type('unproven refusal')
+    monkeypatch.setattr(server._reg(), 'start', reject)
+    monkeypatch.setattr(notifications, 'discard_unstarted', lambda *a: pytest.fail('ambiguous cleanup'))
+    with pytest.raises(MCPError, match='inspect task_id') as error:
+        await server.start_task('test', str(git_repo), backend='codex', notify='hook')
+    assert seen[0] in str(error.value)
+    assert 'unproven refusal' not in str(error.value)
+    assert notifications.status(server._reg().log_dir, seen[0])[0]['state'] == 'pending'
+
+
+async def test_spawned_process_persist_failure_keeps_reservation(configured, monkeypatch, git_repo, fake_backend_clis):
+    registry = server._reg()
+    spawned = []
+    reserved = []
+    register = notifications.subscribe
+    def reserve(*args, **kwargs):
+        reserved.append(args[1])
+        return register(*args, **kwargs)
+    async def fake_exec(*args, **kwargs):
+        proc = SimpleNamespace(pid=424242)
+        spawned.append(proc)
+        return proc
+    def fail_persist(task):
+        assert task.proc is spawned[0]
+        raise OSError('storage unavailable after spawn')
+    monkeypatch.setattr(notifications, 'subscribe', reserve)
+    monkeypatch.setattr(asyncio, 'create_subprocess_exec', fake_exec)
+    monkeypatch.setattr(registry, 'persist', fail_persist)
+    monkeypatch.setattr(notifications, 'discard_unstarted', lambda *a: pytest.fail('live process cleanup'))
+    with pytest.raises(MCPError, match='inspect task_id') as error:
+        await server.start_task('test', str(git_repo), backend='codex', notify='hook')
+    assert len(spawned) == 1
+    assert reserved[0] in str(error.value)
+    assert 'no task was started' not in str(error.value)
+    assert registry.get(reserved[0]) is None
+    assert not store.record_path(registry.log_dir, reserved[0]).exists()
+    assert notifications.status(registry.log_dir, reserved[0])[0]['state'] == 'pending'
+
+
+async def test_notification_status_absent_does_not_create_storage_or_worker(monkeypatch):
+    registry = server._reg()
+    monkeypatch.delenv('PB_NOTIFY_DESTINATIONS', raising=False)
+    assert await server.get_task_notifications('absent') == []
+    assert not (registry.log_dir.parent / 'notifications.sqlite3').exists()
+    assert getattr(registry, '_notification_worker', None) is None

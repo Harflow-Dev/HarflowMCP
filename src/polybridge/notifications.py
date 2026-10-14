@@ -17,6 +17,7 @@ import sys
 import time
 import threading
 import uuid
+from contextlib import closing
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -100,7 +101,22 @@ def subscribe(log_dir: Path, task_id: str, notify: str, *, reservation: bool = F
 
 def status(log_dir: Path, task_id: str) -> list[dict]:
     store.validate_task_id(task_id)
-    with _db(log_dir) as db:
+    path = Path(log_dir).parent / 'notifications.sqlite3'
+    try:
+        path.stat()
+    except FileNotFoundError:
+        return []
+    # A status read must neither initialize storage nor recreate a deleted database.
+    try:
+        connection = sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True, timeout=2)
+    except sqlite3.OperationalError:
+        try:
+            path.stat()
+        except FileNotFoundError:
+            return []
+        raise
+    with closing(connection) as db:
+        db.row_factory = sqlite3.Row
         return [_public(row) for row in db.execute('SELECT * FROM subscriptions WHERE task_id=? ORDER BY created LIMIT ?', (task_id, MAX_SUBSCRIPTIONS))]
 
 

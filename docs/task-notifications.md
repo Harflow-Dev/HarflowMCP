@@ -56,10 +56,14 @@ own network or publishing restrictions. Workflow notifications are unavailable.
 A known rejected start releases its unused reservation; an interrupted start may
 leave a reservation that expires after 30 days. Inspect the returned task identity
 before retrying an uncertain dispatch.
-Capability refusals retain their specific explanation when the server confirms
-that no task was registered and its untouched reservation was removed. If cleanup
+Capability refusals retain their specific explanation when dispatch explicitly marks
+the failure as occurring before process creation, no task is registered, and its
+untouched reservation was removed. Missing task records alone cannot establish that
+no process started: persistence can fail after process creation. If cleanup
 or dispatch remains uncertain, the error instead includes the reserved task ID
 for inspection before retrying.
+Status reads use an existing database read-only, without initializing or changing
+storage; an absent database returns an empty list and does not start a worker.
 
 Workers resume when a server opens its task registry if destinations are configured
 or a notification database already exists. Cleanup continues after destination

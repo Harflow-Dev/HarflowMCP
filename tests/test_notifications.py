@@ -231,3 +231,43 @@ def test_retention_rechecks_new_subscription_after_pin_snapshot(setup, monkeypat
     retention.sweep(setup, 30, datetime.now(timezone.utc))
     assert store.read(setup, r.task_id) is not None
     assert n.status(setup, r.task_id)[0]['state'] == 'pending'
+
+
+
+def test_status_absent_does_not_create_directories(tmp_path):
+    logs = tmp_path / 'missing' / 'tasks'
+    assert n.status(logs, 'absent') == []
+    assert not logs.parent.exists()
+
+
+def test_status_existing_database_does_not_mutate(setup):
+    n.subscribe(setup, 'reserved', 'test', reservation=True)
+    path = setup.parent / 'notifications.sqlite3'
+    path.chmod(0o400)
+    before = (path.read_bytes(), path.stat().st_mode, path.stat().st_mtime_ns)
+    files = set(path.parent.iterdir())
+    assert n.status(setup, 'reserved')[0]['state'] == 'pending'
+    assert (path.read_bytes(), path.stat().st_mode, path.stat().st_mtime_ns) == before
+    assert set(path.parent.iterdir()) == files
+
+
+def test_status_corrupt_database_fails_without_mutation(setup):
+    path = setup.parent / 'notifications.sqlite3'
+    path.write_bytes(b'corrupt database')
+    path.chmod(0o400)
+    before = (path.read_bytes(), path.stat().st_mode, path.stat().st_mtime_ns)
+    with pytest.raises(sqlite3.DatabaseError):
+        n.status(setup, 'reserved')
+    assert (path.read_bytes(), path.stat().st_mode, path.stat().st_mtime_ns) == before
+
+
+def test_status_database_removed_before_connect_is_not_recreated(setup, monkeypatch):
+    n.subscribe(setup, 'reserved', 'test', reservation=True)
+    path = setup.parent / 'notifications.sqlite3'
+    connect = sqlite3.connect
+    def remove_then_connect(*args, **kwargs):
+        path.unlink()
+        return connect(*args, **kwargs)
+    monkeypatch.setattr(sqlite3, 'connect', remove_then_connect)
+    assert n.status(setup, 'reserved') == []
+    assert not path.exists()
