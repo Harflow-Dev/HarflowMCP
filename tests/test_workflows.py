@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -837,6 +838,28 @@ class FeatureRegistry(FakeRegistry):
         return task
 
 
+async def execute_persisted_feature_flow(storage, registry, run):
+    # The longest retry graph performs ~292 durable updates / 5,094 atomic JSON
+    # writes. Main and this branch take ~4.3s locally; profiling alone takes 8.7s,
+    # and the macOS CI runner exceeded the old 10s guard. Keep a finite liveness
+    # guard with load headroom; semantic completion/retry assertions remain below.
+    started = time.monotonic()
+    try:
+        await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]), 20)
+    except TimeoutError:
+        observed = storage.get_run(run["workflow_run_id"])
+        active = [{"id": activation["id"], "node_id": activation["node_id"], "status": activation["status"],
+                   "tasks": [{"task_id": task["task_id"], "status": task["status"]} for task in activation["tasks"]]}
+                  for activation in observed["activations"]
+                  if activation["status"] not in {"completed", "failed", "cancelled"}
+                  or any(task["status"] in {"reserved", "running", "uncertain"} for task in activation["tasks"])]
+        diagnostics = {"elapsed_seconds": round(time.monotonic() - started, 3),
+                       "sequence": observed["sequence"], "status": observed["status"], "transitions": observed["transitions"],
+                       "pending_nodes": [token["node_id"] for token in observed["pending"]], "joins": observed["joins"],
+                       "active_activations": active, "worker_counts": registry.worker_counts}
+        pytest.fail("Persisted feature flow exceeded 20s: " + json.dumps(diagnostics, sort_keys=True))
+
+
 @pytest.mark.parametrize("retry_at", [None, "unit", "ui", "code_gate"])
 async def test_feature_flow_infers_parallel_reviews_and_exclusive_retry_gates(storage, tmp_path, retry_at):
     normalized = w.validate_definition(feature_flow_definition())
@@ -844,7 +867,7 @@ async def test_feature_flow_infers_parallel_reviews_and_exclusive_retry_gates(st
     assert {n["id"]: n["join_id"] for n in normalized["nodes"] if n.get("join_id")} == {"planning": "plan_gate", "ui": "code_gate"}
     run = storage.create_run(normalized, "Implement requested feature", tmp_path)
     registry = FeatureRegistry(storage.root, retry_at)
-    await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]), 10)
+    await execute_persisted_feature_flow(storage, registry, run)
     observed = storage.get_run(run["workflow_run_id"])
     assert observed["status"] == "completed"
     assert observed["joins"] == {}
@@ -857,7 +880,7 @@ async def test_feature_flow_infers_parallel_reviews_and_exclusive_retry_gates(st
 async def test_feature_flow_test_failures_obey_three_implementation_attempt_limit(storage, tmp_path):
     run = storage.create_run(w.validate_definition(feature_flow_definition()), "Implement", tmp_path)
     registry = FeatureRegistry(storage.root, "unit", always_retry=True)
-    await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]), 10)
+    await execute_persisted_feature_flow(storage, registry, run)
     observed = storage.get_run(run["workflow_run_id"])
     assert observed["status"] == "needs_attention"
     assert "Attempt limit reached for implementation" == observed["attention_reason"]
