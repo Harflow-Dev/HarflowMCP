@@ -162,6 +162,11 @@ You can use the same bridge without a workflow. `start_task(prompt, repo_path, b
 returns a **`task_id`** immediately. Follow it with `get_task_status` or `wait_for_task`, then use
 `resume_task` for a follow-up. Independent tasks can run in parallel.
 
+Settled task status includes a persisted best-effort `outcome`: starting and terminal Git
+observations, committed changes, local upstream comparison, and available structured build/test
+and outside-repository edit evidence. These observations do not establish task authorship or
+goal completion; pushed state remains unknown. See [task outcomes](docs/task-outcomes.md).
+
 ```bash
 polybridge-ctl run --backend codex --repo . --prompt 'Review the pagination logic'
 polybridge-ctl list

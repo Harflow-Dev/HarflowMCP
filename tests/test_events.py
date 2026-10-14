@@ -317,12 +317,11 @@ async def test_git_baseline_succeeds_in_a_clean_repo(git_repo: Path, registered)
     await task.done.wait()
 
     assert task.base_commit is not None
-    assert task.start_dirty is None
+    assert task.start_dirty is False
 
 
-async def test_git_baseline_does_not_probe_a_dirty_worktree(git_repo: Path, registered) -> None:
-    """Telling dirty from clean needs `git status`, which runs the repository's own filters in the
-    server process — so `start_dirty` is never probed (see `tasks._git_baseline`)."""
+async def test_git_baseline_safely_probes_a_dirty_worktree(git_repo: Path, registered) -> None:
+    """The isolated status probe records pre-existing dirty state without executing filters."""
     subprocess.run(["git", "-C", str(git_repo), "commit", "-qm", "x", "--allow-empty"], check=True)
     (git_repo / "untracked.txt").write_text("hi")
     backend = registered(_RecordingBackend(_two_line_script()))
@@ -332,7 +331,7 @@ async def test_git_baseline_does_not_probe_a_dirty_worktree(git_repo: Path, regi
     await task.done.wait()
 
     assert task.base_commit is not None
-    assert task.start_dirty is None
+    assert task.start_dirty is True
 
 
 async def test_git_baseline_is_null_outside_a_repo(tmp_path: Path, registered) -> None:
@@ -358,7 +357,8 @@ async def test_a_hanging_git_baseline_is_cut_off_by_its_own_budget(
         time.sleep(5)
         return "should-not-be-seen", False
 
-    monkeypatch.setattr(tasks_module, "_git_baseline", hang)
+    from polybridge import task_outcomes
+    monkeypatch.setattr(task_outcomes, "baseline", hang)
     backend = registered(_RecordingBackend(_two_line_script()))
     registry = TaskRegistry(log_dir=git_repo / ".streams")
 

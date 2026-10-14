@@ -286,22 +286,11 @@ def _git_read(repo_path: Path, deadline: float, *args: str) -> str | None:
 
 
 def _git_baseline(repo_path: Path) -> tuple[str | None, bool | None]:
-    """`(base_commit, start_dirty)` at spawn time, best-effort — nulls on any failure.
-
-    `start_dirty` is always None now: telling a dirty worktree needs `git status`, which reads file
-    contents and so runs the repository's own clean/process filters in this process (see
-    `GIT_SAFE_CONFIG`). Nothing in polybridge or the Monitor acts on it, so it is not probed rather
-    than probed unsafely; the field stays for payload compatibility.
-
-    Same rule as `_publish_branch_notice`: a slow, missing, or broken git must never change a
-    dispatch's outcome, so every failure mode here is absorbed rather than raised.
-    """
-    try:
-        deadline = time.monotonic() + GIT_BASELINE_BUDGET_SECONDS
-        return _git_read(repo_path, deadline, "rev-parse", "--verify", "--quiet", "HEAD"), None
-    except Exception:
-        log.warning("could not determine git baseline for %s", repo_path, exc_info=True)
-        return None, None
+    """Best-effort compatibility fields, with repository executable filters disabled."""
+    from .task_outcomes import baseline
+    observed = baseline(repo_path)
+    status = observed["working_tree_status"]
+    return observed["head"], bool(status) if status is not None else None
 
 
 def _default_branch_remote(repo_path: Path, deadline: float) -> str | None:
@@ -592,6 +581,9 @@ class Task:
     base_commit: str | None = None
     """`git rev-parse HEAD` in the repo at spawn, before the agent ran. None if the repo had no
     commit yet, or the probe failed or timed out."""
+    git_baseline: dict[str, Any] | None = None
+    outcome: dict[str, Any] | None = None
+    outcome_evidence: dict[str, Any] = field(default_factory=dict)
     start_dirty: bool | None = None
     """Whether `git status --porcelain` was non-empty at spawn. None if the probe failed or
     timed out."""
@@ -734,6 +726,7 @@ class Task:
             "enforcement": self.enforcement,
             "base_commit": self.base_commit,
             "start_dirty": self.start_dirty,
+            "outcome": self.outcome,
             "events_log": str(self.log_path.with_name(f"{self.task_id}{EVENTS_SUFFIX}")),
             "resume_command": resume_command(self.backend, self.session_id, self.repo_path),
         }
@@ -1155,11 +1148,16 @@ class TaskRegistry:
         # skip outright. Still strictly before the spawn, so it cannot introduce an await into the
         # no-await window between `create_subprocess_exec` and registration below.
         try:
-            base_commit, start_dirty = await asyncio.wait_for(
-                asyncio.to_thread(_git_baseline, repo_path), timeout=GIT_BASELINE_BUDGET_SECONDS
+            from .task_outcomes import baseline
+            git_baseline = await asyncio.wait_for(
+                asyncio.to_thread(baseline, repo_path), timeout=GIT_BASELINE_BUDGET_SECONDS + 0.2
             )
+            base_commit = git_baseline["head"]
+            observed_status = git_baseline["working_tree_status"]
+            start_dirty = bool(observed_status) if observed_status is not None else None
         except Exception:
             base_commit, start_dirty = None, None
+            git_baseline = None
 
         # Allocate only after cancellable probes finish. No await occurs between this setup
         # and the spawn attempt, so cancellation during git bookkeeping cannot orphan scratch.
@@ -1244,6 +1242,7 @@ class TaskRegistry:
             owner=self._owner,
             base_commit=base_commit,
             start_dirty=start_dirty,
+            git_baseline=git_baseline,
             spawned_by=spawned_by,
             root_task_id=root_task_id,
             depth=depth,
@@ -1900,6 +1899,8 @@ class TaskRegistry:
                 owner=dict(task.owner) if task.owner is not None else None,
                 base_commit=task.base_commit,
                 start_dirty=task.start_dirty,
+                git_baseline=task.git_baseline,
+                outcome=task.outcome,
                 spawned_by=task.spawned_by,
                 root_task_id=task.root_task_id,
                 depth=task.depth,
@@ -3178,6 +3179,12 @@ def _record_events(task: Task, backend: Backend, event: dict[str, Any], raw_offs
             fields["text"] = task.display_prompt
         source_ts = fields.pop("source_ts", None)
         try:
+            from .task_outcomes import observe
+            root = (task.git_baseline or {}).get("repository_root")
+            observe(task.outcome_evidence, kind, fields, task.repo_path, Path(root) if root else None)
+        except Exception:
+            log.debug("task %s: outcome evidence unavailable", task.task_id, exc_info=True)
+        try:
             task.events.write(kind, fields, raw_offset=raw_offset, source_ts=source_ts)
         except Exception:
             task.acc.normalize_errors += 1
@@ -3353,6 +3360,13 @@ async def _monitor(task: Task, registry: TaskRegistry) -> None:
             if task.status not in TERMINAL_STATUSES:
                 task.status = "cancelled" if task.cancel_requested else "failed"
                 task.finished_at = task.finished_at or _now()
+            if task.exit_code is not None:
+                try:
+                    from .task_outcomes import capture
+                    task.outcome = await asyncio.to_thread(capture, task.repo_path, task.git_baseline, task.outcome_evidence)
+                    task.outcome["structured_evidence_complete"] = not task.drain_failed
+                except Exception:
+                    log.warning("task %s: outcome inspection unavailable", task.task_id, exc_info=True)
             task.done.set()
             try:
                 registry.persist(task)

@@ -98,6 +98,8 @@ class TaskRecord:
     base_commit: str | None = None
     """`git rev-parse HEAD` in the repo at spawn, before the agent ran — None if the repo had no
     commit yet, or the probe failed or timed out."""
+    git_baseline: dict[str, Any] | None = None
+    outcome: dict[str, Any] | None = None
     start_dirty: bool | None = None
     """Whether `git status --porcelain` was non-empty at spawn — None if the probe failed, timed
     out, or predates this field."""
@@ -891,6 +893,7 @@ def snapshot(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
         "owned_by_live_server": owned if status == "running" else None,
         "base_commit": record.base_commit,
         "start_dirty": record.start_dirty,
+        "outcome": record.outcome,
         "events_log": str(events.events_path(log_dir, record.task_id)),
         "resume_command": resume_command(record.backend, record.session_id, record.repo_path),
         "recovered": True,

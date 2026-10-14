@@ -450,6 +450,12 @@ async def get_task_status(
     Confirmed usage limits add `failure_diagnostic` (category, reason, source, and optional
     provider-supplied reset_at). It is retained during process settlement and after failure;
     a running status during settlement does not authorize a replacement dispatch.
+
+    Terminal `outcome` records starting and ending Git observations, commits and diff statistics,
+    local upstream comparison, and best-effort structured tool evidence for external file writes
+    and the last build/test command. Missing evidence is null, including pushed state without
+    observed publication evidence. These shared-repository observations do not establish task
+    authorship or goal completion. Old records without captured outcomes return null.
     """
     await _guard_task_read(task_id)
     task = _reg().get(task_id)
