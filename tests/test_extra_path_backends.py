@@ -20,6 +20,9 @@ def qualified(monkeypatch, tmp_path_factory):
     launcher.write_text('#!/bin/sh\nexit 99\n')
     launcher.chmod(0o755)
     monkeypatch.setenv('PATH', str(launcher.parent))
+    # Shell stand-ins exercise namespace/identity guards, not native loaders.
+    monkeypatch.setattr('polybridge.runtime_loaders.qualify_loaders',
+                        lambda paths: (set(paths), set()))
     monkeypatch.setattr('polybridge.backends.codex.sys.platform', 'darwin')
     monkeypatch.setattr(backends, 'version', lambda backend, **kwargs: EXTRA_PATHS_VERSION)
     return backends.get('codex')
@@ -187,6 +190,11 @@ from dataclasses import replace
 from pathlib import Path
 from polybridge.backends.codex import CodexBackend, UnsafeInvocationError
 import polybridge.backends.codex as codex
+import polybridge.runtime_loaders as loaders
+loaders.qualify_loaders = lambda paths: (set(paths), set())
+import polybridge.backends as registry
+# Explicit stand-in version transport: preserve the bound executable under test.
+registry.version = lambda backend, executable=None: subprocess.run([executable, '--version'], capture_output=True, text=True, check=True).stdout.strip()
 from polybridge.extra_paths import normalize_paths
 server, repo = map(Path, sys.argv[1:])
 os.chdir(server)

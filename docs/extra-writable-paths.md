@@ -26,6 +26,17 @@ interpreter targets also protect their installation prefix, including a separate
 base installation behind a virtualenv symlink. These restrictions prevent a worker
 from poisoning unsandboxed repository probes, process checks, later version probes
 or Python imports. They are recomputed before probing and at final validation.
+Host execution also requires a bounded native Mach-O loader qualification. It
+protects discovered absolute, `@loader_path`, `@executable_path` and `@rpath`
+dependencies and lookup namespaces, including missing earlier candidates. Missing
+system shared-cache names qualify only when an existing ancestor is independently
+observed on a read-only filesystem. Malformed, unresolved or unknown loader
+layouts, script host helpers and nonempty loader environment overrides reject
+bounded requests without executing the unqualified helper. Script backends are
+not assigned a generic dependency-graph certification. On macOS, their metadata
+version is unavailable because version inspection does not execute script loaders;
+ordinary dispatch remains available and extra grants remain unsupported for those
+harnesses.
 Selected server helpers with multiple hardlinks are refused on mutable filesystems;
 a filesystem reported read-only by `statvfs` is exempt from that alias refusal,
 because a hardlink alias cannot cross filesystems. Direct overlap still rejects.

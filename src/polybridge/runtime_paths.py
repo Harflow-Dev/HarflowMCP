@@ -48,6 +48,7 @@ def assert_runtime_outside_writes(scopes: list[tuple[Path, str]]) -> None:
     directories = []
     components = set()
     executables = []
+    loader_executables = []
     linked_inodes = set()
     for entry in os.get_exec_path():
         lexical = Path(entry or os.curdir).absolute()
@@ -58,7 +59,21 @@ def assert_runtime_outside_writes(scopes: list[tuple[Path, str]]) -> None:
         selected = shutil.which(name)
         if selected:
             executables.append(Path(selected))
+            with Path(selected).open('rb') as stream:
+                script = stream.read(2) == b'#!'
+            if name in HELPERS or not script:
+                loader_executables.append(Path(selected))
     executables.append(Path(sys.executable))
+    from .runtime_loaders import qualify_loaders
+    loader_files, loader_roots = qualify_loaders([*loader_executables, Path(sys.executable)])
+    for dependency in loader_files:
+        chain, _ = _chain(dependency)
+        components.update(chain)
+    executables.extend(path for path in loader_files if path.exists())
+    for root in loader_roots:
+        chain, canonical = _chain(root)
+        components.update(chain)
+        directories.extend((root, canonical))
     seen = set()
     while executables:
         executable = executables.pop()
