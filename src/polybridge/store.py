@@ -386,7 +386,7 @@ def _project_indexed_status(header: dict[str, Any], record: TaskRecord) -> bool:
     return active
 
 
-def list_page(log_dir: Path, *, limit: int = 100, cursor: str | None = None, active_only: bool = False, session_id: str | None = None, task_ids: list[str] | None = None) -> dict[str, Any]:
+def list_page(log_dir: Path, *, limit: int = 100, cursor: str | None = None, active_only: bool = False, session_id: str | None = None, task_ids: list[str] | None = None, filters: dict[str, Any] | None = None) -> dict[str, Any]:
     from .catalog import Catalog, DeferredRead, apply_read_state
     def load(identifier: str, *, _metadata_budget=None):
         record = read(log_dir, identifier, include_prompt=False, metadata_byte_limit=4 * 1024 * 1024, metadata_budget=_metadata_budget)
@@ -403,7 +403,7 @@ def list_page(log_dir: Path, *, limit: int = 100, cursor: str | None = None, act
             page['related_headers'] = []
             return page
     else:
-        page = catalog.page(load, limit=limit, cursor=cursor, active_only=active_only, session_id=session_id)
+        page = catalog.page(load, limit=limit, cursor=cursor, active_only=active_only, session_id=session_id, filters=filters)
     from .workflows import WorkflowStore
     workflow_storage = WorkflowStore(log_dir.parent)
     workflow_catalog = Catalog(workflow_storage.runs, '.json')

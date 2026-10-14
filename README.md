@@ -173,6 +173,10 @@ returns a **`task_id`** immediately. Follow it with `get_task_status` or `wait_f
 
 [`wait_for_tasks`](docs/multi-task-waiting.md) observes any or all of up to 32 tasks in one
 bounded, read-only call. Timeout and caller disconnect leave execution untouched.
+Use `get_task_status(task_id, brief=true)` or
+[`list_tasks(limit=50, group="review")`](docs/compact-task-reads.md) for bounded overviews.
+Full status and the existing unpaged list remain available.
+
 
 Settled task status includes a persisted best-effort `outcome`: starting and terminal Git
 observations, committed changes, local upstream comparison, and available structured build/test

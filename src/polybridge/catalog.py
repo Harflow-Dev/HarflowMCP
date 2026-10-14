@@ -616,12 +616,17 @@ class Catalog:
         return bool(state['pending_records']) or state['status'] == 'preparing'
 
     def page(self, loader: Callable[[str], tuple[dict[str, Any], float, bool] | None], *, limit: int = PAGE_LIMIT,
-             cursor: str | None = None, active_only: bool = False, session_id: str | None = None) -> dict[str, Any]:
+             cursor: str | None = None, active_only: bool = False, session_id: str | None = None, filters: dict[str, Any] | None = None) -> dict[str, Any]:
+        from .task_reads import validate_filters
+        filters = validate_filters(filters or {})
         if type(limit) is not int or not 1 <= limit <= PAGE_LIMIT:
             raise ValueError('limit must be 1–100')
         if not isinstance(active_only, bool) or session_id is not None and (not isinstance(session_id, str) or len(session_id) > 256):
             raise ValueError('active_only must be boolean; session_id must be a bounded string')
-        scope = [self.identity, active_only, session_id]
+        # Keep cursor size independent of UTF-8 filter values and JSON escaping.
+        # Canonical ordering binds equivalent filter maps to the same scope.
+        filter_scope = hashlib.sha256(json.dumps(filters, sort_keys=True, separators=(',', ':'), ensure_ascii=True).encode()).hexdigest() if filters else None
+        scope = [self.identity, active_only, session_id, filter_scope] if filters else [self.identity, active_only, session_id]
         boundary = None
         if cursor is not None:
             try:
@@ -640,6 +645,17 @@ class Catalog:
             if session_id is not None:
                 conditions.append('session=?')
                 values.append(session_id)
+            for key, value in filters.items():
+                if key == 'since':
+                    conditions.append('stamp >= ?')
+                    values.append(value)
+                elif key == 'title_contains':
+                    conditions.append("instr(lower(COALESCE(json_extract(payload,'$.title'),'')),lower(?)) > 0")
+                    values.append(value)
+                else:
+                    field = 'repo_path' if key == 'repo' else key
+                    conditions.append("json_extract(payload,'$." + field + "') = ?")
+                    values.append(value)
             base = ' WHERE ' + ' AND '.join(conditions) if conditions else ''
             active_count = db.execute('SELECT COUNT(*) FROM entries' + base + (' AND active=1' if conditions else ' WHERE active=1'), values).fetchone()[0]
             count_values = list(values)
@@ -669,7 +685,10 @@ class Catalog:
                         self._put(db, header, actual_stamp, active, identifier)
                         if active_only and not active:
                             continue
-                        payload = db.execute('SELECT payload FROM entries WHERE id=?', (identifier,)).fetchone()[0]
+                        match = db.execute('SELECT payload FROM entries WHERE id=?' + (' AND ' + ' AND '.join(conditions) if conditions else ''), (identifier, *values)).fetchone()
+                        if match is None:
+                            continue
+                        payload = match[0]
                     except DeferredRead:
                         db.execute('INSERT OR IGNORE INTO pending VALUES (?)', (identifier,))
                         pending = True

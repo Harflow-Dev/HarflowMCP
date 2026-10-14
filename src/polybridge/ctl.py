@@ -92,6 +92,14 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     page_p.add_argument('--session-id')
     page_p.add_argument('--task-ids')
 
+    compact_p = sub.add_parser('task-list-compact', help='bounded filtered task headers (since is ISO8601)')
+    compact_p.add_argument('--json', action='store_true')
+    compact_p.add_argument('--limit', type=int, default=50)
+    compact_p.add_argument('--cursor')
+    compact_p.add_argument('--fields', help='comma-separated compact fields')
+    for key in ('group', 'title-contains', 'repo', 'status', 'backend', 'since'):
+        compact_p.add_argument('--' + key)
+
     backends_p = sub.add_parser(
         "backends", help="list the registered backends and whether each is on PATH"
     )
@@ -100,6 +108,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     status_p = sub.add_parser("status", help="show one task's full state")
     status_p.add_argument("task_id")
     status_p.add_argument("--json", action="store_true")
+    status_p.add_argument("--brief", action="store_true", help="bounded display projection")
 
     send_p = sub.add_parser(
         "send", help="queue a message for a running live-input task (reports queued, not delivered)"
@@ -410,6 +419,11 @@ def _cmd_status(args: argparse.Namespace) -> int:
 
     from .workflow_inspection import decorate_tasks
     snapshot = decorate_tasks([store.snapshot(log_dir, record)], log_dir)[0]
+    if getattr(args, 'brief', False):
+        from .task_reads import brief_status
+        from .events import events_path, read_recent
+        snapshot['recent_activity'] = read_recent(events_path(log_dir, task_id), limit=3)
+        snapshot = brief_status(snapshot)
     if args.json:
         print(json.dumps({"v": CTL_JSON_VERSION, "task": snapshot}))
     else:
@@ -819,6 +833,23 @@ def _main(argv: list[str] | None = None) -> int:
         return _cmd_workflow(args)
     if args.command == "list":
         return _cmd_list(args, list_p)
+    if args.command == 'task-list-compact':
+        try:
+            from .task_reads import list_tasks
+            from .workflow_inspection import filter_task_reads, managed_page_reader
+            ready, managed = managed_page_reader(default_log_dir())
+            if not ready:
+                from .workflow_inspection import page_indexing_response
+                result = page_indexing_response(default_log_dir())
+            else:
+                result = list_tasks(default_log_dir(), limit=args.limit, cursor=args.cursor, fields=args.fields.split(',') if args.fields else None, **{key: getattr(args, key) for key in ('group', 'title_contains', 'repo', 'status', 'backend', 'since')})
+                result['items'] = filter_task_reads(result['items'], managed)
+                if managed is not None:
+                    result.update(next_cursor=None, has_more=False, total_active_count=None, counts_complete=False)
+            print(json.dumps({'v': CTL_JSON_VERSION, 'result': result}) if args.json else json.dumps(result, indent=2))
+            return 0
+        except (ValueError, OSError) as exc:
+            return _fail(args, 'invalid_params', str(exc))
     if args.command == 'task-list-page':
         try:
             from .workflow_inspection import filter_task_reads, managed_page_reader

@@ -439,6 +439,7 @@ async def start_task(
 async def get_task_status(
     task_id: str,
     include_tail: bool = False,
+    brief: StrictBool = False,
 ) -> dict[str, Any]:
     """Report a dispatched task's current state without blocking.
 
@@ -449,6 +450,8 @@ async def get_task_status(
             to 5 lines × 500 chars for failed tasks. The caller can request the full raw stream
             log path from `raw_stream_log` for complete output, or use get_task_events for
             normalized events.
+        brief: Return an 8 KiB display projection with bounded summary/outcome, the last three
+            activities and detail references. Overrides include_tail. Full reads remain available.
 
     Returns the task's status, summary, enforcement, and `recent_activity` — a list of ≤ 5 one-line
     strings describing the most recent meaningful events (tool calls, failed tool results, assistant
@@ -474,6 +477,9 @@ async def get_task_status(
     observed publication evidence. These shared-repository observations do not establish task
     authorship or goal completion. Old records without captured outcomes return null.
     """
+    if brief:
+        from .task_reads import brief_status
+        return brief_status(await get_task_status(task_id, include_tail=False))
     await _guard_task_read(task_id)
     task = _reg().get(task_id)
     if task is not None:
@@ -756,7 +762,12 @@ async def resume_task(
 
 
 @mcp.tool()
-async def list_tasks(status: str | None = None, backend: str | None = None) -> list[dict[str, Any]]:
+async def list_tasks(
+    status: str | None = None, backend: str | None = None,
+    group: str | None = None, title_contains: str | None = None, repo: str | None = None,
+    since: str | None = None, limit: StrictInt | None = None,
+    fields: list[str] | None = None, cursor: str | None = None,
+) -> list[dict[str, Any]] | dict[str, Any]:
     """List dispatched tasks, oldest first.
 
     Args:
@@ -764,7 +775,27 @@ async def list_tasks(status: str | None = None, backend: str | None = None) -> l
         backend: Optional filter by agent, e.g. "codex".
 
     Includes tasks from earlier polybridge server processes, marked `recovered: true`.
+    Supplying group/title_contains/repo/since/limit/fields/cursor selects a bounded newest-first
+    indexed page (default limit 50, maximum 100), rather than the legacy oldest-first list.
+    since is an inclusive ISO8601 timestamp with timezone. Filters run before pagination;
+    cursor binds filters. Status is the indexed observation: inspect needs_reconciliation and
+    observed_exit before interpreting it. See docs/compact-task-reads.md for supported fields,
+    bounded-header matching and direct detail lookup. Listing never replays task logs.
     """
+    if any(value is not None for value in (group, title_contains, repo, since, limit, fields, cursor)):
+        from .task_reads import list_tasks as compact_list
+        # The bounded reader enforces managed-workflow visibility before projections.
+        managed = await _bounded_managed_workflow_reader()
+        if managed is not None:
+            raise MCPError(INVALID_PARAMS, "Managed workflow callers use list_task_page for scoped task headers")
+        try:
+            return await asyncio.to_thread(
+                compact_list, _reg().log_dir, limit=50 if limit is None else limit,
+                cursor=cursor, fields=fields, group=group, title_contains=title_contains,
+                repo=repo, status=status, backend=backend, since=since,
+            )
+        except ValueError as exc:
+            raise MCPError(INVALID_PARAMS, str(exc)) from None
     if status is not None and status not in VALID_STATUSES:
         raise MCPError(
             INVALID_PARAMS, f"unknown status {status!r}; expected one of {sorted(VALID_STATUSES)}"
