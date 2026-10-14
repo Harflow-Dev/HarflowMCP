@@ -1232,6 +1232,12 @@ async def workflow_builder(name: str, prompt: str, repo_path: str | None = None,
     concatenating words to save tokens. The caller's prompt is retained unchanged
     before builder input assembly.
 
+    Keep node and connection instructions concise and task-specific. Polybridge owns
+    runtime retries, budget enforcement, configured fallback dispatch and user interaction;
+    use existing configuration fields for limits and fallback candidates, and orchestrator
+    needs_input for clarification or approval. End means intentional workflow termination,
+    not waiting for user input. Preserve legitimate task branches and revision loops.
+
     Layout uses top-left logical point coordinates with x/y >= 0 and a 10-point dot grid.
     Agent nodes are 200 x 92 points (reserve 20 x 10 grid cells); Start/End are 72 x 72
     (reserve 8 x 8 cells). Leave at least 40 points (4 cells) between node edges and avoid
@@ -1261,6 +1267,12 @@ async def workflow_builder(name: str, prompt: str, repo_path: str | None = None,
 @mcp.tool()
 async def followup_workflow_builder(run_id: str, prompt: str) -> dict[str, Any]:
     """Queue a message in the same workflow-builder conversation without saving its draft.
+
+    Keep node and connection instructions concise and task-specific. Polybridge owns
+    runtime retries, budget enforcement, configured fallback dispatch and user interaction;
+    use existing configuration fields for limits and fallback candidates, and orchestrator
+    needs_input for clarification or approval. End means intentional workflow termination,
+    not waiting for user input. Preserve legitimate task branches and revision loops.
 
     Preserve spaces and word boundaries in prompt rather than compressing natural
     prose; the caller's source text is retained unchanged before builder input assembly.

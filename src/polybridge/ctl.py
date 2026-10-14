@@ -167,6 +167,9 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
             wp.description = "Workflow nodes accept child_session_policy agent_decides (default), fresh, or resume in Child orchestrator mode. Resume requires the latest completed compatible invocation in the immediate parent run and never silently starts Fresh. Current mode retains its existing session owner."
         if action == "build":
             wp.description = "Generate or refine an unsaved workflow proposal. Preserve supplied Run workflow references and settings, including child_session_policy: agent_decides (default), fresh, or resume in Child mode; inactive in Current mode. Resume requires the latest completed compatible invocation in the immediate parent run with fresh workflow state and never silently starts Fresh. Never author new Run workflow references."
+        if action in {"build", "builder-followup"}:
+            authoring = "Keep node and connection instructions concise and task-specific. Polybridge owns runtime retries, budget enforcement, configured fallback dispatch and user interaction; use existing configuration fields for limits and fallback candidates, and orchestrator needs_input for clarification or approval. End means intentional workflow termination, not waiting for user input. Preserve legitimate task branches and revision loops."
+            wp.description = (wp.description + " " if wp.description else "") + authoring
         wp.add_argument("--json", action="store_true")
         if action in {"get", "save", "delete", "build", "preview", "start"}:
             wp.add_argument("name")

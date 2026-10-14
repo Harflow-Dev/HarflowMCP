@@ -81,3 +81,39 @@ def test_unreadable_prompt_file_never_starts_builder(monkeypatch, tmp_path, inva
     assert ctl.main(["workflow-build", "canvas", "--backend", "codex", "--prompt-file", str(path), "--json"]) != 0
     assert build.await_count == 0
     assert json.loads(capsys.readouterr().out)["error"]["code"] == "workflow_error"
+
+
+def assert_authoring_contract(description):
+    description = " ".join(description.split())
+    for phrase in (
+        "node and connection instructions concise and task-specific",
+        "runtime retries", "budget enforcement", "configured fallback dispatch",
+        "user interaction", "existing configuration fields", "needs_input",
+        "clarification or approval", "End means intentional workflow termination",
+        "not waiting for user input", "legitimate task branches and revision loops",
+    ):
+        assert phrase in description
+
+
+async def test_mcp_builder_descriptions_expose_authoring_contract():
+    from mcp import Client
+    async with Client(server.mcp) as client:
+        descriptions = {tool.name: tool.description for tool in (await client.list_tools()).tools}
+    for name in ("workflow_builder", "followup_workflow_builder"):
+        assert_authoring_contract(descriptions[name])
+        assert "unchanged" in descriptions[name]
+    assert "never author new Run workflow references" in descriptions["workflow_builder"]
+    assert "Preserve existing node positions exactly" in descriptions["workflow_builder"]
+
+
+@pytest.mark.parametrize("command", ["workflow-build", "workflow-builder-followup"])
+def test_cli_builder_help_exposes_authoring_contract(command, capsys):
+    with pytest.raises(SystemExit) as result:
+        ctl.main([command, "--help"])
+    assert result.value.code == 0
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert_authoring_contract(help_text)
+    assert "--prompt-file" in help_text
+    if command == "workflow-build":
+        assert "Never author new Run workflow references" in help_text
+        assert "never silently starts Fresh" in help_text
