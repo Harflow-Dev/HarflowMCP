@@ -11,7 +11,7 @@ from test_registry import _TrivialBackend
 
 async def test_live_send_malformed_enforcement_refuses_before_inbox_mutation(tmp_path, monkeypatch, backend):
     from unittest.mock import AsyncMock
-    registry = tasks.TaskRegistry(log_dir=tmp_path / 'logs')
+    registry = tasks.TaskRegistry(log_dir=_state_logs(tmp_path))
     task = SimpleNamespace(task_id='malformed-live', backend='codex', live_input=True,
         extra_writable_paths=[], extra_path_certification=None,
         enforcement={'extra_writable_paths': False}, chain_root_task_id=None)
@@ -21,6 +21,11 @@ async def test_live_send_malformed_enforcement_refuses_before_inbox_mutation(tmp
     with pytest.raises(ValueError, match='authority is missing'):
         await registry.send_message(task, 'Follow up')
     locked.assert_not_awaited()
+
+
+def _state_logs(repo):
+    # State is independently located, outside the repository/grant fixture.
+    return repo.parent / (repo.name + '-bridge-state') / 'logs'
 
 
 class Certified(_TrivialBackend):
@@ -57,7 +62,7 @@ def backend(monkeypatch):
 def test_nested_omission_inherits_and_explicit_empty_refuses(tmp_path, backend):
     outside=tmp_path/'shared';outside.mkdir()
     grants=normalize_paths([str(outside)])
-    registry=tasks.TaskRegistry(log_dir=tmp_path/'logs')
+    registry=tasks.TaskRegistry(log_dir=_state_logs(tmp_path))
     caller=SimpleNamespace(record=owner(tmp_path,grants))
     assert registry._resolve_extra_paths(caller,None,backend)==grants
     with pytest.raises(ValueError,match='ambient'):
@@ -69,7 +74,7 @@ def test_nested_narrowing_and_widening(tmp_path, backend):
     shared=tmp_path/'shared';shared.mkdir()
     child=shared/'file';child.write_text('x')
     other=tmp_path/'other';other.mkdir()
-    registry=tasks.TaskRegistry(log_dir=tmp_path/'logs')
+    registry=tasks.TaskRegistry(log_dir=_state_logs(tmp_path))
     caller=SimpleNamespace(record=owner(repo,normalize_paths([str(shared)])))
     assert registry._resolve_extra_paths(caller,[str(child)],backend)[0].kind=='file'
     with pytest.raises(ValueError,match='widen'):
@@ -82,12 +87,12 @@ def test_saved_malformed_authority_refused(tmp_path,backend,alter):
     if alter=='certificate':record=replace(record,extra_path_certification=None)
     elif alter=='records':record=replace(record,extra_writable_paths=[{}])
     else:record=replace(record,enforcement={})
-    with pytest.raises(ValueError):tasks.TaskRegistry(log_dir=tmp_path/'logs')._saved_extra_paths(record,backend)
+    with pytest.raises(ValueError):tasks.TaskRegistry(log_dir=_state_logs(tmp_path))._saved_extra_paths(record,backend)
 
 
 def test_continuation_cannot_substitute_paths(tmp_path,backend):
     source=owner(tmp_path,normalize_paths([str(tmp_path)]))
-    registry=tasks.TaskRegistry(log_dir=tmp_path/'logs')
+    registry=tasks.TaskRegistry(log_dir=_state_logs(tmp_path))
     assert registry._resolve_extra_paths(None,None,backend,source)==normalize_paths([str(tmp_path)])
     with pytest.raises(ValueError,match='substitution'):
         registry._resolve_extra_paths(None,[str(tmp_path)],backend,source)
@@ -98,7 +103,7 @@ async def test_identity_replaced_during_bookkeeping_refuses_and_cleans_scratch(t
     path=tmp_path/'authorized'
     path.mkdir() if kind=='directory' else path.write_text('x')
     grants=normalize_paths([str(path)])
-    registry=tasks.TaskRegistry(log_dir=tmp_path/'logs',open_monitor=False)
+    registry=tasks.TaskRegistry(log_dir=_state_logs(tmp_path),open_monitor=False)
     async def thread(function,*args):
         if function.__name__=='baseline':
             path.rename(tmp_path/'old')
@@ -137,8 +142,8 @@ async def test_resume_inherits_saved_identities_and_refuses_native(tmp_path,monk
     from unittest.mock import AsyncMock
     grants=normalize_paths([str(tmp_path)])
     record=owner(tmp_path,grants)
-    store.write_landed(tmp_path/'logs',record)
-    registry=tasks.TaskRegistry(log_dir=tmp_path/'logs',open_monitor=False)
+    store.write_landed(_state_logs(tmp_path),record)
+    registry=tasks.TaskRegistry(log_dir=_state_logs(tmp_path),open_monitor=False)
     monkeypatch.setattr(registry,'_mutation_caller',AsyncMock(return_value=None))
     monkeypatch.setattr(registry,'session_has_live_run',lambda _:False)
     capture=AsyncMock(return_value=SimpleNamespace(task_id='child'))
@@ -155,7 +160,7 @@ async def test_resume_inherits_saved_identities_and_refuses_native(tmp_path,monk
 
 async def test_workflow_builder_rejects_grants_before_spawn(tmp_path,monkeypatch,backend):
     from unittest.mock import AsyncMock
-    registry=tasks.TaskRegistry(log_dir=tmp_path/'logs')
+    registry=tasks.TaskRegistry(log_dir=_state_logs(tmp_path))
     monkeypatch.setattr(registry,'_mutation_caller',AsyncMock(return_value=None))
     capture=AsyncMock()
     monkeypatch.setattr(registry,'_spawn',capture)
@@ -166,7 +171,7 @@ async def test_workflow_builder_rejects_grants_before_spawn(tmp_path,monkeypatch
 
 async def test_spawn_persists_grants_and_scratch_coexists(tmp_path,monkeypatch,backend):
     grants=normalize_paths([str(tmp_path)])
-    registry=tasks.TaskRegistry(log_dir=tmp_path/'logs',open_monitor=False)
+    registry=tasks.TaskRegistry(log_dir=_state_logs(tmp_path),open_monitor=False)
     monkeypatch.setattr(tasks,'_branch_disclosure_warranted',lambda _:False)
     invocation=backend.with_extra_writable_paths(Invocation(['/bin/echo','{}']),grants,'write_in_repo')
     task=await registry._spawn(invocation,extra_path_grants=grants,backend=backend,prompt='Task',repo_path=tmp_path,session_id='session',freedom='write_in_repo',max_turns=None,model=None,reasoning_effort=None,task_id='worker')
@@ -181,7 +186,7 @@ async def test_spawn_persists_grants_and_scratch_coexists(tmp_path,monkeypatch,b
 
 async def test_preview_matches_grants_without_allocating_scratch(tmp_path,monkeypatch,backend):
     from unittest.mock import AsyncMock
-    registry=tasks.TaskRegistry(log_dir=tmp_path/'logs')
+    registry=tasks.TaskRegistry(log_dir=_state_logs(tmp_path))
     monkeypatch.setattr(registry,'_mutation_caller',AsyncMock(return_value=None))
     result=await registry.preview_permissions(tmp_path,backend=backend,extra_writable_paths=[str(tmp_path)])
     assert result['extra_writable_paths']==serialize_paths(normalize_paths([str(tmp_path)]))
@@ -191,7 +196,7 @@ async def test_preview_matches_grants_without_allocating_scratch(tmp_path,monkey
 
 async def test_granted_cancellation_during_probe_is_not_started_and_leaves_no_scratch(tmp_path,monkeypatch,backend):
     grants=normalize_paths([str(tmp_path)])
-    registry=tasks.TaskRegistry(log_dir=tmp_path/'logs')
+    registry=tasks.TaskRegistry(log_dir=_state_logs(tmp_path))
     entered=asyncio.Event()
     async def thread(function,*args):
         entered.set()
@@ -211,7 +216,7 @@ def test_saved_certificate_change_refuses_resume_authority(tmp_path,backend,monk
     source=owner(tmp_path,normalize_paths([str(tmp_path)]))
     monkeypatch.setattr(backend,'extra_path_support',lambda:{'certification':'fixture-v2'})
     with pytest.raises(ValueError,match='incompatible'):
-        tasks.TaskRegistry(log_dir=tmp_path/'logs')._saved_extra_paths(source,backend)
+        tasks.TaskRegistry(log_dir=_state_logs(tmp_path))._saved_extra_paths(source,backend)
 
 
 async def test_slow_qualification_keeps_loop_responsive_and_cancels_before_scratch(tmp_path, monkeypatch):
@@ -230,7 +235,7 @@ async def test_slow_qualification_keeps_loop_responsive_and_cancels_before_scrat
     monkeypatch.setattr(backend, '_extra_path_configuration', lambda *args: ('fixture',))
     monkeypatch.setattr(backend, '_extra_path_runtime', lambda: ('/fixture',))
     monkeypatch.setattr('polybridge.backends.codex.sys.platform', 'darwin')
-    registry = tasks.TaskRegistry(log_dir=tmp_path/'logs', open_monitor=False)
+    registry = tasks.TaskRegistry(log_dir=_state_logs(tmp_path), open_monitor=False)
     invocation = backend.build_start_argv('Task', repo=tmp_path, freedom='write_in_repo', session_id=None, model=None, max_turns=None, reasoning_effort=None)
     async def spawn(*args, **kwargs):
         raise AssertionError('must not launch')
@@ -262,7 +267,7 @@ async def test_runtime_replaced_during_bookkeeping_refuses_and_cleans_scratch(tm
     monkeypatch.setattr(backend, '_extra_path_configuration', lambda *args: ('fixture',))
     monkeypatch.setattr(backend, '_extra_path_runtime', lambda: tuple(runtime))
     monkeypatch.setattr('polybridge.backends.codex.sys.platform', 'darwin')
-    registry = tasks.TaskRegistry(log_dir=tmp_path/'logs', open_monitor=False)
+    registry = tasks.TaskRegistry(log_dir=_state_logs(tmp_path), open_monitor=False)
     async def thread(function, *args):
         if function.__name__ == 'baseline':
             runtime[0] = '/replacement'
@@ -368,7 +373,7 @@ async def test_slow_path_resolution_times_out_without_dispatch(tmp_path, monkeyp
     import threading
     from unittest.mock import AsyncMock
     entered, release = threading.Event(), threading.Event()
-    registry = tasks.TaskRegistry(log_dir=tmp_path/'logs', open_monitor=False)
+    registry = tasks.TaskRegistry(log_dir=_state_logs(tmp_path), open_monitor=False)
     monkeypatch.setattr(registry, '_mutation_caller', AsyncMock(return_value=None))
     def resolve(*args):
         entered.set()
@@ -401,7 +406,7 @@ async def test_slow_path_resolution_times_out_without_dispatch(tmp_path, monkeyp
 async def test_final_path_validation_block_removes_scratch(tmp_path, monkeypatch, backend, exit_mode):
     import threading
     entered, release = threading.Event(), threading.Event()
-    registry = tasks.TaskRegistry(log_dir=tmp_path/'logs', open_monitor=False)
+    registry = tasks.TaskRegistry(log_dir=_state_logs(tmp_path), open_monitor=False)
     grants = normalize_paths([str(tmp_path)])
     invocation = backend.with_extra_writable_paths(Invocation(['/bin/echo','{}']), grants, 'write_in_repo')
     original = backend.assert_extra_writable_paths
@@ -443,7 +448,7 @@ async def test_saved_authority_resolution_timeout_prevents_effects(tmp_path, mon
     import threading
     from unittest.mock import AsyncMock
     entered, release = threading.Event(), threading.Event()
-    registry = tasks.TaskRegistry(log_dir=tmp_path/'logs', open_monitor=False)
+    registry = tasks.TaskRegistry(log_dir=_state_logs(tmp_path), open_monitor=False)
     record = replace(owner(tmp_path, normalize_paths([str(tmp_path)])), backend=backend.name)
     store.write_landed(registry.log_dir, record)
     parent = SimpleNamespace(**record.__dict__, record_landed=True)
@@ -517,7 +522,7 @@ async def test_abandoned_path_workers_keep_capacity_and_do_not_starve_shared_exe
             await tasks._bounded_extra_path_check(ran.set)
         assert not ran.is_set()
         from unittest.mock import AsyncMock
-        registry = tasks.TaskRegistry(log_dir=tmp_path/'logs', open_monitor=False)
+        registry = tasks.TaskRegistry(log_dir=_state_logs(tmp_path), open_monitor=False)
         monkeypatch.setattr(registry, '_mutation_caller', AsyncMock(return_value=None))
         result = await registry.preview_permissions(tmp_path, backend=backend)
         assert result['extra_writable_paths'] == []

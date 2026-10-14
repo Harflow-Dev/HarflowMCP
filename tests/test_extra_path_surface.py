@@ -11,6 +11,11 @@ from polybridge.backends.base import nested_enforcement_violation
 from polybridge.extra_paths import normalize_paths
 
 
+@pytest.fixture(autouse=True)
+def separate_bridge_state(monkeypatch, tmp_path_factory):
+    monkeypatch.setattr(server._reg(), '_log_dir', tmp_path_factory.mktemp('bridge-state') / 'streams')
+
+
 @pytest.fixture
 def qualified(monkeypatch, fake_backend_clis, tmp_path_factory):
     monkeypatch.setattr('polybridge.backends.codex_config._mdm_absence', lambda: ('managed_preferences_absent',))

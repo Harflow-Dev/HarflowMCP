@@ -155,3 +155,5 @@ uv run pytest -q tests/test_extra_paths.py tests/test_extra_path_backends.py tes
 The opt-in CLI test uses an isolated localhost fake Responses API, makes no paid
 calls and skips other versions/platforms. Support expansion requires new actual
 allowed-write/denied-write evidence for each version and configuration.
+
+Bounded workers cannot write bridge task/control state: the default `~/.polybridge` state, and the active registry state (including custom task-directory aliases) are protected against repository or explicit grant overlap. This preserves saved authorization and lineage records. Only separately allocated per-task scratch remains writable; caller-supplied grants or repositories inside state/scratch are rejected. The shared registry check runs before qualification and again before execution, including permission previews. Ordinary requests without extra grants retain their existing behavior.

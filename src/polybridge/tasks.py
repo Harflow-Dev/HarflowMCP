@@ -978,13 +978,23 @@ class TaskRegistry:
             return ()
         return await _bounded_extra_path_check(self._resolve_extra_paths, caller, request, backend, source)
 
+    def _assert_extra_state(self, repo_path, grants, invocation=None):
+        if not grants:
+            return
+        from .bridge_state import assert_state_outside_writes
+        assert_state_outside_writes(self._log_dir, repo_path, grants,
+                                   invocation.scratch_directory if invocation is not None else None)
+
     async def preview_permissions(self, repo_path: Path, *, backend: Backend, freedom: str = "write_in_repo", network: bool | None = None, extra_writable_paths: list[str] | None = None) -> dict[str, Any]:
         from .extra_paths import serialize_paths
         caller = await self._mutation_caller()
         grants = await self._resolve_extra_paths_async(caller, extra_writable_paths, backend)
+        if grants:
+            await _bounded_extra_path_check(self._assert_extra_state, repo_path, grants)
         invocation = backend.build_start_argv("Permission preview", repo=repo_path, freedom=freedom, session_id=str(uuid.uuid4()) if backend.capabilities.chooses_session_id else None, model=None, max_turns=None, reasoning_effort=None, network=network)
         invocation = await _bounded_extra_path_check(backend.qualify_extra_writable_paths, invocation, grants, freedom, network) if grants else invocation
         if grants:
+            await _bounded_extra_path_check(self._assert_extra_state, repo_path, grants, invocation)
             await _bounded_extra_path_check(backend.assert_extra_writable_paths, invocation, grants, freedom, network)
         else:
             backend.assert_safe(invocation, freedom, network)
@@ -1270,6 +1280,7 @@ class TaskRegistry:
                 # Version probes can block for seconds. Qualify once per execution off loop,
                 # even for externally supplied invocations, before allocating scratch. Final
                 # backend validation below also reads filesystem identities off loop.
+                await _bounded_extra_path_check(self._assert_extra_state, repo_path, extra_path_grants, invocation)
                 invocation = await _bounded_extra_path_check(backend.qualify_extra_writable_paths, invocation, extra_path_grants, freedom, network)
                 await _bounded_extra_path_check(backend.assert_extra_writable_paths, invocation, extra_path_grants, freedom, network)
             else:
@@ -1366,6 +1377,7 @@ class TaskRegistry:
                         backend.assert_safe(invocation, freedom, network)
                         enforcement = replace(enforcement, writable_roots=(*enforcement.writable_roots, str(task_scratch)))
                 if extra_path_grants or invocation.extra_writable_paths:
+                    await _bounded_extra_path_check(self._assert_extra_state, repo_path, extra_path_grants, invocation)
                     await _bounded_extra_path_check(backend.assert_extra_writable_paths, invocation, extra_path_grants, freedom, network)
             except BaseException:
                 if task_scratch is not None:

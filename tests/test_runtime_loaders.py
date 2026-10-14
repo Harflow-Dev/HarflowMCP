@@ -7,6 +7,15 @@ import pytest
 from polybridge import runtime_loaders, runtime_paths
 
 
+@pytest.fixture(autouse=True)
+def isolated_configuration(monkeypatch, tmp_path_factory):
+    # Synthetic loader fixtures must reach loader qualification independently
+    # of the developer's active plugins or platform-managed preferences.
+    monkeypatch.setenv('CODEX_HOME', str(tmp_path_factory.mktemp('loader-config')))
+    monkeypatch.setattr('polybridge.backends.codex_config._mdm_absence',
+                        lambda: ('managed_preferences_absent',))
+
+
 def image(path, dependencies=(), rpaths=()):
     commands = []
     for kind, name in [(0xc, x) for x in dependencies] + [(0x8000001c, x) for x in rpaths]:
