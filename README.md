@@ -181,6 +181,7 @@ Full status and the existing unpaged list remain available.
 completion webhooks to administrator-configured destinations after observed durable settlement.
 Receivers deduplicate event IDs; delivery pauses while servers are down. This does not add
 restart-safe task supervision.
+Retained subscriptions still expire after destination configuration is removed.
 
 Settled task status includes a persisted best-effort `outcome`: starting and terminal Git
 observations, committed changes, local upstream comparison, and available structured build/test

@@ -61,5 +61,10 @@ that no task was registered and its untouched reservation was removed. If cleanu
 or dispatch remains uncertain, the error instead includes the reserved task ID
 for inspection before retrying.
 
-Workers resume when a server opens its task registry. A stopped server cannot
-send notifications. This does not make task execution survive server shutdown.
+Workers resume when a server opens its task registry if destinations are configured
+or a notification database already exists. Cleanup continues after destination
+configuration is removed, releasing expired task pins and aging out final receipts.
+Delivery still requires the alias to be present in the current configuration. A
+configless installation without a notification database starts no worker and creates
+no database. A stopped server cannot send notifications. This does not make task
+execution survive server shutdown.

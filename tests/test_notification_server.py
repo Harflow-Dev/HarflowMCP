@@ -1,5 +1,7 @@
 """MCP notification authorization and pre-spawn durability; no model calls."""
+import asyncio
 import json
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -122,3 +124,81 @@ async def test_capability_refusal_keeps_uncertain_identity(configured, monkeypat
         await server.start_task('test', str(git_repo), backend='codex', notify='hook')
     assert seen[0] in str(error.value)
     assert notifications.status(server._reg().log_dir, seen[0])[0]['state'] == 'pending'
+
+
+async def test_pristine_configless_registry_starts_no_notification_worker(monkeypatch):
+    registry = server._reg()
+    monkeypatch.delenv('PB_NOTIFY_DESTINATIONS', raising=False)
+    monkeypatch.setattr(server, '_registry', None)
+    monkeypatch.setattr(server, 'TaskRegistry', lambda: registry)
+    monkeypatch.setattr(registry, 'start_maintenance', lambda: None)
+    assert server._reg() is registry
+    assert getattr(registry, '_notification_worker', None) is None
+    assert not (registry.log_dir.parent / 'notifications.sqlite3').exists()
+
+
+async def test_configured_registry_starts_notification_worker_once(monkeypatch):
+    registry = server._reg()
+    monkeypatch.setenv('PB_NOTIFY_DESTINATIONS', json.dumps({'hook': {'url': 'https://example.com/hook'}}))
+    started = []
+    async def worker(logs):
+        started.append(logs)
+        await asyncio.Future()
+    monkeypatch.setattr(notifications, 'worker', worker)
+    monkeypatch.setattr(server, '_registry', None)
+    monkeypatch.setattr(server, 'TaskRegistry', lambda: registry)
+    monkeypatch.setattr(registry, 'start_maintenance', lambda: None)
+    try:
+        server._reg()
+        first = registry._notification_worker
+        server._start_notification_worker(registry)
+        await asyncio.sleep(0)
+        assert registry._notification_worker is first
+        assert started == [registry.log_dir]
+    finally:
+        registry._notification_worker.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await registry._notification_worker
+
+
+async def test_existing_database_cleanup_resumes_without_configuration(monkeypatch):
+    registry = server._reg()
+    logs = registry.log_dir
+    monkeypatch.setenv('PB_NOTIFY_DESTINATIONS', json.dumps({'hook': {'url': 'https://example.com/hook'}}))
+    for task_id in ('expired', 'final', 'unexpired'):
+        store.write(logs, store.TaskRecord(task_id=task_id, backend='codex', session_id=None,
+            repo_path='/tmp/repo', started_at='2026-10-14T00:00:00Z',
+            status='completed', exit_code=0, finished_at='2026-10-14T00:00:00Z'))
+        notifications.subscribe(logs, task_id, 'hook')
+    old = time.time() - notifications.RETENTION_SECONDS - 60
+    with notifications._db(logs) as db:
+        db.execute("UPDATE subscriptions SET created=? WHERE task_id='expired'", (old,))
+        db.execute("UPDATE subscriptions SET state='delivered',updated=? WHERE task_id='final'", (old,))
+    assert 'expired' in notifications.pinned_tasks(logs)
+    monkeypatch.delenv('PB_NOTIFY_DESTINATIONS')
+    monkeypatch.setattr(notifications, '_deliver', lambda *a: pytest.fail('delivery without current configuration'))
+    monkeypatch.setattr(notifications, '_resolve', lambda *a: pytest.fail('network without current configuration'))
+    ticked = asyncio.Event()
+    async def tick(log_dir):
+        notifications._tick(log_dir)
+        ticked.set()
+        await asyncio.Future()
+    monkeypatch.setattr(notifications, 'tick', tick)
+    monkeypatch.setattr(server, '_registry', None)
+    monkeypatch.setattr(server, 'TaskRegistry', lambda: registry)
+    monkeypatch.setattr(registry, 'start_maintenance', lambda: None)
+    try:
+        server._reg()
+        await asyncio.wait_for(ticked.wait(), 2)
+        assert notifications.status(logs, 'expired')[0]['state'] == 'expired'
+        assert 'expired' not in notifications.pinned_tasks(logs)
+        assert notifications.status(logs, 'final') == []
+        row = notifications.status(logs, 'unexpired')[0]
+        assert row['state'] == 'retry'
+        assert row['attempts'] == 1
+    finally:
+        worker = getattr(registry, '_notification_worker', None)
+        if worker is not None:
+            worker.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await worker

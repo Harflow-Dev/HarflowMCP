@@ -148,7 +148,9 @@ def _reg() -> TaskRegistry:
 
 
 def _start_notification_worker(registry: TaskRegistry) -> None:
-    if os.environ.get('PB_NOTIFY_DESTINATIONS') and getattr(registry, '_notification_worker', None) is None:
+    configured = bool(os.environ.get('PB_NOTIFY_DESTINATIONS'))
+    persisted = (registry.log_dir.parent / 'notifications.sqlite3').is_file()
+    if (configured or persisted) and getattr(registry, '_notification_worker', None) is None:
         from .notifications import worker
         registry._notification_worker = asyncio.create_task(worker(registry.log_dir), name='pb-notifications')
 
