@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import os
+import hashlib
+import shlex
 import re
 import subprocess
 import stat
@@ -12,6 +14,49 @@ from typing import Any
 
 MAX_OUTPUT = 262_144
 BUDGET = 1.5
+MAX_FIELD_BYTES = 8192
+GIT_LOCAL_ENV = {
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_PREFIX",
+    "GIT_SHALLOW_FILE", "GIT_GRAFT_FILE", "GIT_NAMESPACE", "GIT_IMPLICIT_WORK_TREE",
+    "GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_SYSTEM", "GIT_CONFIG_GLOBAL", "GIT_NO_REPLACE_OBJECTS", "GIT_REPLACE_REF_BASE",
+}
+
+
+def _bounded(value: Any) -> tuple[str | None, bool]:
+    if not isinstance(value, str):
+        return None, False
+    data = value.encode("utf-8")
+    return data[:MAX_FIELD_BYTES].decode("utf-8", errors="ignore"), len(data) > MAX_FIELD_BYTES
+
+
+def _command_match(command: str) -> bool:
+    # Unsupported shell expansion/control grammar is unavailable, never guessed.
+    if any(marker in command for marker in ("$", "`", "(", ")", "\n", "\r", "\\")):
+        return False
+    if re.search(r"['\"][^'\"]*[;&|][^'\"]*['\"]", command):
+        return False
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
+        lexer.whitespace_split = True
+        words = list(lexer)
+    except ValueError:
+        return False
+    starts = [0] + [i + 1 for i, word in enumerate(words) if word in {";", "&&", "||", "|", "&"}]
+    for index in starts:
+        args = words[index:]
+        if args[:2] == ["uv", "run"]:
+            args = args[2:]
+        if not args:
+            continue
+        if args[0] in {"pytest", "xcodebuild"}:
+            return True
+        if args[0] in {"swift", "cargo", "make"} and args[1:2] in (["test"], ["build"]):
+            return True
+        if args[0] == "npm" and (args[1:2] == ["test"] or args[1:3] in (["run", "test"], ["run", "build"])):
+            return True
+    return False
 
 
 class GitProbe:
@@ -24,7 +69,9 @@ class GitProbe:
 
     def read(self, *args: str, environment: dict[str, str] | None = None) -> str | None:
         # Spool rather than buffering unbounded output in server memory; stop at the ceiling.
-        env = {**os.environ, "GIT_NO_LAZY_FETCH": "1", "GIT_OPTIONAL_LOCKS": "0",
+        env = {**{key: value for key, value in os.environ.items()
+                  if key not in GIT_LOCAL_ENV and not key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))},
+               "GIT_NO_LAZY_FETCH": "1", "GIT_OPTIONAL_LOCKS": "0",
                "GIT_TERMINAL_PROMPT": "0", "GIT_PAGER": "cat", **(environment or {})}
         with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
             proc = subprocess.Popen(["git", "--no-optional-locks", "-C", str(self.path), *self.config, *args],
@@ -134,27 +181,42 @@ def capture(path: Path, start: dict[str, Any] | None, evidence: dict[str, Any]) 
 def observe(evidence: dict[str, Any], kind: str, fields: dict[str, Any], repo_path: Path | None = None, repository_root: Path | None = None) -> None:
     """Retain only bounded correlated structured evidence, never infer success from narration."""
     pending = evidence.setdefault("pending", {})
-    call_id = fields.get("call_id")
+    raw_id = fields.get("call_id")
+    call_id, id_truncated = _bounded(raw_id)
+    if id_truncated:
+        call_id = hashlib.sha256(raw_id.encode("utf-8")).hexdigest()
+    id_encoding = "sha256" if id_truncated else "verbatim"
+    correlation_key = hashlib.sha256(raw_id.encode("utf-8")).hexdigest() if isinstance(raw_id, str) and raw_id else None
     if kind == "tool_call" and call_id:
         if len(pending) >= 100:
             pending.pop(next(iter(pending)))
-        pending[call_id] = {key: fields.get(key) for key in ("command", "tool", "category", "path")}
+        call = {}
+        for key in ("command", "tool", "category", "path"):
+            value, truncated = _bounded(fields.get(key))
+            call[key] = None if truncated and key in {"path", "category"} else value
+            call[key + "_truncated"] = truncated
+        pending[correlation_key] = call
     elif kind == "tool_result":
-        call = pending.pop(call_id, None)
+        call = pending.pop(correlation_key, None)
         if not call:
             return
         command = call.get("command")
-        if isinstance(command, str) and re.search(r"(?:^|[\s;&|])(?:pytest|swift\s+(?:test|build)|xcodebuild|(?:uv\s+run\s+)?pytest|npm\s+(?:test|run\s+(?:test|build))|cargo\s+(?:test|build)|make\s+(?:test|build))\b", command):
-            evidence["last_build_test"] = {"command": command[:8192], "exit_code": fields.get("exit_code"),
-                                            "ok": fields.get("ok"), "call_id": call_id}
+        if isinstance(command, str) and not call["command_truncated"] and _command_match(command):
+            evidence["last_build_test"] = {"command": command, "command_truncated": call["command_truncated"],
+                "exit_code": fields.get("exit_code") if type(fields.get("exit_code")) is int else None,
+                "ok": fields.get("ok") if type(fields.get("ok")) is bool else None,
+                "call_id": call_id, "call_id_encoding": id_encoding, "exit_code_scope": "entire tool invocation",
+                "provenance": "correlated tool result; command contains a supported build/test invocation; individual segments may not have executed"}
         path = call.get("path")
         if fields.get("ok") is True and call.get("category") in {"edit", "write"} and isinstance(path, str) and repo_path is not None:
             target = Path(path)
             if not target.is_absolute():
                 target = repo_path / target
             target = target.resolve()
-            if not target.is_relative_to((repository_root or repo_path).resolve()):
+            resolved, truncated = _bounded(str(target))
+            if not truncated and not target.is_relative_to((repository_root or repo_path).resolve()):
                 writes = evidence.setdefault("external_writes", [])
                 if len(writes) < 50:
-                    writes.append({"path": str(target), "tool": call.get("tool"), "call_id": call_id,
+                    writes.append({"path": resolved, "tool": call.get("tool"), "tool_truncated": call["tool_truncated"],
+                                   "call_id": call_id, "call_id_encoding": id_encoding,
                                    "provenance": "successful normalized edit result for path outside repository"})

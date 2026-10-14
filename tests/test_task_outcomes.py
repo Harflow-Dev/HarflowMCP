@@ -1,8 +1,78 @@
 import subprocess
+import pytest
 from pathlib import Path
 
-from polybridge.task_outcomes import baseline, capture, observe
+from polybridge.task_outcomes import baseline, capture, observe, GIT_LOCAL_ENV
 from polybridge import store
+
+
+@pytest.mark.parametrize('command', ['rg pytest tests', 'echo pytest', 'echo "hi; pytest"',
+    'echo ";" pytest', r'echo \; pytest', 'echo $(pytest)', 'echo "&&" pytest', 'echo " ; " pytest', 'echo " && " pytest'])
+def test_arguments_are_not_build_test_commands(command):
+    evidence = {}
+    observe(evidence, 'tool_call', {'call_id': 'a', 'command': command})
+    observe(evidence, 'tool_result', {'call_id': 'a', 'ok': True, 'exit_code': 0})
+    assert 'last_build_test' not in evidence
+
+
+@pytest.mark.parametrize('command', ['pytest tests', 'uv run pytest tests', 'swift test',
+    'swift build', 'xcodebuild -project App', 'cargo test', 'make build', 'npm test',
+    'npm run build', 'cd repo && pytest', 'false || pytest', 'pytest; echo done'])
+def test_supported_command_starts(command):
+    evidence = {}
+    observe(evidence, 'tool_call', {'call_id': 'a', 'command': command})
+    observe(evidence, 'tool_result', {'call_id': 'a', 'exit_code': 1})
+    assert evidence['last_build_test']['command'] == command
+    assert evidence['last_build_test']['exit_code_scope'] == 'entire tool invocation'
+
+
+def test_retained_evidence_has_utf8_byte_budgets(tmp_path):
+    huge = '界' * 10000
+    evidence = {}
+    for index in range(101):
+        observe(evidence, 'tool_call', {'call_id': huge + str(index), 'command': 'pytest ' + huge,
+            'path': '../' + huge, 'tool': huge, 'category': 'edit'}, tmp_path)
+    assert len(evidence['pending']) == 100
+    for key, call in evidence['pending'].items():
+        assert len(key) == 64
+        assert len(call['command'].encode()) <= 8192
+        assert len(call['tool'].encode()) <= 8192
+        assert call['path'] is None
+    observe(evidence, 'tool_result', {'call_id': huge + '100', 'ok': True, 'exit_code': 0}, tmp_path)
+    assert not evidence.get('external_writes')
+    assert 'last_build_test' not in evidence
+
+
+def test_git_observation_ignores_ambient_repository_selectors(tmp_path, monkeypatch):
+    wanted = tmp_path / 'wanted'
+    other = tmp_path / 'other'
+    wanted.mkdir()
+    other.mkdir()
+    repository(wanted)
+    repository(other)
+    git(other, 'commit', '--allow-empty', '-m', 'other head')
+    start = baseline(wanted)
+    git(wanted, 'update-ref', 'refs/remotes/origin/main', start['head'])
+    git(wanted, 'config', 'branch.' + start['branch'] + '.remote', 'origin')
+    git(wanted, 'config', 'branch.' + start['branch'] + '.merge', 'refs/heads/main')
+    git(wanted, 'config', 'remote.origin.fetch', '+refs/heads/*:refs/remotes/origin/*')
+    (wanted / 'file').write_text('new\n')
+    git(wanted, 'add', 'file')
+    git(wanted, 'commit', '-m', 'wanted change')
+    expected = git(wanted, 'rev-parse', 'HEAD')
+    (wanted / 'wanted-dirty').write_text('dirty')
+    (other / 'other-dirty').write_text('dirty')
+    for key, value in {'GIT_DIR': str(other / '.git'), 'GIT_WORK_TREE': str(other),
+        'GIT_COMMON_DIR': str(other / '.git'), 'GIT_INDEX_FILE': str(other / '.git/index'),
+        'GIT_OBJECT_DIRECTORY': str(other / '.git/objects'), 'GIT_CONFIG_COUNT': '1',
+        'GIT_CONFIG_KEY_0': 'core.bare', 'GIT_CONFIG_VALUE_0': 'true'}.items():
+        monkeypatch.setenv(key, value)
+    result = capture(wanted, start, {})
+    assert result['head_commit'] == expected
+    assert result['new_commits'] == [expected]
+    assert 'wanted-dirty' in result['terminal']['working_tree_status']
+    assert 'other-dirty' not in result['terminal']['working_tree_status']
+    assert result['local_upstream']['ahead_behind'] == '1\t0'
 
 
 def git(path, *args):
@@ -107,3 +177,9 @@ def test_recovered_outcome_is_persisted_not_reprobed(tmp_path):
     recovered = store.read(tmp_path, record.task_id)
     assert recovered.outcome == record.outcome
     assert store.snapshot(tmp_path, recovered)['outcome'] == record.outcome
+
+
+def test_local_git_environment_contract_is_covered():
+    local_names = subprocess.run(['git', 'rev-parse', '--local-env-vars'], check=True,
+        capture_output=True, text=True).stdout.splitlines()
+    assert set(local_names) <= GIT_LOCAL_ENV
