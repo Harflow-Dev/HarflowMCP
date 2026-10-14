@@ -311,8 +311,8 @@ async def list_backends() -> list[dict[str, Any]]:
     Worth calling before start_task if the choice is not already obvious. Each entry carries its
     `capabilities` (turn cap, cost reporting, OS sandbox, per-command deny, whether we can choose
     the session id) and, for every `freedom` level, the enforcement it really delivers.
-    On macOS, script entrypoints report version=None without executing their loaders
-    for metadata; this does not disable ordinary dispatch.
+    Ordinary script entrypoints retain version discovery and native eligibility checks.
+    Extra-path qualification separately rejects selected scripts before version execution.
     """
     return await asyncio.to_thread(backends.describe_all)
 

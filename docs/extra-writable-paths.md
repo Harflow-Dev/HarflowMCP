@@ -33,10 +33,7 @@ system shared-cache names qualify only when an existing ancestor is independentl
 observed on a read-only filesystem. Malformed, unresolved or unknown loader
 layouts, script host helpers and nonempty loader environment overrides reject
 bounded requests without executing the unqualified helper. Script backends are
-not assigned a generic dependency-graph certification. On macOS, their metadata
-version is unavailable because version inspection does not execute script loaders;
-ordinary dispatch remains available and extra grants remain unsupported for those
-harnesses.
+not assigned a generic dependency-graph certification. Ordinary script version discovery and native owner eligibility checks remain available; extra-path qualification rejects selected scripts before invoking version discovery.
 Selected server helpers with multiple hardlinks are refused on mutable filesystems;
 a filesystem reported read-only by `statvfs` is exempt from that alias refusal,
 because a hardlink alias cannot cross filesystems. Direct overlap still rejects.

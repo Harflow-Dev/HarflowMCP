@@ -220,9 +220,8 @@ polybridge-ctl status <task_id>
 
 Call `list_backends` to check installation and actual enforcement capabilities. Each harness needs
 its own installation, authentication, and model access; Polybridge does not provide these accounts.
-On macOS, script entrypoints report an unavailable metadata version: Polybridge does
-not execute their unqualified loaders just to inspect a version. Dispatch remains
-available; bounded extra writable paths still require the certified native Codex CLI.
+Ordinary script entrypoints retain version discovery and native workflow eligibility checks.
+Bounded extra writable paths require qualified native launchers and reject selected scripts before version execution.
 
 Before assigning a harness to a node, read [harness permissions and setup](docs/harness-permissions.md).
 For refusals, missing tools or macOS Git cache diagnostics, follow the

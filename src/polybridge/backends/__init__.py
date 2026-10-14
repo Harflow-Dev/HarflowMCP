@@ -6,7 +6,6 @@ import logging
 import shlex
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -80,25 +79,14 @@ def version(backend: Backend, *, executable: str | None = None) -> str | None:
     """The CLI version, optionally probing an already selected executable alias.
 
     The override binds qualification to the exact binary later executed, without
-    modifying a shared backend instance or the process PATH/cwd. On macOS, script
-    entry points are not executed for metadata and report an unavailable version;
-    native bounded-mode dependency qualification is separate from this probe.
+    modifying a shared backend instance or the process PATH/cwd. Ordinary script
+    entry points retain version discovery; bounded extra-path qualification
+    separately refuses unqualified scripts before reaching this probe.
     """
     binary = executable if executable is not None else backend.binary
     if not (is_installed(backend) if executable is None else shutil.which(binary) is not None):
         return None
     try:
-        if sys.platform == "darwin":
-            # Script entry points may load application code outside their
-            # protected environment. Metadata must never execute an unqualified
-            # script after a bounded task could have changed such a dependency.
-            selected = shutil.which(binary)
-            if selected is None:
-                return None
-            with Path(selected).open("rb") as stream:
-                magic = stream.read(4)
-            if magic not in (b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xfe\xed\xfa\xce", b"\xca\xfe\xba\xbe", b"\xca\xfe\xba\xbf"):
-                return None
         result = subprocess.run(
             [binary, "--version"], capture_output=True, text=True, check=False, timeout=15
         )
