@@ -523,6 +523,11 @@ class Task:
     model: str | None = None
     reasoning_effort: str | None = None
     parent_task_id: str | None = None
+    continuation_of_task_id: str | None = None
+    chain_root_task_id: str | None = None
+    auto_continue: int = 0
+    output_drained: bool = False
+    chain_prompt: str | None = None
     freedom: str = "write_in_repo"
     network: bool | None = None
     """The network request this task was dispatched under: True/False explicit, None the
@@ -678,6 +683,10 @@ class Task:
         """
         return {
             "task_id": self.task_id,
+            "continuation_of_task_id": self.continuation_of_task_id,
+            "chain_root_task_id": self.chain_root_task_id,
+            "auto_continue": self.auto_continue,
+            "output_drained": self.output_drained,
             "workflow_builder": self.workflow_builder,
             "backend": self.backend,
             "session_id": self.session_id,
@@ -727,6 +736,10 @@ class Task:
             "base_commit": self.base_commit,
             "start_dirty": self.start_dirty,
             "outcome": self.outcome,
+            "continuation_of_task_id": self.continuation_of_task_id,
+            "chain_root_task_id": self.chain_root_task_id,
+            "auto_continue": self.auto_continue,
+            "output_drained": self.output_drained,
             "events_log": str(self.log_path.with_name(f"{self.task_id}{EVENTS_SUFFIX}")),
             "resume_command": resume_command(self.backend, self.session_id, self.repo_path),
         }
@@ -873,8 +886,16 @@ class TaskRegistry:
         workflow_builder: bool = False,
         group: str | None = None,
         title: str | None = None,
+        auto_continue: int = 0,
+        continuation_of_task_id: str | None = None,
+        chain_root_task_id: str | None = None,
+        chain_prompt: str | None = None,
     ) -> Task:
         """Dispatch a fresh session. Returns once the subprocess exists, not once it finishes."""
+        from .task_continuation import validate_budget
+        validate_budget(auto_continue)
+        if auto_continue and not backend.capabilities.supports_auto_continue:
+            raise ValueError(f"{backend.name} has no certified automatic continuation cutoff; use explicit continue_task")
         # Only some backends let us name the session up front. Where we can, knowing it immediately
         # means a resume works even if the run dies before saying anything.
         session_id = str(uuid.uuid4()) if backend.capabilities.chooses_session_id else None
@@ -896,6 +917,13 @@ class TaskRegistry:
             child_backend=backend.name,
             child_repo=repo_path,
         )
+        if continuation_of_task_id is not None:
+            source = store.read(self._log_dir, continuation_of_task_id)
+            if source is None:
+                raise ValueError("Continuation source unavailable")
+            spawned_by, root_task_id, depth, max_depth, lineage_detected = (
+                source.spawned_by, source.root_task_id, source.depth, source.max_depth, source.lineage_detected
+            )
         # An explicit group wins; otherwise it is inherited from the caller (never invented for a
         # root task with none given).
         resolved_group = group if group is not None else (caller.record.group if caller else None)
@@ -921,7 +949,16 @@ class TaskRegistry:
             title=title,
             lineage_detected=lineage_detected,
             task_id=task_id,
+            auto_continue=auto_continue,
+            continuation_of_task_id=continuation_of_task_id,
+            chain_root_task_id=chain_root_task_id,
+            chain_prompt=chain_prompt,
         )
+
+    async def continue_task(self, task_id: str, extra_prompt: str | None = None, notes_path: str | None = None, *, automatic: bool = False) -> Task:
+        """Start a fresh session from a durably settled task without broadening access."""
+        from .task_continuation import continue_task
+        return await continue_task(self, task_id, extra_prompt, notes_path, automatic=automatic)
 
     async def resume(
         self,
@@ -1071,6 +1108,10 @@ class TaskRegistry:
         task_id: str | None = None,
         display_prompt: str | None = None,
         workflow_builder: bool = False,
+        auto_continue: int = 0,
+        continuation_of_task_id: str | None = None,
+        chain_root_task_id: str | None = None,
+        chain_prompt: str | None = None,
     ) -> Task:
         # Re-checked at the point of execution, not only where the argv was built, so no future
         # caller of this method can launch an agent without its backend's guarantees — and, now
@@ -1232,6 +1273,10 @@ class TaskRegistry:
             model=model,
             reasoning_effort=reasoning_effort,
             parent_task_id=parent_task_id,
+            continuation_of_task_id=continuation_of_task_id,
+            chain_root_task_id=chain_root_task_id or task_id,
+            auto_continue=auto_continue,
+            chain_prompt=chain_prompt,
             freedom=freedom,
             network=network,
             enforcement=enforcement.as_dict(),
@@ -1886,6 +1931,11 @@ class TaskRegistry:
                 max_turns=task.max_turns,
                 network=task.network,
                 parent_task_id=task.parent_task_id,
+                continuation_of_task_id=task.continuation_of_task_id,
+                chain_root_task_id=task.chain_root_task_id,
+                auto_continue=task.auto_continue,
+                output_drained=task.output_drained,
+                chain_prompt=task.chain_prompt,
                 stderr_tail=list(task.stderr_tail),
                 failure_diagnostic=task.acc.failure_diagnostic,
                 workflow_builder=task.workflow_builder,
@@ -2097,6 +2147,7 @@ class TaskRegistry:
         """
         records = store.read_all(self._log_dir)
         lineage_rows = [(r.task_id, r.spawned_by, r.root_task_id) for r in records]
+        lineage_rows.extend((r.task_id, r.continuation_of_task_id, r.root_task_id) for r in records if r.continuation_of_task_id)
         lineage_rows.extend(local_lineage)
         return lineage.lineage_closure(lineage_rows, task_id)
 
@@ -2562,12 +2613,16 @@ class TaskRegistry:
 
         for round_index in range(1, CASCADE_MAX_ROUNDS + 1):
             local_lineage = [(t.task_id, t.spawned_by, t.root_task_id) for t in self._tasks.values()]
+            local_lineage.extend((t.task_id, t.continuation_of_task_id, t.root_task_id) for t in self._tasks.values() if t.continuation_of_task_id)
             targets = await asyncio.to_thread(self._cascade_targets, task_id, local_lineage)
             new_targets = sorted(targets - processed)
             if not new_targets:
                 converged = True
                 break
             rounds = round_index
+            from .task_continuation import stop_chain
+            for target_id in new_targets:
+                await stop_chain(self, target_id)
             processed.update(new_targets)
 
             local_ids: list[str] = []
@@ -2644,6 +2699,7 @@ class TaskRegistry:
         unconverged: list[str] = []
         if not converged:
             local_lineage = [(t.task_id, t.spawned_by, t.root_task_id) for t in self._tasks.values()]
+            local_lineage.extend((t.task_id, t.continuation_of_task_id, t.root_task_id) for t in self._tasks.values() if t.continuation_of_task_id)
             final_targets = await asyncio.to_thread(self._cascade_targets, task_id, local_lineage)
             unconverged = sorted(final_targets - processed)
 
@@ -2841,7 +2897,7 @@ class TaskRegistry:
         overflow = len(self._tasks) - self._max_tasks
         if overflow <= 0:
             return
-        for task in [t for t in self.list() if t.finished][:overflow]:
+        for task in [t for t in self.list() if t.finished and t.task_id not in getattr(self, "_continuation_sources", set())][:overflow]:
             del self._tasks[task.task_id]
             log.debug("evicted finished task %s", task.task_id)
 
@@ -3220,7 +3276,7 @@ async def _drain_stderr(task: Task, registry: TaskRegistry | None = None) -> Non
         _signal_group(task, signal.SIGKILL)
 
 
-async def _finish_draining(task: Task) -> None:
+async def _finish_draining(task: Task) -> bool:
     """Read whatever is left of the pipes, but never wait on them forever.
 
     `proc.wait()` returns when `claude` exits, which does not mean its pipes are closed: a
@@ -3228,10 +3284,10 @@ async def _finish_draining(task: Task) -> None:
     and the run could never be marked finished. Give them a grace period, then cut them loose.
     """
     if not task.watchers:
-        return
+        return True
     _, pending = await asyncio.wait(task.watchers, timeout=DRAIN_GRACE_SECONDS)
     if not pending:
-        return
+        return not task.drain_failed and all(not w.cancelled() and w.exception() is None for w in task.watchers)
 
     log.warning(
         "task %s: output still open %.0fs after exit (a background child likely inherited it); "
@@ -3242,6 +3298,7 @@ async def _finish_draining(task: Task) -> None:
     for watcher in pending:
         watcher.cancel()
     await asyncio.gather(*pending, return_exceptions=True)
+    return False
 
 
 async def _await_cancel_verdict(task: Task, registry: TaskRegistry) -> str:
@@ -3284,8 +3341,14 @@ async def _monitor(task: Task, registry: TaskRegistry) -> None:
     abandoned = False
     try:
         exit_code = await task.proc.wait()
-        await _finish_draining(task)
+        drained = await _finish_draining(task)
         await registry._finish_pump(task)
+        pump_finished = task.pump is None or (
+            task.pump.done() and not task.pump.cancelled() and task.pump.exception() is None
+        )
+        task.output_drained = drained and not task.drain_failed and pump_finished and (
+            not task.live_input or task.inbox_closed and task.inbox_reconciled
+        )
 
         task.exit_code = exit_code
         task.finished_at = _now()
@@ -3364,13 +3427,17 @@ async def _monitor(task: Task, registry: TaskRegistry) -> None:
                 try:
                     from .task_outcomes import capture
                     task.outcome = await asyncio.to_thread(capture, task.repo_path, task.git_baseline, task.outcome_evidence)
-                    task.outcome["structured_evidence_complete"] = not task.drain_failed
+                    task.outcome["structured_evidence_complete"] = task.output_drained and not task.acc.normalize_errors
                 except Exception:
                     log.warning("task %s: outcome inspection unavailable", task.task_id, exc_info=True)
             task.done.set()
             try:
                 registry.persist(task)
-                registry.prune()
+                if task.auto_continue and task.output_drained:
+                    from .task_continuation import schedule_automatic
+                    schedule_automatic(registry, task)
+                else:
+                    registry.prune()
             except Exception:  # pragma: no cover - bookkeeping must never mask a finished run
                 log.exception("task %s: recording the finished run failed", task.task_id)
             # Guarded separately from the persist/prune above: a broken event log must not affect

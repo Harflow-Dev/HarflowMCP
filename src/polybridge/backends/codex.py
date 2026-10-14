@@ -1033,6 +1033,10 @@ class CodexBackend:
             return None
         return [self.binary, "-c", "check_for_update_on_startup=false", "resume", session_id]
 
+    def continuation_reason(self, acc: Accumulator, exit_code: int | None) -> str | None:
+        """Observed recoverable cutoff, or None when no certified signal exists."""
+        return None
+
     def classify(self, acc: Accumulator, exit_code: int | None) -> Status:
         if acc.failure_diagnostic is not None:
             return "failed"

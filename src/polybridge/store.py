@@ -69,6 +69,11 @@ class TaskRecord:
     this field existed still loads and resumes at the historical default; `read` already filters
     unknown keys and defaults missing ones, so no migration is needed."""
     parent_task_id: str | None = None
+    continuation_of_task_id: str | None = None
+    chain_root_task_id: str | None = None
+    auto_continue: int = 0
+    output_drained: bool = False
+    chain_prompt: str | None = None
     stderr_tail: list[str] = field(default_factory=list)
     failure_diagnostic: dict[str, Any] | None = None
     workflow_builder: bool = False
@@ -318,7 +323,7 @@ def read_all(log_dir: Path) -> list[TaskRecord]:
 def listing_header(record: TaskRecord) -> tuple[dict[str, Any], float, bool]:
     """Listing metadata only: never reconstruct an outcome by replaying a stream."""
     keys = ('task_id', 'backend', 'session_id', 'repo_path', 'status', 'freedom', 'started_at',
-            'parent_task_id', 'spawned_by', 'root_task_id', 'depth', 'max_depth', 'group', 'title',
+            'parent_task_id', 'continuation_of_task_id', 'chain_root_task_id', 'spawned_by', 'root_task_id', 'depth', 'max_depth', 'group', 'title',
             'lineage_detected', 'live_input', 'workflow_builder', 'owner', 'finished_at')
     header = {key: getattr(record, key) for key in keys}
     for key, value in list(header.items()):
@@ -335,7 +340,7 @@ def listing_header(record: TaskRecord) -> tuple[dict[str, Any], float, bool]:
     header.update(persisted_status=record.status, observed_exit=not unobserved, needs_reconciliation=unobserved, status_reconciled=False, process_identity_state=None)
     if unobserved:
         header['status'] = 'running'
-    caller_keys = ('task_id', 'backend', 'session_id', 'repo_path', 'started_at', 'freedom', 'markers', 'pid', 'pgid', 'start_time', 'status', 'exit_code', 'root_task_id', 'parent_task_id', 'spawned_by', 'depth', 'max_depth', 'network', 'owner', 'group')
+    caller_keys = ('task_id', 'backend', 'session_id', 'repo_path', 'started_at', 'freedom', 'markers', 'pid', 'pgid', 'start_time', 'status', 'exit_code', 'root_task_id', 'parent_task_id', 'continuation_of_task_id', 'chain_root_task_id', 'spawned_by', 'depth', 'max_depth', 'network', 'owner', 'group')
     header['_caller'] = {key: getattr(record, key) for key in caller_keys}
     try:
         stamp = datetime.fromisoformat(record.started_at).timestamp()
@@ -457,7 +462,7 @@ def list_page(log_dir: Path, *, limit: int = 100, cursor: str | None = None, act
             page['total_active_count'] = None if unresolved else db.execute('SELECT COUNT(*) FROM entries WHERE active=1' + where, values).fetchone()[0]
     page['items'] = [bound_header(item) for item in page['items']]
     related, visited = [], {item['task_id'] for item in page['items']}
-    queue = [item[key] for item in page['items'] for key in ('parent_task_id', 'spawned_by', 'root_task_id') if item.get(key) and item[key] not in visited]
+    queue = [item[key] for item in page['items'] for key in ('parent_task_id', 'continuation_of_task_id', 'chain_root_task_id', 'spawned_by', 'root_task_id') if item.get(key) and item[key] not in visited]
     with catalog.connect() as db:
         while queue and len(related) < 32 and len(visited) < 132:
             identifier = validate_task_id(queue.pop(0))
@@ -494,7 +499,7 @@ def list_page(log_dir: Path, *, limit: int = 100, cursor: str | None = None, act
                     page.update(ownership_incomplete=True, history_incomplete=True, counts_complete=False, total_active_count=None, total_active_root_count=None, total_attention_root_count=None)
                 pass
             related.append(header)
-            queue[0:0] = [header[key] for key in ('parent_task_id', 'spawned_by', 'root_task_id') if header.get(key) and header[key] not in visited]
+            queue[0:0] = [header[key] for key in ('parent_task_id', 'continuation_of_task_id', 'chain_root_task_id', 'spawned_by', 'root_task_id') if header.get(key) and header[key] not in visited]
     page['related_headers'] = related
     return page
 
@@ -861,6 +866,10 @@ def snapshot(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
         "started_at": record.started_at,
         "duration_seconds": _duration_seconds(record, record.finished_at),
         "parent_task_id": record.parent_task_id,
+        "continuation_of_task_id": record.continuation_of_task_id,
+        "chain_root_task_id": record.chain_root_task_id,
+        "auto_continue": record.auto_continue,
+        "output_drained": record.output_drained,
         "spawned_by": record.spawned_by,
         "root_task_id": record.root_task_id,
         "depth": record.depth,
@@ -921,6 +930,10 @@ def brief(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
         "started_at": record.started_at,
         "duration_seconds": _duration_seconds(record, record.finished_at),
         "parent_task_id": record.parent_task_id,
+        "continuation_of_task_id": record.continuation_of_task_id,
+        "chain_root_task_id": record.chain_root_task_id,
+        "auto_continue": record.auto_continue,
+        "output_drained": record.output_drained,
         "spawned_by": record.spawned_by,
         "root_task_id": record.root_task_id,
         "depth": record.depth,

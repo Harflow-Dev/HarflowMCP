@@ -370,6 +370,7 @@ class ClaudeBackend:
     mcp_approval = ClaudeApproval()
     binary = BINARY
     capabilities = Capabilities(
+        supports_auto_continue=True,
         chooses_session_id=True,
         supports_turn_cap=True,
         reports_cost_usd=True,
@@ -1249,6 +1250,21 @@ class ClaudeBackend:
                 if isinstance(text, str):
                     events.append(nz.user_message(text, source="initial", source_ts=source_ts))
         return events
+
+    def continuation_reason(self, acc: Accumulator, exit_code: int | None) -> str | None:
+        """Observed recoverable cutoff, or None when no certified signal exists."""
+        if (
+            exit_code == 0
+            and acc.terminal
+            and acc.terminal.get("subtype") == "error_max_turns"
+            and not acc.failure_diagnostic
+            and not acc.denials
+            and not acc.background_abandoned
+            and not acc.background_open
+            and not acc.turn_open
+        ):
+            return "turn_cap"
+        return None
 
     def classify(self, acc: Accumulator, exit_code: int | None) -> Status:
         if acc.failure_diagnostic is not None:

@@ -203,6 +203,15 @@ def _terminate(pid: int) -> bool:
     return _reap(pid)
 
 
+async def _wait_started(registry: Any) -> None:
+    while True:
+        continuations = list(getattr(registry, "_continuations", ()))
+        pending = [task for task in registry.list() if not task.finished]
+        if not continuations and not pending:
+            return
+        await asyncio.gather(*continuations, *(task.done.wait() for task in pending))
+
+
 async def _release_started(registry: Any) -> None:
     """Cancel every task this process started, and do not return while any is unsettled.
 
@@ -212,6 +221,12 @@ async def _release_started(registry: Any) -> None:
     signal does not interrupt it.
     """
     me = asyncio.current_task()
+    # Stop queued continuations before cancelling the subprocesses they may have created.
+    continuations = list(getattr(registry, "_continuations", ()))
+    for continuation in continuations:
+        continuation.cancel()
+    if continuations:
+        await asyncio.gather(*continuations, return_exceptions=True)
     while True:
         pending = [task for task in registry.list() if not task.finished]
         if not pending:
@@ -281,6 +296,9 @@ async def _child(action: Action, write_fd: int, registry_factory: Callable[[], A
         send({"task_id": task.task_id})
         log.info("owning task %s until it settles", task.task_id)
         await task.done.wait()
+        # Continuation callbacks are scheduled by the terminal monitor before it yields.
+        # Own their reservations and all successors until their drainers settle as well.
+        await _wait_started(registry)
         log.info("task %s settled as %s", task.task_id, task.status)
         return 0
     except asyncio.CancelledError:

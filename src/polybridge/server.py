@@ -309,6 +309,7 @@ async def start_task(
     group: str | None = None,
     title: str | None = None,
     workflow: str | None = None,
+    auto_continue: StrictInt = 0,
 ) -> dict[str, Any]:
     """Dispatch a coding task to a headless agent and return immediately.
 
@@ -361,6 +362,11 @@ async def start_task(
             control characters) shown for this task in the Monitor. Purely informational. It is
             never inherited from a calling task: a dispatch without a title has none. A
             resume_task continuation carries the resumed task's title.
+        auto_continue: Integer 0–10 (default 0). Opt in to that many fresh successors after
+            backend-confirmed recoverable cutoffs and observed process/output settlement.
+            Supported cutoff profiles are backend-owned; missing answers alone never qualify.
+            Cancellation, permission denial, usage limits and workflow-owned tasks are excluded.
+            Automatic continuation across server death is not promised.
 
     Returns the new task_id and its starting state. The run continues in the background; poll
     get_task_status or call wait_for_task to follow it.
@@ -377,7 +383,15 @@ async def start_task(
     if not prompt or not prompt.strip():
         raise MCPError(INVALID_PARAMS, "prompt must be a non-empty string")
 
+    from .task_continuation import validate_budget
+    try:
+        validate_budget(auto_continue)
+    except ValueError as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+
     if workflow is not None:
+        if auto_continue:
+            raise MCPError(INVALID_PARAMS, "Workflow retries belong to their supervisor; auto_continue is unavailable")
         if group is not None or title is not None:
             raise MCPError(INVALID_PARAMS, "workflow runs do not accept task group or title")
         return await start_workflow(
@@ -389,6 +403,8 @@ async def start_task(
 
     freedom = freedom if freedom is not None else DEFAULT_FREEDOM
     chosen = _backend(backend or DEFAULT_BACKEND)
+    if auto_continue and not chosen.capabilities.supports_auto_continue:
+        raise MCPError(INVALID_PARAMS, f"{chosen.name} has no certified automatic continuation cutoff; use continue_task")
     _check_freedom(freedom)
     _check_turn_cap(chosen, max_turns)
     _check_reasoning_effort(chosen, reasoning_effort)
@@ -410,6 +426,7 @@ async def start_task(
             network=network,
             group=group,
             title=normalized_title,
+            auto_continue=auto_continue,
         )
     except backends.UnsupportedCapability as exc:
         # Covers `NestedDispatchRefused` too — it subclasses `UnsupportedCapability`, and this cap
@@ -611,6 +628,26 @@ async def wait_for_task(
     return await asyncio.to_thread(
         _status_payload, snapshot, include_tail=include_tail, log_dir=_reg().log_dir, task_id=task_id
     )
+
+
+@mcp.tool()
+async def continue_task(task_id: str, extra_prompt: str | None = None, notes_path: str | None = None) -> dict[str, Any]:
+    """Start a fresh session from a conclusively settled standalone task.
+
+    This differs from resume_task: it reconstructs the original assignment, latest summary and
+    captured outcome, with optional UTF-8 notes and caller follow-up preserved verbatim. Oversized
+    evidence is referenced by path. Backend, model and access settings are retained. Process exit,
+    complete output drainage and a durable terminal record must be observed; old or inferred
+    records without settlement evidence are refused. Workflow-owned tasks use workflow recovery.
+    Concurrent identical retries share one successor; mismatched or unsettled reservations fail.
+    The returned continuation_of_task_id is separate from session resume/delegation ancestry.
+    """
+    await _guard_task_read(task_id)
+    try:
+        task = await _reg().continue_task(task_id, extra_prompt, notes_path)
+    except (ValueError, OSError, backends.UnsupportedCapability) as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+    return task.brief() | {"enforcement": task.enforcement}
 
 
 @mcp.tool()

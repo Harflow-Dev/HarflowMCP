@@ -367,6 +367,7 @@ class VibeBackend:
     # verification still requires the captured process start time and ancestry.
     caller_process_titles = ("Vibe CLI",)
     capabilities = Capabilities(
+        supports_auto_continue=True,
         # vibe mints its own sessionId and reports it on the first stream entry.
         chooses_session_id=False,
         # Measured (Gate 1): a breach exits 1 and the live-turn assistant message carries the same
@@ -729,6 +730,7 @@ class VibeBackend:
             # turn-scoped for the same reason.
             acc.stream_state["current_turn_id"] = turn_id
             acc.stream_state.pop("stop_event_seen", None)
+            acc.stream_state.pop("continuation_turn_cap", None)
             # Turn-scoped like the latch above: a refusal in the turn that just ended must not
             # colour this one. The warning itself leaves with the rest of `notices` below.
             acc.stream_state.pop("ended_on_refusal", None)
@@ -766,6 +768,7 @@ class VibeBackend:
             # `int | None` and this backend requires an observed zero exit, so the withdrawal stands
             # on its own merits.)
             acc.stream_state["stop_event_seen"] = True
+            acc.stream_state["continuation_turn_cap"] = bool(re.fullmatch(r"<vibe_stop_event>Turn limit of [0-9]+ reached</vibe_stop_event>", text.strip()))
             acc.summary = None
             acc.saw_final_message = False
             acc.notices.append(text)
@@ -896,6 +899,19 @@ class VibeBackend:
         if not interactive_session_id_ok(session_id, repo_path):
             return None
         return [self.binary, "--trust", "--workdir", str(repo_path), "--resume", session_id]
+
+    def continuation_reason(self, acc: Accumulator, exit_code: int | None) -> str | None:
+        """Observed recoverable cutoff, or None when no certified signal exists."""
+        if (
+            exit_code == 1
+            and acc.stream_state.get("continuation_turn_cap")
+            and not acc.is_error
+            and not acc.error_result_seen
+            and not acc.failure_diagnostic
+            and not acc.denials
+        ):
+            return "turn_cap"
+        return None
 
     def classify(self, acc: Accumulator, exit_code: int | None) -> Status:
         if acc.failure_diagnostic is not None:

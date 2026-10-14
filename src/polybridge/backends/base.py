@@ -191,6 +191,9 @@ class Capabilities(NamedTuple):
     when `max_turns` is set (that combination is unmeasured), so what a *task* got is its own
     `live_input` field, never this one."""
 
+    supports_auto_continue: bool = False
+    """Whether a structured recoverable cutoff has a certified continuation classifier."""
+
     live_input_message_is_turn: bool = False
     """Whether each message written on stdin starts a turn of its own, even mid-turn. agy does
     (measured: two queued lines, EOF at the first result, three results), so a run that received N
@@ -469,6 +472,10 @@ class Backend(Protocol):
         caller, but implementations should still be defensive: streams are untrusted input.
         """
         ...
+
+    def continuation_reason(self, acc: Accumulator, exit_code: int | None) -> str | None:
+        """Observed recoverable cutoff, or None when no certified signal exists."""
+        return None
 
     def classify(self, acc: Accumulator, exit_code: int | None) -> Status:
         """Decide the terminal status from this backend's own signals."""

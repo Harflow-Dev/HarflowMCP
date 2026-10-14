@@ -922,6 +922,10 @@ class AntigravityBackend:
         events.append(nz.usage(acc))
         return events
 
+    def continuation_reason(self, acc: Accumulator, exit_code: int | None) -> str | None:
+        """Observed recoverable cutoff, or None when no certified signal exists."""
+        return None
+
     def classify(self, acc: Accumulator, exit_code: int | None) -> Status:
         if acc.failure_diagnostic is not None:
             return "failed"

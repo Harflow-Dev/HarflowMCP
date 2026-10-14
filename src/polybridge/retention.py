@@ -16,6 +16,7 @@ import hashlib
 import math
 import logging
 import os
+import json
 import sqlite3
 import re
 from collections.abc import Collection
@@ -132,6 +133,18 @@ def sweep(log_dir: Path, days: int, now: datetime) -> dict[str, int]:
     # checkpoint is pinned; otherwise pruning only the external successor would
     # make the old checkpoint appear unchanged again.
     protected = set(pinned)
+    for reservation_path in log_dir.glob('*.continuation.json'):
+        try:
+            if reservation_path.stat().st_size > 4096:
+                continue
+            reservation = json.loads(reservation_path.read_text())
+            if reservation.get('state') == 'reserved':
+                protected.add(reservation_path.name.removesuffix('.continuation.json'))
+                protected.add(reservation.get('chain_root_task_id'))
+        except (OSError, ValueError, TypeError):
+            continue
+    protected.discard(None)
+
     protected_sessions: set[str] = set()
     while True:
         before = len(protected), len(protected_sessions)
@@ -141,6 +154,8 @@ def sweep(log_dir: Path, days: int, now: datetime) -> dict[str, int]:
                     protected_sessions.add(record.session_id)
                 if record.parent_task_id:
                     protected.add(record.parent_task_id)
+                if record.continuation_of_task_id:
+                    protected.add(record.continuation_of_task_id)
             if record.parent_task_id in protected or record.session_id and record.session_id in protected_sessions:
                 protected.add(record.task_id)
                 if record.session_id:
@@ -155,7 +170,7 @@ def sweep(log_dir: Path, days: int, now: datetime) -> dict[str, int]:
     # keep that ancestor's record alive while it runs.
     children: dict[str, list[str]] = {}
     for record in records:
-        for ancestor in {record.parent_task_id, record.spawned_by} - {None}:
+        for ancestor in {record.parent_task_id, record.continuation_of_task_id, record.spawned_by} - {None}:
             children.setdefault(ancestor, []).append(record.task_id)
 
     def has_live_descendant(task_id: str, seen: set[str]) -> bool:
@@ -334,7 +349,7 @@ def _has_fresh_descendant(
         if child_id in snapshot_ids:
             continue
         child = store.read(log_dir, child_id)
-        if child is None or {child.parent_task_id, child.spawned_by} & family:
+        if child is None or {child.parent_task_id, child.continuation_of_task_id, child.spawned_by} & family:
             return True
     return False
 

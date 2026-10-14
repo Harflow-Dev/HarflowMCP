@@ -141,6 +141,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     run_p.add_argument("--prompt", required=True)
     run_p.add_argument("--model", default=None)
     run_p.add_argument("--max-turns", type=int, default=None)
+    run_p.add_argument("--auto-continue", type=int, default=0, help="0–10 fresh successors after certified cutoffs; standalone tasks only")
     run_p.add_argument("--reasoning-effort", default=None)
     run_p.add_argument("--network", choices=("true", "false"), default=None)
     run_p.add_argument("--group", default=None)
@@ -155,6 +156,14 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     resume_p.add_argument("--max-turns", type=int, default=None)
     resume_p.add_argument("--network", choices=("true", "false"), default=None)
     resume_p.add_argument("--json", action="store_true")
+
+    continue_p = sub.add_parser("continue", help="start a fresh session from a positively settled standalone task")
+    continue_p.add_argument("task_id")
+    extra = continue_p.add_mutually_exclusive_group()
+    extra.add_argument("--extra-prompt")
+    extra.add_argument("--extra-prompt-file", help="UTF-8 caller follow-up file")
+    continue_p.add_argument("--notes-path", help="Optional UTF-8 notes file")
+    continue_p.add_argument("--json", action="store_true")
 
     allowlist_p = sub.add_parser("mcp-allowlist", help="inspect or explicitly edit harness-global MCP approval rules")
     allowlist_p.add_argument("--backend", required=True, choices=tuple(backends.BACKENDS))
@@ -570,6 +579,7 @@ def _run_action(args: argparse.Namespace):
             network=network,
             group=args.group,
             title=title,
+            auto_continue=args.auto_continue,
         )
 
     return action
@@ -609,6 +619,12 @@ def _resume_action(args: argparse.Namespace):
 
 def _ctl_log_path() -> Path:
     return default_log_dir().parent / "ctl.log"
+
+
+def _continue_action(args: argparse.Namespace):
+    async def action(registry: Any) -> Any:
+        return await registry.continue_task(args.task_id, _workflow_text(args, "extra_prompt"), args.notes_path)
+    return action
 
 
 def _cmd_detached(args: argparse.Namespace, action: Any) -> int:
@@ -741,9 +757,10 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
                 return await server.workflow_builder(args.name, prompt, args.repo, candidate, json.loads(args.fallbacks), definition, source)
             preview_guard = {"expected_preview_hash": args.expected_preview_hash} if getattr(args, "expected_preview_hash", None) is not None else {}
             goal = _workflow_text(args, "goal")
+            goal_guard = {"goal": goal} if goal is not None else {}
             if args.monitor:
-                return await server._workflow_call("start", name=args.name, prompt=prompt, repo_path=args.repo, overrides=candidate or None, freedom=args.freedom, network=_network(args.network), goal=goal, interaction_owner="monitor", **preview_guard)
-            return await server._workflow_call("start", name=args.name, prompt=prompt, repo_path=args.repo, overrides=candidate or None, freedom=args.freedom, network=_network(args.network), goal=goal, **preview_guard)
+                return await server._workflow_call("start", name=args.name, prompt=prompt, repo_path=args.repo, overrides=candidate or None, freedom=args.freedom, network=_network(args.network), interaction_owner="monitor", **preview_guard, **goal_guard)
+            return await server._workflow_call("start", name=args.name, prompt=prompt, repo_path=args.repo, overrides=candidate or None, freedom=args.freedom, network=_network(args.network), **preview_guard, **goal_guard)
         if action == "revise-goal":
             return await server._workflow_call("revise_goal", run_id=args.workflow_run_id,
                 goal=_workflow_text(args, "goal"), expected_revision=args.expected_revision,
@@ -835,6 +852,8 @@ def _main(argv: list[str] | None = None) -> int:
         return _cmd_takeover_attach(args)
     if args.command == "run":
         if args.workflow:
+            if args.auto_continue:
+                return _fail(args, "invalid_params", "Workflow retries belong to their supervisor; --auto-continue is unavailable")
             if args.group is not None or args.title is not None:
                 return _fail(args, "invalid_params", "workflow runs do not accept task group or title")
             args.name = args.workflow
@@ -847,6 +866,8 @@ def _main(argv: list[str] | None = None) -> int:
         return _cmd_detached(args, _run_action(args))
     if args.command == "resume":
         return _cmd_detached(args, _resume_action(args))
+    if args.command == "continue":
+        return _cmd_detached(args, _continue_action(args))
     return _cmd_status(args)
 
 

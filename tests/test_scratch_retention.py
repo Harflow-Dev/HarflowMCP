@@ -22,7 +22,7 @@ async def dispatch(registry,backend,repo):
     return await registry._spawn(Invocation(['/bin/echo','{}']),backend=backend,prompt='Task',repo_path=repo,session_id=None,freedom='write_in_repo',max_turns=None,model=None,reasoning_effort=None,task_id='scratch-worker')
 
 
-@pytest.mark.parametrize('probe',['_publish_branch_notice','_git_baseline'])
+@pytest.mark.parametrize('probe',['_publish_branch_notice','baseline'])
 async def test_cancel_before_spawn_does_not_orphan_scratch(tmp_path,monkeypatch,probe):
     registry=tasks.TaskRegistry(log_dir=tmp_path/'tasks',open_monitor=False)
     entered=asyncio.Event()
@@ -30,7 +30,7 @@ async def test_cancel_before_spawn_does_not_orphan_scratch(tmp_path,monkeypatch,
         if function.__name__==probe:
             entered.set()
             await asyncio.Event().wait()
-        return (None,None) if function.__name__=='_git_baseline' else None
+        return {'head': None, 'working_tree_status': None} if function.__name__=='baseline' else None
     monkeypatch.setattr(tasks.asyncio,'to_thread',thread)
     monkeypatch.setattr(tasks,'_branch_disclosure_warranted',lambda _:True)
     async def spawn(*a,**k):raise AssertionError('must not spawn')

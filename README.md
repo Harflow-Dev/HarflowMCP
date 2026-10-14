@@ -62,6 +62,10 @@ Give each workflow run an optional [explicit goal](docs/workflows.md#per-run-goa
 of its saved purpose. Goals are preserved verbatim, assessed against execution evidence, and
 can be revised by the caller at a quiescent checkpoint without expanding permissions.
 
+For settled standalone tasks, [`continue_task`](docs/task-continuation.md) reconstructs context
+in a fresh session. Opt-in `auto_continue` bounds successors after supported turn-cap signals;
+workflow retries stay with their supervisor, and uncertain settlement never starts a duplicate.
+
 See [workflow mechanics, contracts, and recovery](docs/workflows.md) for the full model and diagrams.
 Run workflow nodes in Child mode offer [Fresh, Resume, or Agent decides](docs/workflows.md#run-workflow-nodes)
 for the orchestrator conversation, defaulting to Agent decides with fresh execution state on every invocation. Explicit Resume

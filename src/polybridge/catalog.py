@@ -176,7 +176,7 @@ def bound_header(header: dict[str, Any]) -> dict[str, Any]:
     result = dict(header)
     if isinstance(result.get('sessions'), dict):
         result['sessions'] = {'orchestrator': str(result['sessions']['orchestrator'])[:128]} if result['sessions'].get('orchestrator') else {}
-    protected = {'task_id', 'workflow_run_id', 'parent_workflow_run_id', 'root_workflow_run_id', 'orchestrator_session_owner_run_id', 'workflow_session_owner_run_id', 'session_id', 'parent_task_id', 'root_task_id', 'spawned_by', 'status', 'started_at', 'created_at', 'updated_at', 'backend', 'kind', 'execution_contract', 'needs_direct_lookup', 'sessions'}
+    protected = {'task_id', 'workflow_run_id', 'parent_workflow_run_id', 'root_workflow_run_id', 'orchestrator_session_owner_run_id', 'workflow_session_owner_run_id', 'session_id', 'parent_task_id', 'continuation_of_task_id', 'chain_root_task_id', 'root_task_id', 'spawned_by', 'status', 'started_at', 'created_at', 'updated_at', 'backend', 'kind', 'execution_contract', 'needs_direct_lookup', 'sessions'}
     protected.update({'persisted_status', 'observed_exit', 'process_identity_state', 'needs_reconciliation', 'status_reconciled'})
     for key, value in list(result.items()):
         if isinstance(value, str):
@@ -430,7 +430,7 @@ class Catalog:
             db.execute('INSERT OR REPLACE INTO associations VALUES (?,?)', (task_id, json.dumps(association, separators=(',', ':'))))
         if caller is not None:
             # Identity must be lossless; display/content fields never enter the caller index.
-            keys = {'task_id', 'backend', 'session_id', 'started_at', 'freedom', 'markers', 'pid', 'pgid', 'start_time', 'status', 'exit_code', 'root_task_id', 'parent_task_id', 'spawned_by', 'depth', 'max_depth', 'network'}
+            keys = {'task_id', 'backend', 'session_id', 'started_at', 'freedom', 'markers', 'pid', 'pgid', 'start_time', 'status', 'exit_code', 'root_task_id', 'parent_task_id', 'continuation_of_task_id', 'chain_root_task_id', 'spawned_by', 'depth', 'max_depth', 'network'}
             caller = {key: value for key, value in caller.items() if key in keys}
             caller['repo_path'] = ''
             markers = caller.get('markers')
