@@ -38,6 +38,45 @@ async def test_order_terminal_and_timeout_cap(tmp_path):
     assert (await server.wait_for_tasks(["b", "a"], "all", 0))["timed_out"]
 
 
+@pytest.mark.parametrize("requested,effective", [(0, 0), (1, 1), (300, 45)])
+async def test_initial_io_does_not_consume_observation_interval(monkeypatch, requested, effective):
+    clock = [100.0]
+    monkeypatch.setattr(task_waiting.asyncio, "get_running_loop",
+                        lambda: SimpleNamespace(time=lambda: clock[0]))
+    source = SimpleNamespace(backend="codex", session_id=None, title=None)
+    reads = []
+    sleeps = []
+
+    def exists(*args):
+        clock[0] += .75
+        return True
+
+    def read(*args):
+        reads.append(clock[0])
+        # Initial materialization and the first observation both take time.
+        clock[0] += .75 if len(reads) == 1 else .25
+        return source, "running", None, "recovered_record"
+
+    async def to_thread(func, *args):
+        return func(*args)
+
+    async def sleep(interval):
+        sleeps.append(interval)
+        clock[0] += interval
+
+    monkeypatch.setattr(task_waiting, "_record_exists", exists)
+    monkeypatch.setattr(task_waiting, "_recovered", read)
+    monkeypatch.setattr(task_waiting.asyncio, "to_thread", to_thread)
+    monkeypatch.setattr(task_waiting.asyncio, "sleep", sleep)
+    registry = SimpleNamespace(get=lambda _: None, log_dir=None)
+    result = await task_waiting.wait_for_tasks(registry, ["recovered"], timeout_seconds=requested)
+    assert result["timed_out"]
+    assert result["effective_timeout_seconds"] == effective
+    assert reads[1] == 101.5  # Existence and initial materialization precede the interval.
+    assert clock[0] >= 101.5 + effective
+    assert bool(sleeps) is (effective > 0)
+
+
 async def test_missing_validates_before_observers(tmp_path):
     live = add_task("live", tmp_path)
     with pytest.raises(MCPError, match="unknown task_id"):

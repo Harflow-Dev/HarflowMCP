@@ -22,7 +22,8 @@ status only counts after the task completion event confirms output settlement.
 Timeout accepts integer values from 0 through 300 seconds, defaults to 30, and holds the
 observation delay to at most 45 seconds. Bounded metadata I/O can add up to two seconds
 for initial existence validation and metadata together, and two seconds for a final observation round; reported effective
-timeout describes the observation delay. Zero performs one observation without sleeping. Inspect
+timeout describes the observation delay, starting after initial validation and metadata
+materialization. Zero performs one observation without sleeping. Inspect
 `requested_timeout_seconds`, `effective_timeout_seconds`, and `timed_out`; poll again while
 tasks remain active. Progress notifications are best effort. Timing out or cancelling the
 request only stops temporary observers; it never signals, cancels or changes a task.

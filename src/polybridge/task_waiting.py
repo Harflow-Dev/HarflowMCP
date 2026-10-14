@@ -73,8 +73,6 @@ async def wait_for_tasks(
     validate(task_ids, mode, timeout_seconds)
     effective = min(timeout_seconds, 45)
     loop = asyncio.get_running_loop()
-    deadline = loop.time() + effective
-    next_progress = loop.time() + PROGRESS_SECONDS
     sources = []
     io_deadline = loop.time() + OBSERVATION_IO_SECONDS
     live_tasks = {task_id: registry.get(task_id) for task_id in task_ids}
@@ -115,6 +113,10 @@ async def wait_for_tasks(
         if task is None and record is None:
             record = unavailable()
         sources.append((task_id, task, record))
+    # Initial validation/materialization has its own bounded I/O budget; it must
+    # not consume the caller's requested observation interval.
+    deadline = loop.time() + effective
+    next_progress = loop.time() + PROGRESS_SECONDS
     observers = {asyncio.create_task(task.done.wait()) for _, task, _ in sources if task is not None and not task.done.is_set()}
     try:
         while True:
