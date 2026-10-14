@@ -631,6 +631,32 @@ async def wait_for_task(
 
 
 @mcp.tool()
+async def wait_for_tasks(
+    task_ids: list[str], mode: str = "any", timeout_seconds: int = 30,
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """Observe 1..32 unique task IDs, returning compact statuses in requested order.
+
+    mode any returns when at least one requested task is terminal; all waits for every task.
+    timeout_seconds accepts 0..300 (default 30), with an effective hold capped at 45 seconds.
+    Zero polls immediately. All IDs must exist and pass caller read authorization before waiting.
+    Returns terminal_task_ids, bounded summaries and get_task_status diagnostic references;
+    no output tails. Timeout and caller cancellation never cancel or signal the observed tasks.
+    """
+    from . import task_waiting
+    try:
+        task_waiting.validate(task_ids, mode, timeout_seconds)
+        for task_id in task_ids:
+            await _guard_task_read(task_id)
+        return await task_waiting.wait_for_tasks(
+            _reg(), task_ids, mode, timeout_seconds,
+            ctx.report_progress if ctx is not None else None,
+        )
+    except ValueError as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+
+@mcp.tool()
 async def continue_task(task_id: str, extra_prompt: str | None = None, notes_path: str | None = None) -> dict[str, Any]:
     """Start a fresh session from a conclusively settled standalone task.
 
