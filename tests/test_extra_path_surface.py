@@ -20,6 +20,15 @@ def separate_bridge_state(monkeypatch, tmp_path_factory):
 def qualified(monkeypatch, fake_backend_clis, tmp_path_factory):
     monkeypatch.setattr('polybridge.backends.codex_config._mdm_absence', lambda: ('managed_preferences_absent',))
     monkeypatch.setenv("CODEX_HOME", str(tmp_path_factory.mktemp("qualified-config")))
+    launcher = tmp_path_factory.mktemp('native-launcher') / 'codex'
+    launcher.write_bytes(b'\x7fELF-native-fixture'); launcher.chmod(0o755)
+    import shutil
+    for name in ('git', 'ps', 'open'):
+        selected = shutil.which(name)
+        if selected:
+            (launcher.parent / name).symlink_to(selected)
+    monkeypatch.setenv('PATH', str(launcher.parent))
+    monkeypatch.setattr('polybridge.runtime_loaders.qualify_loaders', lambda paths: (set(paths), set()))
     # Qualification still resolves/fingerprints a CLI, even with its version stubbed.
     monkeypatch.setattr(backends, 'version', lambda backend, **kwargs: EXTRA_PATHS_VERSION)
     monkeypatch.setattr('polybridge.backends.codex.sys.platform', 'darwin')

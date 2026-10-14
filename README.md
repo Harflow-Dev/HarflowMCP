@@ -171,7 +171,7 @@ You can use the same bridge without a workflow. `start_task(prompt, repo_path, b
 returns a **`task_id`** immediately. Follow it with `get_task_status` or `wait_for_task`, then use
 `resume_task` for a follow-up. Independent tasks can run in parallel.
 
-Extra-path support requires a qualified Codex configuration with notify, hooks, MCP and plugins disabled and no project configuration.
+Extra-path support requires absolute nonempty PATH entries, native selected helpers/backend launchers, and a qualified Codex configuration with notify, hooks, MCP and plugins disabled and no project configuration.
 
 [`extra_writable_paths`](docs/extra-writable-paths.md) adds bounded local file or directory
 grants on verified configurations. Inspect `preview_task_permissions` before launch;

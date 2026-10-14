@@ -65,6 +65,8 @@ def assert_runtime_outside_writes(scopes: list[tuple[Path, str]]) -> None:
             executables.append(Path(selected))
             with Path(selected).open('rb') as stream:
                 script = stream.read(2) == b'#!'
+            if script:
+                raise ValueError('selected script runtime dependency graphs are not qualified for extra writable paths')
             if name in HELPERS or not script:
                 loader_executables.append(Path(selected))
     executables.append(Path(sys.executable))

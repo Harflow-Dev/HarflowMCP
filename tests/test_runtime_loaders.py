@@ -52,7 +52,7 @@ def test_unknown_shell_helper_rejected_without_execution(tmp_path, monkeypatch):
     sentinel = tmp_path / 'executed'
     shell.write_text(f'#!/bin/sh\ntouch {sentinel}\n')
     monkeypatch.setattr(runtime_paths.shutil, 'which', lambda name: str(shell))
-    with pytest.raises(ValueError, match='script loader'):
+    with pytest.raises(ValueError, match='script runtime'):
         runtime_paths.assert_runtime_outside_writes([(tmp_path / 'executed', 'file')])
     assert not sentinel.exists()
 
@@ -99,7 +99,7 @@ def test_truncated_thin_header_is_value_error(tmp_path):
 
 
 @pytest.mark.parametrize('env_shebang', [False, True])
-def test_discovered_interpreter_dependency_refused_before_version(tmp_path, monkeypatch, env_shebang):
+def test_script_interpreter_layout_refused_before_version(tmp_path, monkeypatch, env_shebang):
     from polybridge import backends
     from polybridge.backends.codex import UnsafeInvocationError
     from polybridge.extra_paths import normalize_paths
@@ -134,7 +134,7 @@ def test_discovered_interpreter_dependency_refused_before_version(tmp_path, monk
     backend = backends.get('codex')
     plain = backend.build_start_argv('task', repo=repo, freedom='write_in_repo', session_id=None,
                                      model=None, max_turns=None, reasoning_effort=None)
-    with pytest.raises(UnsafeInvocationError, match='protected server runtime paths'):
+    with pytest.raises(UnsafeInvocationError, match='script runtime'):
         backend.with_extra_writable_paths(plain, normalize_paths([str(dependency)]), 'write_in_repo')
     assert calls == []
 

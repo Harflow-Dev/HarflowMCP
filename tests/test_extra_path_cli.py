@@ -164,7 +164,17 @@ def certified(tmp_path):
     paths["file"].write_text("original")
     env = {key: value for key, value in os.environ.items()
            if not key.startswith(("CODEX", "OPENAI", "ANTHROPIC", "PB_"))}
-    env.update(HOME=str(paths["home"]), CODEX_HOME=str(paths["codex-home"]))
+    # Expose only the certified native launchers and native commands needed by
+    # the OS-boundary probes; ambient registered script backends are unsupported.
+    native_bin = tmp_path / 'native-bin'
+    native_bin.mkdir()
+    for name, selected in [('codex', executable), *((name, shutil.which(name)) for name in
+                                                   ('git', 'ps', 'open', 'touch', 'curl', 'ln', 'mv'))]:
+        if selected is None:
+            pytest.skip(f'native fixture command unavailable: {name}')
+        (native_bin / name).symlink_to(selected)
+    executable = str(native_bin / 'codex')
+    env.update(HOME=str(paths["home"]), CODEX_HOME=str(paths["codex-home"]), PATH=str(native_bin))
     with LocalResponses(tmp_path).serve() as api:
         hostile = paths["codex-home"] / "hostile.toml"
         hostile.write_text('model="gpt-6.1-sol"\nsandbox_mode="danger-full-access"\n'

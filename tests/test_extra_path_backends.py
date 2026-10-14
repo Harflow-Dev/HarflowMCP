@@ -19,10 +19,10 @@ def qualified(monkeypatch, tmp_path_factory):
     monkeypatch.setattr('polybridge.backends.codex_config._mdm_absence', lambda: ('managed_preferences_absent',))
     monkeypatch.setenv('CODEX_HOME', str(tmp_path_factory.mktemp('qualified-config')))
     launcher = tmp_path_factory.mktemp('qualified-launcher') / 'codex'
-    launcher.write_text('#!/bin/sh\nexit 99\n')
+    launcher.write_bytes(b'\x7fELF-native-fixture')
     launcher.chmod(0o755)
     monkeypatch.setenv('PATH', str(launcher.parent))
-    # Shell stand-ins exercise namespace/identity guards, not native loaders.
+    # Native-shaped stand-ins exercise namespace/identity guards, not native loaders.
     monkeypatch.setattr('polybridge.runtime_loaders.qualify_loaders',
                         lambda paths: (set(paths), set()))
     monkeypatch.setattr('polybridge.backends.codex.sys.platform', 'darwin')
@@ -169,67 +169,25 @@ def test_runtime_snapshot_tracks_path_and_symlink_target(qualified, monkeypatch,
     assert qualified._extra_path_runtime() != unchanged_target
 
 
-def test_absolute_path_probe_and_execution_bind_same_absolute_alias(tmp_path):
-    """Isolate cwd/PATH changes so concurrent tests retain their original environment."""
+@pytest.mark.parametrize('backend_name', ['codex', 'claude', 'opencode', 'vibe', 'agy', 'git', 'ps', 'open'])
+@pytest.mark.parametrize('container', [None, 'pyvenv.cfg', 'package.json'])
+def test_selected_backend_scripts_refused_before_probe(qualified, monkeypatch, tmp_path, backend_name, container):
     import os
-    import subprocess
-    import sys
-    from pathlib import Path
-    server = tmp_path / 'server'
-    repo = tmp_path / 'repo'
-    server.mkdir()
-    repo.mkdir()
-    certified = server / 'certified'
-    certified.write_text('#!/bin/sh\nif [ "$1" = "--version" ]; then\n echo "' + EXTRA_PATHS_VERSION + '"\nelse\n echo qualified-server\nfi\n')
-    certified.chmod(0o755)
-    (server / 'codex').symlink_to(certified)
-    malicious = repo / 'codex'
-    malicious.write_text('#!/bin/sh\necho wrong-repo-binary\n')
-    malicious.chmod(0o755)
-    script = '''
-import os, subprocess, sys
-from dataclasses import replace
-from pathlib import Path
-from polybridge.backends.codex import CodexBackend, UnsafeInvocationError
-import polybridge.backends.codex as codex
-import polybridge.runtime_loaders as loaders
-loaders.qualify_loaders = lambda paths: (set(paths), set())
-import polybridge.backends.codex_config as config
-config._mdm_absence = lambda: ('managed_preferences_absent',)
-import polybridge.backends as registry
-# Explicit stand-in version transport: preserve the bound executable under test.
-registry.version = lambda backend, executable=None: subprocess.run([executable, '--version'], capture_output=True, text=True, check=True).stdout.strip()
-from polybridge.extra_paths import normalize_paths
-server, repo = map(Path, sys.argv[1:])
-os.chdir(server)
-os.environ['PATH'] = str(server)
-codex.sys.platform = 'darwin'
-backend = CodexBackend()
-plain = backend.build_start_argv('Task', repo=repo, freedom='write_in_repo', session_id=None, model=None, max_turns=None, reasoning_effort=None)
-grants = normalize_paths([str(repo)])
-invocation = backend.with_extra_writable_paths(plain, grants, 'write_in_repo')
-# Preserve the selected alias: resolving this symlink would hide updates to it.
-assert invocation.argv[0] == str(server / 'codex')
-assert invocation.extra_path_runtime[1] == str(server / 'certified')
-assert subprocess.run(invocation.argv, cwd=repo, capture_output=True, text=True, check=True).stdout.strip() == 'qualified-server'
-for binary in ('codex', str(repo / 'codex'), str(server / 'certified')):
-    altered = replace(invocation, argv=[binary, *invocation.argv[1:]])
-    try:
-        backend.assert_extra_writable_paths(altered, grants, 'write_in_repo')
-    except UnsafeInvocationError:
-        pass
-    else:
-        raise AssertionError('executable substitution was accepted')
-try:
-    backend.assert_safe(replace(plain, argv=[str(server / 'codex'), *plain.argv[1:]]), 'write_in_repo')
-except UnsafeInvocationError:
-    pass
-else:
-    raise AssertionError('legacy executable allowance changed')
-'''
-    env = {**os.environ, 'CODEX_HOME': str(tmp_path / 'empty-codex-home'), 'PYTHONPATH': str(Path(__file__).resolve().parents[1] / 'src')}
-    result = subprocess.run([sys.executable, '-c', script, str(server), str(repo)], env=env, capture_output=True, text=True, timeout=10)
-    assert result.returncode == 0, result.stderr
+    bin_dir = tmp_path / 'unqualified-bin'; bin_dir.mkdir()
+    if container:
+        (bin_dir / container).write_text('{}')
+    external = tmp_path / 'external-source'; external.mkdir()
+    source = external / 'implementation.sh'; source.write_text('exit 99')
+    selected = bin_dir / backend_name
+    selected.write_text('#!/bin/sh\n. "' + str(source) + '"\n')
+    selected.chmod(0o755)
+    monkeypatch.setenv('PATH', str(bin_dir) + os.pathsep + os.environ['PATH'])
+    monkeypatch.setattr(backends, 'version', lambda *args, **kwargs: pytest.fail('unqualified script was executed'))
+    repo = tmp_path / 'repo'; repo.mkdir()
+    with pytest.raises(UnsafeInvocationError, match='script runtime'):
+        qualified.with_extra_writable_paths(build(qualified, repo), normalize_paths([str(external)]), 'write_in_repo')
+    plain = build(qualified, repo)
+    assert qualified.with_extra_writable_paths(plain, (), 'write_in_repo') is plain
 
 
 def test_probe_uses_selected_absolute_binary_without_mutating_backend(qualified, monkeypatch, tmp_path):
@@ -384,7 +342,7 @@ def test_unrelated_grant_preserves_helper_namespace(qualified, monkeypatch, tmp_
     helpers = tmp_path / 'helpers'
     helpers.mkdir()
     git = helpers / 'git'
-    git.write_text('#!/bin/sh\nexit 99\n')
+    git.write_bytes(b'\x7fELF-native-helper-fixture')
     git.chmod(0o755)
     monkeypatch.setenv('PATH', str(helpers) + os.pathsep + os.environ['PATH'])
     repo = tmp_path / 'repo'
@@ -418,7 +376,7 @@ def test_helper_hardlinks_require_readonly_filesystem(qualified, monkeypatch, tm
     helpers = tmp_path / 'helpers'
     helpers.mkdir()
     helper = helpers / 'git'
-    helper.write_text('#!/bin/sh\nexit 99\n')
+    helper.write_bytes(b'\x7fELF-native-helper-fixture')
     helper.chmod(0o755)
     os.link(helper, tmp_path / 'hidden-helper-alias')
     monkeypatch.setenv('PATH', str(helpers) + os.pathsep + os.environ['PATH'])
@@ -658,3 +616,18 @@ def test_configuration_changed_before_final_refused(qualified, tmp_path):
     config.write_text('model="second"')
     with pytest.raises(UnsafeInvocationError, match='configuration changed'):
         qualified.assert_extra_writable_paths(invocation, grants, 'write_in_repo')
+
+
+def test_native_alias_binding_rejects_executable_substitution(qualified, monkeypatch, tmp_path):
+    launcher_dir=tmp_path/'native-bin';launcher_dir.mkdir()
+    target=launcher_dir/'native-target';target.write_bytes(b'\x7fELF-native-fixture');target.chmod(0o755)
+    alias=launcher_dir/'codex';alias.symlink_to(target)
+    monkeypatch.setenv('PATH',str(launcher_dir))
+    repo=tmp_path/'repo';repo.mkdir()
+    grants=normalize_paths([str(repo)])
+    invocation=qualified.with_extra_writable_paths(build(qualified,repo),grants,'write_in_repo')
+    assert invocation.argv[0]==str(alias)
+    assert invocation.extra_path_runtime[1]==str(target)
+    for binary in ('codex',str(repo/'codex'),str(target)):
+        with pytest.raises(UnsafeInvocationError):
+            qualified.assert_extra_writable_paths(replace(invocation,argv=[binary,*invocation.argv[1:]]),grants,'write_in_repo')

@@ -16,11 +16,7 @@ These checks precede the version probe and repeat at final validation. Every PAT
 with multiple hardlinks are rejected even when the requested grant is elsewhere:
 this conservatively prevents writable indirect launcher aliases. The same effective authority also cannot overlap the server's
 PATH directories (including absent higher-priority helper namespaces), selected helper/backend executable chains or targets, Python prefixes,
-import search roots or server package code. Discovered selected script containers
-(the closest `pyvenv.cfg` or `package.json` ancestor) are protected too; this
-does not certify an arbitrary script dependency graph. Bounded shebang inspection
-also protects absolute interpreters and simple `env`/`env -S` interpreter lookups;
-unqualified interpreter shapes reject the request. Recognized Python `bin/python*`
+import search roots or server package code. Every selected helper and registered backend launcher must be native. Script launchers are rejected before version execution, even when a `pyvenv.cfg` or `package.json` container exists: wrappers can source or import dependencies outside that container. Ordinary requests without extra grants retain existing behavior. Container markers do not qualify arbitrary script dependency graphs. Recognized Python `bin/python*`
 interpreter targets also protect their installation prefix, including a separate
 base installation behind a virtualenv symlink. These restrictions prevent a worker
 from poisoning unsandboxed repository probes, process checks, later version probes

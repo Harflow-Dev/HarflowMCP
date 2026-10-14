@@ -359,7 +359,7 @@ class CodexBackend(ExtraPathsUnsupported):
     def extra_path_support(self) -> dict[str, Any]:
         return {"supported": True, "platforms": ["darwin"], "versions": [EXTRA_PATHS_VERSION],
                 "freedoms": ["write_in_repo", "publish"], "network": [False, True],
-                "native_subagent": False, "configuration": "notify, hooks, MCP and plugins disabled; no project config", "certification": EXTRA_PATHS_CERTIFICATION}
+                "native_subagent": False, "runtime": "absolute nonempty PATH; native selected helpers and registered backend launchers", "configuration": "notify, hooks, MCP and plugins disabled; no project config", "certification": EXTRA_PATHS_CERTIFICATION}
 
     def _extra_path_runtime(self):
         import shutil
