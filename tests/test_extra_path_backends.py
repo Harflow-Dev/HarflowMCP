@@ -13,7 +13,9 @@ def build(backend, repo, freedom='write_in_repo', network=None, resume=False):
 
 
 @pytest.fixture
-def qualified(monkeypatch):
+def qualified(monkeypatch, fake_backend_clis):
+    # Exercise the real executable fingerprint without requiring an installed CLI.
+    # The version probe is stubbed below; invoking the stand-in would fail loudly.
     monkeypatch.setattr('polybridge.backends.codex.sys.platform', 'darwin')
     monkeypatch.setattr(backends, 'version', lambda backend, **kwargs: EXTRA_PATHS_VERSION)
     return backends.get('codex')

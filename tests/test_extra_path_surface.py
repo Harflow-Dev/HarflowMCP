@@ -12,7 +12,8 @@ from polybridge.extra_paths import normalize_paths
 
 
 @pytest.fixture
-def qualified(monkeypatch):
+def qualified(monkeypatch, fake_backend_clis):
+    # Qualification still resolves/fingerprints a CLI, even with its version stubbed.
     monkeypatch.setattr(backends, 'version', lambda backend, **kwargs: EXTRA_PATHS_VERSION)
     monkeypatch.setattr('polybridge.backends.codex.sys.platform', 'darwin')
 
@@ -31,7 +32,7 @@ async def test_preview_exposes_effective_scopes_without_task_or_scratch(git_repo
     assert not registry.log_dir.exists()
 
 
-async def test_start_passes_explicit_request_to_registry(git_repo, tmp_path, monkeypatch):
+async def test_start_passes_explicit_request_to_registry(git_repo, tmp_path, monkeypatch, fake_backend_clis):
     request = [str(tmp_path)]
     task = type('Task', (), {'enforcement': {}, 'brief': lambda self: {'task_id': 'fixture'}})()
     start = AsyncMock(return_value=task)
@@ -56,7 +57,7 @@ async def test_mcp_refuses_non_string_paths(git_repo):
     assert result.is_error
 
 
-async def test_unsupported_preview_is_specific(git_repo):
+async def test_unsupported_preview_is_specific(git_repo, fake_backend_clis):
     with pytest.raises(MCPError, match='not certified'):
         await server.preview_task_permissions(str(git_repo), backend='claude', extra_writable_paths=[str(git_repo)])
 
