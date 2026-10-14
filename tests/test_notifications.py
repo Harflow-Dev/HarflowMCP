@@ -105,6 +105,64 @@ def test_unsubscribe_and_pin(setup):
     assert not n.pinned_tasks(setup)
 
 
+def test_expiry_preserves_active_delivery_lease(setup, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    clock = [time.time()]
+    monkeypatch.setattr(n.time, 'time', lambda: clock[0])
+    r = record(setup)
+    subscription = n.subscribe(setup, r.task_id, 'test')
+    boundary = clock[0] + n.RETENTION_SECONDS
+    clock[0] = boundary - 1
+    started = threading.Event()
+    release = threading.Event()
+
+    def deliver(*args):
+        started.set()
+        assert release.wait(5)
+
+    monkeypatch.setattr(n, '_deliver', deliver)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        delivery = executor.submit(n._tick, setup)
+        try:
+            assert started.wait(5)
+            with n._db(setup) as db:
+                claimed = dict(db.execute('SELECT * FROM subscriptions WHERE id=?', (subscription['id'],)).fetchone())
+            clock[0] = boundary + 1
+            n._tick(setup)
+            with n._db(setup) as db:
+                current = dict(db.execute('SELECT * FROM subscriptions WHERE id=?', (subscription['id'],)).fetchone())
+            assert current['state'] == 'delivering'
+            assert current['lease'] == claimed['lease']
+            assert current['lease_until'] == claimed['lease_until']
+            assert current['attempts'] == 1
+            assert r.task_id in n.pinned_tasks(setup)
+        finally:
+            release.set()
+        delivery.result(timeout=5)
+    assert n.status(setup, r.task_id)[0]['state'] == 'delivered'
+    assert not n.pinned_tasks(setup)
+
+
+@pytest.mark.parametrize('state', ['pending', 'retry', 'delivering'])
+def test_expiry_after_lease_elapsed(setup, monkeypatch, state):
+    clock = [time.time()]
+    monkeypatch.setattr(n.time, 'time', lambda: clock[0])
+    r = record(setup)
+    n.subscribe(setup, r.task_id, 'test')
+    with n._db(setup) as db:
+        db.execute('UPDATE subscriptions SET state=?,lease=?,lease_until=?',
+                   (state, 'abandoned', clock[0] + n.LEASE_SECONDS))
+    clock[0] += n.RETENTION_SECONDS + 1
+    monkeypatch.setattr(n, '_deliver', lambda *args: pytest.fail('expired subscription delivered'))
+    n._tick(setup)
+    assert n.status(setup, r.task_id)[0]['state'] == 'expired'
+    with n._db(setup) as db:
+        assert db.execute('SELECT lease FROM subscriptions').fetchone()['lease'] is None
+    assert not n.pinned_tasks(setup)
+
+
 @pytest.mark.parametrize('url', ['http://example.com', 'https://u:p@example.com', 'https://example.com/#x', 'file:///tmp/a'])
 def test_reject_urls(setup, monkeypatch, url):
     monkeypatch.setenv('PB_NOTIFY_DESTINATIONS', json.dumps({'test': {'url': url}}))

@@ -50,7 +50,8 @@ Only 2xx responses acknowledge delivery. Failures retry with exponential delay,
 up to six attempts; errors are deliberately sanitized. Leases allow another
 server process to resume abandoned attempts after 60 seconds. The worker scans
 at most 16 subscriptions per tick. At most 1000 retained subscriptions exist;
-subscriptions expire after 30 days, and final states are retained for 30 days.
+subscriptions expire after 30 days once any active delivery lease has elapsed,
+and final states are retained for 30 days.
 Pending subscriptions protect their task records from retention. Unsubscribe can
 race with an already transmitted request; it cannot recall a request.
 

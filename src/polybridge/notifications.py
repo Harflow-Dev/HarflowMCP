@@ -316,7 +316,7 @@ def _tick(log_dir: Path):
     now = time.time()
     with _db(log_dir) as db:
         db.execute("UPDATE subscriptions SET state='failed',updated=?,lease=NULL,error='delivery attempts exhausted' WHERE attempts>=? AND state IN ('pending','retry','delivering') AND lease_until<=?", (now, MAX_ATTEMPTS, now))
-        db.execute("UPDATE subscriptions SET state='expired',updated=?,lease=NULL,error='subscription expired' WHERE state IN ('pending','retry','delivering') AND created<?", (now, now - RETENTION_SECONDS))
+        db.execute("UPDATE subscriptions SET state='expired',updated=?,lease=NULL,error='subscription expired' WHERE state IN ('pending','retry','delivering') AND created<? AND lease_until<=?", (now, now - RETENTION_SECONDS, now))
         db.execute("DELETE FROM subscriptions WHERE state IN ('delivered','failed','expired','unsubscribed') AND updated<?", (now - RETENTION_SECONDS,))
         candidates = db.execute("SELECT * FROM subscriptions WHERE state IN ('pending','retry','delivering') AND due<=? AND lease_until<=? ORDER BY updated LIMIT ?", (now, now, BATCH)).fetchall()
     for candidate in candidates:
