@@ -126,6 +126,7 @@ async def test_invalid_path_id():
 
 
 async def test_disappearing_recovered_record(monkeypatch):
+    monkeypatch.setattr(task_waiting, "_record_exists", lambda *a: True)
     source = SimpleNamespace(backend="codex", session_id=None, title=None)
     records = iter([(source, "running", None, "recovered_liveness"), None])
     monkeypatch.setattr(task_waiting, "_recovered", lambda *a: next(records))
@@ -136,6 +137,7 @@ async def test_disappearing_recovered_record(monkeypatch):
 
 async def test_recovered_refresh_with_live_completion(tmp_path, monkeypatch):
     live = add_task("live", tmp_path)
+    monkeypatch.setattr(task_waiting, "_record_exists", lambda *a: True)
     source = SimpleNamespace(backend="codex", session_id=None, title=None)
     monkeypatch.setattr(task_waiting, "POLL_SECONDS", .001)
     polls = []
@@ -205,3 +207,70 @@ async def test_corrupt_existing_metadata_is_unavailable():
     result = await server.wait_for_tasks(['corrupt'], timeout_seconds=0)
     assert result['tasks'][0]['status'] == 'unavailable'
     assert result['terminal_task_ids'] == []
+
+
+async def test_missing_after_slow_metadata_is_rejected_before_reads(tmp_path, monkeypatch):
+    live = add_task("live", tmp_path)
+    registry = server._reg()
+    registry.log_dir.mkdir(parents=True, exist_ok=True)
+    store.record_path(registry.log_dir, "early").write_text("{}")
+    monkeypatch.setattr(task_waiting, "OBSERVATION_IO_SECONDS", .02)
+    import threading
+    release = threading.Event()
+    reads = []
+    # On the old path this read exhausted the budget, hiding the later missing ID.
+    def read(*args):
+        reads.append(True)
+        release.wait(1)
+        return None
+    monkeypatch.setattr(task_waiting, "_recovered", read)
+    try:
+        with pytest.raises(MCPError, match="unknown task_id: missing"):
+            await server.wait_for_tasks(["live", "early", "missing"], timeout_seconds=0)
+    finally:
+        release.set()
+    assert not reads
+    assert not live.done._waiters
+    assert live.status == "running" and not live.cancel_requested
+
+
+async def test_existing_metadata_after_budget_is_unavailable(monkeypatch):
+    import threading
+    release = threading.Event()
+    calls = []
+    monkeypatch.setattr(task_waiting, "OBSERVATION_IO_SECONDS", .01)
+    monkeypatch.setattr(task_waiting, "_record_exists", lambda *a: True)
+    def read(directory, task_id):
+        calls.append(task_id)
+        release.wait(1)
+        raise PermissionError("unreadable")
+    monkeypatch.setattr(task_waiting, "_recovered", read)
+    try:
+        result = await server.wait_for_tasks(["early", "later"], timeout_seconds=0)
+    finally:
+        release.set()
+    assert calls and set(calls) == {"early"}
+    assert [row["status"] for row in result["tasks"]] == ["unavailable", "unavailable"]
+    assert not result["terminal_task_ids"]
+
+
+@pytest.mark.parametrize("failure", ["timeout", "permission"])
+async def test_undecidable_existence_fails_before_observation(tmp_path, monkeypatch, failure):
+    import threading
+    live = add_task("live", tmp_path)
+    release = threading.Event()
+    monkeypatch.setattr(task_waiting, "OBSERVATION_IO_SECONDS", .01)
+    def exists(*args):
+        if failure == "timeout":
+            release.wait(1)
+            return True
+        raise PermissionError("stat denied")
+    monkeypatch.setattr(task_waiting, "_record_exists", exists)
+    monkeypatch.setattr(task_waiting, "_recovered", lambda *a: pytest.fail("metadata before existence validation"))
+    try:
+        with pytest.raises(MCPError, match="Unable to validate task existence"):
+            await server.wait_for_tasks(["live", "unvalidated"], timeout_seconds=0)
+    finally:
+        release.set()
+    assert not live.done._waiters
+    assert live.status == "running" and not live.cancel_requested

@@ -747,6 +747,8 @@ async def wait_for_tasks(
     mode any returns when at least one requested task is terminal; all waits for every task.
     timeout_seconds accepts 0..300 (default 30), with an effective hold capped at 45 seconds.
     Zero polls immediately. All IDs must exist and pass caller read authorization before waiting.
+    Existence checks and initial metadata share a two-second I/O budget; undecidable existence
+    rejects the request. A final metadata observation can add up to two more seconds.
     Returns terminal_task_ids, bounded summaries and get_task_status diagnostic references;
     no output tails. Timeout and caller cancellation never cancel or signal the observed tasks.
     """

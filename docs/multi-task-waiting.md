@@ -3,6 +3,9 @@
 Use `wait_for_tasks(task_ids=["task-a", "task-b"], mode="any", timeout_seconds=30)`
 to observe up to 32 unique task IDs. Every ID must exist and pass the caller's task-read
 permissions before observation starts. Empty, duplicate, oversized and missing IDs are errors.
+Non-live IDs receive concurrent filesystem existence checks before any metadata reads or
+observers start. A check that times out or fails (for example, permission denied) rejects
+the request as unable to validate existence; it is never treated as missing or unavailable.
 
 `any` returns as soon as at least one requested task is terminal. `all` returns when every
 requested task is terminal. Responses include `tasks` in input order, `terminal_task_ids`
@@ -18,7 +21,7 @@ status only counts after the task completion event confirms output settlement.
 
 Timeout accepts integer values from 0 through 300 seconds, defaults to 30, and holds the
 observation delay to at most 45 seconds. Bounded metadata I/O can add up to two seconds
-for initial validation and two seconds for a final observation round; reported effective
+for initial existence validation and metadata together, and two seconds for a final observation round; reported effective
 timeout describes the observation delay. Zero performs one observation without sleeping. Inspect
 `requested_timeout_seconds`, `effective_timeout_seconds`, and `timed_out`; poll again while
 tasks remain active. Progress notifications are best effort. Timing out or cancelling the

@@ -17,11 +17,17 @@ METADATA_BYTES = 256 * 1024
 OBSERVATION_IO_SECONDS = 2.0
 
 
+def _record_exists(directory, task_id):
+    try:
+        store.record_path(directory, task_id).stat()
+    except FileNotFoundError:
+        return False
+    return True
+
+
 def _recovered(directory, task_id):
     record = store.read(directory, task_id, include_prompt=False, metadata_byte_limit=METADATA_BYTES)
     if record is None:
-        if store.record_path(directory, task_id).exists():
-            raise ValueError('Existing task metadata is unreadable')
         return None
     header, _, unobserved = store.listing_header(record)
     store._project_indexed_status(header, record)
@@ -71,6 +77,28 @@ async def wait_for_tasks(
     next_progress = loop.time() + PROGRESS_SECONDS
     sources = []
     io_deadline = loop.time() + OBSERVATION_IO_SECONDS
+    live_tasks = {task_id: registry.get(task_id) for task_id in task_ids}
+    recovered_ids = [task_id for task_id, task in live_tasks.items() if task is None]
+    # Complete existence validation before metadata can consume the shared budget.
+    # stat errors and timeouts are undecidable, never evidence of a missing ID.
+    if recovered_ids:
+        try:
+            existence = await asyncio.wait_for(
+                asyncio.gather(*(asyncio.to_thread(_record_exists, registry.log_dir, task_id)
+                                 for task_id in recovered_ids), return_exceptions=True),
+                max(0, io_deadline - loop.time()),
+            )
+        except asyncio.TimeoutError:
+            raise ValueError("Unable to validate task existence within the bounded I/O budget; retry.") from None
+        for task_id, exists in zip(recovered_ids, existence):
+            if isinstance(exists, BaseException):
+                raise ValueError(f"Unable to validate task existence for task_id: {task_id}; retry or inspect task diagnostics.") from None
+            if not exists:
+                raise ValueError(f"unknown task_id: {task_id}")
+
+    def unavailable():
+        return (SimpleNamespace(backend=None, session_id=None, title=None), "unavailable", "Bounded metadata observation unavailable; retry or inspect task diagnostics.", "unavailable")
+
     async def read_recovered(task_id):
         remaining = io_deadline - loop.time()
         try:
@@ -78,14 +106,14 @@ async def wait_for_tasks(
                 raise asyncio.TimeoutError
             return await asyncio.wait_for(asyncio.to_thread(_recovered, registry.log_dir, task_id), remaining)
         except (asyncio.TimeoutError, OSError, ValueError):
-            return (SimpleNamespace(backend=None, session_id=None, title=None), "unavailable", "Bounded metadata observation unavailable; retry or inspect task diagnostics.", "unavailable")
+            return unavailable()
 
     # Resolve the complete set before creating observers; no partial wait on missing ids.
     for task_id in task_ids:
-        task = registry.get(task_id)
+        task = live_tasks[task_id]
         record = None if task is not None else await read_recovered(task_id)
         if task is None and record is None:
-            raise ValueError(f"unknown task_id: {task_id}")
+            record = unavailable()
         sources.append((task_id, task, record))
     observers = {asyncio.create_task(task.done.wait()) for _, task, _ in sources if task is not None and not task.done.is_set()}
     try:
@@ -104,7 +132,7 @@ async def wait_for_tasks(
                 else:
                     fresh = await read_recovered(task_id)
                     if fresh is None:
-                        source, status, note, status_source = record[0], "unavailable", "Task record disappeared while waiting.", "unavailable"
+                        source, status, note, status_source = record[0], "unavailable", "Task metadata disappeared or became unreadable while waiting.", "unavailable"
                     else:
                         source, status, note, status_source = fresh
                     summary = None
