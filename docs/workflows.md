@@ -1484,3 +1484,4 @@ Monitor's Run Workflow sheet offers an optional multiline goal; a blank field is
 The run inspector shows the verbatim current goal, its history and assessment evidence IDs.
 **Revise goal…** is available only for an eligible Monitor-owned root checkpoint. The editor
 keeps its captured revision and text if another caller's edit causes a stale-revision error.
+Successful revisions refresh the inspector and close the editor when the new goal is displayed.
