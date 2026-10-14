@@ -886,6 +886,8 @@ async def list_tasks(
     cursor binds filters. Status is the indexed observation: inspect needs_reconciliation and
     observed_exit before interpreting it. See docs/compact-task-reads.md for supported fields,
     bounded-header matching and direct detail lookup. Listing never replays task logs.
+    When status_reconciliation_pending is true, results are incomplete: retry the same filters
+    without a cursor as directed by polling_guidance, even if has_more is false.
     """
     if any(value is not None for value in (group, title_contains, repo, since, limit, fields, cursor)):
         from .task_reads import list_tasks as compact_list

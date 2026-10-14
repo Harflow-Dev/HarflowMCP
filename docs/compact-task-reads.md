@@ -36,8 +36,17 @@ visibility, or use status reads for known tasks. Compact filters are ANDed:
 Limits are 1–100, default 50; filter strings are nonempty and at most 200 UTF-8
 bytes. Responses retain catalog readiness, incomplete-history and reconciliation
 metadata. They omit global active counts, which would be misleading for a filtered
-page. A process that ends during reconciliation can leave a short or empty page;
-follow `next_cursor` while `has_more` is true.
+page. Status filters are indexed best-effort reads: a process can end without
+changing its metadata, and identity reconciliation runs after indexed selection.
+Each request checks up to 100 selected identities plus up to 100 rotating active
+identities. If rotating checks change a status or active identities remain
+unchecked, `status_reconciliation_pending=true`, `history_incomplete=true`, and
+`counts_complete=false`; `polling_guidance` directs a retry with the same filters
+**without a cursor**. Newly matching rows may precede the old cursor. An empty
+page with `has_more=false` does not establish absence while reconciliation is
+pending. When reconciliation is settled, follow `next_cursor` while `has_more`
+is true. Large active inventories can remain pending across retries because
+every request has a bounded identity budget.
 
 Rows sort newest first by immutable catalog start time, then descending task ID.
 Pass the returned opaque `next_cursor` with the same filters. It is rejected in

@@ -1,5 +1,6 @@
 import json
 import time
+from dataclasses import replace
 
 import pytest
 
@@ -86,6 +87,46 @@ def test_maximum_unicode_filters_round_trip_cursor(tmp_path):
     with pytest.raises(ValueError, match='cursor'):
         catalog.page(no_load, limit=1, cursor=page['next_cursor'],
                      filters={**filters, 'group': 'different'})
+
+
+def test_status_filter_retries_after_unloaded_process_dies(tmp_path, monkeypatch):
+    task = replace(record('dies'), status='running', exit_code=None, pid=1234, markers=['codex'])
+    store.write(tmp_path, task)
+    alive = True
+    monkeypatch.setattr(store.identity, 'identity_check', lambda _: 'alive' if alive else 'dead')
+    assert task_reads.list_tasks(tmp_path, status='running')['items'][0]['task_id'] == 'dies'
+    original = store.record_path(tmp_path, 'dies').read_bytes()
+    monkeypatch.setattr(store, 'read', lambda *a, **k: pytest.fail('metadata read'))
+    monkeypatch.setattr(store, 'replay_log', lambda *a, **k: pytest.fail('log replay'))
+    alive = False
+    first = task_reads.list_tasks(tmp_path, status='unknown')
+    assert first['items'] == [] and not first['has_more']
+    assert first['status_reconciliation_pending'] and first['history_incomplete']
+    assert not first['counts_complete']
+    assert 'same filters without a cursor' in first['polling_guidance']
+    second = task_reads.list_tasks(tmp_path, status='unknown')
+    assert second['items'][0]['task_id'] == 'dies'
+    assert not second['status_reconciliation_pending'] and not second['history_incomplete']
+    assert store.record_path(tmp_path, 'dies').read_bytes() == original
+
+
+def test_status_filter_reports_unchecked_active_inventory(tmp_path, monkeypatch):
+    for number in range(205):
+        store.write(tmp_path, replace(record(f'live-{number:03}'), status='running',
+            exit_code=None, pid=1000 + number, markers=['codex']))
+    while store.bootstrap_catalog(tmp_path):
+        pass
+    checks = []
+    monkeypatch.setattr(store.identity, 'identity_check', lambda value: checks.append(value['pid']) or 'alive')
+    monkeypatch.setattr(store, 'read', lambda *a, **k: pytest.fail('metadata read'))
+    monkeypatch.setattr(store, 'replay_log', lambda *a, **k: pytest.fail('log replay'))
+    for _ in range(3):
+        checks.clear()
+        page = task_reads.list_tasks(tmp_path, status='unknown')
+        assert 0 < len(checks) <= 100
+        assert page['items'] == [] and not page['has_more']
+        assert page['status_reconciliation_pending'] and page['history_incomplete']
+        assert not page['counts_complete']
 
 async def test_mcp_compact_projection_and_page(tmp_path):
     from polybridge import server

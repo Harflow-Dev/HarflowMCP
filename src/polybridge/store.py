@@ -451,9 +451,12 @@ def list_page(log_dir: Path, *, limit: int = 100, cursor: str | None = None, act
         rotating = db.execute(selection + (' AND (e.stamp<? OR (e.stamp=? AND e.id<?))' if boundary else '') + suffix, (*excluded, *((boundary[0], boundary[0], boundary[1]) if boundary else ()))).fetchall()
         if not rotating and boundary is not None:
             rotating = db.execute(selection + suffix, excluded).fetchall()
+        rotating_status_changed = False
         for identifier, stamp, payload, caller in rotating:
             header = json.loads(payload)
+            previous_status = header.get('status')
             active = _project_indexed_status(header, TaskRecord(**json.loads(caller)))
+            rotating_status_changed |= header.get('status') != previous_status
             db.execute('UPDATE entries SET active=?,payload=? WHERE id=?', (int(active), json.dumps(bound_header(header), ensure_ascii=True, separators=(',', ':')), identifier))
         if rotating:
             db.execute('INSERT OR REPLACE INTO state VALUES (?,?)', ('identity_after', json.dumps([rotating[-1][1], rotating[-1][0]])))
@@ -462,6 +465,20 @@ def list_page(log_dir: Path, *, limit: int = 100, cursor: str | None = None, act
             unresolved = db.execute("SELECT COUNT(*) FROM entries WHERE active=1 AND (json_extract(payload,'$.process_identity_state') IS NULL OR json_extract(payload,'$.process_identity_state')='uncertain')" + where, values).fetchone()[0]
             page['counts_complete'] = not bool(unresolved)
             page['total_active_count'] = None if unresolved else db.execute('SELECT COUNT(*) FROM entries WHERE active=1' + where, values).fetchone()[0]
+        if filters and filters.get('status') is not None:
+            # SQL selected this page before identity reconciliation. A changed
+            # off-page row may now match anywhere before or after its cursor.
+            # Previously checked identities can die without metadata changing,
+            # so every active identity outside this request's batch is pending.
+            checked = excluded + [row[0] for row in rotating]
+            unchecked_exclusion = ' AND e.id NOT IN (' + ','.join('?' for _ in checked) + ')' if checked else ''
+            unchecked = db.execute('SELECT 1 FROM entries e JOIN callers c ON c.id=e.id WHERE e.active=1 AND c.terminal=0' + unchecked_exclusion + ' LIMIT 1', checked).fetchone()
+            pending = rotating_status_changed or unchecked is not None
+            page['status_reconciliation_pending'] = pending
+            if pending:
+                page.update(history_incomplete=True, counts_complete=False,
+                    total_active_count=None, total_active_root_count=None, total_attention_root_count=None,
+                    polling_guidance='Retry with the same filters without a cursor; status reconciliation may have changed matches outside this page.')
     page['items'] = [bound_header(item) for item in page['items']]
     related, visited = [], {item['task_id'] for item in page['items']}
     queue = [item[key] for item in page['items'] for key in ('parent_task_id', 'continuation_of_task_id', 'chain_root_task_id', 'spawned_by', 'root_task_id') if item.get(key) and item[key] not in visited]
