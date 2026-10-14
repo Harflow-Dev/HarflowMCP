@@ -34,6 +34,15 @@ def test_discard_confirms_only_removed_reservation(setup):
     assert n.discard_unstarted(setup, 'reserved') is False
 
 
+@pytest.mark.parametrize('scheme,allow_private', [('https', False), ('http', True)])
+def test_preflight_rejects_explicit_port_zero(setup, monkeypatch, scheme, allow_private):
+    monkeypatch.setenv('PB_NOTIFY_DESTINATIONS', json.dumps({
+        'test': {'url': f'{scheme}://receiver.example:0/hook', 'allow_private': allow_private}
+    }))
+    with pytest.raises(ValueError, match='notification destination unavailable or invalid'):
+        n.preflight('test')
+
+
 @pytest.mark.parametrize('change', ["state='retry'", 'attempts=1', "payload=X'01'"])
 def test_discard_retains_touched_reservation(setup, change):
     n.subscribe(setup, 'reserved', 'test', reservation=True)
@@ -421,6 +430,14 @@ def test_transport_fallback_order_deadline_and_timer_binding(monkeypatch):
     timers[0].callback()  # A timer racing cancellation must only touch its own socket.
     assert [sock.shutdowns for sock in sockets] == [1, 0]
     assert clock[0] == n.REQUEST_SECONDS / 2
+
+
+@pytest.mark.parametrize('scheme,allow_private', [('https', False), ('http', True)])
+def test_transport_preserves_explicit_port_zero(monkeypatch, scheme, allow_private):
+    config = {'url': f'{scheme}://receiver.example:0/hook', 'allow_private': allow_private}
+    monkeypatch.setattr(n, '_resolve', lambda *args: pytest.fail('invalid port reached DNS'))
+    with pytest.raises(ValueError):
+        n._deliver(config, 'id', b'{}')
 
 
 def test_transport_mixed_addresses_rejected_before_connect(monkeypatch):

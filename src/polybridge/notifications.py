@@ -52,7 +52,9 @@ def preflight(notify: str) -> dict:
             raise ValueError
         if len(url) > 2048 or any(ord(c) < 33 or ord(c) > 126 for c in url):
             raise ValueError
-        parsed.port
+        port = parsed.port
+        if port == 0:
+            raise ValueError
         secret = config.get('secret_env')
         if secret is not None and (not isinstance(secret, str) or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,127}', secret)):
             raise ValueError
@@ -225,7 +227,9 @@ class _BoundedResponse(http.client.HTTPResponse):
 def _deliver(config, identifier: str, body: bytes):
     """Resolve once per attempt, validate every address, then try numeric addresses in order."""
     parsed = urlsplit(config['url'])
-    port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+    port = parsed.port if parsed.port is not None else (443 if parsed.scheme == 'https' else 80)
+    if port == 0:
+        raise ValueError('destination port rejected')
     deadline = time.monotonic() + REQUEST_SECONDS
     addresses = _resolve(parsed.hostname, port)
     if not addresses or len(addresses) > 32:

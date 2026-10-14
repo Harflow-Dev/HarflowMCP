@@ -47,6 +47,33 @@ async def test_start_rejects_non_string_notification_url_before_spawn(configured
     assert error.value.code == -32602
 
 
+@pytest.mark.parametrize('scheme,allow_private', [('https', False), ('http', True)])
+async def test_start_rejects_port_zero_before_reservation_or_spawn(configured, monkeypatch, git_repo, fake_backend_clis, scheme, allow_private):
+    monkeypatch.setenv('PB_NOTIFY_DESTINATIONS', json.dumps({
+        'hook': {'url': f'{scheme}://receiver.example:0/hook', 'allow_private': allow_private}
+    }))
+    monkeypatch.setattr(server._reg(), 'start', lambda *a, **k: pytest.fail('spawned'))
+    monkeypatch.setattr(notifications, 'subscribe', lambda *a, **k: pytest.fail('reserved'))
+    with pytest.raises(MCPError, match='notification destination unavailable or invalid') as error:
+        await server.start_task('test', str(git_repo), backend='codex', notify='hook')
+    assert error.value.code == -32602
+
+
+@pytest.mark.parametrize('scheme,allow_private', [('https', False), ('http', True)])
+async def test_subscribe_rejects_port_zero_before_persistence(configured, monkeypatch, scheme, allow_private):
+    logs = server._reg().log_dir
+    task_id = 'port-zero-task'
+    store.write(logs, store.TaskRecord(task_id=task_id, backend='codex', session_id=None,
+        repo_path='/tmp/repo', started_at='2026-10-14T00:00:00Z'))
+    monkeypatch.setenv('PB_NOTIFY_DESTINATIONS', json.dumps({
+        'hook': {'url': f'{scheme}://receiver.example:0/hook', 'allow_private': allow_private}
+    }))
+    with pytest.raises(MCPError, match='notification destination unavailable or invalid') as error:
+        await server.subscribe(task_id, 'hook')
+    assert error.value.code == -32602
+    assert not (logs.parent / 'notifications.sqlite3').exists()
+
+
 @pytest.mark.parametrize('url', [123, 1.5, True, None, [], {}], ids=['int', 'float', 'bool', 'null', 'list', 'dict'])
 async def test_subscribe_rejects_non_string_notification_url_before_persistence(configured, monkeypatch, url):
     logs = server._reg().log_dir
