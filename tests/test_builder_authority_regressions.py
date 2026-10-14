@@ -66,6 +66,8 @@ async def test_builder_followup_with_retained_session_missing_starts_fresh(tmp_p
     assert settled['status']=='completed'
     prompt=registry.calls[0][0]
     assert 'New feedback' in prompt and 'Durable edited instruction' in prompt
+    assert w.BUILDER_AUTHORING_GUIDANCE in prompt
+    assert 'Put explicit failure/retry and success/continue conditions on arrows' not in prompt
     assert 'revision 7' in prompt
     assert settled['activations'][0]['tasks'][0]['session_mode']=='fresh'
 

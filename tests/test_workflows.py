@@ -1249,6 +1249,7 @@ async def test_builder_nonlive_feedback_drains_next_turn_same_session_without_sa
     observed = storage.get_run(run["workflow_run_id"])
     assert len(registry.calls) == 2
     assert "Make the second edit" in registry.calls[1][0]
+    assert all(w.BUILDER_AUTHORING_GUIDANCE in prompt for prompt, _ in registry.calls)
     assert "max_turns" in registry.calls[1][1]  # same-session resume path
     assert observed["generated_definition"]["description"] == "Followup"
     assert storage.get("example") == baseline
@@ -1728,6 +1729,65 @@ def test_nonnegative_canvas_positions_preserve_zero_and_large_expandable_layout(
     actual = w.validate_builder_preview(graph, "example") if preview else w.validate_definition(graph)
     assert actual["nodes"][0]["position"] == {"x": 0, "y": 0}
     assert actual["nodes"][1]["position"] == {"x": 20000, "y": 30000}
+
+
+@pytest.mark.parametrize("editing", [False, True])
+@pytest.mark.parametrize("with_repo", [False, True])
+async def test_builder_authoring_guidance_reaches_create_and_edit_dispatch(storage, tmp_path, monkeypatch, editing, with_repo):
+    monkeypatch.setattr(w, "_launch", lambda *args: None)
+    canvas = definition()
+    canvas["nodes"].append({"id": "review", "type": "agent", "role": "review", "agent": {"backend": "codex"}, "instructions": "Review the implementation evidence"})
+    canvas["connections"] = [
+        {"id": "begin", "source": "start", "target": "work"},
+        {"id": "review-work", "source": "work", "target": "review", "instructions": "Implementation ready for review"},
+        {"id": "revise", "source": "review", "target": "work", "instructions": "Review findings require revision", "max_retries": 2},
+        {"id": "finish", "source": "review", "target": "end", "instructions": "Review passed"},
+        {"id": "stop", "source": "work", "target": "end", "instructions": "Task is intentionally abandoned"},
+    ]
+    expected = w.validate_definition(canvas)
+    request = ("Refine this workflow" if editing else "Create a reviewed task") + ". Allow two retries, cap the budget at 20 transitions, configure Claude as fallback, and ask approval before implementation."
+    run = await w.build_workflow("example", request, repo_path=tmp_path if with_repo else None, agent={"backend": "codex"}, definition=canvas if editing else None, root=storage.root)
+    registry = FakeRegistry(storage.root, [json.dumps(canvas)])
+    await w.WorkflowSupervisor(registry, storage).build(run["workflow_run_id"])
+    prompt = registry.calls[0][0]
+    assert w.BUILDER_AUTHORING_GUIDANCE in prompt
+    assert request in prompt
+    for phrase in ("concise and task-specific", "runtime retries", "budget enforcement", "configured fallback dispatch", "user interaction", "End means intentional workflow termination", "needs_input", "task revision loops"):
+        assert phrase in prompt
+    assert "Put explicit failure/retry and success/continue conditions on arrows" not in prompt
+    assert "do not set a backward flag" in prompt
+    assert "caps actual traversals" in prompt
+    assert ("No user repository was supplied" in prompt) is not with_repo
+    if editing:
+        assert "Preserve existing node and connection IDs, agent settings, permissions and instructions" in prompt
+        assert json.dumps(canvas) in prompt
+    # A canned proposal establishes graph handling, not model compliance with the guidance.
+    actual = storage.get_run(run["workflow_run_id"])["generated_definition"]
+    assert actual["connections"] == expected["connections"]
+    assert [(n["id"], n.get("instructions")) for n in actual["nodes"]] == [(n["id"], n.get("instructions")) for n in expected["nodes"]]
+
+
+async def test_live_builder_feedback_is_verbatim_and_initial_session_has_guidance(storage, tmp_path, monkeypatch):
+    monkeypatch.setattr(w, "_supervisor_present", lambda r: bool(r.get("supervisor_pid")))
+    run = storage.create_run({"name": "example", "orchestrator": {"backend": "codex"}}, "Create", tmp_path, kind="builder", freedom="read_only")
+    feedback = "  Keep approval before implementation.\nPreserve the review loop.  "
+    class LiveRegistry(FakeRegistry):
+        async def start(self, prompt, repo_path, **kwargs):
+            task = await super().start(prompt, repo_path, **kwargs)
+            task.live_input = True
+            task.done.clear()
+            await w.followup_workflow_builder(run["workflow_run_id"], feedback, root=storage.root)
+            return task
+        async def send_message(self, task, text):
+            self.delivered = text
+            task.done.set()
+            return {"accepted": True}
+    registry = LiveRegistry(storage.root, [json.dumps(definition())])
+    await w.WorkflowSupervisor(registry, storage).build(run["workflow_run_id"])
+    assert len(registry.calls) == 1
+    assert w.BUILDER_AUTHORING_GUIDANCE in registry.calls[0][0]
+    assert registry.delivered == feedback
+    assert storage.get_run(run["workflow_run_id"])["status"] == "completed"
 
 
 async def test_builder_receives_canvas_geometry_and_spacing_guidance(storage, tmp_path, monkeypatch):
