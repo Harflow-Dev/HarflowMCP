@@ -114,6 +114,15 @@ def test_reject_urls(setup, monkeypatch, url):
         n.preflight('https://example.com')
 
 
+@pytest.mark.parametrize('url', [123, 1.5, True, None, [], {}], ids=['int', 'float', 'bool', 'null', 'list', 'dict'])
+def test_reject_non_string_configured_urls(setup, monkeypatch, url):
+    monkeypatch.setenv('PB_NOTIFY_DESTINATIONS', json.dumps({'test': {'url': url}}))
+    with pytest.raises(ValueError, match='notification destination unavailable or invalid') as error:
+        n.preflight('test')
+    assert 'Traceback' not in str(error.value)
+    assert str(url) not in str(error.value)
+
+
 def test_private_resolution_rejected(setup, monkeypatch):
     monkeypatch.setattr(n, '_resolve', lambda *a: [(2, 1, 6, '', ('127.0.0.1', 443))])
     with pytest.raises(ValueError, match='address rejected'):

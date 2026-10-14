@@ -37,6 +37,29 @@ async def test_failed_reservation_never_spawns(configured, monkeypatch, git_repo
         await server.start_task('test', str(git_repo), backend='codex', notify='hook')
 
 
+@pytest.mark.parametrize('url', [123, 1.5, True, None, [], {}], ids=['int', 'float', 'bool', 'null', 'list', 'dict'])
+async def test_start_rejects_non_string_notification_url_before_spawn(configured, monkeypatch, git_repo, fake_backend_clis, url):
+    monkeypatch.setenv('PB_NOTIFY_DESTINATIONS', json.dumps({'hook': {'url': url}}))
+    monkeypatch.setattr(server._reg(), 'start', lambda *a, **k: pytest.fail('spawned'))
+    monkeypatch.setattr(notifications, 'subscribe', lambda *a, **k: pytest.fail('reserved'))
+    with pytest.raises(MCPError, match='notification destination unavailable or invalid') as error:
+        await server.start_task('test', str(git_repo), backend='codex', notify='hook')
+    assert error.value.code == -32602
+
+
+@pytest.mark.parametrize('url', [123, 1.5, True, None, [], {}], ids=['int', 'float', 'bool', 'null', 'list', 'dict'])
+async def test_subscribe_rejects_non_string_notification_url_before_persistence(configured, monkeypatch, url):
+    logs = server._reg().log_dir
+    task_id = 'malformed-url-task'
+    store.write(logs, store.TaskRecord(task_id=task_id, backend='codex', session_id=None,
+        repo_path='/tmp/repo', started_at='2026-10-14T00:00:00Z'))
+    monkeypatch.setenv('PB_NOTIFY_DESTINATIONS', json.dumps({'hook': {'url': url}}))
+    with pytest.raises(MCPError, match='notification destination unavailable or invalid') as error:
+        await server.subscribe(task_id, 'hook')
+    assert error.value.code == -32602
+    assert not (logs.parent / 'notifications.sqlite3').exists()
+
+
 @pytest.mark.parametrize('method,args', [(server.subscribe, ('id', 'hook')),
     (server.unsubscribe, ('id',)), (server.get_task_notifications, ('id',))])
 async def test_delegated_caller_cannot_manage_egress(configured, monkeypatch, method, args):

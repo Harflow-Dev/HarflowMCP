@@ -7,7 +7,8 @@ Administrators configure `PB_NOTIFY_DESTINATIONS` in the server environment:
 ```
 
 Callers supply only the destination alias (`builds`), never a URL or secret. HTTPS
-and globally routable resolved addresses are required by default. The trusted
+and globally routable resolved addresses are required by default; each configured
+destination URL must be a string. The trusted
 administrator can set `allow_private: true` per destination to permit private
 addresses and HTTP, including isolated local test receivers. Treat that override
 as authority to access the configured internal service. Redirects and proxies are

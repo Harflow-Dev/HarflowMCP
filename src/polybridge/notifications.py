@@ -42,6 +42,8 @@ def preflight(notify: str) -> dict:
         if not isinstance(config, dict):
             raise ValueError
         url = config['url']
+        if not isinstance(url, str):
+            raise ValueError
         parsed = urlsplit(url)
         private = config.get('allow_private', False)
         if type(private) is not bool or not parsed.hostname or parsed.username is not None or parsed.password is not None or parsed.fragment:
