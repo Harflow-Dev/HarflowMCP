@@ -413,3 +413,61 @@ def test_v9_task_documents_preserve_usage_limit_diagnostics(home, capsys, comman
     assert document["v"] == 9
     task = document["tasks"][0] if command == "list" else document["task"]
     assert task["failure_diagnostic"] == diagnostic
+
+
+def test_compact_list_refuses_managed_callers_before_global_reads(home, monkeypatch, capsys):
+    from polybridge import task_reads, workflow_inspection
+
+    monkeypatch.setattr(workflow_inspection, 'managed_page_reader', lambda path: (True, ({}, {})))
+
+    def forbidden(*args, **kwargs):
+        pytest.fail('managed compact listing must not query or materialize global history')
+
+    monkeypatch.setattr(task_reads, 'list_tasks', forbidden)
+    monkeypatch.setattr(store, 'read', forbidden)
+    monkeypatch.setattr(store, 'list_page', forbidden)
+    assert ctl.main(['task-list-compact', '--json']) == 1
+    doc = _one_doc(capsys)
+    assert doc['v'] == 9
+    assert doc['error']['code'] == 'invalid_params'
+    assert 'direct callers' in doc['error']['message']
+    assert 'task-list-page --task-ids' in doc['error']['message']
+
+
+def test_compact_list_direct_caller_can_page_to_older_filtered_tasks(home, monkeypatch, capsys):
+    from polybridge import workflow_inspection
+
+    monkeypatch.setattr(workflow_inspection, 'managed_page_reader', lambda path: (True, None))
+    now = datetime.now(timezone.utc)
+    for index in range(4):
+        store.write(_log_dir(home), make_record(task_id=f'history-{index}',
+            started_at=_iso(now - timedelta(hours=index)), group='wanted' if index != 1 else 'other'))
+    args = ['task-list-compact', '--json', '--limit', '1', '--group', 'wanted', '--fields', 'title']
+    assert ctl.main(args) == 0
+    first = _one_doc(capsys)['result']
+    assert [item['task_id'] for item in first['items']] == ['history-0']
+    assert first['has_more'] and first['next_cursor']
+    assert ctl.main(args + ['--cursor', first['next_cursor']]) == 0
+    second = _one_doc(capsys)['result']
+    assert [item['task_id'] for item in second['items']] == ['history-2']
+    assert second['has_more'] and second['next_cursor']
+    assert ctl.main(args + ['--cursor', second['next_cursor']]) == 0
+    last = _one_doc(capsys)['result']
+    assert [item['task_id'] for item in last['items']] == ['history-3']
+    assert not last['has_more'] and last['next_cursor'] is None
+
+
+def test_compact_list_preserves_authority_preparing_response(home, monkeypatch, capsys):
+    from polybridge import task_reads, workflow_inspection
+
+    monkeypatch.setattr(workflow_inspection, 'managed_page_reader', lambda path: (False, None))
+    monkeypatch.setattr(task_reads, 'list_tasks', lambda *a, **k: pytest.fail('global query while preparing'))
+    assert ctl.main(['task-list-compact', '--json']) == 0
+    doc = _one_doc(capsys)
+    assert doc['v'] == 9
+    result = doc['result']
+    assert result['items'] == []
+    assert result['bootstrap_pending'] is True
+    assert result['catalog_state']['status'] == 'preparing'
+    assert result['counts_complete'] is False
+    assert result['next_cursor'] is None and result['has_more'] is False

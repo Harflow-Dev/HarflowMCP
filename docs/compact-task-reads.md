@@ -14,7 +14,17 @@ The projection bounds response size; obtaining a full recovered status can still
 require the existing recovery/replay work before projection.
 
 For indexed history use `polybridge-ctl task-list-compact --json --limit 50`, or
-explicit bounded listing options on the MCP tool. Filters are ANDed:
+explicit bounded listing options on the MCP `list_tasks` tool. These compact
+history listings are available only to direct callers. Once caller readiness is
+established, managed workflow callers receive an invalid-parameters error before
+any global compact history query. While caller readiness is preparing, the CLI
+retains its catalog preparation response; the MCP tool reports incomplete caller
+authority as an invalid-parameters error.
+
+Managed callers can inspect explicit known IDs with
+`polybridge-ctl task-list-page --json --task-ids TASK1,TASK2` (MCP
+`list_task_page(task_ids=["TASK1", "TASK2"])`), subject to their existing task
+visibility, or use status reads for known tasks. Compact filters are ANDed:
 
 - `--group`, `--repo`, `--status`, `--backend`: exact indexed header values.
 - `--title-contains`: case-insensitive substring (SQLite's ASCII case folding).

@@ -176,6 +176,7 @@ bounded, read-only call. Timeout and caller disconnect leave execution untouched
 Use `get_task_status(task_id, brief=true)` or
 [`list_tasks(limit=50, group="review")`](docs/compact-task-reads.md) for bounded overviews.
 Full status and the existing unpaged list remain available.
+Compact listings are for direct callers; managed workflows use scoped task reads.
 
 [`start_task(..., notify="builds")` and `subscribe`](docs/task-notifications.md) deliver bounded
 completion webhooks to administrator-configured destinations after observed durable settlement.

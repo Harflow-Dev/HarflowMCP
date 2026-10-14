@@ -92,7 +92,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     page_p.add_argument('--session-id')
     page_p.add_argument('--task-ids')
 
-    compact_p = sub.add_parser('task-list-compact', help='bounded filtered task headers (since is ISO8601)')
+    compact_p = sub.add_parser('task-list-compact', help='bounded filtered task headers for direct callers only (since is ISO8601)')
     compact_p.add_argument('--json', action='store_true')
     compact_p.add_argument('--limit', type=int, default=50)
     compact_p.add_argument('--cursor')
@@ -836,16 +836,15 @@ def _main(argv: list[str] | None = None) -> int:
     if args.command == 'task-list-compact':
         try:
             from .task_reads import list_tasks
-            from .workflow_inspection import filter_task_reads, managed_page_reader
+            from .workflow_inspection import managed_page_reader
             ready, managed = managed_page_reader(default_log_dir())
             if not ready:
                 from .workflow_inspection import page_indexing_response
                 result = page_indexing_response(default_log_dir())
             else:
-                result = list_tasks(default_log_dir(), limit=args.limit, cursor=args.cursor, fields=args.fields.split(',') if args.fields else None, **{key: getattr(args, key) for key in ('group', 'title_contains', 'repo', 'status', 'backend', 'since')})
-                result['items'] = filter_task_reads(result['items'], managed)
                 if managed is not None:
-                    result.update(next_cursor=None, has_more=False, total_active_count=None, counts_complete=False)
+                    raise ValueError('Compact task listing is available only to direct callers; managed callers should use task-list-page --task-ids with known task IDs or status reads.')
+                result = list_tasks(default_log_dir(), limit=args.limit, cursor=args.cursor, fields=args.fields.split(',') if args.fields else None, **{key: getattr(args, key) for key in ('group', 'title_contains', 'repo', 'status', 'backend', 'since')})
             print(json.dumps({'v': CTL_JSON_VERSION, 'result': result}) if args.json else json.dumps(result, indent=2))
             return 0
         except (ValueError, OSError) as exc:
