@@ -128,3 +128,47 @@ def test_discovered_interpreter_dependency_refused_before_version(tmp_path, monk
     with pytest.raises(UnsafeInvocationError, match='protected server runtime paths'):
         backend.with_extra_writable_paths(plain, normalize_paths([str(dependency)]), 'write_in_repo')
     assert calls == []
+
+
+def test_later_rpath_candidate_dependency_refused_before_version(tmp_path, monkeypatch):
+    from polybridge import backends
+    from polybridge.backends.codex import UnsafeInvocationError
+    from polybridge.extra_paths import normalize_paths
+
+    binaries = tmp_path / 'bin'
+    first = tmp_path / 'first'
+    later = tmp_path / 'later'
+    for directory in (binaries, first, later):
+        directory.mkdir()
+    dependency = image(tmp_path / 'outside.dylib')
+    wrong_arch = image(first / 'candidate.dylib')
+    data = bytearray(wrong_arch.read_bytes())
+    struct.pack_into('<I', data, 4, 0x1000007)  # x86_64 instead of synthetic arm64.
+    wrong_arch.write_bytes(data)
+    image(later / 'candidate.dylib', [str(dependency)])
+    executable = image(binaries / 'codex', ['@rpath/candidate.dylib'], [str(first), str(later)])
+    monkeypatch.setattr(runtime_paths.shutil, 'which', lambda name: str(executable) if name == 'codex' else None)
+    monkeypatch.setattr(runtime_paths.sys, 'executable', str(executable))
+    monkeypatch.setattr('polybridge.backends.codex.sys.platform', 'darwin')
+    calls = []
+    monkeypatch.setattr(backends, 'version', lambda *a, **kw: calls.append(1))
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    backend = backends.get('codex')
+    plain = backend.build_start_argv('task', repo=repo, freedom='write_in_repo', session_id=None,
+                                     model=None, max_turns=None, reasoning_effort=None)
+    with pytest.raises(UnsafeInvocationError, match='protected server runtime paths'):
+        backend.with_extra_writable_paths(plain, normalize_paths([str(dependency)]), 'write_in_repo')
+    assert calls == []
+
+
+def test_existing_unqualified_later_rpath_candidate_fails_closed(tmp_path):
+    first = tmp_path / 'first'
+    later = tmp_path / 'later'
+    first.mkdir()
+    later.mkdir()
+    image(first / 'candidate.dylib')
+    (later / 'candidate.dylib').write_bytes(b'not an image')
+    executable = image(tmp_path / 'native', ['@rpath/candidate.dylib'], [str(first), str(later)])
+    with pytest.raises(ValueError, match='unsupported runtime executable loader layout'):
+        runtime_loaders.qualify_loaders([executable])

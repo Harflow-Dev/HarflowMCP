@@ -131,10 +131,12 @@ def qualify_loaders(executables):
                 if not candidates:
                     raise ValueError('runtime loader rpath cannot be qualified')
                 files.update(candidates)  # Includes missing earlier lookup candidates.
-                selected = next((candidate for candidate in candidates if candidate.exists()), None)
-                if selected is None:
+                selected_candidates = [candidate for candidate in candidates if candidate.exists()]
+                if not selected_candidates:
                     raise ValueError('runtime loader rpath dependency is unresolved')
+                # dyld may skip an existing image for architecture/compatibility.
+                # Qualify every existing candidate instead of guessing its choice.
+                pending.extend((candidate, main, rpaths) for candidate in selected_candidates)
             else:
-                selected = expand(name)
-            pending.append((selected, main, rpaths))
+                pending.append((expand(name), main, rpaths))
     return files, roots
