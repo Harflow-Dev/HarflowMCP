@@ -135,7 +135,8 @@ def test_retry_exhaustion(setup, monkeypatch):
 @pytest.mark.parametrize('response,passes', [(b'HTTP/1.1 204 No Content\r\n\r\n', True),
     (b'HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1/secret\r\nContent-Length: 0\r\n\r\n', False),
     (b'HTTP/1.1 200 OK\r\nX-Large: ' + b'a' * 17000 + b'\r\n\r\n', False)], ids=['success', 'redirect', 'oversize'])
-def test_local_transport_signature_and_response_bounds(setup, monkeypatch, response, passes):
+@pytest.mark.parametrize('fallback', [False, True])
+def test_local_transport_signature_and_response_bounds(setup, monkeypatch, response, passes, fallback):
     import socket
     import threading
     import hashlib
@@ -146,7 +147,7 @@ def test_local_transport_signature_and_response_bounds(setup, monkeypatch, respo
     except PermissionError:
         pytest.skip('sandbox denies loopback listener')
     listener.listen(1)
-    listener.settimeout(2)
+    listener.settimeout(n.REQUEST_SECONDS + 2)
     captured = []
     def serve():
         conn, _ = listener.accept()
@@ -160,7 +161,12 @@ def test_local_transport_signature_and_response_bounds(setup, monkeypatch, respo
     thread.start()
     port = listener.getsockname()[1]
     monkeypatch.setenv('PB_NOTIFY_DESTINATIONS', json.dumps({'test': {'url': f'http://127.0.0.1:{port}/hook', 'allow_private': True, 'secret_env': 'TEST_SECRET'}}))
-    monkeypatch.setattr(n, '_resolve', lambda *a: [(2, 1, 6, '', ('127.0.0.1', port))])
+    refused = socket.socket()
+    refused.bind(('127.0.0.1', 0))  # Reserve a port without listening: connect is refused.
+    addresses = [(2, 1, 6, '', ('127.0.0.1', port))]
+    if fallback:
+        addresses.insert(0, (2, 1, 6, '', refused.getsockname()))
+    monkeypatch.setattr(n, '_resolve', lambda *a: addresses)
     try:
         if passes:
             n._deliver(n.preflight('test'), 'stable-id', b'{}')
@@ -168,12 +174,14 @@ def test_local_transport_signature_and_response_bounds(setup, monkeypatch, respo
             with pytest.raises(ValueError):
                 n._deliver(n.preflight('test'), 'stable-id', b'{}')
         thread.join(2)
+        assert len(captured) == 1
         head = captured[0].split(b'\r\n\r\n')[0].decode()
         headers = dict(line.split(': ', 1) for line in head.split('\r\n')[1:])
         signed = b'stable-id.' + headers['X-Polybridge-Timestamp'].encode() + b'.{}'
         assert headers['X-Polybridge-Signature'] == 'sha256=' + hmac.new(b'never-persist-this', signed, hashlib.sha256).hexdigest()
         assert 'never-persist-this' not in head
     finally:
+        refused.close()
         listener.close()
 
 @pytest.mark.parametrize('summary', ['猫' * 10000, '\x00' * 10000], ids=['utf8','controls'])
@@ -271,3 +279,175 @@ def test_status_database_removed_before_connect_is_not_recreated(setup, monkeypa
     monkeypatch.setattr(sqlite3, 'connect', remove_then_connect)
     assert n.status(setup, 'reserved') == []
     assert not path.exists()
+
+
+def fake_transport(monkeypatch, *, failures=(), request_error=False, response_error=False):
+    from types import SimpleNamespace
+    sockets, timers, requests = [], [], []
+    clock = [0.0]
+    class Socket:
+        def __init__(self, *args):
+            self.closed = False
+            self.shutdowns = 0
+            self.timeouts = []
+            sockets.append(self)
+        def settimeout(self, value):
+            self.timeouts.append(value)
+        def connect(self, address):
+            self.address = address
+            if len(sockets) in failures:
+                clock[0] += self.timeouts[-1]
+                raise TimeoutError('unreachable')
+        def shutdown(self, how):
+            self.shutdowns += 1
+        def close(self):
+            self.closed = True
+    class Timer:
+        def __init__(self, interval, callback):
+            self.interval, self.callback = interval, callback
+            self.cancelled = False
+            timers.append(self)
+        def start(self):
+            pass
+        def cancel(self):
+            self.cancelled = True
+    class Connection:
+        def __init__(self, host, port, timeout):
+            assert host == 'receiver.example'
+        def request(self, *args):
+            requests.append(args)
+            if request_error:
+                raise OSError('write failed')
+        def getresponse(self):
+            if response_error:
+                raise OSError('response lost')
+            return SimpleNamespace(status=204)
+        def close(self):
+            self.sock.close()
+    monkeypatch.setattr(n.socket, 'socket', Socket)
+    monkeypatch.setattr(n.threading, 'Timer', Timer)
+    monkeypatch.setattr(n.http.client, 'HTTPConnection', Connection)
+    monkeypatch.setattr(n.time, 'monotonic', lambda: clock[0])
+    return sockets, timers, requests, clock
+
+
+def transport_config():
+    return {'url': 'http://receiver.example/hook', 'allow_private': False, 'secret_env': None}
+
+
+def transport_addresses():
+    return [(n.socket.AF_INET6, 1, 6, '', ('2606:4700:4700::1111', 80, 0, 0)),
+            (n.socket.AF_INET, 1, 6, '', ('1.1.1.1', 80))]
+
+
+def test_transport_fallback_order_deadline_and_timer_binding(monkeypatch):
+    sockets, timers, requests, clock = fake_transport(monkeypatch, failures=(1,))
+    monkeypatch.setattr(n, '_resolve', lambda *args: transport_addresses())
+    n._deliver(transport_config(), 'id', b'{}')
+    assert [sock.address for sock in sockets] == [row[4] for row in transport_addresses()]
+    assert sockets[0].timeouts == [n.REQUEST_SECONDS / 2]
+    assert sockets[1].timeouts == [n.REQUEST_SECONDS / 2, n.REQUEST_SECONDS / 2]
+    assert [timer.interval for timer in timers] == [n.REQUEST_SECONDS, n.REQUEST_SECONDS / 2]
+    assert len(requests) == 1
+    assert all(sock.closed for sock in sockets)
+    assert all(timer.cancelled for timer in timers)
+    timers[0].callback()  # A timer racing cancellation must only touch its own socket.
+    assert [sock.shutdowns for sock in sockets] == [1, 0]
+    assert clock[0] == n.REQUEST_SECONDS / 2
+
+
+def test_transport_mixed_addresses_rejected_before_connect(monkeypatch):
+    sockets, _, requests, _ = fake_transport(monkeypatch)
+    monkeypatch.setattr(n, '_resolve', lambda *args: transport_addresses() + [(2, 1, 6, '', ('127.0.0.1', 80))])
+    with pytest.raises(ValueError, match='address rejected'):
+        n._deliver(transport_config(), 'id', b'{}')
+    assert sockets == requests == []
+
+
+@pytest.mark.parametrize('phase', ['request', 'response'])
+def test_transport_does_not_fallback_after_request_started(monkeypatch, phase):
+    sockets, timers, requests, _ = fake_transport(monkeypatch, request_error=phase == 'request', response_error=phase == 'response')
+    monkeypatch.setattr(n, '_resolve', lambda *args: transport_addresses())
+    with pytest.raises(OSError):
+        n._deliver(transport_config(), 'id', b'{}')
+    assert len(sockets) == len(requests) == 1
+    assert sockets[0].closed and timers[0].cancelled
+
+
+def test_transport_total_deadline_includes_resolution_and_connects(monkeypatch):
+    sockets, timers, requests, clock = fake_transport(monkeypatch, failures=(1, 2))
+    def resolve(*args):
+        clock[0] += 2
+        return transport_addresses()
+    monkeypatch.setattr(n, '_resolve', resolve)
+    with pytest.raises(TimeoutError):
+        n._deliver(transport_config(), 'id', b'{}')
+    assert [sock.timeouts for sock in sockets] == [[4], [4]]
+    assert clock[0] == n.REQUEST_SECONDS
+    assert requests == []
+    assert all(sock.closed for sock in sockets)
+    assert all(timer.cancelled for timer in timers)
+
+
+def test_transport_expired_resolution_never_connects(monkeypatch):
+    sockets, _, requests, clock = fake_transport(monkeypatch)
+    def resolve(*args):
+        clock[0] += n.REQUEST_SECONDS
+        return transport_addresses()
+    monkeypatch.setattr(n, '_resolve', resolve)
+    with pytest.raises(TimeoutError, match='deadline'):
+        n._deliver(transport_config(), 'id', b'{}')
+    assert sockets == requests == []
+
+
+def test_tls_handshake_has_bound_socket_watchdog_and_no_fallback(monkeypatch):
+    from types import SimpleNamespace
+    sockets, timers, requests, clock = fake_transport(monkeypatch)
+    monkeypatch.setattr(n, '_resolve', lambda *args: transport_addresses())
+    wrapped = SimpleNamespace(shutdowns=0, closed=False)
+    def shutdown(how):
+        wrapped.shutdowns += 1
+    def close():
+        wrapped.closed = True
+    def settimeout(value):
+        assert value == n.REQUEST_SECONDS - 2
+    def handshake():
+        timers[-1].callback()
+        assert wrapped.shutdowns == 1
+        raise n.ssl.SSLCertVerificationError('invalid certificate')
+    wrapped.shutdown, wrapped.close = shutdown, close
+    wrapped.settimeout, wrapped.do_handshake = settimeout, handshake
+    def wrap(sock, *, server_hostname, do_handshake_on_connect):
+        assert sock is sockets[0]
+        assert server_hostname == 'receiver.example'
+        assert do_handshake_on_connect is False
+        assert timers[0].cancelled
+        clock[0] += 2
+        return wrapped
+    monkeypatch.setattr(n.ssl, 'create_default_context', lambda: SimpleNamespace(wrap_socket=wrap))
+    config = transport_config() | {'url': 'https://receiver.example/hook'}
+    with pytest.raises(n.ssl.SSLCertVerificationError):
+        n._deliver(config, 'id', b'{}')
+    assert len(sockets) == 1 and requests == []
+    assert wrapped.closed and all(timer.cancelled for timer in timers)
+    assert timers[-1].interval == n.REQUEST_SECONDS - 2
+    timers[0].callback()
+    assert sockets[0].shutdowns == 1 and wrapped.shutdowns == 1
+
+
+def test_transport_falls_back_when_address_family_unavailable(monkeypatch):
+    import errno
+    sockets, _, requests, _ = fake_transport(monkeypatch)
+    original = n.socket.socket
+    families = []
+    def socket_for_family(family, kind, proto):
+        families.append(family)
+        if family == n.socket.AF_INET6:
+            raise OSError(errno.EAFNOSUPPORT, 'IPv6 unavailable')
+        return original(family, kind, proto)
+    monkeypatch.setattr(n.socket, 'socket', socket_for_family)
+    monkeypatch.setattr(n, '_resolve', lambda *args: transport_addresses())
+    n._deliver(transport_config(), 'id', b'{}')
+    assert families == [n.socket.AF_INET6, n.socket.AF_INET]
+    assert len(sockets) == len(requests) == 1
+    assert sockets[0].closed

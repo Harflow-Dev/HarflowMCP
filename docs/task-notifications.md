@@ -11,8 +11,13 @@ and globally routable resolved addresses are required by default. The trusted
 administrator can set `allow_private: true` per destination to permit private
 addresses and HTTP, including isolated local test receivers. Treat that override
 as authority to access the configured internal service. Redirects and proxies are
-not used; DNS addresses are validated on every attempt and the connection pins
-one numeric address, retaining the original TLS hostname for certificate checks.
+not used; all DNS addresses are validated before any connection on every attempt.
+Numeric addresses are tried in resolver order after TCP connection failures, sharing
+one ten-second attempt deadline (including DNS); each connection gets a share of
+the remaining time so later addresses can be tried. The connection retains the
+original TLS hostname for certificate checks and the HTTP Host header. TLS failures
+and failures after HTTP transmission begins do not try another address within the
+attempt, avoiding an additional POST to another address.
 
 Subscriptions are durable in `notifications.sqlite3` beside the tasks directory
 (mode 0600). A task and alias have one stable subscription ID during receipt retention. Repeating subscribe

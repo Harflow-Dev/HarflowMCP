@@ -185,6 +185,7 @@ Receivers deduplicate event IDs; delivery pauses while servers are down. This do
 restart-safe task supervision.
 Retained subscriptions still expire after destination configuration is removed.
 Ambiguous starts retain notification intent for inspection.
+Webhook connections try validated destination addresses within one bounded attempt.
 
 Settled task status includes a persisted best-effort `outcome`: starting and terminal Git
 observations, committed changes, local upstream comparison, and available structured build/test

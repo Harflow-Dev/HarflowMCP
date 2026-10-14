@@ -211,7 +211,7 @@ class _BoundedResponse(http.client.HTTPResponse):
 
 
 def _deliver(config, identifier: str, body: bytes):
-    """Resolve once per attempt, validate every address, connect to that numeric address."""
+    """Resolve once per attempt, validate every address, then try numeric addresses in order."""
     parsed = urlsplit(config['url'])
     port = parsed.port or (443 if parsed.scheme == 'https' else 80)
     deadline = time.monotonic() + REQUEST_SECONDS
@@ -222,23 +222,54 @@ def _deliver(config, identifier: str, body: bytes):
         ip = ipaddress.ip_address(address[0])
         if not config['allow_private'] and not ip.is_global:
             raise ValueError('destination address rejected')
-    family, kind, proto, _, address = addresses[0]
-    remaining = lambda: max(0.001, deadline - time.monotonic())
-    sock = socket.socket(family, kind, proto)
-    timer = None
-    try:
+    def remaining():
+        budget = deadline - time.monotonic()
+        if budget <= 0:
+            raise TimeoutError('delivery deadline exceeded')
+        return budget
+
+    def watchdog(target):
+        # Bind the socket: a cancelled timer may already be executing during fallback.
         def abort():
             try:
-                sock.shutdown(socket.SHUT_RDWR)
+                target.shutdown(socket.SHUT_RDWR)
             except OSError:
                 pass
         timer = threading.Timer(remaining(), abort)
         timer.daemon = True
         timer.start()
-        sock.settimeout(remaining())
-        sock.connect(tuple(address))
+        return timer
+
+    sock = None
+    timer = None
+    try:
+        for index, (family, kind, proto, _, address) in enumerate(addresses):
+            budget = remaining()
+            sock = None
+            timer = None
+            try:
+                sock = socket.socket(family, kind, proto)
+                timer = watchdog(sock)
+                # Reserve time for later validated addresses if this route blackholes.
+                sock.settimeout(budget / (len(addresses) - index))
+                sock.connect(tuple(address))
+            except OSError:
+                if timer is not None:
+                    timer.cancel()
+                if sock is not None:
+                    sock.close()
+                sock = None
+                if index == len(addresses) - 1:
+                    raise
+                continue
+            break
         if parsed.scheme == 'https':
-            sock = ssl.create_default_context().wrap_socket(sock, server_hostname=parsed.hostname)
+            timer.cancel()
+            sock = ssl.create_default_context().wrap_socket(
+                sock, server_hostname=parsed.hostname, do_handshake_on_connect=False)
+            timer = watchdog(sock)
+            sock.settimeout(remaining())
+            sock.do_handshake()
         sock.settimeout(remaining())
         timestamp = str(int(time.time()))
         headers = {'Content-Type': 'application/json', 'Content-Length': str(len(body)),
@@ -265,7 +296,8 @@ def _deliver(config, identifier: str, body: bytes):
     finally:
         if timer is not None:
             timer.cancel()
-        sock.close()
+        if sock is not None:
+            sock.close()
 
 
 def _tick(log_dir: Path):
