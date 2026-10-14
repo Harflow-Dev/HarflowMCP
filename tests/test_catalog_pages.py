@@ -1681,3 +1681,32 @@ def test_catalog_reader_waits_for_locked_cache_recovery(tmp_path, monkeypatch):
         page = reader.result(timeout=5)
     assert page['catalog_state']['status'] == 'ready'
     assert page['items'][0]['title'] == 'recovered terminal'
+
+
+@pytest.mark.parametrize('excluded', [('d', 'c'), ('d',)])
+def test_filtered_cursor_advances_past_refreshed_excluded_rows(tmp_path, excluded):
+    for identifier in ('a', 'b', 'c', 'd'):
+        store.write(tmp_path, replace(record(identifier), group='wanted'))
+    store.list_page(tmp_path)
+    # An older writer changes existing metadata without projecting the catalog.
+    # The directory namespace is unchanged, so page materialization refreshes it.
+    for identifier in excluded:
+        store.record_path(tmp_path, identifier).write_text(json.dumps(asdict(
+            replace(record(identifier), group='excluded'))))
+
+    listing = catalog.Catalog(tmp_path, store.RECORD_SUFFIX)
+    loads = []
+    def load(identifier):
+        loads.append(identifier)
+        value = store.read(tmp_path, identifier)
+        return store.listing_header(value)
+
+    first = listing.page(load, limit=2, filters={'group': 'wanted'})
+    assert [item['task_id'] for item in first['items']] == ([] if len(excluded) == 2 else ['c'])
+    assert first['has_more'] and first['next_cursor']
+    assert loads == list(excluded)
+    second = listing.page(load, limit=2, cursor=first['next_cursor'], filters={'group': 'wanted'})
+    assert [item['task_id'] for item in second['items']] == ['b', 'a']
+    assert not second['has_more'] and second['next_cursor'] is None
+    assert [item['task_id'] for item in first['items'] + second['items']] == [
+        identifier for identifier in ('d', 'c', 'b', 'a') if identifier not in excluded]
