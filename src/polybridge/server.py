@@ -315,6 +315,26 @@ async def list_backends() -> list[dict[str, Any]]:
     return await asyncio.to_thread(backends.describe_all)
 
 
+async def _notification_io(function, *args, **kwargs):
+    """Finish an off-loop notification mutation before propagating cancellation."""
+    operation = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+    try:
+        return await asyncio.shield(operation)
+    except asyncio.CancelledError:
+        # Cancelling to_thread does not stop its thread. Retain the operation until its
+        # commit is known, including when the caller cancels us again during cleanup.
+        while not operation.done():
+            try:
+                await asyncio.shield(operation)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        if not operation.cancelled():
+            operation.exception()  # Retrieve a failed mutation without masking cancellation.
+        raise
+
+
 @mcp.tool()
 async def start_task(
     prompt: str,
@@ -454,7 +474,15 @@ async def start_task(
         reserved_id = str(uuid.uuid4())
         # Commit intent before spawning so a crash cannot strand a started task without opt-in.
         try:
-            notification = await asyncio.to_thread(register, _reg().log_dir, reserved_id, notify, reservation=True)
+            notification = await _notification_io(register, _reg().log_dir, reserved_id, notify, reservation=True)
+        except asyncio.CancelledError:
+            from .notifications import discard_unstarted
+            # No dispatch has begun, and the reservation thread has finished committing.
+            try:
+                await _notification_io(discard_unstarted, _reg().log_dir, reserved_id)
+            except Exception:
+                log.warning('Notification reservation cleanup unavailable for task %s', reserved_id)
+            raise
         except Exception:
             raise MCPError(INTERNAL_ERROR, 'Notification reservation failed; no task was started') from None
     try:
@@ -472,15 +500,17 @@ async def start_task(
             auto_continue=auto_continue,
             **({'task_id': reserved_id} if reserved_id is not None else {}),
         )
-    except Exception as exc:
+    except (Exception, asyncio.CancelledError) as exc:
         if reserved_id is not None:
             from .notifications import discard_unstarted
             cleaned = False
             if getattr(exc, 'polybridge_not_started', False) is True and _reg().get(reserved_id) is None:
                 try:
-                    cleaned = await asyncio.to_thread(discard_unstarted, _reg().log_dir, reserved_id)
+                    cleaned = await _notification_io(discard_unstarted, _reg().log_dir, reserved_id)
                 except Exception:
                     log.warning('Notification reservation cleanup unavailable for task %s', reserved_id)
+            if isinstance(exc, asyncio.CancelledError):
+                raise
             if cleaned is True and _reg().get(reserved_id) is None and isinstance(exc, backends.UnsupportedCapability):
                 raise MCPError(INVALID_PARAMS, str(exc)) from None
             raise MCPError(INVALID_PARAMS, f'Dispatch did not return normally; inspect task_id {reserved_id} and its notification state before retrying') from None

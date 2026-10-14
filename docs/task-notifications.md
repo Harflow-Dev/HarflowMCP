@@ -60,8 +60,10 @@ spawning, or `subscribe(task_id, notify="builds")` for an existing task. These
 actions, `unsubscribe(task_id, notify="builds")`, and `get_task_notifications(task_id)`
 require a direct caller: delegated agents cannot use server HTTP to bypass their
 own network or publishing restrictions. Workflow notifications are unavailable.
-A known rejected start releases its unused reservation; an interrupted start may
-leave a reservation that expires after 30 days. Inspect the returned task identity
+A known rejected start releases its unused reservation. Cancellation while reserving
+waits for the reservation commit and removes the unused intent before propagating.
+After dispatch begins, cancellation only removes intent when the dispatch explicitly
+proves no process started; an uncertain start retains its reservation for up to 30 days. Inspect the returned task identity
 before retrying an uncertain dispatch.
 Capability refusals retain their specific explanation when dispatch explicitly marks
 the failure as occurring before process creation, no task is registered, and its

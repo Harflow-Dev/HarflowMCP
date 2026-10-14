@@ -2,6 +2,7 @@
 import asyncio
 import json
 import time
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -323,3 +324,95 @@ async def test_unsubscribe_absent_does_not_create_storage_or_future_worker(monke
     assert server._reg() is registry
     assert getattr(registry, '_notification_worker', None) is None
     assert not (registry.log_dir.parent / 'notifications.sqlite3').exists()
+
+
+async def test_cancel_during_reservation_waits_for_commit_then_cleans(configured, monkeypatch, git_repo, fake_backend_clis):
+    registry = server._reg()
+    entered = asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+    seen = []
+    register = notifications.subscribe
+    def blocked_register(*args, **kwargs):
+        seen.append(args[1])
+        loop.call_soon_threadsafe(entered.set)
+        assert release.wait(5)
+        return register(*args, **kwargs)
+    monkeypatch.setattr(notifications, 'subscribe', blocked_register)
+    monkeypatch.setattr(registry, 'start', lambda *a, **k: pytest.fail('spawned'))
+    pending = asyncio.create_task(server.start_task('test', str(git_repo), backend='codex', notify='hook'))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        pending.cancel()
+        await asyncio.sleep(0)
+        pending.cancel()  # A repeated cancellation cannot abandon the committing thread.
+        await asyncio.sleep(0)
+        assert not pending.done()
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    assert notifications.status(registry.log_dir, seen[0]) == []
+    assert seen[0] not in notifications.pinned_tasks(registry.log_dir)
+
+
+@pytest.mark.parametrize('marked', [True, False])
+async def test_cancel_during_start_cleans_only_proven_unstarted(configured, monkeypatch, git_repo, fake_backend_clis, marked):
+    registry = server._reg()
+    entered = asyncio.Event()
+    seen = []
+    async def interrupted_start(*args, **kwargs):
+        seen.append(kwargs['task_id'])
+        entered.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError as error:
+            if marked:
+                error.polybridge_not_started = True
+            raise
+    monkeypatch.setattr(registry, 'start', interrupted_start)
+    if not marked:
+        monkeypatch.setattr(notifications, 'discard_unstarted', lambda *a: pytest.fail('ambiguous cleanup'))
+    pending = asyncio.create_task(server.start_task('test', str(git_repo), backend='codex', notify='hook'))
+    await asyncio.wait_for(entered.wait(), 2)
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    rows = notifications.status(registry.log_dir, seen[0])
+    if marked:
+        assert rows == []
+    else:
+        assert rows[0]['state'] == 'pending'
+
+
+async def test_repeated_cancellation_waits_for_reservation_cleanup(configured, monkeypatch, git_repo, fake_backend_clis):
+    registry = server._reg()
+    entered = asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+    seen = []
+    discard = notifications.discard_unstarted
+    def blocked_discard(*args):
+        loop.call_soon_threadsafe(entered.set)
+        assert release.wait(5)
+        return discard(*args)
+    async def reject(*args, **kwargs):
+        seen.append(kwargs['task_id'])
+        error = asyncio.CancelledError()
+        error.polybridge_not_started = True
+        raise error
+    monkeypatch.setattr(registry, 'start', reject)
+    monkeypatch.setattr(notifications, 'discard_unstarted', blocked_discard)
+    pending = asyncio.create_task(server.start_task('test', str(git_repo), backend='codex', notify='hook'))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        pending.cancel()
+        await asyncio.sleep(0)
+        pending.cancel()
+        await asyncio.sleep(0)
+        assert not pending.done()
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    assert notifications.status(registry.log_dir, seen[0]) == []
