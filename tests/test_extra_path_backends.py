@@ -169,7 +169,7 @@ def test_runtime_snapshot_tracks_path_and_symlink_target(qualified, monkeypatch,
     assert qualified._extra_path_runtime() != unchanged_target
 
 
-def test_relative_path_probe_and_execution_bind_same_absolute_alias(tmp_path):
+def test_absolute_path_probe_and_execution_bind_same_absolute_alias(tmp_path):
     """Isolate cwd/PATH changes so concurrent tests retain their original environment."""
     import os
     import subprocess
@@ -202,7 +202,7 @@ registry.version = lambda backend, executable=None: subprocess.run([executable, 
 from polybridge.extra_paths import normalize_paths
 server, repo = map(Path, sys.argv[1:])
 os.chdir(server)
-os.environ['PATH'] = '.'
+os.environ['PATH'] = str(server)
 codex.sys.platform = 'darwin'
 backend = CodexBackend()
 plain = backend.build_start_argv('Task', repo=repo, freedom='write_in_repo', session_id=None, model=None, max_turns=None, reasoning_effort=None)
@@ -438,7 +438,7 @@ def test_helper_hardlinks_require_readonly_filesystem(qualified, monkeypatch, tm
         assert calls == []
 
 
-@pytest.mark.parametrize('path_entry', ['', 'helpers', 'missing'])
+@pytest.mark.parametrize('path_entry', ['', '.', 'helpers', 'missing'])
 def test_relative_and_absent_helper_namespaces(qualified, monkeypatch, tmp_path, path_entry):
     import os
     server_cwd = tmp_path / 'server'
@@ -450,9 +450,15 @@ def test_relative_and_absent_helper_namespaces(qualified, monkeypatch, tmp_path,
     repo = tmp_path / 'repo'
     repo.mkdir()
     monkeypatch.setattr(backends, 'version', lambda *args, **kwargs: pytest.fail('unsafe version probe'))
-    grant = server_cwd if path_entry != 'helpers' else helpers
-    with pytest.raises(UnsafeInvocationError, match='runtime'):
+    # No writable scope overlaps the server-relative helper directory: refusal
+    # must come from cwd ambiguity itself, not incidental namespace overlap.
+    grant = tmp_path / 'independent-grant'
+    grant.mkdir()
+    (repo / 'helpers').mkdir()
+    with pytest.raises(UnsafeInvocationError, match='absolute nonempty PATH'):
         qualified.with_extra_writable_paths(build(qualified, repo), normalize_paths([str(grant)]), 'write_in_repo')
+    plain = build(qualified, repo)
+    assert qualified.with_extra_writable_paths(plain, (), 'write_in_repo') is plain
 
 
 @pytest.mark.parametrize('root_kind', ['prefix', 'import'])

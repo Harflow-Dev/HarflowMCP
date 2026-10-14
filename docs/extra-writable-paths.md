@@ -12,11 +12,10 @@ deadline. Bounded-mode execution uses the qualified absolute executable path;
 runtime identity and path checks run again immediately before launch. The effective
 repository, scratch directory and extra grants must not overlap the selected
 launcher, its resolved executable or any intermediate symlink or lexical ancestor.
-These checks precede the version probe and repeat at final validation. Executables
+These checks precede the version probe and repeat at final validation. Every PATH entry must be absolute and nonempty: relative entries and empty segments (implicit cwd) reject extra-path requests before the version probe, since worker subprocesses run from the repository rather than the server cwd. Ordinary requests without extra grants retain existing behavior. Executables
 with multiple hardlinks are rejected even when the requested grant is elsewhere:
 this conservatively prevents writable indirect launcher aliases. The same effective authority also cannot overlap the server's
-PATH directories (including empty/relative and absent higher-priority helper
-namespaces), selected helper/backend executable chains or targets, Python prefixes,
+PATH directories (including absent higher-priority helper namespaces), selected helper/backend executable chains or targets, Python prefixes,
 import search roots or server package code. Discovered selected script containers
 (the closest `pyvenv.cfg` or `package.json` ancestor) are protected too; this
 does not certify an arbitrary script dependency graph. Bounded shebang inspection

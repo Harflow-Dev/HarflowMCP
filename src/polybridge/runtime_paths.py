@@ -51,7 +51,11 @@ def assert_runtime_outside_writes(scopes: list[tuple[Path, str]]) -> None:
     loader_executables = []
     linked_inodes = set()
     for entry in os.get_exec_path():
-        lexical = Path(entry or os.curdir).absolute()
+        # Worker subprocesses use their repository cwd. Relative/empty entries
+        # would therefore resolve differently from this server's qualification.
+        if not entry or not Path(entry).is_absolute():
+            raise ValueError('extra writable paths require absolute nonempty PATH entries')
+        lexical = Path(entry)
         chain, canonical = _chain(lexical)
         components.update(chain)
         directories.extend((lexical, canonical))
