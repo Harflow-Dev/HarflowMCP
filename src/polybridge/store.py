@@ -27,6 +27,7 @@ from . import control, events, identity
 from .backends import Accumulator
 from .backends import get as get_backend
 from .backends import resume_command
+from .extra_paths import has_extra_path_authority
 from .stream import parse_line
 
 log = logging.getLogger(__name__)
@@ -925,7 +926,7 @@ def snapshot(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
         "start_dirty": record.start_dirty,
         "outcome": record.outcome,
         "events_log": str(events.events_path(log_dir, record.task_id)),
-        "resume_command": None if record.extra_writable_paths or record.extra_path_certification else resume_command(record.backend, record.session_id, record.repo_path),
+        "resume_command": None if has_extra_path_authority(record) else resume_command(record.backend, record.session_id, record.repo_path),
         "extra_writable_paths": record.extra_writable_paths,
         "extra_path_certification": record.extra_path_certification,
         "recovered": True,

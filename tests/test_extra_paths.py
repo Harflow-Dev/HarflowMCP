@@ -90,3 +90,20 @@ def test_utf8_and_aggregate_bounds(tmp_path):
         paths.append(str(tmp_path) + '/.' * 1800 + '/' + str(index))
     with pytest.raises(ValueError, match='16384'):
         normalize_paths(paths)
+
+
+@pytest.mark.parametrize("markers,expected", [
+    ({}, False),
+    ({"extra_writable_paths": [], "extra_path_certification": None}, False),
+    ({"extra_writable_paths": {}}, True),
+    ({"extra_path_certification": False}, True),
+    ({"enforcement": {"extra_writable_paths": None}}, True),
+    ({"enforcement": {"extra_path_certification": ""}}, True),
+])
+def test_saved_authority_detection_accepts_mappings(markers, expected):
+    from types import MappingProxyType, SimpleNamespace
+    from polybridge.extra_paths import has_extra_path_authority
+    if isinstance(markers.get("enforcement"), dict):
+        markers = {**markers, "enforcement": MappingProxyType(markers["enforcement"])}
+    assert has_extra_path_authority(MappingProxyType(markers)) is expected
+    assert has_extra_path_authority(SimpleNamespace(**markers)) is expected

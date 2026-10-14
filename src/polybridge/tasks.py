@@ -32,7 +32,7 @@ from collections import deque
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 from typing import Any, Literal, NamedTuple
 
 from . import control, identity, inbox, lineage, retention, store
@@ -47,6 +47,7 @@ from .backends import (
 )
 from .backends import get as get_backend
 from .backends import resume_command
+from .extra_paths import has_extra_path_authority
 from .events import EVENTS_SUFFIX, EventLog, events_path
 from .stream import parse_line
 
@@ -758,7 +759,7 @@ class Task:
             "auto_continue": self.auto_continue,
             "output_drained": self.output_drained,
             "events_log": str(self.log_path.with_name(f"{self.task_id}{EVENTS_SUFFIX}")),
-            "resume_command": None if self.extra_writable_paths or self.extra_path_certification else resume_command(self.backend, self.session_id, self.repo_path),
+            "resume_command": None if has_extra_path_authority(self) else resume_command(self.backend, self.session_id, self.repo_path),
             "extra_writable_paths": self.extra_writable_paths,
             "extra_path_certification": self.extra_path_certification,
         }
@@ -893,14 +894,13 @@ class TaskRegistry:
         from .extra_paths import restore_paths, revalidate_paths
         grants = restore_paths(record.extra_writable_paths)
         certificate = record.extra_path_certification
-        recorded = record.enforcement if isinstance(record.enforcement, dict) else {}
-        if not grants and certificate is None and (recorded.get("extra_writable_paths") or recorded.get("extra_path_certification") is not None):
+        if not grants and certificate is None and has_extra_path_authority(record):
             raise ValueError("Saved extra writable path authority is missing")
         if grants or certificate is not None:
             expected = backend.extra_path_support().get("certification")
             if not grants or not certificate or certificate != expected:
                 raise ValueError("Saved extra writable path certification is unavailable or incompatible")
-            if not isinstance(record.enforcement, dict) or record.enforcement.get("extra_writable_paths") != record.extra_writable_paths or record.enforcement.get("extra_path_certification") != certificate:
+            if not isinstance(record.enforcement, Mapping) or record.enforcement.get("extra_writable_paths") != record.extra_writable_paths or record.enforcement.get("extra_path_certification") != certificate:
                 raise ValueError("Saved extra writable path authority disagrees with enforcement")
             revalidate_paths(grants)
         return grants
@@ -1586,7 +1586,7 @@ class TaskRegistry:
         """
         from .workflow_hooks import refuse_direct_message
         await asyncio.to_thread(refuse_direct_message, self._log_dir, task.task_id)
-        if task.extra_writable_paths or task.extra_path_certification or task.enforcement.get("extra_writable_paths") or task.enforcement.get("extra_path_certification"):
+        if has_extra_path_authority(task):
             caller = await self._mutation_caller()
             self._resolve_extra_paths(caller, None, get_backend(task.backend), task)
         if not task.live_input:
@@ -1624,7 +1624,7 @@ class TaskRegistry:
         from .workflow_hooks import refuse_direct_message
         await asyncio.to_thread(refuse_direct_message, self._log_dir, task_id)
         record = store.read(self._log_dir, task_id)
-        if record is not None and (record.extra_writable_paths or record.extra_path_certification or (record.enforcement or {}).get("extra_writable_paths") or (record.enforcement or {}).get("extra_path_certification")):
+        if record is not None and has_extra_path_authority(record):
             caller = await self._mutation_caller()
             self._resolve_extra_paths(caller, None, get_backend(record.backend), record)
         return await asyncio.to_thread(

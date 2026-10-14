@@ -9,6 +9,20 @@ from polybridge.backends.base import Invocation
 from test_registry import _TrivialBackend
 
 
+async def test_live_send_malformed_enforcement_refuses_before_inbox_mutation(tmp_path, monkeypatch, backend):
+    from unittest.mock import AsyncMock
+    registry = tasks.TaskRegistry(log_dir=tmp_path / 'logs')
+    task = SimpleNamespace(task_id='malformed-live', backend='codex', live_input=True,
+        extra_writable_paths=[], extra_path_certification=None,
+        enforcement={'extra_writable_paths': False}, chain_root_task_id=None)
+    monkeypatch.setattr(registry, '_mutation_caller', AsyncMock(return_value=None))
+    locked = AsyncMock(side_effect=AssertionError('inbox mutated before authority validation'))
+    monkeypatch.setattr(tasks.inbox, 'lock_async', locked)
+    with pytest.raises(ValueError, match='authority is missing'):
+        await registry.send_message(task, 'Follow up')
+    locked.assert_not_awaited()
+
+
 class Certified(_TrivialBackend):
     def qualify_extra_writable_paths(self, invocation, grants, freedom, network=None):
         if not invocation.extra_writable_paths:
@@ -261,3 +275,85 @@ async def test_runtime_replaced_during_bookkeeping_refuses_and_cleans_scratch(tm
         await registry._spawn(invocation, extra_path_grants=normalize_paths([str(tmp_path)]), backend=backend, prompt='Task', repo_path=tmp_path, session_id=None, freedom='write_in_repo', max_turns=None, model=None, reasoning_effort=None, task_id='worker')
     assert error.value.polybridge_not_started
     assert not scratch.directory(registry.log_dir, 'worker').exists()
+
+
+# Exercise records decoded from disk, including old records without top-level markers.
+AUTHORITY_MARKERS = [
+    {"enforcement": {"extra_writable_paths": [{"path": "/saved"}]}},
+    {"enforcement": {"extra_path_certification": "fixture-v1"}},
+    {"extra_writable_paths": {}},
+    {"extra_path_certification": False},
+    {"extra_path_certification": ""},
+    {"enforcement": False},
+    {"enforcement": []},
+    {"enforcement": {"extra_writable_paths": False}},
+    {"enforcement": {"extra_writable_paths": {}}},
+    {"enforcement": {"extra_writable_paths": None}},
+    {"enforcement": {"extra_path_certification": False}},
+    {"enforcement": {"extra_path_certification": ""}},
+]
+LEGACY_MARKERS = [{}, {"enforcement": None}, {"enforcement": {}},
+                  {"extra_writable_paths": [], "extra_path_certification": None,
+                   "enforcement": {"extra_writable_paths": [], "extra_path_certification": None}}]
+
+
+def persisted_markers(tmp_path, markers):
+    import json
+    record = store.TaskRecord(task_id="saved", backend="codex", session_id="session",
+                              repo_path=str(tmp_path), started_at="2026-01-01T00:00:00+00:00")
+    store.write_landed(tmp_path, record)
+    path = store.record_path(tmp_path, record.task_id)
+    payload = json.loads(path.read_text())
+    for key in ("extra_writable_paths", "extra_path_certification", "enforcement"):
+        payload.pop(key, None)
+    payload.update(markers)
+    path.write_text(json.dumps(payload))
+    return store.read(tmp_path, record.task_id)
+
+
+@pytest.mark.parametrize("markers,blocked", [(m, True) for m in AUTHORITY_MARKERS] + [(m, False) for m in LEGACY_MARKERS])
+def test_live_and_recovered_snapshot_saved_markers(tmp_path, monkeypatch, markers, blocked):
+    from datetime import datetime, timezone
+    record = persisted_markers(tmp_path, markers)
+    monkeypatch.setattr(store, "resume_command", lambda *args: "ordinary resume")
+    monkeypatch.setattr(tasks, "resume_command", lambda *args: "ordinary resume")
+    live = tasks.Task(task_id="saved", backend="codex", session_id="session", repo_path=tmp_path,
+                      prompt="Task", max_turns=1, log_path=tmp_path/"saved.log",
+                      started_at=datetime.now(timezone.utc), extra_writable_paths=record.extra_writable_paths,
+                      extra_path_certification=record.extra_path_certification, enforcement=record.enforcement)
+    expected = None if blocked else "ordinary resume"
+    assert live.snapshot()["resume_command"] == expected
+    assert store.snapshot(tmp_path, record)["resume_command"] == expected
+
+
+@pytest.mark.parametrize("markers", AUTHORITY_MARKERS)
+async def test_saved_markers_refuse_resume_and_takeover_before_mutation(tmp_path, monkeypatch, backend, markers):
+    record = persisted_markers(tmp_path, markers)
+    from unittest.mock import AsyncMock
+    registry = tasks.TaskRegistry(log_dir=tmp_path)
+    monkeypatch.setattr(registry, "_mutation_caller", AsyncMock(return_value=None))
+    spawn = AsyncMock()
+    monkeypatch.setattr(registry, "_spawn", spawn)
+    with pytest.raises(ValueError):
+        await registry.resume_record(record, "Continue", task_id="child")
+    spawn.assert_not_awaited()
+    monkeypatch.setattr(takeover, "_refuse_agents", lambda *args: None)
+    def mutation(*args, **kwargs):
+        raise AssertionError("authority must be checked before control mutation")
+    monkeypatch.setattr(control, "begin_takeover", mutation)
+    with pytest.raises(control.TakeoverRefused) as error:
+        await takeover.take_over(tmp_path, record.task_id, registry_factory=mutation)
+    assert error.value.code == "extra_paths_unsupported"
+    with pytest.raises(control.TakeoverRefused) as error:
+        takeover._open_attempt(tmp_path, record.task_id, {}, record.session_id)
+    assert error.value.code == "extra_paths_unsupported"
+    with pytest.raises(control.TakeoverRefused) as error:
+        takeover.attach(tmp_path, record.task_id, pid=12345)
+    assert error.value.code == "extra_paths_unsupported"
+    assert control.takeover_attempt(tmp_path, record.task_id) is None
+
+
+@pytest.mark.parametrize("markers", LEGACY_MARKERS)
+def test_legacy_saved_markers_keep_resume_authority(tmp_path, backend, markers):
+    record = persisted_markers(tmp_path, markers)
+    assert tasks.TaskRegistry(log_dir=tmp_path)._saved_extra_paths(record, backend) == ()

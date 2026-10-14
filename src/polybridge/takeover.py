@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any
 
 from . import backends, control, identity, lineage, store
+from .extra_paths import has_extra_path_authority
 
 log = logging.getLogger(__name__)
 
@@ -194,7 +195,7 @@ def _open_attempt(
         record = store.read(log_dir, task_id)
         if record is None:
             raise control.TakeoverRefused("unknown_task", f"unknown task_id: {task_id}")
-        if record.extra_writable_paths or record.extra_path_certification or (record.enforcement or {}).get("extra_writable_paths") or (record.enforcement or {}).get("extra_path_certification"):
+        if has_extra_path_authority(record):
             raise control.TakeoverRefused("extra_paths_unsupported", "Interactive takeover cannot preserve scoped extra writable paths")
         try:
             n = control.begin_takeover(
@@ -335,7 +336,7 @@ async def take_over(
     record = await asyncio.to_thread(store.read, log_dir, task_id)
     if record is None:
         raise control.TakeoverRefused("unknown_task", f"unknown task_id: {task_id}")
-    if record.extra_writable_paths or record.extra_path_certification or (record.enforcement or {}).get("extra_writable_paths") or (record.enforcement or {}).get("extra_path_certification"):
+    if has_extra_path_authority(record):
         raise control.TakeoverRefused("extra_paths_unsupported", "Interactive takeover cannot preserve scoped extra writable paths")
     from .workflow_hooks import refuse_takeover
     await asyncio.to_thread(refuse_takeover, log_dir, task_id)
@@ -445,7 +446,7 @@ def attach(
     record = store.read(log_dir, task_id)
     if record is None:
         raise control.TakeoverRefused("unknown_task", f"unknown task_id: {task_id}")
-    if record.extra_writable_paths or record.extra_path_certification or (record.enforcement or {}).get("extra_writable_paths") or (record.enforcement or {}).get("extra_path_certification"):
+    if has_extra_path_authority(record):
         raise control.TakeoverRefused("extra_paths_unsupported", "Interactive takeover cannot preserve scoped extra writable paths")
     from .workflow_hooks import refuse_takeover
     refuse_takeover(log_dir, task_id)

@@ -1,10 +1,32 @@
 """Typed, identity-checked authorization for existing writable paths."""
+from collections.abc import Mapping
 from dataclasses import dataclass, asdict
 from pathlib import Path
 import stat
 import os
 import unicodedata
 from typing import Literal
+
+
+def has_extra_path_authority(record: object) -> bool:
+    """Detect saved extra-path markers, including malformed authority, without I/O.
+
+    Only an empty list and a None certificate establish absence. Enforcement may
+    omit both markers in legacy records; malformed values must not unlock an
+    ordinary interactive resume with ambient permissions.
+    """
+    def marked(paths: object, certificate: object) -> bool:
+        return not isinstance(paths, list) or bool(paths) or certificate is not None
+
+    get = record.get if isinstance(record, Mapping) else lambda key, default: getattr(record, key, default)
+    if marked(get("extra_writable_paths", []), get("extra_path_certification", None)):
+        return True
+    enforcement = get("enforcement", None)
+    if enforcement is None:
+        return False
+    if not isinstance(enforcement, Mapping):
+        return True
+    return marked(enforcement.get("extra_writable_paths", []), enforcement.get("extra_path_certification", None))
 
 
 @dataclass(frozen=True)
