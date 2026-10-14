@@ -351,6 +351,12 @@ def child_run_record(store: Any, parent_run: dict[str, Any], activation: dict[st
         "interaction_owner": parent_run.get("interaction_owner", "caller"),
         "invocation_inputs": invocation.get("inputs", []),
     }
+    from .workflow_goals import context as goal_context
+    constraints = goal_context(parent_run, root=store.root)
+    if parent_run.get("goal") is not None:
+        child["parent_goal"] = {"workflow_run_id": parent_run["workflow_run_id"], "goal": parent_run["goal"], "revision": parent_run["goal_revision"]}
+    elif constraints.get("parent_goal"):
+        child["parent_goal"] = constraints["parent_goal"]
     if parent_run.get("owner_contracts") is not None:
         child["scheduling_policy"] = parent_run.get("scheduling_policy", "legacy")
         child["permission_policy"] = parent_run.get("permission_policy", "legacy_ceiling")

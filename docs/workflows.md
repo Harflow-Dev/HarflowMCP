@@ -1449,3 +1449,38 @@ Uncertain or dead-but-unreconciled outcomes stay explicit; verified process deat
 a failed harness result. Finish notifications wait for the reconciled outcome. Counts remain
 unknown until the relevant identities have been checked, and transient indexing preserves the
 last verified totals.
+
+### Per-run goals
+
+A workflow launch may supply `goal`, independently of its saved purpose and runtime
+request. Supplied goals are preserved verbatim, must contain non-whitespace text,
+and are limited to 64 KiB UTF-8. Omitting the goal retains the existing completion
+contract. A goal adds constraints; it never grants permissions.
+
+Run reads retain `goal`, `goal_revision`, `goal_history` and `goal_assessment`.
+Monitor retrieves the potentially large goal, history and assessment through paged
+detail views. At End, the orchestrator must explicitly assess the current revision
+as `satisfied`, `unmet` or `unverifiable`, with a reason and issued settled execution
+IDs in `evidence_refs`. A satisfied assessment requires successful execution with
+observed evidence. Unmet or unverifiable assessments await caller input; they do
+not change the harness execution status. Git outcomes alone do not certify a goal.
+
+`revise_workflow_goal(run_id, goal, expected_revision)` replaces the goal
+at a paused or awaiting-input root checkpoint, only after the complete nested run
+tree is quiescent. The original interaction owner retains control; revisions reject
+stale versions and terminal runs. An omitted original goal has revision zero.
+Revision history and completed work remain intact. Old routing assignments and
+assessments are invalidated; the next orchestrator decision must supply a nonempty
+`goal_replan` for the current revision before dispatch or completion. Nested runs
+refresh inherited goal constraints before scheduling while keeping their scoped
+requests. Design-comparison plans must identify supplied references, screens,
+states and verification criteria, and request missing references.
+
+For MCP, pass `goal` to `start_workflow`. The CLI accepts `workflow-start ... --goal`
+or `--goal-file`; revise with `workflow-revise-goal RUN_ID --goal-file goal.txt
+--expected-revision N`. File transport preserves line breaks without large argument vectors.
+
+Monitor's Run Workflow sheet offers an optional multiline goal; a blank field is omitted.
+The run inspector shows the verbatim current goal, its history and assessment evidence IDs.
+**Revise goal…** is available only for an eligible Monitor-owned root checkpoint. The editor
+keeps its captured revision and text if another caller's edit causes a stale-revision error.

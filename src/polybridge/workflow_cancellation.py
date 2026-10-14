@@ -84,6 +84,11 @@ def eligibility(store: Any, run: dict[str, Any]) -> tuple[bool, str]:
 def monitor_projection(store: Any, run: dict[str, Any]) -> dict[str, Any]:
     result = dict(run)
     result["can_cancel_from_monitor"], result["monitor_cancel_reason"] = eligibility(store, run)
+    from .workflow_goals import revision_eligibility
+    result["can_revise_goal"], result["goal_revision_reason"] = revision_eligibility(store, run)
+    if run.get("interaction_owner", "caller") != "monitor":
+        result["can_revise_goal"] = False
+        result["goal_revision_reason"] = "Workflow interaction belongs to its original caller"
     return result
 
 

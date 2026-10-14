@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from mcp import MCPError
-from pydantic import StrictBool
+from pydantic import StrictBool, StrictInt
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
 from mcp.types import INTERNAL_ERROR, INVALID_PARAMS
@@ -1081,7 +1081,7 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
                 refuse_managed(_reg().log_dir, caller.record.task_id)
             kwargs["repo_path"] = await _validate_repo_path(kwargs["repo_path"])
             return await asyncio.to_thread(workflows.preview_workflow_run, **kwargs)
-        if action in {"pause", "resume", "recover"}:
+        if action in {"pause", "resume", "recover", "revise_goal"}:
             kwargs.setdefault("interaction_owner", "caller")
         if action not in {"list", "list_runs", "list_run_page", "get_run_header", "get", "status", "inspect", "assigned_input", "detail"}:
             from .workflow_hooks import refuse_managed
@@ -1172,6 +1172,9 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
             if action == "inspect" and kwargs["run_id"] != owned_run["workflow_run_id"]:
                 raise ValueError("Orchestrators may only inspect their own workflow run")
         store_ = workflows.WorkflowStore()
+        if action == "revise_goal":
+            from .workflow_goals import revise
+            return await asyncio.to_thread(revise, store_, **kwargs)
         if action == "save":
             return await asyncio.to_thread(store_.save, kwargs["name"], kwargs["definition"], kwargs.get("expected_revision"), authority_guard=guard_tree)
         if action == "delete":
@@ -1325,7 +1328,7 @@ async def preview_workflow_run(name: str, repo_path: str, overrides: dict[str, A
 
 
 @mcp.tool()
-async def start_workflow(name: str, prompt: str, repo_path: str, overrides: dict[str, Any] | None = None, freedom: str | None = None, network: StrictBool | None = None, expected_preview_hash: str | None = None) -> dict[str, Any]:
+async def start_workflow(name: str, prompt: str, repo_path: str, overrides: dict[str, Any] | None = None, freedom: str | None = None, network: StrictBool | None = None, expected_preview_hash: str | None = None, goal: str | None = None) -> dict[str, Any]:
     """Start a durable workflow run; returns workflow_run_id rather than task_id.
 
     Preserve spaces and word boundaries in prompt rather than compressing natural prose;
@@ -1335,9 +1338,26 @@ async def start_workflow(name: str, prompt: str, repo_path: str, overrides: dict
     before the run is created, so later edits or deletes never reinterpret the
     run. Children are linked runs that share the root's harness-turn budget;
     public controls apply to the root run id only.
+
+    goal is optional nonblank text up to 64 KiB UTF-8, preserved verbatim. It complements the
+    saved purpose and request without expanding permissions. Completion requires an assessment
+    with evidence for the current goal revision; conflicts or unverifiable criteria need input.
     """
     from .workflow_responses import compact
-    return compact(await _workflow_call("start", name=name, prompt=prompt, repo_path=repo_path, overrides=overrides, freedom=freedom, network=network, expected_preview_hash=expected_preview_hash))
+    return compact(await _workflow_call("start", name=name, prompt=prompt, repo_path=repo_path, overrides=overrides, freedom=freedom, network=network, expected_preview_hash=expected_preview_hash, goal=goal))
+
+
+@mcp.tool()
+async def revise_workflow_goal(run_id: str, goal: str, expected_revision: StrictInt) -> dict[str, Any]:
+    """Revise a root run goal at a quiescent paused or awaiting-input checkpoint.
+
+    Only the run's interaction owner can revise it. Supply the current goal_revision (0 if no
+    goal exists). Stale revisions, terminal runs and active nested/parallel work are rejected.
+    The nonblank goal is preserved verbatim up to 64 KiB UTF-8. History and completed work remain;
+    previous assessments are invalidated and replanning is required before further dispatch.
+    """
+    from .workflow_responses import compact
+    return compact(await _workflow_call("revise_goal", run_id=run_id, goal=goal, expected_revision=expected_revision))
 
 
 @mcp.tool()

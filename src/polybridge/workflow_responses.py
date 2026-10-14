@@ -12,11 +12,11 @@ BUDGET = 24 * 1024
 VIEWS = {"executions": "activations", "decisions": "decisions", "checklist": "tasks", "checklist_disposition": "checklist_disposition", "technical_plan": "technical_plan", "definition": "definition", "owner_contracts": "owner_contracts", "question": "input_question", "reason": "reason", "wait_reason": "wait_reason", "checkout_wait": "checkout_wait", "summary": "summary", "failure_reason": "failure_reason", "attention_reason": "attention_reason", "builder_draft": "builder_draft", "generated_definition": "generated_definition"}
 
 
-PUBLIC_VIEWS = frozenset(VIEWS)
+PUBLIC_VIEWS = frozenset(VIEWS) | {"goal", "goal_history", "goal_assessment"}
 
 # These lossless views are fetched only when their digest changes. Executions have
 # individual identities so a new checkpoint does not resend old worker results.
-MONITOR_FIELDS = ("definition", "owner_contracts", "tasks", "checklist_disposition", "technical_plan", "decisions", "pending", "joins", "released_parallel_groups", "exhausted_retry_edges", "input_question", "orchestrator_usage_recovery", "worker_usage_recovery", "usage_recovery_history", "reason", "wait_reason", "checkout_wait", "summary", "failure_reason", "attention_reason", "builder_draft", "generated_definition", "editing_definition", "source_saved_definition", "prompt")
+MONITOR_FIELDS = ("goal", "goal_history", "goal_assessment", "definition", "owner_contracts", "tasks", "checklist_disposition", "technical_plan", "decisions", "pending", "joins", "released_parallel_groups", "exhausted_retry_edges", "input_question", "orchestrator_usage_recovery", "worker_usage_recovery", "usage_recovery_history", "reason", "wait_reason", "checkout_wait", "summary", "failure_reason", "attention_reason", "builder_draft", "generated_definition", "editing_definition", "source_saved_definition", "prompt")
 VIEWS.update({field: field for field in MONITOR_FIELDS})
 VIEWS["execution_index"] = "execution_index"
 
@@ -92,7 +92,7 @@ def history_page(runs: list[dict[str, Any]], offset: int = 0, limit: int = 100) 
 
 
 def compact(run: dict[str, Any]) -> dict[str, Any]:
-    keys = ("workflow_run_id", "name", "revision", "kind", "status", "created_at", "updated_at", "interaction_owner", "settling", "can_cancel_from_monitor", "monitor_cancel_reason", "input_decision_id", "optional_review_skip_available", "execution_contract", "draft_revision", "scheduling_policy", "preview_hash")
+    keys = ("workflow_run_id", "name", "revision", "goal_revision", "goal_replanning_required", "can_revise_goal", "goal_revision_reason", "kind", "status", "created_at", "updated_at", "interaction_owner", "settling", "can_cancel_from_monitor", "monitor_cancel_reason", "input_decision_id", "optional_review_skip_available", "execution_contract", "draft_revision", "scheduling_policy", "preview_hash")
     result = {key: run[key] for key in keys if key in run and isinstance(run[key], (str, int, float, bool, type(None)))}
     link = run.get("parent_link") or {}
     if link:

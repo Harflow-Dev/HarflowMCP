@@ -132,6 +132,9 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     run_p = sub.add_parser("run", help="start a task, owned by a detached process until it settles")
     run_p.add_argument("--backend", default=None)
     run_p.add_argument("--workflow", default=None)
+    run_goal = run_p.add_mutually_exclusive_group()
+    run_goal.add_argument("--goal", help="Optional goal when --workflow is selected")
+    run_goal.add_argument("--goal-file", help="UTF-8 goal file when --workflow is selected")
     run_p.add_argument("--monitor", action="store_true", help="Verified human Monitor workflow interaction")
     run_p.add_argument("--repo", required=True)
     run_p.add_argument("--freedom", default=None)
@@ -161,7 +164,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     edits.add_argument("--remove")
 
     workflow_parsers = []
-    for action in ("validate", "list", "list-page", "get", "save", "delete", "build", "preview", "start", "list-runs", "status", "detail", "wait", "pause", "resume", "cancel", "builder-followup", "builder-apply", "inspect", "assigned-input", "recover", "migrate", "abandon-dispatch"):
+    for action in ("validate", "list", "list-page", "get", "save", "delete", "build", "preview", "start", "list-runs", "status", "detail", "wait", "pause", "resume", "cancel", "revise-goal", "builder-followup", "builder-apply", "inspect", "assigned-input", "recover", "migrate", "abandon-dispatch"):
         wp = sub.add_parser("workflow-" + action, help=action + " workflows")
         if action in {"save", "validate"}:
             wp.description = "Workflow nodes accept child_session_policy agent_decides (default), fresh, or resume in Child orchestrator mode. Resume requires the latest completed compatible invocation in the immediate parent run and never silently starts Fresh. Current mode retains its existing session owner."
@@ -173,7 +176,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
         wp.add_argument("--json", action="store_true")
         if action in {"get", "save", "delete", "build", "preview", "start"}:
             wp.add_argument("name")
-        if action in {"status", "detail", "wait", "pause", "resume", "cancel", "builder-followup", "inspect", "assigned-input", "recover", "abandon-dispatch"}:
+        if action in {"status", "detail", "wait", "pause", "resume", "cancel", "revise-goal", "builder-followup", "inspect", "assigned-input", "recover", "abandon-dispatch"}:
             wp.add_argument("workflow_run_id")
         if action == "list":
             wp.add_argument("--monitor-view", action="store_true")
@@ -218,8 +221,14 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
             reason_group.add_argument("--reason")
             reason_group.add_argument("--reason-file", help="UTF-8 recovery reason file")
             wp.add_argument("--additional-attempts", type=int, default=0)
-        if action in {"start", "pause", "resume", "recover", "cancel"}:
+        if action in {"start", "pause", "resume", "recover", "cancel", "revise-goal"}:
             wp.add_argument("--monitor", action="store_true", help="Verified human Monitor workflow interaction")
+        if action in {"start", "revise-goal"}:
+            goal_group = wp.add_mutually_exclusive_group(required=action == "revise-goal")
+            goal_group.add_argument("--goal", help="Verbatim nonblank run goal, up to 64 KiB UTF-8")
+            goal_group.add_argument("--goal-file", help="UTF-8 run goal file, preserving spaces and line breaks")
+        if action == "revise-goal":
+            wp.add_argument("--expected-revision", type=int, required=True, help="Current goal revision, or 0 when absent")
         if action == "resume":
             wp.add_argument("--decision-id")
             wp.add_argument("--allow-optional-review-skip", action="store_true", help="Explicitly permit skipping the current eligible optional review refusal; requires its current decision ID and answer")
@@ -731,9 +740,14 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
                     source = json.loads(Path(args.source_file).read_text())
                 return await server.workflow_builder(args.name, prompt, args.repo, candidate, json.loads(args.fallbacks), definition, source)
             preview_guard = {"expected_preview_hash": args.expected_preview_hash} if getattr(args, "expected_preview_hash", None) is not None else {}
+            goal = _workflow_text(args, "goal")
             if args.monitor:
-                return await server._workflow_call("start", name=args.name, prompt=prompt, repo_path=args.repo, overrides=candidate or None, freedom=args.freedom, network=_network(args.network), interaction_owner="monitor", **preview_guard)
-            return await server._workflow_call("start", name=args.name, prompt=prompt, repo_path=args.repo, overrides=candidate or None, freedom=args.freedom, network=_network(args.network), **preview_guard)
+                return await server._workflow_call("start", name=args.name, prompt=prompt, repo_path=args.repo, overrides=candidate or None, freedom=args.freedom, network=_network(args.network), goal=goal, interaction_owner="monitor", **preview_guard)
+            return await server._workflow_call("start", name=args.name, prompt=prompt, repo_path=args.repo, overrides=candidate or None, freedom=args.freedom, network=_network(args.network), goal=goal, **preview_guard)
+        if action == "revise-goal":
+            return await server._workflow_call("revise_goal", run_id=args.workflow_run_id,
+                goal=_workflow_text(args, "goal"), expected_revision=args.expected_revision,
+                **({"interaction_owner": "monitor"} if args.monitor else {}))
         if action == "wait":
             return await server._wait_workflow_full(args.workflow_run_id, args.timeout_seconds)
         if action == "resume":
@@ -828,6 +842,8 @@ def _main(argv: list[str] | None = None) -> int:
             return _cmd_workflow(args)
         if not args.backend:
             return _fail(args, "invalid_params", "--backend is required without --workflow")
+        if args.goal is not None or args.goal_file is not None:
+            return _fail(args, "invalid_params", "--goal is available only with --workflow")
         return _cmd_detached(args, _run_action(args))
     if args.command == "resume":
         return _cmd_detached(args, _resume_action(args))
