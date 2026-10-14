@@ -62,6 +62,8 @@ class TaskRecord:
     model: str | None = None
     reasoning_effort: str | None = None
     max_turns: int | None = None
+    extra_writable_paths: list[dict[str, Any]] = field(default_factory=list)
+    extra_path_certification: str | None = None
     network: bool | None = None
     """The network request this run was dispatched with: True/False explicit, None the freedom's
     historical default. The *outcome* lives in `enforcement.network_access` — this records what
@@ -342,7 +344,7 @@ def listing_header(record: TaskRecord) -> tuple[dict[str, Any], float, bool]:
     header.update(persisted_status=record.status, observed_exit=not unobserved, needs_reconciliation=unobserved, status_reconciled=False, process_identity_state=None)
     if unobserved:
         header['status'] = 'running'
-    caller_keys = ('task_id', 'backend', 'session_id', 'repo_path', 'started_at', 'freedom', 'markers', 'pid', 'pgid', 'start_time', 'status', 'exit_code', 'root_task_id', 'parent_task_id', 'continuation_of_task_id', 'chain_root_task_id', 'spawned_by', 'depth', 'max_depth', 'network', 'owner', 'group')
+    caller_keys = ('task_id', 'backend', 'session_id', 'repo_path', 'started_at', 'freedom', 'markers', 'pid', 'pgid', 'start_time', 'status', 'exit_code', 'root_task_id', 'parent_task_id', 'continuation_of_task_id', 'chain_root_task_id', 'spawned_by', 'depth', 'max_depth', 'network', 'owner', 'group', 'extra_writable_paths', 'extra_path_certification', 'enforcement')
     header['_caller'] = {key: getattr(record, key) for key in caller_keys}
     try:
         stamp = datetime.fromisoformat(record.started_at).timestamp()
@@ -923,7 +925,9 @@ def snapshot(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
         "start_dirty": record.start_dirty,
         "outcome": record.outcome,
         "events_log": str(events.events_path(log_dir, record.task_id)),
-        "resume_command": resume_command(record.backend, record.session_id, record.repo_path),
+        "resume_command": None if record.extra_writable_paths or record.extra_path_certification else resume_command(record.backend, record.session_id, record.repo_path),
+        "extra_writable_paths": record.extra_writable_paths,
+        "extra_path_certification": record.extra_path_certification,
         "recovered": True,
         "note": note,
     } | control.taken_over_fields(log_dir, record.task_id)

@@ -75,13 +75,18 @@ def is_installed(backend: Backend) -> bool:
     return shutil.which(backend.binary) is not None
 
 
-def version(backend: Backend) -> str | None:
-    """The backend CLI's version, or None if it is absent or unresponsive."""
-    if not is_installed(backend):
+def version(backend: Backend, *, executable: str | None = None) -> str | None:
+    """The CLI version, optionally probing an already selected executable alias.
+
+    The override binds qualification to the exact binary later executed, without
+    modifying a shared backend instance or the process PATH/cwd.
+    """
+    binary = executable if executable is not None else backend.binary
+    if not (is_installed(backend) if executable is None else shutil.which(binary) is not None):
         return None
     try:
         result = subprocess.run(
-            [backend.binary, "--version"], capture_output=True, text=True, check=False, timeout=15
+            [binary, "--version"], capture_output=True, text=True, check=False, timeout=15
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -96,7 +101,7 @@ def describe(backend: Backend) -> dict[str, Any]:
         "binary": backend.binary,
         "installed": installed,
         "version": version(backend) if installed else None,
-        "capabilities": backend.capabilities.as_dict(),
+        "capabilities": {**backend.capabilities.as_dict(), "extra_writable_paths": backend.extra_path_support()},
         "freedoms": {
             freedom: backend.enforcement(freedom).as_dict()  # type: ignore[arg-type]
             for freedom in FREEDOMS

@@ -153,9 +153,20 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     run_p.add_argument("--auto-continue", type=int, default=0, help="0–10 fresh successors after certified cutoffs; standalone tasks only")
     run_p.add_argument("--reasoning-effort", default=None)
     run_p.add_argument("--network", choices=("true", "false"), default=None)
+    run_p.add_argument("--extra-writable-path", action="append", default=None,
+                       help="Existing absolute file/directory grant; repeat up to 16 times; verified harnesses only")
     run_p.add_argument("--group", default=None)
     run_p.add_argument("--title", default=None)
     run_p.add_argument("--json", action="store_true")
+
+    preview_p = sub.add_parser("permission-preview", help="validate and preview standalone permissions without launching")
+    preview_p.add_argument("--repo", required=True)
+    preview_p.add_argument("--backend", required=True)
+    preview_p.add_argument("--freedom", default=None)
+    preview_p.add_argument("--network", choices=("true", "false"), default=None)
+    preview_p.add_argument("--extra-writable-path", action="append", default=None,
+                           help="Existing absolute file/directory grant; repeat up to 16 times")
+    preview_p.add_argument("--json", action="store_true")
 
     resume_p = sub.add_parser(
         "resume", help="continue a finished task's session, owned by a detached process"
@@ -594,6 +605,7 @@ def _run_action(args: argparse.Namespace):
             group=args.group,
             title=title,
             auto_continue=args.auto_continue,
+            **({'extra_writable_paths': args.extra_writable_path} if args.extra_writable_path is not None else {}),
         )
 
     return action
@@ -816,6 +828,18 @@ def _main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
 
+    if args.command == "permission-preview":
+        from . import server
+        try:
+            result = asyncio.run(server.preview_task_permissions(
+                repo_path=args.repo, backend=args.backend, freedom=args.freedom,
+                network=_network(args.network), extra_writable_paths=args.extra_writable_path,
+            ))
+        except Exception as exc:
+            return _fail(args, "invalid_params", str(exc))
+        print(json.dumps({"v": CTL_JSON_VERSION, "result": result}) if args.json else json.dumps(result, indent=2))
+        return 0
+
     if args.command == "mcp-allowlist":
         from . import mcp_allowlist, server
         try:
@@ -882,6 +906,8 @@ def _main(argv: list[str] | None = None) -> int:
         return _cmd_takeover_attach(args)
     if args.command == "run":
         if args.workflow:
+            if args.extra_writable_path is not None:
+                return _fail(args, "invalid_params", "Extra writable paths are unavailable for workflow launches")
             if args.auto_continue:
                 return _fail(args, "invalid_params", "Workflow retries belong to their supervisor; --auto-continue is unavailable")
             if args.group is not None or args.title is not None:

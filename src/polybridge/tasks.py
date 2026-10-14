@@ -548,6 +548,8 @@ class Task:
     """The network request this task was dispatched under: True/False explicit, None the
     freedom's historical default. Kept raw rather than resolved so a resume inherits exactly
     what was asked; the resolved outcome is `enforcement.network_access`."""
+    extra_writable_paths: list[dict[str, Any]] = field(default_factory=list)
+    extra_path_certification: str | None = None
     enforcement: dict[str, Any] = field(default_factory=dict)
     # Strings guaranteed to appear in the process's command line, so a later server process can tell
     # this task's pid apart from a reused one. What identifies a run differs per backend: Claude
@@ -756,7 +758,9 @@ class Task:
             "auto_continue": self.auto_continue,
             "output_drained": self.output_drained,
             "events_log": str(self.log_path.with_name(f"{self.task_id}{EVENTS_SUFFIX}")),
-            "resume_command": resume_command(self.backend, self.session_id, self.repo_path),
+            "resume_command": None if self.extra_writable_paths or self.extra_path_certification else resume_command(self.backend, self.session_id, self.repo_path),
+            "extra_writable_paths": self.extra_writable_paths,
+            "extra_path_certification": self.extra_path_certification,
         }
         # Only meaningful when something went wrong, and usually empty otherwise.
         if self.status == "failed" and self.stderr_tail:
@@ -885,6 +889,58 @@ class TaskRegistry:
         root_task_id = caller.record.root_task_id or caller.record.task_id
         return caller.record.task_id, root_task_id, caller.record.depth + 1, parent_max_depth, caller.method
 
+    def _saved_extra_paths(self, record: Any, backend: Backend):
+        from .extra_paths import restore_paths, revalidate_paths
+        grants = restore_paths(record.extra_writable_paths)
+        certificate = record.extra_path_certification
+        recorded = record.enforcement if isinstance(record.enforcement, dict) else {}
+        if not grants and certificate is None and (recorded.get("extra_writable_paths") or recorded.get("extra_path_certification") is not None):
+            raise ValueError("Saved extra writable path authority is missing")
+        if grants or certificate is not None:
+            expected = backend.extra_path_support().get("certification")
+            if not grants or not certificate or certificate != expected:
+                raise ValueError("Saved extra writable path certification is unavailable or incompatible")
+            if not isinstance(record.enforcement, dict) or record.enforcement.get("extra_writable_paths") != record.extra_writable_paths or record.enforcement.get("extra_path_certification") != certificate:
+                raise ValueError("Saved extra writable path authority disagrees with enforcement")
+            revalidate_paths(grants)
+        return grants
+
+    def _resolve_extra_paths(self, caller: Any, request: list[str] | None, backend: Backend, source: Any = None):
+        from .extra_paths import normalize_paths, check_child_paths
+        owner = self._saved_extra_paths(caller.record, get_backend(caller.record.backend)) if caller else ()
+        if source is not None:
+            grants = self._saved_extra_paths(source, backend)
+            if source.chain_root_task_id and source.chain_root_task_id != source.task_id:
+                root = store.read(self._log_dir, source.chain_root_task_id)
+                if root is None:
+                    if grants:
+                        raise ValueError("Continuation root authority unavailable")
+                else:
+                    roots = self._saved_extra_paths(root, get_backend(root.backend))
+                    if roots and not grants:
+                        raise ValueError("Continuation cannot restore legacy ambient authority")
+                    check_child_paths(roots, grants, root.repo_path)
+            if request is not None:
+                raise ValueError("Continuations inherit saved path identities; path substitution is refused")
+        else:
+            grants = owner if request is None and caller else normalize_paths(request)
+        if caller:
+            if owner and not grants:
+                raise ValueError("An extra-path owner cannot narrow to legacy ambient write authority")
+            check_child_paths(owner, grants, Path(caller.record.repo_path))
+        return grants
+
+    async def preview_permissions(self, repo_path: Path, *, backend: Backend, freedom: str = "write_in_repo", network: bool | None = None, extra_writable_paths: list[str] | None = None) -> dict[str, Any]:
+        from .extra_paths import serialize_paths
+        caller = await self._mutation_caller()
+        grants = self._resolve_extra_paths(caller, extra_writable_paths, backend)
+        invocation = backend.build_start_argv("Permission preview", repo=repo_path, freedom=freedom, session_id=str(uuid.uuid4()) if backend.capabilities.chooses_session_id else None, model=None, max_turns=None, reasoning_effort=None, network=network)
+        invocation = await asyncio.wait_for(asyncio.to_thread(backend.qualify_extra_writable_paths, invocation, grants, freedom, network), timeout=20) if grants else invocation
+        backend.assert_extra_writable_paths(invocation, grants, freedom, network) if grants else backend.assert_safe(invocation, freedom, network)
+        enforcement = backend.extra_path_enforcement(backend.enforcement(freedom, network), grants, repo_path) if grants else backend.enforcement(freedom, network)
+        self._resolve_lineage(caller, child_enforcement=enforcement, child_backend=backend.name, child_repo=repo_path)
+        return {"backend": backend.name, "freedom": freedom, "network": network, "repo_path": str(repo_path), "extra_writable_paths": serialize_paths(grants), "extra_path_certification": backend.extra_path_support().get("certification") if grants else None, "enforcement": enforcement.as_dict(), "limitations": "Existing typed path identities are checked before launch; grants are unavailable to native workflows and interactive takeover."}
+
     async def start(
         self,
         prompt: str,
@@ -905,6 +961,7 @@ class TaskRegistry:
         continuation_of_task_id: str | None = None,
         chain_root_task_id: str | None = None,
         chain_prompt: str | None = None,
+        extra_writable_paths: list[str] | None = None,
     ) -> Task:
         """Dispatch a fresh session. Returns once the subprocess exists, not once it finishes."""
         with _before_spawn():
@@ -912,6 +969,15 @@ class TaskRegistry:
             validate_budget(auto_continue)
             if auto_continue and not backend.capabilities.supports_auto_continue:
                 raise ValueError(f"{backend.name} has no certified automatic continuation cutoff; use explicit continue_task")
+            caller = await self._mutation_caller()
+            source = store.read(self._log_dir, continuation_of_task_id) if continuation_of_task_id is not None else None
+            if continuation_of_task_id is not None and source is None:
+                raise ValueError("Continuation source unavailable")
+            if source is not None and (source.backend != backend.name or source.freedom != freedom or source.network != network or Path(source.repo_path) != repo_path or source.model != model or source.reasoning_effort != reasoning_effort):
+                raise ValueError("Continuation settings must match saved source authority")
+            grants = self._resolve_extra_paths(caller, extra_writable_paths, backend, source)
+            if grants and workflow_builder:
+                raise ValueError("Extra writable paths are unavailable to workflow builders")
             # Only some backends let us name the session up front. Where we can, knowing it immediately
             # means a resume works even if the run dies before saying anything.
             session_id = str(uuid.uuid4()) if backend.capabilities.chooses_session_id else None
@@ -926,10 +992,9 @@ class TaskRegistry:
                 network=network,
             )
 
-            caller = await self._mutation_caller()
             spawned_by, root_task_id, depth, max_depth, lineage_detected = self._resolve_lineage(
                 caller,
-                child_enforcement=backend.enforcement(freedom, network),  # type: ignore[arg-type]
+                child_enforcement=backend.extra_path_enforcement(backend.enforcement(freedom, network), grants, repo_path) if grants else backend.enforcement(freedom, network),  # type: ignore[arg-type]
                 child_backend=backend.name,
                 child_repo=repo_path,
             )
@@ -946,6 +1011,7 @@ class TaskRegistry:
 
         return await self._spawn(
             invocation,
+            extra_path_grants=grants,
             backend=backend,
             prompt=prompt,
             display_prompt=display_prompt,
@@ -1008,9 +1074,12 @@ class TaskRegistry:
         # Caller detection and the nested-dispatch caps run before the session lock — they are
         # read-only and must never block on, or be blocked by, another resume of this session.
         caller = await self._mutation_caller()
+        grants = self._resolve_extra_paths(caller, None, backend, parent)
+        if grants and (native_subagent or workflow_builder):
+            raise ValueError("Extra writable paths are unavailable to native workflows or workflow builders")
         spawned_by, root_task_id, depth, max_depth, lineage_detected = self._resolve_lineage(
             caller,
-            child_enforcement=backend.enforcement(parent.freedom, effective_network),  # type: ignore[arg-type]
+            child_enforcement=backend.extra_path_enforcement(backend.enforcement(parent.freedom, effective_network), grants, parent.repo_path) if grants else backend.enforcement(parent.freedom, effective_network),  # type: ignore[arg-type]
             child_backend=backend.name,
             child_repo=parent.repo_path,
         )
@@ -1072,6 +1141,7 @@ class TaskRegistry:
                         raise
                 return await self._spawn(
                     invocation,
+                    extra_path_grants=grants,
                     backend=backend,
                     prompt=followup_prompt,
                     display_prompt=display_prompt,
@@ -1104,6 +1174,7 @@ class TaskRegistry:
         self,
         invocation: Invocation,
         *,
+        extra_path_grants: tuple = (),
         backend: Backend,
         prompt: str,
         repo_path: Path,
@@ -1143,7 +1214,19 @@ class TaskRegistry:
         # antigravity run, is live). Classic runs use DEVNULL or a backend-validated one-shot
         # prompt pipe which closes immediately at EOF, without a live-input pump.
         with _before_spawn():
-            backend.assert_safe(invocation, freedom, network)  # type: ignore[arg-type]
+            if extra_path_grants or invocation.extra_writable_paths:
+                # Version probes can block for seconds. Qualify once per execution off loop,
+                # even for externally supplied invocations, before allocating scratch. Final
+                # backend validation below is synchronous and rechecks runtime identity only.
+                invocation = await asyncio.wait_for(
+                    asyncio.to_thread(backend.qualify_extra_writable_paths, invocation, extra_path_grants, freedom, network),
+                    timeout=20,
+                )
+                backend.assert_extra_writable_paths(invocation, extra_path_grants, freedom, network)
+            else:
+                backend.assert_safe(invocation, freedom, network)
+            if extra_path_grants and workflow_builder:
+                raise ValueError("Extra writable paths are unavailable to workflow builders")
 
             task_id = store.validate_task_id(task_id) if task_id else str(uuid.uuid4())
             if self.get(task_id) is not None or store.read(self._log_dir, task_id) is not None:
@@ -1162,6 +1245,8 @@ class TaskRegistry:
             # below guards. One computation serves the notice, the Task, and the record, so all
             # three describe the same (freedom, network) pair.
             enforcement = backend.enforcement(freedom, network)  # type: ignore[arg-type]
+            if extra_path_grants:
+                enforcement = backend.extra_path_enforcement(enforcement, extra_path_grants, repo_path)
 
             # Before the spawn, deliberately. Between `create_subprocess_exec` and the registration
             # below there must be no await at all: one there could be cancelled — a client
@@ -1228,6 +1313,8 @@ class TaskRegistry:
                         invocation = writable(invocation, task_scratch, freedom)
                         backend.assert_safe(invocation, freedom, network)
                         enforcement = replace(enforcement, writable_roots=(*enforcement.writable_roots, str(task_scratch)))
+                if extra_path_grants or invocation.extra_writable_paths:
+                    backend.assert_extra_writable_paths(invocation, extra_path_grants, freedom, network)
             except BaseException:
                 if task_scratch is not None:
                     try:
@@ -1274,6 +1361,7 @@ class TaskRegistry:
                     log.exception("task %s: could not clean scratch after failed exec", task_id)
             raise
 
+        from .extra_paths import serialize_paths
         task = Task(
             task_id=task_id,
             backend=backend.name,
@@ -1294,6 +1382,8 @@ class TaskRegistry:
             chain_prompt=chain_prompt,
             freedom=freedom,
             network=network,
+            extra_writable_paths=serialize_paths(extra_path_grants),
+            extra_path_certification=backend.extra_path_support().get("certification") if extra_path_grants else None,
             enforcement=enforcement.as_dict(),
             markers=_identity_markers(backend, session_id, repo_path),
             proc=proc,
@@ -1495,6 +1585,9 @@ class TaskRegistry:
         """
         from .workflow_hooks import refuse_direct_message
         await asyncio.to_thread(refuse_direct_message, self._log_dir, task.task_id)
+        if task.extra_writable_paths or task.extra_path_certification or task.enforcement.get("extra_writable_paths") or task.enforcement.get("extra_path_certification"):
+            caller = await self._mutation_caller()
+            self._resolve_extra_paths(caller, None, get_backend(task.backend), task)
         if not task.live_input:
             raise inbox.SendRefused(
                 f"task {task.task_id} was not started with live input, so it cannot take a message "
@@ -1527,6 +1620,12 @@ class TaskRegistry:
 
     async def send_to_record(self, task_id: str, text: str) -> dict[str, Any]:
         """Queue `text` for a live-input task another server owns, via its on-disk inbox."""
+        from .workflow_hooks import refuse_direct_message
+        await asyncio.to_thread(refuse_direct_message, self._log_dir, task_id)
+        record = store.read(self._log_dir, task_id)
+        if record is not None and (record.extra_writable_paths or record.extra_path_certification or (record.enforcement or {}).get("extra_writable_paths") or (record.enforcement or {}).get("extra_path_certification")):
+            caller = await self._mutation_caller()
+            self._resolve_extra_paths(caller, None, get_backend(record.backend), record)
         return await asyncio.to_thread(
             inbox.send_to_record, self._log_dir, task_id, text, by=self._owner
         )
@@ -1958,6 +2057,8 @@ class TaskRegistry:
                 status=task.status,
                 exit_code=task.exit_code,
                 finished_at=task.finished_at.isoformat() if task.finished_at else None,
+                extra_writable_paths=task.extra_writable_paths,
+                extra_path_certification=task.extra_path_certification,
                 enforcement=dict(task.enforcement),
                 bridge_notices=list(task.bridge_notices),
                 start_time=task.start_time,
@@ -2815,9 +2916,12 @@ class TaskRegistry:
 
         # Same ordering as `resume`: caller detection and the caps run before the session lock.
         caller = await self._mutation_caller()
+        grants = self._resolve_extra_paths(caller, None, backend, record)
+        if grants and (native_subagent or workflow_builder):
+            raise ValueError("Extra writable paths are unavailable to native workflows or workflow builders")
         spawned_by, root_task_id, depth, max_depth, lineage_detected = self._resolve_lineage(
             caller,
-            child_enforcement=backend.enforcement(record.freedom, effective_network),  # type: ignore[arg-type]
+            child_enforcement=backend.extra_path_enforcement(backend.enforcement(record.freedom, effective_network), grants, repo_path) if grants else backend.enforcement(record.freedom, effective_network),  # type: ignore[arg-type]
             child_backend=backend.name,
             child_repo=repo_path,
         )
@@ -2874,6 +2978,7 @@ class TaskRegistry:
                         raise
                 return await self._spawn(
                     invocation,
+                    extra_path_grants=grants,
                     backend=backend,
                     prompt=followup_prompt,
                     display_prompt=display_prompt,

@@ -194,6 +194,8 @@ def _open_attempt(
         record = store.read(log_dir, task_id)
         if record is None:
             raise control.TakeoverRefused("unknown_task", f"unknown task_id: {task_id}")
+        if record.extra_writable_paths or record.extra_path_certification or (record.enforcement or {}).get("extra_writable_paths") or (record.enforcement or {}).get("extra_path_certification"):
+            raise control.TakeoverRefused("extra_paths_unsupported", "Interactive takeover cannot preserve scoped extra writable paths")
         try:
             n = control.begin_takeover(
                 log_dir, task_id, controller=controller, session_id=session_id
@@ -333,6 +335,8 @@ async def take_over(
     record = await asyncio.to_thread(store.read, log_dir, task_id)
     if record is None:
         raise control.TakeoverRefused("unknown_task", f"unknown task_id: {task_id}")
+    if record.extra_writable_paths or record.extra_path_certification or (record.enforcement or {}).get("extra_writable_paths") or (record.enforcement or {}).get("extra_path_certification"):
+        raise control.TakeoverRefused("extra_paths_unsupported", "Interactive takeover cannot preserve scoped extra writable paths")
     from .workflow_hooks import refuse_takeover
     await asyncio.to_thread(refuse_takeover, log_dir, task_id)
     controller = await asyncio.to_thread(identity.own_identity)
@@ -441,6 +445,8 @@ def attach(
     record = store.read(log_dir, task_id)
     if record is None:
         raise control.TakeoverRefused("unknown_task", f"unknown task_id: {task_id}")
+    if record.extra_writable_paths or record.extra_path_certification or (record.enforcement or {}).get("extra_writable_paths") or (record.enforcement or {}).get("extra_path_certification"):
+        raise control.TakeoverRefused("extra_paths_unsupported", "Interactive takeover cannot preserve scoped extra writable paths")
     from .workflow_hooks import refuse_takeover
     refuse_takeover(log_dir, task_id)
     if not record.session_id:

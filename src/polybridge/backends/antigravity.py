@@ -60,6 +60,7 @@ from .base import (
     Accumulator,
     Capabilities,
     Enforcement,
+    ExtraPathsUnsupported,
     Freedom,
     Invocation,
     NetworkControl,
@@ -289,7 +290,7 @@ def _tool_command(parameters: dict[str, Any]) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-class AntigravityBackend:
+class AntigravityBackend(ExtraPathsUnsupported):
     @staticmethod
     def workflow_stderr_blocks_availability_failure(diagnostic: str) -> bool:
         from .workflow_diagnostics import stderr_blocks_availability
@@ -503,6 +504,8 @@ class AntigravityBackend:
     def assert_safe(
         self, invocation: Invocation, freedom: Freedom, network: bool | None = None
     ) -> None:
+        if isinstance(invocation, Invocation) and invocation.extra_writable_paths:
+            raise UnsupportedCapability("bounded extra writable paths are not certified for this backend")
         # Rejects an unknown freedom outright rather than letting MODES[freedom] raise a bare
         # KeyError below. The network request is validated here too — this is the final execution
         # seam, so an unhonourable request must fail loudly even if every earlier check was

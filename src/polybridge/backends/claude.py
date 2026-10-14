@@ -73,6 +73,8 @@ from .base import (
     Accumulator,
     Capabilities,
     Enforcement,
+    ExtraPathsUnsupported,
+    UnsupportedCapability,
     STDIN_DEVNULL,
     STDIN_PIPE,
     Freedom,
@@ -316,7 +318,7 @@ class UnsafeInvocationError(RuntimeError):
     """An argv was assembled without this backend's required guarantees."""
 
 
-class ClaudeBackend:
+class ClaudeBackend(ExtraPathsUnsupported):
     @staticmethod
     def workflow_observed_metadata(snapshot: dict[str, Any]) -> dict[str, Any] | None:
         path = snapshot.get("raw_stream_log")
@@ -569,6 +571,8 @@ class ClaudeBackend:
     def assert_safe(
         self, invocation: Invocation, freedom: Freedom, network: bool | None = None
     ) -> None:
+        if isinstance(invocation, Invocation) and invocation.extra_writable_paths:
+            raise UnsupportedCapability("bounded extra writable paths are not certified for this backend")
         # Rejects an unknown freedom outright rather than letting PERMISSION_MODES[freedom] raise a
         # bare KeyError below. The network request is validated here too — this is the final
         # execution seam, so an unhonourable request must fail loudly even if every earlier check

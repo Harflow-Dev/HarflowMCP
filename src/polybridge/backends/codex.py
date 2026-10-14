@@ -65,6 +65,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import os
+import sys
 import tomllib
 
 from pathlib import Path
@@ -77,6 +78,7 @@ from .base import (
     Accumulator,
     Capabilities,
     Enforcement,
+    ExtraPathsUnsupported,
     Freedom,
     Invocation,
     NetworkControl,
@@ -91,6 +93,14 @@ from .base import (
 )
 
 BINARY = "codex"
+EXTRA_PATHS_VERSION = "codex-cli 0.162.0-alpha.17.2"
+EXTRA_PATHS_CERTIFICATION = "codex-macos-0.162.0-alpha.17.2-bounded-paths-v1"
+EXTRA_PATH_PAIRS = (
+    "sandbox_workspace_write.writable_roots=[]",
+    "sandbox_workspace_write.exclude_slash_tmp=true",
+    "sandbox_workspace_write.exclude_tmpdir_env_var=true",
+)
+
 
 SANDBOX_MODES: dict[str, str] = {
     "read_only": "read-only",
@@ -259,7 +269,7 @@ class UnsafeInvocationError(RuntimeError):
     """An argv was assembled without this backend's required guarantees."""
 
 
-class CodexBackend:
+class CodexBackend(ExtraPathsUnsupported):
     @staticmethod
     def workflow_stderr_blocks_availability_failure(diagnostic: str) -> bool:
         from .workflow_diagnostics import stderr_blocks_availability
@@ -346,6 +356,99 @@ class CodexBackend:
         from .codex_native import CodexNativeAdapter
         return CodexNativeAdapter()
 
+    def extra_path_support(self) -> dict[str, Any]:
+        return {"supported": True, "platforms": ["darwin"], "versions": [EXTRA_PATHS_VERSION],
+                "freedoms": ["write_in_repo", "publish"], "network": [False, True],
+                "native_subagent": False, "certification": EXTRA_PATHS_CERTIFICATION}
+
+    def _extra_path_runtime(self):
+        import shutil
+        selected = shutil.which(self.binary)
+        if selected is None:
+            raise UnsupportedCapability("extra writable paths require an installed certified CLI")
+        selected = Path(selected).absolute()
+        resolved = selected.resolve(strict=True)
+        link = selected.lstat()
+        target = resolved.stat()
+        return (str(selected), str(resolved), link.st_dev, link.st_ino,
+                link.st_mtime_ns, link.st_size, target.st_dev, target.st_ino,
+                target.st_mtime_ns, target.st_size)
+
+    def _validate_extra_paths(self, invocation, grants, freedom, network):
+        from ..extra_paths import revalidate_paths
+        if freedom not in ("write_in_repo", "publish") or invocation.native_subagent:
+            raise UnsupportedCapability("extra writable paths require a plain bounded workspace-write invocation")
+        self._resolve_network(freedom, network)
+        if sys.platform != "darwin":
+            raise UnsupportedCapability("extra writable paths require macOS and " + EXTRA_PATHS_VERSION)
+        revalidate_paths(grants)
+
+    def qualify_extra_writable_paths(self, invocation, grants, freedom, network=None):
+        """Fresh qualification per request; callers run this bounded probe off the event loop."""
+        if not grants:
+            self.assert_extra_writable_paths(invocation, grants, freedom, network)
+            return invocation
+        if invocation.extra_writable_paths and invocation.extra_writable_paths != tuple(g.path for g in grants):
+            raise UnsafeInvocationError("invocation extra writable paths differ from authorized grants")
+        from . import version
+        self._validate_extra_paths(invocation, grants, freedom, network)
+        self.assert_safe(invocation, freedom, network)
+        before = self._extra_path_runtime()
+        # Probe and execute the same PATH-selected absolute alias. A relative PATH
+        # entry would otherwise select a different binary under the agent repo cwd.
+        if version(self, executable=before[0]) != EXTRA_PATHS_VERSION:
+            raise UnsupportedCapability("extra writable paths require macOS and " + EXTRA_PATHS_VERSION)
+        if before != self._extra_path_runtime():
+            raise UnsafeInvocationError("CLI runtime identity changed during qualification")
+        invocation = replace(invocation, extra_path_runtime=before)
+        if not invocation.extra_writable_paths:
+            invocation = self._decorate_extra_paths(invocation, grants, freedom, network)
+        self.assert_extra_writable_paths(invocation, grants, freedom, network)
+        return invocation
+
+    def with_extra_writable_paths(self, invocation, grants, freedom, network=None):
+        if not grants:
+            return invocation
+        return self.qualify_extra_writable_paths(invocation, grants, freedom, network)
+
+    def _decorate_extra_paths(self, invocation, grants, freedom, network):
+        if invocation.extra_writable_paths:
+            raise ValueError("invocation already has extra writable paths")
+        self.assert_safe(invocation, freedom, network)
+        argv = list(invocation.argv)
+        index = argv.index("--")
+        if argv[index - 1] == "resume":
+            index -= 1
+        additions = [part for pair in EXTRA_PATH_PAIRS for part in ("-c", pair)]
+        additions += [part for grant in grants for part in ("--add-dir", grant.path)]
+        argv[index:index] = additions
+        argv[0] = invocation.extra_path_runtime[0]
+        result = replace(invocation, argv=argv, extra_writable_paths=tuple(g.path for g in grants))
+        self.assert_extra_writable_paths(result, grants, freedom, network)
+        return result
+
+    def assert_extra_writable_paths(self, invocation, grants, freedom, network=None):
+        if tuple(g.path for g in grants) != invocation.extra_writable_paths:
+            raise UnsafeInvocationError("invocation extra writable paths differ from authorized grants")
+        if grants:
+            self._validate_extra_paths(invocation, grants, freedom, network)
+            if invocation.extra_path_runtime != self._extra_path_runtime():
+                raise UnsafeInvocationError("CLI runtime identity changed or was not qualified")
+        self.assert_safe(invocation, freedom, network)
+
+    def extra_path_enforcement(self, enforcement, grants, repo):
+        if not grants:
+            return enforcement
+        from ..extra_paths import serialize_paths
+        if enforcement.freedom not in ("write_in_repo", "publish"):
+            raise UnsupportedCapability("extra writable paths require bounded workspace-write")
+        caveats = tuple(c for c in enforcement.caveats if "temporary directories" not in c)
+        return replace(enforcement, writable_roots=("the working directory", *(g.path for g in grants)),
+                       extra_writable_paths=tuple(serialize_paths(grants)),
+                       extra_path_certification=EXTRA_PATHS_CERTIFICATION,
+                       mechanism=enforcement.mechanism + "; bounded extra writable paths; ambient and implicit temporary roots excluded",
+                       caveats=caveats + ("Existing files are pathname grants; identity changes prevent later reuse. Ordinary CLI children inherit the bounded sandbox.",))
+
     def with_writable_directory(self, invocation: Invocation, path: Path, freedom: Freedom) -> Invocation:
         if freedom == "read_only":
             raise ValueError("read-only tasks cannot receive a writable scratch directory")
@@ -357,6 +460,8 @@ class CodexBackend:
         index = argv.index("--") if "--" in argv else len(argv)
         if index and argv[index - 1] == "resume":
             index -= 1
+        if invocation.extra_writable_paths:
+            index = argv.index("--add-dir")
         argv[index:index] = ["--add-dir", directory]
         return replace(invocation, argv=argv, scratch_directory=directory)
 
@@ -477,6 +582,8 @@ class CodexBackend:
     def assert_safe(
         self, invocation: Invocation, freedom: Freedom, network: bool | None = None
     ) -> None:
+        if isinstance(invocation, Invocation) and invocation.native_subagent and invocation.extra_writable_paths:
+            raise UnsupportedCapability("native adapter extra writable paths are not certified")
         if isinstance(invocation, Invocation) and invocation.native_subagent:
             from .codex_native import validate_native
             invocation = validate_native(invocation, freedom)
@@ -497,7 +604,13 @@ class CodexBackend:
         # must be refused here just as it is in the builders, never waved through.
         check_freedom(freedom)
         resolved = self._resolve_network(freedom, network)
-        if argv[:2] != [BINARY, "exec"]:
+        executable = BINARY
+        if invocation.extra_writable_paths:
+            runtime = invocation.extra_path_runtime
+            if not runtime or not isinstance(runtime[0], str) or not Path(runtime[0]).is_absolute():
+                raise UnsafeInvocationError("extra writable paths require a qualified absolute executable")
+            executable = runtime[0]
+        if argv[:2] != [executable, "exec"]:
             raise UnsafeInvocationError(f"unrecognised codex argv layout: {argv!r}")
 
         # Only the option region is inspected. Everything after `--` is positional — prompt text
@@ -524,8 +637,10 @@ class CodexBackend:
                 "backend's main safety property"
             )
 
-        seen, is_resume = self._parse_options(options, argv)
-        expected_directories = [invocation.scratch_directory] if invocation.scratch_directory else []
+        seen, is_resume = self._parse_options(options, argv, bool(invocation.extra_writable_paths))
+        expected_directories = ([invocation.scratch_directory] if invocation.scratch_directory else []) + list(invocation.extra_writable_paths)
+        if invocation.extra_writable_paths and freedom not in ("write_in_repo", "publish"):
+            raise UnsafeInvocationError("extra writable paths require bounded workspace-write")
         if seen.get("--add-dir", []) != expected_directories or (expected_directories and freedom == "read_only"):
             raise UnsafeInvocationError("additional directory must match this invocation's writable scratch directory")
 
@@ -628,13 +743,17 @@ class CodexBackend:
                 f"the user's own config rather than this run: found {disables!r}: {argv!r}"
             )
 
-        overrides_with_own_checks = {NEVER_ASK[1], NETWORK_ENABLE_PAIR, NETWORK_DISABLE_PAIR}
+        for pair in EXTRA_PATH_PAIRS:
+            expected_pairs = [pair] if invocation.extra_writable_paths else []
+            if [value for value in pairs if value == pair] != expected_pairs:
+                raise UnsafeInvocationError("bounded extra paths require exactly the pinned sandbox overrides")
+        overrides_with_own_checks = {NEVER_ASK[1], NETWORK_ENABLE_PAIR, NETWORK_DISABLE_PAIR, *EXTRA_PATH_PAIRS}
         efforts = [pair for pair in pairs if pair not in overrides_with_own_checks]
         if len(efforts) > 1:
             raise UnsafeInvocationError(f"expected at most one {EFFORT_KEY} override: {argv!r}")
 
     @staticmethod
-    def _parse_options(options: list[str], argv: list[str]) -> tuple[dict[str, list[str]], bool]:
+    def _parse_options(options: list[str], argv: list[str], extra_paths: bool = False) -> tuple[dict[str, list[str]], bool]:
         """Walk the option region strictly, refusing any token this backend would not have written.
 
         Mirrors OpencodeBackend._parse_options and exists for the same reason: searching for
@@ -682,7 +801,7 @@ class CodexBackend:
                     # outright rather than silently dropped from `seen`, which would let it slip
                     # past every check below unexamined.
                     raise UnsafeInvocationError(f"-c/--config pair has no '=': {value!r}: {argv!r}")
-                if value not in PERMITTED_C_PAIRS:
+                if value not in PERMITTED_C_PAIRS and not (extra_paths and value in EXTRA_PATH_PAIRS):
                     raise UnsafeInvocationError(f"unexpected -c pair {value!r}: {argv!r}")
                 seen.setdefault(token, []).append(value)
                 index += 2

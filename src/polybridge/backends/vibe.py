@@ -133,6 +133,7 @@ from .base import (
     Accumulator,
     Capabilities,
     Enforcement,
+    ExtraPathsUnsupported,
     Freedom,
     Invocation,
     NetworkControl,
@@ -271,7 +272,7 @@ class UnsafeInvocationError(RuntimeError):
     """An argv was assembled without this backend's required guarantees."""
 
 
-class VibeBackend:
+class VibeBackend(ExtraPathsUnsupported):
     @staticmethod
     def workflow_observed_metadata(snapshot: dict[str, Any]) -> dict[str, Any] | None:
         """Read Vibe's own session config snapshot, never worker self-report text."""
@@ -485,6 +486,8 @@ class VibeBackend:
     def assert_safe(
         self, invocation: Invocation, freedom: Freedom, network: bool | None = None
     ) -> None:
+        if isinstance(invocation, Invocation) and invocation.extra_writable_paths:
+            raise UnsupportedCapability("bounded extra writable paths are not certified for this backend")
         # One-shot stdin is closed after delivery, never a live conversation pipe.
         one_shot = isinstance(invocation, Invocation) and invocation.stdin_mode == "pipe_once"
         if one_shot:

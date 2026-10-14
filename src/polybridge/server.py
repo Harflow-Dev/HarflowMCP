@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from mcp import MCPError
-from pydantic import StrictBool, StrictInt
+from pydantic import StrictBool, StrictInt, StrictStr
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
 from mcp.types import INTERNAL_ERROR, INVALID_PARAMS
@@ -350,6 +350,7 @@ async def start_task(
     workflow: str | None = None,
     auto_continue: StrictInt = 0,
     notify: str | None = None,
+    extra_writable_paths: list[StrictStr] | None = None,
 ) -> dict[str, Any]:
     """Dispatch a coding task to a headless agent and return immediately.
 
@@ -411,6 +412,17 @@ async def start_task(
         notify: Configured destination alias, direct callers only. Intent is durable before spawn.
             Receivers must deduplicate stable IDs; retries resume only while a server is active.
 
+        extra_writable_paths: Optional bounded list of existing absolute local file or directory
+            paths. At most 16 paths, 4096 UTF-8 bytes each and 16384 bytes total. Relative paths,
+            missing/special paths, filesystem roots and canonical duplicates are errors. Only
+            version-qualified configurations in capabilities.extra_writable_paths are supported;
+            other harnesses/configurations reject the request. The certified bounded mode clears
+            ambient writable roots and excludes implicit temporary roots. Grants permit reads
+            as well as writes, never publication. Omission inherits a detected owner's grants;
+            nested requests cannot widen them. Saved grants and path identities carry through
+            resume/continuation; replacement requires a new authorized task. Workflows and
+            native adapters do not accept these grants. Use preview_task_permissions before launch.
+
     Returns the new task_id and its starting state. The run continues in the background; poll
     get_task_status or call wait_for_task to follow it.
 
@@ -443,6 +455,8 @@ async def start_task(
         raise MCPError(INVALID_PARAMS, str(exc)) from None
 
     if workflow is not None:
+        if extra_writable_paths is not None:
+            raise MCPError(INVALID_PARAMS, "extra_writable_paths is unavailable for workflow launches")
         if auto_continue:
             raise MCPError(INVALID_PARAMS, "Workflow retries belong to their supervisor; auto_continue is unavailable")
         if group is not None or title is not None:
@@ -498,6 +512,7 @@ async def start_task(
             group=group,
             title=normalized_title,
             auto_continue=auto_continue,
+            **({'extra_writable_paths': extra_writable_paths} if extra_writable_paths is not None else {}),
             **({'task_id': reserved_id} if reserved_id is not None else {}),
         )
     except (Exception, asyncio.CancelledError) as exc:
@@ -524,6 +539,36 @@ async def start_task(
         result['notification'] = notification
         _start_notification_worker(_reg())
     return result
+
+
+@mcp.tool()
+async def preview_task_permissions(
+    repo_path: str,
+    backend: str | None = None,
+    freedom: str | None = None,
+    network: StrictBool | None = None,
+    extra_writable_paths: list[StrictStr] | None = None,
+) -> dict[str, Any]:
+    """Preview standalone task permissions without launching an agent or allocating scratch.
+
+    Uses the same bounded extra_writable_paths validation, installed-version checks and detected
+    owner caps as start_task. Returns requested/effective typed paths, certification and truthful
+    enforcement. The preview is an observation, not a reservation: launch revalidates paths and
+    configuration. Extra grants never authorize publication. Workflow/native-adapter grants and
+    unverified harness configurations are unavailable; see docs/extra-writable-paths.md.
+    """
+    chosen = _backend(backend or DEFAULT_BACKEND)
+    access = freedom if freedom is not None else DEFAULT_FREEDOM
+    _check_freedom(access)
+    _check_network(chosen, access, network)
+    path = await _validate_repo_path(repo_path)
+    try:
+        return await _reg().preview_permissions(
+            path, backend=chosen, freedom=access, network=network,
+            extra_writable_paths=extra_writable_paths,
+        )
+    except (ValueError, backends.UnsupportedCapability) as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
 
 
 @mcp.tool()

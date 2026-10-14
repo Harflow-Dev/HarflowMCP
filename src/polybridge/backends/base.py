@@ -48,6 +48,10 @@ class Invocation:
     argv: list[str]
     stdin_mode: StdinMode = STDIN_DEVNULL
     initial_input: bytes | None = None
+    extra_writable_paths: tuple[str, ...] = ()
+    # Request-local runtime observation, never persisted as grant authority. The execution
+    # boundary refreshes it before any scratch allocation; final checks only inspect identity.
+    extra_path_runtime: tuple[Any, ...] | None = None
     scratch_directory: str | None = None
     native_subagent: bool = False
     native_settings: dict[str, Any] | None = None
@@ -267,9 +271,13 @@ class Enforcement:
     NOT the same as "blocked"."""
 
     caveats: tuple[str, ...] = ()
+    extra_writable_paths: tuple[dict[str, Any], ...] = ()
+    extra_path_certification: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
+            "extra_writable_paths": list(self.extra_writable_paths),
+            "extra_path_certification": self.extra_path_certification,
             "freedom": self.freedom,
             "mechanism": self.mechanism,
             "os_enforced": self.os_enforced,
@@ -367,12 +375,46 @@ class NestedDispatchRefused(UnsupportedCapability):
         self.rule = rule
 
 
+class ExtraPathsUnsupported:
+    """Default fail-closed seam for harnesses without bounded-path certification."""
+
+    def extra_path_support(self) -> dict[str, Any]:
+        return {"supported": False, "certification": None, "reason": "bounded writable paths are not certified for this backend"}
+
+    def with_extra_writable_paths(self, invocation, grants, freedom, network=None):
+        if grants:
+            raise UnsupportedCapability(self.extra_path_support()["reason"])
+        return invocation
+
+    def assert_extra_writable_paths(self, invocation, grants, freedom, network=None):
+        if grants or invocation.extra_writable_paths:
+            raise UnsupportedCapability(self.extra_path_support()["reason"])
+        self.assert_safe(invocation, freedom, network)
+
+    def qualify_extra_writable_paths(self, invocation, grants, freedom, network=None):
+        if invocation.extra_writable_paths:
+            self.assert_extra_writable_paths(invocation, grants, freedom, network)
+            return invocation
+        return self.with_extra_writable_paths(invocation, grants, freedom, network)
+
+    def extra_path_enforcement(self, enforcement, grants, repo):
+        if grants:
+            raise UnsupportedCapability(self.extra_path_support()["reason"])
+        return enforcement
+
+
 @runtime_checkable
 class Backend(Protocol):
     name: str
     binary: str
     capabilities: Capabilities
     mcp_approval: MCPApprovalPolicy
+
+    def extra_path_support(self) -> dict[str, Any]: ...
+    def with_extra_writable_paths(self, invocation, grants, freedom, network=None) -> Invocation: ...
+    def assert_extra_writable_paths(self, invocation, grants, freedom, network=None) -> None: ...
+    def qualify_extra_writable_paths(self, invocation, grants, freedom, network=None) -> Invocation: ...
+    def extra_path_enforcement(self, enforcement, grants, repo) -> Enforcement: ...
 
     def usage_limit_diagnostic(self, event: dict[str, Any]) -> dict[str, Any] | None: ...
 
@@ -682,6 +724,24 @@ def nested_enforcement_violation(
     if missing:
         return _violation("parent_enforcement_unrecorded", missing[0], "n/a (parent unrecorded)")
 
+    # Typed additional scopes can narrow from a directory to a descendant/file.
+    # Keep them separate from symbolic base roots and the trusted scratch grant.
+    from ..extra_paths import restore_paths
+    try:
+        parent_extra = restore_paths(parent.get("extra_writable_paths", []))
+        child_extra = restore_paths(list(_field(child, "extra_writable_paths") or ()))
+    except (ValueError, TypeError, AttributeError):
+        return _violation("extra_writable_paths", "invalid recorded scope", "cannot compare")
+    owner_repo = Path(os.path.realpath(parent_repo))
+    for grant in child_extra:
+        target = Path(grant.path)
+        if target.is_relative_to(owner_repo):
+            continue
+        if not any((owner.kind == "directory" and target.is_relative_to(Path(owner.path))) or
+                   (owner.kind == "file" and grant.kind == "file" and grant.path == owner.path)
+                   for owner in parent_extra):
+            return _violation("extra_writable_paths", "owner scope", grant.path)
+
     for field_name in _MONOTONIC_TRUE_RESTRICTS:
         parent_value = parent[field_name]
         child_value = _field(child, field_name)
@@ -711,8 +771,8 @@ def nested_enforcement_violation(
         if child_backend != parent_backend:
             return _violation("backend", parent_backend, child_backend)
 
-        parent_roots = set(parent["writable_roots"])
-        child_roots = set(_field(child, "writable_roots") or ())
+        parent_roots = set(parent["writable_roots"]) - {grant.path for grant in parent_extra}
+        child_roots = set(_field(child, "writable_roots") or ()) - {grant.path for grant in child_extra}
         if not child_roots <= parent_roots:
             return _violation(
                 "writable_roots", parent["writable_roots"], _field(child, "writable_roots")

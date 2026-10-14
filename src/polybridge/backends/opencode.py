@@ -63,6 +63,7 @@ from .base import (
     Accumulator,
     Capabilities,
     Enforcement,
+    ExtraPathsUnsupported,
     Freedom,
     Invocation,
     NetworkControl,
@@ -189,7 +190,7 @@ class UnsafeInvocationError(RuntimeError):
     """An argv was assembled without this backend's required guarantees."""
 
 
-class OpencodeBackend:
+class OpencodeBackend(ExtraPathsUnsupported):
     @staticmethod
     def workflow_stderr_blocks_availability_failure(diagnostic: str) -> bool:
         from .workflow_diagnostics import stderr_blocks_availability
@@ -347,6 +348,8 @@ class OpencodeBackend:
     def assert_safe(
         self, invocation: Invocation, freedom: Freedom, network: bool | None = None
     ) -> None:
+        if isinstance(invocation, Invocation) and invocation.extra_writable_paths:
+            raise UnsupportedCapability("bounded extra writable paths are not certified for this backend")
         # EOF stdin is a one-shot assignment transport, never a live input pipe.
         one_shot = isinstance(invocation, Invocation) and invocation.stdin_mode == "pipe_once"
         if one_shot:

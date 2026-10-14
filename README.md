@@ -171,6 +171,12 @@ You can use the same bridge without a workflow. `start_task(prompt, repo_path, b
 returns a **`task_id`** immediately. Follow it with `get_task_status` or `wait_for_task`, then use
 `resume_task` for a follow-up. Independent tasks can run in parallel.
 
+[`extra_writable_paths`](docs/extra-writable-paths.md) adds bounded local file or directory
+grants on verified configurations. Inspect `preview_task_permissions` before launch;
+unsupported versions/configurations reject the request. The measured Codex mode clears
+ambient writable roots and excludes implicit temporary roots. Resume and continuation
+preserve saved scope; grants never authorize publication.
+
 [`wait_for_tasks`](docs/multi-task-waiting.md) observes any or all of up to 32 tasks in one
 bounded, read-only call. Timeout and caller disconnect leave execution untouched.
 Use `get_task_status(task_id, brief=true)` or

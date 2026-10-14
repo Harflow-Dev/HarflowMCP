@@ -1,5 +1,9 @@
 # Fresh task continuation
 
+[Extra writable paths](extra-writable-paths.md) carry the source's saved typed grants,
+certification and identities into the fresh session. They have no continuation override.
+Changed identities, unsupported versions and incompatible recovery reject reuse.
+
 `continue_task(task_id, extra_prompt=None, notes_path=None)` launches a new agent session from an existing assignment. It carries the original request, latest summary, observed outcome and optional caller notes into a fresh context. Caller prose is preserved. Evidence exceeding 64 KiB is referenced by its local file path; missing original context is refused. Notes must be a regular UTF-8 file; large notes are referenced without reading them completely.
 
 The source must have a durably recorded terminal status, an observed process exit, fully drained output and a finished input pump. Old records without drain evidence and recovered runs without observed exit are ineligible. Workflow-owned tasks and managed workflow callers must use their workflow supervisor instead.

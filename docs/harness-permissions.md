@@ -4,6 +4,10 @@ Before using a harness as a workflow node, configure its account, tools, and com
 for the work that node needs. Polybridge selects a permission mode; the harness still uses its own
 configuration and credentials. A headless worker cannot answer an interactive approval prompt.
 
+Standalone tasks can request [extra writable paths](extra-writable-paths.md) on
+version-qualified configurations. File-tool permissions alone do not establish a shell write
+boundary. Workflow and separately certified native-adapter launches do not accept these grants.
+
 Audited **2026-10-06** against this checkout's backend adapters and current vendor documentation.
 Mappings below describe Polybridge's launch behavior. Installed CLI versions can differ from current
 vendor documentation; the Vibe example explicitly covers the locally inspected **2.25.8** version.
