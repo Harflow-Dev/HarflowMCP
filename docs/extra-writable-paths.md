@@ -15,7 +15,25 @@ launcher, its resolved executable or any intermediate symlink or lexical ancesto
 These checks precede the version probe and repeat at final validation. Executables
 with multiple hardlinks are rejected even when the requested grant is elsewhere:
 this conservatively prevents writable indirect aliases without scanning granted
-directory trees. Path resolution,
+directory trees. The same effective authority also cannot overlap the server's
+PATH directories (including empty/relative and absent higher-priority helper
+namespaces), selected helper/backend executable chains or targets, Python prefixes,
+import search roots or server package code. Discovered selected script containers
+(the closest `pyvenv.cfg` or `package.json` ancestor) are protected too; this
+does not certify an arbitrary script dependency graph. Bounded shebang inspection
+also protects absolute interpreters and simple `env`/`env -S` interpreter lookups;
+unqualified interpreter shapes reject the request. Recognized Python `bin/python*`
+interpreter targets also protect their installation prefix, including a separate
+base installation behind a virtualenv symlink. These restrictions prevent a worker
+from poisoning unsandboxed repository probes, process checks, later version probes
+or Python imports. They are recomputed before probing and at final validation.
+Selected server helpers with multiple hardlinks are refused on mutable filesystems;
+a filesystem reported read-only by `statvfs` is exempt from that alias refusal,
+because a hardlink alias cannot cross filesystems. Direct overlap still rejects.
+The Codex launcher itself retains its unconditional single-hardlink requirement.
+A server running from a source checkout therefore cannot grant writable authority
+over its own source/import root; use an installed server for bounded tasks there.
+Path resolution,
 saved-authority reads, runtime qualification and final identity checks run in worker
 threads with a 20-second budget per check, including executor queueing. Timeout
 refuses the request with an actionable validation error; no agent is launched and

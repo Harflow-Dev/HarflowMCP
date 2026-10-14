@@ -433,6 +433,12 @@ class CodexBackend(ExtraPathsUnsupported):
                                  for path in protected):
                 raise UnsafeInvocationError("writable authority overlaps the qualified CLI launcher")
 
+        from ..runtime_paths import assert_runtime_outside_writes
+        try:
+            assert_runtime_outside_writes(scopes)
+        except (ValueError, OSError, RuntimeError) as exc:
+            raise UnsafeInvocationError(str(exc)) from exc
+
     def qualify_extra_writable_paths(self, invocation, grants, freedom, network=None):
         """Fresh qualification per request; callers run this bounded probe off the event loop."""
         if not grants:

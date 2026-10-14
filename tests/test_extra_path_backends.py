@@ -325,3 +325,254 @@ def test_parent_directory_symlink_alias_overlap(qualified, monkeypatch, tmp_path
     repo.mkdir()
     with pytest.raises(UnsafeInvocationError, match='overlaps'):
         qualified.with_extra_writable_paths(build(qualified, repo), normalize_paths([str(aliasdir)]), 'write_in_repo')
+
+
+@pytest.mark.parametrize('scope', ['git-file', 'path-directory', 'target', 'hop', 'missing-helper', 'repo', 'scratch', 'hardlink'])
+def test_server_helper_authority_refused_before_probe(qualified, monkeypatch, tmp_path, scope):
+    import os
+    bin_dir = tmp_path / 'helpers'
+    bin_dir.mkdir()
+    target_dir = tmp_path / 'helper-target'
+    target_dir.mkdir()
+    target = target_dir / 'real-git'
+    target.write_text('#!/bin/sh\nexit 99\n')
+    target.chmod(0o755)
+    hop_dir = tmp_path / 'helper-hop'
+    hop_dir.mkdir()
+    hop = hop_dir / 'git-hop'
+    hop.symlink_to(target)
+    helper = bin_dir / 'git'
+    helper.symlink_to(hop)
+    earlier = tmp_path / 'earlier-path'
+    earlier.mkdir()
+    monkeypatch.setenv('PATH', os.pathsep.join([str(earlier), str(bin_dir), os.environ['PATH']]))
+    calls = []
+    monkeypatch.setattr(backends, 'version', lambda *args, **kwargs: calls.append(1) or EXTRA_PATHS_VERSION)
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    safe = tmp_path / 'safe'
+    safe.mkdir()
+    grant = {'git-file': helper, 'path-directory': bin_dir, 'target': target,
+             'hop': hop_dir, 'missing-helper': earlier, 'repo': safe,
+             'scratch': safe, 'hardlink': safe}[scope]
+    if scope == 'repo':
+        repo = earlier
+    if scope == 'hardlink':
+        os.link(target, safe / 'hidden-alias')
+    invocation = build(qualified, repo)
+    if scope == 'scratch':
+        invocation = qualified.with_writable_directory(invocation, earlier, 'write_in_repo')
+    with pytest.raises(UnsafeInvocationError, match='runtime'):
+        qualified.with_extra_writable_paths(invocation, normalize_paths([str(grant)]), 'write_in_repo')
+    assert calls == []
+
+
+def test_unrelated_grant_preserves_helper_namespace(qualified, monkeypatch, tmp_path):
+    import os
+    helpers = tmp_path / 'helpers'
+    helpers.mkdir()
+    git = helpers / 'git'
+    git.write_text('#!/bin/sh\nexit 99\n')
+    git.chmod(0o755)
+    monkeypatch.setenv('PATH', str(helpers) + os.pathsep + os.environ['PATH'])
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    grant = tmp_path / 'grant'
+    grant.mkdir()
+    calls = []
+    monkeypatch.setattr(backends, 'version', lambda *args, **kwargs: calls.append(1) or EXTRA_PATHS_VERSION)
+    invocation = qualified.with_extra_writable_paths(build(qualified, repo), normalize_paths([str(grant)]), 'write_in_repo')
+    assert calls == [1]
+    qualified.assert_extra_writable_paths(invocation, normalize_paths([str(grant)]), 'write_in_repo')
+
+
+def test_final_revalidation_rejects_new_path_namespace(qualified, monkeypatch, tmp_path):
+    import os
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    grant = tmp_path / 'grant'
+    grant.mkdir()
+    grants = normalize_paths([str(grant)])
+    invocation = qualified.with_extra_writable_paths(build(qualified, repo), grants, 'write_in_repo')
+    monkeypatch.setenv('PATH', str(grant) + os.pathsep + os.environ['PATH'])
+    with pytest.raises(UnsafeInvocationError, match='runtime'):
+        qualified.assert_extra_writable_paths(invocation, grants, 'write_in_repo')
+
+
+@pytest.mark.parametrize('readonly', [False, True])
+def test_helper_hardlinks_require_readonly_filesystem(qualified, monkeypatch, tmp_path, readonly):
+    import os
+    from types import SimpleNamespace
+    helpers = tmp_path / 'helpers'
+    helpers.mkdir()
+    helper = helpers / 'git'
+    helper.write_text('#!/bin/sh\nexit 99\n')
+    helper.chmod(0o755)
+    os.link(helper, tmp_path / 'hidden-helper-alias')
+    monkeypatch.setenv('PATH', str(helpers) + os.pathsep + os.environ['PATH'])
+    monkeypatch.setattr('polybridge.runtime_paths.os.statvfs', lambda path: SimpleNamespace(f_flag=os.ST_RDONLY if readonly else 0))
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    grant = tmp_path / 'grant'
+    grant.mkdir()
+    calls = []
+    monkeypatch.setattr(backends, 'version', lambda *args, **kwargs: calls.append(1) or EXTRA_PATHS_VERSION)
+    if readonly:
+        qualified.with_extra_writable_paths(build(qualified, repo), normalize_paths([str(grant)]), 'write_in_repo')
+        assert calls == [1]
+    else:
+        with pytest.raises(UnsafeInvocationError, match='hardlinks'):
+            qualified.with_extra_writable_paths(build(qualified, repo), normalize_paths([str(grant)]), 'write_in_repo')
+        assert calls == []
+
+
+@pytest.mark.parametrize('path_entry', ['', 'helpers', 'missing'])
+def test_relative_and_absent_helper_namespaces(qualified, monkeypatch, tmp_path, path_entry):
+    import os
+    server_cwd = tmp_path / 'server'
+    server_cwd.mkdir()
+    helpers = server_cwd / 'helpers'
+    helpers.mkdir()
+    monkeypatch.chdir(server_cwd)
+    monkeypatch.setenv('PATH', path_entry + os.pathsep + os.environ['PATH'])
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    monkeypatch.setattr(backends, 'version', lambda *args, **kwargs: pytest.fail('unsafe version probe'))
+    grant = server_cwd if path_entry != 'helpers' else helpers
+    with pytest.raises(UnsafeInvocationError, match='runtime'):
+        qualified.with_extra_writable_paths(build(qualified, repo), normalize_paths([str(grant)]), 'write_in_repo')
+
+
+@pytest.mark.parametrize('root_kind', ['prefix', 'import'])
+def test_python_execution_roots_refused_before_probe(qualified, monkeypatch, tmp_path, root_kind):
+    import sys
+    root = tmp_path / 'python-runtime'
+    root.mkdir()
+    if root_kind == 'prefix':
+        monkeypatch.setattr('polybridge.runtime_paths.sys.prefix', str(root))
+    else:
+        monkeypatch.setattr('polybridge.runtime_paths.sys.path', [*sys.path, str(root)])
+    grant = root / 'poison.py'
+    grant.touch()
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    monkeypatch.setattr(backends, 'version', lambda *args, **kwargs: pytest.fail('unsafe version probe'))
+    with pytest.raises(UnsafeInvocationError, match='runtime'):
+        qualified.with_extra_writable_paths(build(qualified, repo), normalize_paths([str(grant)]), 'write_in_repo')
+
+
+def test_readonly_helper_alias_still_refuses_direct_grant(qualified, monkeypatch, tmp_path):
+    import os
+    from types import SimpleNamespace
+    helpers = tmp_path / 'helpers'
+    helpers.mkdir()
+    helper = helpers / 'git'
+    helper.write_text('#!/bin/sh\nexit 99\n')
+    helper.chmod(0o755)
+    alias = tmp_path / 'alias'
+    os.link(helper, alias)
+    monkeypatch.setenv('PATH', str(helpers) + os.pathsep + os.environ['PATH'])
+    monkeypatch.setattr('polybridge.runtime_paths.os.statvfs', lambda path: SimpleNamespace(f_flag=os.ST_RDONLY))
+    monkeypatch.setattr(backends, 'version', lambda *args, **kwargs: pytest.fail('unsafe version probe'))
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    with pytest.raises(UnsafeInvocationError, match='runtime'):
+        qualified.with_extra_writable_paths(build(qualified, repo), normalize_paths([str(alias)]), 'write_in_repo')
+
+
+@pytest.mark.parametrize('marker', ['pyvenv.cfg', 'package.json'])
+def test_selected_script_package_container_refused_before_probe(qualified, monkeypatch, tmp_path, marker):
+    import os
+    env = tmp_path / 'script-environment'
+    bin_dir = env / 'bin'
+    bin_dir.mkdir(parents=True)
+    (env / marker).write_text('{}')
+    script = bin_dir / 'vibe'
+    script.write_text('#!/bin/sh\nexit 99\n')
+    script.chmod(0o755)
+    dependencies = env / 'lib' / 'site-packages'
+    dependencies.mkdir(parents=True)
+    poison = dependencies / 'module.py'
+    poison.touch()
+    monkeypatch.setenv('PATH', str(bin_dir) + os.pathsep + os.environ['PATH'])
+    monkeypatch.setattr(backends, 'version', lambda *args, **kwargs: pytest.fail('unsafe version probe'))
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    with pytest.raises(UnsafeInvocationError, match='runtime'):
+        qualified.with_extra_writable_paths(build(qualified, repo), normalize_paths([str(poison)]), 'write_in_repo')
+
+
+def test_shebang_interpreter_environment_refused_before_probe(qualified, monkeypatch, tmp_path):
+    import os
+    wrapper_bin = tmp_path / 'wrappers'
+    wrapper_bin.mkdir()
+    environment = tmp_path / 'hidden-env'
+    interpreter_dir = environment / 'bin'
+    interpreter_dir.mkdir(parents=True)
+    (environment / 'pyvenv.cfg').write_text('home = elsewhere')
+    interpreter = interpreter_dir / 'python'
+    interpreter.symlink_to('/bin/sh')
+    wrapper = wrapper_bin / 'vibe'
+    wrapper.write_text('#!' + str(interpreter) + '\nexit 99\n')
+    wrapper.chmod(0o755)
+    dependency = environment / 'lib' / 'poison.py'
+    dependency.parent.mkdir()
+    dependency.touch()
+    monkeypatch.setenv('PATH', str(wrapper_bin) + os.pathsep + os.environ['PATH'])
+    monkeypatch.setattr(backends, 'version', lambda *args, **kwargs: pytest.fail('unsafe version probe'))
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    with pytest.raises(UnsafeInvocationError, match='runtime'):
+        qualified.with_extra_writable_paths(build(qualified, repo), normalize_paths([str(dependency)]), 'write_in_repo')
+
+
+def test_lexical_package_does_not_hide_target_environment(qualified, monkeypatch, tmp_path):
+    import os
+    package = tmp_path / 'package'
+    package.mkdir()
+    (package / 'package.json').write_text('{}')
+    environment = tmp_path / 'environment'
+    environment.mkdir()
+    (environment / 'pyvenv.cfg').write_text('home = elsewhere')
+    script = environment / 'bin' / 'vibe'
+    script.parent.mkdir()
+    script.write_text('#!/bin/sh\nexit 99\n')
+    script.chmod(0o755)
+    (package / 'vibe').symlink_to(script)
+    poison = environment / 'lib' / 'poison.py'
+    poison.parent.mkdir()
+    poison.touch()
+    monkeypatch.setenv('PATH', str(package) + os.pathsep + os.environ['PATH'])
+    monkeypatch.setattr(backends, 'version', lambda *args, **kwargs: pytest.fail('unsafe version probe'))
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    with pytest.raises(UnsafeInvocationError, match='runtime'):
+        qualified.with_extra_writable_paths(build(qualified, repo), normalize_paths([str(poison)]), 'write_in_repo')
+
+
+def test_virtualenv_external_python_installation_refused_before_probe(qualified, monkeypatch, tmp_path):
+    import os
+    installation = tmp_path / 'standalone-python'
+    python = installation / 'bin' / 'python3.12'
+    python.parent.mkdir(parents=True)
+    # Stand-in is never executed; retain a normal header for safe qualification.
+    python.write_text('#!/bin/sh\nexit 99\n')
+    python.chmod(0o755)
+    environment = tmp_path / 'vibe-env'
+    environment.mkdir()
+    (environment / 'pyvenv.cfg').write_text('home = ' + str(python.parent))
+    interpreter = environment / 'bin' / 'python'
+    interpreter.parent.mkdir()
+    interpreter.symlink_to(python)
+    script = environment / 'bin' / 'vibe'
+    script.write_text('#!' + str(interpreter) + '\nexit 99\n')
+    script.chmod(0o755)
+    site = installation / 'lib' / 'python3.12' / 'site.py'
+    site.parent.mkdir(parents=True)
+    site.touch()
+    monkeypatch.setenv('PATH', str(script.parent) + os.pathsep + os.environ['PATH'])
+    monkeypatch.setattr(backends, 'version', lambda *args, **kwargs: pytest.fail('unsafe version probe'))
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    with pytest.raises(UnsafeInvocationError, match='runtime'):
+        qualified.with_extra_writable_paths(build(qualified, repo), normalize_paths([str(site)]), 'write_in_repo')
