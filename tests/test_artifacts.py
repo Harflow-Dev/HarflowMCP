@@ -17,7 +17,6 @@ def setup(tmp_path, monkeypatch):
     store.write(logs, record)
     monkeypatch.setattr(lineage, '_default_process_table', lambda: {os.getpid(): 123, 123: 1, 1: 0})
     monkeypatch.setattr(identity, 'identity_check', lambda _: 'alive')
-    monkeypatch.setattr(workflow_hooks, 'owner', lambda *a, **k: None)
     monkeypatch.delenv('PB_TASK_ID', raising=False)
     monkeypatch.delenv('PB_ROOT_TASK_ID', raising=False)
     return logs, repo, record
@@ -111,10 +110,10 @@ def test_terminal_workflow_spoof_and_human(setup, monkeypatch):
     with pytest.raises(ValueError, match='unverifiable'):
         artifacts.register(logs, str(target), 'report')
     monkeypatch.delenv('PB_TASK_ID')
-    monkeypatch.setattr(workflow_hooks, 'owner', lambda *a, **k: {'role': 'worker'})
+    monkeypatch.setattr(artifacts, '_workflow_owner', lambda *a, **k: {'role': 'worker'})
     with pytest.raises(ValueError, match='Managed'):
         artifacts.get(logs, record.task_id)
-    monkeypatch.setattr(workflow_hooks, 'owner', lambda *a, **k: None)
+    monkeypatch.setattr(artifacts, '_workflow_owner', lambda *a, **k: None)
     store.write(logs, replace(record, status='completed', exit_code=0))
     with pytest.raises(ValueError):
         artifacts.register(logs, str(target), 'report')
@@ -277,10 +276,10 @@ def test_inherited_workflow_and_cyclic_ancestry(setup, monkeypatch):
     parent = replace(record, task_id='parent', pid=999, pgid=888)
     store.write(logs, parent)
     store.write(logs, replace(record, parent_task_id='parent'))
-    monkeypatch.setattr(workflow_hooks, 'owner', lambda directory, task_id, strict: {'role': 'worker'} if task_id == 'parent' else None)
+    monkeypatch.setattr(artifacts, '_workflow_owner', lambda directory, task_id, strict: {'role': 'worker'} if task_id == 'parent' else None)
     with pytest.raises(ValueError, match='Managed'):
         artifacts.get(logs, record.task_id)
-    monkeypatch.setattr(workflow_hooks, 'owner', lambda *a, **k: None)
+    monkeypatch.setattr(artifacts, '_workflow_owner', lambda *a, **k: None)
     store.write(logs, replace(parent, parent_task_id=record.task_id))
     with pytest.raises(ValueError, match='cyclic'):
         artifacts.get(logs, record.task_id)
@@ -301,7 +300,7 @@ from polybridge import artifacts, identity, store, workflow_hooks
 logs = Path(sys.argv[1])
 artifacts._caller = lambda directory: store.read(directory, 'owner', include_prompt=False)
 identity.identity_check = lambda value: 'alive'
-workflow_hooks.owner = lambda *args, **kwargs: None
+artifacts._workflow_owner = lambda *args, **kwargs: None
 for index in range(10):
     artifacts.register(logs, sys.argv[2], 'report', sys.argv[3] + '-' + str(index))
 '''
@@ -526,12 +525,12 @@ def test_unsupported_summary_is_shared_by_live_recovered_and_brief(setup, monkey
     store.write(logs, record)
     if case in ('worker', 'ancestor'):
         managed = 'owner' if case == 'worker' else 'parent'
-        monkeypatch.setattr(workflow_hooks, 'owner', lambda directory, identifier, strict:
+        monkeypatch.setattr(artifacts, '_workflow_owner', lambda directory, identifier, strict:
                             {'role': 'worker'} if identifier == managed else None)
     elif case == 'owner_error':
         def fail(*args, **kwargs):
             raise RuntimeError('ownership lookup unavailable')
-        monkeypatch.setattr(workflow_hooks, 'owner', fail)
+        monkeypatch.setattr(artifacts, '_workflow_owner', fail)
     monkeypatch.setattr(artifacts, '_load', lambda *args: pytest.fail('unsupported manifest must not open'))
     monkeypatch.setattr(artifacts, '_caller', lambda *args: pytest.fail('summary must not detect callers'))
     live = Task(task_id=record.task_id, backend='codex', session_id=None, repo_path=repo,
@@ -573,7 +572,7 @@ def test_continuation_ancestry_denies_artifact_access(setup, monkeypatch, case):
     if case in ('mixed', 'transitive'):
         store.write(logs, replace(source, task_id='managed', spawned_by=None, continuation_of_task_id=None))
     store.write(logs, owner)
-    monkeypatch.setattr(workflow_hooks, 'owner', lambda directory, identifier, strict:
+    monkeypatch.setattr(artifacts, '_workflow_owner', lambda directory, identifier, strict:
                         {'role': 'worker'} if identifier == ('managed' if case in ('mixed', 'transitive') else 'source')
                         and case in ('managed', 'mixed', 'transitive') else None)
     reason = {'missing': 'Task ancestry is unavailable', 'cycle': 'Task ancestry is cyclic'}.get(
@@ -593,3 +592,170 @@ def test_standalone_continuation_artifact_access(setup):
     artifacts.register(logs, 'report', 'report')
     assert artifacts.get(logs, 'owner')['count'] == 1
     assert artifacts.summary(logs, 'owner')['state'] == 'available'
+
+
+def test_ready_caller_does_not_deserialize_unrelated_history(setup, monkeypatch):
+    logs, _, record = setup
+    for number in range(120):
+        store.write(logs, replace(record, task_id=f'unrelated-{number}', pid=10000 + number, pgid=20000))
+    while store.bootstrap_catalog(logs):
+        pass
+    original = store.read
+    reads = []
+    def read(directory, task_id, **kwargs):
+        reads.append(task_id)
+        assert not task_id.startswith('unrelated-')
+        return original(directory, task_id, **kwargs)
+    monkeypatch.setattr(store, 'read', read)
+    assert artifacts._caller(logs).task_id == record.task_id
+    assert reads == ['owner']
+
+
+def test_caller_cold_catalog_advances_boundedly_and_retries(setup, monkeypatch):
+    logs, _, record = setup
+    for number in range(205):
+        store.write(logs, replace(record, task_id=f'unrelated-{number:03}', pid=10000 + number, pgid=20000))
+    for path in logs.glob('.listing.v9.sqlite3*'):
+        path.unlink()
+    original = store.read
+    reads = []
+    def read(*args, **kwargs):
+        reads.append(args[1])
+        return original(*args, **kwargs)
+    monkeypatch.setattr(store, 'read', read)
+    for expected in (100, 200):
+        with pytest.raises(ValueError, match='preparation is incomplete'):
+            artifacts._caller(logs)
+        assert len(reads) == expected
+    assert artifacts._caller(logs).task_id == record.task_id
+    assert len(reads) == 207  # Six remaining metadata records and selected full owner.
+
+
+def test_caller_related_overflow_fails_closed(setup):
+    logs, _, record = setup
+    for number in range(100):
+        store.write(logs, replace(record, task_id=f'rival-{number}', pid=123))
+    while store.bootstrap_catalog(logs):
+        pass
+    with pytest.raises(ValueError, match='More than 100 related'):
+        artifacts._caller(logs)
+
+
+def test_caller_observes_late_uncooperative_metadata_replacement(setup):
+    logs, _, record = setup
+    rival = replace(record, task_id='rival', pid=777, pgid=888)
+    store.write(logs, rival)
+    assert artifacts._caller(logs).task_id == record.task_id
+    source = logs / ('rival' + store.RECORD_SUFFIX)
+    data = json.loads(source.read_text())
+    data['pgid'] = os.getsid(0)
+    replacement = logs / 'replacement'
+    replacement.write_text(json.dumps(data))
+    replacement.replace(source)
+    with pytest.raises(ValueError, match='ambiguous'):
+        artifacts._caller(logs)
+
+
+@pytest.mark.parametrize('hint', ['forged', 'owner'])
+def test_caller_unknown_identity_and_forged_hints_fail_closed(setup, monkeypatch, hint):
+    logs, _, _ = setup
+    monkeypatch.setenv('PB_TASK_ID', hint)
+    if hint == 'owner':
+        monkeypatch.setattr(identity, 'identity_check', lambda _: 'undecidable')
+    with pytest.raises(ValueError, match='identity|ambiguous'):
+        artifacts._caller(logs)
+
+
+def test_caller_blocked_catalog_does_not_authorize_human(setup):
+    logs, _, _ = setup
+    (logs / ('broken' + store.RECORD_SUFFIX)).write_text('{')
+    with pytest.raises(ValueError, match='caller identity is unavailable'):
+        artifacts._caller(logs)
+
+
+def test_caller_rechecks_selected_full_record_identity(setup, monkeypatch):
+    logs, _, record = setup
+    original = lineage.related_catalog_candidates
+    def candidates(*args):
+        result = original(*args)
+        store.write(logs, replace(record, start_time='replacement-process'))
+        return result
+    monkeypatch.setattr(lineage, 'related_catalog_candidates', candidates)
+    with pytest.raises(ValueError, match='identity changed'):
+        artifacts._caller(logs)
+
+
+def test_registration_identity_checks_share_preparation_budget(setup, monkeypatch):
+    from polybridge import catalog
+    logs, repo, _ = setup
+    (repo / 'report').write_text('observed')
+    original = lineage.related_catalog_candidates
+    budgets = []
+    def candidates(*args):
+        budgets.append(catalog._request_budget.get())
+        return original(*args)
+    monkeypatch.setattr(lineage, 'related_catalog_candidates', candidates)
+    artifacts.register(logs, 'report', 'report')
+    assert len(budgets) == 2
+    assert budgets[0] is budgets[1]
+    assert budgets[0] is not None
+    assert budgets[0].metadata_decodes <= 100
+
+
+def test_artifact_boundaries_never_scan_workflow_history(setup, monkeypatch):
+    from polybridge.workflows import WorkflowStore
+    logs, repo, record = setup
+    monkeypatch.setattr(WorkflowStore, 'list_runs', lambda *a, **k: pytest.fail('unbounded workflow history'))
+    (repo / 'report').write_text('report')
+    artifacts.register(logs, 'report', 'report')
+    assert artifacts.get(logs, record.task_id)['count'] == 1
+    assert artifacts.summary(logs, record.task_id)['count'] == 1
+
+
+def test_artifact_workflow_preparation_is_bounded_and_summary_unavailable(setup, monkeypatch):
+    from polybridge.workflows import WorkflowStore
+    logs, _, record = setup
+    storage = WorkflowStore(logs.parent)
+    for n in range(205):
+        run = {'workflow_run_id': f'run-{n:03}', 'created_at': n, 'status': 'completed',
+               'repo_path': str(logs.parent), 'activations': []}
+        (storage.runs / f'run-{n:03}.json').write_text(json.dumps(run))
+    original = WorkflowStore.get_run
+    reads = []
+    def get_run(self, run_id, **kwargs):
+        reads.append(run_id)
+        return original(self, run_id, **kwargs)
+    monkeypatch.setattr(WorkflowStore, 'get_run', get_run)
+    assert artifacts.summary(logs, record.task_id) == {'count': 0, 'state': 'unavailable'}
+    assert len(reads) == 100
+    with pytest.raises(ValueError, match='preparation is incomplete'):
+        artifacts.get(logs, record.task_id)
+    assert len(reads) == 200
+    assert artifacts.summary(logs, record.task_id)['state'] == 'available'
+    assert len(reads) == 205
+
+
+@pytest.mark.parametrize('ownership', ['association', 'receipt', 'malformed', 'dangling'])
+def test_real_inherited_workflow_ownership_denies_artifacts(setup, ownership):
+    from polybridge.workflows import WorkflowStore
+    logs, repo, record = setup
+    storage = WorkflowStore(logs.parent)
+    parent = replace(record, task_id='managed-parent', pid=777, pgid=888)
+    store.write(logs, parent)
+    store.write(logs, replace(record, spawned_by=parent.task_id))
+    if ownership == 'association':
+        run = {'workflow_run_id': 'run', 'created_at': 1, 'status': 'completed',
+               'repo_path': str(repo), 'activations': [{'id': 'activation', 'node_id': 'node',
+               'role': 'worker', 'tasks': [{'task_id': parent.task_id, 'status': 'completed'}]}]}
+        (storage.runs / 'run.json').write_text(json.dumps(run))
+    else:
+        receipt = storage.owners / f'{parent.task_id}.json'
+        if ownership == 'dangling':
+            receipt.symlink_to(storage.owners / 'missing')
+        else:
+            receipt.write_text('{' if ownership == 'malformed' else json.dumps({'workflow_run_id': 'run'}))
+    (repo / 'report').write_text('report')
+    for action in (lambda: artifacts.register(logs, 'report', 'report'), lambda: artifacts.get(logs, 'owner')):
+        with pytest.raises(ValueError, match='Managed'):
+            action()
+    assert artifacts.summary(logs, 'owner') == {'count': 0, 'state': 'unavailable'}

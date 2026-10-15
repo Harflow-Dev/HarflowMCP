@@ -29,6 +29,20 @@ parameter that lets a caller choose another owner. Human sessions, spoofed or am
 task identities, and tasks that have settled cannot register. The registrar identity
 describes who submitted the reference, not who created the contents.
 
+Caller discovery uses the task catalog and considers at most 100 identities related
+by process ancestry or session. Overflow or incomplete/unreadable authority fails
+closed. Cold MCP and CLI requests prepare at most 100 metadata records and 8 MiB of
+metadata per request; retry a preparation error to advance the catalog. Registration's
+two identity checks share that preparation budget. Ready requests do not deserialize
+unrelated historical records. The selected owner is reloaded with a 4 MiB metadata
+limit, and its identity and standalone ancestry are checked before authorization.
+Standalone exclusion also uses the bounded workflow ownership catalog, checking each
+ancestor and refusing any ownership receipt, including malformed or unavailable
+receipts. Incomplete workflow preparation requires a retry; summaries report
+`unavailable` until ownership can be established. Task and workflow preparation share
+the request's metadata budget. Artifact paths never fall back to scanning full
+workflow history.
+
 Workflow orchestrators, workers, builders, native children and inherited workflow
 descendants, including continuation successors, are not supported by this standalone
 contract. Workflow ownership and output selection belong to #82; workflow extra

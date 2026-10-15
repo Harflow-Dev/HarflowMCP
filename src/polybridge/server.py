@@ -1887,6 +1887,7 @@ async def register_artifact(path: str, kind: str, note: str = '') -> dict[str, A
     at most 4096 UTF-8 bytes; at most 100 references per task and a 1 MiB manifest.
     A reference establishes no content validity, task success, access, copy, or publication
     authority. No content is read, copied, hashed, previewed, or published.
+    Caller indexing is bounded; retry a catalog-preparation error to advance cold history.
     """
     from . import artifacts
     from .tasks import default_log_dir
@@ -1905,6 +1906,7 @@ async def get_task_artifacts(task_id: str, cursor: str | None = None, limit: int
     Workflow callers and managed tasks are refused. Cursors are task-bound and reject manifest
     changes. Availability is available/deleted/changed/unavailable at observed_at; available does
     not establish unchanged contents. Missing legacy manifests are empty; corrupt ones unavailable.
+    Caller indexing is bounded; retry a catalog-preparation error to advance cold history.
     """
     from . import artifacts
     from .tasks import default_log_dir

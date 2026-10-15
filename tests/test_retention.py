@@ -871,7 +871,7 @@ def _artifact_family(tmp_path, monkeypatch, edge="spawned_by"):
     for record in (grandparent, parent, child):
         assert store.write_landed(log_dir, record)
     monkeypatch.setattr(artifacts, '_caller', lambda _: None)
-    monkeypatch.setattr(workflow_hooks, 'owner', lambda *a, **k: None)
+    monkeypatch.setattr(artifacts, '_workflow_owner', lambda *a, **k: None)
     # Persist a genuine reference using the normal service before settling the owner.
     from dataclasses import replace
     store.record_path(log_dir, 'child').unlink()
@@ -918,11 +918,11 @@ def test_artifact_retention_cycles_are_bounded_and_workflow_denial_is_preserved(
     from polybridge import artifacts, workflow_hooks
     log_dir, now, child, _ = _artifact_family(tmp_path, monkeypatch)
     retention.sweep(log_dir, 30, now)
-    monkeypatch.setattr(workflow_hooks, 'owner', lambda directory, task_id, strict:
+    monkeypatch.setattr(artifacts, '_workflow_owner', lambda directory, task_id, strict:
                         {'role': 'worker'} if task_id == 'grandparent' else None)
     with pytest.raises(ValueError, match='Managed workflow'):
         artifacts.get(log_dir, 'child')
-    monkeypatch.setattr(workflow_hooks, 'owner', lambda *a, **k: None)
+    monkeypatch.setattr(artifacts, '_workflow_owner', lambda *a, **k: None)
     parent = store.read(log_dir, 'parent')
     store.record_path(log_dir, 'parent').unlink()
     assert store.write_landed(log_dir, replace(parent, parent_task_id='child'))

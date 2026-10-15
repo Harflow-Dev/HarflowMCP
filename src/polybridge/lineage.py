@@ -428,6 +428,38 @@ def detect_caller_detail(
         return Detection(None, f"caller detection failed: {type(exc).__name__}: {exc}")
 
 
+def related_catalog_candidates(log_dir: Path, chain: list[int], sid: int) -> list[store.TaskRecord]:
+    """Prepare bounded metadata and return at most 100 related caller projections.
+
+    This is candidate discovery only; authority consumers must retain their own
+    ambiguity policy and reload the selected full record before authorizing it.
+    """
+    import sqlite3
+    from .catalog import Catalog
+    try:
+        if len(chain) > 100:
+            raise ValueError('Caller ancestry exceeds authority bounds')
+        if store.bootstrap_catalog(log_dir):
+            raise ValueError('Task catalog preparation is incomplete; retry the request')
+        index = Catalog(log_dir, store.RECORD_SUFFIX)
+        with index.connect() as db:
+            # Manifest/lock creation can change directory mtime after preparation.
+            # Reconcile names/stats without another metadata bootstrap batch.
+            index._discover(db)
+            if index.state(db)['status'] != 'ready':
+                raise ValueError('Task catalog caller identity is unavailable')
+            placeholders = ','.join('?' for _ in chain) or 'NULL'
+            rows = db.execute(
+                f'SELECT payload FROM callers WHERE terminal=0 AND (pgid=? OR pid IN ({placeholders})) LIMIT 101',
+                (sid, *chain)).fetchall()
+        if len(rows) > 100:
+            raise ValueError('More than 100 related caller identities require reconciliation')
+        return [store.TaskRecord(**json.loads(row[0])) for row in rows]
+    except (OSError, sqlite3.Error, TypeError, KeyError) as exc:
+        raise ValueError('Task catalog caller identity is unavailable') from exc
+
+
+
 def detect_catalog_caller(log_dir: Path, *, environ: Mapping[str, str] | None = None,
                           getsid: Callable[[int], int] = os.getsid, getpid: Callable[[], int] = os.getpid,
                           process_table: Callable[[], Mapping[int, int] | None] | None = None,

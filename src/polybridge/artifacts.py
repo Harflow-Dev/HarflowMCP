@@ -11,9 +11,10 @@ import stat
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from . import control, identity, lineage, store, workflow_hooks
+from . import control, identity, lineage, store
 from .canonical_paths import canonical
 from .extra_paths import restore_paths, revalidate_paths
+from .catalog import metadata_request
 
 MAX_BYTES = 1048576
 KINDS = frozenset(('screenshot', 'log', 'report', 'other'))
@@ -29,6 +30,35 @@ def _text(value, label):
     return value
 
 
+def _workflow_owner(log_dir, task_id, *, strict=True):
+    """Exclude managed or unverifiable ownership without scanning run history."""
+    import sqlite3
+    from .workflows import WorkflowStore
+    storage = WorkflowStore(root=log_dir.parent)
+    receipt = storage.owners / f'{store.validate_task_id(task_id)}.json'
+    try:
+        receipt.lstat()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise ValueError('Workflow ownership is unavailable') from exc
+    else:
+        return {'managed_or_unverifiable': True}
+    try:
+        page = storage.list_run_page(limit=1)
+        if page.get('bootstrap_pending') or page.get('history_incomplete'):
+            raise ValueError('Workflow ownership preparation is incomplete; retry the request')
+        index = storage._ownership_catalog()
+        with index.connect() as db:
+            index._discover(db)
+            if index.state(db)['status'] != 'ready':
+                raise ValueError('Workflow ownership is unavailable')
+            row = db.execute('SELECT 1 FROM associations WHERE id=? LIMIT 1', (task_id,)).fetchone()
+        return {'managed_or_unverifiable': True} if row else None
+    except (OSError, sqlite3.Error, TypeError, KeyError) as exc:
+        raise ValueError('Workflow ownership is unavailable') from exc
+
+
 def _standalone(log_dir, record):
     pending, seen = [(record, frozenset())], set()
     while pending:
@@ -40,7 +70,7 @@ def _standalone(log_dir, record):
         seen.add(record.task_id)
         if len(seen) > 100:
             raise ValueError('Task ancestry exceeds authority bounds')
-        if record.workflow_builder or workflow_hooks.owner(log_dir, record.task_id, strict=True) is not None:
+        if record.workflow_builder or _workflow_owner(log_dir, record.task_id, strict=True) is not None:
             raise ValueError('Managed workflow artifact access is not supported')
         for parent in {value for value in (record.spawned_by, record.parent_task_id, record.continuation_of_task_id) if value}:
             ancestor = store.read(log_dir, parent, include_prompt=False)
@@ -49,15 +79,17 @@ def _standalone(log_dir, record):
             pending.append((ancestor, ancestors | {record.task_id}))
 
 
+@metadata_request()
 def _caller(log_dir):
     # Unlike best-effort dispatch lineage, authorization rejects ambiguity and spoofed hints.
     table = lineage._default_process_table()
     if table is None or os.getpid() not in table:
         raise ValueError('Caller ancestry is unavailable')
-    chain = set(lineage.ancestors(os.getpid(), table))
+    ordered = lineage.ancestors(os.getpid(), table)
+    chain = set(ordered)
     sid = os.getsid(0)
     matches = []
-    for record in lineage._candidates(log_dir):
+    for record in lineage.related_catalog_candidates(log_dir, ordered, sid):
         if record.pid in chain or record.pgid == sid:
             verdict = identity.identity_check(lineage._candidate_identity(record))
             if verdict not in ('alive', 'dead'):
@@ -65,7 +97,6 @@ def _caller(log_dir):
             if verdict == 'alive':
                 matches.append(record)
     # Nested standalone dispatch has several ancestors: only the nearest verified owner wins.
-    ordered = lineage.ancestors(os.getpid(), table)
     ancestral = [record for record in matches if record.pid in chain]
     if ancestral:
         nearest = min(ordered.index(record.pid) for record in ancestral)
@@ -81,8 +112,17 @@ def _caller(log_dir):
         if os.environ.get('PB_ROOT_TASK_ID'):
             raise ValueError('Caller task identity is unverifiable')
         return None
-    _standalone(log_dir, matches[0])
-    return matches[0]
+    selected = matches[0]
+    record = store.read(log_dir, selected.task_id, include_prompt=False,
+                        metadata_byte_limit=4 * 1024 * 1024)
+    if (record is None or
+            (record.pid, record.pgid, record.start_time, record.markers) !=
+            (selected.pid, selected.pgid, selected.start_time, selected.markers) or
+            record.status in store.TERMINAL_RECORD_STATUSES and record.exit_code is not None or
+            identity.identity_check(lineage._candidate_identity(record)) != 'alive'):
+        raise ValueError('Caller task identity changed or is unavailable')
+    _standalone(log_dir, record)
+    return record
 
 
 def _path(log_dir, task_id):
@@ -135,6 +175,7 @@ def _load(log_dir: Path, task_id: str, directory_fd: int | None = None):
         os.close(fd)
 
 
+@metadata_request()
 def summary(log_dir: Path, task_id: str) -> dict:
     """Summarize supported standalone metadata without caller or target-file probes.
 
@@ -272,6 +313,7 @@ def _task_lock(log_dir, task_id):
         os.close(directory_fd)
 
 
+@metadata_request()
 def register(log_dir: Path, path: str, kind: str, note: str = '') -> dict:
     """Append an immutable reference under the owner's existing task flock."""
     if kind not in KINDS:
@@ -327,6 +369,7 @@ def register(log_dir: Path, path: str, kind: str, note: str = '') -> dict:
         return item
 
 
+@metadata_request()
 def get(log_dir: Path, task_id: str, cursor: str | None = None, limit: int = 20) -> dict:
     """Read a bounded reference page and observe target metadata without reading contents."""
     store.validate_task_id(task_id)
