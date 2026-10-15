@@ -116,7 +116,7 @@ def _maybe_sweep(log_dir: Path, *, now: datetime | None) -> dict[str, int] | Non
 def _artifact_ancestor_pins(log_dir: Path, by_id: dict[str, store.TaskRecord]) -> set[str]:
     """Keep exact ancestry evidence needed by manifest owners or in-flight snapshots.
 
-    Walk the in-memory record graph once, with at most two edges per vertex. No
+    Walk the in-memory record graph once, with at most three causal edges per vertex. No
     manifest contents or referenced files are opened, and symlink manifests never
     establish an owner. Unreadable metadata is conservatively treated as present.
     Unsettled snapshots also seed the walk: registration may finish after this
@@ -145,7 +145,7 @@ def _artifact_ancestor_pins(log_dir: Path, by_id: dict[str, store.TaskRecord]) -
             continue
         visited.add(identifier)
         record = by_id[identifier]
-        for parent in {record.spawned_by, record.parent_task_id} - {None}:
+        for parent in {record.spawned_by, record.parent_task_id, record.continuation_of_task_id} - {None}:
             if parent in by_id:
                 pins.add(parent)
                 pending.append(parent)

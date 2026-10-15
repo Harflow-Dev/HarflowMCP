@@ -30,8 +30,9 @@ task identities, and tasks that have settled cannot register. The registrar iden
 describes who submitted the reference, not who created the contents.
 
 Workflow orchestrators, workers, builders, native children and inherited workflow
-descendants are not supported by this standalone contract. Workflow ownership and
-output selection belong to #82; workflow extra writable paths belong to #81.
+descendants, including continuation successors, are not supported by this standalone
+contract. Workflow ownership and output selection belong to #82; workflow extra
+writable paths belong to #81.
 
 ## Paths and observations
 
@@ -118,8 +119,8 @@ cleanup can delete a referenced scratch file. Files in repositories or external 
 locations are never deleted by artifact-reference cleanup. Registration is not archival
 storage. Concurrent registration and retention share the task lifecycle lock, and a
 receipt is returned only after its manifest is durably written. Retention preserves the
-exact parent and dispatch-ancestor records needed to verify each manifest owner's
-standalone ancestry. In-flight snapshots conservatively preserve the same ancestors
+exact resume-parent, dispatch-parent and continuation-source records needed to verify
+each manifest owner's standalone ancestry. In-flight snapshots conservatively preserve the same ancestors
 so a registration finishing during a sweep cannot lose that evidence. The owner
 expires normally; those ancestors may remain until a subsequent sweep. If owner
 deletion fails, its ancestors remain for the retry. Ancestor preservation does not

@@ -42,7 +42,7 @@ def _standalone(log_dir, record):
             raise ValueError('Task ancestry exceeds authority bounds')
         if record.workflow_builder or workflow_hooks.owner(log_dir, record.task_id, strict=True) is not None:
             raise ValueError('Managed workflow artifact access is not supported')
-        for parent in {value for value in (record.spawned_by, record.parent_task_id) if value}:
+        for parent in {value for value in (record.spawned_by, record.parent_task_id, record.continuation_of_task_id) if value}:
             ancestor = store.read(log_dir, parent, include_prompt=False)
             if ancestor is None:
                 raise ValueError('Task ancestry is unavailable')

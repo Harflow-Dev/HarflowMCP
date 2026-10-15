@@ -556,3 +556,40 @@ def test_supported_empty_corrupt_and_unknown_summary_references(setup, monkeypat
     assert summary == {'count': 0, 'state': 'unavailable', 'detail_ref': reference}
     assert task_reads.brief_status({'task_id': record.task_id, 'artifact_summary': summary})['artifact_summary'] == summary
     assert artifacts.summary(logs, 'unknown') == {'count': 0, 'state': 'unavailable'}
+
+
+@pytest.mark.parametrize('case', ['builder', 'managed', 'transitive', 'mixed', 'missing', 'cycle'])
+def test_continuation_ancestry_denies_artifact_access(setup, monkeypatch, case):
+    logs, repo, record = setup
+    (repo / 'report').write_text('report')
+    # A persisted successor can lack the builder marker carried by its source.
+    owner = replace(record, continuation_of_task_id='source')
+    source = replace(record, task_id='source', pid=999, pgid=888,
+                     workflow_builder=case == 'builder',
+                     continuation_of_task_id='owner' if case == 'cycle' else 'managed' if case == 'transitive' else None,
+                     spawned_by='managed' if case == 'mixed' else None)
+    if case != 'missing':
+        store.write(logs, source)
+    if case in ('mixed', 'transitive'):
+        store.write(logs, replace(source, task_id='managed', spawned_by=None, continuation_of_task_id=None))
+    store.write(logs, owner)
+    monkeypatch.setattr(workflow_hooks, 'owner', lambda directory, identifier, strict:
+                        {'role': 'worker'} if identifier == ('managed' if case in ('mixed', 'transitive') else 'source')
+                        and case in ('managed', 'mixed', 'transitive') else None)
+    reason = {'missing': 'Task ancestry is unavailable', 'cycle': 'Task ancestry is cyclic'}.get(
+        case, 'Managed workflow artifact access is not supported')
+    with pytest.raises(ValueError, match=reason):
+        artifacts.register(logs, 'report', 'report')
+    with pytest.raises(ValueError, match=reason):
+        artifacts.get(logs, 'owner')
+    assert artifacts.summary(logs, 'owner') == {'count': 0, 'state': 'unavailable'}
+
+
+def test_standalone_continuation_artifact_access(setup):
+    logs, repo, record = setup
+    (repo / 'report').write_text('report')
+    store.write(logs, replace(record, task_id='source', pid=999, pgid=888))
+    store.write(logs, replace(record, continuation_of_task_id='source', chain_root_task_id='owner'))
+    artifacts.register(logs, 'report', 'report')
+    assert artifacts.get(logs, 'owner')['count'] == 1
+    assert artifacts.summary(logs, 'owner')['state'] == 'available'

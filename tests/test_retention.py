@@ -861,8 +861,12 @@ def _artifact_family(tmp_path, monkeypatch, edge="spawned_by"):
     target.write_text('retained report')
     now = datetime.now(timezone.utc)
     grandparent = make_record(task_id='grandparent', session_id='grand-session', repo_path=str(repo))
-    parent = make_record(task_id='parent', session_id='parent-session', repo_path=str(repo), **{edge: 'grandparent'})
-    child = make_record(task_id='child', session_id='child-session', repo_path=str(repo), **{edge: 'parent'},
+    parent_edge = 'spawned_by' if edge == 'mixed' else edge
+    child_edge = 'continuation_of_task_id' if edge == 'mixed' else edge
+    parent = make_record(task_id='parent', session_id='parent-session', repo_path=str(repo),
+                         **{parent_edge: 'grandparent'})
+    child = make_record(task_id='child', session_id='child-session', repo_path=str(repo),
+                        **{child_edge: 'parent'},
                         finished_at=_iso(now - timedelta(days=1)))
     for record in (grandparent, parent, child):
         assert store.write_landed(log_dir, record)
@@ -881,7 +885,7 @@ def _artifact_family(tmp_path, monkeypatch, edge="spawned_by"):
     return log_dir, now, child, target
 
 
-@pytest.mark.parametrize('edge', ['spawned_by', 'parent_task_id'])
+@pytest.mark.parametrize('edge', ['spawned_by', 'parent_task_id', 'continuation_of_task_id', 'mixed'])
 def test_artifact_ancestors_survive_until_owner_collection(tmp_path, monkeypatch, edge):
     from polybridge import artifacts
     log_dir, now, child, target = _artifact_family(tmp_path, monkeypatch, edge)
@@ -896,9 +900,10 @@ def test_artifact_ancestors_survive_until_owner_collection(tmp_path, monkeypatch
     assert target.read_text() == 'retained report'
 
 
-def test_failed_artifact_owner_collection_keeps_ancestors(tmp_path, monkeypatch):
+@pytest.mark.parametrize('edge', ['spawned_by', 'parent_task_id', 'continuation_of_task_id', 'mixed'])
+def test_failed_artifact_owner_collection_keeps_ancestors(tmp_path, monkeypatch, edge):
     from polybridge import artifacts
-    log_dir, now, _, _ = _artifact_family(tmp_path, monkeypatch)
+    log_dir, now, _, _ = _artifact_family(tmp_path, monkeypatch, edge)
     original = retention._delete_task_files
     monkeypatch.setattr(retention, '_delete_task_files', lambda directory, identifier:
                         False if identifier == 'child' else original(directory, identifier))
