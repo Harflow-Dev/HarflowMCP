@@ -93,7 +93,10 @@ than requested. Cursors are bound to the task and manifest revision; restart pag
 when concurrent registration makes a cursor stale. Notes remain complete in detail
 pages. No file-content payload is included, regardless of referenced file size.
 
-Older tasks without a manifest have an empty registration set. An unreadable or
+Supported standalone tasks without a manifest have an empty registration set.
+Unsupported or unverifiable ownership (including workflow builders, managed workers,
+and their descendants) reports an unavailable summary without a detail reference;
+its manifest is not opened for that summary. An unreadable or
 malformed manifest is reported as unavailable, not as an empty successful result, and
 cannot be overwritten by a new registration.
 

@@ -70,9 +70,17 @@ def brief_status(payload: dict[str, Any]) -> dict[str, Any]:
               for key, value in payload.items() if key in keys and (value is None or isinstance(value, (str, bool, int, float)))}
     artifact = payload.get('artifact_summary')
     if isinstance(artifact, dict):
-        result['artifact_summary'] = {
-            'count': artifact.get('count', 0), 'state': artifact.get('state', 'unavailable'),
-            'detail_ref': {'tool': 'get_task_artifacts', 'task_id': _text(payload.get('task_id'), 64)}}
+        count, state = artifact.get('count'), artifact.get('state')
+        if type(count) is not int or not 0 <= count <= 100 or state not in ('available', 'unavailable'):
+            count, state = 0, 'unavailable'
+        projected = {'count': count, 'state': state}
+        reference = artifact.get('detail_ref')
+        task_id = payload.get('task_id')
+        if (isinstance(task_id, str) and store.TASK_ID_PATTERN.fullmatch(task_id)
+                and isinstance(reference, dict)
+                and reference == {'tool': 'get_task_artifacts', 'task_id': task_id}):
+            projected['detail_ref'] = {'tool': 'get_task_artifacts', 'task_id': task_id}
+        result['artifact_summary'] = projected
     refs = {'status': {'tool': 'get_task_status', 'task_id': _text(payload.get('task_id'), 64)},
             'events': {'tool': 'get_task_events', 'task_id': _text(payload.get('task_id'), 64)}}
     truncated = []

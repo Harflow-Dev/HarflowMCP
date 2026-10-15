@@ -13,7 +13,10 @@ reports the registered backends, whether each binary is on PATH (`backends.is_in
 backend's declared capabilities (`backends.capability_metadata`, the same serialization as MCP
 `list_backends` — including bounded extra-path support) — no
 `--version` probe, no subprocess. Every command prints one versioned JSON document
-(`"v": 10`, `CTL_JSON_VERSION`) with `--json`. v10 adds bounded extra-path grants
+(`"v": 11`, `CTL_JSON_VERSION`) with `--json`. v11 adds bounded artifact summaries
+to full task snapshots, standalone self-registration (`register-artifact`), and
+paged metadata references (`task-artifacts`). Unsupported ownership has an unavailable
+summary without a detail reference. v10 adds bounded extra-path grants
 and their capability and enforcement metadata to task/backend documents. v9 adds durable task usage-limit
 diagnostics and workflow recovery choices. v8 adds pinned owner permissions,
 launch previews and preview hash guards. v7 adds separate human Monitor workflow

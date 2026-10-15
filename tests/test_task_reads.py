@@ -176,3 +176,24 @@ async def test_oversized_group_rejected_by_mcp_and_cli(monkeypatch, capsys, grou
     monkeypatch.setattr(workflow_inspection, 'managed_page_reader', lambda _: (True, None))
     assert ctl.main(['task-list-compact', '--json', '--group', group]) == 1
     assert json.loads(capsys.readouterr().out)['error']['code'] == 'invalid_params'
+
+
+@pytest.mark.parametrize('artifact', [
+    {'count': 0, 'state': 'unavailable'},
+    {'count': 10 ** 1000, 'state': '界' * 10000, 'detail_ref': {'tool': 'arbitrary', 'task_id': 'one'}},
+    {'count': '界' * 10000, 'state': ['available'], 'detail_ref': {'tool': 'get_task_artifacts', 'task_id': 'other'}},
+    {'count': True, 'state': 'available', 'detail_ref': {'tool': 'get_task_artifacts', 'task_id': 'one', 'extra': '界' * 10000}},
+])
+def test_brief_artifact_summary_preserves_missing_ref_and_bounds_fields(artifact):
+    payload = {'task_id': 'one', 'artifact_summary': artifact, 'summary': '界' * 10000}
+    result = task_reads.brief_status(payload)
+    assert result['artifact_summary'] == {'count': 0, 'state': 'unavailable'}
+    assert len(json.dumps(result).encode()) <= task_reads.BRIEF_BYTES
+
+
+def test_brief_artifact_summary_preserves_only_exact_matching_ref():
+    summary = {'count': 100, 'state': 'available', 'detail_ref': {'tool': 'get_task_artifacts', 'task_id': 'one'}}
+    assert task_reads.brief_status({'task_id': 'one', 'artifact_summary': summary})['artifact_summary'] == summary
+    invalid = task_reads.brief_status({'task_id': 'x' * 10000, 'artifact_summary': summary})
+    assert 'detail_ref' not in invalid['artifact_summary']
+    assert len(json.dumps(invalid).encode()) <= task_reads.BRIEF_BYTES

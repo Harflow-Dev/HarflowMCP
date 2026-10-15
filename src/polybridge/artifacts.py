@@ -136,7 +136,19 @@ def _load(log_dir: Path, task_id: str, directory_fd: int | None = None):
 
 
 def summary(log_dir: Path, task_id: str) -> dict:
-    """Bounded manifest-only summary for task detail; never stats artifact targets."""
+    """Summarize supported standalone metadata without caller or target-file probes.
+
+    Ownership must be established before opening a manifest. Unsupported or unknown
+    ownership offers no detail reference; a supported but corrupt manifest keeps one
+    so the detail API can report its unavailability.
+    """
+    try:
+        record = store.read(log_dir, task_id, include_prompt=False)
+        if record is None:
+            raise ValueError('Artifact owner is unavailable')
+        _standalone(log_dir, record)
+    except Exception:
+        return {'count': 0, 'state': 'unavailable'}
     try:
         items, _ = _load(log_dir, task_id)
         count, state = len(items), 'available'

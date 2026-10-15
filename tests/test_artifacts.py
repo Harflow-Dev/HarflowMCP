@@ -509,3 +509,50 @@ def test_overlapping_covering_grants_are_independent_but_structure_is_strict(set
     assert artifacts.get(logs, record.task_id)['items'][0]['availability']['state'] == 'unavailable'
     with pytest.raises(ValueError):
         artifacts.register(logs, str(target), 'report')
+
+
+@pytest.mark.parametrize('case', ['builder', 'worker', 'ancestor', 'owner_error', 'missing_parent', 'cycle'])
+def test_unsupported_summary_is_shared_by_live_recovered_and_brief(setup, monkeypatch, case):
+    logs, repo, record = setup
+    from datetime import datetime, timezone
+    from polybridge import task_reads
+    from polybridge.tasks import Task
+    if case == 'builder':
+        record = replace(record, workflow_builder=True)
+    elif case in ('ancestor', 'missing_parent', 'cycle'):
+        record = replace(record, spawned_by='parent')
+        if case != 'missing_parent':
+            store.write(logs, replace(record, task_id='parent', spawned_by='owner' if case == 'cycle' else None))
+    store.write(logs, record)
+    if case in ('worker', 'ancestor'):
+        managed = 'owner' if case == 'worker' else 'parent'
+        monkeypatch.setattr(workflow_hooks, 'owner', lambda directory, identifier, strict:
+                            {'role': 'worker'} if identifier == managed else None)
+    elif case == 'owner_error':
+        def fail(*args, **kwargs):
+            raise RuntimeError('ownership lookup unavailable')
+        monkeypatch.setattr(workflow_hooks, 'owner', fail)
+    monkeypatch.setattr(artifacts, '_load', lambda *args: pytest.fail('unsupported manifest must not open'))
+    monkeypatch.setattr(artifacts, '_caller', lambda *args: pytest.fail('summary must not detect callers'))
+    live = Task(task_id=record.task_id, backend='codex', session_id=None, repo_path=repo,
+                prompt='', max_turns=None, log_path=logs / 'owner.jsonl',
+                started_at=datetime.now(timezone.utc), workflow_builder=record.workflow_builder,
+                spawned_by=record.spawned_by)
+    expected = {'count': 0, 'state': 'unavailable'}
+    assert artifacts.summary(logs, record.task_id) == expected
+    for snapshot in (live.snapshot(), store.snapshot(logs, record)):
+        assert snapshot['artifact_summary'] == expected
+        assert task_reads.brief_status(snapshot)['artifact_summary'] == expected
+
+
+def test_supported_empty_corrupt_and_unknown_summary_references(setup, monkeypatch):
+    logs, _, record = setup
+    from polybridge import task_reads
+    monkeypatch.setattr(artifacts, '_caller', lambda *args: pytest.fail('summary must not detect callers'))
+    reference = {'tool': 'get_task_artifacts', 'task_id': record.task_id}
+    assert artifacts.summary(logs, record.task_id) == {'count': 0, 'state': 'available', 'detail_ref': reference}
+    artifacts._path(logs, record.task_id).write_text('{')
+    summary = artifacts.summary(logs, record.task_id)
+    assert summary == {'count': 0, 'state': 'unavailable', 'detail_ref': reference}
+    assert task_reads.brief_status({'task_id': record.task_id, 'artifact_summary': summary})['artifact_summary'] == summary
+    assert artifacts.summary(logs, 'unknown') == {'count': 0, 'state': 'unavailable'}
