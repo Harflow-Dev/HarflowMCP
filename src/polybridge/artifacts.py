@@ -14,10 +14,17 @@ from pathlib import Path
 from . import control, identity, lineage, store
 from .canonical_paths import canonical
 from .extra_paths import restore_paths, revalidate_paths
-from .catalog import metadata_request
+from .catalog import METADATA_BYTES, catalog_lock, current_metadata_budget, metadata_request
+from .bounded_io import ReadLimit
 
 MAX_BYTES = 1048576
 KINDS = frozenset(('screenshot', 'log', 'report', 'other'))
+
+
+def _read_owner(log_dir, task_id):
+    return store.read(log_dir, task_id, include_prompt=False,
+                      metadata_byte_limit=METADATA_BYTES,
+                      metadata_budget=current_metadata_budget())
 
 
 def _now():
@@ -73,7 +80,7 @@ def _standalone(log_dir, record):
         if record.workflow_builder or _workflow_owner(log_dir, record.task_id, strict=True) is not None:
             raise ValueError('Managed workflow artifact access is not supported')
         for parent in {value for value in (record.spawned_by, record.parent_task_id, record.continuation_of_task_id) if value}:
-            ancestor = store.read(log_dir, parent, include_prompt=False)
+            ancestor = _read_owner(log_dir, parent)
             if ancestor is None:
                 raise ValueError('Task ancestry is unavailable')
             pending.append((ancestor, ancestors | {record.task_id}))
@@ -113,8 +120,7 @@ def _caller(log_dir):
             raise ValueError('Caller task identity is unverifiable')
         return None
     selected = matches[0]
-    record = store.read(log_dir, selected.task_id, include_prompt=False,
-                        metadata_byte_limit=4 * 1024 * 1024)
+    record = _read_owner(log_dir, selected.task_id)
     if (record is None or
             (record.pid, record.pgid, record.start_time, record.markers) !=
             (selected.pid, selected.pgid, selected.start_time, selected.markers) or
@@ -132,6 +138,10 @@ def _path(log_dir, task_id):
 
 def _load(log_dir: Path, task_id: str, directory_fd: int | None = None):
     path = _path(log_dir, task_id)
+    budget = current_metadata_budget()
+    if budget is not None and budget.metadata_decodes >= 100:
+        raise ReadLimit('Metadata decode request limit reached')
+    available = MAX_BYTES if budget is None else min(MAX_BYTES, max(0, budget.metadata_limit - budget.metadata_bytes))
     if log_dir.is_symlink() or canonical(log_dir) != log_dir.absolute():
         raise ValueError('Artifact storage directory is unsafe')
     try:
@@ -141,10 +151,16 @@ def _load(log_dir: Path, task_id: str, directory_fd: int | None = None):
         return [], b''
     try:
         info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_BYTES:
+        if not stat.S_ISREG(info.st_mode) or info.st_size > available:
             raise ValueError('Artifact manifest is unavailable')
-        with os.fdopen(fd, 'rb', closefd=False) as source:
-            raw = source.read(MAX_BYTES + 1)
+        with os.fdopen(fd, 'rb', buffering=0, closefd=False) as source:
+            raw = source.read(available)
+        if budget is not None:
+            budget.metadata_bytes += len(raw)
+        if os.fstat(fd).st_size > available:
+            raise ReadLimit('Artifact manifest exceeds bounded read budget')
+        if budget is not None:
+            budget.metadata_decodes += 1
         try:
             data = json.loads(raw)
         except RecursionError as exc:
@@ -184,7 +200,7 @@ def summary(log_dir: Path, task_id: str) -> dict:
     so the detail API can report its unavailability.
     """
     try:
-        record = store.read(log_dir, task_id, include_prompt=False)
+        record = _read_owner(log_dir, task_id)
         if record is None:
             raise ValueError('Artifact owner is unavailable')
         _standalone(log_dir, record)
@@ -280,13 +296,15 @@ def _task_lock(log_dir, task_id):
     try:
         lock_name = f'{task_id}.lock'
         flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK
-        try:
-            # Darwin can return ENOENT when O_CREAT|O_NOFOLLOW races another initial
-            # creator. Exclusive creation, then a no-create open of its inode, avoids it.
-            fd = os.open(lock_name, flags | os.O_CREAT | os.O_EXCL, 0o644,
-                         dir_fd=directory_fd)
-        except FileExistsError:
-            fd = os.open(lock_name, flags, dir_fd=directory_fd)
+        # Release the catalog lock before waiting for the lifecycle flock.
+        with catalog_lock(log_dir):
+            try:
+                # Darwin can return ENOENT when O_CREAT|O_NOFOLLOW races another initial
+                # creator. Exclusive creation, then a no-create open of its inode, avoids it.
+                fd = os.open(lock_name, flags | os.O_CREAT | os.O_EXCL, 0o644,
+                             dir_fd=directory_fd)
+            except FileExistsError:
+                fd = os.open(lock_name, flags, dir_fd=directory_fd)
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
             raise ValueError('Task lock is unsafe')
@@ -328,7 +346,7 @@ def register(log_dir: Path, path: str, kind: str, note: str = '') -> dict:
     if lock.is_symlink():
         raise ValueError('Task lock is unsafe')
     with _task_lock(log_dir, caller.task_id) as storage_fd:
-        record = store.read(log_dir, caller.task_id, include_prompt=False)
+        record = _read_owner(log_dir, caller.task_id)
         if record is not None and (record.pid, record.pgid, record.start_time) != (caller.pid, caller.pgid, caller.start_time):
             raise ValueError('Artifact owner process identity changed')
         if record is None or record.status in store.TERMINAL_RECORD_STATUSES or identity.identity_check(lineage._candidate_identity(record)) != 'alive':
@@ -351,21 +369,23 @@ def register(log_dir: Path, path: str, kind: str, note: str = '') -> dict:
         if len(raw) > MAX_BYTES:
             raise ValueError('Task artifact manifest limit reached')
         name = f'{record.task_id}.artifacts-{uuid.uuid4().hex}.tmp'
-        fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                     0o600, dir_fd=storage_fd)
-        try:
-            with os.fdopen(fd, 'wb') as output:
-                output.write(raw)
-                output.flush()
-                os.fsync(output.fileno())
-            os.replace(name, _path(log_dir, record.task_id).name,
-                       src_dir_fd=storage_fd, dst_dir_fd=storage_fd)
-            os.fsync(storage_fd)
-        finally:
+        # Catalog discovery needs a stable directory snapshot, including sidecars.
+        with catalog_lock(log_dir):
+            fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                         0o600, dir_fd=storage_fd)
             try:
-                os.unlink(name, dir_fd=storage_fd)
-            except FileNotFoundError:
-                pass
+                with os.fdopen(fd, 'wb') as output:
+                    output.write(raw)
+                    output.flush()
+                    os.fsync(output.fileno())
+                os.replace(name, _path(log_dir, record.task_id).name,
+                           src_dir_fd=storage_fd, dst_dir_fd=storage_fd)
+                os.fsync(storage_fd)
+            finally:
+                try:
+                    os.unlink(name, dir_fd=storage_fd)
+                except FileNotFoundError:
+                    pass
         return item
 
 
@@ -378,7 +398,7 @@ def get(log_dir: Path, task_id: str, cursor: str | None = None, limit: int = 20)
     caller = _caller(log_dir)
     if caller is not None and caller.task_id != task_id:
         raise ValueError('Task callers may read only their own artifacts')
-    record = store.read(log_dir, task_id, include_prompt=False)
+    record = _read_owner(log_dir, task_id)
     if record is None:
         raise ValueError('Unknown task')
     _standalone(log_dir, record)

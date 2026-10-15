@@ -40,6 +40,11 @@ class MetadataBudget:
 _request_budget: ContextVar[MetadataBudget | None] = ContextVar('catalog_request_budget', default=None)
 
 
+def current_metadata_budget() -> MetadataBudget | None:
+    """Return the current request's shared raw metadata read budget."""
+    return _request_budget.get()
+
+
 _unscoped_authority_preparation: ContextVar[tuple[str | None, dict[str, Any] | None] | None] = ContextVar('unscoped_authority_preparation', default=None)
 
 

@@ -447,6 +447,8 @@ def test_replaced_lock_inode_is_refused(setup, monkeypatch):
     real_flock = artifacts.fcntl.flock
     def replaced(descriptor, operation):
         real_flock(descriptor, operation)
+        if not operation & artifacts.fcntl.LOCK_NB:
+            return  # Only replace the task lock, never the catalog lock.
         lock = logs / 'owner.lock'
         lock.rename(logs / 'old-owner.lock')
         lock.write_text('replacement')
@@ -727,10 +729,10 @@ def test_artifact_workflow_preparation_is_bounded_and_summary_unavailable(setup,
         return original(self, run_id, **kwargs)
     monkeypatch.setattr(WorkflowStore, 'get_run', get_run)
     assert artifacts.summary(logs, record.task_id) == {'count': 0, 'state': 'unavailable'}
-    assert len(reads) == 100
+    assert len(reads) == 99  # The owner consumed one shared decode.
     with pytest.raises(ValueError, match='preparation is incomplete'):
         artifacts.get(logs, record.task_id)
-    assert len(reads) == 200
+    assert len(reads) == 198
     assert artifacts.summary(logs, record.task_id)['state'] == 'available'
     assert len(reads) == 205
 
@@ -759,3 +761,162 @@ def test_real_inherited_workflow_ownership_denies_artifacts(setup, ownership):
         with pytest.raises(ValueError, match='Managed'):
             action()
     assert artifacts.summary(logs, 'owner') == {'count': 0, 'state': 'unavailable'}
+
+
+@pytest.mark.parametrize('edge', ['spawned_by', 'parent_task_id', 'continuation_of_task_id', None])
+def test_artifact_authority_rejects_oversized_owner_or_ancestor(setup, monkeypatch, edge):
+    logs, _, record = setup
+    monkeypatch.setattr(artifacts, '_caller', lambda _: None)
+    monkeypatch.setattr(artifacts, '_workflow_owner', lambda *args, **kwargs: None)
+    oversized = record.task_id
+    if edge:
+        oversized = 'ancestor'
+        store.write(logs, replace(record, **{edge: oversized}))
+        store.write(logs, replace(record, task_id=oversized))
+    path = store.record_path(logs, oversized)
+    path.write_bytes(path.read_bytes() + b' ' * (4 * 1024 * 1024))
+    assert artifacts.summary(logs, record.task_id) == {'count': 0, 'state': 'unavailable'}
+    with pytest.raises(ValueError):
+        artifacts.get(logs, record.task_id)
+
+
+def test_manifest_and_repeated_owner_reads_share_nested_budget(setup, monkeypatch):
+    from polybridge.catalog import current_metadata_budget, metadata_request
+    logs, _, record = setup
+    monkeypatch.setattr(artifacts, '_workflow_owner', lambda *args, **kwargs: None)
+    manifest = artifacts._path(logs, record.task_id)
+    manifest.write_text(json.dumps({'v': 1, 'task_id': record.task_id, 'items': []}))
+    owner_size = store.record_path(logs, record.task_id).stat().st_size
+    with metadata_request():
+        budget = current_metadata_budget()
+        budget.metadata_limit = owner_size + manifest.stat().st_size
+        assert artifacts.summary(logs, record.task_id)['state'] == 'available'
+        assert budget.metadata_bytes == budget.metadata_limit
+        assert budget.metadata_decodes == 2
+        assert artifacts.summary(logs, record.task_id)['state'] == 'unavailable'
+        assert current_metadata_budget() is budget
+    assert artifacts.summary(logs, record.task_id)['state'] == 'available'
+
+
+def test_registration_budget_exhaustion_preserves_manifest(setup):
+    from polybridge.catalog import current_metadata_budget, metadata_request
+    logs, repo, record = setup
+    (repo / 'report').write_text('report')
+    artifacts.register(logs, 'report', 'report')
+    manifest = artifacts._path(logs, record.task_id)
+    saved = manifest.read_bytes()
+    with metadata_request():
+        current_metadata_budget().metadata_limit = 0
+        with pytest.raises(ValueError):
+            artifacts.register(logs, 'report', 'report', 'new')
+    assert manifest.read_bytes() == saved
+
+
+def test_valid_near_file_limit_and_shared_ancestor_byte_exhaustion(setup, monkeypatch):
+    from polybridge.catalog import METADATA_BYTES
+    logs, _, record = setup
+    monkeypatch.setattr(artifacts, '_workflow_owner', lambda *args, **kwargs: None)
+    monkeypatch.setattr(artifacts, '_caller', lambda _: None)
+    def padded(task):
+        store.write(logs, task)
+        path = store.record_path(logs, task.task_id)
+        raw = path.read_bytes()
+        path.write_bytes(raw + b' ' * (METADATA_BYTES - len(raw)))
+    padded(record)
+    assert artifacts.get(logs, record.task_id)['state'] == 'available'
+    padded(replace(record, spawned_by='parent'))
+    padded(replace(record, task_id='parent', parent_task_id='grandparent'))
+    store.write(logs, replace(record, task_id='grandparent'))
+    assert artifacts.summary(logs, record.task_id)['state'] == 'unavailable'
+    with pytest.raises(ValueError):
+        artifacts.get(logs, record.task_id)
+
+
+def test_registration_exhaustion_after_locked_rechecks_preserves_manifest(setup):
+    from polybridge.catalog import current_metadata_budget, metadata_request
+    logs, repo, record = setup
+    (repo / 'report').write_text('report')
+    artifacts.register(logs, 'report', 'report')
+    manifest = artifacts._path(logs, record.task_id)
+    saved = manifest.read_bytes()
+    owner_size = store.record_path(logs, record.task_id).stat().st_size
+    with metadata_request():
+        budget = current_metadata_budget()
+        budget.metadata_limit = 3 * owner_size + len(saved) - 1
+        with pytest.raises(ValueError):
+            artifacts.register(logs, 'report', 'report', 'new')
+        assert budget.metadata_decodes == 3
+        assert budget.metadata_bytes == 3 * owner_size
+    assert manifest.read_bytes() == saved
+
+
+def test_artifact_directory_mutations_share_catalog_lock_without_flock_inversion(setup, monkeypatch):
+    from contextlib import contextmanager
+    from polybridge.catalog import catalog_lock
+    logs, repo, record = setup
+    (repo / 'report').write_text('report')
+    depth = 0
+    mutations = []
+    @contextmanager
+    def tracked_lock(directory):
+        nonlocal depth
+        with catalog_lock(directory):
+            depth += 1
+            try:
+                yield
+            finally:
+                depth -= 1
+    original_open, original_replace, original_unlink = os.open, os.replace, os.unlink
+    original_flock = artifacts.fcntl.flock
+    def opened(path, flags, *args, **kwargs):
+        if flags & os.O_CREAT and str(path).startswith(record.task_id):
+            assert depth > 0
+            mutations.append('create')
+        return original_open(path, flags, *args, **kwargs)
+    def replaced(source, destination, *args, **kwargs):
+        if str(destination) == f'{record.task_id}.artifacts.json':
+            assert depth > 0
+            mutations.append('replace')
+        return original_replace(source, destination, *args, **kwargs)
+    def unlinked(path, *args, **kwargs):
+        if str(path).startswith(f'{record.task_id}.artifacts-'):
+            assert depth > 0
+            mutations.append('cleanup')
+        return original_unlink(path, *args, **kwargs)
+    def flocked(fd, operation):
+        if operation & artifacts.fcntl.LOCK_NB:
+            assert depth == 0  # Never wait for a task flock while holding catalog lock.
+        return original_flock(fd, operation)
+    monkeypatch.setattr(artifacts, 'catalog_lock', tracked_lock)
+    monkeypatch.setattr(os, 'open', opened)
+    monkeypatch.setattr(os, 'replace', replaced)
+    monkeypatch.setattr(os, 'unlink', unlinked)
+    monkeypatch.setattr(artifacts.fcntl, 'flock', flocked)
+    artifacts.register(logs, 'report', 'report')
+    assert mutations == ['create', 'create', 'replace', 'cleanup']
+
+
+def test_initial_task_lock_creation_waits_for_catalog_discovery(setup, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from contextlib import contextmanager
+    from threading import Event
+    from polybridge.catalog import catalog_lock
+    logs, _, record = setup
+    attempted = Event()
+    @contextmanager
+    def observed_lock(directory):
+        attempted.set()
+        with catalog_lock(directory):
+            yield
+    monkeypatch.setattr(artifacts, 'catalog_lock', observed_lock)
+    def create():
+        with artifacts._task_lock(logs, record.task_id):
+            pass
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with catalog_lock(logs):
+            future = pool.submit(create)
+            assert attempted.wait(5)
+            assert not (logs / f'{record.task_id}.lock').exists()
+            assert not future.done()
+        future.result(timeout=5)
+    assert (logs / f'{record.task_id}.lock').is_file()

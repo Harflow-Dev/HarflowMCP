@@ -31,17 +31,28 @@ describes who submitted the reference, not who created the contents.
 
 Caller discovery uses the task catalog and considers at most 100 identities related
 by process ancestry or session. Overflow or incomplete/unreadable authority fails
-closed. Cold MCP and CLI requests prepare at most 100 metadata records and 8 MiB of
-metadata per request; retry a preparation error to advance the catalog. Registration's
-two identity checks share that preparation budget. Ready requests do not deserialize
-unrelated historical records. The selected owner is reloaded with a 4 MiB metadata
-limit, and its identity and standalone ancestry are checked before authorization.
-Standalone exclusion also uses the bounded workflow ownership catalog, checking each
+closed. MCP and CLI requests share a raw metadata budget of 8 MiB and 100 JSON
+attempts across task and workflow catalog preparation, every owner and ancestor
+reload (including registration's fresh checks under the lock), and manifest reads.
+Task and workflow records have a 4 MiB per-file limit; manifests have a 1 MiB limit.
+Malformed JSON consumes its bytes and decode attempt. Budget exhaustion fails closed;
+registration does not replace the manifest. Retry an incomplete preparation request
+to advance the catalog. Nested readers share the budget; a new request starts fresh.
+Ready requests do not deserialize unrelated historical records. Caller discovery's
+derived SQLite projections are separately limited to 100 rows of at most 8 KiB each.
+Target availability, protected configuration paths and saved grant identity checks
+inspect filesystem metadata without reading target or configuration contents. Prompt
+sidecars and execution logs are not opened by artifact authorization. These limits
+cover the artifact path; they do not change the separate full status recovery read.
+These content bounds do not guarantee constant time for filesystem enumeration,
+stat calls or SQLite operations.
+
+The selected owner's identity and standalone ancestry are checked before authorization.
+Standalone exclusion uses the bounded workflow ownership catalog, checking each
 ancestor and refusing any ownership receipt, including malformed or unavailable
-receipts. Incomplete workflow preparation requires a retry; summaries report
-`unavailable` until ownership can be established. Task and workflow preparation share
-the request's metadata budget. Artifact paths never fall back to scanning full
-workflow history.
+receipts. Receipt existence is checked without reading its contents. Incomplete
+workflow preparation requires a retry; summaries report `unavailable` until ownership
+can be established. Artifact paths never fall back to scanning full workflow history.
 
 Workflow orchestrators, workers, builders, native children and inherited workflow
 descendants, including continuation successors, are not supported by this standalone

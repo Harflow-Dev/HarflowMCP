@@ -663,6 +663,14 @@ async def get_task_status(
     server process are still reported, marked `recovered: true` with a `note` explaining what is and
     is not known about them.
 
+    Live, recovered and brief snapshots include `artifact_summary` with a bounded `count` and
+    `state` (available or unavailable). Supported standalone owners may include `detail_ref`:
+    {"tool": "get_task_artifacts", "task_id": "..."}, for explicit paged metadata reads.
+    Unsupported or unverifiable ownership returns unavailable without a detail reference;
+    a supported owner with an unreadable manifest may retain the reference for diagnostics.
+    Artifact registration is a reference, not proof of valid contents, successful execution,
+    or permission to copy or publish. Availability does not verify content integrity.
+
     Confirmed usage limits add `failure_diagnostic` (category, reason, source, and optional
     provider-supplied reset_at). It is retained during process settlement and after failure;
     a running status during settlement does not authorize a replacement dispatch.
