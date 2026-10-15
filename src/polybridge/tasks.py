@@ -62,6 +62,11 @@ log = logging.getLogger(__name__)
 EXTRA_PATH_CHECK_BUDGET_SECONDS = 20.0
 EXTRA_PATH_CHECK_WORKERS = 4
 
+# Symbolic stand-in for the per-task scratch root a dispatch appends to its recorded
+# `Enforcement.writable_roots` (see `_spawn`). `preview_permissions` discloses it so the
+# previewed writable_roots match what a launched task would carry, without allocating anything.
+FUTURE_TASK_SCRATCH_ROOT = "the task scratch directory (allocated per task at launch)"
+
 # One shared wall-clock budget for every preflight authority read in a single request. Each
 # individual check can legally wait up to EXTRA_PATH_CHECK_BUDGET_SECONDS, so several of them
 # in one dispatch could together outlast a caller's own handshake window (detached's is 30 s);
@@ -1098,6 +1103,12 @@ class TaskRegistry:
             backend.assert_safe(invocation, freedom, network)
         enforcement = backend.extra_path_enforcement(backend.enforcement(freedom, network), grants, repo_path) if grants else backend.enforcement(freedom, network)
         self._resolve_lineage(caller, child_enforcement=enforcement, child_backend=backend.name, child_repo=repo_path)
+        # A dispatch grants every non-read-only task of a scratch-aware backend a task-owned
+        # scratch directory and appends its path to the recorded writable_roots — after the
+        # lineage check above, exactly like here. The preview allocates nothing, so it discloses
+        # the future root symbolically and never feeds it to the nested-authority comparison.
+        if freedom != "read_only" and getattr(backend, "with_writable_directory", None) is not None:
+            enforcement = replace(enforcement, writable_roots=(*enforcement.writable_roots, FUTURE_TASK_SCRATCH_ROOT))
         return {"backend": backend.name, "freedom": freedom, "network": network, "repo_path": str(repo_path), "extra_writable_paths": serialize_paths(grants), "extra_path_certification": backend.extra_path_support().get("certification") if grants else None, "enforcement": enforcement.as_dict(), "limitations": "Existing typed path identities are checked before launch; grants are unavailable to native workflows and interactive takeover."}
 
     @_with_authority_check_budget

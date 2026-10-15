@@ -5,7 +5,9 @@ additional local writes without selecting unrestricted access. Inspect
 `preview_task_permissions(repo_path=..., backend=..., extra_writable_paths=...)`
 first: it returns requested/effective typed scopes, certification and enforcement
 without launching an agent or allocating task scratch. Launch revalidates this
-observation; preview does not reserve authority.
+observation; preview does not reserve authority. For writable launches on scratch-aware
+backends, enforcement includes `the task scratch directory (allocated per task at launch)`
+as a symbolic future writable root. Read-only previews include no scratch root.
 
 Installed-version qualification runs off the server event loop with a bounded
 deadline. Bounded-mode execution uses the qualified absolute executable path;

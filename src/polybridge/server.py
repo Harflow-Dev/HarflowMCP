@@ -559,7 +559,9 @@ async def preview_task_permissions(
 
     Uses the same bounded extra_writable_paths validation, installed-version checks and detected
     owner caps as start_task. Returns requested/effective typed paths, certification and truthful
-    enforcement. The preview is an observation, not a reservation: launch revalidates paths and
+    enforcement. Writable scratch-aware launches disclose future task scratch symbolically in
+    writable_roots without allocating it; read-only previews have no scratch root.
+    The preview is an observation, not a reservation: launch revalidates paths and
     configuration. Extra grants never authorize publication. Workflow/native-adapter grants and
     unverified harness configurations are unavailable. Known external backend execution configuration
     is protected; unsupported existing inputs reject requests. Existing repository configuration

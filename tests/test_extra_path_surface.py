@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 import pytest
 from mcp import Client, MCPError
 
-from polybridge import backends, ctl, server
+from polybridge import backends, ctl, server, tasks
 from polybridge.backends.codex import EXTRA_PATHS_VERSION
 from polybridge.backends.base import nested_enforcement_violation
 from polybridge.extra_paths import normalize_paths
@@ -43,11 +43,36 @@ async def test_preview_exposes_effective_scopes_without_task_or_scratch(git_repo
     result = await server.preview_task_permissions(str(git_repo), backend='codex', extra_writable_paths=[str(grant)])
     assert result['extra_writable_paths'][0]['requested'] == str(grant)
     assert result['extra_writable_paths'][0]['path'] == str(grant.resolve())
-    assert result['enforcement']['writable_roots'] == ['the working directory', str(grant.resolve())]
+    assert result['enforcement']['writable_roots'] == [
+        'the working directory', str(grant.resolve()), tasks.FUTURE_TASK_SCRATCH_ROOT,
+    ]
     assert result['enforcement']['network_access'] == 'blocked'
     assert result['enforcement']['publish_attempts_allowed_by_polybridge'] is False
     assert not registry._tasks
     assert not registry.log_dir.exists()
+    assert not (registry.log_dir.parent / 'scratch').exists()
+
+
+@pytest.mark.parametrize('freedom', ['read_only', 'write_in_repo', 'publish', 'unrestricted'])
+async def test_preview_discloses_future_scratch_without_allocating(git_repo, monkeypatch, fake_backend_clis, freedom):
+    registry = server._reg()
+    lineage = []
+    def check(caller, *, child_enforcement, **kwargs):
+        lineage.append(child_enforcement.writable_roots)
+    monkeypatch.setattr(registry, '_resolve_lineage', check)
+    def refuse(*args, **kwargs):
+        raise AssertionError('preview allocated task scratch')
+    monkeypatch.setattr('polybridge.scratch.create', refuse)
+    result = await server.preview_task_permissions(str(git_repo), backend='codex', freedom=freedom)
+    assert (tasks.FUTURE_TASK_SCRATCH_ROOT in result['enforcement']['writable_roots']) == (freedom != 'read_only')
+    assert all(tasks.FUTURE_TASK_SCRATCH_ROOT not in roots for roots in lineage)
+    assert not registry._tasks
+    assert not registry.log_dir.exists()
+
+
+async def test_preview_without_scratch_backend_does_not_claim_root(git_repo, fake_backend_clis):
+    result = await server.preview_task_permissions(str(git_repo), backend='vibe')
+    assert tasks.FUTURE_TASK_SCRATCH_ROOT not in result['enforcement']['writable_roots']
 
 
 async def test_start_passes_explicit_request_to_registry(git_repo, tmp_path, monkeypatch, fake_backend_clis):

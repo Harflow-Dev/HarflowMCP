@@ -178,7 +178,8 @@ Extra-path support requires absolute nonempty PATH entries, native selected help
 
 [`extra_writable_paths`](docs/extra-writable-paths.md) adds bounded local file or directory
 grants on verified configurations. Inspect `preview_task_permissions` before launch;
-unsupported versions/configurations reject the request. The measured Codex mode clears
+writable previews disclose future task scratch symbolically without allocating it.
+Unsupported versions/configurations reject the request. The measured Codex mode clears
 ambient writable roots and excludes implicit temporary roots. Resume and continuation
 preserve saved scope; grants never authorize publication. Writable scopes cannot overlap
 the Codex launcher chain or server helper/PATH and Python import namespaces. Launcher
