@@ -83,6 +83,20 @@ def test_inline_config_and_relative_environment_refused_without_values(layout,mo
     assert 'secret' not in str(exc.value)
 
 
+def test_granted_output_is_requalified_when_selected_as_repository(layout):
+    _, repo, output = layout
+    grants = normalize_paths([str(output)])
+    assert_execution_config_outside_writes(repo, grants)
+    project = output / '.claude'
+    project.mkdir()
+    (project / 'settings.json').write_text('{}')
+    # Authorized output is not an input of repo A. Selecting B creates a new
+    # execution context, whose existing project configuration is not qualified.
+    assert_execution_config_outside_writes(repo, grants)
+    with pytest.raises(ValueError, match='existing backend execution configuration'):
+        assert_execution_config_outside_writes(output, normalize_paths([str(repo)]))
+
+
 def test_external_implicit_repository_overlap_refused(layout,monkeypatch):
     _,repo,grant=layout
     monkeypatch.setenv('CLAUDE_CONFIG_DIR',str(repo))

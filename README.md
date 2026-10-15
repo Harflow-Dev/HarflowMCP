@@ -183,7 +183,8 @@ Unsupported versions/configurations reject the request. The measured Codex mode 
 ambient writable roots and excludes implicit temporary roots. Resume and continuation
 preserve saved scope; grants never authorize publication. Writable scopes cannot overlap
 the Codex launcher chain or server helper/PATH and Python import namespaces. Launcher
-hardlinks and mutable server helper hardlinks are unsupported; see the linked guide.
+hardlinks and mutable server helper hardlinks are unsupported. Granted outputs, including
+another checkout's settings, are not certified for later execution; see the linked guide.
 
 [`wait_for_tasks`](docs/multi-task-waiting.md) observes any or all of up to 32 tasks in one
 bounded, read-only call. Timeout and caller disconnect leave execution untouched.
