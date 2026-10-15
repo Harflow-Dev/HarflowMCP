@@ -75,7 +75,10 @@ FUTURE_TASK_SCRATCH_ROOT = "the task scratch directory (allocated per task at la
 # response overhead all have to fit after the authority budget for the handshake to answer
 # before it expires. This budget governs only the pure preflight waits in
 # `_bounded_extra_path_check` — never the subprocess await, and never the registry invocation as
-# a whole: expiry refuses the next check before it is submitted. Existing pre-spawn
+# a whole: expiry refuses the next check before it is submitted. The deadline is an absolute
+# wall-clock moment, not an accumulated CPU allowance: it ages during any other startup work
+# between checks and is only consulted by them — nothing meters or debits that other work.
+# Existing pre-spawn
 # boundaries, rather than this timer, determine whether a refusal is safely retryable.
 AUTHORITY_CHECK_REQUEST_BUDGET_SECONDS = 15.0
 _AUTHORITY_CHECK_DEADLINE: contextvars.ContextVar[tuple[weakref.ReferenceType[Any] | None, float] | None] = contextvars.ContextVar(

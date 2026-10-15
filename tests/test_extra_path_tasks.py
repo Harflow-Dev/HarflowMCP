@@ -655,30 +655,61 @@ async def test_background_request_does_not_reuse_its_creators_expired_budget():
     assert tasks.authority_check_deadline() is None
 
 
-async def test_request_budget_failcloses_across_individually_in_budget_checks():
+async def test_request_budget_failcloses_across_individually_in_budget_checks(monkeypatch):
+    # Deterministic replacement for the real-sleep version: a loaded runner could take the
+    # 0.06 s first check past the whole 0.10 s budget. The deadline is an absolute wall-clock
+    # moment that only the checks consult, so a controlled clock plus an intercepted
+    # `wait_for` proves the same three facts without any real timing: the first check runs
+    # inside the budget, the second is handed the remainder (not a fresh per-check cap) and
+    # times out, and the third is refused before submission once the budget has expired.
     import threading
-    import time
+    now = {'monotonic': 1000.0}
+    def advance(seconds):
+        now['monotonic'] += seconds
+    # Only the tasks module's own binding is redirected; stdlib time (and asyncio's use of
+    # it) keeps the real clock, so the event loop is untouched.
+    monkeypatch.setattr(tasks, 'time', SimpleNamespace(monotonic=lambda: now['monotonic']))
     calls = []
     submitted = threading.Event()
     def first():
         calls.append('first')
-        time.sleep(0.06)
         return 'first-ok'
     def second():
         calls.append('second')
         submitted.set()
-        time.sleep(0.5)
         return 'second-ok'
     def third():
         raise AssertionError('authority read submitted after the request budget expired')
+    timeouts = []
+    async def controlled_wait_for(awaitable, timeout=None):
+        timeouts.append(timeout)
+        if len(timeouts) == 1:
+            return await awaitable  # the in-budget first check genuinely completes
+        await awaitable  # settle the real worker before injecting the timeout outcome
+        raise TimeoutError()  # the remainder handed to the second check has run out
+    # Again a module-local binding: asyncio.wait_for itself is never patched globally, so
+    # unrelated awaits in the same process are unaffected.
+    monkeypatch.setattr(tasks, 'asyncio', SimpleNamespace(
+        current_task=asyncio.current_task,
+        wrap_future=asyncio.wrap_future,
+        wait_for=controlled_wait_for,
+    ))
     with tasks.authority_check_budget(seconds=0.10):
         assert await tasks._bounded_extra_path_check(first) == 'first-ok'
+        # The first check (and any other startup work) consumed part of the shared allowance.
+        advance(0.06)
         with pytest.raises(ValueError, match='Extra writable path validation'):
             await tasks._bounded_extra_path_check(second)
-        assert submitted.wait(1)
+        assert submitted.is_set()
+        advance(0.06)  # past the 0.10 s deadline
         with pytest.raises(ValueError, match='request budget expired'):
             await tasks._bounded_extra_path_check(third)
     assert calls == ['first', 'second']
+    # The second check received the 0.04 s remainder of the shared budget, not a fresh
+    # EXTRA_PATH_CHECK_BUDGET_SECONDS cap, and the first received the full opening budget.
+    assert timeouts[0] == pytest.approx(0.10)
+    assert timeouts[1] == pytest.approx(0.04)
+    assert len(timeouts) == 2
 
 
 async def test_timeout_retains_real_worker_slot_until_the_worker_finishes(monkeypatch):
