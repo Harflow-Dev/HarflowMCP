@@ -75,6 +75,9 @@ New workflow runs use [bounded context delivery](docs/workflows.md#context-deliv
 acknowledged orchestrator resumes receive deltas, and headless workers retrieve assigned evidence
 in pages. The execution inspector reports delivered bytes and available model usage separately.
 Monitor keeps workflow headers and builder activity within the window's content area during resizing.
+The editor preserves conflicting drafts for recovery and identifies each broken child-workflow
+reference, including repeated references to a deleted workflow; see
+[draft recovery](docs/workflows.md#unsaved-editor-drafts).
 It shows children beneath their parent and as regular workflow entries, with shared navigation; see
 [Monitor navigation and layout](docs/workflows.md#monitor-history-and-notifications).
 

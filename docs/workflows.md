@@ -387,6 +387,15 @@ polybridge-ctl workflow-resume <workflow_run_id> \
 Validate an editable graph before saving with
 `polybridge-ctl workflow-validate --definition workflow.json --json`.
 It returns `result.valid` and an optional `result.error` without saving definitions or run state.
+Missing dependencies also return bounded `missing_references` diagnostics with the owning
+workflow, node and dependency path, plus `missing_references_truncated` when the diagnostic
+budget is exhausted (at most 256 occurrences, 10,000 visited nodes, four path levels and
+128 KiB of encoded diagnostic records). Display labels are shortened; oversized identity
+keys are omitted with truncation reported. The existing error text remains available. Resolve every occurrence:
+changing one step does not repair another step that still references a deleted workflow.
+Callers updating an existing workflow can supply `--expected-workflow-id ID` to
+`workflow-save` (MCP: `expected_workflow_id`) alongside `expected_revision`. The identity
+guard rejects a deleted or replaced destination even if its replacement has the same revision.
 Every node must be reachable from Start and have a forward path to End, including loops.
 
 `workflow-list` and `workflow-list-runs` list definitions and runs. `workflow-get` reads a definition;
@@ -1083,13 +1092,29 @@ one. Inspect each task's enforcement report.
 
 The Monitor automatically keeps unsaved canvas edits as local drafts, including incomplete graphs and applied agent proposals. Navigating away or reopening the app restores the draft. Drafts retain the original saved revision, so Save still detects another update to the saved workflow. Only an explicit successful Save changes the runnable definition. Save is disabled when the canvas matches the saved workflow.
 
+Restoring a saved-workflow draft checks the current saved identity and revision. A conflicting
+draft stays intact and cannot overwrite newer saved work. **Save copy and reload** preserves
+the unsaved canvas in the New workflow draft slot before opening the current saved definition.
+If that slot already contains another draft, resolve it first; recovery never overwrites it.
+The preserved copy remains available through New workflow for reconciliation. A deleted source
+or failed read is reported explicitly, with the draft retained. Save also checks the current
+baseline and sends an expected identity and revision so concurrent changes remain protected.
+
+For unavailable child workflows, validation identifies the offending steps and their dependency
+paths. Selecting another saved workflow in one step changes only that step. Use **Replace all**
+to review and replace every matching unavailable reference in the open workflow, or repair each
+step individually. **Review missing workflows** locates the affected step in the current canvas.
+Nested workflows are identified separately and are never rewritten by this
+action. For example, after duplicating a verification workflow and deleting its original, both
+the baseline and final-verification steps must be relinked if both referenced the original.
+
 A workflow editor draft also remembers its builder conversation. Navigating to another task and back reconnects to the same running agent or completed proposal. Applying the proposal or explicitly returning to the canvas dismisses that conversation from the editor. Workflow-builder activity has no terminal takeover button.
 
 New canvases start with Start → Plan → Implementation → Review → End in an evenly spaced row. Review also has a retry path back to Implementation when changes are needed.
 
 With the canvas focused, use ⌘C and ⌘V to copy and paste selected nodes. Pasted nodes get new IDs and an offset; connections within the selected group are copied. Existing Start/End nodes are skipped so terminal nodes stay unique. Text fields retain their normal copy/paste behavior.
 
-With the canvas focused, press ⌘Z repeatedly to undo earlier edits. A full node drag is one undo step. Text fields retain their normal text undo. **Discard**, beside Save, restores the saved workflow (or the starter for a new workflow) and clears its unsaved draft. Discard and canvas undo are unavailable while an agent is editing.
+With the canvas focused, press ⌘Z repeatedly to undo earlier edits. A full node drag is one undo step. Text fields retain their normal text undo. **Discard**, beside Save, fetches the latest saved workflow (or restores the starter for a new workflow) before clearing its unsaved draft. A failed fetch retains the draft. Discard and canvas undo are unavailable while an agent is editing.
 
 ## Edit the current canvas with an agent
 
