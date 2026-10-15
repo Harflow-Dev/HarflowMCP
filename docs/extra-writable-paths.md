@@ -71,9 +71,10 @@ manually to follow these tasks. Ordinary requests retain optional auto-open.
 Path resolution,
 saved-authority reads, runtime qualification and final identity checks run in worker
 threads with a 20-second budget per check, including executor queueing. There is
-also one shared 25-second authority-validation deadline for each
+also one shared 15-second authority-validation deadline for each
 start, resume, continuation or preview request, below the CLI's 30-second startup
-handshake. A later background continuation receives a fresh deadline. Qualification
+handshake and leaving headroom inside it for the bounded publish-branch
+and git-baseline probes plus fork and response overhead. A later background continuation receives a fresh deadline. Qualification
 validates once, and execution rechecks after allocating scratch.
 Timeout refuses the request with an actionable validation error; no agent is launched and
 any pre-launch scratch is removed. A filesystem worker can finish after cancellation

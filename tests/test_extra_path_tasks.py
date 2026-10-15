@@ -476,7 +476,7 @@ async def test_final_path_validation_block_removes_scratch(tmp_path, monkeypatch
     async def spawn(*args, **kwargs): raise AssertionError('must not launch')
     monkeypatch.setattr(tasks.asyncio, 'create_subprocess_exec', spawn)
     async def launch():
-        with tasks.authority_check_budget(seconds=1 if exit_mode == 'request_budget' else 25):
+        with tasks.authority_check_budget(seconds=1 if exit_mode == 'request_budget' else tasks.AUTHORITY_CHECK_REQUEST_BUDGET_SECONDS):
             return await registry._spawn(invocation, extra_path_grants=grants, backend=backend, prompt='Task', repo_path=tmp_path, session_id=None, freedom='write_in_repo', max_turns=None, model=None, reasoning_effort=None, task_id='worker')
     pending = asyncio.create_task(launch())
     try:
@@ -615,6 +615,22 @@ async def test_expired_request_budget_refuses_before_submitting():
             await tasks._bounded_extra_path_check(never)
     # Outside any request budget the same check runs under the flat per-check budget again.
     assert await tasks._bounded_extra_path_check(lambda: None) is None
+
+
+def test_shared_authority_budget_leaves_headroom_inside_detached_handshake():
+    # The shared authority deadline plus the bounded publish-branch and git-baseline
+    # probes must fit inside detached's handshake window with at least 5 seconds to
+    # spare, so a fully-spent authority budget cannot expire the handshake on its own.
+    from polybridge import detached
+    assert tasks.EXTRA_PATH_CHECK_BUDGET_SECONDS == 20.0
+    spent = (
+        tasks.AUTHORITY_CHECK_REQUEST_BUDGET_SECONDS
+        + tasks.GIT_PROBE_BUDGET_SECONDS * 2
+        + tasks.GIT_BASELINE_BUDGET_SECONDS
+        + 0.2  # _spawn's wait_for allowance around the baseline thread
+    )
+    assert tasks.AUTHORITY_CHECK_REQUEST_BUDGET_SECONDS <= detached.HANDSHAKE_TIMEOUT_SECONDS / 2
+    assert detached.HANDSHAKE_TIMEOUT_SECONDS - spent >= 5
 
 
 async def test_background_request_does_not_reuse_its_creators_expired_budget():

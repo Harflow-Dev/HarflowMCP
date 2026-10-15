@@ -69,12 +69,15 @@ FUTURE_TASK_SCRATCH_ROOT = "the task scratch directory (allocated per task at la
 
 # One shared wall-clock budget for every preflight authority read in a single request. Each
 # individual check can legally wait up to EXTRA_PATH_CHECK_BUDGET_SECONDS, so several of them
-# in one dispatch could together outlast a caller's own handshake window (detached's is 30 s);
-# this budget is deliberately below it. It governs only the pure preflight waits in
+# in one dispatch could together outlast a caller's own handshake window (detached's is 30 s).
+# 15 s deliberately reserves half that window as headroom: the bounded publish-branch wait
+# (GIT_PROBE_BUDGET_SECONDS * 2) and git baseline read (GIT_BASELINE_BUDGET_SECONDS + 0.2) plus fork and
+# response overhead all have to fit after the authority budget for the handshake to answer
+# before it expires. This budget governs only the pure preflight waits in
 # `_bounded_extra_path_check` — never the subprocess await, and never the registry invocation as
 # a whole: expiry refuses the next check before it is submitted. Existing pre-spawn
 # boundaries, rather than this timer, determine whether a refusal is safely retryable.
-AUTHORITY_CHECK_REQUEST_BUDGET_SECONDS = 25.0
+AUTHORITY_CHECK_REQUEST_BUDGET_SECONDS = 15.0
 _AUTHORITY_CHECK_DEADLINE: contextvars.ContextVar[tuple[weakref.ReferenceType[Any] | None, float] | None] = contextvars.ContextVar(
     "polybridge_authority_check_deadline", default=None
 )
