@@ -212,6 +212,12 @@ observations, committed changes, local upstream comparison, and available struct
 and outside-repository edit evidence. These observations do not establish task authorship or
 goal completion; pushed state remains unknown. See [task outcomes](docs/task-outcomes.md).
 
+Standalone dispatched tasks can [`register_artifact(path, kind, note)`](docs/task-artifacts.md)
+to retain bounded screenshot/log/report metadata references. Inspect them with
+`get_task_artifacts` or `polybridge-ctl task-artifacts <task_id> --json`, and in the
+Monitor's task Summary. Registration does not read, copy or publish contents, prove
+success, or grant file access. Workflow integration is tracked separately.
+
 ```bash
 polybridge-ctl run --backend codex --repo . --prompt 'Review the pagination logic'
 polybridge-ctl list

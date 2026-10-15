@@ -193,10 +193,20 @@ class UnsafeInvocationError(RuntimeError):
 class OpencodeBackend(ExtraPathsUnsupported):
     def execution_configuration_namespaces(self, repo):
         import os
-        import pwd
-        from .config_namespaces import environment_path, project_namespaces
         if os.environ.get('OPENCODE_CONFIG_CONTENT'):
             raise ValueError('inline backend execution configuration is not qualified')
+        return self._configuration_namespaces(repo)
+
+    def artifact_configuration_namespaces(self, repo):
+        # Inline JSON is not a file namespace; its execution qualification is unrelated
+        # to metadata references from this or another backend. File redirects still apply.
+        groups = self._configuration_namespaces(repo)
+        return tuple(path for group in groups.values() for path in group)
+
+    def _configuration_namespaces(self, repo):
+        import os
+        import pwd
+        from .config_namespaces import environment_path, project_namespaces
         home = environment_path('OPENCODE_TEST_HOME', Path.home())
         roots = [Path.home() / '.config/opencode', Path.home() / '.local/share/opencode',
                  Path.home() / '.cache/opencode', Path.home() / '.local/state/opencode',

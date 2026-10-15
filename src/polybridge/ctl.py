@@ -44,7 +44,7 @@ from .tasks import default_log_dir
 # Bumped to 2 when `status`/`list`'s snapshot/brief documents gained `resume_command` (Monitor
 # piece 3/3). `setup` and the event log are separate contracts and stay at v1 — see CLAUDE.md's
 # "The Monitor app is a consumer of three frozen contracts".
-CTL_JSON_VERSION = 10
+CTL_JSON_VERSION = 11
 
 # How long `cancel`/`takeover` stay alive for a failing `.sig` write to be retried before exiting —
 # the lease (60 s) is what a later recovery waits for anyway.
@@ -81,6 +81,17 @@ class _ArgumentParser(argparse.ArgumentParser):
 def _build_parser() -> tuple[_ArgumentParser, ...]:
     parser = _ArgumentParser(prog="polybridge-ctl")
     sub = parser.add_subparsers(dest="command", required=True, parser_class=_ArgumentParser)
+
+    artifact_p = sub.add_parser('register-artifact', help='register an existing artifact metadata reference for the verified calling task')
+    artifact_p.add_argument('path')
+    artifact_p.add_argument('--kind', required=True, choices=('screenshot', 'log', 'report', 'other'))
+    artifact_p.add_argument('--note', default='')
+    artifact_p.add_argument('--json', action='store_true')
+    artifacts_p = sub.add_parser('task-artifacts', help='page metadata references and current stat observations; does not verify content')
+    artifacts_p.add_argument('task_id')
+    artifacts_p.add_argument('--cursor')
+    artifacts_p.add_argument('--limit', type=int, default=20)
+    artifacts_p.add_argument('--json', action='store_true')
 
     list_p = sub.add_parser("list", help="list tasks recorded on disk")
     list_p.add_argument(
@@ -320,6 +331,8 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
         run_p,
         resume_p,
         allowlist_p,
+        artifact_p,
+        artifacts_p,
         *workflow_parsers,
     )
 
@@ -834,6 +847,17 @@ def _main(argv: list[str] | None = None) -> int:
     parser, list_p = parsers[0], parsers[1]
 
     args = parser.parse_args(argv)
+
+    if args.command in ('register-artifact', 'task-artifacts'):
+        from . import artifacts
+        try:
+            result = (artifacts.register(default_log_dir(), args.path, args.kind, args.note)
+                      if args.command == 'register-artifact' else
+                      artifacts.get(default_log_dir(), args.task_id, args.cursor, args.limit))
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            return _fail(args, 'artifact_error', str(exc))
+        print(json.dumps({'v': CTL_JSON_VERSION, 'result': result}) if args.json else json.dumps(result, indent=2))
+        return 0
 
     if args.command == "permission-preview":
         from . import server

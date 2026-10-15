@@ -68,6 +68,11 @@ def brief_status(payload: dict[str, Any]) -> dict[str, Any]:
     keys = LIST_FIELDS | {'exit_code', 'owned_by_live_server', 'workflow_run_id', 'workflow_node_id'}
     result = {key: (_text(value, 256) if isinstance(value, str) else value)
               for key, value in payload.items() if key in keys and (value is None or isinstance(value, (str, bool, int, float)))}
+    artifact = payload.get('artifact_summary')
+    if isinstance(artifact, dict):
+        result['artifact_summary'] = {
+            'count': artifact.get('count', 0), 'state': artifact.get('state', 'unavailable'),
+            'detail_ref': {'tool': 'get_task_artifacts', 'task_id': _text(payload.get('task_id'), 64)}}
     refs = {'status': {'tool': 'get_task_status', 'task_id': _text(payload.get('task_id'), 64)},
             'events': {'tool': 'get_task_events', 'task_id': _text(payload.get('task_id'), 64)}}
     truncated = []

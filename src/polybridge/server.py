@@ -1877,5 +1877,43 @@ def main() -> None:
     mcp.run()
 
 
+@mcp.tool()
+async def register_artifact(path: str, kind: str, note: str = '') -> dict[str, Any]:
+    """Register an existing regular-file metadata reference for the verified standalone caller.
+
+    No owner parameter is accepted. Relative paths use the recorded repository; only repository,
+    allocated own scratch, and revalidated saved grants are accepted. Workflow callers are refused.
+    Notes are preserved verbatim. Kinds: screenshot, log, report, other. Paths and notes are
+    at most 4096 UTF-8 bytes; at most 100 references per task and a 1 MiB manifest.
+    A reference establishes no content validity, task success, access, copy, or publication
+    authority. No content is read, copied, hashed, previewed, or published.
+    """
+    from . import artifacts
+    from .tasks import default_log_dir
+    directory = _registry.log_dir if _registry is not None else default_log_dir()
+    try:
+        return await asyncio.to_thread(artifacts.register, directory, path, kind, note)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from exc
+
+
+@mcp.tool()
+async def get_task_artifacts(task_id: str, cursor: str | None = None, limit: int = 20) -> dict[str, Any]:
+    """Page at most 50 artifact references with current stat observations, not content verification.
+
+    Verified human callers can inspect a known standalone task; task callers can inspect only self.
+    Workflow callers and managed tasks are refused. Cursors are task-bound and reject manifest
+    changes. Availability is available/deleted/changed/unavailable at observed_at; available does
+    not establish unchanged contents. Missing legacy manifests are empty; corrupt ones unavailable.
+    """
+    from . import artifacts
+    from .tasks import default_log_dir
+    directory = _registry.log_dir if _registry is not None else default_log_dir()
+    try:
+        return await asyncio.to_thread(artifacts.get, directory, task_id, cursor, limit)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from exc
+
+
 if __name__ == "__main__":
     main()

@@ -11,6 +11,10 @@ status. `base_commit`, `head_commit`, `new_commits` (at most 100, with a truncat
 oversized output or timeout produces explicit unavailable fields. Failures never affect the
 agent's execution status.
 
+[Task artifact registrations](task-artifacts.md) are separate metadata references.
+A task may register a report and later fail; neither registration nor current path
+availability establishes successful execution or content validity.
+
 Git commands have time and output budgets and never contact a remote. They ignore ambient
 repository selectors and injected Git configuration so observations remain scoped to the task
 repository. Working tree status reads through a disposable Git directory with repository, global

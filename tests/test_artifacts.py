@@ -1,0 +1,457 @@
+"""Artifact references never read or own target contents."""
+from dataclasses import replace
+import json
+import os
+from pathlib import Path
+import pytest
+from polybridge import artifacts, identity, lineage, store, workflow_hooks
+
+
+@pytest.fixture
+def setup(tmp_path, monkeypatch):
+    logs = tmp_path / 'bridge' / 'tasks'
+    logs.mkdir(parents=True)
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    record = store.TaskRecord('owner', 'codex', None, str(repo), '2026-01-01T00:00:00+00:00', pid=123, pgid=456, start_time='start')
+    store.write(logs, record)
+    monkeypatch.setattr(lineage, '_default_process_table', lambda: {os.getpid(): 123, 123: 1, 1: 0})
+    monkeypatch.setattr(identity, 'identity_check', lambda _: 'alive')
+    monkeypatch.setattr(workflow_hooks, 'owner', lambda *a, **k: None)
+    monkeypatch.delenv('PB_TASK_ID', raising=False)
+    monkeypatch.delenv('PB_ROOT_TASK_ID', raising=False)
+    return logs, repo, record
+
+
+def test_reference_idempotency_and_observation(setup):
+    logs, repo, record = setup
+    target = repo / 'report.txt'
+    target.write_text('first')
+    item = artifacts.register(logs, 'report.txt', 'report', ' A\n note ')
+    assert item == artifacts.register(logs, str(target), 'report', ' A\n note ')
+    assert item['note'] == ' A\n note '
+    page = artifacts.get(logs, record.task_id)
+    assert page['items'][0]['availability']['state'] == 'available'
+    target.write_text('second bigger')
+    assert artifacts.get(logs, record.task_id)['items'][0]['availability']['state'] == 'changed'
+    assert artifacts.register(logs, str(target), 'report', ' A\n note ')['artifact_id'] != item['artifact_id']
+    target.unlink()
+    assert artifacts.get(logs, record.task_id)['items'][0]['availability']['state'] == 'deleted'
+
+
+def test_pre_epoch_file_timestamp_remains_readable(setup):
+    logs, repo, record = setup
+    target = repo / 'historical-report'
+    target.write_text('preserved historical timestamp')
+    os.utime(target, ns=(-1_000_000_000, -1_000_000_000))
+    receipt = artifacts.register(logs, str(target), 'report')
+    page = artifacts.get(logs, record.task_id)
+    assert page['state'] == 'available'
+    assert page['items'][0]['artifact_id'] == receipt['artifact_id']
+    assert page['items'][0]['availability']['state'] == 'available'
+
+
+def test_path_authority(setup):
+    logs, repo, record = setup
+    outside = repo.parent / 'outside'
+    outside.write_text('secret')
+    (repo / 'escape').symlink_to(outside)
+    for path in ('missing', 'escape', str(outside), str(repo)):
+        with pytest.raises((OSError, ValueError)):
+            artifacts.register(logs, path, 'other')
+    protected = repo / '.codex'
+    protected.mkdir()
+    (protected / 'config.toml').write_text('secret')
+    with pytest.raises(ValueError, match='protected'):
+        artifacts.register(logs, '.codex/config.toml', 'other')
+
+
+def test_manifest_corrupt_symlink_fifo(setup):
+    logs, repo, record = setup
+    target = repo / 'report'
+    target.write_text('hello')
+    manifest = artifacts._path(logs, record.task_id)
+    manifest.write_text('{')
+    assert artifacts.get(logs, record.task_id)['state'] == 'unavailable'
+    with pytest.raises(ValueError):
+        artifacts.register(logs, str(target), 'report')
+    manifest.unlink()
+    manifest.symlink_to(target)
+    assert artifacts.get(logs, record.task_id)['state'] == 'unavailable'
+    with pytest.raises(OSError):
+        artifacts.register(logs, str(target), 'report')
+    manifest.unlink()
+    os.mkfifo(manifest)
+    assert artifacts.get(logs, record.task_id)['state'] == 'unavailable'
+
+
+def test_paging_cursor_and_bounds(setup):
+    logs, repo, record = setup
+    target = repo / 'report'
+    target.write_text('hello')
+    for n in range(4):
+        artifacts.register(logs, str(target), 'report', str(n))
+    page = artifacts.get(logs, record.task_id, limit=2)
+    assert page['has_more'] and len(page['items']) == 2
+    assert len(artifacts.get(logs, record.task_id, page['next_cursor'], 2)['items']) == 2
+    artifacts.register(logs, str(target), 'report', 'new')
+    with pytest.raises(ValueError, match='stale'):
+        artifacts.get(logs, record.task_id, page['next_cursor'])
+    with pytest.raises(ValueError):
+        artifacts.get(logs, record.task_id, limit=51)
+    with pytest.raises(ValueError):
+        artifacts.register(logs, str(target), 'other', 'x' * 4097)
+
+
+def test_terminal_workflow_spoof_and_human(setup, monkeypatch):
+    logs, repo, record = setup
+    target = repo / 'report'
+    target.write_text('hello')
+    monkeypatch.setenv('PB_TASK_ID', 'another')
+    with pytest.raises(ValueError, match='unverifiable'):
+        artifacts.register(logs, str(target), 'report')
+    monkeypatch.delenv('PB_TASK_ID')
+    monkeypatch.setattr(workflow_hooks, 'owner', lambda *a, **k: {'role': 'worker'})
+    with pytest.raises(ValueError, match='Managed'):
+        artifacts.get(logs, record.task_id)
+    monkeypatch.setattr(workflow_hooks, 'owner', lambda *a, **k: None)
+    store.write(logs, replace(record, status='completed', exit_code=0))
+    with pytest.raises(ValueError):
+        artifacts.register(logs, str(target), 'report')
+    assert artifacts.get(logs, record.task_id)['count'] == 0
+
+
+def test_snapshot_brief_and_retention(setup):
+    logs, repo, record = setup
+    target = repo / 'report'
+    target.write_text('hello')
+    artifacts.register(logs, str(target), 'report')
+    assert store.snapshot(logs, record)['artifact_summary']['count'] == 1
+    from polybridge.task_reads import brief_status
+    assert brief_status(store.snapshot(logs, record))['artifact_summary']['count'] == 1
+    from polybridge.retention import _delete_task_files_locked
+    assert _delete_task_files_locked(logs, record.task_id)
+    assert target.read_text() == 'hello'
+    assert not artifacts._path(logs, record.task_id).exists()
+
+
+def test_nested_nearest_and_ambiguous_session(setup, monkeypatch):
+    logs, repo, record = setup
+    parent = replace(record, task_id='parent', pid=999, pgid=888)
+    store.write(logs, parent)
+    store.write(logs, replace(record, spawned_by='parent', parent_task_id='parent'))
+    monkeypatch.setattr(lineage, '_default_process_table', lambda: {os.getpid(): 123, 123: 999, 999: 1, 1: 0})
+    assert artifacts._caller(logs).task_id == record.task_id
+    rival = replace(record, task_id='rival', pid=777, pgid=os.getsid(0))
+    store.write(logs, rival)
+    with pytest.raises(ValueError, match='ambiguous'):
+        artifacts._caller(logs)
+
+
+def test_extra_path_revocation_and_changed_symlink(setup):
+    logs, repo, record = setup
+    from polybridge.extra_paths import normalize_paths, serialize_paths
+    outside = repo.parent / 'grant'
+    outside.mkdir()
+    target = outside / 'report'
+    target.write_text('hello')
+    store.write(logs, replace(record, extra_writable_paths=serialize_paths(normalize_paths([str(outside)]))))
+    artifacts.register(logs, str(target), 'report')
+    outside.rename(outside.with_name('old-grant'))
+    outside.mkdir()
+    target.write_text('new')
+    assert artifacts.get(logs, record.task_id)['items'][0]['availability']['state'] == 'unavailable'
+    store.write(logs, record)
+    target = repo / 'local'
+    target.write_text('hello')
+    artifacts.register(logs, str(target), 'report')
+    target.unlink()
+    target.symlink_to(outside / 'report')
+    assert artifacts.get(logs, record.task_id)['items'][1]['availability']['state'] == 'changed'
+
+
+async def test_mcp_cli_parity_and_no_registry_launch(setup, monkeypatch, capsys):
+    logs, repo, record = setup
+    from polybridge import ctl, server, tasks
+    monkeypatch.setattr(tasks, 'default_log_dir', lambda: logs)
+    monkeypatch.setattr(ctl, 'default_log_dir', lambda: logs)
+    monkeypatch.setattr(server, '_registry', None)
+    monkeypatch.setattr(server, '_reg', lambda: pytest.fail('must not launch registry'))
+    target = repo / 'report'
+    target.write_text('hello')
+    item = await server.register_artifact(str(target), 'report', ' exact note ')
+    assert ctl.main(['task-artifacts', record.task_id, '--json']) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result['v'] == 11
+    assert result['result']['items'][0]['artifact_id'] == item['artifact_id']
+    assert ctl.main(['register-artifact', str(target), '--kind', 'report', '--note', ' exact note ', '--json']) == 0
+    assert json.loads(capsys.readouterr().out)['result']['artifact_id'] == item['artifact_id']
+    assert (await server.get_task_artifacts(record.task_id))['count'] == 1
+
+
+def test_concurrent_registration_preserves_records(setup):
+    logs, repo, record = setup
+    from concurrent.futures import ThreadPoolExecutor
+    target = repo / 'report'
+    target.write_text('hello')
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        entries = list(pool.map(lambda n: artifacts.register(logs, str(target), 'report', str(n)), range(20)))
+    assert len({item['artifact_id'] for item in entries}) == 20
+    assert artifacts.get(logs, record.task_id)['count'] == 20
+    assert store.read(logs, record.task_id) == record
+
+
+def test_manifest_provenance_and_duplicate_id_rejected(setup):
+    logs, repo, record = setup
+    target = repo / 'report'
+    target.write_text('hello')
+    artifacts.register(logs, str(target), 'report')
+    path = artifacts._path(logs, record.task_id)
+    data = json.loads(path.read_text())
+    data['items'][0]['provenance']['task_id'] = 'spoof'
+    path.write_text(json.dumps(data))
+    assert artifacts.summary(logs, record.task_id)['state'] == 'unavailable'
+
+
+def test_own_scratch_and_sibling_refusal(setup):
+    logs, repo, record = setup
+    from polybridge import scratch
+    own = scratch.create(logs, record.task_id)
+    sibling = scratch.create(logs, 'sibling')
+    (own / 'capture').write_text('own')
+    (sibling / 'capture').write_text('sibling')
+    store.write(logs, replace(record, enforcement={'writable_roots': [str(own)]}))
+    assert artifacts.register(logs, str(own / 'capture'), 'screenshot')['path'] == str(own / 'capture')
+    with pytest.raises(ValueError):
+        artifacts.register(logs, str(sibling / 'capture'), 'screenshot')
+
+
+def test_underlock_terminal_and_process_change(setup, monkeypatch):
+    logs, repo, record = setup
+    from contextlib import contextmanager
+    target = repo / 'report'
+    target.write_text('hello')
+    @contextmanager
+    def lock(*args):
+        store.write(logs, replace(record, status='completed', exit_code=0))
+        yield
+    monkeypatch.setattr(artifacts, '_task_lock', lock)
+    with pytest.raises(ValueError, match='no longer running'):
+        artifacts.register(logs, str(target), 'report')
+    store.record_path(logs, record.task_id).unlink()
+    store.write(logs, record)
+    @contextmanager
+    def changed(*args):
+        store.write(logs, replace(record, start_time='different'))
+        yield
+    monkeypatch.setattr(artifacts, '_task_lock', changed)
+    with pytest.raises(ValueError, match='identity changed'):
+        artifacts.register(logs, str(target), 'report')
+
+
+def test_manifest_bounds_special_shapes_and_no_target_content_read(setup, monkeypatch):
+    logs, repo, record = setup
+    target = repo / 'report'
+    target.write_text('hello')
+    artifacts.register(logs, str(target), 'report')
+    manifest = artifacts._path(logs, record.task_id)
+    valid = json.loads(manifest.read_text())
+    for shape in (None, 4, [], {'v': 1, 'task_id': record.task_id, 'items': [valid['items'][0] | {'registered_observation': 1}]}, {'v': 1, 'task_id': record.task_id, 'items': [valid['items'][0] | {'registered_observation': ['device', 'inode', 'size', 'mtime_ns']}]}):
+        manifest.write_text(json.dumps(shape))
+        assert artifacts.get(logs, record.task_id)['state'] == 'unavailable'
+    manifest.write_text('[' * 2000 + '0' + ']' * 2000)
+    assert artifacts.get(logs, record.task_id)['state'] == 'unavailable'
+    manifest.write_bytes(b'x' * (artifacts.MAX_BYTES + 1))
+    assert artifacts.get(logs, record.task_id)['state'] == 'unavailable'
+    manifest.unlink()
+    # On Linux canonical is resolve-only; macOS canonical needs O_EVTONLY, so inspect read APIs
+    # separately rather than forbidding canonical metadata descriptors on that platform.
+    monkeypatch.setattr(Path, 'read_bytes', lambda path: pytest.fail('no artifact content reads'))
+    artifacts.register(logs, str(target), 'report')
+    monkeypatch.setattr(os, 'access', lambda *args: False)
+    assert artifacts.get(logs, record.task_id)['items'][0]['availability']['state'] == 'unavailable'
+
+
+def test_inherited_workflow_and_cyclic_ancestry(setup, monkeypatch):
+    logs, repo, record = setup
+    parent = replace(record, task_id='parent', pid=999, pgid=888)
+    store.write(logs, parent)
+    store.write(logs, replace(record, parent_task_id='parent'))
+    monkeypatch.setattr(workflow_hooks, 'owner', lambda directory, task_id, strict: {'role': 'worker'} if task_id == 'parent' else None)
+    with pytest.raises(ValueError, match='Managed'):
+        artifacts.get(logs, record.task_id)
+    monkeypatch.setattr(workflow_hooks, 'owner', lambda *a, **k: None)
+    store.write(logs, replace(parent, parent_task_id=record.task_id))
+    with pytest.raises(ValueError, match='cyclic'):
+        artifacts.get(logs, record.task_id)
+
+
+def test_cross_process_registration_and_retention_flock(setup):
+    logs, repo, record = setup
+    import subprocess
+    import sys
+    from collections import defaultdict
+    from datetime import datetime, timezone
+    target = repo / 'report'
+    target.write_text('hello')
+    script = '''
+import sys
+from pathlib import Path
+from polybridge import artifacts, identity, store, workflow_hooks
+logs = Path(sys.argv[1])
+artifacts._caller = lambda directory: store.read(directory, 'owner', include_prompt=False)
+identity.identity_check = lambda value: 'alive'
+workflow_hooks.owner = lambda *args, **kwargs: None
+for index in range(10):
+    artifacts.register(logs, sys.argv[2], 'report', sys.argv[3] + '-' + str(index))
+'''
+    processes = [subprocess.Popen([sys.executable, '-c', script, str(logs), str(target), str(index)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for index in range(4)]
+    for process in processes:
+        output, error = process.communicate(timeout=30)
+        assert process.returncode == 0, error
+    assert artifacts.get(logs, record.task_id, limit=50)['count'] == 40
+    assert store.read(logs, record.task_id) == record
+    lock_script = '''
+import fcntl, sys
+with open(sys.argv[1], 'a') as stream:
+    fcntl.flock(stream, fcntl.LOCK_EX)
+    print('locked', flush=True)
+    sys.stdin.readline()
+'''
+    process = subprocess.Popen([sys.executable, '-c', lock_script, str(logs / 'owner.lock')], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        assert process.stdout.readline().strip() == 'locked'
+        terminal = replace(record, status='completed', exit_code=0)
+        store.write(logs, terminal)
+        from polybridge.retention import _delete_task
+        stats = defaultdict(int)
+        _delete_task(logs, terminal, stats, datetime.now(timezone.utc), frozenset({'owner'}), {'owner': terminal})
+        assert stats['kept_locked'] == 1
+        assert artifacts._path(logs, 'owner').exists()
+    finally:
+        process.communicate('\n', timeout=10)
+    assert target.read_text() == 'hello'
+
+
+def test_replaced_target_symlink_after_authority_check_is_refused(setup, monkeypatch):
+    logs, repo, record = setup
+    target = repo / 'report'
+    outside = repo.parent / 'secret'
+    target.write_text('hello')
+    outside.write_text('secret')
+    regular_stat = artifacts._regular_stat
+    def replace_before_stat(path):
+        target.unlink()
+        target.symlink_to(outside)
+        return regular_stat(path)
+    monkeypatch.setattr(artifacts, '_regular_stat', replace_before_stat)
+    with pytest.raises((OSError, ValueError)):
+        artifacts.register(logs, str(target), 'report')
+    assert not artifacts._path(logs, record.task_id).exists()
+
+
+def test_summary_brief_cap_and_lists_do_not_load_manifest(setup, monkeypatch):
+    logs, repo, record = setup
+    target = repo / 'report'
+    target.write_text('hello')
+    artifacts.register(logs, str(target), 'report', '界' * 1000)
+    from polybridge import task_reads
+    full = store.snapshot(logs, record)
+    brief = task_reads.brief_status(full | {'summary': '界' * 10000, 'note': '界' * 10000})
+    assert len(json.dumps(brief).encode()) <= task_reads.BRIEF_BYTES
+    assert brief['artifact_summary']['count'] == 1
+    monkeypatch.setattr(artifacts, '_load', lambda *args: pytest.fail('list must not read manifests'))
+    assert store.brief(logs, record)['task_id'] == record.task_id
+
+
+def test_artifact_cli_usage_error_has_json_envelope(capsys):
+    from polybridge import ctl
+    with pytest.raises(SystemExit) as exited:
+        ctl.main(['register-artifact', 'path', '--kind', 'invalid', '--json'])
+    assert exited.value.code == 2
+    assert json.loads(capsys.readouterr().out)['error']['code'] == 'usage'
+
+
+def test_missing_repository_preserves_independent_scratch_and_grant_authority(setup):
+    logs, repo, record = setup
+    from polybridge import scratch
+    from polybridge.extra_paths import normalize_paths, serialize_paths
+    own = scratch.create(logs, record.task_id)
+    scratch_target = own / 'capture'
+    scratch_target.write_text('scratch')
+    grant = repo.parent / 'external-report'
+    grant.write_text('grant')
+    with_grant = replace(record, enforcement={'writable_roots': [str(own)]},
+                         extra_writable_paths=serialize_paths(normalize_paths([str(grant)])))
+    store.write(logs, with_grant)
+    artifacts.register(logs, str(scratch_target), 'screenshot')
+    artifacts.register(logs, str(grant), 'report')
+    repo.rmdir()
+    assert [item['availability']['state'] for item in artifacts.get(logs, record.task_id)['items']] == ['available', 'available']
+    # Replacement invalidates exact-file grant identity while the artifact path still exists.
+    grant.rename(grant.with_name('retained-old-grant'))
+    grant.write_text('replacement')
+    assert artifacts.get(logs, record.task_id)['items'][1]['availability']['state'] == 'unavailable'
+    assert artifacts.get(logs, record.task_id)['items'][0]['availability']['state'] == 'available'
+
+
+def test_missing_authority_is_unavailable_not_deleted(setup, monkeypatch):
+    logs, repo, record = setup
+    target = repo / 'report'
+    target.write_text('hello')
+    artifacts.register(logs, str(target), 'report')
+    def missing_authority(*args):
+        raise FileNotFoundError('saved authority root is missing')
+    monkeypatch.setattr(artifacts, '_target', missing_authority)
+    assert artifacts.get(logs, record.task_id)['items'][0]['availability']['state'] == 'unavailable'
+    target.unlink()
+    assert artifacts.get(logs, record.task_id)['items'][0]['availability']['state'] == 'deleted'
+
+
+def test_inline_other_backend_configuration_does_not_block_references(setup, monkeypatch):
+    logs, repo, record = setup
+    target = repo / 'report'
+    target.write_text('hello')
+    monkeypatch.setenv('OPENCODE_CONFIG_CONTENT', '{"model":"some-model"}')
+    assert artifacts.register(logs, str(target), 'report')['kind'] == 'report'
+    assert artifacts.get(logs, record.task_id)['items'][0]['availability']['state'] == 'available'
+    # Redirected file configuration remains excluded even when inline content is set.
+    protected = repo / 'custom-config.json'
+    protected.write_text('{}')
+    monkeypatch.setenv('OPENCODE_CONFIG', str(protected))
+    with pytest.raises(ValueError, match='protected backend configuration'):
+        artifacts.register(logs, str(protected), 'other')
+    from polybridge.backends import get
+    with pytest.raises(ValueError, match='inline backend execution'):
+        get('opencode').execution_configuration_namespaces(repo)
+
+
+def test_concurrent_initial_lock_creation_uses_one_inode(setup):
+    logs, _, _ = setup
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    # Several fresh names exercise initial creation without a timing-dependent soak.
+    for index in range(8):
+        gate = Barrier(8)
+        def acquire(_):
+            gate.wait(timeout=5)
+            with artifacts._task_lock(logs, f'fresh-{index}') as directory_fd:
+                info = os.stat(f'fresh-{index}.lock', dir_fd=directory_fd, follow_symlinks=False)
+                return info.st_dev, info.st_ino
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            identities = list(pool.map(acquire, range(8)))
+        assert len(set(identities)) == 1
+
+
+def test_replaced_lock_inode_is_refused(setup, monkeypatch):
+    logs, _, _ = setup
+    real_flock = artifacts.fcntl.flock
+    def replaced(descriptor, operation):
+        real_flock(descriptor, operation)
+        lock = logs / 'owner.lock'
+        lock.rename(logs / 'old-owner.lock')
+        lock.write_text('replacement')
+    monkeypatch.setattr(artifacts.fcntl, 'flock', replaced)
+    with pytest.raises(ValueError, match='lock identity changed'):
+        with artifacts._task_lock(logs, 'owner'):
+            pytest.fail('must not enter with split task lock')

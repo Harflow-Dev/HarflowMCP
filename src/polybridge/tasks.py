@@ -880,7 +880,9 @@ class Task:
 
     def snapshot(self) -> dict[str, Any]:
         """Full current state of the run, safe to call at any point."""
+        from . import artifacts
         snap = self.brief() | {
+            "artifact_summary": artifacts.summary(self.log_path.parent, self.task_id),
             # Overrides brief's bridge-only list with the full merge; see `brief`.
             "notices": self._notices(),
             "summary": self.acc.summary,

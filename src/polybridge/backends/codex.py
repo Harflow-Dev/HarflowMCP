@@ -361,6 +361,12 @@ class CodexBackend(ExtraPathsUnsupported):
         # plugins and managed preference inputs; preserve its typed profile.
         return {"external": (), "project": ()}
 
+    def artifact_configuration_namespaces(self, repo):
+        from .config_namespaces import environment_path, project_namespaces
+        home = Path.home() / '.codex'
+        configured = environment_path('CODEX_HOME', home)
+        return (home, configured, *project_namespaces(repo, ('.codex',)))
+
     def extra_path_support(self) -> dict[str, Any]:
         return {"supported": True, "platforms": ["darwin"], "versions": [EXTRA_PATHS_VERSION],
                 "freedoms": ["write_in_repo", "publish"], "network": [False, True],

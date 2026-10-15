@@ -10,6 +10,9 @@ up to three recent activity lines, and references to full status and event reads
 Oversized fields appear in `truncated_fields`. Outcome publication values remain
 nullable: absence of publication evidence does not mean a push failed or succeeded.
 The same projection is available with `polybridge-ctl status TASK --brief --json`.
+Standalone artifact registrations add a bounded `artifact_summary` with a count,
+availability of registration metadata, and a detail reference. Full notes and current
+file observations are paged separately through [task artifact reads](task-artifacts.md).
 The projection bounds response size; obtaining a full recovered status can still
 require the existing recovery/replay work before projection.
 

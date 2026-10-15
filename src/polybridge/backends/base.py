@@ -382,6 +382,11 @@ class ExtraPathsUnsupported:
     def execution_configuration_namespaces(self, repo):
         raise UnsupportedCapability("backend execution configuration namespaces are not qualified")
 
+    def artifact_configuration_namespaces(self, repo):
+        """Configuration namespaces excluded from metadata artifact registration."""
+        groups = self.execution_configuration_namespaces(repo)
+        return tuple(path for group in groups.values() for path in group)
+
     def extra_path_support(self) -> dict[str, Any]:
         return {"supported": False, "certification": None, "reason": "bounded writable paths are not certified for this backend"}
 
@@ -415,6 +420,8 @@ class Backend(Protocol):
     mcp_approval: MCPApprovalPolicy
 
     def execution_configuration_namespaces(self, repo: Path) -> dict[str, Any]: ...
+
+    def artifact_configuration_namespaces(self, repo: Path) -> tuple[Path, ...]: ...
     def extra_path_support(self) -> dict[str, Any]: ...
     def with_extra_writable_paths(self, invocation, grants, freedom, network=None) -> Invocation: ...
     def assert_extra_writable_paths(self, invocation, grants, freedom, network=None) -> None: ...

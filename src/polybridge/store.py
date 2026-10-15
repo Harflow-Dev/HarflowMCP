@@ -849,6 +849,7 @@ def _notices(record: TaskRecord, state: Accumulator) -> list[str]:
 
 def snapshot(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
     """A recovered task's state, shaped like a live snapshot so callers need no special casing."""
+    from . import artifacts
     if record.prompt_truncated:
         authoritative = read(log_dir, record.task_id)
         if authoritative is None:
@@ -879,6 +880,7 @@ def snapshot(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
         "pending_messages": pending,
         **({"prompt_source": record.prompt_source, "prompt_truncated": record.prompt_truncated, **({"prompt_error": record.prompt_error} if record.prompt_error else {})} if record.prompt_source or record.prompt_error else {}),
         "task_id": record.task_id,
+        "artifact_summary": artifacts.summary(log_dir, record.task_id),
         "workflow_builder": record.workflow_builder,
         "backend": record.backend,
         "session_id": record.session_id,
