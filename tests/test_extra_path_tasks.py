@@ -452,7 +452,7 @@ async def test_slow_path_resolution_times_out_without_dispatch(tmp_path, monkeyp
         release.set()
 
 
-@pytest.mark.parametrize('exit_mode', ['timeout', 'cancel'])
+@pytest.mark.parametrize('exit_mode', ['timeout', 'cancel', 'request_budget'])
 async def test_final_path_validation_block_removes_scratch(tmp_path, monkeypatch, backend, exit_mode):
     import threading
     entered, release = threading.Event(), threading.Event()
@@ -464,17 +464,21 @@ async def test_final_path_validation_block_removes_scratch(tmp_path, monkeypatch
     def validate(*args):
         nonlocal calls
         calls += 1
-        # Qualification, initial validation, then validation after scratch allocation.
-        if calls == 3:
+        # Qualification asserts its own result; the next assertion is the post-scratch
+        # final validation.
+        if calls == 2:
             entered.set()
             assert release.wait(3)
         return original(*args)
     monkeypatch.setattr(backend, 'assert_extra_writable_paths', validate)
-    monkeypatch.setattr(tasks, 'EXTRA_PATH_CHECK_BUDGET_SECONDS', .2)
+    monkeypatch.setattr(tasks, 'EXTRA_PATH_CHECK_BUDGET_SECONDS', 5 if exit_mode == 'request_budget' else .2)
     monkeypatch.setattr(tasks, '_branch_disclosure_warranted', lambda _: False)
     async def spawn(*args, **kwargs): raise AssertionError('must not launch')
     monkeypatch.setattr(tasks.asyncio, 'create_subprocess_exec', spawn)
-    pending = asyncio.create_task(registry._spawn(invocation, extra_path_grants=grants, backend=backend, prompt='Task', repo_path=tmp_path, session_id=None, freedom='write_in_repo', max_turns=None, model=None, reasoning_effort=None, task_id='worker'))
+    async def launch():
+        with tasks.authority_check_budget(seconds=1 if exit_mode == 'request_budget' else 25):
+            return await registry._spawn(invocation, extra_path_grants=grants, backend=backend, prompt='Task', repo_path=tmp_path, session_id=None, freedom='write_in_repo', max_turns=None, model=None, reasoning_effort=None, task_id='worker')
+    pending = asyncio.create_task(launch())
     try:
         for _ in range(200):
             if entered.is_set(): break
@@ -592,3 +596,137 @@ async def test_abandoned_path_workers_keep_capacity_and_do_not_starve_shared_exe
     assert not slots.acquire(blocking=False)
     slots.release()
     slots.release()
+
+
+async def test_request_budget_caps_each_wait_at_the_remaining_budget():
+    import time
+    def slow():
+        time.sleep(0.5)
+    with tasks.authority_check_budget(seconds=0.05):
+        with pytest.raises(ValueError, match='validation timed out'):
+            await tasks._bounded_extra_path_check(slow)
+
+
+async def test_expired_request_budget_refuses_before_submitting():
+    def never():
+        raise AssertionError('authority read submitted after the request budget expired')
+    with tasks.authority_check_budget(seconds=0.0):
+        with pytest.raises(ValueError, match='request budget expired'):
+            await tasks._bounded_extra_path_check(never)
+    # Outside any request budget the same check runs under the flat per-check budget again.
+    assert await tasks._bounded_extra_path_check(lambda: None) is None
+
+
+async def test_background_request_does_not_reuse_its_creators_expired_budget():
+    gate = asyncio.Event()
+    seen = []
+
+    @tasks._with_authority_check_budget
+    async def later_request():
+        seen.append(tasks.authority_check_deadline())
+        return await tasks._bounded_extra_path_check(lambda: 'fresh')
+
+    async def background():
+        await gate.wait()
+        return await later_request()
+
+    with tasks.authority_check_budget(seconds=0):
+        expired = tasks.authority_check_deadline()
+        child = asyncio.create_task(background())
+    gate.set()
+    assert await child == 'fresh'
+    assert seen[0] > expired
+    assert tasks.authority_check_deadline() is None
+
+
+async def test_request_budget_failcloses_across_individually_in_budget_checks():
+    import threading
+    import time
+    calls = []
+    submitted = threading.Event()
+    def first():
+        calls.append('first')
+        time.sleep(0.06)
+        return 'first-ok'
+    def second():
+        calls.append('second')
+        submitted.set()
+        time.sleep(0.5)
+        return 'second-ok'
+    def third():
+        raise AssertionError('authority read submitted after the request budget expired')
+    with tasks.authority_check_budget(seconds=0.10):
+        assert await tasks._bounded_extra_path_check(first) == 'first-ok'
+        with pytest.raises(ValueError, match='Extra writable path validation'):
+            await tasks._bounded_extra_path_check(second)
+        assert submitted.wait(1)
+        with pytest.raises(ValueError, match='request budget expired'):
+            await tasks._bounded_extra_path_check(third)
+    assert calls == ['first', 'second']
+
+
+async def test_timeout_retains_real_worker_slot_until_the_worker_finishes(monkeypatch):
+    import threading
+    import time
+    monkeypatch.setattr(tasks, '_EXTRA_PATH_SLOTS', threading.BoundedSemaphore(1))
+    def slow():
+        time.sleep(0.4)
+        return 'slow-ok'
+    with tasks.authority_check_budget(seconds=0.05):
+        with pytest.raises(ValueError, match='validation timed out'):
+            await tasks._bounded_extra_path_check(slow)
+    # The abandoned worker still occupies the pool's only slot...
+    with pytest.raises(ValueError, match='capacity is exhausted'):
+        await tasks._bounded_extra_path_check(lambda: None)
+    # ...and releases it once the real work finishes, not before.
+    for _ in range(40):
+        try:
+            assert await tasks._bounded_extra_path_check(lambda: 'later-ok') == 'later-ok'
+            break
+        except ValueError:
+            await asyncio.sleep(0.05)
+    else:
+        pytest.fail('the abandoned worker never released its slot')
+
+
+async def test_root_request_sets_and_resets_the_shared_deadline(tmp_path, monkeypatch, backend):
+    from unittest.mock import AsyncMock
+    registry = tasks.TaskRegistry(log_dir=_state_logs(tmp_path))
+    monkeypatch.setattr(registry, '_mutation_caller', AsyncMock(return_value=None))
+    seen = {}
+    def resolve(*args, **kwargs):
+        seen['deadline'] = tasks.authority_check_deadline()
+        return normalize_paths([str(tmp_path)])
+    monkeypatch.setattr(registry, '_resolve_extra_paths', resolve)
+    with pytest.raises(ValueError, match='workflow builders'):
+        await registry.start('Task', tmp_path, backend=backend, workflow_builder=True, extra_writable_paths=[str(tmp_path)])
+    assert seen['deadline'] is not None
+    assert tasks.authority_check_deadline() is None
+
+
+async def test_nested_entry_reuses_the_caller_deadline_and_fails_closed_before_spawn(tmp_path, monkeypatch, backend):
+    from unittest.mock import AsyncMock
+    registry = tasks.TaskRegistry(log_dir=_state_logs(tmp_path), open_monitor=False)
+    monkeypatch.setattr(registry, '_mutation_caller', AsyncMock(return_value=None))
+    def resolve(*args, **kwargs):
+        raise AssertionError('authority read submitted under an expired request budget')
+    monkeypatch.setattr(registry, '_resolve_extra_paths', resolve)
+    async def launch(*args, **kwargs):
+        raise AssertionError('must not launch after the request budget expired')
+    monkeypatch.setattr(tasks.asyncio, 'create_subprocess_exec', launch)
+    with tasks.authority_check_budget(seconds=0.0):
+        with pytest.raises(ValueError, match='request budget expired') as error:
+            await registry.start('Task', tmp_path, backend=backend, extra_writable_paths=[str(tmp_path)])
+    assert error.value.polybridge_not_started
+    assert not (registry.log_dir.exists() and any(registry.log_dir.rglob('*')))
+
+
+async def test_expired_request_budget_leaves_ordinary_no_extra_dispatch_available(tmp_path, monkeypatch, backend):
+    from unittest.mock import AsyncMock
+    registry = tasks.TaskRegistry(log_dir=_state_logs(tmp_path), open_monitor=False)
+    monkeypatch.setattr(registry, '_mutation_caller', AsyncMock(return_value=None))
+    monkeypatch.setattr(tasks, '_branch_disclosure_warranted', lambda _: False)
+    with tasks.authority_check_budget(seconds=0.0):
+        task = await registry.start('Task', tmp_path, backend=backend)
+    await asyncio.wait_for(task.done.wait(), 5)
+    assert task.status == 'completed'

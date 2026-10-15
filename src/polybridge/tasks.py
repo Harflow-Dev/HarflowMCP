@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import functools
 import threading
 from concurrent.futures import ThreadPoolExecutor
 import logging
@@ -30,6 +31,7 @@ import time
 import subprocess
 import sys
 import uuid
+import weakref
 from contextlib import contextmanager
 from collections import deque
 from dataclasses import dataclass, field, replace
@@ -58,6 +60,74 @@ log = logging.getLogger(__name__)
 
 EXTRA_PATH_CHECK_BUDGET_SECONDS = 20.0
 EXTRA_PATH_CHECK_WORKERS = 4
+
+# One shared wall-clock budget for every preflight authority read in a single request. Each
+# individual check can legally wait up to EXTRA_PATH_CHECK_BUDGET_SECONDS, so several of them
+# in one dispatch could together outlast a caller's own handshake window (detached's is 30 s);
+# this budget is deliberately below it. It governs only the pure preflight waits in
+# `_bounded_extra_path_check` — never the subprocess await, and never the registry invocation as
+# a whole: expiry refuses the next check before it is submitted. Existing pre-spawn
+# boundaries, rather than this timer, determine whether a refusal is safely retryable.
+AUTHORITY_CHECK_REQUEST_BUDGET_SECONDS = 25.0
+_AUTHORITY_CHECK_DEADLINE: contextvars.ContextVar[tuple[weakref.ReferenceType[Any] | None, float] | None] = contextvars.ContextVar(
+    "polybridge_authority_check_deadline", default=None
+)
+
+
+def authority_check_deadline() -> float | None:
+    """The shared preflight authority-check deadline in force for this request, if any."""
+    value = _AUTHORITY_CHECK_DEADLINE.get()
+    return value[1] if value is not None else None
+
+
+def _current_authority_check_deadline() -> float | None:
+    value = _AUTHORITY_CHECK_DEADLINE.get()
+    if value is None:
+        return None
+    owner, deadline = value
+    if owner is None:
+        return deadline
+    try:
+        current = asyncio.current_task()
+    except RuntimeError:
+        return None
+    return deadline if owner() is current else None
+
+
+@contextmanager
+def authority_check_budget(seconds: float | None = None) -> Iterator[None]:
+    """Start a fresh shared deadline for the current request; reset it on exit."""
+    try:
+        owner = asyncio.current_task()
+    except RuntimeError:
+        owner = None
+    duration = AUTHORITY_CHECK_REQUEST_BUDGET_SECONDS if seconds is None else seconds
+    token = _AUTHORITY_CHECK_DEADLINE.set((weakref.ref(owner) if owner is not None else None,
+                                         time.monotonic() + duration))
+    try:
+        yield
+    finally:
+        _AUTHORITY_CHECK_DEADLINE.reset(token)
+
+
+def _with_authority_check_budget(function):
+    """Decorate a registry entry point so one request shares one preflight deadline.
+
+    A nested entry point reached from inside another (`continue_task` reaching `start`, a resume
+    reaching `_spawn`) sees a deadline already in force and reuses it; a fresh root request
+    starts a new one. The budget is not a cancellation of the invocation itself — only the
+    bounded preflight reads consult it.
+    """
+
+    @functools.wraps(function)
+    async def wrapper(*args, **kwargs):
+        if _current_authority_check_deadline() is not None:
+            return await function(*args, **kwargs)
+        with authority_check_budget():
+            return await function(*args, **kwargs)
+
+    return wrapper
+
 _EXTRA_PATH_EXECUTOR = ThreadPoolExecutor(
     max_workers=EXTRA_PATH_CHECK_WORKERS, thread_name_prefix="pb-extra-path"
 )
@@ -69,8 +139,20 @@ async def _bounded_extra_path_check(function, *args):
 
     Timeout cannot stop a filesystem syscall. Keep its slot occupied until the actual
     concurrent future finishes, so abandoned workers cannot create an unbounded queue.
-    Callbacks must not allocate or mutate task state.
+    Callbacks must not allocate or mutate task state. A request deadline in force caps each
+    wait at what remains of it, and an expired budget refuses the check before submitting it —
+    so several individually in-budget checks cannot together outlast the request.
     """
+    timeout = EXTRA_PATH_CHECK_BUDGET_SECONDS
+    deadline = _current_authority_check_deadline()
+    if deadline is not None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ValueError(
+                "Extra writable path validation request budget expired; "
+                "check filesystem availability and retry"
+            )
+        timeout = min(timeout, remaining)
     slots = _EXTRA_PATH_SLOTS
     if not slots.acquire(blocking=False):
         raise ValueError(
@@ -86,7 +168,7 @@ async def _bounded_extra_path_check(function, *args):
     worker.add_done_callback(lambda _: slots.release())
     try:
         return await asyncio.wait_for(
-            asyncio.wrap_future(worker), timeout=EXTRA_PATH_CHECK_BUDGET_SECONDS
+            asyncio.wrap_future(worker), timeout=timeout
         )
     except TimeoutError as exc:
         raise ValueError(
@@ -985,6 +1067,7 @@ class TaskRegistry:
         assert_state_outside_writes(self._log_dir, repo_path, grants,
                                    invocation.scratch_directory if invocation is not None else None)
 
+    @_with_authority_check_budget
     async def preview_permissions(self, repo_path: Path, *, backend: Backend, freedom: str = "write_in_repo", network: bool | None = None, extra_writable_paths: list[str] | None = None) -> dict[str, Any]:
         from .extra_paths import serialize_paths
         caller = await self._mutation_caller()
@@ -994,14 +1077,16 @@ class TaskRegistry:
         invocation = backend.build_start_argv("Permission preview", repo=repo_path, freedom=freedom, session_id=str(uuid.uuid4()) if backend.capabilities.chooses_session_id else None, model=None, max_turns=None, reasoning_effort=None, network=network)
         invocation = await _bounded_extra_path_check(backend.qualify_extra_writable_paths, invocation, grants, freedom, network) if grants else invocation
         if grants:
+            # The qualifier asserted the invocation it returned; only the bridge-state check
+            # remains, against the qualified invocation's scratch directory.
             await _bounded_extra_path_check(self._assert_extra_state, repo_path, grants, invocation)
-            await _bounded_extra_path_check(backend.assert_extra_writable_paths, invocation, grants, freedom, network)
         else:
             backend.assert_safe(invocation, freedom, network)
         enforcement = backend.extra_path_enforcement(backend.enforcement(freedom, network), grants, repo_path) if grants else backend.enforcement(freedom, network)
         self._resolve_lineage(caller, child_enforcement=enforcement, child_backend=backend.name, child_repo=repo_path)
         return {"backend": backend.name, "freedom": freedom, "network": network, "repo_path": str(repo_path), "extra_writable_paths": serialize_paths(grants), "extra_path_certification": backend.extra_path_support().get("certification") if grants else None, "enforcement": enforcement.as_dict(), "limitations": "Existing typed path identities are checked before launch; grants are unavailable to native workflows and interactive takeover."}
 
+    @_with_authority_check_budget
     async def start(
         self,
         prompt: str,
@@ -1098,11 +1183,13 @@ class TaskRegistry:
             chain_prompt=chain_prompt,
         )
 
+    @_with_authority_check_budget
     async def continue_task(self, task_id: str, extra_prompt: str | None = None, notes_path: str | None = None, *, automatic: bool = False) -> Task:
         """Start a fresh session from a durably settled task without broadening access."""
         from .task_continuation import continue_task
         return await continue_task(self, task_id, extra_prompt, notes_path, automatic=automatic)
 
+    @_with_authority_check_budget
     async def resume(
         self,
         parent: Task,
@@ -1278,11 +1365,11 @@ class TaskRegistry:
         with _before_spawn():
             if extra_path_grants or invocation.extra_writable_paths:
                 # Version probes can block for seconds. Qualify once per execution off loop,
-                # even for externally supplied invocations, before allocating scratch. Final
-                # backend validation below also reads filesystem identities off loop.
+                # even for externally supplied invocations, before allocating scratch; the
+                # qualifier asserts the invocation it returns, so no immediate re-assert follows.
+                # Final backend validation below also reads filesystem identities off loop.
                 await _bounded_extra_path_check(self._assert_extra_state, repo_path, extra_path_grants, invocation)
                 invocation = await _bounded_extra_path_check(backend.qualify_extra_writable_paths, invocation, extra_path_grants, freedom, network)
-                await _bounded_extra_path_check(backend.assert_extra_writable_paths, invocation, extra_path_grants, freedom, network)
             else:
                 backend.assert_safe(invocation, freedom, network)
             if extra_path_grants and workflow_builder:
@@ -2949,6 +3036,7 @@ class TaskRegistry:
 
         return store.read(self._log_dir, record.task_id) or record
 
+    @_with_authority_check_budget
     async def resume_record(
         self,
         record: store.TaskRecord,

@@ -79,6 +79,10 @@ def error_doc(exc: BaseException) -> dict[str, str]:
     for kind, code in ordered:
         if kind and isinstance(exc, kind):
             return {"code": code, "message": str(exc)}
+    if isinstance(exc, ValueError) and getattr(exc, "polybridge_not_started", False):
+        # Refused inside a boundary that cannot have created a process: the caller's request was
+        # invalid, and retrying it unchanged cannot strand a running agent.
+        return {"code": "invalid_params", "message": str(exc)}
     return {"code": "start_failed", "message": f"{type(exc).__name__}: {exc}"}
 
 
