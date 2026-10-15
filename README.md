@@ -101,6 +101,9 @@ ditto 'macos/build/Polybridge Monitor.app' '/Applications/Polybridge Monitor.app
 open '/Applications/Polybridge Monitor.app'
 ```
 
+Optional `PB_OPEN_MONITOR=1` launches the installed `/Applications/Polybridge Monitor.app`
+explicitly in the background; a missing app does not stop the task.
+
 In Monitor, click **+** beside **Workflows**, arrange the steps, select their harnesses, and connect
 them. Save the workflow, then run it with a repository and a request. You can also use **Edit with
 agent** to refine the graph and instructions.
@@ -171,7 +174,7 @@ You can use the same bridge without a workflow. `start_task(prompt, repo_path, b
 returns a **`task_id`** immediately. Follow it with `get_task_status` or `wait_for_task`, then use
 `resume_task` for a follow-up. Independent tasks can run in parallel.
 
-Extra-path support requires absolute nonempty PATH entries, native selected helpers/backend launchers, and an isolated qualified configuration profile. Known external execution configuration namespaces of all registered backends stay protected; existing unsupported configuration inputs reject requests. Inherited repository write authority remains unchanged.
+Extra-path support requires absolute nonempty PATH entries, native selected helpers/backend launchers, Monitor auto-open disabled, and an isolated qualified configuration profile. Known external execution configuration namespaces of all registered backends stay protected; existing unsupported configuration inputs reject requests. Inherited repository write authority remains unchanged.
 
 [`extra_writable_paths`](docs/extra-writable-paths.md) adds bounded local file or directory
 grants on verified configurations. Inspect `preview_task_permissions` before launch;

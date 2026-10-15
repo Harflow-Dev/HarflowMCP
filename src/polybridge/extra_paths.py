@@ -7,6 +7,8 @@ import os
 import unicodedata
 from typing import Literal
 
+from .canonical_paths import canonical
+
 
 def has_extra_path_authority(record: object) -> bool:
     """Detect saved extra-path markers, including malformed authority, without I/O.
@@ -53,7 +55,10 @@ def _path(value: str) -> Path:
 
 def _grant(value: str) -> PathGrant:
     try:
-        path = _path(value).resolve(strict=True)
+        # Kernel-canonical spelling: on a case-insensitive filesystem the
+        # requested `CONFIG.TOML` must be recorded as the `config.toml` the
+        # kernel would actually write, so protected namespaces still match.
+        path = canonical(_path(value))
         info = path.stat()
     except OSError as exc:
         raise ValueError('extra writable path must exist and be accessible') from exc
@@ -115,7 +120,7 @@ def revalidate_paths(grants: tuple[PathGrant, ...]) -> None:
 def check_child_paths(parent_grants: tuple[PathGrant, ...], child_grants: tuple[PathGrant, ...], parent_repo: str) -> None:
     revalidate_paths(parent_grants)
     revalidate_paths(child_grants)
-    repo = Path(parent_repo).resolve(strict=True)
+    repo = canonical(Path(parent_repo))
     if not repo.is_dir():
         raise ValueError('owner repository must be a directory')
     for child in child_grants:

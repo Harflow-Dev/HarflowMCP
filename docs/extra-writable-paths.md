@@ -57,6 +57,15 @@ unstable entries, directory cycles, more than 100,000 metadata visits, depth ove
 cannot freeze a concurrently mutated filesystem or interrupt a blocked syscall.
 A server running from a source checkout therefore cannot grant writable authority
 over its own source/import root; use an installed server for bounded tasks there.
+On macOS, existing paths use kernel-derived spelling so case, Unicode and Data
+firmlink aliases cannot hide protected namespaces. Symlink hops remain protected,
+and missing names are anchored to their verified existing ancestors. Lookup
+failures reject authority. The installed `/Applications/Polybridge Monitor.app`
+bundle is protected as a whole, even when auto-open is off or the bundle is absent.
+Auto-open names that bundle explicitly rather than using the URL-handler mapping.
+Extra-path requests require `PB_OPEN_MONITOR` to be unset or different from `1`;
+automatic app launch is outside this qualified runtime profile. Open Monitor
+manually to follow these tasks. Ordinary requests retain optional auto-open.
 Path resolution,
 saved-authority reads, runtime qualification and final identity checks run in worker
 threads with a 20-second budget per check, including executor queueing. There is

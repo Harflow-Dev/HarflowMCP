@@ -1,14 +1,16 @@
 """Protect added authority against registered backends' execution configuration."""
 from pathlib import Path
 
+from .canonical_paths import canonical
+
 
 def assert_execution_config_outside_writes(repo: Path, grants, scratch_directory: str | None = None) -> None:
     from . import backends
     from .runtime_paths import _chain
-    repo = repo.resolve(strict=True)
+    repo = canonical(repo)
     scopes = [(repo, 'directory'), *((Path(g.path), g.kind) for g in grants)]
     if scratch_directory is not None:
-        scopes.append((Path(scratch_directory).resolve(strict=True), 'directory'))
+        scopes.append((canonical(Path(scratch_directory)), 'directory'))
     for backend in backends.BACKENDS.values():
         namespaces = backend.execution_configuration_namespaces(repo)
         for category in ('external', 'project'):

@@ -7,13 +7,30 @@ import shlex
 import sys
 import sysconfig
 
+from .canonical_paths import canonical_component_path
+
 
 # Server repository probes, outcome capture, process identity and Monitor launch.
 HELPERS = ('git', 'ps', 'open')
 
+# The Monitor app is a fixed launch target: `PB_OPEN_MONITOR=1` opens exactly
+# this bundle (`open -g -a <absolute path>`), never LaunchServices' mutable
+# URL-handler mapping. Its whole namespace — absent names and symlink targets
+# included — is protected by `assert_runtime_outside_writes` regardless of
+# `PB_OPEN_MONITOR`, so no writable authority can replace what a later
+# ordinary launch of this bundle would open.
+MONITOR_BUNDLE = Path('/Applications/Polybridge Monitor.app')
+
 
 def _chain(path: Path) -> tuple[set[Path], Path]:
-    """Keep lexical components as well as every symlink hop and final target."""
+    """Keep lexical components as well as every symlink hop and final target.
+
+    Each existing component is recorded in the kernel's actual spelling
+    (case and Unicode form), looked up without following it when it is a
+    symlink; missing components stay lexical after their verified ancestors.
+    On case-insensitive filesystems this is what makes a differently-spelled
+    alias of a protected component recognizable instead of silently passing.
+    """
     path = path.absolute()
     pending = list(path.parts[1:])
     current = Path(path.anchor)
@@ -27,6 +44,17 @@ def _chain(path: Path) -> tuple[set[Path], Path]:
         if part == '.':
             continue
         current /= part
+        protected.add(current)
+        try:
+            actual = canonical_component_path(current)
+        except OSError as exc:
+            raise ValueError('protected path spelling cannot be verified') from exc
+        if actual is not None:
+            # Preserve the lexical hop, then follow only the kernel's nofollow
+            # spelling. Earlier symlinks were already visited; the current one
+            # remains a symlink, while firmlink aliases now share one target.
+            protected.add(current.with_name(actual.name))
+            current = actual
         protected.add(current)
         if current.is_symlink():
             hops += 1
@@ -45,6 +73,8 @@ def assert_runtime_outside_writes(scopes: list[tuple[Path, str]]) -> None:
     PATH changes cannot silently expand the server's trusted execution namespace.
     """
     from . import backends
+    if os.environ.get('PB_OPEN_MONITOR') == '1':
+        raise ValueError('extra writable paths require Monitor auto-open disabled; open Monitor manually')
     directories = []
     components = set()
     executables = []
@@ -155,6 +185,13 @@ def assert_runtime_outside_writes(scopes: list[tuple[Path, str]]) -> None:
             chain, canonical = _chain(lexical)
             components.update(chain)
             directories.extend((lexical, canonical))
+    # The Monitor bundle namespace is protected whole — every existing
+    # component of its path plus symlink targets — whether or not the bundle
+    # or `PB_OPEN_MONITOR` is present, so a later ordinary launch of the
+    # fixed bundle cannot have been redirected by writable authority.
+    monitor_chain, monitor_target = _chain(MONITOR_BUNDLE)
+    components.update(monitor_chain)
+    directories.extend((MONITOR_BUNDLE, monitor_target))
     for scope, kind in scopes:
         if any(scope == path or (kind == 'directory' and path.is_relative_to(scope)) for path in components):
             raise ValueError('writable authority overlaps protected server runtime paths')

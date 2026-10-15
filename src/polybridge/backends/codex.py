@@ -364,7 +364,7 @@ class CodexBackend(ExtraPathsUnsupported):
     def extra_path_support(self) -> dict[str, Any]:
         return {"supported": True, "platforms": ["darwin"], "versions": [EXTRA_PATHS_VERSION],
                 "freedoms": ["write_in_repo", "publish"], "network": [False, True],
-                "native_subagent": False, "runtime": "absolute nonempty PATH; native selected helpers and registered backend launchers", "configuration": "notify, hooks, MCP and plugins disabled; no Codex project config; other-backend external namespaces protected and existing configuration unsupported; inherited repository configuration authority unchanged", "certification": EXTRA_PATHS_CERTIFICATION}
+                "native_subagent": False, "runtime": "absolute nonempty PATH; native selected helpers and registered backend launchers; Monitor auto-open disabled", "configuration": "notify, hooks, MCP and plugins disabled; no Codex project config; other-backend external namespaces protected and existing configuration unsupported; inherited repository configuration authority unchanged", "certification": EXTRA_PATHS_CERTIFICATION}
 
     def _extra_path_runtime(self):
         import shutil
@@ -425,11 +425,15 @@ class CodexBackend(ExtraPathsUnsupported):
         target_info = current.stat()
         if target_info.st_nlink != 1:
             raise UnsafeInvocationError("CLI launcher hardlinks are not supported with extra writable paths")
-        # assert_safe has already established canonical option shape.
-        repo = Path(invocation.argv[invocation.argv.index('-C') + 1]).resolve(strict=True)
+        # assert_safe has already established canonical option shape. Scopes
+        # are kernel-canonical, so a case-aliased repository or scratch path
+        # cannot slip past the launcher protections below on a
+        # case-insensitive filesystem.
+        from ..canonical_paths import canonical
+        repo = canonical(Path(invocation.argv[invocation.argv.index('-C') + 1]))
         scopes = [(repo, 'directory')]
         if invocation.scratch_directory:
-            scopes.append((Path(invocation.scratch_directory).resolve(strict=True), 'directory'))
+            scopes.append((canonical(Path(invocation.scratch_directory)), 'directory'))
         scopes.extend((Path(grant.path), grant.kind) for grant in grants)
         for scope, kind in scopes:
             info = scope.stat()
@@ -455,10 +459,11 @@ class CodexBackend(ExtraPathsUnsupported):
 
     def _extra_path_configuration(self, invocation, grants):
         from .codex_config import qualify_configuration
-        repo = Path(invocation.argv[invocation.argv.index('-C') + 1]).resolve(strict=True)
+        from ..canonical_paths import canonical
+        repo = canonical(Path(invocation.argv[invocation.argv.index('-C') + 1]))
         scopes = [(repo, 'directory'), *((Path(g.path), g.kind) for g in grants)]
         if invocation.scratch_directory:
-            scopes.append((Path(invocation.scratch_directory).resolve(strict=True), 'directory'))
+            scopes.append((canonical(Path(invocation.scratch_directory)), 'directory'))
         try:
             return qualify_configuration(repo, scopes, [(Path(g.path), g.kind) for g in grants])
         except (ValueError, OSError, RuntimeError) as exc:

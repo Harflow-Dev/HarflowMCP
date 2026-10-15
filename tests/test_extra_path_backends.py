@@ -32,6 +32,18 @@ def qualified(monkeypatch, tmp_path_factory):
     return backends.get('codex')
 
 
+def test_monitor_auto_open_is_outside_the_qualified_profile(qualified, monkeypatch, tmp_path):
+    monkeypatch.setenv('PB_OPEN_MONITOR', '1')
+    calls = []
+    monkeypatch.setattr(backends, 'version', lambda *args, **kwargs: calls.append(1))
+    repo, grant = tmp_path / 'repo', tmp_path / 'grant'
+    repo.mkdir()
+    grant.mkdir()
+    with pytest.raises(UnsafeInvocationError, match='auto-open disabled'):
+        qualified.with_extra_writable_paths(build(qualified, repo), normalize_paths([str(grant)]), 'write_in_repo')
+    assert calls == []
+
+
 @pytest.mark.parametrize('freedom', ['write_in_repo', 'publish'])
 @pytest.mark.parametrize('network', [None, False, True])
 @pytest.mark.parametrize('resume', [False, True])
@@ -337,6 +349,21 @@ def test_server_helper_authority_refused_before_probe(qualified, monkeypatch, tm
     with pytest.raises(UnsafeInvocationError, match='runtime'):
         qualified.with_extra_writable_paths(invocation, normalize_paths([str(grant)]), 'write_in_repo')
     assert calls == []
+
+
+def test_monitor_bundle_namespace_protected_regardless_of_open_monitor(qualified, monkeypatch):
+    """The fixed Monitor bundle is a launch target of this server's `open` helper, so its
+    whole namespace — absent names included — stays outside writable authority whether or
+    not `PB_OPEN_MONITOR` asks for a launch; a later ordinary launch must stay safe."""
+    from pathlib import Path
+    from polybridge.runtime_paths import MONITOR_BUNDLE, assert_runtime_outside_writes
+    for env in (None, "0", "1"):
+        monkeypatch.delenv("PB_OPEN_MONITOR", raising=False)
+        if env is not None:
+            monkeypatch.setenv("PB_OPEN_MONITOR", env)
+        for scope in (MONITOR_BUNDLE, Path("/Applications")):
+            with pytest.raises(ValueError, match="auto-open disabled" if env == "1" else "runtime"):
+                assert_runtime_outside_writes([(scope, "directory")])
 
 
 def test_unrelated_grant_preserves_helper_namespace(qualified, monkeypatch, tmp_path):

@@ -54,8 +54,9 @@ def _mdm_absence() -> tuple:
 
 
 def qualify_configuration(repo: Path, scopes: list[tuple[Path, str]], grants: list[tuple[Path, str]] = ()) -> tuple:
+    from ..canonical_paths import canonical
     from ..runtime_paths import _chain
-    repo = repo.resolve(strict=True)
+    repo = canonical(repo)
     home = Path(os.environ.get('CODEX_HOME', str(Path.home() / '.codex'))).expanduser()
     if not home.is_absolute():
         raise ValueError('extra writable paths require an absolute CODEX_HOME')

@@ -184,8 +184,13 @@ async def test_start_task_response_is_the_same_whatever_the_launcher_does(
     assert len(task.bridge_notices) == (0 if result == 0 else 1)
 
 
-async def test_the_default_launcher_runs_open_g_and_reaps_it(monkeypatch) -> None:
+@pytest.mark.parametrize('saturated', [False, True])
+async def test_the_default_launcher_opens_the_fixed_bundle_and_reaps_it(monkeypatch, tmp_path, saturated) -> None:
     from polybridge import tasks as tasks_module
+    import threading
+
+    if saturated:
+        monkeypatch.setattr(tasks_module, '_EXTRA_PATH_SLOTS', threading.BoundedSemaphore(0))
 
     calls: list[tuple] = []
 
@@ -200,7 +205,26 @@ async def test_the_default_launcher_runs_open_g_and_reaps_it(monkeypatch) -> Non
         calls.append(argv)
         return _Proc()
 
+    monkeypatch.setattr(tasks_module, "MONITOR_BUNDLE", tmp_path)
     monkeypatch.setattr(tasks_module.asyncio, "create_subprocess_exec", fake_exec)
 
     assert await tasks_module._launch_monitor("polybridge-monitor://task/x") == 0
-    assert calls == [("open", "-g", "polybridge-monitor://task/x")]
+    assert calls == [("open", "-g", "-a", str(tmp_path), "polybridge-monitor://task/x")]
+
+
+async def test_the_default_launcher_refuses_without_spawning_when_the_bundle_is_absent(
+    monkeypatch, tmp_path
+) -> None:
+    from polybridge import tasks as tasks_module
+
+    calls: list[tuple] = []
+
+    async def fake_exec(*argv, **kwargs):
+        calls.append(argv)
+        raise AssertionError("nothing may be spawned when the bundle is absent")
+
+    monkeypatch.setattr(tasks_module, "MONITOR_BUNDLE", tmp_path / "Polybridge Monitor.app")
+    monkeypatch.setattr(tasks_module.asyncio, "create_subprocess_exec", fake_exec)
+
+    assert await tasks_module._launch_monitor("polybridge-monitor://task/x") != 0
+    assert calls == []

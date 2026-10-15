@@ -54,6 +54,7 @@ from .backends import get as get_backend
 from .backends import resume_command
 from .extra_paths import has_extra_path_authority
 from .events import EVENTS_SUFFIX, EventLog, events_path
+from .runtime_paths import MONITOR_BUNDLE
 from .stream import parse_line
 
 log = logging.getLogger(__name__)
@@ -574,11 +575,24 @@ MONITOR_OPEN_TIMEOUT_SECONDS = 30.0
 
 
 async def _launch_monitor(url: str) -> int:
-    """`open -g <url>`: hand the URL to the Monitor app without bringing it to the front. Returns
-    the exit status; the process is always reaped."""
+    """Launch the fixed Monitor bundle explicitly — `open -g -a <bundle> <url>` —
+    rather than letting LaunchServices resolve the URL scheme through its mutable handler
+    mapping (which writable authority elsewhere could have repointed). Returns the exit
+    status; nonzero, and without spawning anything, when the bundle is absent. The
+    existence probe runs off the event loop without consuming authority-validation
+    capacity. The process is always reaped."""
+    try:
+        installed = await asyncio.wait_for(asyncio.to_thread(MONITOR_BUNDLE.is_dir),
+                                           timeout=MONITOR_OPEN_TIMEOUT_SECONDS)
+    except Exception:
+        return 1
+    if not installed:
+        return 1
     proc = await asyncio.create_subprocess_exec(
         "open",
         "-g",
+        "-a",
+        str(MONITOR_BUNDLE),
         url,
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.DEVNULL,
@@ -1694,8 +1708,8 @@ class TaskRegistry:
             if code == 0:
                 return
             notice = (
-                f"The Monitor app could not be opened (`open -g` exited {code}); the task runs "
-                "regardless."
+                f"The Monitor app could not be opened (`open -g -a` failed with status {code}); "
+                "the task runs regardless."
             )
         task.bridge_notices.append(notice)
         try:

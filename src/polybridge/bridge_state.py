@@ -1,6 +1,8 @@
 """Keep bounded worker writes outside bridge authorization and control state."""
 from pathlib import Path
 
+from .canonical_paths import canonical
+
 
 def assert_state_outside_writes(log_dir: Path, repo: Path, grants, scratch_directory: str | None = None) -> None:
     """Protect default CLI state and this registry's custom state before execution.
@@ -10,7 +12,7 @@ def assert_state_outside_writes(log_dir: Path, repo: Path, grants, scratch_direc
     """
     from .runtime_paths import _chain
     roots = {Path.home() / '.polybridge', Path(log_dir).absolute().parent}
-    scopes = [(Path(repo).resolve(strict=True), 'directory')]
+    scopes = [(canonical(Path(repo)), 'directory')]
     scopes.extend((Path(grant.path), grant.kind) for grant in grants)
     protected = []
     controls = []
@@ -33,10 +35,14 @@ def assert_state_outside_writes(log_dir: Path, repo: Path, grants, scratch_direc
     if scratch_directory is not None:
         allocated = Path(scratch_directory)
         expected = Path(log_dir).parent / 'scratch'
-        if (expected.is_symlink() or allocated.parent != expected.resolve(strict=True)
-                or allocated.resolve(strict=True) != allocated or allocated.is_symlink()):
+        # The scratch identity is verified in the kernel's actual spelling, so
+        # a case-alias cannot present an allocated directory under a spelling
+        # the namespace checks below would not recognize.
+        verified = canonical(allocated)
+        if (expected.is_symlink() or verified.parent != canonical(expected)
+                or verified != allocated or allocated.is_symlink()):
             raise ValueError('task scratch identity is outside its allocated namespace')
         # Scratch must never resolve into the task-record tree or another state
         # root's controls via a substituted parent alias.
-        if any(allocated.is_relative_to(target) for target in (*controls, task_target)):
+        if any(verified.is_relative_to(target) for target in (*controls, task_target)):
             raise ValueError('task scratch overlaps bridge task/control state')
