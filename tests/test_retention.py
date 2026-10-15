@@ -849,3 +849,124 @@ def test_supported_retention_removal_waits_for_catalog_decode_before_unlinking(t
     assert not path.exists()
     recovered = store.list_page(tmp_path)
     assert recovered['items'] == [] and recovered['catalog_state']['status'] == 'ready'
+
+
+def _artifact_family(tmp_path, monkeypatch, edge="spawned_by"):
+    from polybridge import artifacts, identity, workflow_hooks
+    log_dir = tmp_path / 'bridge' / 'tasks'
+    log_dir.mkdir(parents=True)
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    target = repo / 'report'
+    target.write_text('retained report')
+    now = datetime.now(timezone.utc)
+    grandparent = make_record(task_id='grandparent', session_id='grand-session', repo_path=str(repo))
+    parent = make_record(task_id='parent', session_id='parent-session', repo_path=str(repo), **{edge: 'grandparent'})
+    child = make_record(task_id='child', session_id='child-session', repo_path=str(repo), **{edge: 'parent'},
+                        finished_at=_iso(now - timedelta(days=1)))
+    for record in (grandparent, parent, child):
+        assert store.write_landed(log_dir, record)
+    monkeypatch.setattr(artifacts, '_caller', lambda _: None)
+    monkeypatch.setattr(workflow_hooks, 'owner', lambda *a, **k: None)
+    # Persist a genuine reference using the normal service before settling the owner.
+    from dataclasses import replace
+    store.record_path(log_dir, 'child').unlink()
+    live = replace(child, status='running', exit_code=None, finished_at=None, pid=123, start_time='start')
+    assert store.write_landed(log_dir, live)
+    monkeypatch.setattr(artifacts, '_caller', lambda _: live)
+    monkeypatch.setattr(identity, 'identity_check', lambda _: 'alive')
+    artifacts.register(log_dir, str(target), 'report')
+    assert store.write_landed(log_dir, child)
+    monkeypatch.setattr(artifacts, '_caller', lambda _: None)
+    return log_dir, now, child, target
+
+
+@pytest.mark.parametrize('edge', ['spawned_by', 'parent_task_id'])
+def test_artifact_ancestors_survive_until_owner_collection(tmp_path, monkeypatch, edge):
+    from polybridge import artifacts
+    log_dir, now, child, target = _artifact_family(tmp_path, monkeypatch, edge)
+    assert retention.sweep(log_dir, 30, now)['deleted_tasks'] == 0
+    assert store.read(log_dir, 'grandparent') and store.read(log_dir, 'parent')
+    assert artifacts.get(log_dir, 'child')['items'][0]['availability']['state'] == 'available'
+    expired = now + timedelta(days=31)
+    assert retention.sweep(log_dir, 30, expired)['deleted_tasks'] == 1
+    assert store.read(log_dir, 'child') is None
+    assert store.read(log_dir, 'parent') is not None
+    assert retention.sweep(log_dir, 30, expired)['deleted_tasks'] == 2
+    assert target.read_text() == 'retained report'
+
+
+def test_failed_artifact_owner_collection_keeps_ancestors(tmp_path, monkeypatch):
+    from polybridge import artifacts
+    log_dir, now, _, _ = _artifact_family(tmp_path, monkeypatch)
+    original = retention._delete_task_files
+    monkeypatch.setattr(retention, '_delete_task_files', lambda directory, identifier:
+                        False if identifier == 'child' else original(directory, identifier))
+    stats = retention.sweep(log_dir, 30, now + timedelta(days=31))
+    assert stats['kept_delete_failed'] == 1
+    assert all(store.read(log_dir, identifier) for identifier in ('child', 'parent', 'grandparent'))
+    assert artifacts.get(log_dir, 'child')['count'] == 1
+
+
+def test_artifact_retention_cycles_are_bounded_and_workflow_denial_is_preserved(tmp_path, monkeypatch):
+    from dataclasses import replace
+    from polybridge import artifacts, workflow_hooks
+    log_dir, now, child, _ = _artifact_family(tmp_path, monkeypatch)
+    retention.sweep(log_dir, 30, now)
+    monkeypatch.setattr(workflow_hooks, 'owner', lambda directory, task_id, strict:
+                        {'role': 'worker'} if task_id == 'grandparent' else None)
+    with pytest.raises(ValueError, match='Managed workflow'):
+        artifacts.get(log_dir, 'child')
+    monkeypatch.setattr(workflow_hooks, 'owner', lambda *a, **k: None)
+    parent = store.read(log_dir, 'parent')
+    store.record_path(log_dir, 'parent').unlink()
+    assert store.write_landed(log_dir, replace(parent, parent_task_id='child'))
+    records = {record.task_id: record for record in store.read_all(log_dir)}
+    assert retention._artifact_ancestor_pins(log_dir, records) == {'child', 'parent', 'grandparent'}
+    # A malformed cycle fails artifact authority closed; the sweep walk still terminates.
+    assert retention.sweep(log_dir, 30, now)['deleted_tasks'] == 0
+    with pytest.raises(ValueError, match='cyclic'):
+        artifacts.get(log_dir, 'child')
+
+
+def test_symlink_manifest_does_not_establish_retention_ancestry(tmp_path, monkeypatch):
+    log_dir, now, _, target = _artifact_family(tmp_path, monkeypatch)
+    manifest = log_dir / 'child.artifacts.json'
+    manifest.unlink()
+    manifest.symlink_to(target)
+    assert retention.sweep(log_dir, 30, now)['deleted_tasks'] == 2
+    assert store.read(log_dir, 'child') is not None
+    assert target.read_text() == 'retained report'
+
+
+def test_late_artifact_registration_and_finish_preserve_snapshot_ancestors(tmp_path, monkeypatch):
+    from dataclasses import replace
+    from polybridge import artifacts, identity
+    log_dir, now, child, target = _artifact_family(tmp_path, monkeypatch)
+    (log_dir / 'child.artifacts.json').unlink()
+    live = replace(child, status='running', exit_code=None, finished_at=None,
+                   started_at=_iso(now - timedelta(days=1)), pid=123, start_time='start')
+    store.record_path(log_dir, 'child').unlink()
+    assert store.write_landed(log_dir, live)
+    monkeypatch.setattr(artifacts, '_caller', lambda _: live)
+    resolve_status = store.resolve_status
+    finished = False
+    def finish_after_pin_inventory(directory, record, **kwargs):
+        nonlocal finished
+        if record.task_id == 'child' and not finished:
+            finished = True
+            # The manifest did not exist when the retention ancestry pins were seeded.
+            assert not (log_dir / 'child.artifacts.json').exists()
+            artifacts.register(log_dir, str(target), 'report')
+            assert store.write_landed(log_dir, replace(live, status='completed', exit_code=0,
+                                                       finished_at=_iso(now)))
+            monkeypatch.setattr(identity, 'identity_check', lambda _: 'dead')
+        if record.task_id == 'child':
+            return 'completed', None
+        return resolve_status(directory, record, **kwargs)
+    monkeypatch.setattr(store, 'resolve_status', finish_after_pin_inventory)
+    assert retention.sweep(log_dir, 30, now)['deleted_tasks'] == 0
+    assert finished
+    assert all(store.read(log_dir, identifier) for identifier in ('child', 'parent', 'grandparent'))
+    monkeypatch.setattr(artifacts, '_caller', lambda _: None)
+    assert artifacts.get(log_dir, 'child')['items'][0]['availability']['state'] == 'available'

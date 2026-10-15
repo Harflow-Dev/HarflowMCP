@@ -18,6 +18,7 @@ import logging
 import os
 import json
 import sqlite3
+import stat
 import re
 from collections.abc import Collection
 from datetime import datetime, timedelta, timezone
@@ -112,6 +113,45 @@ def _maybe_sweep(log_dir: Path, *, now: datetime | None) -> dict[str, int] | Non
         os.close(lock_fd)
 
 
+def _artifact_ancestor_pins(log_dir: Path, by_id: dict[str, store.TaskRecord]) -> set[str]:
+    """Keep exact ancestry evidence needed by manifest owners or in-flight snapshots.
+
+    Walk the in-memory record graph once, with at most two edges per vertex. No
+    manifest contents or referenced files are opened, and symlink manifests never
+    establish an owner. Unreadable metadata is conservatively treated as present.
+    Unsettled snapshots also seed the walk: registration may finish after this
+    inventory, then the owner may exit before status reconciliation.
+    These pins do not propagate to descendants or sessions: an expired artifact
+    owner may be collected now, and its ancestors become eligible next sweep.
+    """
+    pending = []
+    for identifier, record in by_id.items():
+        if record.status not in store.TERMINAL_RECORD_STATUSES or store.outcome_unobserved(record):
+            pending.append(identifier)
+            continue
+        try:
+            info = (log_dir / f'{identifier}.artifacts.json').lstat()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            pending.append(identifier)
+        else:
+            if stat.S_ISREG(info.st_mode):
+                pending.append(identifier)
+    pins, visited = set(), set()
+    while pending:
+        identifier = pending.pop()
+        if identifier in visited:
+            continue
+        visited.add(identifier)
+        record = by_id[identifier]
+        for parent in {record.spawned_by, record.parent_task_id} - {None}:
+            if parent in by_id:
+                pins.add(parent)
+                pending.append(parent)
+    return pins
+
+
 def sweep(log_dir: Path, days: int, now: datetime) -> dict[str, int]:
     """One retention pass. Never raises — the caller (`maybe_sweep`) is the one that guarantees it."""
     stats = {
@@ -165,6 +205,8 @@ def sweep(log_dir: Path, days: int, now: datetime) -> dict[str, int]:
         if before == (len(protected), len(protected_sessions)):
             break
     pinned = protected
+    # Keep these separate from the session/descendant protection closure above.
+    artifact_ancestors = _artifact_ancestor_pins(log_dir, by_id)
     statuses = {r.task_id: store.resolve_status(log_dir, r, detail=False)[0] for r in records}
 
     # Both edges count as descent: `parent_task_id` (resumed from) and `spawned_by` (dispatched by,
@@ -206,6 +248,8 @@ def sweep(log_dir: Path, days: int, now: datetime) -> dict[str, int]:
             continue
         if has_live_descendant(record.task_id, set()):
             stats["kept_live_descendant"] += 1
+            continue
+        if record.task_id in artifact_ancestors:
             continue
         _delete_task(log_dir, record, stats, now, _family(record.task_id, children), by_id)
 

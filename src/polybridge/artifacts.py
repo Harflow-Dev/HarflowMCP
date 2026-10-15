@@ -199,11 +199,21 @@ def _target(log_dir, record, spelling):
             if target.is_relative_to(namespace) or target.is_relative_to(resolved):
                 raise ValueError('Artifact is in protected backend configuration')
     if not (own_scratch or (repo is not None and target.is_relative_to(repo))):
+        # Validate the entire saved shape, but authority is independent per grant.
+        # A revoked unrelated grant (or narrower overlapping grant) cannot revoke
+        # another still-valid grant that covers this canonical target.
         grants = restore_paths(record.extra_writable_paths)
-        revalidate_paths(grants)
-        if not any((g.kind == 'directory' and target.is_relative_to(Path(g.path))) or
-                   (g.kind == 'file' and str(target) == g.path) for g in grants):
-            raise ValueError('Artifact path is outside task authority')
+        for grant in grants:
+            if not ((grant.kind == 'directory' and target.is_relative_to(Path(grant.path))) or
+                    (grant.kind == 'file' and str(target) == grant.path)):
+                continue
+            try:
+                revalidate_paths((grant,))
+            except (OSError, ValueError, RuntimeError):
+                continue
+            break
+        else:
+            raise ValueError('Artifact path has no valid covering task authority')
     _text(str(target), 'canonical path')
     info = _regular_stat(target)
     return target, _observation(info)

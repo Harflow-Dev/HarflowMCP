@@ -79,6 +79,9 @@ polybridge-ctl status <task_id> --brief --json
 
 A verified human caller can inspect a known standalone task. A dispatched standalone
 task can inspect its own references. Metadata reads do not grant file-content access.
+Saved extra-path grants are structurally validated together, then each covering grant
+is revalidated independently. One valid
+covering grant suffices; a changed unrelated grant does not revoke it.
 Task status returns a bounded `artifact_summary` and a detail reference, rather than
 injecting complete notes or file contents into task results. Compact status retains
 its 8 KiB response budget. Task listings do not stat every referenced file.
@@ -111,6 +114,12 @@ Registration metadata follows its owning task record's retention. Existing task 
 cleanup can delete a referenced scratch file. Files in repositories or external granted
 locations are never deleted by artifact-reference cleanup. Registration is not archival
 storage. Concurrent registration and retention share the task lifecycle lock, and a
-receipt is returned only after its manifest is durably written.
+receipt is returned only after its manifest is durably written. Retention preserves the
+exact parent and dispatch-ancestor records needed to verify each manifest owner's
+standalone ancestry. In-flight snapshots conservatively preserve the same ancestors
+so a registration finishing during a sweep cannot lose that evidence. The owner
+expires normally; those ancestors may remain until a subsequent sweep. If owner
+deletion fails, its ancestors remain for the retry. Ancestor preservation does not
+extend the lifetime of the owner's descendants or session peers.
 
 The CLI JSON contract is version 11; setup and event-log versions are unchanged.

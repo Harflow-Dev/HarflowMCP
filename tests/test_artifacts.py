@@ -455,3 +455,57 @@ def test_replaced_lock_inode_is_refused(setup, monkeypatch):
     with pytest.raises(ValueError, match='lock identity changed'):
         with artifacts._task_lock(logs, 'owner'):
             pytest.fail('must not enter with split task lock')
+
+
+@pytest.mark.parametrize('grant_kind', ['file', 'directory'])
+def test_only_covering_grants_need_revalidation(setup, grant_kind):
+    logs, repo, record = setup
+    from polybridge.extra_paths import normalize_paths, serialize_paths
+    authority = repo.parent / 'authority-a'
+    authority.mkdir()
+    target = authority / 'report'
+    target.write_text('report')
+    other = repo.parent / 'authority-b'
+    other.write_text('unrelated')
+    grant_a = target if grant_kind == 'file' else authority
+    grants = serialize_paths(normalize_paths([str(grant_a), str(other)]))
+    store.write(logs, replace(record, extra_writable_paths=grants))
+    artifacts.register(logs, str(target), 'report')
+    other.rename(other.with_name('old-b'))
+    other.write_text('replacement')
+    assert artifacts.get(logs, record.task_id)['items'][0]['availability']['state'] == 'available'
+    artifacts.register(logs, str(target), 'report', 'independent grant remains valid')
+    other.unlink()
+    assert artifacts.get(logs, record.task_id)['items'][0]['availability']['state'] == 'available'
+    grant_a.rename(grant_a.with_name('old-a'))
+    if grant_kind == 'directory':
+        grant_a.mkdir()
+        target.write_text('replacement')
+    else:
+        target.write_text('replacement')
+    assert artifacts.get(logs, record.task_id)['items'][0]['availability']['state'] == 'unavailable'
+    with pytest.raises(ValueError):
+        artifacts.register(logs, str(target), 'report')
+
+
+def test_overlapping_covering_grants_are_independent_but_structure_is_strict(setup):
+    logs, repo, record = setup
+    from polybridge.extra_paths import normalize_paths, serialize_paths
+    authority = repo.parent / 'authority'
+    authority.mkdir()
+    target = authority / 'report'
+    target.write_text('first')
+    other = repo.parent / 'other'
+    other.write_text('other')
+    grants = serialize_paths(normalize_paths([str(target), str(authority), str(other)]))
+    store.write(logs, replace(record, extra_writable_paths=grants))
+    artifacts.register(logs, str(target), 'report')
+    target.rename(authority / 'old-report')
+    target.write_text('replacement through still valid directory grant')
+    assert artifacts.get(logs, record.task_id)['items'][0]['availability']['state'] == 'changed'
+    artifacts.register(logs, str(target), 'report', 'broad grant')
+    grants[-1]['inode'] = 'malformed unrelated grant'
+    store.write(logs, replace(record, extra_writable_paths=grants))
+    assert artifacts.get(logs, record.task_id)['items'][0]['availability']['state'] == 'unavailable'
+    with pytest.raises(ValueError):
+        artifacts.register(logs, str(target), 'report')
