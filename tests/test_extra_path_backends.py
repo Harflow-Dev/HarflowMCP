@@ -623,6 +623,38 @@ def test_final_revalidation_rejects_new_writable_file_alias(qualified, tmp_path)
         qualified.assert_extra_writable_paths(invocation, grants, 'write_in_repo')
 
 
+def test_final_recheck_rejects_grant_replaced_during_final_scan(qualified, monkeypatch, tmp_path):
+    """An exact-file grant atomically replaced while the final launcher scan runs is
+    refused by the closing saved-identity recheck; an unchanged grant still passes
+    and qualification keeps exactly two full scans — the recheck adds none."""
+    import os
+    from polybridge import runtime_paths
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    grant = tmp_path / 'grant-file'
+    grant.write_text('original')
+    grants = normalize_paths([str(grant)])
+    scans = []
+    real_scan = runtime_paths.assert_single_link_writable_files
+    monkeypatch.setattr(runtime_paths, 'assert_single_link_writable_files',
+                        lambda scopes: scans.append(1) or real_scan(scopes))
+    invocation = qualified.with_extra_writable_paths(build(qualified, repo), grants, 'write_in_repo')
+    assert len(scans) == 2
+    qualified.assert_extra_writable_paths(invocation, grants, 'write_in_repo')
+    assert len(scans) == 3
+    real_launcher_scan = qualified._assert_launcher_outside_writes
+    def replace_grant_mid_scan(inv, gr, runtime):
+        result = real_launcher_scan(inv, gr, runtime)
+        replacement = tmp_path / 'replacement'
+        replacement.write_text('replaced')
+        os.replace(replacement, grant)
+        return result
+    monkeypatch.setattr(qualified, '_assert_launcher_outside_writes', replace_grant_mid_scan)
+    with pytest.raises(ValueError, match='identity or target changed'):
+        qualified.assert_extra_writable_paths(invocation, grants, 'write_in_repo')
+    assert len(scans) == 4
+
+
 def test_active_configuration_refused_before_version_probe(qualified, monkeypatch, tmp_path):
     from pathlib import Path
     home = Path(__import__('os').environ['CODEX_HOME'])

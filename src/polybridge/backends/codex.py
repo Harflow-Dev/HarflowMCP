@@ -530,6 +530,11 @@ class CodexBackend(ExtraPathsUnsupported):
         if grants:
             self._assert_execution_configuration(invocation, grants)
             self._assert_launcher_outside_writes(invocation, grants, invocation.extra_path_runtime)
+            # The scans above take time: an exact-file grant replaced while they
+            # ran must not slip through with a stale saved identity. Cheap
+            # saved-identity recheck only — never a third full scan.
+            from ..extra_paths import revalidate_paths
+            revalidate_paths(grants)
 
     def extra_path_enforcement(self, enforcement, grants, repo):
         if not grants:
