@@ -426,6 +426,8 @@ async def start_task(
             nested requests cannot widen them. Saved grants and path identities carry through
             resume/continuation; replacement requires a new authorized task. Workflows and
             native adapters do not accept these grants. Use preview_task_permissions before launch.
+            Keep qualified startup inputs stable: checks refuse observed changes but do not atomically
+            pin configuration or executables against independently authorized concurrent writers.
 
     Returns the new task_id and its starting state. The run continues in the background; poll
     get_task_status or call wait_for_task to follow it.

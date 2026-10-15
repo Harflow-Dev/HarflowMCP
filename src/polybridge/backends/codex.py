@@ -558,7 +558,8 @@ class CodexBackend(ExtraPathsUnsupported):
                        extra_writable_paths=tuple(serialize_paths(grants)),
                        extra_path_certification=EXTRA_PATHS_CERTIFICATION,
                        mechanism=enforcement.mechanism + "; bounded extra writable paths; ambient and implicit temporary roots excluded",
-                       caveats=caveats + ("Existing files are pathname grants; identity changes prevent later reuse. Ordinary CLI children inherit the bounded sandbox.",))
+                       caveats=caveats + ("Existing files are pathname grants; identity changes prevent later reuse. Ordinary CLI children inherit the bounded sandbox.",
+                                          "Keep qualified startup inputs stable: checks reject observed changes but do not atomically pin configuration or executables against independent concurrent writers. Granted output is not certified for future execution."))
 
     def with_writable_directory(self, invocation: Invocation, path: Path, freedom: Freedom) -> Invocation:
         if freedom == "read_only":
