@@ -275,6 +275,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
             wp.add_argument("--definition", required=True, help="JSON file, or - for stdin")
             if action == "save":
                 wp.add_argument("--expected-revision", type=int)
+                wp.add_argument("--expected-workflow-id", help="Loaded stable workflow identity; rejects deleted or replaced definitions")
         if action in {"start", "build", "preview"}:
             wp.add_argument("--repo", required=action in {"start", "preview"})
             prompt_group = wp.add_mutually_exclusive_group(required=action != "preview")
@@ -484,10 +485,10 @@ def _cmd_send(args: argparse.Namespace) -> int:
     return 0
 
 
-def _fail(args: argparse.Namespace, code: str, message: str) -> int:
+def _fail(args: argparse.Namespace, code: str, message: str, data: Any = None) -> int:
     print(f"polybridge-ctl: error: {message}", file=sys.stderr)
     if getattr(args, "json", False):
-        print(json.dumps({"v": CTL_JSON_VERSION, "error": {"code": code, "message": message}}))
+        print(json.dumps({"v": CTL_JSON_VERSION, "error": {"code": code, "message": message, **({"data": data} if data is not None else {})}}))
     return 1
 
 
@@ -719,6 +720,7 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
                 return {"valid": False, "error": str(exc)}
             dependencies: dict[str, Any] | None = None
             error: str | None = None
+            diagnostics: dict[str, Any] = {}
             if any(node.get("type") == "workflow" for node in canonical.get("nodes", [])):
                 # Resolution is additive: it reports the pinned tree or names the problem.
                 from .workflow_references import DependencyError, resolve_dependencies
@@ -728,8 +730,9 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
                     dependencies = {"root_workflow_id": tree["root_workflow_id"], "workflows": {ident: {"name": entry["name"], "revision": entry["revision"], "definition_sha256": entry["definition_sha256"]} for ident, entry in tree["workflows"].items()}, "edges": tree["edges"], "access": tree["access"]}
                 except DependencyError as exc:
                     error = str(exc)
+                    diagnostics = {"missing_references": exc.missing_references, "missing_references_truncated": exc.missing_references_truncated}
             from .backends.native import available as native_available
-            return {"valid": error is None, "native_subagents_available": native_available(), "definition": canonical, **({"dependencies": dependencies} if dependencies is not None else {}), **({"error": error} if error is not None else {})}
+            return {**diagnostics, "valid": error is None, "native_subagents_available": native_available(), "definition": canonical, **({"dependencies": dependencies} if dependencies is not None else {}), **({"error": error} if error is not None else {})}
         if action in {"list", "list-runs", "list-page", "get", "status", "detail"}:
             from .read_metrics import span
             with span("import"):
@@ -770,7 +773,7 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
             return await server._workflow_call("delete", name=args.name)
         if action == "save":
             raw = sys.stdin.read() if args.definition == "-" else Path(args.definition).read_text()
-            return await server.save_workflow(args.name, json.loads(raw), args.expected_revision)
+            return await server.save_workflow(args.name, json.loads(raw), args.expected_revision, expected_workflow_id=args.expected_workflow_id)
         if action in {"start", "build", "preview"}:
             prompt = _workflow_prompt(args) if action != "preview" else ""
             candidate = {k: v for k, v in {"backend": args.backend, "model": args.model,
@@ -806,7 +809,7 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
     try:
         result = asyncio.run(invoke())
     except Exception as exc:
-        return _fail(args, "workflow_error", str(exc))
+        return _fail(args, "workflow_error", str(exc), getattr(getattr(exc, "error", None), "data", None))
     from .read_metrics import span
     with span("serialization"):
         output = json.dumps({"v": CTL_JSON_VERSION, "result": result}) if args.json else json.dumps(result, indent=2)

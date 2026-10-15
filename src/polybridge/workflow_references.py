@@ -58,6 +58,12 @@ def access_summary(definition: dict[str, Any], depth: int) -> dict[str, Any]:
 class DependencyError(ValueError):
     """A workflow tree is unresolvable: missing, cyclic or too deep."""
 
+    def __init__(self, message: str, *, missing_references: list[dict[str, Any]] | None = None,
+                 missing_references_truncated: bool = False):
+        super().__init__(message)
+        self.missing_references = missing_references or []
+        self.missing_references_truncated = missing_references_truncated
+
 
 def _indexed_definitions(store: Any, substitute_name: str | None = None) -> dict[str, dict[str, Any]]:
     """Index every saved definition by its stable workflow identity.
@@ -122,8 +128,83 @@ def resolve_dependencies_locked(store: Any, *, definition: dict[str, Any] | None
                 tree["edges"].append(edge)
             pin(target, depth + 1, path + [target_id])
 
-    pin(root, 1, [root_id])
+    try:
+        pin(root, 1, [root_id])
+    except DependencyError as exc:
+        # Keep the resolver's first error and all rejection guards authoritative.
+        # Diagnostics are a separate bounded read of occurrences, never a pinned tree.
+        missing, truncated = _missing_reference_diagnostics(root, index)
+        exc.missing_references = missing
+        exc.missing_references_truncated = truncated
+        raise
     return tree
+
+
+MAX_MISSING_REFERENCE_DIAGNOSTICS = 256
+MAX_DIAGNOSTIC_NODE_VISITS = 10000
+MAX_DIAGNOSTIC_BYTES = 131072
+MAX_DIAGNOSTIC_ID_LENGTH = 1024
+MAX_DIAGNOSTIC_DISPLAY_LENGTH = 200
+
+
+def _missing_reference_diagnostics(root: dict[str, Any], index: dict[str, dict[str, Any]]) -> tuple[list[dict[str, Any]], bool]:
+    """Find missing occurrences with provenance, bounded even for branching DAGs.
+
+    Repeated child workflows retain each calling path. Invalid, cyclic and
+    over-depth branches cannot be traversed; strict resolution reports those errors.
+    """
+    missing: list[dict[str, Any]] = []
+    visits = 0
+    encoded_bytes = 2
+    truncated = False
+
+    def visit(current: dict[str, Any], ancestors: tuple[str, ...], path: list[dict[str, Any]]) -> None:
+        nonlocal visits, truncated, encoded_bytes
+        ident = workflow_identity(current)
+        if ident in ancestors or len(ancestors) >= MAX_WORKFLOW_NESTING_DEPTH:
+            return
+        try:
+            _w().validate_definition(current)
+        except ValueError:
+            return
+        if ident in index and definition_sha256(index[ident]) != definition_sha256(current):
+            return
+        for node in current.get("nodes", []):
+            visits += 1
+            if visits > MAX_DIAGNOSTIC_NODE_VISITS:
+                truncated = True
+                return
+            if node.get("type") != "workflow":
+                continue
+            target_id = node.get("workflow_ref", {}).get("workflow_id")
+            if any(not isinstance(value, str) or len(value) > MAX_DIAGNOSTIC_ID_LENGTH
+                   for value in (ident, node["id"], target_id)):
+                truncated = True
+                return
+            segment = {"workflow_id": ident,
+                       "workflow_name": current.get("name", "")[:MAX_DIAGNOSTIC_DISPLAY_LENGTH],
+                       "node_id": node["id"],
+                       "node_title": (node.get("title") or node["id"])[:MAX_DIAGNOSTIC_DISPLAY_LENGTH]}
+            target = index.get(target_id)
+            if target is None:
+                if len(missing) >= MAX_MISSING_REFERENCE_DIAGNOSTICS:
+                    truncated = True
+                    return
+                report = {**segment, "target_workflow_id": target_id,
+                          "dependency_path": path + [segment]}
+                size = len(json.dumps(report, ensure_ascii=True).encode()) + 2
+                if encoded_bytes + size > MAX_DIAGNOSTIC_BYTES:
+                    truncated = True
+                    return
+                encoded_bytes += size
+                missing.append(report)
+            else:
+                visit(target, ancestors + (ident,), path + [segment])
+            if truncated:
+                return
+
+    visit(root, (), [])
+    return missing, truncated
 
 
 def resolve_dependencies(store: Any, *, definition: dict[str, Any] | None = None, name: str | None = None, substitute_name: str | None = None) -> dict[str, Any]:

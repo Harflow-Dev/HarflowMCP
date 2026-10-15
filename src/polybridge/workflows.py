@@ -704,7 +704,7 @@ class WorkflowStore:
                     node.setdefault("execution_mode", "headless")
         return definitions
 
-    def save(self, name: str, definition: dict[str, Any], expected_revision: int | None = None, *, authority_guard: Any = None) -> dict[str, Any]:
+    def save(self, name: str, definition: dict[str, Any], expected_revision: int | None = None, *, authority_guard: Any = None, expected_workflow_id: str | None = None) -> dict[str, Any]:
         """Validate, resolve and write under the definitions-tree lock.
 
         The candidate definition substitutes for its own slot while its dependency
@@ -719,6 +719,10 @@ class WorkflowStore:
             with self.lock(f"definition:{name}"):
                 path = self.definitions / f"{_workflow_name(name)}.json"
                 old = json.loads(path.read_text()) if path.exists() else None
+                if expected_workflow_id is not None:
+                    current_id = workflow_identity(old) if old is not None else None
+                    if expected_workflow_id != current_id:
+                        raise WorkflowError(f"Stale workflow identity: expected {expected_workflow_id}, current {current_id}")
                 # Saving an authored definition always adopts bounded delivery.
                 # Historical run snapshots keep their original delivery contract.
                 d["context_delivery"] = "optimized_v1"
@@ -737,7 +741,10 @@ class WorkflowStore:
                 try:
                     resolved = resolve_dependencies_locked(self, definition=d, substitute_name=name)
                 except DependencyError as exc:
-                    raise WorkflowError(str(exc)) from exc
+                    error = WorkflowError(str(exc))
+                    error.missing_references = exc.missing_references
+                    error.missing_references_truncated = exc.missing_references_truncated
+                    raise error from exc
                 for node in d["nodes"]:
                     if node.get("type") != "workflow":
                         continue

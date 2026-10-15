@@ -1474,7 +1474,7 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
             from .workflow_goals import revise
             return await asyncio.to_thread(revise, store_, **kwargs)
         if action == "save":
-            return await asyncio.to_thread(store_.save, kwargs["name"], kwargs["definition"], kwargs.get("expected_revision"), authority_guard=guard_tree)
+            return await asyncio.to_thread(store_.save, kwargs["name"], kwargs["definition"], kwargs.get("expected_revision"), authority_guard=guard_tree, expected_workflow_id=kwargs.get("expected_workflow_id"))
         if action == "delete":
             return await asyncio.to_thread(store_.delete, kwargs["name"])
         if action == "inspect":
@@ -1484,7 +1484,11 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
             return await asyncio.to_thread(inspect_request, run, store_.root, request)
         return await asyncio.to_thread(store_.control, action=action, **kwargs)
     except (ValueError, KeyError, OSError, backends.UnsupportedCapability) as exc:
-        raise MCPError(INVALID_PARAMS, str(exc)) from None
+        data = None
+        if hasattr(exc, "missing_references"):
+            data = {"missing_references": exc.missing_references,
+                    "missing_references_truncated": exc.missing_references_truncated}
+        raise MCPError(INVALID_PARAMS, str(exc), data=data) from None
 
 
 @mcp.tool()
@@ -1500,9 +1504,11 @@ async def get_workflow(name: str) -> dict[str, Any]:
 
 
 @mcp.tool()
-async def save_workflow(name: str, definition: dict[str, Any], expected_revision: int | None = None) -> dict[str, Any]:
+async def save_workflow(name: str, definition: dict[str, Any], expected_revision: int | None = None, expected_workflow_id: str | None = None) -> dict[str, Any]:
     """Validate and save an explicit workflow; expected_revision protects concurrent edits.
 
+    expected_workflow_id optionally checks the loaded stable identity, rejecting a
+    deleted or replaced same-name definition even if its revision matches.
     Every save normalizes context_delivery to optimized_v1, including omitted or legacy
     values. Historical runs retain their pinned delivery policy. Bounded delivery uses
     session-bound acknowledgements and assigned evidence retrieval,
@@ -1522,7 +1528,7 @@ async def save_workflow(name: str, definition: dict[str, Any], expected_revision
     within their recorded capability envelope, checked over the resolved tree;
     verified human callers can author workflow permissions.
     """
-    return await _workflow_call("save", name=name, definition=definition, expected_revision=expected_revision)
+    return await _workflow_call("save", name=name, definition=definition, expected_revision=expected_revision, expected_workflow_id=expected_workflow_id)
 
 
 @mcp.tool()

@@ -235,6 +235,9 @@ def test_workflow_validate_reports_dependencies(tmp_path, monkeypatch, capsys):
     document = json.loads(capsys.readouterr().out)["result"]
     assert document["valid"] is False
     assert "Unknown workflow reference" in document["error"]
+    assert document["missing_references"][0]["node_id"] == "call"
+    assert document["missing_references"][0]["workflow_name"] == "parent"
+    assert document["missing_references_truncated"] is False
 
 
 def test_shared_dependency_is_checked_on_every_depth_path(storage):
@@ -268,3 +271,111 @@ async def test_launch_refuses_a_tree_pinned_before_orchestrator_override(storage
     stale_tree = refs.resolve_dependencies(storage, definition=definition, substitute_name="override-root")
     with pytest.raises(w.WorkflowError, match="does not match the starting definition"):
         await w.start_workflow("override-root", "assignment", tmp_path, root=storage.root, overrides={"model": "override-model"}, definition_snapshot=definition, dependency_tree=stale_tree)
+
+
+def two_calls(target_id, name="parent"):
+    definition = parent_definition(target_id, name=name, node_id="baseline")
+    definition["nodes"].insert(2, {"id": "verify", "title": "Verify", "type": "workflow", "workflow_ref": {"workflow_id": target_id}, "instructions": "Verify"})
+    definition["nodes"][1]["title"] = "Baseline"
+    definition["connections"][1]["target"] = "verify"
+    definition["connections"].append({"id": "verified", "source": "verify", "target": "end"})
+    return definition
+
+
+def test_deleted_duplicate_requires_every_occurrence_relinked(storage):
+    original = storage.save("ios-verify", child_definition("ios-verify"))
+    replacement = storage.save("ios-verification", child_definition("ios-verification"))
+    parent = storage.save("parent", two_calls(original["workflow_id"]))
+    storage.delete("ios-verify")
+    with pytest.raises(refs.DependencyError) as caught:
+        refs.resolve_dependencies(storage, definition=parent)
+    assert [item["node_id"] for item in caught.value.missing_references] == ["baseline", "verify"]
+    assert str(caught.value) == f"Unknown workflow reference {original['workflow_id']} at node baseline"
+    parent["nodes"][2]["workflow_ref"]["workflow_id"] = replacement["workflow_id"]
+    with pytest.raises(refs.DependencyError) as caught:
+        refs.resolve_dependencies(storage, definition=parent, substitute_name="parent")
+    assert [item["node_id"] for item in caught.value.missing_references] == ["baseline"]
+    with pytest.raises(w.WorkflowError, match="Unknown workflow reference"):
+        storage.save("parent", parent, parent["revision"])
+    parent["nodes"][1]["workflow_ref"]["workflow_id"] = replacement["workflow_id"]
+    refs.resolve_dependencies(storage, definition=parent, substitute_name="parent")
+    storage.save("parent", parent, parent["revision"])
+
+
+def test_nested_missing_occurrences_preserve_calling_paths(storage):
+    leaf = storage.save("leaf", child_definition("leaf"))
+    middle = storage.save("middle", parent_definition(leaf["workflow_id"], name="middle"))
+    parent = storage.save("parent", two_calls(middle["workflow_id"]))
+    storage.delete("leaf")
+    with pytest.raises(refs.DependencyError) as caught:
+        refs.resolve_dependencies(storage, definition=parent)
+    reports = caught.value.missing_references
+    assert len(reports) == 2
+    assert [entry["node_id"] for entry in reports[0]["dependency_path"]] == ["baseline", "call"]
+    assert [entry["node_id"] for entry in reports[1]["dependency_path"]] == ["verify", "call"]
+    assert reports[0]["workflow_name"] == "middle"
+    assert reports[0]["workflow_id"] == middle["workflow_id"]
+    assert reports[0]["target_workflow_id"] == leaf["workflow_id"]
+    assert not caught.value.missing_references_truncated
+
+
+def test_missing_diagnostics_are_bounded(storage, monkeypatch):
+    monkeypatch.setattr(refs, "MAX_MISSING_REFERENCE_DIAGNOSTICS", 1)
+    with pytest.raises(refs.DependencyError) as caught:
+        refs.resolve_dependencies(storage, definition=two_calls("deleted"))
+    assert len(caught.value.missing_references) == 1
+    assert caught.value.missing_references_truncated
+
+
+def test_expected_identity_rejects_recreated_definition_at_same_revision(storage):
+    old = storage.save("child", child_definition())
+    storage.delete("child")
+    recreated = storage.save("child", child_definition())
+    assert old["revision"] == recreated["revision"]
+    with pytest.raises(w.WorkflowError, match="Stale workflow identity"):
+        storage.save("child", child_definition(), old["revision"], expected_workflow_id=old["workflow_id"])
+    assert storage.get("child") == recreated
+    saved = storage.save("child", child_definition(), recreated["revision"], expected_workflow_id=recreated["workflow_id"])
+    assert saved["workflow_id"] == recreated["workflow_id"]
+    storage.delete("child")
+    with pytest.raises(w.WorkflowError, match="Stale workflow identity"):
+        storage.save("child", child_definition(), 0, expected_workflow_id=saved["workflow_id"])
+
+
+def test_missing_diagnostics_bound_strings_without_changing_ids(storage, monkeypatch):
+    definition = parent_definition("missing")
+    definition["nodes"][1]["title"] = "界" * 10000
+    with pytest.raises(refs.DependencyError) as caught:
+        refs.resolve_dependencies(storage, definition=definition)
+    assert len(caught.value.missing_references[0]["node_title"]) == refs.MAX_DIAGNOSTIC_DISPLAY_LENGTH
+    assert caught.value.missing_references[0]["target_workflow_id"] == "missing"
+    definition["nodes"][1]["workflow_ref"]["workflow_id"] = "x" * 10000
+    with pytest.raises(refs.DependencyError) as caught:
+        refs.resolve_dependencies(storage, definition=definition)
+    assert caught.value.missing_references == []
+    assert caught.value.missing_references_truncated
+    monkeypatch.setattr(refs, "MAX_DIAGNOSTIC_BYTES", 10)
+    with pytest.raises(refs.DependencyError) as caught:
+        refs.resolve_dependencies(storage, definition=parent_definition("missing"))
+    assert caught.value.missing_references == []
+    assert caught.value.missing_references_truncated
+
+
+def test_save_error_preserves_missing_diagnostics_through_cli(tmp_path, monkeypatch, capsys):
+    from polybridge import ctl, server
+    monkeypatch.setenv("HOME", str(tmp_path))
+    store = w.WorkflowStore(tmp_path / ".polybridge")
+    async def save(name, definition, expected_revision=None, expected_workflow_id=None):
+        try:
+            return store.save(name, definition, expected_revision, expected_workflow_id=expected_workflow_id)
+        except w.WorkflowError as exc:
+            from mcp import MCPError
+            raise MCPError(-32602, str(exc), data={"missing_references": exc.missing_references,
+                           "missing_references_truncated": exc.missing_references_truncated})
+    monkeypatch.setattr(server, "save_workflow", save)
+    definition_file = tmp_path / "missing.json"
+    definition_file.write_text(json.dumps(two_calls("deleted")))
+    assert ctl.main(["workflow-save", "parent", "--definition", str(definition_file), "--json"]) == 1
+    error = json.loads(capsys.readouterr().out)["error"]
+    assert [report["node_id"] for report in error["data"]["missing_references"]] == ["baseline", "verify"]
+    assert not error["data"]["missing_references_truncated"]

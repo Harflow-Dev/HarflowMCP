@@ -50,14 +50,17 @@ def test_cli_workflow_start_envelope(monkeypatch, capsys):
     assert observed == {"name": "review", "overrides": None, "network": None, "freedom": None, "prompt": "do it", "repo_path": "/tmp/repo"}
 
 
-def test_cli_save_reads_file_and_expected_revision(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("identity", [None, "loaded-workflow-id"])
+def test_cli_save_reads_file_and_expected_revision(tmp_path, monkeypatch, capsys, identity):
     definition = tmp_path / "definition.json"
     definition.write_text('{"nodes": []}')
-    async def save(name, value, revision):
+    async def save(name, value, revision, expected_workflow_id=None):
         assert (name, value, revision) == ("draft", {"nodes": []}, 3)
+        assert expected_workflow_id == identity
         return {"name": name, "revision": 4}
     monkeypatch.setattr(server, "save_workflow", save)
-    assert ctl.main(["workflow-save", "draft", "--definition", str(definition), "--expected-revision", "3", "--json"]) == 0
+    options = ["--expected-workflow-id", identity] if identity is not None else []
+    assert ctl.main(["workflow-save", "draft", "--definition", str(definition), "--expected-revision", "3", "--json", *options]) == 0
     assert json.loads(capsys.readouterr().out)["result"]["revision"] == 4
 
 
