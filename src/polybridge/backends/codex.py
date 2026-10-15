@@ -530,9 +530,20 @@ class CodexBackend(ExtraPathsUnsupported):
         if grants:
             self._assert_execution_configuration(invocation, grants)
             self._assert_launcher_outside_writes(invocation, grants, invocation.extra_path_runtime)
-            # The scans above take time: an exact-file grant replaced while they
-            # ran must not slip through with a stale saved identity. Cheap
-            # saved-identity recheck only — never a third full scan.
+            # The scans above take time — the launcher walk alone can run for
+            # seconds — and a concurrent writer can add a project Codex config
+            # or swap the qualified CLI runtime while they run; the bounded
+            # launch must not then consume that unqualified startup input.
+            # Close with the same scoped snapshots before the saved-identity
+            # recheck: snapshot equality only, never a second
+            # execution-configuration or full-tree scan.
+            if self._extra_path_configuration(invocation, grants) != invocation.extra_path_configuration:
+                raise UnsafeInvocationError("Codex configuration changed during final validation")
+            if self._extra_path_runtime() != invocation.extra_path_runtime:
+                raise UnsafeInvocationError("CLI runtime identity changed during final validation")
+            # An exact-file grant replaced while the scans ran must not slip
+            # through with a stale saved identity. Cheap saved-identity
+            # recheck only — never a third full scan.
             from ..extra_paths import revalidate_paths
             revalidate_paths(grants)
 

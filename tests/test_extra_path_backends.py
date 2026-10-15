@@ -655,6 +655,62 @@ def test_final_recheck_rejects_grant_replaced_during_final_scan(qualified, monke
     assert len(scans) == 4
 
 
+def test_final_recheck_rejects_mid_scan_configuration_and_runtime_mutation(qualified, monkeypatch, tmp_path):
+    """The launcher scan is the slow step, so a concurrent writer can add a
+    project Codex config — unqualified startup input — or swap the CLI runtime
+    while it runs. The closing scoped snapshots refuse both; unchanged
+    snapshots still pass and the closing checks add no full scans."""
+    import shutil
+    from pathlib import Path
+    from polybridge import runtime_paths
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    grant = tmp_path / 'grant'
+    grant.mkdir()
+    grants = normalize_paths([str(grant)])
+    scans = []
+    real_scan = runtime_paths.assert_single_link_writable_files
+    monkeypatch.setattr(runtime_paths, 'assert_single_link_writable_files',
+                        lambda scopes: scans.append(1) or real_scan(scopes))
+    invocation = qualified.with_extra_writable_paths(build(qualified, repo), grants, 'write_in_repo')
+    qualified.assert_extra_writable_paths(invocation, grants, 'write_in_repo')
+    baseline = len(scans)
+    real_launcher_scan = qualified._assert_launcher_outside_writes
+
+    def add_project_config_mid_scan(inv, gr, runtime):
+        result = real_launcher_scan(inv, gr, runtime)
+        (repo / '.codex').mkdir()
+        (repo / '.codex' / 'config.toml').write_text('notify = ["secret-command"]')
+        return result
+
+    monkeypatch.setattr(qualified, '_assert_launcher_outside_writes', add_project_config_mid_scan)
+    with pytest.raises(UnsafeInvocationError, match='project Codex configuration'):
+        qualified.assert_extra_writable_paths(invocation, grants, 'write_in_repo')
+    assert len(scans) == baseline + 1
+    shutil.rmtree(repo / '.codex')
+
+    def mutate_runtime_mid_scan(inv, gr, runtime):
+        result = real_launcher_scan(inv, gr, runtime)
+        Path(invocation.extra_path_runtime[0]).write_bytes(b'\x7fELF-mutated-fixture')
+        return result
+
+    monkeypatch.setattr(qualified, '_assert_launcher_outside_writes', mutate_runtime_mid_scan)
+    with pytest.raises(UnsafeInvocationError, match='runtime identity changed during final validation'):
+        qualified.assert_extra_writable_paths(invocation, grants, 'write_in_repo')
+    assert len(scans) == baseline + 2
+
+    # Unchanged snapshots pass through the real final scan; the closing checks
+    # add none beyond it. Requalify first: the saved runtime snapshot describes
+    # the launcher as it was before the mutation above.
+    Path(invocation.extra_path_runtime[0]).write_bytes(b'\x7fELF-native-fixture')
+    monkeypatch.setattr(qualified, '_assert_launcher_outside_writes',
+                        lambda inv, gr, runtime: real_launcher_scan(inv, gr, runtime))
+    invocation = qualified.with_extra_writable_paths(build(qualified, repo), grants, 'write_in_repo')
+    assert len(scans) == baseline + 4
+    qualified.assert_extra_writable_paths(invocation, grants, 'write_in_repo')
+    assert len(scans) == baseline + 5
+
+
 def test_active_configuration_refused_before_version_probe(qualified, monkeypatch, tmp_path):
     from pathlib import Path
     home = Path(__import__('os').environ['CODEX_HOME'])
