@@ -672,3 +672,70 @@ def test_other_backend_config_grant_refused_before_version_and_ordinary_unchange
         qualified.with_extra_writable_paths(build(qualified,repo),normalize_paths([str(settings)]),'write_in_repo')
     plain=build(qualified,repo)
     assert qualified.with_extra_writable_paths(plain,(),'write_in_repo') is plain
+
+
+def test_qualify_runs_one_preflight_and_one_final_full_scan(qualified, monkeypatch, tmp_path):
+    """The private decorator must not duplicate qualify's final validation: a fresh
+    qualification performs one preflight scan plus one final assert (two full
+    filesystem/runtime scans, not three), and an already-decorated qualify performs
+    the same two."""
+    repo = tmp_path / 'repo'; repo.mkdir()
+    grant = tmp_path / 'grant'; grant.mkdir()
+    grants = normalize_paths([str(grant)])
+    validate_calls, assert_calls, scans = [], [], []
+    from polybridge import runtime_paths
+    real_scan = runtime_paths.assert_single_link_writable_files
+    monkeypatch.setattr(runtime_paths, 'assert_single_link_writable_files',
+                        lambda scopes: scans.append(1) or real_scan(scopes))
+    real_validate = qualified._validate_extra_paths
+    real_assert = qualified.assert_extra_writable_paths
+    monkeypatch.setattr(qualified, '_validate_extra_paths',
+                        lambda inv, gr, fr, net=None: validate_calls.append(1) or real_validate(inv, gr, fr, net))
+    monkeypatch.setattr(qualified, 'assert_extra_writable_paths',
+                        lambda inv, gr, fr, net=None: assert_calls.append(1) or real_assert(inv, gr, fr, net))
+    qualified.qualify_extra_writable_paths(build(qualified, repo), grants, 'write_in_repo')
+    assert len(validate_calls) == 2
+    assert len(assert_calls) == 1
+    assert len(scans) == 2
+    decorated = qualified.with_extra_writable_paths(build(qualified, repo), grants, 'write_in_repo')
+    assert len(validate_calls) == 4
+    assert len(assert_calls) == 2
+    assert len(scans) == 4
+    validate_calls.clear()
+    assert_calls.clear()
+    scans.clear()
+    qualified.qualify_extra_writable_paths(decorated, grants, 'write_in_repo')
+    assert len(validate_calls) == 2
+    assert len(assert_calls) == 1
+    assert len(scans) == 2
+
+
+@pytest.mark.parametrize('mutate', ['config', 'runtime'])
+def test_qualify_rejects_postversion_configuration_and_runtime_mutation(qualified, monkeypatch, tmp_path, mutate):
+    """Removing the decorator's duplicate assert must not weaken qualify: a mutation
+    landing after the version probe is still refused — runtime identity at the
+    qualification check, configuration by qualify's final assertion."""
+    repo = tmp_path / 'repo'; repo.mkdir()
+    grant = tmp_path / 'grant'; grant.mkdir()
+    grants = normalize_paths([str(grant)])
+    if mutate == 'runtime':
+        monkeypatch.setattr(qualified, '_assert_launcher_outside_writes', lambda *args: None)
+        runtime = ['/original']
+        monkeypatch.setattr(qualified, '_extra_path_runtime', lambda: tuple(runtime))
+        def probe(_, **kwargs):
+            runtime[0] = '/mutated'
+            return EXTRA_PATHS_VERSION
+        monkeypatch.setattr(backends, 'version', probe)
+        with pytest.raises(UnsafeInvocationError, match='during qualification'):
+            qualified.qualify_extra_writable_paths(build(qualified, repo), grants, 'write_in_repo')
+    else:
+        import os
+        from pathlib import Path
+        config = Path(os.environ['CODEX_HOME']) / 'config.toml'
+        config.write_text('model="first"')
+        def probe(_, **kwargs):
+            config.write_text('model="mutated"')
+            return EXTRA_PATHS_VERSION
+        monkeypatch.setattr(backends, 'version', probe)
+        with pytest.raises(UnsafeInvocationError, match='configuration changed'):
+            qualified.qualify_extra_writable_paths(build(qualified, repo), grants, 'write_in_repo')

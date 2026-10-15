@@ -513,7 +513,8 @@ class CodexBackend(ExtraPathsUnsupported):
         argv[index:index] = additions
         argv[0] = invocation.extra_path_runtime[0]
         result = replace(invocation, argv=argv, extra_writable_paths=tuple(g.path for g in grants))
-        self.assert_extra_writable_paths(result, grants, freedom, network)
+        # The caller re-asserts the decorated result once, after this returns:
+        # a second full filesystem/runtime scan here would only duplicate it.
         return result
 
     def assert_extra_writable_paths(self, invocation, grants, freedom, network=None):
