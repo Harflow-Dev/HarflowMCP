@@ -566,7 +566,8 @@ async def preview_task_permissions(
     unverified harness configurations are unavailable. Known external backend execution configuration
     is protected; unsupported existing inputs reject requests. Existing repository configuration
     authority retains its baseline limits. Grants authorize output writes, not trust in that output
-    as a future repository, hook or executable; see docs/extra-writable-paths.md.
+    as a future repository, hook or executable. Startup inputs are checked, not atomically
+    pinned against independently authorized concurrent writers; see docs/extra-writable-paths.md.
     """
     chosen = _backend(backend or DEFAULT_BACKEND)
     access = freedom if freedom is not None else DEFAULT_FREEDOM

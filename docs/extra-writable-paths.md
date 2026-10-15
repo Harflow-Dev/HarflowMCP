@@ -102,7 +102,7 @@ Measured **2026-10-14**, with isolated local fake APIs or installed permission
 engines without paid model calls for the certification. One separately authorized
 authenticated Antigravity check also confirmed its allowed and denied file-tool
 writes, with no observed quota error; its default model identity was not reported.
-Only qualified configurations are enabled. Extra-path requests require notify, hooks, MCP servers and plugins to be absent or explicitly disabled, including referenced agent configuration files and profiles. Project `.codex/config.toml` files and symlinked project `.codex` directories are not qualified; direct grants inside the selected project's `.codex` are rejected. The pinned CLI preserves its native selected-project `.codex` write exclusion for missing configurations even with repository or ancestor directory grants. Global `CODEX_HOME/config.toml` and referenced role files (including their symlink paths and missing global configuration namespace) must stay outside all writable scopes. Configuration is bounded, parsed without execution, and revalidated before launch — including a closing snapshot recheck after the final launcher scans, so a project `.codex/config.toml` or CLI runtime introduced while those scans run rejects the launch. Known auxiliary hook/managed configuration files, effective macOS managed preference inputs, and nonempty plugin state are outside the qualified profile and reject requests; missing auxiliary and plugin namespaces remain protected. Empty plugin directories are permitted. This is a conservative supported profile, not a generic proof of every plugin or configuration graph. Ordinary requests without extra paths retain existing behavior.
+Only qualified configurations are enabled. Extra-path requests require notify, hooks, MCP servers and plugins to be absent or explicitly disabled, including referenced agent configuration files and profiles. Project `.codex/config.toml` files and symlinked project `.codex` directories are not qualified; direct grants inside the selected project's `.codex` are rejected. The pinned CLI preserves its native selected-project `.codex` write exclusion for missing configurations even with repository or ancestor directory grants. Global `CODEX_HOME/config.toml` and referenced role files (including their symlink paths and missing global configuration namespace) must stay outside all writable scopes. Configuration is bounded, parsed without execution, and revalidated before launch — including a closing snapshot recheck after the final launcher scans, which refuses configuration or runtime changes observed after those scans. Known auxiliary hook/managed configuration files, effective macOS managed preference inputs, and nonempty plugin state are outside the qualified profile and reject requests; missing auxiliary and plugin namespaces remain protected. Empty plugin directories are permitted. This is a conservative supported profile, not a generic proof of every plugin or configuration graph. Ordinary requests without extra paths retain existing behavior.
 
 | Harness | Installed version | Evidence and coverage |
 | --- | --- | --- |
@@ -181,3 +181,12 @@ or executing its generated files, requires trusting those contents independently
 the original grant does not establish that trust. The runtime/configuration guards
 protect the inputs selected for this dispatch and ambient backend configuration,
 not every future consumer of authorized output.
+
+The write boundary constrains the dispatched worker and certified children. Known
+startup inputs must remain outside that worker's writable authority. Qualification
+refuses changes it observes; it does not atomically pin configuration or executable
+files. Independent processes, separately authorized tasks, or the OS user can mutate
+those inputs between the last check and the CLI reading them. Protection against
+non-cooperating concurrent writers requires a separately isolated or immutable
+runtime and is outside this feature's certification. Keep the qualified startup
+environment stable while launching bounded tasks.

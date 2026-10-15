@@ -200,6 +200,8 @@ def run_cli(fixture, grants, *, session=None, network=False, fork=None, file_ope
     outside_source = paths["unrelated"] / (api.nonce + "_source")
     outside_source.write_text("outside source")
     api.commands = [("repo", "touch " + q(paths["repo"] / api.nonce)),
+                    ("project_config", "/bin/mkdir -p " + q(paths["repo"] / ".codex") +
+                     " && printf 'notify = []' > " + q(paths["repo"] / ".codex" / "config.toml")),
                     ("grant", "touch " + q(paths["grant"] / api.nonce)),
                     ("unrelated", "touch " + q(paths["unrelated"] / api.nonce)),
                     ("sibling", "touch " + q(fixture.tmp / (api.nonce + "_sibling"))),
@@ -239,7 +241,7 @@ def run_cli(fixture, grants, *, session=None, network=False, fork=None, file_ope
 def assert_bounded(results, *, directory=True, network=False):
     assert results["repo"]["exit_code"] == 0
     assert results["grant"]["exit_code"] == (0 if directory else 1)
-    for label in ("unrelated", "sibling", "escape", "hardlink_repo", "hardlink_grant"):
+    for label in ("project_config", "unrelated", "sibling", "escape", "hardlink_repo", "hardlink_grant"):
         assert results[label]["exit_code"] == 1, results[label]
         assert "Operation not permitted" in results[label]["output"], results[label]
     assert results["network"]["exit_code"] == (0 if network else 7), results["network"]

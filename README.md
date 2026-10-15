@@ -184,7 +184,9 @@ ambient writable roots and excludes implicit temporary roots. Resume and continu
 preserve saved scope; grants never authorize publication. Writable scopes cannot overlap
 the Codex launcher chain or server helper/PATH and Python import namespaces. Launcher
 hardlinks and mutable server helper hardlinks are unsupported. Granted outputs, including
-another checkout's settings, are not certified for later execution; see the linked guide.
+another checkout's settings, are not certified for later execution. Startup checks require
+a stable qualified environment; they do not pin files against independent concurrent
+writers. See the linked guide.
 
 [`wait_for_tasks`](docs/multi-task-waiting.md) observes any or all of up to 32 tasks in one
 bounded, read-only call. Timeout and caller disconnect leave execution untouched.
