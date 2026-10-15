@@ -23,6 +23,54 @@ async def test_live_send_malformed_enforcement_refuses_before_inbox_mutation(tmp
     locked.assert_not_awaited()
 
 
+async def test_non_live_task_send_refusal_precedes_authority_revalidation(tmp_path, monkeypatch, backend):
+    # The saturated pool and the instrumented resolver both fail the test if the
+    # authority revalidation runs first: a full pool raises ValueError('capacity
+    # is exhausted') and an empty one would hit the AssertionError.
+    import threading
+    from unittest.mock import AsyncMock
+    from polybridge import inbox
+    registry = tasks.TaskRegistry(log_dir=_state_logs(tmp_path))
+    task = SimpleNamespace(task_id='ordinary-worker', backend='codex', live_input=False,
+        extra_writable_paths=serialize_paths(normalize_paths([str(tmp_path)])),
+        extra_path_certification='fixture-v1', enforcement={}, chain_root_task_id=None)
+    monkeypatch.setattr(registry, '_mutation_caller', AsyncMock(return_value=None))
+    monkeypatch.setattr(tasks, '_EXTRA_PATH_SLOTS', threading.BoundedSemaphore(1))
+    assert tasks._EXTRA_PATH_SLOTS.acquire(blocking=False)
+    def revalidate(*args):
+        raise AssertionError('authority revalidated before the non-live refusal')
+    monkeypatch.setattr(registry, '_resolve_extra_paths', revalidate)
+    locked = AsyncMock(side_effect=AssertionError('inbox mutated before the refusal'))
+    monkeypatch.setattr(tasks.inbox, 'lock_async', locked)
+    with pytest.raises(inbox.SendRefused, match='not started with live input') as error:
+        await registry.send_message(task, 'Follow up')
+    assert error.value.code == 'not_live_input'
+    locked.assert_not_awaited()
+
+
+async def test_non_live_record_send_refusal_precedes_authority_revalidation(tmp_path, monkeypatch, backend):
+    import threading
+    from unittest.mock import AsyncMock
+    from polybridge import inbox
+    registry = tasks.TaskRegistry(log_dir=_state_logs(tmp_path))
+    record = replace(owner(tmp_path, normalize_paths([str(tmp_path)])), backend=backend.name)
+    store.write_landed(registry.log_dir, record)
+    assert store.read(registry.log_dir, record.task_id) is not None
+    assert not store.read(registry.log_dir, record.task_id).live_input
+    monkeypatch.setattr(registry, '_mutation_caller', AsyncMock(return_value=None))
+    monkeypatch.setattr(tasks, '_EXTRA_PATH_SLOTS', threading.BoundedSemaphore(1))
+    assert tasks._EXTRA_PATH_SLOTS.acquire(blocking=False)
+    def revalidate(*args):
+        raise AssertionError('authority revalidated before the non-live refusal')
+    monkeypatch.setattr(registry, '_resolve_extra_paths', revalidate)
+    def sent(*args, **kwargs):
+        raise AssertionError('reached the inbox before the refusal')
+    monkeypatch.setattr(tasks.inbox, 'send_to_record', sent)
+    with pytest.raises(inbox.SendRefused, match='not started with live input') as error:
+        await registry.send_to_record(record.task_id, 'Follow up')
+    assert error.value.code == 'not_live_input'
+
+
 def _state_logs(repo):
     # State is independently located, outside the repository/grant fixture.
     return repo.parent / (repo.name + '-bridge-state') / 'logs'
@@ -451,7 +499,7 @@ async def test_saved_authority_resolution_timeout_prevents_effects(tmp_path, mon
     from unittest.mock import AsyncMock
     entered, release = threading.Event(), threading.Event()
     registry = tasks.TaskRegistry(log_dir=_state_logs(tmp_path), open_monitor=False)
-    record = replace(owner(tmp_path, normalize_paths([str(tmp_path)])), backend=backend.name)
+    record = replace(owner(tmp_path, normalize_paths([str(tmp_path)])), backend=backend.name, live_input=True)
     store.write_landed(registry.log_dir, record)
     parent = SimpleNamespace(**record.__dict__, record_landed=True)
     parent.live_input = True

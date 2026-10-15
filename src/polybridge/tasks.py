@@ -1649,15 +1649,15 @@ class TaskRegistry:
         """
         from .workflow_hooks import refuse_direct_message
         await asyncio.to_thread(refuse_direct_message, self._log_dir, task.task_id)
-        if has_extra_path_authority(task):
-            caller = await self._mutation_caller()
-            await self._resolve_extra_paths_async(caller, None, get_backend(task.backend), task)
         if not task.live_input:
             raise inbox.SendRefused(
                 f"task {task.task_id} was not started with live input, so it cannot take a message "
                 "while it runs; continue it with resume_task once it has finished",
                 code="not_live_input",
             )
+        if has_extra_path_authority(task):
+            caller = await self._mutation_caller()
+            await self._resolve_extra_paths_async(caller, None, get_backend(task.backend), task)
         try:
             fd = await inbox.lock_async(self._log_dir, task.task_id)
         except control.LockTimeout:
@@ -1686,7 +1686,13 @@ class TaskRegistry:
         """Queue `text` for a live-input task another server owns, via its on-disk inbox."""
         from .workflow_hooks import refuse_direct_message
         await asyncio.to_thread(refuse_direct_message, self._log_dir, task_id)
-        record = await _bounded_extra_path_check(store.read, self._log_dir, task_id)
+        record = await asyncio.to_thread(store.read, self._log_dir, task_id)
+        if record is not None and not record.live_input:
+            raise inbox.SendRefused(
+                f"task {task_id} was not started with live input, so it cannot take a message while "
+                "it runs; continue it with resume_task once it has finished",
+                code="not_live_input",
+            )
         if record is not None and has_extra_path_authority(record):
             caller = await self._mutation_caller()
             await self._resolve_extra_paths_async(caller, None, get_backend(record.backend), record)
