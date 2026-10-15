@@ -9,7 +9,9 @@ inbox's lock (see `inbox.py`) for the owning server to deliver.
 The control commands act (A4.2): `cancel` runs the same cascade as `cancel_task` from a registry
 this process owns; `takeover` / `takeover-attach` are the human-only takeover (`takeover.py`); `run`
 and `resume` fork a process that owns the new task until it settles (`detached.py`). `backends`
-reports the registered backends and whether each binary is on PATH (`backends.is_installed`) — no
+reports the registered backends, whether each binary is on PATH (`backends.is_installed`) and each
+backend's declared capabilities (`backends.capability_metadata`, the same serialization as MCP
+`list_backends` — including bounded extra-path support) — no
 `--version` probe, no subprocess. Every command prints one versioned JSON document
 (`"v": 10`, `CTL_JSON_VERSION`) with `--json`. v10 adds bounded extra-path grants
 and their capability and enforcement metadata to task/backend documents. v9 adds durable task usage-limit
@@ -102,7 +104,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
         compact_p.add_argument('--' + key)
 
     backends_p = sub.add_parser(
-        "backends", help="list the registered backends and whether each is on PATH"
+        "backends", help="list the registered backends, PATH presence and declared capabilities"
     )
     backends_p.add_argument("--json", action="store_true")
 
@@ -392,6 +394,7 @@ def _cmd_backends(args: argparse.Namespace) -> int:
             "backend": backend.name,
             "binary": backend.binary,
             "installed": backends.is_installed(backend),
+            "capabilities": backends.capability_metadata(backend),
         }
         for backend in backends.BACKENDS.values()
     ]

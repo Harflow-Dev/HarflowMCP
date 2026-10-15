@@ -95,6 +95,15 @@ def version(backend: Backend, *, executable: str | None = None) -> str | None:
     return result.stdout.strip().splitlines()[0] if result.stdout.strip() else None
 
 
+def capability_metadata(backend: Backend) -> dict[str, Any]:
+    """Per-backend capability metadata, including its declared bounded extra-path support.
+
+    Serializes only what the backend itself declares — no subprocess, unlike `version()` — so it is
+    safe wherever a `--version` probe is not (polybridge-ctl's `backends`).
+    """
+    return {**backend.capabilities.as_dict(), "extra_writable_paths": backend.extra_path_support()}
+
+
 def describe(backend: Backend) -> dict[str, Any]:
     """Everything a caller needs to choose a backend deliberately."""
     installed = is_installed(backend)
@@ -103,7 +112,7 @@ def describe(backend: Backend) -> dict[str, Any]:
         "binary": backend.binary,
         "installed": installed,
         "version": version(backend) if installed else None,
-        "capabilities": {**backend.capabilities.as_dict(), "extra_writable_paths": backend.extra_path_support()},
+        "capabilities": capability_metadata(backend),
         "freedoms": {
             freedom: backend.enforcement(freedom).as_dict()  # type: ignore[arg-type]
             for freedom in FREEDOMS
@@ -171,6 +180,7 @@ __all__ = [
     "Status",
     "UnknownBackend",
     "UnsupportedCapability",
+    "capability_metadata",
     "check_freedom",
     "classic_invocation_problem",
     "check_nested_depth",

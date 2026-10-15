@@ -8,6 +8,9 @@ without launching an agent or allocating task scratch. Launch revalidates this
 observation; preview does not reserve authority. For writable launches on scratch-aware
 backends, enforcement includes `the task scratch directory (allocated per task at launch)`
 as a symbolic future writable root. Read-only previews include no scratch root.
+`polybridge-ctl backends --json` exposes declared support under
+`capabilities.extra_writable_paths` without a version or model probe. Use the
+permission preview to qualify the actual installed environment before launch.
 
 Installed-version qualification runs off the server event loop with a bounded
 deadline. Bounded-mode execution uses the qualified absolute executable path;

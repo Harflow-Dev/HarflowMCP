@@ -357,9 +357,42 @@ def test_backends_json_reports_the_registry_in_order(
         "claude", "codex", "opencode", "vibe", "antigravity"
     ]
     assert doc["backends"] == [
-        {"backend": name, "binary": backend.binary, "installed": name != "claude"}
+        {
+            "backend": name,
+            "binary": backend.binary,
+            "installed": name != "claude",
+            "capabilities": backends_module.capability_metadata(backend),
+        }
         for name, backend in backends_module.BACKENDS.items()
     ]
+
+
+def test_backends_json_capabilities_extra_writable_paths_reflect_declared_support(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """The v10 contract promises capability metadata on backend documents: each entry carries the
+    backend's own `extra_path_support` under `capabilities.extra_writable_paths`, so discovery does
+    not need a version or model call to tell which backends accept bounded extra-path grants."""
+    from polybridge import backends as backends_module
+
+    monkeypatch.setattr(
+        backends_module.shutil, "which", lambda binary: f"/usr/local/bin/{binary}"
+    )
+
+    def refuse_probe(*args, **kwargs):
+        raise AssertionError('backend discovery must not execute version or model probes')
+    monkeypatch.setattr(backends_module, 'version', refuse_probe)
+
+    assert ctl.main(["backends", "--json"]) == 0
+
+    doc = _one_doc(capsys)
+    entries = {entry["backend"]: entry for entry in doc["backends"]}
+    assert set(entries) == set(backends_module.BACKENDS)
+    for name, backend in backends_module.BACKENDS.items():
+        extra = entries[name]["capabilities"]["extra_writable_paths"]
+        assert extra == backend.extra_path_support()
+        assert extra["supported"] is (name == "codex")
+    assert entries["codex"]["capabilities"]["extra_writable_paths"]["supported"] is True
 
 
 def test_backends_plain_text_is_one_line_per_backend(
