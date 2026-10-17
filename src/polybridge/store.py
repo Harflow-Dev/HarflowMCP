@@ -876,8 +876,12 @@ def snapshot(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
         except (OSError, ValueError, KeyError, TypeError):
             log.warning("task %s: workflow pending-message bookkeeping unavailable", record.task_id, exc_info=True)
 
+    from . import followups
+    queued_followups = followups.view(log_dir, record.task_id)
     return {
         "pending_messages": pending,
+        "queued_followups": queued_followups,
+        "queued_followup_count": followups.count_outstanding(queued_followups),
         **({"prompt_source": record.prompt_source, "prompt_truncated": record.prompt_truncated, **({"prompt_error": record.prompt_error} if record.prompt_error else {})} if record.prompt_source or record.prompt_error else {}),
         "task_id": record.task_id,
         "artifact_summary": artifacts.summary(log_dir, record.task_id),
@@ -944,6 +948,7 @@ def brief(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
     stream replayed, which a listing should not pay for — and they are stream detail, which is what
     `snapshot` is for. Uses `detail=False`, so a settled, observed task costs no replay here either.
     """
+    from . import followups
     status, _, state, _, owned = _resolve(log_dir, record, detail=False)
     return {
         "task_id": record.task_id,
@@ -969,6 +974,7 @@ def brief(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
         "lineage_detected": record.lineage_detected,
         "live_input": record.live_input,
         "notices": list(record.bridge_notices),
+        "queued_followup_count": followups.outstanding_count(log_dir, record.task_id),
         "failure_diagnostic": state.failure_diagnostic or record.failure_diagnostic,
         "owner": record.owner,
         "owned_by_live_server": owned if status == "running" else None,

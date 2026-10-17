@@ -177,6 +177,15 @@ You can use the same bridge without a workflow. `start_task(prompt, repo_path, b
 returns a **`task_id`** immediately. Follow it with `get_task_status` or `wait_for_task`, then use
 `resume_task` for a follow-up. Independent tasks can run in parallel.
 
+`send_message(task_id, text)` adds a message to a running live-input task (`delivery: "live_input"`).
+A task without live input (a backend that has none, or claude with `max_turns`) queues it instead
+(`delivery: "next_continuation"`): nothing is started or delivered, and the next continuation you
+start explicitly from that task (`resume_task`, `continue_task`, `polybridge-ctl resume|continue`
+or Resume in the Monitor) consumes every queued message verbatim, in order, exactly once.
+`resume_task`'s `followup_prompt` may then be omitted. `cancel_queued_message` withdraws a message
+that is still queued, and `queued_followups` in the task status lists them. See
+[queued follow-ups](docs/task-continuation.md#queued-follow-ups).
+
 Extra-path support requires absolute nonempty PATH entries, native selected helpers/backend launchers, Monitor auto-open disabled, and an isolated qualified configuration profile. Known external execution configuration namespaces of all registered backends stay protected; existing unsupported configuration inputs reject requests. Inherited repository write authority remains unchanged.
 
 [`extra_writable_paths`](docs/extra-writable-paths.md) adds bounded local file or directory

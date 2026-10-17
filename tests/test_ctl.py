@@ -63,7 +63,7 @@ def test_list_json_is_exactly_one_document(home: Path, capsys: pytest.CaptureFix
     lines = [line for line in out.splitlines() if line.strip()]
     assert len(lines) == 1
     doc = json.loads(lines[0])
-    assert doc["v"] == 11
+    assert doc["v"] == 12
     assert len(doc["tasks"]) == 1
     assert doc["tasks"][0]["task_id"] == "task-1"
     assert doc["tasks"][0]["owner"]["pid"] == 4242
@@ -76,7 +76,7 @@ def test_list_json_with_no_tasks_is_still_one_document(
 
     assert code == 0
     doc = json.loads(capsys.readouterr().out)
-    assert doc == {"v": 11, "tasks": []}
+    assert doc == {"v": 12, "tasks": []}
 
 
 def test_list_plain_table_names_its_columns(home: Path, capsys: pytest.CaptureFixture) -> None:
@@ -112,7 +112,7 @@ def test_a_bad_since_value_is_a_usage_error(home: Path, capsys: pytest.CaptureFi
     assert exc_info.value.code == 2
     captured = capsys.readouterr()
     doc = json.loads(captured.out)
-    assert doc["v"] == 11
+    assert doc["v"] == 12
     assert doc["error"]["code"] == "usage"
     assert captured.err.strip()
 
@@ -127,7 +127,7 @@ def test_status_json_for_a_known_task(home: Path, capsys: pytest.CaptureFixture)
     lines = [line for line in out.splitlines() if line.strip()]
     assert len(lines) == 1
     doc = json.loads(lines[0])
-    assert doc["v"] == 11
+    assert doc["v"] == 12
     assert doc["task"]["task_id"] == "task-1"
     assert doc["task"]["status"] == "completed"
 
@@ -139,7 +139,7 @@ def test_status_json_for_an_unknown_task(home: Path, capsys: pytest.CaptureFixtu
     captured = capsys.readouterr()
     doc = json.loads(captured.out)
     assert doc == {
-        "v": 11,
+        "v": 12,
         "error": {"code": "unknown_task", "message": "unknown task_id: no-such-task"},
     }
     assert "no-such-task" in captured.err
@@ -177,7 +177,7 @@ def test_status_batch_entries_match_single_status_documents(
 
     assert ctl.main(["status-batch", "--task-ids", "task-1,task-2,task-3", "--json"]) == 0
     doc = json.loads(capsys.readouterr().out)
-    assert doc["v"] == 11
+    assert doc["v"] == 12
     assert doc["errors"] == {}
     assert [task["task_id"] for task in doc["tasks"]] == ["task-1", "task-2", "task-3"]
 
@@ -264,7 +264,7 @@ def test_status_batch_fails_whole_on_undecidable_authority(
     assert ctl.main(["status-batch", "--task-ids", "task-1,task-2", "--json"]) == 1
     doc = json.loads(capsys.readouterr().out)
     assert doc == {
-        "v": 11,
+        "v": 12,
         "error": {
             "code": "workflow_read_refused",
             "message": "Workflow caller authority is undecidable: ps denied",
@@ -298,7 +298,7 @@ def test_bad_subcommand_with_json_still_emits_a_usage_document(
 
     assert exc_info.value.code == 2
     doc = json.loads(capsys.readouterr().out)
-    assert doc["v"] == 11
+    assert doc["v"] == 12
     assert doc["error"]["code"] == "usage"
 
 
@@ -395,7 +395,7 @@ def test_send_queues_a_message_in_the_inbox(
 
     assert code == 0
     doc = _one_doc(capsys)
-    assert doc["v"] == 11
+    assert doc["v"] == 12
     assert doc["result"]["status"] == "queued"
     messages, _ = inbox.read_new(_log_dir(home), "task-1", 0)
     assert [m["text"] for m in messages] == ["please also check the tests"]
@@ -419,10 +419,9 @@ def test_send_after_close_says_to_resume(
     ("record", "code"),
     [
         (lambda: make_record(live_input=True), "settled"),
-        (lambda: _live_running(live_input=False), "not_live_input"),
         (lambda: _live_running(owner=None), "owner_not_alive"),
     ],
-    ids=["settled", "not-live", "no-owner"],
+    ids=["settled", "no-owner"],
 )
 def test_send_refusals_are_json_errors(
     identities, home: Path, capsys: pytest.CaptureFixture, record, code) -> None:
@@ -469,7 +468,7 @@ def test_backends_json_reports_the_registry_in_order(
     assert ctl.main(["backends", "--json"]) == 0
 
     doc = _one_doc(capsys)
-    assert doc["v"] == 11
+    assert doc["v"] == 12
     assert [b["backend"] for b in doc["backends"]] == [
         "claude", "codex", "opencode", "vibe", "antigravity"
     ]
@@ -560,7 +559,7 @@ def test_current_task_documents_preserve_usage_limit_diagnostics(home, capsys, c
     args = [command, "--json"] if command == "list" else [command, "task-1", "--json"]
     assert ctl.main(args) == 0
     document = json.loads(capsys.readouterr().out)
-    assert document["v"] == 11
+    assert document["v"] == 12
     task = document["tasks"][0] if command == "list" else document["task"]
     assert task["failure_diagnostic"] == diagnostic
 
@@ -578,7 +577,7 @@ def test_compact_list_refuses_managed_callers_before_global_reads(home, monkeypa
     monkeypatch.setattr(store, 'list_page', forbidden)
     assert ctl.main(['task-list-compact', '--json']) == 1
     doc = _one_doc(capsys)
-    assert doc['v'] == 11
+    assert doc['v'] == 12
     assert doc['error']['code'] == 'invalid_params'
     assert 'direct callers' in doc['error']['message']
     assert 'task-list-page --task-ids' in doc['error']['message']
@@ -614,7 +613,7 @@ def test_compact_list_preserves_authority_preparing_response(home, monkeypatch, 
     monkeypatch.setattr(task_reads, 'list_tasks', lambda *a, **k: pytest.fail('global query while preparing'))
     assert ctl.main(['task-list-compact', '--json']) == 0
     doc = _one_doc(capsys)
-    assert doc['v'] == 11
+    assert doc['v'] == 12
     result = doc['result']
     assert result['items'] == []
     assert result['bootstrap_pending'] is True
@@ -630,7 +629,7 @@ def test_v10_status_document_exposes_bounded_path_authority(home, capsys):
         extra_path_certification="cert", enforcement=enforcement))
     assert ctl.main(["status", "task-1", "--json"]) == 0
     document = _one_doc(capsys)
-    assert document["v"] == 11
+    assert document["v"] == 12
     task = document["task"]
     assert task["enforcement"]["extra_writable_paths"] == grants
     assert task["enforcement"]["extra_path_certification"] == "cert"

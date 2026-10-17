@@ -19,7 +19,7 @@ from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
 from mcp.types import INTERNAL_ERROR, INVALID_PARAMS
 
-from . import backends, control, identity, inbox, store, wait_policy
+from . import backends, control, followups, identity, inbox, store, wait_policy
 from .backends import DEFAULT_BACKEND, DEFAULT_FREEDOM, FREEDOMS
 from .catalog import bounded_request
 from .events import EVENT_KINDS, events_path, read_page, read_recent
@@ -73,6 +73,9 @@ def _status_payload(
     """
     from .workflow_inspection import decorate_tasks
     payload = decorate_tasks([dict(snapshot)], log_dir)[0]
+    if "queued_followups" not in payload:
+        # Read here, in the caller's worker thread, rather than in a live snapshot built on the loop.
+        payload["queued_followups"] = followups.view(log_dir, task_id)
     payload["recent_activity"] = read_recent(events_path(log_dir, task_id), limit=RECENT_ACTIVITY_LIMIT)
     if include_tail:
         return payload
@@ -126,6 +129,12 @@ mcp = MCPServer(
         "Once every turn the run owes has been answered and nothing is queued the task closes its "
         "own input and settles as usual; a send after that is refused with 'finished; continue "
         "with resume_task'.\n\n"
+        "Any other standalone task (a backend without live input, or claude with max_turns) takes "
+        "send_message too, but nothing is delivered while it runs: the message is queued "
+        "(`delivery: 'next_continuation'`) and consumed, verbatim and exactly once, by the next "
+        "continuation you start explicitly from that task — resume_task (whose followup_prompt may "
+        "then be omitted) or continue_task. Queuing starts nothing. cancel_queued_message withdraws "
+        "a message that is still queued; queued_followups on the task status lists every one.\n\n"
         "Workflows are durable graphs owned by Polybridge. start_workflow gives the caller's "
         "original prompt and workflow context to an orchestrator harness. The orchestrator "
         "chooses valid next nodes and writes focused assignments; Polybridge validates those "
@@ -720,7 +729,7 @@ async def get_task_status(
             f"unknown task_id: {task_id}. No task with that id is running, and no record of one "
             f"exists under {_reg().log_dir}. Use list_tasks to see what is known.",
         )
-    snapshot = store.snapshot(_reg().log_dir, record)
+    snapshot = await asyncio.to_thread(store.snapshot, _reg().log_dir, record)
     return await asyncio.to_thread(
         _status_payload, snapshot, include_tail=include_tail, log_dir=_reg().log_dir, task_id=task_id
     )
@@ -776,6 +785,15 @@ def _owner_alive(record: store.TaskRecord) -> bool:
         return False
 
 
+def _recovered_settlement(log_dir: Path, record: store.TaskRecord) -> tuple[str, bool]:
+    """The resolved status of a recovered record and whether it is a dead, unobserved outcome.
+
+    Blocking identity checks (`ps`), so callers on the event loop run it in a thread.
+    """
+    status = store.resolve_status(log_dir, record, detail=False)[0]
+    return status, status in TERMINAL_STATUSES and _dead_without_observed_exit(record, status)
+
+
 async def _poll_recovered(
     record: store.TaskRecord, plan: wait_policy.WaitPlan, ctx: Context | None
 ) -> tuple[store.TaskRecord, str, bool]:
@@ -806,8 +824,7 @@ async def _poll_recovered(
     while True:
         round_failed = False
         try:
-            status = store.resolve_status(_reg().log_dir, record, detail=False)[0]
-            gone = status in TERMINAL_STATUSES and _dead_without_observed_exit(record, status)
+            status, gone = await asyncio.to_thread(_recovered_settlement, _reg().log_dir, record)
         except Exception:
             status, gone = None, False
             round_failed = True
@@ -816,7 +833,7 @@ async def _poll_recovered(
             # keep observing for a bounded grace before calling the outcome unobservable.
             if draining_since is None:
                 draining_since = wait_policy.monotonic()
-            if (not _owner_alive(record)
+            if (not await asyncio.to_thread(_owner_alive, record)
                     or wait_policy.monotonic() - draining_since >= wait_policy.OWNER_DRAIN_GRACE_SECONDS):
                 return record, wait_policy.STOP_UNAVAILABLE, False
         elif status in TERMINAL_STATUSES:
@@ -878,9 +895,11 @@ async def wait_for_task(
     status is "running" with a `next_step` hint: call this again, or poll get_task_status. The
     dispatched process is never signalled, written or resumed by a wait, so waiting is always safe
     and repeating it costs nothing. For a task recovered from an earlier server process the result
-    carries `outcome_observed`: false (with stop_reason observation_unavailable, in either mode)
-    means its process is gone but its exit was never observed, so the status is an inference —
-    inspect it with get_task_status; true otherwise. Live tasks carry it (true) once finished.
+    carries `outcome_observed` once it is finished or the wait stopped as observation_unavailable:
+    false (normally with stop_reason observation_unavailable) means its process is gone but its
+    exit was never observed, so the status is an inference — inspect it with get_task_status;
+    true otherwise. It is never present on a task that is still running. Live tasks carry it
+    (true) once finished.
     Progress is sent every 5 seconds, best effort. Returns
     `recent_activity` — a list of ≤ 5 one-line strings describing the most recent meaningful events
     — for a live summary without the bulk of the raw stream.
@@ -908,7 +927,7 @@ async def wait_for_task(
             )
         record, stop_reason, outcome_observed = await _poll_recovered(record, plan, ctx)
         try:
-            snapshot = store.snapshot(_reg().log_dir, record)
+            snapshot = await asyncio.to_thread(store.snapshot, _reg().log_dir, record)
         except Exception:
             if stop_reason != wait_policy.STOP_UNAVAILABLE:
                 raise
@@ -926,8 +945,15 @@ async def wait_for_task(
     if task is None and finished and stop_reason in (wait_policy.STOP_TIMEOUT, wait_policy.STOP_CEILING):
         # The hold ran out as the record settled; apply the same unobserved-outcome rule the
         # polling loop uses before calling that a settled outcome.
-        if _dead_without_observed_exit(record, snapshot["status"]):
-            stop_reason, outcome_observed = wait_policy.STOP_UNAVAILABLE, False
+        if await asyncio.to_thread(_dead_without_observed_exit, record, snapshot["status"]):
+            outcome_observed = False
+            # A bounded hold that ran out while the owning server is still persisting the outcome
+            # keeps `timeout` as its reason; the status is still only inferred.
+            owner_draining = (
+                stop_reason == wait_policy.STOP_TIMEOUT and await asyncio.to_thread(_owner_alive, record)
+            )
+            if not owner_draining:
+                stop_reason = wait_policy.STOP_UNAVAILABLE
         else:
             stop_reason = wait_policy.STOP_TERMINAL
     elif finished and stop_reason in (wait_policy.STOP_TIMEOUT, wait_policy.STOP_CEILING):
@@ -956,7 +982,7 @@ async def wait_for_task(
         log.warning("task %s: status payload unavailable after the wait", task_id, exc_info=True)
         payload = dict(snapshot)
     guidance = None
-    if task is None or finished:
+    if finished or stop_reason == wait_policy.STOP_UNAVAILABLE:
         payload["outcome_observed"] = outcome_observed
     if not outcome_observed:
         guidance = (
@@ -1019,10 +1045,17 @@ async def continue_task(task_id: str, extra_prompt: str | None = None, notes_pat
     records without settlement evidence are refused. Workflow-owned tasks use workflow recovery.
     Concurrent identical retries share one successor; mismatched or unsettled reservations fail.
     The returned continuation_of_task_id is separate from session resume/delegation ancestry.
+
+    Follow-ups queued on the source with send_message are consumed by this call: they appear
+    verbatim, in queue order, ahead of extra_prompt (or ahead of a fixed closing line when there is
+    none), and the new task's task_started event lists their message_ids. With nothing queued the
+    call behaves exactly as without the feature. Two manual calls with the same extra_prompt and
+    notes are the same request whatever is queued: the queue is read once, when the successor is
+    reserved, and a retry returns that successor. An automatic continuation never consumes.
     """
     await _guard_task_read(task_id)
     try:
-        task = await _reg().continue_task(task_id, extra_prompt, notes_path)
+        task = await _reg().continue_task(task_id, extra_prompt, notes_path, consume_followups=True)
     except (ValueError, OSError, backends.UnsupportedCapability) as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
     return task.brief() | {"enforcement": task.enforcement}
@@ -1031,7 +1064,7 @@ async def continue_task(task_id: str, extra_prompt: str | None = None, notes_pat
 @mcp.tool()
 async def resume_task(
     task_id: str,
-    followup_prompt: str,
+    followup_prompt: str | None = None,
     max_turns: int | None = None,
     network: StrictBool | None = None,
 ) -> dict[str, Any]:
@@ -1043,13 +1076,22 @@ async def resume_task(
             in plain prose, as with start_task's prompt: preserve spaces and word boundaries and
             never concatenate words to shrink the payload — the text is stored and delivered
             exactly as submitted. Blank or all-whitespace follow-ups are rejected rather than
-            trimmed into shape.
+            trimmed into shape. May be omitted only when the task has follow-ups queued with
+            send_message (see below); otherwise it is required.
         max_turns: Cap on agent turns, where the backend supports one.
         network: Optional boolean overriding the parent run's network setting for this run only:
             None (the default) inherits what the parent was dispatched with — which is also the
             historical default for a record written before the field existed — True asks for no
             network barrier of polybridge's own, False asks for one, honoured or refused exactly
             as on start_task for the parent's freedom.
+
+    Follow-ups queued on the task with send_message are consumed by this call, exactly once: the
+    prompt is each queued message as a block "Queued caller follow-up N of M (message <id>, queued
+    <time>):" followed by its text exactly as sent, in queue order, a blank line, then
+    followup_prompt verbatim — or the line "End of queued caller follow-ups." when it is omitted.
+    The new task's task_started event lists the message_ids. A message cannot be consumed twice;
+    one that cannot be proven undelivered after a failed launch is kept as delivery_unknown rather
+    than re-queued.
 
     Returns a new task_id sharing the original session, and returns immediately as with start_task.
     Runs on the same backend, model, reasoning_effort and freedom as the original — none of these
@@ -1061,8 +1103,8 @@ async def resume_task(
     doing so, its conversation cannot be continued and this says so rather than starting a
     disconnected one.
     """
-    if not followup_prompt or not followup_prompt.strip():
-        raise MCPError(INVALID_PARAMS, "followup_prompt must be a non-empty string")
+    if followup_prompt is not None and (not isinstance(followup_prompt, str) or not followup_prompt.strip()):
+        raise MCPError(INVALID_PARAMS, "followup_prompt must be a non-empty string when provided")
     # Same strict boolean rule as start_task, checked before anything is resumed.
     if network is not None and not isinstance(network, bool):
         raise MCPError(
@@ -1083,7 +1125,8 @@ async def resume_task(
             _check_turn_cap(backends.get(parent.backend), max_turns)
             _check_network(backends.get(parent.backend), parent.freedom, network)
             task = await _reg().resume(
-                parent, followup_prompt, max_turns=max_turns, network=network
+                parent, followup_prompt, max_turns=max_turns, network=network,
+                consume_followups=True,
             )
         else:
             record = _reg().recover(task_id)
@@ -1098,7 +1141,8 @@ async def resume_task(
             _check_turn_cap(backends.get(record.backend), max_turns)
             _check_network(backends.get(record.backend), record.freedom, network)
             task = await _reg().resume_record(
-                record, followup_prompt, max_turns=max_turns, network=network
+                record, followup_prompt, max_turns=max_turns, network=network,
+                consume_followups=True,
             )
     except (SessionBusyError, SessionUnknownError, RepoUnavailableError) as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
@@ -1242,7 +1286,7 @@ async def cancel_task(task_id: str) -> dict[str, Any]:
         snapshot = task.snapshot()
     else:
         record = _reg().recover(task_id)
-        snapshot = store.snapshot(_reg().log_dir, record) if record is not None else {}
+        snapshot = await asyncio.to_thread(store.snapshot, _reg().log_dir, record) if record is not None else {}
     
     response = await asyncio.to_thread(
         _status_payload, snapshot, include_tail=False, log_dir=_reg().log_dir, task_id=task_id
@@ -1391,11 +1435,13 @@ async def get_task_event_page(
 
 @mcp.tool()
 async def send_message(task_id: str, text: str) -> dict[str, Any]:
-    """Add a message to a running live-input task, as if the user had typed it mid-run.
+    """Add a message to a running live-input task, as if the user had typed it mid-run — or queue
+    it for the next continuation of a task that has no live input.
 
     Args:
         task_id: A running task whose `live_input` is true (claude started without `max_turns`,
-            or any antigravity task).
+            or any antigravity task); or any other standalone task, running or settled, whose
+            message waits for its next continuation (see below).
         text: The message, stored and delivered exactly as submitted — keep plain prose intact,
             as with start_task's prompt: spaces and word boundaries preserved, never words
             concatenated to save tokens. Blank or all-whitespace messages are rejected.
@@ -1409,8 +1455,23 @@ async def send_message(task_id: str, text: str) -> dict[str, Any]:
 
     A live task closes its own input once it is idle with nothing queued, so it still settles
     unattended. A send after that is refused with "finished; continue with resume_task" — which is
-    exactly what to do. Also refused: a task that was not started with live input, one that has
-    settled, and one whose owning polybridge server is not confirmed alive.
+    exactly what to do. Also refused: a live-input task that has settled, and one whose owning
+    polybridge server is not confirmed alive. The response carries `delivery: "live_input"`.
+
+    A task without live input (a backend that has none, or claude started with max_turns) is not
+    refused: the message goes to a durable per-task queue and the response is `status: "queued"`
+    with `delivery: "next_continuation"`, `message_id` and `seq`. Nothing is started and nothing is
+    delivered. The next continuation you start explicitly from that task — resume_task (its
+    followup_prompt may then be omitted) or continue_task, or `polybridge-ctl resume|continue`
+    and Resume in the Monitor — consumes every queued message, verbatim and in order, exactly once
+    (see those tools for the prompt shape); an automatic continuation does not. Withdraw a message
+    that is still queued with cancel_queued_message; task status lists them all as
+    `queued_followups`. Refused with a stable code: `superseded` (a successor already exists or
+    probably exists — the error names it; send there), `message_too_large` (over 32 KiB of UTF-8),
+    `queue_full` (16 outstanding, or the queue's byte budget), `unavailable` (the queue cannot be
+    read), `invalid_text` (not valid UTF-8), `live_input` (the task has live input), `workflow_owned`
+    and the workflow-active codes (a task owned by a workflow), `unknown_task`, `lock_timeout` (try
+    again) and `write_failed`.
     """
     try:
         store.validate_task_id(task_id)
@@ -1430,6 +1491,37 @@ async def send_message(task_id: str, text: str) -> dict[str, Any]:
         if _reg().recover(task_id) is None:
             raise MCPError(INVALID_PARAMS, f"unknown task_id: {task_id}")
         return await _reg().send_to_record(task_id, text)
+    except inbox.SendRefused as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+
+@mcp.tool()
+async def cancel_queued_message(task_id: str, message_id: str) -> dict[str, Any]:
+    """Withdraw a follow-up that send_message queued for a task's next continuation.
+
+    Args:
+        task_id: The task the message was queued on.
+        message_id: The `message_id` send_message returned (also listed in the task's
+            `queued_followups`).
+
+    Only a message that is still `queued` can be cancelled: one already reserved for, or consumed
+    by, a continuation is refused (`not_cancellable`), and so is an unknown id (`unknown_message`).
+    The checks are the ones send_message takes: workflow-owned tasks and workflow-managed callers
+    are refused. Returns `status: "cancelled"`; the message is kept as metadata only.
+    """
+    try:
+        store.validate_task_id(task_id)
+    except store.InvalidTaskId as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+    if not isinstance(message_id, str) or not message_id.strip():
+        raise MCPError(INVALID_PARAMS, "message_id must be a non-empty string")
+    await _guard_task_read(task_id)
+    try:
+        caller = await _verified_workflow_caller()
+        if caller is not None:
+            from .workflow_hooks import refuse_message_caller
+            refuse_message_caller(_reg().log_dir, caller.record.task_id)
+        return await _reg().cancel_queued_followup(task_id, message_id)
     except inbox.SendRefused as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
 

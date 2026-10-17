@@ -179,7 +179,7 @@ async def test_recovered_uncertain_identity_keeps_waiting(tmp_path, fast_clock, 
     write_record(tmp_path, start_time="Mon Jan  1 00:00:00 2024")
     result = await server.wait_for_task("rec", until="terminal")
     assert result["stop_reason"] == "ceiling" and result["status"] == "running"
-    assert len(checks) > 3 and result["outcome_observed"] is True
+    assert len(checks) > 3 and "outcome_observed" not in result  # still running: nothing observed
 
 
 async def test_unavailable_wait_survives_a_snapshot_that_raises(tmp_path, fast_clock, monkeypatch):
@@ -687,6 +687,31 @@ async def test_final_snapshot_reconciliation_applies_the_unobserved_rule(tmp_pat
     result = await server.wait_for_task("rec", 1)
     assert result["stop_reason"] == "observation_unavailable" and result["timed_out"] is False
     assert result["outcome_observed"] is False and record.status == "failed"
+
+
+async def test_bounded_wait_keeps_timeout_when_the_owner_is_still_alive(tmp_path, monkeypatch):
+    """The hold ran out with the owner alive and persisting: `timeout`, not observation_unavailable."""
+    record = write_record(tmp_path, owner={"pid": 999, "start_time": "x"})
+    _owner_stub(monkeypatch, ["alive"])
+    monkeypatch.setattr(store, "record_process_alive", lambda r: True)
+    async def poll(rec, plan, ctx):
+        monkeypatch.setattr(store, "record_process_alive", lambda r: False)
+        return rec, wait_policy.STOP_TIMEOUT, True
+    monkeypatch.setattr(server, "_poll_recovered", poll)
+    result = await server.wait_for_task("rec", 1)
+    assert result["stop_reason"] == "timeout" and result["timed_out"] is True
+    assert result["outcome_observed"] is False and record.status == "failed"
+    _owner_stub(monkeypatch, ["dead"])
+    result = await server.wait_for_task("rec", 1)
+    assert result["stop_reason"] == "observation_unavailable"
+
+
+async def test_outcome_observed_is_absent_on_a_running_recovered_task(tmp_path, fast_clock, monkeypatch):
+    monkeypatch.setattr(store, "process_alive", lambda pid, markers: True)
+    write_record(tmp_path)
+    result = await server.wait_for_task("rec", 5)
+    assert result["stop_reason"] == "timeout" and result["status"] == "running"
+    assert "outcome_observed" not in result
 
 
 async def test_wait_for_tasks_keeps_observing_while_the_owner_is_draining(tmp_path, monkeypatch, fake_clock):

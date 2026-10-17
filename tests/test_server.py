@@ -52,7 +52,7 @@ async def test_task_and_workflow_tools_are_exposed() -> None:
     async with Client(server.mcp) as client:
         names = sorted(tool.name for tool in (await client.list_tools()).tools)
 
-    assert names == ['apply_workflow_draft', 'cancel_task', 'cancel_workflow', 'continue_task', 'delete_workflow', 'followup_workflow_builder', 'get_task_artifacts', 'get_task_event_page', 'get_task_events', 'get_task_notifications', 'get_task_status', 'get_workflow', 'get_workflow_run_detail', 'get_workflow_status', 'inspect_workflow_node', 'list_backends', 'list_task_page', 'list_tasks', 'list_workflow_run_page', 'list_workflow_runs', 'list_workflows', 'pause_workflow', 'preview_task_permissions', 'preview_workflow_run', 'read_workflow_assigned_input', 'recover_workflow', 'register_artifact', 'resume_task', 'resume_workflow', 'revise_workflow_goal', 'save_workflow', 'send_message', 'start_task', 'start_workflow', 'subscribe', 'unsubscribe', 'wait_for_task', 'wait_for_tasks', 'wait_for_workflow', 'workflow_builder']
+    assert names == ['apply_workflow_draft', 'cancel_queued_message', 'cancel_task', 'cancel_workflow', 'continue_task', 'delete_workflow', 'followup_workflow_builder', 'get_task_artifacts', 'get_task_event_page', 'get_task_events', 'get_task_notifications', 'get_task_status', 'get_workflow', 'get_workflow_run_detail', 'get_workflow_status', 'inspect_workflow_node', 'list_backends', 'list_task_page', 'list_tasks', 'list_workflow_run_page', 'list_workflow_runs', 'list_workflows', 'pause_workflow', 'preview_task_permissions', 'preview_workflow_run', 'read_workflow_assigned_input', 'recover_workflow', 'register_artifact', 'resume_task', 'resume_workflow', 'revise_workflow_goal', 'save_workflow', 'send_message', 'start_task', 'start_workflow', 'subscribe', 'unsubscribe', 'wait_for_task', 'wait_for_tasks', 'wait_for_workflow', 'workflow_builder']
 
 
 async def test_list_backends_describes_every_one() -> None:
@@ -736,9 +736,12 @@ async def test_send_message_queues_for_a_live_task_the_server_owns(fake_task: Ta
     assert fake_task.pump_wake.is_set()
 
 
-async def test_send_message_refuses_a_task_without_live_input(fake_task: Task) -> None:
-    with pytest.raises(MCPError, match="not started with live input"):
-        await call("send_message", task_id="task-1", text="hi")
+async def test_send_message_queues_for_the_next_continuation_without_live_input(fake_task: Task) -> None:
+    server._reg().persist(fake_task)
+    result = (await call("send_message", task_id="task-1", text="hi")).structured_content
+    assert result["status"] == "queued" and result["delivery"] == "next_continuation"
+    from polybridge import inbox
+    assert inbox.read_new(server._reg().log_dir, fake_task.task_id, 0)[0] == []  # never the inbox
 
 
 async def test_send_message_after_close_says_to_resume(fake_task: Task) -> None:

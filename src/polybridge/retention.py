@@ -24,7 +24,7 @@ from collections.abc import Collection
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import control, identity, store
+from . import control, followups, identity, store
 
 log = logging.getLogger(__name__)
 
@@ -158,6 +158,7 @@ def sweep(log_dir: Path, days: int, now: datetime) -> dict[str, int]:
         "deleted_tasks": 0,
         "kept_live_descendant": 0,
         "kept_active_attempt": 0,
+        "kept_followups": 0,
         "kept_locked": 0,
         "kept_delete_failed": 0,
         "deleted_temp_files": 0,
@@ -185,6 +186,10 @@ def sweep(log_dir: Path, days: int, now: datetime) -> dict[str, int]:
                 protected.add(reservation.get('chain_root_task_id'))
         except (OSError, ValueError, TypeError):
             continue
+    # Queued or reserved follow-ups are acknowledged messages awaiting a continuation: keep their
+    # task, and the successor a reservation names so a dead owner's reservation can still resolve.
+    followups.reconcile_all(log_dir)  # crash leftovers and superseded messages must not pin a task
+    protected.update(followups.protected_task_ids(log_dir))
     protected.discard(None)
 
     protected_sessions: set[str] = set()
@@ -481,15 +486,26 @@ def _delete_task(
                     stats["kept_active_attempt"] += 1
                     return
 
-                # Emptied first: once the record is gone no later sweep can find this task again, so an
-                # inbox that cannot be emptied now (its lock is busy) keeps the whole task for a retry.
-                if not _empty_inbox(log_dir, task_id):
-                    stats["kept_locked"] += 1
-                    return
-                if not _delete_task_files(log_dir, task_id):
-                    stats["kept_delete_failed"] += 1
-                    return
-                stats["deleted_tasks"] += 1
+                # The follow-up lock is held from re-reading the ledger until the record is gone
+                # (the record is unlinked last): a send lands before, and keeps the task, or after,
+                # and is refused as an unknown task — never acknowledged and then lost. Order:
+                # catalog locks, then this lock; a session lock is never taken while holding it.
+                with followups.hold_for_delete(log_dir, task_id) as ledger:
+                    if ledger == "busy":
+                        stats["kept_locked"] += 1
+                        return
+                    if ledger == "blocked":
+                        stats["kept_followups"] += 1
+                        return
+                    # Emptied first: once the record is gone no later sweep can find this task again, so an
+                    # inbox that cannot be emptied now (its lock is busy) keeps the whole task for a retry.
+                    if not _empty_inbox(log_dir, task_id):
+                        stats["kept_locked"] += 1
+                        return
+                    if not _delete_task_files(log_dir, task_id):
+                        stats["kept_delete_failed"] += 1
+                        return
+                    stats["deleted_tasks"] += 1
         finally:
             try:
                 fcntl.flock(lock_fd, fcntl.LOCK_UN)
@@ -539,8 +555,8 @@ def _delete_task_files(log_dir: Path, task_id: str) -> bool:
 
 
 def _delete_task_files_locked(log_dir: Path, task_id: str) -> bool:
-    """Delete every `{task_id}.*` file except the lock files — `.lock`, and `.inbox.jsonl`, which is
-    the inbox's `flock` target (see `inbox.py`) — with the record (`.meta.json`) last, and only once
+    """Delete every `{task_id}.*` file except the lock files — `.lock`, `.inbox.jsonl`, which is
+    the inbox's `flock` target (see `inbox.py`), and `.followups.lock` (see `followups.py`) — with the record (`.meta.json`) last, and only once
     everything else is gone: the record is what lets a later sweep find this task again, so removing
     it past a failed unlink would orphan that file (prompts, raw output) for good. False when
     anything, the record included, was left behind."""
@@ -548,7 +564,7 @@ def _delete_task_files_locked(log_dir: Path, task_id: str) -> bool:
         entries = list(log_dir.iterdir())
     except OSError:
         return False
-    lock_names = {f"{task_id}.lock", f"{task_id}.inbox.jsonl"}
+    lock_names = {f"{task_id}.lock", f"{task_id}.inbox.jsonl", f"{task_id}{followups.LOCK_SUFFIX}"}
     record_name = f"{task_id}{store.RECORD_SUFFIX}"
     prefix = f"{task_id}."
     record_path: Path | None = None

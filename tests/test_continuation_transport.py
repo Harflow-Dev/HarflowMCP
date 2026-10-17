@@ -24,7 +24,8 @@ async def test_continue_tool_passes_exact_text_and_notes(monkeypatch):
     async def guard(task_id):
         observed.append(("guard", task_id))
 
-    async def continue_task(task_id, extra_prompt, notes_path):
+    async def continue_task(task_id, extra_prompt, notes_path, *, consume_followups=False):
+        assert consume_followups is True  # a caller-initiated continuation consumes queued follow-ups
         observed.append((task_id, extra_prompt, notes_path))
         return SimpleNamespace(brief=lambda: {"task_id": "new"}, enforcement={})
 
@@ -41,7 +42,8 @@ def test_continue_cli_file_preserves_prose(tmp_path, monkeypatch):
     path.write_bytes(text.encode("utf-8"))
     observed = []
 
-    async def continue_task(task_id, extra_prompt, notes_path):
+    async def continue_task(task_id, extra_prompt, notes_path, *, consume_followups=False):
+        assert consume_followups is True
         observed.append((task_id, extra_prompt, notes_path))
         return "task"
 

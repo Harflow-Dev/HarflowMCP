@@ -730,7 +730,7 @@ async def test_cancelling_a_live_task_closes_its_input(fake) -> None:
         await fake.registry.send_message(task, "after cancel")
 
 
-async def test_a_classic_task_refuses_a_message(fake, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_classic_task_queues_a_message_for_its_next_continuation(fake, monkeypatch: pytest.MonkeyPatch) -> None:
     class _Classic(_CatDouble):
         name = "classic-double"
 
@@ -740,13 +740,13 @@ async def test_a_classic_task_refuses_a_message(fake, monkeypatch: pytest.Monkey
     backend = _Classic(fake.repo / "unused")
     monkeypatch.setitem(backends.BACKENDS, backend.name, backend)
     task = await fake.registry.start("x", fake.repo, backend=backend)
-    with pytest.raises(inbox.SendRefused, match="not started with live input") as caught:
-        await fake.registry.send_message(task, "hi")
-    assert caught.value.code == "not_live_input"
+    first = await fake.registry.send_message(task, "hi")
+    assert first["status"] == "queued" and first["delivery"] == "next_continuation"
     await _settle(task)
-    with pytest.raises(inbox.SendRefused) as caught:
-        await fake.registry.send_to_record(task.task_id, "hi")
-    assert caught.value.code == "not_live_input"
+    second = await fake.registry.send_to_record(task.task_id, "again")
+    assert second["delivery"] == "next_continuation" and second["seq"] == first["seq"] + 1
+    assert not inbox.inbox_path(fake.registry.log_dir, task.task_id).exists() or not inbox.inbox_path(
+        fake.registry.log_dir, task.task_id).read_bytes()
 
 
 # Unit level: a Task with a stub process, so every branch of the close protocol is deterministic.

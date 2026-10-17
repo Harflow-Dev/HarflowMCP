@@ -8,7 +8,8 @@ why `list`'s status resolution is cheap for a settled task — see `store.resolv
 import the server module; the ctl paths that do need registry-backed server helpers install one
 with `server.install_cli_registry`, which starts neither the maintenance sweep nor the
 notification worker. `send` appends a message to a live-input task's inbox under that
-inbox's lock (see `inbox.py`) for the owning server to deliver.
+inbox's lock (see `inbox.py`) for the owning server to deliver, or queues it in the follow-up
+ledger (`followups.py`) of a task without live input, for its next continuation.
 
 The control commands act (A4.2): `cancel` runs the same cascade as `cancel_task` from a registry
 this process owns; `takeover` / `takeover-attach` are the human-only takeover (`takeover.py`); `run`
@@ -17,7 +18,8 @@ reports the registered backends, whether each binary is on PATH (`backends.is_in
 backend's declared capabilities (`backends.capability_metadata`, the same serialization as MCP
 `list_backends` — including bounded extra-path support) — no
 `--version` probe, no subprocess. Every command prints one versioned JSON document
-(`"v": 11`, `CTL_JSON_VERSION`) with `--json`. v11 adds bounded artifact summaries
+(`"v": 12`, `CTL_JSON_VERSION`) with `--json`. v12 adds `queued_followups` to full task snapshots
+and `queued_followup_count` to briefs, and `delivery` to `send` results. v11 adds bounded artifact summaries
 to full task snapshots, standalone self-registration (`register-artifact`), and
 paged metadata references (`task-artifacts`). Unsupported ownership has an unavailable
 summary without a detail reference. v10 adds bounded extra-path grants
@@ -44,14 +46,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from . import backends, control, detached, identity, inbox, store, takeover
+from . import backends, control, detached, followups, identity, inbox, store, takeover
 from . import tasks as tasks_module
 from .tasks import default_log_dir
 
 # Bumped to 2 when `status`/`list`'s snapshot/brief documents gained `resume_command` (Monitor
 # piece 3/3). `setup` and the event log are separate contracts and stay at v1 — see CLAUDE.md's
 # "The Monitor app is a consumer of three frozen contracts".
-CTL_JSON_VERSION = 11
+CTL_JSON_VERSION = 12
 
 # How long `cancel`/`takeover` stay alive for a failing `.sig` write to be retried before exiting —
 # the lease (60 s) is what a later recovery waits for anyway.
@@ -140,7 +142,9 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     status_batch_p.add_argument("--json", action="store_true")
 
     send_p = sub.add_parser(
-        "send", help="queue a message for a running live-input task (reports queued, not delivered)"
+        "send",
+        help="queue a message: for a live-input task's running agent, or for the next continuation "
+             "of a task without live input (reports queued, never delivered)",
     )
     send_p.add_argument("task_id")
     send_p.add_argument("text")
@@ -198,15 +202,17 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     preview_p.add_argument("--json", action="store_true")
 
     resume_p = sub.add_parser(
-        "resume", help="continue a finished task's session, owned by a detached process"
+        "resume",
+        help="continue a finished task's session, owned by a detached process; follow-ups queued "
+             "with `send` are consumed by it, so text may be omitted only when something is queued",
     )
     resume_p.add_argument("task_id")
-    resume_p.add_argument("text")
+    resume_p.add_argument("text", nargs="?", default=None)
     resume_p.add_argument("--max-turns", type=int, default=None)
     resume_p.add_argument("--network", choices=("true", "false"), default=None)
     resume_p.add_argument("--json", action="store_true")
 
-    continue_p = sub.add_parser("continue", help="start a fresh session from a positively settled standalone task")
+    continue_p = sub.add_parser("continue", help="start a fresh session from a positively settled standalone task; follow-ups queued with `send` are consumed by it")
     continue_p.add_argument("task_id")
     extra = continue_p.add_mutually_exclusive_group()
     extra.add_argument("--extra-prompt")
@@ -573,12 +579,14 @@ def _cmd_send(args: argparse.Namespace) -> int:
             raise inbox.SendRefused("Caller authority cannot be verified", code="caller_undecidable")
         if detection.caller is not None:
             refuse_message_caller(default_log_dir(), detection.caller.record.task_id)
-        result = inbox.send_to_record(default_log_dir(), task_id, args.text, by=by)
+        result = followups.dispatch_send(default_log_dir(), task_id, args.text, by=by)
     except inbox.SendRefused as exc:
         return fail(exc.code, str(exc))
 
     if args.json:
         print(json.dumps({"v": CTL_JSON_VERSION, "result": result}))
+    elif result.get("delivery") == "next_continuation":
+        print(f"queued {result['message_id']} for {task_id} (next continuation; nothing started or delivered)")
     else:
         print(f"queued {result['message_id']} for {task_id} (not yet delivered)")
     return 0
@@ -726,8 +734,8 @@ def _resume_action(args: argparse.Namespace):
             task_id = store.validate_task_id(args.task_id)
         except store.InvalidTaskId as exc:
             raise MCPError(INVALID_PARAMS, str(exc)) from None
-        if not args.text.strip():
-            raise MCPError(INVALID_PARAMS, "text must be a non-empty string")
+        if args.text is not None and not args.text.strip():
+            raise MCPError(INVALID_PARAMS, "text must be a non-empty string when provided")
         record = await asyncio.to_thread(store.read, registry.log_dir, task_id)
         if record is None:
             raise MCPError(INVALID_PARAMS, f"unknown task_id: {task_id}")
@@ -741,7 +749,7 @@ def _resume_action(args: argparse.Namespace):
         server._check_turn_cap(backends.get(record.backend), args.max_turns)
         server._check_network(backends.get(record.backend), record.freedom, network)
         return await registry.resume_record(
-            record, args.text, max_turns=args.max_turns, network=network
+            record, args.text, max_turns=args.max_turns, network=network, consume_followups=True
         )
 
     return action
@@ -753,7 +761,7 @@ def _ctl_log_path() -> Path:
 
 def _continue_action(args: argparse.Namespace):
     async def action(registry: Any) -> Any:
-        return await registry.continue_task(args.task_id, _workflow_text(args, "extra_prompt"), args.notes_path)
+        return await registry.continue_task(args.task_id, _workflow_text(args, "extra_prompt"), args.notes_path, consume_followups=True)
     return action
 
 

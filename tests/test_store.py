@@ -426,8 +426,9 @@ def test_recovered_snapshot_matches_the_live_snapshot_shape(tmp_path: Path) -> N
     recovered = store.snapshot(tmp_path, make_record(pid=999_999_999))
 
     assert set(live) - set(recovered) == set()
-    # Recovery adds provenance the live path has no need for.
-    assert set(recovered) - set(live) == {"recovered", "note"}
+    # Recovery adds provenance the live path has no need for, and the follow-up ledger, which a live
+    # snapshot leaves to the (threaded) status payload so it is never read on the event loop.
+    assert set(recovered) - set(live) == {"recovered", "note", "queued_followups"}
 
 
 def test_both_snapshot_builders_carry_the_resume_command(tmp_path: Path) -> None:

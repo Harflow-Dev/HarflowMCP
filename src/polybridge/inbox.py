@@ -49,7 +49,9 @@ CLOSED_MESSAGE = "finished; continue with resume_task"
 class SendRefused(RuntimeError):
     """A message that was not queued, and why. `code` is stable for callers and `polybridge-ctl`:
     `closed`, `not_live_input`, `settled`, `exited`, `owner_not_alive`, `unknown_task`,
-    `lock_timeout`, `write_failed`."""
+    `lock_timeout`, `write_failed`; the follow-up ledger (`followups.py`) adds `superseded`,
+    `message_too_large`, `queue_full`, `unavailable`, `invalid_text`, `live_input`,
+    `workflow_owned`, `unknown_message` and `not_cancellable`."""
 
     def __init__(self, message: str, *, code: str) -> None:
         super().__init__(message)
@@ -77,6 +79,7 @@ def queued_response(task_id: str, message: dict[str, Any]) -> dict[str, Any]:
         "task_id": task_id,
         "message_id": message["id"],
         "status": "queued",
+        "delivery": "live_input",
         "note": (
             "queued, not yet delivered: the run's input pump writes it to the agent — on claude "
             "it is folded into the running turn if one is in progress, on antigravity it is its "

@@ -10,7 +10,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from . import control, store
+from . import control, followups, store
 from .backends import get as get_backend
 
 CONTEXT_BYTES = 64 * 1024
@@ -46,7 +46,7 @@ def _section(label: str, text: str, reference: str) -> str:
     return f'{label}:\n{text}\n'
 
 
-def context(registry: Any, record: store.TaskRecord, extra_prompt: str | None, notes_path: str | None) -> str:
+def context(registry: Any, record: store.TaskRecord, extra_prompt: str | None, notes_path: str | None, queued: list[dict[str, Any]] | None = None) -> str:
     root = store.read(registry.log_dir, record.chain_root_task_id) if record.chain_root_task_id else record
     if root is None or root.prompt_error or root.prompt_truncated:
         raise ValueError('Original chain assignment unavailable')
@@ -73,6 +73,10 @@ def context(registry: Any, record: store.TaskRecord, extra_prompt: str | None, n
             parts.append(f'Notes: oversized evidence; read verbatim from {path}\n')
         else:
             parts.append(_section('Caller notes', raw.decode('utf-8'), str(path)))
+    if queued:
+        # The consumed follow-ups sit ahead of the explicit one; without an explicit prompt the
+        # closing line keeps the composition from ending in caller whitespace.
+        parts.append(followups.blocks_text(queued) + ('' if extra_prompt is not None else followups.CLOSING_LINE + '\n'))
     if extra_prompt is not None:
         parts.append('Caller follow-up:\n' + extra_prompt + '\n')
     return '\n'.join(parts)
@@ -91,7 +95,7 @@ async def stop_chain(registry: Any, task_id: str) -> None:
         _write(registry.log_dir / f'{root}.continuation-stopped.json', {'cancelled_task_id': task_id})
 
 
-async def continue_task(registry: Any, task_id: str, extra_prompt: str | None = None, notes_path: str | None = None, *, automatic: bool = False) -> Any:
+async def continue_task(registry: Any, task_id: str, extra_prompt: str | None = None, notes_path: str | None = None, *, automatic: bool = False, consume_followups: bool = False) -> Any:
     store.validate_task_id(task_id)
     if extra_prompt is not None and not isinstance(extra_prompt, str):
         raise ValueError('extra_prompt must be text')
@@ -119,7 +123,7 @@ async def continue_task(registry: Any, task_id: str, extra_prompt: str | None = 
         if source.prompt_error or source.prompt_truncated:
             raise ValueError('Original assignment unavailable; continuation refused')
         path = registry.log_dir / f'{task_id}.continuation.json'
-        prompt = context(registry, source, extra_prompt, notes_path)
+        prompt = await asyncio.to_thread(context, registry, source, extra_prompt, notes_path)
         fingerprint = hashlib.sha256(json.dumps({'prompt': prompt, 'automatic': automatic}, ensure_ascii=False).encode('utf-8')).hexdigest()
         reservation = None
         if path.exists():
@@ -153,18 +157,41 @@ async def continue_task(registry: Any, task_id: str, extra_prompt: str | None = 
             if reason is None:
                 raise ValueError('No certified recoverable cutoff observed')
         identifier = reservation['task_id'] if reservation else str(uuid.uuid4())
-        _write(path, {'task_id': identifier, 'state': 'reserved', 'chain_root_task_id': root, 'automatic': automatic, 'request_fingerprint': fingerprint})
+        # Only a request that reaches this point launches, so only here are the queued follow-ups
+        # reserved: a launched reservation above returned its successor without touching them, and
+        # a proven-unstarted one is recomposed from whatever is queued now. The fingerprint above
+        # covers the base request only, never these ids.
+        attempt = None
+        if consume_followups and not automatic:
+            attempt = await followups.begin(registry.log_dir, task_id, identifier, getattr(registry, '_owner', None))
+            if not attempt.items:
+                attempt = None
+        spawn_called = False
         try:
-            child = await registry.start(prompt, Path(source.repo_path), backend=get_backend(source.backend), freedom=source.freedom, model=source.model, reasoning_effort=source.reasoning_effort, network=source.network, max_turns=source.max_turns, group=source.group, title=source.title, task_id=identifier, auto_continue=max(source.auto_continue - 1, 0) if automatic else 0, continuation_of_task_id=task_id, chain_root_task_id=root, chain_prompt=None)
-            # Preserve delegation ownership, independently of fresh-session ancestry.
-            child.spawned_by, child.root_task_id = source.spawned_by, source.root_task_id
-            child.depth, child.max_depth = source.depth, source.max_depth
-            registry.persist(child)
+            if attempt is not None:
+                # context() appends one structural newline after the last section; drop exactly that
+                # one (the caller's own prose stays verbatim) so a large consuming prompt does not end
+                # in it, which vibe refuses over 32 KiB. The fingerprint above never saw these ids.
+                prompt = (await asyncio.to_thread(context, registry, source, extra_prompt, notes_path, attempt.items)).removesuffix('\n')
+            _write(path, {'task_id': identifier, 'state': 'reserved', 'chain_root_task_id': root, 'automatic': automatic, 'request_fingerprint': fingerprint})
+            try:
+                spawn_called = True
+                child = await registry.start(prompt, Path(source.repo_path), backend=get_backend(source.backend), freedom=source.freedom, model=source.model, reasoning_effort=source.reasoning_effort, network=source.network, max_turns=source.max_turns, group=source.group, title=source.title, task_id=identifier, auto_continue=max(source.auto_continue - 1, 0) if automatic else 0, continuation_of_task_id=task_id, chain_root_task_id=root, chain_prompt=None, **({'message_ids': attempt.ids} if attempt is not None else {}))
+                # Preserve delegation ownership, independently of fresh-session ancestry.
+                child.spawned_by, child.root_task_id = source.spawned_by, source.root_task_id
+                child.depth, child.max_depth = source.depth, source.max_depth
+                registry.persist(child)
+            except BaseException as exc:
+                if getattr(exc, 'polybridge_not_started', False):
+                    _write(path, {'task_id': identifier, 'state': 'not_started', 'chain_root_task_id': root, 'request_fingerprint': fingerprint})
+                raise
+            _write(path, {'task_id': identifier, 'state': 'started', 'chain_root_task_id': root, 'request_fingerprint': fingerprint})
         except BaseException as exc:
-            if getattr(exc, 'polybridge_not_started', False):
-                _write(path, {'task_id': identifier, 'state': 'not_started', 'chain_root_task_id': root, 'request_fingerprint': fingerprint})
+            if attempt is not None:
+                await attempt.fail(registry, exc, spawn_called)
             raise
-        _write(path, {'task_id': identifier, 'state': 'started', 'chain_root_task_id': root, 'request_fingerprint': fingerprint})
+        if attempt is not None:
+            await attempt.consumed(registry, child)
         return child
 
 

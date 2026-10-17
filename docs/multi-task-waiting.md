@@ -59,8 +59,10 @@ status. A record that cannot be re-read for 3 consecutive rounds stops an `until
 with `observation_unavailable`. A recovered task whose process is confirmed gone but whose exit was
 never observed stops either mode with `observation_unavailable` and `outcome_observed: false`
 (unless its owning polybridge server is still alive, in which case the wait keeps observing for a
-15 second grace while that server persists the outcome); every recovered response carries
-`outcome_observed` (true otherwise), and a live task carries it (true) once finished. The reported status is exactly what `get_task_status` resolves, an inference rather than an
+15 second grace while that server persists the outcome); `outcome_observed` is present only once the task is finished or the wait stopped as
+`observation_unavailable` (true when the outcome was observed, never present on a task still
+running); a bounded hold that runs out while the owner is still alive keeps `stop_reason: timeout`
+with `outcome_observed: false`. The reported status is exactly what `get_task_status` resolves, an inference rather than an
 observed outcome. If the status snapshot itself cannot be built after such a stop, a minimal
 `unknown` payload is returned instead of an error. If the task has settled by the time the hold
 ends, `stop_reason` is `terminal` and `timed_out` is false.

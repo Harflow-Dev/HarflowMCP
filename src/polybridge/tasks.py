@@ -32,7 +32,7 @@ import subprocess
 import sys
 import uuid
 import weakref
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from collections import deque
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -40,7 +40,7 @@ from pathlib import Path
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from typing import Any, Literal, NamedTuple
 
-from . import control, identity, inbox, lineage, retention, store
+from . import control, followups, identity, inbox, lineage, retention, store
 from .backends import (
     Accumulator,
     Backend,
@@ -871,6 +871,7 @@ class Task:
             "lineage_detected": self.lineage_detected,
             "live_input": self.live_input,
             "notices": list(self.bridge_notices),
+            "queued_followup_count": followups.outstanding_count(self.log_path.parent, self.task_id),
             "failure_diagnostic": self.acc.failure_diagnostic,
             "owner": self.owner,
             # Meaningful only while the task is still running — a settled task has no live server
@@ -1144,8 +1145,12 @@ class TaskRegistry:
         chain_root_task_id: str | None = None,
         chain_prompt: str | None = None,
         extra_writable_paths: list[str] | None = None,
+        message_ids: list[str] | None = None,
     ) -> Task:
-        """Dispatch a fresh session. Returns once the subprocess exists, not once it finishes."""
+        """Dispatch a fresh session. Returns once the subprocess exists, not once it finishes.
+
+        `message_ids` are the queued follow-ups a continuation consumed; its `task_started` event
+        carries them."""
         with _before_spawn():
             from .task_continuation import validate_budget
             validate_budget(auto_continue)
@@ -1217,19 +1222,23 @@ class TaskRegistry:
             continuation_of_task_id=continuation_of_task_id,
             chain_root_task_id=chain_root_task_id,
             chain_prompt=chain_prompt,
+            message_ids=message_ids,
         )
 
     @_with_authority_check_budget
-    async def continue_task(self, task_id: str, extra_prompt: str | None = None, notes_path: str | None = None, *, automatic: bool = False) -> Task:
-        """Start a fresh session from a durably settled task without broadening access."""
+    async def continue_task(self, task_id: str, extra_prompt: str | None = None, notes_path: str | None = None, *, automatic: bool = False, consume_followups: bool = False) -> Task:
+        """Start a fresh session from a durably settled task without broadening access.
+
+        `consume_followups` is set by the caller-facing paths only; an automatic continuation never
+        consumes."""
         from .task_continuation import continue_task
-        return await continue_task(self, task_id, extra_prompt, notes_path, automatic=automatic)
+        return await continue_task(self, task_id, extra_prompt, notes_path, automatic=automatic, consume_followups=consume_followups)
 
     @_with_authority_check_budget
     async def resume(
         self,
         parent: Task,
-        followup_prompt: str,
+        followup_prompt: str | None,
         *,
         max_turns: int | None = None,
         network: bool | None = None,
@@ -1239,8 +1248,17 @@ class TaskRegistry:
         native_subagent: bool = False,
         native_settings: dict[str, Any] | None = None,
         require_unchanged_session: bool = False,
+        consume_followups: bool = False,
     ) -> Task:
-        """Continue the session; strict inheritance may require no later writers."""
+        """Continue the session; strict inheritance may require no later writers.
+
+        `consume_followups` is set only by the caller-facing paths (`resume_task`, `polybridge-ctl
+        resume`): the task's queued follow-ups then go to this continuation, ahead of
+        `followup_prompt`, which may be omitted only when something is queued. It is a flag of its
+        own, never inferred from `task_id`, which keeps marking supervisor-owned resumes.
+        """
+        if followup_prompt is None and not consume_followups:
+            raise ValueError("followup_prompt is required")
         if parent.session_id is None:
             raise SessionUnknownError(
                 f"task {parent.task_id} never disclosed a session id, so its conversation cannot "
@@ -1302,16 +1320,105 @@ class TaskRegistry:
                         "removes aged tasks), so its conversation cannot be resumed; start a new "
                         "task instead"
                     )
-                invocation = backend.build_resume_argv(
-                    followup_prompt,
-                    repo=parent.repo_path,
-                    freedom=parent.freedom,  # type: ignore[arg-type]
+                return await self._launch_resume(
+                    backend=backend,
+                    parent_task_id=parent.task_id,
                     session_id=parent.session_id,
+                    repo_path=parent.repo_path,
+                    freedom=parent.freedom,
+                    model=parent.model,
+                    reasoning_effort=parent.reasoning_effort,
+                    # The resumed task's own title, whoever the caller is — unlike `group`.
+                    title=parent.title,
+                    followup_prompt=followup_prompt,
+                    max_turns=max_turns,
+                    effective_network=effective_network,
+                    grants=grants,
+                    native_subagent=native_subagent,
+                    native_settings=native_settings,
+                    workflow_builder=workflow_builder,
+                    display_prompt=display_prompt,
+                    spawned_by=spawned_by,
+                    root_task_id=root_task_id,
+                    depth=depth,
+                    max_depth=max_depth,
+                    group=resolved_group,
+                    lineage_detected=lineage_detected,
+                    task_id=task_id,
+                    consume_followups=consume_followups,
+                )
+        except control.LockTimeout:
+            raise SessionBusyError(
+                f"another resume of session {parent.session_id} is already in progress; "
+                "try again shortly"
+            ) from None
+
+    async def _launch_resume(
+        self,
+        *,
+        backend: Backend,
+        parent_task_id: str,
+        session_id: str,
+        repo_path: Path,
+        freedom: str,
+        model: str | None,
+        reasoning_effort: str | None,
+        title: str | None,
+        followup_prompt: str | None,
+        max_turns: int | None,
+        effective_network: bool | None,
+        grants: tuple,
+        native_subagent: bool,
+        native_settings: dict[str, Any] | None,
+        workflow_builder: bool,
+        display_prompt: str | None,
+        spawned_by: str | None,
+        root_task_id: str | None,
+        depth: int,
+        max_depth: int | None,
+        group: str | None,
+        lineage_detected: str | None,
+        task_id: str | None,
+        consume_followups: bool,
+    ) -> Task:
+        """Build and spawn a resume, consuming the parent's queued follow-ups when asked to.
+
+        Called with the session lock held, after every refusal check. The reservation is the last
+        step before the build; see `followups` for how a failure after it is resolved.
+        """
+        attempt: followups.Attempt | None = None
+        prompt = followup_prompt
+        spawn_id = task_id
+        if consume_followups:
+            spawn_id = task_id or str(uuid.uuid4())
+            attempt = await followups.begin(self._log_dir, parent_task_id, spawn_id, self._owner)
+            if attempt.items:
+                prompt = attempt.compose(followup_prompt)
+            else:
+                attempt = None
+                if followup_prompt is None:
+                    refusal = ValueError(
+                        f"task {parent_task_id} has no queued follow-ups, so followup_prompt is "
+                        "required"
+                    )
+                    refusal.polybridge_not_started = True  # type: ignore[attr-defined]
+                    raise refusal
+        assert prompt is not None
+        spawn_called = False
+        try:
+            # Failures before the spawn are flagged as provably not started, so a consumption
+            # releases its reservation; ordinary resumes keep their exceptions unmarked.
+            with _before_spawn() if attempt is not None else nullcontext():
+                invocation = backend.build_resume_argv(
+                    prompt,
+                    repo=repo_path,
+                    freedom=freedom,  # type: ignore[arg-type]
+                    session_id=session_id,
                     # Carried over so the continuation runs on the model and effort the run
                     # started with, and so what we report for it stays true.
-                    model=parent.model,
+                    model=model,
                     max_turns=max_turns,
-                    reasoning_effort=parent.reasoning_effort,
+                    reasoning_effort=reasoning_effort,
                     network=effective_network,
                 )
                 if native_subagent:
@@ -1324,36 +1431,39 @@ class TaskRegistry:
                     except Exception as exc:
                         exc.polybridge_not_started = True
                         raise
-                return await self._spawn(
-                    invocation,
-                    extra_path_grants=grants,
-                    backend=backend,
-                    prompt=followup_prompt,
-                    display_prompt=display_prompt,
-                    workflow_builder=workflow_builder,
-                    repo_path=parent.repo_path,
-                    session_id=parent.session_id,
-                    freedom=parent.freedom,
-                    max_turns=max_turns,
-                    model=parent.model,
-                    reasoning_effort=parent.reasoning_effort,
-                    network=effective_network,
-                    parent_task_id=parent.task_id,
-                    spawned_by=spawned_by,
-                    root_task_id=root_task_id,
-                    depth=depth,
-                    max_depth=max_depth,
-                    group=resolved_group,
-                    # The resumed task's own title, whoever the caller is — unlike `group`.
-                    title=parent.title,
-                    lineage_detected=lineage_detected,
-                    task_id=task_id,
-                )
-        except control.LockTimeout:
-            raise SessionBusyError(
-                f"another resume of session {parent.session_id} is already in progress; "
-                "try again shortly"
-            ) from None
+            spawn_called = True
+            task = await self._spawn(
+                invocation,
+                extra_path_grants=grants,
+                backend=backend,
+                prompt=prompt,
+                display_prompt=display_prompt,
+                workflow_builder=workflow_builder,
+                repo_path=repo_path,
+                session_id=session_id,
+                freedom=freedom,
+                max_turns=max_turns,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                network=effective_network,
+                parent_task_id=parent_task_id,
+                spawned_by=spawned_by,
+                root_task_id=root_task_id,
+                depth=depth,
+                max_depth=max_depth,
+                group=group,
+                title=title,
+                lineage_detected=lineage_detected,
+                task_id=spawn_id,
+                message_ids=attempt.ids if attempt is not None else None,
+            )
+        except BaseException as exc:
+            if attempt is not None:
+                await attempt.fail(self, exc, spawn_called)
+            raise
+        if attempt is not None:
+            await attempt.consumed(self, task)
+        return task
 
     async def _spawn(
         self,
@@ -1384,6 +1494,7 @@ class TaskRegistry:
         continuation_of_task_id: str | None = None,
         chain_root_task_id: str | None = None,
         chain_prompt: str | None = None,
+        message_ids: list[str] | None = None,
     ) -> Task:
         # Re-checked at the point of execution, not only where the argv was built, so no future
         # caller of this method can launch an agent without its backend's guarantees — and, now
@@ -1634,6 +1745,8 @@ class TaskRegistry:
                     "title": task.title,
                     "lineage_detected": task.lineage_detected,
                     "live_input": task.live_input,
+                    # The queued follow-ups this continuation consumed, in queue order.
+                    **({"message_ids": list(message_ids)} if message_ids else {}),
                 },
             )
         except Exception:
@@ -1773,11 +1886,9 @@ class TaskRegistry:
         from .workflow_hooks import refuse_direct_message
         await asyncio.to_thread(refuse_direct_message, self._log_dir, task.task_id)
         if not task.live_input:
-            raise inbox.SendRefused(
-                f"task {task.task_id} was not started with live input, so it cannot take a message "
-                "while it runs; continue it with resume_task once it has finished",
-                code="not_live_input",
-            )
+            # No live pipe to write to: the message waits in the follow-up ledger for the next
+            # continuation. The inbox, its lock and its close protocol are not involved.
+            return await self.queue_followup(task.task_id, task, text)
         if has_extra_path_authority(task):
             caller = await self._mutation_caller()
             await self._resolve_extra_paths_async(caller, None, get_backend(task.backend), task)
@@ -1811,17 +1922,34 @@ class TaskRegistry:
         await asyncio.to_thread(refuse_direct_message, self._log_dir, task_id)
         record = await asyncio.to_thread(store.read, self._log_dir, task_id)
         if record is not None and not record.live_input:
-            raise inbox.SendRefused(
-                f"task {task_id} was not started with live input, so it cannot take a message while "
-                "it runs; continue it with resume_task once it has finished",
-                code="not_live_input",
-            )
+            return await self.queue_followup(task_id, record, text)
         if record is not None and has_extra_path_authority(record):
             caller = await self._mutation_caller()
             await self._resolve_extra_paths_async(caller, None, get_backend(record.backend), record)
         return await asyncio.to_thread(
             inbox.send_to_record, self._log_dir, task_id, text, by=self._owner
         )
+
+    async def queue_followup(self, task_id: str, source: Any, text: str) -> dict[str, Any]:
+        """Queue `text` for the next continuation of a task without live input. `source` is the
+        live `Task` or recovered record, for the extra-path authority check. Returns "queued"
+        with `delivery: "next_continuation"` — nothing was started or delivered."""
+        if has_extra_path_authority(source):
+            caller = await self._mutation_caller()
+            await self._resolve_extra_paths_async(caller, None, get_backend(source.backend), source)
+        return await asyncio.to_thread(followups.send, self._log_dir, task_id, text, by=self._owner)
+
+    async def cancel_queued_followup(self, task_id: str, message_id: str) -> dict[str, Any]:
+        """Cancel a still-queued follow-up, under the checks a send takes."""
+        from .workflow_hooks import refuse_direct_message
+        await asyncio.to_thread(refuse_direct_message, self._log_dir, task_id)
+        record = await asyncio.to_thread(store.read, self._log_dir, task_id)
+        if record is None:
+            raise inbox.SendRefused(f"unknown task_id: {task_id}", code="unknown_task")
+        if has_extra_path_authority(record):
+            caller = await self._mutation_caller()
+            await self._resolve_extra_paths_async(caller, None, get_backend(record.backend), record)
+        return await asyncio.to_thread(followups.cancel, self._log_dir, task_id, message_id)
 
     def _take_pending(self, task: Task) -> list[dict[str, Any]]:
         """Everything queued, from this server and from other processes, in queue order. Call with
@@ -3076,7 +3204,7 @@ class TaskRegistry:
     async def resume_record(
         self,
         record: store.TaskRecord,
-        followup_prompt: str,
+        followup_prompt: str | None,
         *,
         max_turns: int | None = None,
         network: bool | None = None,
@@ -3086,8 +3214,11 @@ class TaskRegistry:
         native_subagent: bool = False,
         native_settings: dict[str, Any] | None = None,
         require_unchanged_session: bool = False,
+        consume_followups: bool = False,
     ) -> Task:
-        """Continue the session of a task recovered from disk."""
+        """Continue the session of a task recovered from disk (see `resume` for the flags)."""
+        if followup_prompt is None and not consume_followups:
+            raise ValueError("followup_prompt is required")
         if not record.session_id:
             raise SessionUnknownError(
                 f"task {record.task_id} never disclosed a session id, so its conversation cannot "
@@ -3151,49 +3282,32 @@ class TaskRegistry:
                         "removes aged tasks), so its conversation cannot be resumed; start a new "
                         "task instead"
                     )
-                invocation = backend.build_resume_argv(
-                    followup_prompt,
-                    repo=repo_path,
-                    freedom=record.freedom,  # type: ignore[arg-type]
-                    session_id=record.session_id,
-                    model=record.model,
-                    max_turns=max_turns,
-                    reasoning_effort=record.reasoning_effort,
-                    network=effective_network,
-                )
-                if native_subagent:
-                    from .backends.native import adapter
-                    native = adapter(backend)
-                    if native is None:
-                        raise ValueError("No certified native adapter")
-                    try:
-                        invocation = native.configure(invocation, native_settings) if native_settings is not None else native.configure(invocation)
-                    except Exception as exc:
-                        exc.polybridge_not_started = True
-                        raise
-                return await self._spawn(
-                    invocation,
-                    extra_path_grants=grants,
+                return await self._launch_resume(
                     backend=backend,
-                    prompt=followup_prompt,
-                    display_prompt=display_prompt,
-                    workflow_builder=workflow_builder,
-                    repo_path=repo_path,
+                    parent_task_id=record.task_id,
                     session_id=record.session_id,
+                    repo_path=repo_path,
                     freedom=record.freedom,
-                    max_turns=max_turns,
                     model=record.model,
                     reasoning_effort=record.reasoning_effort,
-                    network=effective_network,
-                    parent_task_id=record.task_id,
+                    # The resumed task's own title, whoever the caller is — unlike `group`.
+                    title=record.title,
+                    followup_prompt=followup_prompt,
+                    max_turns=max_turns,
+                    effective_network=effective_network,
+                    grants=grants,
+                    native_subagent=native_subagent,
+                    native_settings=native_settings,
+                    workflow_builder=workflow_builder,
+                    display_prompt=display_prompt,
                     spawned_by=spawned_by,
                     root_task_id=root_task_id,
                     depth=depth,
                     max_depth=max_depth,
                     group=resolved_group,
-                    title=record.title,
                     lineage_detected=lineage_detected,
                     task_id=task_id,
+                    consume_followups=consume_followups,
                 )
         except control.LockTimeout:
             raise SessionBusyError(
