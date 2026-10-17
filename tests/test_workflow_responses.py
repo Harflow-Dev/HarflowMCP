@@ -87,11 +87,11 @@ async def test_workflow_entry_rejects_freedom_before_dispatch(entry):
 async def test_undecidable_workflow_reader_fails_closed(monkeypatch):
     from types import SimpleNamespace
     from polybridge import lineage
-    async def caller():
+    async def caller(*args, **kwargs):
         return None
     registry = SimpleNamespace(_detect_caller=caller, log_dir=__import__('pathlib').Path('/tmp/tasks'))
     monkeypatch.setattr(server, '_reg', lambda: registry)
-    monkeypatch.setattr(lineage, 'detect_caller_detail', lambda *args: lineage.Detection(None, undecidable='unreadable ancestry'))
+    monkeypatch.setattr(lineage, 'detect_caller_detail', lambda *args, **kwargs: lineage.Detection(None, undecidable='unreadable ancestry'))
     with pytest.raises(Exception, match='undecidable'):
         await server.get_workflow_run_detail('r', 'definition')
 

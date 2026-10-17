@@ -20,7 +20,7 @@ async def test_builder_reader_is_scoped_without_delegation_contract(tmp_path, mo
         value=await server._managed_workflow_reader()
     else:
         from polybridge import lineage
-        monkeypatch.setattr(lineage,'detect_caller',lambda *a:source)
+        monkeypatch.setattr(lineage,'detect_caller',lambda *a,**k:source)
         value=wi.managed_reader(tmp_path/'tasks')
     assert value==(association,run)
 
@@ -104,8 +104,8 @@ async def test_verified_builder_caller_survives_transient_redetection(tmp_path, 
     monkeypatch.setattr(w,'WorkflowStore',lambda root=None:storage)
     monkeypatch.setattr(w,'_launch',lambda *a:None)
     monkeypatch.setattr(backends,'is_installed',lambda _:True)
-    monkeypatch.setattr(lineage,'detect_caller',lambda *a:None)
-    monkeypatch.setattr(lineage,'detect_caller_detail',lambda *a:lineage.Detection(None,'transient process lookup failure'))
+    monkeypatch.setattr(lineage,'detect_caller',lambda *a,**k:None)
+    monkeypatch.setattr(lineage,'detect_caller_detail',lambda *a,**k:lineage.Detection(None,'transient process lookup failure'))
     initial_runs=[]
     original_write=w._write
     def observed_write(path,value):
@@ -125,8 +125,8 @@ async def test_verified_builder_caller_survives_transient_redetection(tmp_path, 
 @pytest.mark.parametrize('entry',['build','start'])
 async def test_direct_workflow_entry_refuses_uncertain_caller_before_persistence(tmp_path,monkeypatch,entry):
     from polybridge import lineage
-    monkeypatch.setattr(lineage,'detect_caller',lambda *a:None)
-    monkeypatch.setattr(lineage,'detect_caller_detail',lambda *a:lineage.Detection(None,'unreadable ancestry'))
+    monkeypatch.setattr(lineage,'detect_caller',lambda *a,**k:None)
+    monkeypatch.setattr(lineage,'detect_caller_detail',lambda *a,**k:lineage.Detection(None,'unreadable ancestry'))
     monkeypatch.setattr(w,'_launch',lambda *a:(_ for _ in ()).throw(AssertionError('must not launch')))
     monkeypatch.setattr(backends,'is_installed',lambda _:True)
     with pytest.raises(ValueError,match='undecidable'):

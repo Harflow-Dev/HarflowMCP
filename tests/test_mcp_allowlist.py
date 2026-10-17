@@ -115,7 +115,7 @@ def test_cli_read_and_write_human_guard(home, monkeypatch, capsys):
 
 
 @pytest.mark.parametrize('notification_source', ['environment', 'database'])
-def test_cli_allowlist_without_loop_defers_notification_worker(
+def test_cli_allowlist_never_installs_a_registry_or_notification_worker(
     home, monkeypatch, capsys, notification_source,
 ):
     from polybridge import ctl, notifications, server, takeover
@@ -123,7 +123,6 @@ def test_cli_allowlist_without_loop_defers_notification_worker(
 
     registry = TaskRegistry(log_dir=home / '.polybridge' / 'tasks')
     monkeypatch.setattr(server, '_registry', None)
-    monkeypatch.setattr(server, 'TaskRegistry', lambda: registry)
     monkeypatch.delenv('PB_NOTIFY_DESTINATIONS', raising=False)
     if notification_source == 'environment':
         monkeypatch.setenv('PB_NOTIFY_DESTINATIONS', json.dumps({
@@ -152,8 +151,8 @@ def test_cli_allowlist_without_loop_defers_notification_worker(
         gc.collect()
     assert json.loads(capsys.readouterr().out)['result'] == result
     assert [str(item.message) for item in caught] == []
-    assert server._registry is registry
-    assert getattr(registry, '_notification_worker', None) is None
+    # The allowlist edit needs no registry: none is installed, so no worker can be started.
+    assert server._registry is None
     assert started == []
 
     async def later_startup():

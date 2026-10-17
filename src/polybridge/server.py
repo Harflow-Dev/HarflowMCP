@@ -159,6 +159,21 @@ def _start_notification_worker(registry: TaskRegistry) -> None:
         registry._notification_worker = loop.create_task(worker(registry.log_dir), name='pb-notifications')
 
 
+def install_cli_registry(log_dir: Path | None = None) -> TaskRegistry:
+    """Give `polybridge-ctl` the registry-backed server helpers, without their side effects.
+
+    ctl has no MCP session, so unlike `_reg()` this never starts the maintenance sweep (retention
+    is a live-server job — see `retention.py`'s own contract) and never starts the notification
+    worker (ctl's `asyncio.run` loop would cancel it mid-delivery anyway). Only installs when no
+    registry is installed yet: an already-injected registry (a test, an embedding) is left
+    untouched.
+    """
+    global _registry
+    if _registry is None:
+        _registry = TaskRegistry(log_dir=log_dir, open_monitor=False)
+    return _registry
+
+
 async def _notification_authority() -> None:
     if await _verified_workflow_caller() is not None:
         raise MCPError(INVALID_PARAMS, 'Completion subscriptions require a direct caller; delegated tasks cannot authorize server network egress')
@@ -1302,10 +1317,14 @@ async def _filter_task_reads(entries: list[dict[str, Any]]) -> list[dict[str, An
 async def _verified_workflow_caller():
     """Read/mutation authority must distinguish a human from failed detection."""
     from . import lineage
-    caller = await _reg()._detect_caller()
+    # One metadata scan feeds both detection phases (previously three per read).
+    candidates = await asyncio.to_thread(lineage.read_candidates, _reg().log_dir)
+    caller = await _reg()._detect_caller(candidates=candidates)
     if caller is not None:
         return caller
-    detection = await asyncio.to_thread(lineage.detect_caller_detail, _reg().log_dir)
+    detection = await asyncio.to_thread(
+        lineage.detect_caller_detail, _reg().log_dir, candidates=candidates
+    )
     if detection.undecidable is not None:
         raise MCPError(INVALID_PARAMS, "Workflow caller authority is undecidable: " + str(detection.undecidable))
     if detection.caller is not None:
@@ -1465,8 +1484,8 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
             return await workflows.followup_workflow_builder(**kwargs)
         managed = await _managed_workflow_reader()
         if action == "assigned_input":
-            from .workflow_inspection import assigned_input_page
-            return await asyncio.to_thread(assigned_input_page, managed, workflows.WorkflowStore().root, kwargs["run_id"], kwargs["execution_id"], source_run_id=kwargs.get("source_run_id"), task_id=kwargs.get("task_id"), cursor=kwargs.get("cursor"), limit=kwargs.get("limit", 16000))
+            from .workflow_node_reads import assigned_input_node
+            return await asyncio.to_thread(assigned_input_node, managed, kwargs["run_id"], kwargs["execution_id"], source_run_id=kwargs.get("source_run_id"), task_id=kwargs.get("task_id"), cursor=kwargs.get("cursor"), limit=kwargs.get("limit", 16000))
         if managed is not None:
             association, owned_run = managed
             if association["role"] == "builder":
@@ -1486,10 +1505,8 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
         if action == "delete":
             return await asyncio.to_thread(store_.delete, kwargs["name"])
         if action == "inspect":
-            from .workflow_inspection import inspect_request
-            run = await asyncio.to_thread(store_.get_run, kwargs["run_id"])
-            request = {key: value for key, value in kwargs.items() if key != "run_id"}
-            return await asyncio.to_thread(inspect_request, run, store_.root, request)
+            from .workflow_node_reads import inspect_node
+            return await asyncio.to_thread(inspect_node, managed, kwargs["run_id"], execution_id=kwargs["execution_id"], task_id=kwargs.get("task_id"), view=kwargs.get("view", "result"), cursor=kwargs.get("cursor"), limit=kwargs.get("limit"), before_seq=kwargs.get("before_seq"), after_seq=kwargs.get("after_seq"))
         return await asyncio.to_thread(store_.control, action=action, **kwargs)
     except (ValueError, KeyError, OSError, backends.UnsupportedCapability) as exc:
         data = None

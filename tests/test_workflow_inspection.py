@@ -92,13 +92,16 @@ async def test_human_reads_unchanged(monkeypatch):
 
 
 def test_cli_inspection_parity(monkeypatch, capsys):
+    from polybridge import workflow_inspection, workflow_node_reads
     observed = []
-    async def inspect(*args):
-        observed.extend(args)
+    managed = object()
+    monkeypatch.setattr(workflow_inspection, "managed_reader", lambda log_dir: managed)
+    def inspect(resolved, run_id, *, execution_id, task_id, view, cursor, limit, before_seq, after_seq):
+        observed.extend((resolved, run_id, execution_id, task_id, view, cursor, limit, before_seq, after_seq))
         return {"chunk": "{}", "has_more": False}
-    monkeypatch.setattr(server, "inspect_workflow_node", inspect)
+    monkeypatch.setattr(workflow_node_reads, "inspect_node", inspect)
     assert ctl.main(["workflow-inspect", "r1", "e1", "--task-id", "t1", "--view", "activity", "--limit", "5", "--after-seq", "7", "--json"]) == 0
-    assert observed == ["r1", "e1", "t1", "activity", None, 5, None, 7]
+    assert observed == [managed, "r1", "e1", "t1", "activity", None, 5, None, 7]
     assert json.loads(capsys.readouterr().out)["result"]["has_more"] is False
 
 

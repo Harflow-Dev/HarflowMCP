@@ -80,3 +80,27 @@ local reproducibility sample, not a latency guarantee or a cold-bootstrap claim.
 Group matching uses a separate bounded index of the exact label, even when the
 displayed header is shortened. The v9 derivative catalog rebuilds existing history
 through the usual bounded bootstrap; retry while `bootstrap_pending` is true.
+
+## Batched full status reads
+
+`polybridge-ctl status-batch --task-ids TASK1,TASK2 --json` returns several full
+snapshots in one document and one process:
+`{"v": 11, "tasks": [<snapshot>...], "errors": {"<id>": {"code", "message"}}}`.
+It is an additive command under `CTL_JSON_VERSION` 11 — no existing document
+changes shape. Entries are exactly what `status <id> --json` reports (only a
+running task's `duration_seconds`, computed per call, may differ), and `errors`
+carries the same codes single `status` reports: `unknown_task`, read-refusal
+codes, and `invalid_task_id`. A whole-batch refusal — including undecidable
+caller authority — is the `status` error shape for the whole command, never
+partial data. At most 100 exact comma-separated ids per call; duplicates are
+collapsed. There is no `--brief` variant.
+
+The command reads caller metadata once for the whole batch (the same one-scan
+caller detection `status` and the MCP workflow reads use) and, like every other
+ctl read, never starts retention, never starts the notification worker, and
+never constructs a registry. The workflow node reads (`workflow inspect`,
+`workflow assigned-input`) share the MCP tools' checks through
+`workflow_node_reads` and never import the MCP server module; the ctl paths
+that do need registry-backed server helpers (`permission-preview`, mutating
+workflow actions) install a registry without the maintenance sweep or the
+notification worker. See the Monitor contract notes in CLAUDE.md.

@@ -268,10 +268,12 @@ def managed_reader(log_dir: Any) -> tuple[dict[str, Any], dict[str, Any]] | None
     """CLI caller verification without constructing a registry or running maintenance."""
     from . import lineage
     from .workflows import WorkflowStore
-    caller = lineage.detect_caller(log_dir)
+    # One metadata scan feeds both detection phases (previously three per read).
+    candidates = lineage.read_candidates(log_dir)
+    caller = lineage.detect_caller(log_dir, candidates=candidates)
     if caller is None:
         import os
-        detection = lineage.detect_caller_detail(log_dir)
+        detection = lineage.detect_caller_detail(log_dir, candidates=candidates)
         if detection.undecidable is not None:
             raise ValueError("Workflow caller authority is undecidable: " + str(detection.undecidable))
         caller = detection.caller

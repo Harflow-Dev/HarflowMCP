@@ -222,6 +222,62 @@ def _candidates(log_dir: Path) -> list[store.TaskRecord]:
     ]
 
 
+class _CandidateReadFailure:
+    """The sentinel `read_candidates` returns when the candidate scan failed.
+
+    Carries the exception so the failure messages below stay byte-identical to the ones the
+    scanning path produces when `_candidates` raises inside `detect_caller`/`detect_caller_detail`.
+    """
+
+    __slots__ = ("exc",)
+
+    def __init__(self, exc: BaseException) -> None:
+        self.exc = exc
+
+
+class CandidateScan:
+    """One lazily-read, memoized metadata scan shared by a call site's detection phases.
+
+    Lazy so a stubbed `detect_caller` (the test seam) never triggers a scan it would ignore, and
+    so the scan happens at most once however many phases consume it.
+    """
+
+    __slots__ = ("_log_dir", "_value")
+
+    def __init__(self, log_dir: Path) -> None:
+        self._log_dir = log_dir
+        self._value: list[store.TaskRecord] | _CandidateReadFailure | None = None
+
+    def resolve(self) -> list[store.TaskRecord] | _CandidateReadFailure:
+        if self._value is None:
+            try:
+                self._value = _candidates(self._log_dir)
+            except Exception as exc:
+                log.debug("caller candidate scan failed", exc_info=True)
+                self._value = _CandidateReadFailure(exc)
+        return self._value
+
+
+def read_candidates(log_dir: Path) -> CandidateScan:
+    """A shared candidate scan for a call site that needs both `detect_caller` and
+    `detect_caller_detail`: pass it to each as `candidates=` so one `store.read_all` serves both
+    phases instead of three. Never raises; a failed read resolves to the sentinel, which makes
+    `detect_caller` answer None and `detect_caller_detail` fail closed, exactly as a scan raising
+    inside them does today.
+    """
+    return CandidateScan(log_dir)
+
+
+def _resolve_candidates(
+    log_dir: Path, candidates: list[store.TaskRecord] | _CandidateReadFailure | CandidateScan | None
+) -> list[store.TaskRecord] | _CandidateReadFailure:
+    if candidates is None:
+        return _candidates(log_dir)
+    if isinstance(candidates, CandidateScan):
+        return candidates.resolve()
+    return candidates
+
+
 def _own_sid(getsid: Callable[[int], int]) -> int | None:
     try:
         return getsid(0)
@@ -316,6 +372,7 @@ def detect_caller(
     getpid: Callable[[], int] = os.getpid,
     process_table: Callable[[], Mapping[int, int] | None] | None = None,
     check: Callable[[Mapping[str, Any]], str] | None = None,
+    candidates: list[store.TaskRecord] | _CandidateReadFailure | CandidateScan | None = None,
 ) -> Caller | None:
     """Find the task (if any) that dispatched the current process, best-effort.
 
@@ -325,6 +382,10 @@ def detect_caller(
     would find a record first. Never raises: any failure (an unreadable `ps`, a corrupt record, a
     getsid error) is logged at debug and treated as "no caller found", per CLAUDE.md's rule that
     bookkeeping must never change an outcome.
+
+    `candidates` reuses one metadata scan (from `read_candidates`) across both detection phases of
+    a call site; the `_CandidateReadFailure` sentinel it returns on a failed read makes this
+    answer None, the same as a scan that raises here.
 
     `check` defaults to `identity.identity_check`, resolved through the module attribute at call
     time rather than bound as the parameter's default value — a default bound at import time would
@@ -336,7 +397,10 @@ def detect_caller(
     env = environ if environ is not None else os.environ
     check = check if check is not None else identity.identity_check
     try:
-        candidates = _candidates(log_dir)
+        candidates = _resolve_candidates(log_dir, candidates)
+        if isinstance(candidates, _CandidateReadFailure):
+            log.debug("caller detection failed", exc_info=candidates.exc)
+            return None
         found = _by_pb_task_id(log_dir, env, candidates, getsid, getpid, table_fn, check)
         if found is not None:
             return found
@@ -374,6 +438,7 @@ def detect_caller_detail(
     getpid: Callable[[], int] = os.getpid,
     process_table: Callable[[], Mapping[int, int] | None] | None = None,
     check: Callable[[Mapping[str, Any]], str] | None = None,
+    candidates: list[store.TaskRecord] | _CandidateReadFailure | CandidateScan | None = None,
 ) -> Detection:
     """`detect_caller` for a gate that must fail closed (takeover is for people only).
 
@@ -381,10 +446,20 @@ def detect_caller_detail(
     look — `ps` missing or denied, an unreadable session, an exception — which is the right answer
     for lineage (a task with no detected caller is simply a root) and the wrong one for a gate. This
     tells the two apart: `Detection(None, None)` only once the negative was actually established.
+
+    `candidates` reuses one metadata scan (from `read_candidates`) for both this gate's phases; the
+    `_CandidateReadFailure` sentinel it returns on a failed read fails closed here with the same
+    message a scan raising inside would produce.
     """
     table_fn = process_table if process_table is not None else _default_process_table
     check_fn = check if check is not None else identity.identity_check
     try:
+        candidates = _resolve_candidates(log_dir, candidates)
+        if isinstance(candidates, _CandidateReadFailure):
+            return Detection(
+                None,
+                f"caller detection failed: {type(candidates.exc).__name__}: {candidates.exc}",
+            )
         caller = _real_detect_caller(
             log_dir,
             environ=environ,
@@ -392,6 +467,7 @@ def detect_caller_detail(
             getpid=getpid,
             process_table=table_fn,
             check=check_fn,
+            candidates=candidates,
         )
         if caller is not None:
             return Detection(caller)
@@ -411,7 +487,9 @@ def detect_caller_detail(
         if sid is None:
             return Detection(None, "this process's session id could not be read")
         chain = set(ancestors(own_pid, table))
-        for record in _candidates(log_dir):
+        # Deliberate (single-scan design): reuses the list read before `ps`; a related record that
+        # appears between the reads is not seen, which is fine as the caller's own record predates its ctl call.
+        for record in candidates:
             related = (record.pgid is not None and record.pgid == sid) or (
                 record.pid is not None and record.pid in chain
             )

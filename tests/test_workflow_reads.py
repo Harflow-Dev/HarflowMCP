@@ -72,8 +72,8 @@ async def test_ordinary_cli_authority_fails_closed(monkeypatch, tmp_path, identi
         monkeypatch.setenv(lineage.ENV_TASK_ID, identity)
     else:
         monkeypatch.delenv(lineage.ENV_TASK_ID, raising=False)
-    monkeypatch.setattr(lineage, 'detect_caller', lambda _: None)
-    monkeypatch.setattr(lineage, 'detect_caller_detail', lambda _: SimpleNamespace(caller=None, undecidable=undecidable))
+    monkeypatch.setattr(lineage, 'detect_caller', lambda *args, **kwargs: None)
+    monkeypatch.setattr(lineage, 'detect_caller_detail', lambda *args, **kwargs: SimpleNamespace(caller=None, undecidable=undecidable))
     with pytest.raises(ValueError, match=message):
         await workflow_reads.call('list', directory=tmp_path / 'tasks')
 
@@ -118,7 +118,7 @@ async def test_real_ownership_receipt_enforces_expected_read_scope(monkeypatch, 
     directory = storage.root / 'tasks'
     store.bootstrap_catalog(directory)
     caller = SimpleNamespace(record=SimpleNamespace(task_id='owned-caller'))
-    monkeypatch.setattr(lineage, 'detect_caller', lambda _: caller)
+    monkeypatch.setattr(lineage, 'detect_caller', lambda *args, **kwargs: caller)
     monkeypatch.setattr(lineage, 'detect_catalog_caller', lambda _: SimpleNamespace(caller=caller, undecidable=None))
     # The only stub is verified process detection. Durable receipt/run matching is real.
     assert storage.task_owner('owned-caller', strict=True)['role'] == role
@@ -152,8 +152,8 @@ async def test_verified_human_reads_real_saved_definition(monkeypatch, tmp_path,
     directory = storage.root / 'tasks'
     store.bootstrap_catalog(directory)
     detection = SimpleNamespace(caller=None, undecidable=None)
-    monkeypatch.setattr(lineage, 'detect_caller', lambda _: None)
-    monkeypatch.setattr(lineage, 'detect_caller_detail', lambda _: detection)
+    monkeypatch.setattr(lineage, 'detect_caller', lambda *args, **kwargs: None)
+    monkeypatch.setattr(lineage, 'detect_caller_detail', lambda *args, **kwargs: detection)
     monkeypatch.setattr(lineage, 'detect_catalog_caller', lambda _: detection)
     assert await workflow_reads.call('list', directory=directory, _bounded_read=bounded) == [saved]
 

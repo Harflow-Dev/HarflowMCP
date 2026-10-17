@@ -1,9 +1,13 @@
 """polybridge-ctl: a CLI over the task records `polybridge-server` writes to disk.
 
-Deliberately separate from the MCP server, and it never starts retention. `list` and `status` only
-read what `store` and `tasks.default_log_dir` already expose (which is also why `list`'s status
-resolution is cheap for a settled task — see `store.resolve_status`'s `detail=False` shortcut), and
-never construct a `TaskRegistry`. `send` appends a message to a live-input task's inbox under that
+Deliberately separate from the MCP server, and it never starts retention. `list`, `status` and
+`status-batch` only read what `store` and `tasks.default_log_dir` already expose (which is also
+why `list`'s status resolution is cheap for a settled task — see `store.resolve_status`'s
+`detail=False` shortcut), and never construct a `TaskRegistry`. The workflow node reads
+(`inspect`/`assigned-input`) share the server's checks through `workflow_node_reads` and never
+import the server module; the ctl paths that do need registry-backed server helpers install one
+with `server.install_cli_registry`, which starts neither the maintenance sweep nor the
+notification worker. `send` appends a message to a live-input task's inbox under that
 inbox's lock (see `inbox.py`) for the owning server to deliver.
 
 The control commands act (A4.2): `cancel` runs the same cascade as `cancel_task` from a registry
@@ -126,6 +130,14 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     status_p.add_argument("task_id")
     status_p.add_argument("--json", action="store_true")
     status_p.add_argument("--brief", action="store_true", help="bounded display projection")
+
+    status_batch_p = sub.add_parser(
+        "status-batch", help="show several tasks' full state in one document (at most 100 ids)"
+    )
+    status_batch_p.add_argument(
+        "--task-ids", required=True, help="comma-separated exact task ids, at most 100"
+    )
+    status_batch_p.add_argument("--json", action="store_true")
 
     send_p = sub.add_parser(
         "send", help="queue a message for a running live-input task (reports queued, not delivered)"
@@ -327,6 +339,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
         list_p,
         backends_p,
         status_p,
+        status_batch_p,
         send_p,
         cancel_p,
         takeover_p,
@@ -424,33 +437,52 @@ def _cmd_backends(args: argparse.Namespace) -> int:
     return 0
 
 
+class _StatusReadRefused(Exception):
+    """One task id's share of a read: the same code and message single `status` reports."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+def _status_snapshot(log_dir: Path, task_id: str, managed: Any) -> dict[str, Any]:
+    """One task's full snapshot — the shared body of `status` and `status-batch`.
+
+    Raises `_StatusReadRefused` with the same `code`/`message` a single `status` reports for this
+    id, so a batch entry and a direct status call can never disagree. `task_id` must already be
+    validated (invariant 8: an id is validated before it can become a path).
+    """
+    from .workflow_inspection import guard_task_read
+    try:
+        guard_task_read(task_id, managed)
+    except Exception as exc:
+        raise _StatusReadRefused("workflow_read_refused", str(exc)) from None
+    record = store.read(log_dir, task_id)
+    if record is None:
+        raise _StatusReadRefused("unknown_task", f"unknown task_id: {task_id}")
+    from .workflow_inspection import decorate_tasks
+    return decorate_tasks([store.snapshot(log_dir, record)], log_dir)[0]
+
+
 def _cmd_status(args: argparse.Namespace) -> int:
     log_dir = default_log_dir()
     try:
         task_id = store.validate_task_id(args.task_id)
     except store.InvalidTaskId:
-        message = f"not a valid task id: {args.task_id!r}"
-        print(f"polybridge-ctl: error: {message}", file=sys.stderr)
-        if args.json:
-            print(json.dumps({"v": CTL_JSON_VERSION, "error": {"code": "invalid_task_id", "message": message}}))
-        return 1
+        return _fail(args, "invalid_task_id", f"not a valid task id: {args.task_id!r}")
 
-    from .workflow_inspection import guard_task_read, managed_reader
+    from .workflow_inspection import managed_reader
     try:
-        guard_task_read(task_id, managed_reader(log_dir))
+        managed = managed_reader(log_dir)
     except Exception as exc:
         return _fail(args, "workflow_read_refused", str(exc))
 
-    record = store.read(log_dir, task_id)
-    if record is None:
-        message = f"unknown task_id: {task_id}"
-        print(f"polybridge-ctl: error: {message}", file=sys.stderr)
-        if args.json:
-            print(json.dumps({"v": CTL_JSON_VERSION, "error": {"code": "unknown_task", "message": message}}))
-        return 1
+    try:
+        snapshot = _status_snapshot(log_dir, task_id, managed)
+    except _StatusReadRefused as exc:
+        return _fail(args, exc.code, exc.message)
 
-    from .workflow_inspection import decorate_tasks
-    snapshot = decorate_tasks([store.snapshot(log_dir, record)], log_dir)[0]
     if getattr(args, 'brief', False):
         from .task_reads import brief_status
         from .events import events_path, read_recent
@@ -461,6 +493,53 @@ def _cmd_status(args: argparse.Namespace) -> int:
     else:
         for key, value in snapshot.items():
             print(f"{key}: {value}")
+    return 0
+
+
+# One `status-batch` bounds both the work and the document: the Monitor polls leased tasks
+# through it, and 100 snapshots is already a large response.
+STATUS_BATCH_MAX_IDS = 100
+
+
+def _cmd_status_batch(args: argparse.Namespace) -> int:
+    log_dir = default_log_dir()
+    ids = list(dict.fromkeys(args.task_ids.split(",")))
+    if not 1 <= len(ids) <= STATUS_BATCH_MAX_IDS:
+        return _fail(
+            args,
+            "invalid_params",
+            f"status-batch takes 1..{STATUS_BATCH_MAX_IDS} comma-separated task ids, got {len(ids)}",
+        )
+    # Invariant 8: every id is validated before any of them can become a path.
+    valid: list[str] = []
+    errors: dict[str, dict[str, str]] = {}
+    for raw in ids:
+        try:
+            valid.append(store.validate_task_id(raw))
+        except store.InvalidTaskId:
+            errors[raw] = {"code": "invalid_task_id", "message": f"not a valid task id: {raw!r}"}
+
+    from .workflow_inspection import managed_reader
+    try:
+        managed = managed_reader(log_dir)
+    except Exception as exc:
+        # Undecidable caller authority refuses the whole batch — never partial data.
+        return _fail(args, "workflow_read_refused", str(exc))
+
+    tasks: list[dict[str, Any]] = []
+    for task_id in valid:
+        try:
+            tasks.append(_status_snapshot(log_dir, task_id, managed))
+        except _StatusReadRefused as exc:
+            errors[task_id] = {"code": exc.code, "message": exc.message}
+
+    if args.json:
+        print(json.dumps({"v": CTL_JSON_VERSION, "tasks": tasks, "errors": errors}))
+    else:
+        for snapshot in tasks:
+            print(f"{snapshot.get('task_id')}: {snapshot.get('status')}")
+        for error in errors.values():
+            print(f"polybridge-ctl: error: {error['message']}", file=sys.stderr)
     return 0
 
 
@@ -754,18 +833,36 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
             with span("import"):
                 from .workflow_reads import cli_read
             return await cli_read(action, args, default_log_dir())
-        from . import server
+        if action in {"assigned-input", "inspect"}:
+            # Node reads resolve their own managed authority and share the server's checks through
+            # `workflow_node_reads`, so they never import the MCP server module (with its MCP
+            # stack, retention startup and notification worker).
+            from . import workflow_node_reads
+            from .workflow_inspection import managed_reader
+            managed = managed_reader(default_log_dir())
+            try:
+                if action == "assigned-input":
+                    return await asyncio.to_thread(workflow_node_reads.assigned_input_node, managed, args.workflow_run_id, args.execution_id, source_run_id=args.source_run_id, task_id=args.task_id, cursor=args.cursor, limit=args.limit)
+                return await asyncio.to_thread(workflow_node_reads.inspect_node, managed, args.workflow_run_id, execution_id=args.execution_id, task_id=args.task_id, view=args.view, cursor=args.cursor, limit=args.limit, before_seq=args.before_seq, after_seq=args.after_seq)
+            except (ValueError, KeyError, OSError, backends.UnsupportedCapability) as exc:
+                # Only the exception set the server path converts; anything else reaches the outer
+                # handler as for other commands. The same message/data mapping the MCP path applies, so the CLI reports
+                # the identical refusal. The MCP import stays on this failure path only.
+                from mcp import MCPError
+                from mcp.types import INVALID_PARAMS
+                message, data = workflow_node_reads.error_payload(exc)
+                raise MCPError(INVALID_PARAMS, message, data=data) from None
         if action == "abandon-dispatch":
             from .workflows import WorkflowStore
             from .takeover import caller_refusal
-            refusal = await asyncio.to_thread(caller_refusal, server._reg().log_dir)
+            refusal = await asyncio.to_thread(caller_refusal, default_log_dir())
             if refusal is not None:
                 raise ValueError("Only a verified human may abandon an uncertain dispatch: " + refusal[1])
             return await asyncio.to_thread(WorkflowStore().abandon_dispatch, args.workflow_run_id, args.execution_id, args.task_id, args.reason, args.confirm_no_process)
-        if action == "assigned-input":
-            return await server.read_workflow_assigned_input(args.workflow_run_id, args.execution_id, args.source_run_id, args.task_id, args.cursor, args.limit)
-        if action == "inspect":
-            return await server.inspect_workflow_node(args.workflow_run_id, args.execution_id, args.task_id, args.view, args.cursor, args.limit, args.before_seq, args.after_seq)
+        from . import server
+        # Registry-backed helpers below get a registry without maintenance or notifications: ctl
+        # has no MCP session, and its asyncio.run loop would cancel a notification worker anyway.
+        server.install_cli_registry()
         if action == "recover":
             reason = _workflow_text(args, "reason")
             if args.monitor:
@@ -778,7 +875,7 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
             from .workflow_hooks import refuse_managed
             caller = await server._verified_workflow_caller()
             if caller is not None:
-                refuse_managed(server._reg().log_dir, caller.record.task_id)
+                refuse_managed(default_log_dir(), caller.record.task_id)
             return migrate_workflows()
         if action == "builder-followup":
             return await server.followup_workflow_builder(args.workflow_run_id, _workflow_prompt(args))
@@ -864,6 +961,9 @@ def _main(argv: list[str] | None = None) -> int:
 
     if args.command == "permission-preview":
         from . import server
+        # Registry-backed validation, without the maintenance sweep or notification worker a
+        # live server's `_reg()` would start.
+        server.install_cli_registry()
         try:
             result = asyncio.run(server.preview_task_permissions(
                 repo_path=args.repo, backend=args.backend, freedom=args.freedom,
@@ -875,11 +975,11 @@ def _main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "mcp-allowlist":
-        from . import mcp_allowlist, server
+        from . import mcp_allowlist
         try:
             if args.allow is not None or args.remove is not None:
                 from .takeover import caller_refusal
-                refusal = caller_refusal(server._reg().log_dir)
+                refusal = caller_refusal(default_log_dir())
                 if refusal is not None:
                     return _fail(args, "human_only", "Only a verified human may change global MCP approval rules: " + refusal[1])
             result = mcp_allowlist.edit(args.backend, allow=args.allow, remove=args.remove)
@@ -958,6 +1058,8 @@ def _main(argv: list[str] | None = None) -> int:
         return _cmd_detached(args, _resume_action(args))
     if args.command == "continue":
         return _cmd_detached(args, _continue_action(args))
+    if args.command == "status-batch":
+        return _cmd_status_batch(args)
     return _cmd_status(args)
 
 

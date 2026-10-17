@@ -94,7 +94,7 @@ async def test_workflow_mutation_refuses_managed_caller(monkeypatch, tmp_path):
     from polybridge import workflow_hooks
     from polybridge.tasks import TaskRegistry
     registry = TaskRegistry(log_dir=tmp_path / "tasks", owner={})
-    async def caller():
+    async def caller(*args, **kwargs):
         return SimpleNamespace(record=SimpleNamespace(task_id="managed-1"))
     monkeypatch.setattr(registry, "_detect_caller", caller)
     monkeypatch.setattr(server, "_reg", lambda: registry)
@@ -149,7 +149,7 @@ def managed_workflow_run(tmp_path, monkeypatch):
         run["activations"] = [{"id": "activation-1", "node_id": "worker", "role": "node", "status": "running", "tasks": [{"task_id": "reserved-worker", "status": "reserved"}]}]
     storage.update_run(run_id, reserve, "test_reserved")
     registry = TaskRegistry(log_dir=storage.root / "tasks", owner={})
-    async def caller():
+    async def caller(*args, **kwargs):
         return SimpleNamespace(record=SimpleNamespace(task_id="reserved-worker"))
     monkeypatch.setattr(registry, "_detect_caller", caller)
     monkeypatch.setattr(server, "_reg", lambda: registry)
@@ -280,7 +280,7 @@ def test_cli_builder_followup_preserves_run_and_message(monkeypatch, capsys):
 async def test_builder_apply_uses_verified_caller_and_revision(monkeypatch):
     from polybridge import workflows
     marker = object()
-    async def detect():
+    async def detect(*args, **kwargs):
         return marker
     async def apply(definition, expected_draft_revision, *, caller):
         assert definition == {"nodes": []}
@@ -343,7 +343,7 @@ def test_cli_managed_caller_cannot_send_to_ordinary_task(monkeypatch, capsys, ro
     from types import SimpleNamespace
     from polybridge import lineage, workflow_hooks, inbox
     detection = SimpleNamespace(undecidable=None, caller=SimpleNamespace(record=SimpleNamespace(task_id='managed')))
-    monkeypatch.setattr(lineage, 'detect_caller_detail', lambda _: detection)
+    monkeypatch.setattr(lineage, 'detect_caller_detail', lambda *args, **kwargs: detection)
     monkeypatch.setattr(workflow_hooks, 'owner', lambda *a, **k: {'role': role})
     monkeypatch.setattr(inbox, 'send_to_record', lambda *a, **k: (_ for _ in ()).throw(AssertionError('message must not be queued')))
     assert ctl.main(['send', 'ordinary', 'Change assignment', '--json']) == 1

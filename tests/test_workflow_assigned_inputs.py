@@ -106,12 +106,29 @@ async def test_server_worker_reader_and_inspection_restriction(tmp_path, monkeyp
 
 
 def test_cli_assigned_input_parity(monkeypatch, capsys):
-    from polybridge import ctl, server
+    from polybridge import ctl, workflow_inspection, workflow_node_reads
     seen = []
-    async def read(*args):
-        seen.append(args)
+    managed = object()
+    monkeypatch.setattr(workflow_inspection, "managed_reader", lambda log_dir: managed)
+    def read(resolved, run_id, execution_id, *, source_run_id, task_id, cursor, limit):
+        seen.append((resolved, run_id, execution_id, source_run_id, task_id, cursor, limit))
         return {"chunk": "ok"}
-    monkeypatch.setattr(server, "read_workflow_assigned_input", read)
+    monkeypatch.setattr(workflow_node_reads, "assigned_input_node", read)
     assert ctl.main(["workflow-assigned-input", "run", "source", "--source-run", "child", "--task-id", "attempt", "--limit", "7", "--cursor", "cursor", "--json"]) == 0
-    assert seen == [("run", "source", "child", "attempt", "cursor", 7)]
+    assert seen == [(managed, "run", "source", "child", "attempt", "cursor", 7)]
+    assert json.loads(capsys.readouterr().out)["result"]["chunk"] == "ok"
+
+
+def test_cli_inspect_parity(monkeypatch, capsys):
+    """`workflow-inspect` routes through the shared node-read body, never the server module."""
+    from polybridge import ctl, workflow_inspection, workflow_node_reads
+    seen = []
+    managed = object()
+    monkeypatch.setattr(workflow_inspection, "managed_reader", lambda log_dir: managed)
+    def inspect(resolved, run_id, *, execution_id, task_id, view, cursor, limit, before_seq, after_seq):
+        seen.append((resolved, run_id, execution_id, task_id, view, cursor, limit, before_seq, after_seq))
+        return {"chunk": "ok"}
+    monkeypatch.setattr(workflow_node_reads, "inspect_node", inspect)
+    assert ctl.main(["workflow-inspect", "run", "source", "--task-id", "attempt", "--view", "activity", "--cursor", "cursor", "--limit", "7", "--before-seq", "2", "--json"]) == 0
+    assert seen == [(managed, "run", "source", "attempt", "activity", "cursor", 7, 2, None)]
     assert json.loads(capsys.readouterr().out)["result"]["chunk"] == "ok"

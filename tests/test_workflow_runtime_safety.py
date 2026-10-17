@@ -143,7 +143,7 @@ async def test_task_mutation_refuses_undecidable_caller(tmp_path,monkeypatch):
     from polybridge import lineage
     from polybridge.tasks import TaskRegistry
     from polybridge.backends import NestedDispatchRefused
-    monkeypatch.setattr(lineage,"detect_caller_detail",lambda *a:lineage.Detection(None,"ps denied"))
+    monkeypatch.setattr(lineage,"detect_caller_detail",lambda *a,**k:lineage.Detection(None,"ps denied"))
     registry=TaskRegistry(log_dir=tmp_path/"tasks")
     with pytest.raises(NestedDispatchRefused,match="ps denied"):
         await registry._mutation_caller()

@@ -963,7 +963,7 @@ class TaskRegistry:
         # The live phase-write retry per (task_id, attempt n, phase) — see `_start_phase_retry`.
         self._phase_retries: dict[tuple[str, int, str], asyncio.Task[Any]] = {}
 
-    async def _detect_caller(self) -> lineage.Caller | None:
+    async def _detect_caller(self, candidates: Any = None) -> lineage.Caller | None:
         """Best-effort: which task (if any) dispatched the process calling us.
 
         Looked up through the `lineage` module attribute at call time — never imported as a bare
@@ -972,11 +972,14 @@ class TaskRegistry:
         this wrapper exists so a failure in the `to_thread` dispatch itself (or a misbehaving
         monkeypatch) cannot become an exception either — per CLAUDE.md, bookkeeping must never
         change an outcome.
+
+        `candidates` reuses a caller-supplied metadata scan (from `lineage.read_candidates`) so a
+        path that also needs `detect_caller_detail` reads the records once, not three times.
         """
         if self._caller_override is not None:
             return self._caller_override
         try:
-            return await asyncio.to_thread(lineage.detect_caller, self._log_dir)
+            return await asyncio.to_thread(lineage.detect_caller, self._log_dir, candidates=candidates)
         except Exception:
             log.debug("caller detection failed", exc_info=True)
             return None

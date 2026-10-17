@@ -164,6 +164,122 @@ def test_status_plain_text_for_an_unknown_task_prints_nothing_to_stdout(
     assert "no-such-task" in captured.err
 
 
+# --- status-batch: one document for several ids ------------------------------------------------
+
+
+def test_status_batch_entries_match_single_status_documents(
+    home: Path, capsys: pytest.CaptureFixture
+) -> None:
+    log_dir = _log_dir(home)
+    store.write(log_dir, make_record())
+    store.write(log_dir, make_record(task_id="task-2", backend="codex", session_id="s2", markers=["s2"]))
+    store.write(log_dir, make_record(task_id="task-3", status="running", exit_code=None, finished_at=None))
+
+    assert ctl.main(["status-batch", "--task-ids", "task-1,task-2,task-3", "--json"]) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["v"] == 11
+    assert doc["errors"] == {}
+    assert [task["task_id"] for task in doc["tasks"]] == ["task-1", "task-2", "task-3"]
+
+    for index, task_id in enumerate(("task-1", "task-2", "task-3")):
+        assert ctl.main(["status", task_id, "--json"]) == 0
+        single = json.loads(capsys.readouterr().out)["task"]
+        batched = doc["tasks"][index]
+        if task_id == "task-3":
+            # A running task's duration is computed from now() per call, so only it may differ.
+            single.pop("duration_seconds", None)
+            batched.pop("duration_seconds", None)
+        assert batched == single
+
+
+def test_status_batch_mixes_authorized_unauthorized_and_unknown_ids(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    log_dir = _log_dir(home)
+    store.write(log_dir, make_record(task_id="owned"))
+    store.write(log_dir, make_record(task_id="foreign", backend="codex", session_id="s2", markers=["s2"]))
+    managed = (
+        {"role": "node", "activation_id": "exec"},
+        {
+            "workflow_run_id": "run",
+            "activations": [
+                {
+                    "id": "exec",
+                    "role": "node",
+                    "status": "running",
+                    "tasks": [{"task_id": "owned", "status": "running"}],
+                }
+            ],
+        },
+    )
+    from polybridge import workflow_inspection
+
+    monkeypatch.setattr(workflow_inspection, "managed_reader", lambda log_dir: managed)
+
+    assert (
+        ctl.main(["status-batch", "--task-ids", "owned,foreign,missing,../escape", "--json"]) == 0
+    )
+    doc = json.loads(capsys.readouterr().out)
+    assert [task["task_id"] for task in doc["tasks"]] == ["owned"]
+    assert doc["errors"]["foreign"]["code"] == "workflow_read_refused"
+    assert doc["errors"]["foreign"]["message"] == (
+        "Managed agents may only read tasks from their own workflow run"
+    )
+    # A managed caller is refused before any lookup (so existence is not disclosed), exactly as
+    # single `status` does for the same id.
+    assert doc["errors"]["missing"]["code"] == "workflow_read_refused"
+    assert ctl.main(["status", "missing", "--json"]) == 1
+    assert json.loads(capsys.readouterr().out)["error"]["code"] == "workflow_read_refused"
+    assert doc["errors"]["../escape"]["code"] == "invalid_task_id"
+
+
+def test_status_batch_reports_unknown_task_for_a_human_like_single_status(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    store.write(_log_dir(home), make_record(task_id="present"))
+    from polybridge import workflow_inspection
+
+    monkeypatch.setattr(workflow_inspection, "managed_reader", lambda log_dir: None)
+    assert ctl.main(["status-batch", "--task-ids", "present,missing", "--json"]) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["errors"]["missing"]["code"] == "unknown_task"
+    assert ctl.main(["status", "missing", "--json"]) == 1
+    single = json.loads(capsys.readouterr().out)["error"]
+    assert single["code"] == doc["errors"]["missing"]["code"]
+    assert single["message"] == doc["errors"]["missing"]["message"]
+
+
+def test_status_batch_fails_whole_on_undecidable_authority(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """Undecidable caller authority refuses the whole batch — never partial data."""
+    from polybridge import workflow_inspection
+
+    def undecidable(log_dir):
+        raise ValueError("Workflow caller authority is undecidable: ps denied")
+
+    monkeypatch.setattr(workflow_inspection, "managed_reader", undecidable)
+    store.write(_log_dir(home), make_record())
+
+    assert ctl.main(["status-batch", "--task-ids", "task-1,task-2", "--json"]) == 1
+    doc = json.loads(capsys.readouterr().out)
+    assert doc == {
+        "v": 11,
+        "error": {
+            "code": "workflow_read_refused",
+            "message": "Workflow caller authority is undecidable: ps denied",
+        },
+    }
+
+
+def test_status_batch_is_capped_at_100_ids(home: Path, capsys: pytest.CaptureFixture) -> None:
+    ids = ",".join(f"task-{index}" for index in range(101))
+    assert ctl.main(["status-batch", "--task-ids", ids, "--json"]) == 1
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["error"]["code"] == "invalid_params"
+    assert "100" in doc["error"]["message"]
+
+
 def test_bad_subcommand_is_a_usage_error(home: Path, capsys: pytest.CaptureFixture) -> None:
     with pytest.raises(SystemExit) as exc_info:
         ctl.main(["bogus"])
@@ -200,6 +316,7 @@ def test_ctl_never_constructs_a_task_registry(
 
     assert ctl.main(["list", "--json"]) == 0
     assert ctl.main(["status", "task-1", "--json"]) == 0
+    assert ctl.main(["status-batch", "--task-ids", "task-1", "--json"]) == 0
 
 
 # --- resume: the still-running guard ------------------------------------------------------------
