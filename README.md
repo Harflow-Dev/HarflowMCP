@@ -191,8 +191,13 @@ another checkout's settings, are not certified for later execution. Startup chec
 a stable qualified environment; they do not pin files against independent concurrent
 writers. See the linked guide.
 
-[`wait_for_tasks`](docs/multi-task-waiting.md) observes any or all of up to 32 tasks in one
-bounded, read-only call. Timeout and caller disconnect leave execution untouched.
+[`wait_for_task`, `wait_for_tasks` and `wait_for_workflow`](docs/multi-task-waiting.md) share one
+read-only wait contract: `timeout_seconds` 0..3600 is honoured as asked (never silently clamped),
+`until="terminal"` holds to a 6 hour ceiling, and every response reports `stop_reason`,
+`timed_out`, `elapsed_seconds` and `polling_guidance`. Breaking change: `wait_for_task` now
+accepts 0 and rejects more than 3600. Your MCP client's own request deadline still applies, and
+timeouts or disconnects leave execution untouched. `wait_for_tasks` observes any or all of up to
+32 tasks in one call.
 Use `get_task_status(task_id, brief=true)` or
 [`list_tasks(limit=50, group="review")`](docs/compact-task-reads.md) for bounded overviews.
 Full status and the existing unpaged list remain available.

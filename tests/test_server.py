@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 from mcp import Client, MCPError
 
-from polybridge import identity, server, store
+from polybridge import identity, server, store, wait_policy
 from polybridge.tasks import Task, TAIL_LINES_RETURNED
 
 
@@ -347,7 +347,7 @@ async def test_default_wait_stays_under_a_typical_client_request_timeout() -> No
 async def test_wait_tells_the_caller_what_to_do_when_still_running(
     fake_task: Task, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(server, "PROGRESS_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(wait_policy, "PROGRESS_INTERVAL_SECONDS", 0.01)
 
     snapshot = (
         await call("wait_for_task", task_id=fake_task.task_id, timeout_seconds=1)
@@ -363,6 +363,11 @@ async def test_a_started_task_reports_its_enforcement(fake_task: Task) -> None:
 
     assert status["backend"] == "claude"
     assert "enforcement" in status
+
+
+def _plan(seconds: int):
+    from polybridge import wait_policy
+    return wait_policy.WaitPlan.validate(seconds, "timeout", 55)
 
 
 class _RecordingContext:
@@ -383,7 +388,7 @@ async def test_waiting_on_a_recovered_task_does_not_believe_a_stale_terminal_rec
     Breaking on the record's own status returned in a single tick while `next_step` claimed the
     whole timeout had elapsed — a wait that looked like it had done its job and had not.
     """
-    monkeypatch.setattr(server, "PROGRESS_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(wait_policy, "PROGRESS_INTERVAL_SECONDS", 0.01)
     monkeypatch.setattr(store, "process_alive", lambda pid, markers: True)
     record = store.TaskRecord(
         task_id="orphan",
@@ -400,7 +405,7 @@ async def test_waiting_on_a_recovered_task_does_not_believe_a_stale_terminal_rec
     store.write(server._reg().log_dir, record)
 
     ctx = _RecordingContext()
-    await server._poll_recovered(record, 1, ctx)
+    await server._poll_recovered(record, _plan(1), ctx)
 
     assert len(ctx.reports) > 1, "the wait ended early instead of polling for its full timeout"
 
@@ -411,7 +416,7 @@ async def test_waiting_keeps_polling_a_retitled_live_vibe_record(
     """The reported bug through the wait path: a live vibe run renamed itself to `Vibe CLI`, so
     its markers never match the command line again, but its recorded start time does. Believing
     the marker-only test ended the wait after one tick and reported a `failed` nobody observed."""
-    monkeypatch.setattr(server, "PROGRESS_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(wait_policy, "PROGRESS_INTERVAL_SECONDS", 0.01)
     captured = identity.capture(os.getpid(), [])
     assert captured is not None
     # `ps` sees the retitled process: the recorded start time matches, the markers do not.
@@ -434,7 +439,7 @@ async def test_waiting_keeps_polling_a_retitled_live_vibe_record(
     store.write(server._reg().log_dir, record)
 
     ctx = _RecordingContext()
-    await server._poll_recovered(record, 1, ctx)
+    await server._poll_recovered(record, _plan(1), ctx)
 
     assert len(ctx.reports) > 1, "the wait ended early instead of polling for its full timeout"
 
@@ -442,7 +447,7 @@ async def test_waiting_keeps_polling_a_retitled_live_vibe_record(
 async def test_waiting_on_a_recovered_task_stops_once_it_has_really_settled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(server, "PROGRESS_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(wait_policy, "PROGRESS_INTERVAL_SECONDS", 0.01)
     monkeypatch.setattr(store, "process_alive", lambda pid, markers: False)
     record = store.TaskRecord(
         task_id="settled",
@@ -458,7 +463,7 @@ async def test_waiting_on_a_recovered_task_stops_once_it_has_really_settled(
     store.write(server._reg().log_dir, record)
 
     ctx = _RecordingContext()
-    await asyncio.wait_for(server._poll_recovered(record, 30, ctx), timeout=2)
+    await asyncio.wait_for(server._poll_recovered(record, _plan(30), ctx), timeout=2)
 
     assert ctx.reports == []
 

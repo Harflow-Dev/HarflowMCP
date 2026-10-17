@@ -70,8 +70,8 @@ def test_cli_requires_backend_without_workflow(capsys):
 
 
 async def test_wait_workflow_checks_timeout():
-    with pytest.raises(Exception, match="between 0 and 300"):
-        await server.wait_for_workflow("run-1", 301)
+    with pytest.raises(Exception, match="between 0 and 3600"):
+        await server.wait_for_workflow("run-1", 3601)
 
 
 def test_managed_agent_cannot_directly_dispatch(monkeypatch, tmp_path):

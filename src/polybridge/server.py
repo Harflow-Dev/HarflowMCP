@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import math
 import os
 import shutil
 import subprocess
@@ -12,7 +11,7 @@ import sys
 import unicodedata
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from mcp import MCPError
 from pydantic import StrictBool, StrictInt, StrictStr
@@ -20,7 +19,7 @@ from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
 from mcp.types import INTERNAL_ERROR, INVALID_PARAMS
 
-from . import backends, control, identity, inbox, store
+from . import backends, control, identity, inbox, store, wait_policy
 from .backends import DEFAULT_BACKEND, DEFAULT_FREEDOM, FREEDOMS
 from .catalog import bounded_request
 from .events import EVENT_KINDS, events_path, read_page, read_recent
@@ -39,15 +38,18 @@ log = logging.getLogger("polybridge")
 
 VALID_STATUSES = frozenset({"running"}) | TERMINAL_STATUSES
 
-# MCP clients impose their own per-request timeout — commonly 60s — and exceeding it surfaces to the
-# caller as a transport error (-32001) even though the dispatched run is unaffected. So the default
-# wait stays under that, and callers are expected to come back rather than hold one request open for
-# the length of a coding task.
+# MCP clients may impose their own per-request deadline; exceeding it surfaces to the caller as a
+# transport error (-32001) even though the dispatched run is unaffected. A client's deadline is not
+# discoverable from here, so the default stays short enough for clients that apply the common 60s;
+# longer holds are an explicit, honoured request (see wait_policy).
 DEFAULT_WAIT_SECONDS = 55
 
-# Emitted while waiting so the client can see the wait is alive; per the MCP spec a client may also
-# reset its request timeout on progress, which is what makes longer explicit waits viable.
-PROGRESS_INTERVAL_SECONDS = 5.0
+# How often wait_for_workflow re-checks the run while it is active.
+WORKFLOW_POLL_SECONDS = 1.0
+
+# An `until="terminal"` workflow wait stops once a terminal-but-settling run's file has not changed
+# for this long: settling that never makes progress would otherwise hold to the 6 hour ceiling.
+WORKFLOW_SETTLING_STALL_SECONDS = 300.0
 
 # Matches the Monitor's `TaskTitle.maxLength`.
 MAX_TITLE_LENGTH = 90
@@ -111,7 +113,11 @@ mcp = MCPServer(
         "one, and None keeps each freedom's historical behaviour. It governs polybridge's own "
         "network barrier only, never reachability.\n\n"
         "A wait_for_task that comes back still 'running' has not failed — the run is untouched, so "
-        "call again or poll. Tasks outlive this server process: ones started by an earlier "
+        "call again or poll. wait_for_task, wait_for_tasks and wait_for_workflow share one contract: "
+        "timeout_seconds 0..3600 is honoured as asked (never clamped), until='terminal' holds to a "
+        "6 hour server ceiling (omit timeout_seconds), and each reports stop_reason, timed_out, "
+        "elapsed_seconds and polling_guidance. Your MCP client's own request deadline still applies; "
+        "see docs/multi-task-waiting.md. Tasks outlive this server process: ones started by an earlier "
         "polybridge server are still reported, marked 'recovered: true'.\n\n"
         "A claude task started without max_turns, and every antigravity task, has live input "
         "(`live_input: true`): send_message adds a message while it runs — folded into the "
@@ -720,102 +726,162 @@ async def get_task_status(
     )
 
 
-async def _await_with_progress(task: Task, timeout_seconds: int, ctx: Context | None) -> None:
-    """Wait for `task`, emitting progress every few seconds until it finishes or time runs out."""
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout_seconds
-    steps = max(1, math.ceil(timeout_seconds / PROGRESS_INTERVAL_SECONDS))
+def _wait_plan(timeout_seconds: Any, until: Any, default: int) -> wait_policy.WaitPlan:
+    """Validate a wait request for any of the three waits; a bad one is INVALID_PARAMS."""
+    try:
+        return wait_policy.WaitPlan.validate(timeout_seconds, until, default)
+    except ValueError as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
 
-    for step in range(1, steps + 1):
-        remaining = deadline - loop.time()
+
+async def _await_with_progress(task: Task, plan: wait_policy.WaitPlan, ctx: Context | None) -> str:
+    """Wait for `task`, emitting progress every few seconds; returns why the wait stopped."""
+    clock = plan.begin()
+    step = 0
+    while True:
+        if task.done.is_set():
+            return wait_policy.STOP_TERMINAL
+        remaining = clock.remaining()
         if remaining <= 0:
-            return
+            return plan.expiry_reason
         try:
-            await asyncio.wait_for(
-                task.done.wait(), timeout=min(PROGRESS_INTERVAL_SECONDS, remaining)
-            )
-            return
+            await asyncio.wait_for(task.done.wait(), timeout=min(wait_policy.PROGRESS_INTERVAL_SECONDS, remaining))
+            return wait_policy.STOP_TERMINAL
         except asyncio.TimeoutError:
             pass
 
-        if ctx is None:
-            continue
-        try:
-            await ctx.report_progress(
-                step,
-                total=steps,
-                message=(
-                    f"{task.backend} task {task.task_id} still running "
-                    f"({task.duration_seconds:.0f}s elapsed)"
-                ),
-            )
-        except Exception:  # pragma: no cover - a client that ignores progress must not break us
-            log.debug("task %s: client did not accept progress", task.task_id)
+        step += 1
+        await wait_policy.report_progress(
+            ctx.report_progress if ctx is not None else None,
+            step,
+            plan.progress_total,
+            f"{task.backend} task {task.task_id} still running ({task.duration_seconds:.0f}s elapsed)",
+        )
+
+
+def _dead_without_observed_exit(record: store.TaskRecord, status: str) -> bool:
+    """A recovered row whose process is confirmed gone and whose exit nobody observed.
+
+    Its reported status is inferred, not observed, so a wait must not present it as a settled
+    outcome. `cancelled` is exempt: that records something the bridge itself did.
+    """
+    return status != "cancelled" and store.outcome_unobserved(record) and not store.record_process_alive(record)
+
+
+def _owner_alive(record: store.TaskRecord) -> bool:
+    """Whether the polybridge server that owns this record is still running."""
+    try:
+        return identity.identity_check(record.owner) == "alive"
+    except Exception:
+        return False
 
 
 async def _poll_recovered(
-    record: store.TaskRecord, timeout_seconds: int, ctx: Context | None
-) -> store.TaskRecord:
+    record: store.TaskRecord, plan: wait_policy.WaitPlan, ctx: Context | None
+) -> tuple[store.TaskRecord, str, bool]:
     """Wait on a task from another server process by polling its liveness.
 
     There is no completion event to await here, so this checks the recorded process on the same
     cadence it reports progress, and re-reads the record in case that process's own server finishes
-    it first.
+    it first. Returns the freshest record, why the wait stopped, and whether the outcome was
+    actually observed.
 
     Whether it has settled is decided by `store.resolve_status`, never by the record's own `status`
     field: a record can claim `failed` about a process that is still running (see
     `store.outcome_unobserved`), and believing it would end the wait after a single interval while
-    the caller is told the whole timeout elapsed.
+    the caller is told the whole timeout elapsed. A process whose identity is merely uncertain is
+    not settled either; resolve_status keeps it running. A process confirmed gone without an
+    observed exit stops the wait as `observation_unavailable` (in both modes) with the status left
+    exactly as resolve_status reports it — unless its owning server is still alive, in which case
+    that server is persisting the outcome and the wait keeps observing for a bounded grace first.
+
+    A record that cannot be read or re-read for `UNAVAILABLE_ROUNDS` consecutive rounds stops an
+    `until="terminal"` wait with `observation_unavailable`, so it cannot run to the ceiling on a
+    record that can no longer change. Bounded waits keep their timeout as the only such stop.
     """
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout_seconds
-    steps = max(1, math.ceil(timeout_seconds / PROGRESS_INTERVAL_SECONDS))
+    clock = plan.begin()
+    step = 0
+    failed_rounds = 0
+    draining_since: float | None = None
+    while True:
+        round_failed = False
+        try:
+            status = store.resolve_status(_reg().log_dir, record, detail=False)[0]
+            gone = status in TERMINAL_STATUSES and _dead_without_observed_exit(record, status)
+        except Exception:
+            status, gone = None, False
+            round_failed = True
+        if gone:
+            # Another live polybridge server owning the run is still draining and persisting it:
+            # keep observing for a bounded grace before calling the outcome unobservable.
+            if draining_since is None:
+                draining_since = wait_policy.monotonic()
+            if (not _owner_alive(record)
+                    or wait_policy.monotonic() - draining_since >= wait_policy.OWNER_DRAIN_GRACE_SECONDS):
+                return record, wait_policy.STOP_UNAVAILABLE, False
+        elif status in TERMINAL_STATUSES:
+            return record, wait_policy.STOP_TERMINAL, True
+        if plan.terminal_mode and round_failed and failed_rounds + 1 >= wait_policy.UNAVAILABLE_ROUNDS:
+            return record, wait_policy.STOP_UNAVAILABLE, True
+        remaining = clock.remaining()
+        if remaining <= 0:
+            return record, plan.expiry_reason, True
+        await asyncio.sleep(min(wait_policy.PROGRESS_INTERVAL_SECONDS, remaining))
 
-    for step in range(1, steps + 1):
-        if loop.time() >= deadline:
-            break
-        if store.resolve_status(_reg().log_dir, record, detail=False)[0] in TERMINAL_STATUSES:
-            break
-        await asyncio.sleep(min(PROGRESS_INTERVAL_SECONDS, max(0.0, deadline - loop.time())))
-
-        fresh = _reg().recover(record.task_id)
+        try:
+            fresh = _reg().recover(record.task_id)
+        except Exception:
+            fresh = None
         if fresh is not None:
             record = fresh
+        else:
+            round_failed = True
+        failed_rounds = failed_rounds + 1 if round_failed else 0
+        if plan.terminal_mode and failed_rounds >= wait_policy.UNAVAILABLE_ROUNDS:
+            return record, wait_policy.STOP_UNAVAILABLE, True
 
-        if ctx is None:
-            continue
-        try:
-            await ctx.report_progress(
-                step, total=steps, message=f"{record.task_id} still running (recovered task)"
-            )
-        except Exception:  # pragma: no cover
-            log.debug("task %s: client did not accept progress", record.task_id)
-
-    return record
+        step += 1
+        await wait_policy.report_progress(
+            ctx.report_progress if ctx is not None else None,
+            step, plan.progress_total, f"{record.task_id} still running (recovered task)",
+        )
 
 
 @mcp.tool()
 async def wait_for_task(
     task_id: str,
-    timeout_seconds: int = DEFAULT_WAIT_SECONDS,
+    timeout_seconds: StrictInt | None = None,
     include_tail: bool = False,
+    until: Literal["timeout", "terminal"] = "timeout",
     ctx: Context | None = None,
 ) -> dict[str, Any]:
     """Wait for a task to finish, giving up after a timeout without disturbing the run.
 
     Args:
         task_id: Identifier of the task to await.
-        timeout_seconds: How long to wait before returning early. Keep this modest — your MCP client
-            applies its own request timeout (often 60s), and exceeding it fails the *call* with a
-            timeout error even though the task keeps running.
+        timeout_seconds: How long to hold, 0..3600 (default 55; 0 observes once without
+            sleeping). Honoured as asked, never silently clamped; out of range is INVALID_PARAMS.
+            Breaking change: values above 3600 are now rejected (0 is newly accepted). Your MCP
+            client applies its own request deadline, and exceeding it fails the *call* even though
+            the task keeps running — see docs/multi-task-waiting.md before asking for long holds.
         include_tail: If True, include the full last_output_tail (20 lines × 2000 chars each);
             if False (default), the tail is omitted for running/completed tasks and shortened
             to 5 lines × 500 chars for failed tasks.
+        until: "timeout" (default) returns when the task settles or timeout_seconds elapses.
+            "terminal" holds until the task settles, bounded only by a 6 hour server ceiling;
+            timeout_seconds must then be omitted (passing both is INVALID_PARAMS).
         ctx: Injected by the server; not a caller argument.
 
-    If the task is still going when the wait ends, the result comes back with status "running" and a
-    `next_step` hint: call this again, or poll get_task_status. The dispatched process is never
-    signalled here, so waiting is always safe and repeating it costs nothing. Returns
+    The result is the task status plus `requested_timeout_seconds`, `effective_timeout_seconds`,
+    `until`, `timed_out`, `stop_reason` (terminal, timeout, ceiling or observation_unavailable),
+    `elapsed_seconds` and `polling_guidance`. If the task is still going when the wait ends, the
+    status is "running" with a `next_step` hint: call this again, or poll get_task_status. The
+    dispatched process is never signalled, written or resumed by a wait, so waiting is always safe
+    and repeating it costs nothing. For a task recovered from an earlier server process the result
+    carries `outcome_observed`: false (with stop_reason observation_unavailable, in either mode)
+    means its process is gone but its exit was never observed, so the status is an inference —
+    inspect it with get_task_status; true otherwise. Live tasks carry it (true) once finished.
+    Progress is sent every 5 seconds, best effort. Returns
     `recent_activity` — a list of ≤ 5 one-line strings describing the most recent meaningful events
     — for a live summary without the bulk of the raw stream.
 
@@ -823,13 +889,14 @@ async def wait_for_task(
     Confirmed usage limits retain `failure_diagnostic` and partial output while the task owner
     settles the process. Waiting does not retry the task or authorize a paid fallback.
     """
+    plan = _wait_plan(timeout_seconds, until, DEFAULT_WAIT_SECONDS)
     await _guard_task_read(task_id)
-    if timeout_seconds <= 0:
-        raise MCPError(INVALID_PARAMS, f"timeout_seconds must be > 0, got {timeout_seconds}")
 
+    clock = plan.begin()
+    outcome_observed = True
     task = _reg().get(task_id)
     if task is not None:
-        await _await_with_progress(task, timeout_seconds, ctx)
+        stop_reason = await _await_with_progress(task, plan, ctx)
         snapshot = task.snapshot()
         finished = task.finished
     else:
@@ -839,45 +906,103 @@ async def wait_for_task(
                 INVALID_PARAMS,
                 f"unknown task_id: {task_id}. Use list_tasks to see what is known.",
             )
-        record = await _poll_recovered(record, timeout_seconds, ctx)
-        snapshot = store.snapshot(_reg().log_dir, record)
+        record, stop_reason, outcome_observed = await _poll_recovered(record, plan, ctx)
+        try:
+            snapshot = store.snapshot(_reg().log_dir, record)
+        except Exception:
+            if stop_reason != wait_policy.STOP_UNAVAILABLE:
+                raise
+            # The record could not be observed, and the snapshot cannot be built either: report
+            # that, with nothing invented beyond what the record itself says.
+            log.warning("task %s: snapshot unavailable after the wait", task_id, exc_info=True)
+            snapshot = {
+                "task_id": record.task_id, "backend": record.backend, "session_id": record.session_id,
+                "recovered": True, "status": "unknown",
+                "note": "The task's status could not be read; inspect it with get_task_status.",
+            }
         finished = snapshot["status"] in TERMINAL_STATUSES
 
+    elapsed = clock.elapsed()
+    if task is None and finished and stop_reason in (wait_policy.STOP_TIMEOUT, wait_policy.STOP_CEILING):
+        # The hold ran out as the record settled; apply the same unobserved-outcome rule the
+        # polling loop uses before calling that a settled outcome.
+        if _dead_without_observed_exit(record, snapshot["status"]):
+            stop_reason, outcome_observed = wait_policy.STOP_UNAVAILABLE, False
+        else:
+            stop_reason = wait_policy.STOP_TERMINAL
+    elif finished and stop_reason in (wait_policy.STOP_TIMEOUT, wait_policy.STOP_CEILING):
+        # The task settled while the hold was running out: report what the snapshot says.
+        stop_reason = wait_policy.STOP_TERMINAL
     if not finished:
-        log.info("task %s still running after %ss wait", task_id, timeout_seconds)
-        snapshot["next_step"] = (
-            f"still running after {timeout_seconds}s and unaffected by this wait — "
-            "call wait_for_task again, or poll get_task_status"
-        )
+        log.info("task %s still running after %.0fs wait", task_id, elapsed)
+        if stop_reason == wait_policy.STOP_UNAVAILABLE:
+            snapshot["next_step"] = (
+                f"could not keep observing after {elapsed:.0f}s; the task is unaffected — "
+                "poll get_task_status, then call wait_for_task again"
+            )
+        else:
+            snapshot["next_step"] = (
+                f"still running after {elapsed:.0f}s and unaffected by this wait — "
+                "call wait_for_task again, or poll get_task_status"
+            )
 
-    return await asyncio.to_thread(
-        _status_payload, snapshot, include_tail=include_tail, log_dir=_reg().log_dir, task_id=task_id
-    )
+    try:
+        payload = await asyncio.to_thread(
+            _status_payload, snapshot, include_tail=include_tail, log_dir=_reg().log_dir, task_id=task_id
+        )
+    except Exception:
+        if stop_reason != wait_policy.STOP_UNAVAILABLE:
+            raise
+        log.warning("task %s: status payload unavailable after the wait", task_id, exc_info=True)
+        payload = dict(snapshot)
+    guidance = None
+    if task is None or finished:
+        payload["outcome_observed"] = outcome_observed
+    if not outcome_observed:
+        guidance = (
+            "The task's process is gone but its exit was never observed, so the reported status is "
+            "inferred rather than observed. Inspect it with get_task_status."
+        )
+    payload.update(wait_policy.result_fields(
+        plan, stop_reason, elapsed, "wait_for_task", "get_task_status", guidance))
+    return payload
 
 
 @mcp.tool()
 async def wait_for_tasks(
-    task_ids: list[str], mode: str = "any", timeout_seconds: int = 30,
+    task_ids: list[str], mode: str = "any", timeout_seconds: StrictInt | None = None,
+    until: Literal["timeout", "terminal"] = "timeout",
     ctx: Context | None = None,
 ) -> dict[str, Any]:
     """Observe 1..32 unique task IDs, returning compact statuses in requested order.
 
-    mode any returns when at least one requested task is terminal; all waits for every task.
-    timeout_seconds accepts 0..300 (default 30), with an effective hold capped at 45 seconds.
-    Zero polls immediately. All IDs must exist and pass caller read authorization before waiting.
+    mode any returns when at least one requested task is settled; all waits for every task.
+    timeout_seconds accepts 0..3600 (default 30) and is honoured as asked, never silently clamped;
+    out of range is INVALID_PARAMS. Zero polls immediately. until="terminal" holds until the mode
+    is satisfied, bounded by a 6 hour server ceiling, and requires timeout_seconds to be omitted.
+    Your MCP client's own request deadline still applies; see docs/multi-task-waiting.md.
+    All IDs must exist and pass caller read authorization before waiting.
     Existence checks and initial metadata share a two-second I/O budget; undecidable existence
     rejects the request. A final metadata observation can add up to two more seconds.
     Returns terminal_task_ids, bounded summaries and get_task_status diagnostic references;
-    no output tails. Timeout and caller cancellation never cancel or signal the observed tasks.
+    no output tails. A recovered task whose process is confirmed gone without an observed exit is
+    listed in undecidable_task_ids (status unknown) and counts as settled in both modes, as in
+    wait_for_task, after a short grace if its owning polybridge server is still alive; an uncertain
+    identity keeps waiting. Under until="terminal", targets that stay unobservable for
+    3 rounds stop the wait with stop_reason observation_unavailable. Rows carry a bounded
+    failure_diagnostic (category, reason) when one exists. Also returns requested/effective
+    timeout, until, timed_out, stop_reason, elapsed_seconds and polling_guidance. Progress is sent
+    every 5 seconds. Timeout and caller cancellation never cancel or signal the observed tasks.
     """
     from . import task_waiting
     try:
-        task_waiting.validate(task_ids, mode, timeout_seconds)
+        task_waiting.validate(task_ids, mode, timeout_seconds, until)
         for task_id in task_ids:
             await _guard_task_read(task_id)
         return await task_waiting.wait_for_tasks(
             _reg(), task_ids, mode, timeout_seconds,
             ctx.report_progress if ctx is not None else None,
+            until,
         )
     except ValueError as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
@@ -1733,42 +1858,113 @@ async def get_workflow_status(workflow_run_id: str) -> dict[str, Any]:
     return compact(await _workflow_call("status", run_id=workflow_run_id))
 
 
-async def _wait_workflow_full(workflow_run_id: str, timeout_seconds: int = 30) -> dict[str, Any]:
-    if type(timeout_seconds) is not int or not 0 <= timeout_seconds <= 300:
-        raise MCPError(INVALID_PARAMS, "timeout_seconds must be between 0 and 300")
-    effective = min(timeout_seconds, 45)
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + effective
+# Statuses in which a run is still moving on its own: a wait keeps holding through them. Every
+# other non-terminal status (needs_input, needs_attention, paused) needs the caller, so it ends a
+# wait as `attention`.
+_WORKFLOW_ACTIVE = frozenset({"running", "pending", "building", "pausing", "starting", "cancelling"})
+_WORKFLOW_TERMINAL = frozenset({"completed", "failed", "cancelled"})
+
+
+async def _wait_workflow_full(
+    workflow_run_id: str,
+    timeout_seconds: int | None = None,
+    until: str = "timeout",
+    progress: Any = None,
+) -> dict[str, Any]:
+    plan = _wait_plan(timeout_seconds, until, 30)
+    clock = plan.begin()
     result = await _workflow_call("status", run_id=workflow_run_id)
-    path = Path.home() / ".polybridge" / "workflow-runs" / (workflow_run_id + ".json")
+    # The same root retention uses for run files, not the home directory.
+    path = _reg().log_dir.parent / "workflow-runs" / (workflow_run_id + ".json")
     def revision():
         try:
             stat = path.stat()
             return stat.st_mtime_ns, stat.st_size
         except OSError:
             return None
+    def finish(stop_reason: str) -> dict[str, Any]:
+        return {**result, **wait_policy.result_fields(
+            plan, stop_reason, clock.elapsed(), "wait_for_workflow", "get_workflow_status")}
     # First poll refreshes after the initial read, avoiding a read/stat race.
     previous_revision = None
+    last_seen_revision = revision()
+    revision_changed_at = clock.started
+    failed_rounds = 0
+    step = 0
+    next_progress = clock.started + wait_policy.PROGRESS_INTERVAL_SECONDS
     while True:
-        active = result.get("status") in {"running", "pending", "building", "pausing", "starting", "cancelling"}
-        if not active or loop.time() >= deadline:
-            return {**result, "requested_timeout_seconds": timeout_seconds, "effective_timeout_seconds": effective, "timed_out": active, "polling_guidance": "Poll wait_for_workflow again while running; server holds at most 45 seconds."}
-        await asyncio.sleep(min(1, max(0, deadline - loop.time())))
+        status = result.get("status")
+        if status in _WORKFLOW_TERMINAL:
+            # A terminal run whose tasks are still settling is not done yet.
+            if not result.get("settling"):
+                return finish(wait_policy.STOP_TERMINAL)
+            if (plan.terminal_mode
+                    and wait_policy.monotonic() - revision_changed_at >= WORKFLOW_SETTLING_STALL_SECONDS):
+                # Settling that has made no visible progress for this long is not going to.
+                return finish(wait_policy.STOP_UNAVAILABLE)
+        elif status not in _WORKFLOW_ACTIVE:
+            return finish(wait_policy.STOP_ATTENTION)
+        remaining = clock.remaining()
+        if remaining <= 0:
+            return finish(plan.expiry_reason)
+        await asyncio.sleep(min(WORKFLOW_POLL_SECONDS, max(0, remaining)))
         current_revision = revision()
+        if current_revision is not None and current_revision != last_seen_revision:
+            last_seen_revision = current_revision
+            revision_changed_at = wait_policy.monotonic()
+        read_ok = current_revision is not None  # an unreadable run file is an unavailable read
         if current_revision is None or current_revision != previous_revision:
-            result = await _workflow_call("status", run_id=workflow_run_id)
-            previous_revision = current_revision
+            try:
+                result = await _workflow_call("status", run_id=workflow_run_id)
+            except Exception:
+                # Keep the last good snapshot; only a failure that persists ends the wait.
+                read_ok = False
+            else:
+                if read_ok:
+                    previous_revision = current_revision
+        if read_ok:
+            failed_rounds = 0
+        else:
+            failed_rounds += 1
+            if failed_rounds >= wait_policy.UNAVAILABLE_ROUNDS:
+                return finish(wait_policy.STOP_UNAVAILABLE)
+        if wait_policy.monotonic() >= next_progress:
+            step += 1
+            next_progress = wait_policy.monotonic() + wait_policy.PROGRESS_INTERVAL_SECONDS
+            await wait_policy.report_progress(
+                progress, step, plan.progress_total,
+                f"workflow {workflow_run_id} {result.get('status')} ({clock.elapsed():.0f}s elapsed)",
+            )
 
 
 @mcp.tool()
-async def wait_for_workflow(workflow_run_id: str, timeout_seconds: int = 30) -> dict[str, Any]:
-    """Wait for attention/completion, default 30s; effective hold capped at 45s.
+async def wait_for_workflow(
+    workflow_run_id: str,
+    timeout_seconds: StrictInt | None = None,
+    until: Literal["timeout", "terminal"] = "timeout",
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """Wait for a workflow run to need attention or finish; read-only and resumable.
 
-    Requests up to 300s are accepted but capped; inspect returned timeout and polling fields.
+    timeout_seconds accepts 0..3600 (default 30; 0 reads once). It is honoured as asked, never
+    silently clamped; out of range is INVALID_PARAMS. Breaking change: values above 300 used to
+    be rejected, and 46..300 were silently held for only 45 seconds. until="terminal" holds until the run stops
+    needing the wait, bounded by a 6 hour server ceiling, and requires timeout_seconds to be
+    omitted. Your MCP client's own request deadline still applies; see docs/multi-task-waiting.md.
+
+    Returns when the run is completed, failed or cancelled and has finished settling
+    (stop_reason terminal), or reaches needs_input, needs_attention or paused (stop_reason
+    attention), or the hold ends (timeout, ceiling). If reading the run keeps failing for 3
+    rounds the last good snapshot comes back with stop_reason observation_unavailable, as does an
+    until="terminal" wait on a terminal run that stays settling with its run file unchanged for
+    300 seconds. Also
+    returns requested/effective timeout, until, timed_out, elapsed_seconds and polling_guidance.
+    Progress is sent every 5 seconds, best effort. A wait never changes, resumes or cancels a run.
     """
     from .workflow_responses import compact
-    run = await _wait_workflow_full(workflow_run_id, timeout_seconds)
-    return compact(run) | {key: run[key] for key in ("requested_timeout_seconds", "effective_timeout_seconds", "timed_out", "polling_guidance")}
+    run = await _wait_workflow_full(
+        workflow_run_id, timeout_seconds, until, ctx.report_progress if ctx is not None else None)
+    return compact(run) | {key: run[key] for key in wait_policy.WAIT_FIELD_NAMES}
 
 
 @mcp.tool()

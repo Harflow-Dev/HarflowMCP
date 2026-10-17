@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 from mcp import MCPError
 
-from polybridge import server, store, task_waiting
+from polybridge import server, store, task_waiting, wait_policy
 from polybridge.tasks import Task
 
 
@@ -21,28 +21,27 @@ def add_task(task_id, tmp_path, status="running"):
     return task
 
 
-@pytest.mark.parametrize("ids,mode,timeout", [([], "any", 0), (["a", "a"], "any", 0), (["a"]*33, "all", 0), (["a"], "bad", 0), (["a"], "any", -1), (["a"], "any", 301), (["a"], "any", True), ([""], "any", 0)])
+@pytest.mark.parametrize("ids,mode,timeout", [([], "any", 0), (["a", "a"], "any", 0), (["a"]*33, "all", 0), (["a"], "bad", 0), (["a"], "any", -1), (["a"], "any", 3601), (["a"], "any", True), ([""], "any", 0)])
 async def test_invalid(ids, mode, timeout):
     with pytest.raises(MCPError):
         await server.wait_for_tasks(ids, mode, timeout)
 
 
-async def test_order_terminal_and_timeout_cap(tmp_path):
+async def test_order_terminal_and_timeout_honoured(tmp_path):
     add_task("b", tmp_path)
     add_task("a", tmp_path, "completed")
     result = await server.wait_for_tasks(["b", "a"], timeout_seconds=300)
     assert [row["task_id"] for row in result["tasks"]] == ["b", "a"]
     assert result["terminal_task_ids"] == ["a"]
-    assert result["effective_timeout_seconds"] == 45
+    assert result["effective_timeout_seconds"] == 300
     assert not result["timed_out"]
     assert (await server.wait_for_tasks(["b", "a"], "all", 0))["timed_out"]
 
 
-@pytest.mark.parametrize("requested,effective", [(0, 0), (1, 1), (300, 45)])
+@pytest.mark.parametrize("requested,effective", [(0, 0), (1, 1), (300, 300)])
 async def test_initial_io_does_not_consume_observation_interval(monkeypatch, requested, effective):
     clock = [100.0]
-    monkeypatch.setattr(task_waiting.asyncio, "get_running_loop",
-                        lambda: SimpleNamespace(time=lambda: clock[0]))
+    monkeypatch.setattr(task_waiting, "_now", lambda: clock[0])
     source = SimpleNamespace(backend="codex", session_id=None, title=None)
     reads = []
     sleeps = []
@@ -67,7 +66,7 @@ async def test_initial_io_does_not_consume_observation_interval(monkeypatch, req
     monkeypatch.setattr(task_waiting, "_record_exists", exists)
     monkeypatch.setattr(task_waiting, "_recovered", read)
     monkeypatch.setattr(task_waiting.asyncio, "to_thread", to_thread)
-    monkeypatch.setattr(task_waiting.asyncio, "sleep", sleep)
+    monkeypatch.setattr(task_waiting, "_sleep", sleep)
     registry = SimpleNamespace(get=lambda _: None, log_dir=None)
     result = await task_waiting.wait_for_tasks(registry, ["recovered"], timeout_seconds=requested)
     assert result["timed_out"]
@@ -141,7 +140,7 @@ async def test_recovered_uses_bounded_headers(tmp_path, monkeypatch):
 
 
 async def test_progress_and_size(tmp_path, monkeypatch):
-    monkeypatch.setattr(task_waiting, "PROGRESS_SECONDS", 0)
+    monkeypatch.setattr(wait_policy, "PROGRESS_INTERVAL_SECONDS", 0)
     monkeypatch.setattr(task_waiting, "POLL_SECONDS", .001)
     tasks = [add_task(f"task-{i}", tmp_path) for i in range(32)]
     for task in tasks:

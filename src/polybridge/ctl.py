@@ -326,7 +326,11 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
                 if action == "start":
                     wp.add_argument("--expected-preview-hash")
         if action == "wait":
-            wp.add_argument("--timeout-seconds", type=int, default=30)
+            wp.add_argument("--timeout-seconds", type=int, default=None,
+                            help="hold for 0..3600 seconds (default 30; omit with --until terminal)")
+            wp.add_argument("--until", choices=("timeout", "terminal"), default="timeout",
+                            help="'terminal' holds until the run settles or needs attention, "
+                                 "up to a 6 hour server ceiling")
         if action == "resume":
             instructions_group = wp.add_mutually_exclusive_group()
             instructions_group.add_argument("--instructions")
@@ -912,7 +916,7 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
                 goal=_workflow_text(args, "goal"), expected_revision=args.expected_revision,
                 **({"interaction_owner": "monitor"} if args.monitor else {}))
         if action == "wait":
-            return await server._wait_workflow_full(args.workflow_run_id, args.timeout_seconds)
+            return await server._wait_workflow_full(args.workflow_run_id, args.timeout_seconds, args.until)
         if action == "resume":
             instructions = _workflow_text(args, "instructions")
             if args.monitor:

@@ -365,10 +365,17 @@ is bounded, including a single large result. Cursors bind the run, view and cont
 if content changes, restart that view. Managed orchestrators can read their own run only;
 execution results still require settled-only `inspect_workflow_node` rather than a detail shortcut.
 
-`wait_for_workflow` defaults to 30 seconds and caps its effective hold at 45 seconds.
-It accepts legacy requests up to 300 seconds but returns `requested_timeout_seconds`,
-`effective_timeout_seconds`, `timed_out` and polling guidance. Repeat the wait while the run
-is active; a long request does not guarantee one long-lived transport connection.
+`wait_for_workflow` defaults to 30 seconds and accepts `timeout_seconds` 0..3600, honoured as asked
+(never clamped; the earlier silent 45 second cap is gone). `until="terminal"` holds to a 6 hour
+server ceiling and requires `timeout_seconds` to be omitted. It returns on a settled terminal
+run (`stop_reason` `terminal`), on `needs_input`, `needs_attention` or `paused` (`attention`), or
+when the hold ends (`timeout`, `ceiling`); a terminal run still `settling` keeps waiting, and a
+read that keeps failing, or (under `until="terminal"`) settling with no run-file change for 300
+seconds, returns the last good snapshot as `observation_unavailable`. Responses
+carry `requested_timeout_seconds`, `effective_timeout_seconds`, `until`, `timed_out`,
+`stop_reason`, `elapsed_seconds` and `polling_guidance`; progress is sent every 5 seconds.
+Repeat the wait while the run is active, and see
+[the wait guide](multi-task-waiting.md) for client request deadlines.
 
 For example, load the supplied [implementation/review workflow](../examples/workflows/implement-review.json):
 
