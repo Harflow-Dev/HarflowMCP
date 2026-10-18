@@ -1515,7 +1515,8 @@ def test_optional_start_purpose_rejects_nonstring(invalid):
 def test_start_purpose_defaults_empty_and_preserves_agent_fields():
     graph = definition(); graph["nodes"][1]["prompt"] = {"existing": "custom extension"}
     canonical = w.validate_definition(graph)
-    assert canonical["nodes"][0]["prompt"] == ""
+    assert canonical["orchestrator"]["instructions"] == ""
+    assert "prompt" not in canonical["nodes"][0]
     assert canonical["nodes"][1]["prompt"] == {"existing": "custom extension"}
 
 

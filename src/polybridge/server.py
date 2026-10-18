@@ -1755,6 +1755,13 @@ async def save_workflow(name: str, definition: dict[str, Any], expected_revision
     values. Historical runs retain their pinned delivery policy. Bounded delivery uses
     session-bound acknowledgements and assigned evidence retrieval,
     with a 64 KiB target that never silently cuts required constraints.
+    orchestrator.instructions holds the workflow purpose; Start and End have no settings.
+    on_demand_nodes is separate from connected nodes, with id/title, required instructions,
+    optional call_condition (When to call guidance), agent/fallbacks, freedom/network,
+    session_mode agent_decides|fresh|resume and execution_mode headless|prefer_subagent.
+    Standalone IDs are unique across both lists; connections cannot reference them.
+    max_on_demand_calls defaults to 5, range 1–50, per routing/question checkpoint;
+    no per-node or per-run call cap exists. Legacy Start prompt migrates on saved reads.
     Set routing_mode="explicit". Ordinary nodes choose exactly one outgoing path.
     Parallel execution uses paired parallel_start/parallel_end nodes with shared
     parallel_group_id. Every branch reaches its matching end; nesting is supported.
@@ -1782,6 +1789,13 @@ async def delete_workflow(name: str) -> dict[str, Any]:
 @mcp.tool()
 async def workflow_builder(name: str, prompt: str, repo_path: str | None = None, agent: dict[str, Any] | None = None, fallbacks: list[dict[str, Any]] | None = None, definition: dict[str, Any] | None = None, source: dict[str, Any] | None = None) -> dict[str, Any]:
     """Generate a workflow, or refine the current canvas into an unsaved validated proposal.
+
+    Orchestrator instructions belong in orchestrator.instructions; Start/End are structural.
+    Optional on_demand_nodes are a separate ordered list with globally unique local id, title,
+    required nonempty instructions, optional call_condition (When to call guidance), agent,
+    freedom, network, session_mode agent_decides|fresh|resume and execution_mode.
+    They have no position, role or connections. max_on_demand_calls defaults to 5 (1–50)
+    per routing/question checkpoint; no per-node or per-run call cap exists.
 
     Write prompt in plain prose: preserve spaces and word boundaries rather than
     concatenating words to save tokens. The caller's prompt is retained unchanged
@@ -2158,6 +2172,9 @@ async def get_workflow_run_detail(workflow_run_id: str, view: str, cursor: str |
 
     owner_contracts contains the pinned per-owner permission plan. Concatenate chunk fields
     then decode JSON. Cursors bind content, run and view; changed content requires restarting.
+    On-demand detail views: on_demand_nodes (configured owner-scope catalog),
+    on_demand_calls (chronological reservation/call records), on_demand_state.
+    Calls include source scope, checkpoint/origin, timing, result_ref and nullable task_id.
     Managed orchestrators use settled node inspection for executions.
     """
     return await _workflow_call("detail", run_id=workflow_run_id, view=view, cursor=cursor, limit=limit)

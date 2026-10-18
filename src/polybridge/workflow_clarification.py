@@ -70,7 +70,8 @@ def compatible_origin(run: dict[str, Any], node: dict[str, Any], activation: dic
 async def answer_question(supervisor: Any, node: dict[str, Any], token: dict[str, Any], activation_id: str, question_id: str) -> bool:
     """Question decisions serialize with routing decisions; input releases the lock."""
     w, d = _modules()
-    async with supervisor.decision_lock:
+    from .workflow_on_demand import decision_lock
+    async with decision_lock(supervisor):
         while True:
             run = supervisor.run()
             activation = next(a for a in run["activations"] if a["id"] == activation_id)
@@ -82,7 +83,7 @@ async def answer_question(supervisor: Any, node: dict[str, Any], token: dict[str
             if question.get("decision_attempts", 0) >= run["definition"].get("max_decision_attempts", 3):
                 supervisor.update(lambda r: d.exhaust_decision(r, question, clarification=True), "question_decision_exhausted")
                 return False
-            context_token = {**token, "decision_id": question["decision_id"], "input_result_refs": activation.get("input_result_refs", []), "inspection_count": question.get("inspection_count", 0), "inspection_results": question.get("inspection_results", [])}
+            context_token = {**token, "decision_id": question["decision_id"], "input_result_refs": activation.get("input_result_refs", []), "inspection_count": question.get("inspection_count", 0), "inspection_results": question.get("inspection_results", []), "on_demand_count": question.get("on_demand_count", 0), "on_demand_results": question.get("on_demand_results", [])}
             context_token.pop("execution_activation_id", None)
             from .workflow_artifact_refs import artifact_references
             references = await asyncio.to_thread(artifact_references, run, supervisor.store.root)
@@ -92,9 +93,13 @@ async def answer_question(supervisor: Any, node: dict[str, Any], token: dict[str
                 answer_sessions = [{"task_id": source["task_id"], "candidate": source["candidate"], "session_id": source["result"]["session_id"]}]
             except w.WorkflowError:
                 answer_sessions = []
-            context.update(current_stage={"node_id": node["id"], "phase": "clarification", "execution_id": activation_id}, assignment=activation["assignment_prompt"], worker_question={**{k: question[k] for k in ("question_id", "question", "origin_task_id", "answer_delivery_state")}, "context": w._bounded(question["context"], 8000), "progress": w._bounded(question["progress"], 8000), "evidence": w._bounded(question["evidence"], 8000), "execution_id": activation_id}, valid_continuations=[], valid_actions=["answer", "inspect", "failed", "needs_input"], answer_sessions=answer_sessions)
+            context.update(current_stage={"node_id": node["id"], "phase": "clarification", "execution_id": activation_id}, assignment=activation["assignment_prompt"], worker_question={**{k: question[k] for k in ("question_id", "question", "origin_task_id", "answer_delivery_state")}, "context": w._bounded(question["context"], 8000), "progress": w._bounded(question["progress"], 8000), "evidence": w._bounded(question["evidence"], 8000), "execution_id": activation_id}, valid_continuations=[], valid_actions=["answer", "inspect", "call_on_demand", "failed", "needs_input"], answer_sessions=answer_sessions)
+            if question.get("child_question"):
+                context["child_question"] = copy.deepcopy(question["child_question"])
+                context["child_question_policy"] = "This is a child orchestrator question. Answer ordinary context only, or return needs_input to forward the exact original question to the caller. Never grant permissions, retries, usage-limit recovery, optional-review overrides or goal revisions. Child answers use Fresh as a delivery marker; no child conversation/session selection changes."
             base = {"decision_id": question["decision_id"], "reason": "Explain the decision"}
             examples = {
+                "call_on_demand": {**base, "action": "call_on_demand", "node_id": "issued on-demand node ID", "assignment": "Focused specialist assignment", "session_mode": "fresh"},
                 "answer": {**base, "action": "answer", "question_id": question_id, "answer": "Focused answer", "session_mode": "resume" if answer_sessions else "fresh"},
                 "inspect": {**base, "action": "inspect", "requests": [{"execution_id": "settled execution ID", "view": "result"}]},
                 "failed": {**base, "action": "failed"},
@@ -113,6 +118,11 @@ async def answer_question(supervisor: Any, node: dict[str, Any], token: dict[str
             try:
                 decision = d.parse_contract(raw, guided=run.get("runner_policy") == "guided")
                 decision, protocol_warnings = d.normalize_decision(run, node, context_token, decision, clarification=True, root=supervisor.store.root)
+                if decision.get("action") == "call_on_demand":
+                    from .workflow_on_demand import call
+                    if not await call(supervisor, node, token, question, decision, orchestration["id"], question_id=question_id):
+                        return False
+                    continue
                 if decision.get("action") == "inspect":
                     d.inspect_decision(supervisor, decision, question, orchestration["id"], question_id=question_id, execution_id=activation_id, protocol_warnings=protocol_warnings)
                     continue
@@ -124,7 +134,7 @@ async def answer_question(supervisor: Any, node: dict[str, Any], token: dict[str
                 if action == "answer":
                     if decision.get("question_id") != question_id or not isinstance(decision.get("answer"), str) or not decision["answer"].strip():
                         raise w.WorkflowError("Answer requires this question_id and a nonempty answer")
-                    mode = decision.get("session_mode", "resume")
+                    mode = decision.get("session_mode", "fresh" if question.get("child_question") else "resume")
                     if mode not in {"fresh", "resume"}:
                         raise w.WorkflowError("Answer session_mode must be fresh or resume")
                     if question.get("answer_delivery_state") == "requires_fresh" and mode != "fresh":
@@ -143,9 +153,14 @@ async def answer_question(supervisor: Any, node: dict[str, Any], token: dict[str
                         a["decision_ignored"] = "Workflow tree stopped running before answer acceptance"
                         return
                     q = question_record(r, activation_id, question_id)
+                    q["on_demand_count"] = 0
                     r["decisions"].append({**decision, "node_id": node["id"], "activation_id": orchestration["id"], "execution_id": activation_id, "protocol_warnings": protocol_warnings})
                     if action == "answer":
-                        q.update(status="answered", answer=decision["answer"], session_mode=decision.get("session_mode", "resume"), answer_delivery_state="pending", answered_at=time.time())
+                        q.update(status="answered", answer=decision["answer"], session_mode=mode, answer_delivery_state="pending", answered_at=time.time(), on_demand_count=0)
+                    elif action == "needs_input" and q.get("child_question"):
+                        # Forwarding preserves the child's exact caller question
+                        # and input ID; parent prose cannot replace that identity.
+                        q.update(status="forwarded", answer_delivery_state="forwarded")
                     elif action == "failed":
                         r.update(status="failed", failure_reason=decision["reason"], failed_decision_id=q["decision_id"])
                     else:

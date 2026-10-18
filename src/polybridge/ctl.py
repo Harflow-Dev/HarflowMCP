@@ -55,7 +55,7 @@ from .tasks import default_log_dir
 # Bumped to 2 when `status`/`list`'s snapshot/brief documents gained `resume_command` (Monitor
 # piece 3/3). `setup` and the event log are separate contracts and stay at v1 — see CLAUDE.md's
 # "The Monitor app is a consumer of three frozen contracts".
-CTL_JSON_VERSION = 13
+CTL_JSON_VERSION = 14
 
 # How long `cancel`/`takeover` stay alive for a failing `.sig` write to be retried before exiting —
 # the lease (60 s) is what a later recovery waits for anyway.
@@ -255,7 +255,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
             wp.add_argument("--cursor")
         if action == "detail":
             wp.add_argument("--monitor-view", action="store_true")
-            wp.add_argument("--view", required=True)
+            wp.add_argument("--view", required=True, help="Lossless detail view, including on_demand_nodes, on_demand_calls or on_demand_state")
             wp.add_argument("--cursor")
         if action == "abandon-dispatch":
             wp.add_argument("execution_id")

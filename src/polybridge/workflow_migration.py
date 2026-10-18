@@ -100,3 +100,28 @@ def migrate_parallel_boundaries(
         ])
     converted["routing_mode"] = "explicit"
     return converted
+
+
+def migrate_orchestrator_instructions(definition: dict[str, Any]) -> dict[str, Any]:
+    """Normalize saved definitions without modifying historical run snapshots."""
+    value = copy.deepcopy(definition)
+    orchestrator = value.setdefault("orchestrator", {"backend": "codex"})
+    if not isinstance(orchestrator, dict):
+        return value
+    # Programmatic callers may reuse one candidate mapping for the owner and
+    # workers. Isolate owner-only fields after deepcopy preserves those aliases.
+    orchestrator = copy.deepcopy(orchestrator)
+    value["orchestrator"] = orchestrator
+    nodes = value.get("nodes", [])
+    for node in nodes if isinstance(nodes, list) else []:
+        if isinstance(node, dict) and node.get("type") == "start":
+            if "prompt" in node and not isinstance(node["prompt"], str):
+                from .workflows import WorkflowError
+                raise WorkflowError("Start prompt must be a string")
+            if "instructions" not in orchestrator and "prompt" in node:
+                orchestrator["instructions"] = node["prompt"]
+            node.pop("prompt", None)
+    orchestrator.setdefault("instructions", "")
+    value.setdefault("on_demand_nodes", [])
+    value.setdefault("max_on_demand_calls", 5)
+    return value

@@ -152,6 +152,14 @@ From an MCP client such as Claude Desktop:
 
 “Feature Delivery” is an example name; create and save your workflow first.
 
+Each workflow has a standalone Orchestrator for its instructions, candidates and limits.
+Optional on-demand specialists run only when the orchestrator calls them at routing or question
+checkpoints. Calls return to that checkpoint, with one specialist at a time and a default allowance
+of five calls per decision. Unused specialists never block completion. Current-orchestrator
+children share their owner's specialists; Child-orchestrator boundaries remain isolated.
+See [on-demand specialists](docs/workflows.md#on-demand-specialists) for definitions, session
+choices, call limits and recovery.
+
 The MCP tools are `start_workflow(name, prompt, repo_path)`, `get_workflow_status(workflow_run_id)`,
 and `wait_for_workflow(workflow_run_id)`. You can also pass `workflow="Feature Delivery"` to
 `start_task`. Workflow starts return a **`workflow_run_id`**, which uses workflow status tools.

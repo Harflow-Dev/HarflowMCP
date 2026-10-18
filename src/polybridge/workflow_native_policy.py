@@ -61,7 +61,7 @@ def plan_owner_contracts(definition: dict[str, Any], tree: dict[str, Any] | None
         current = definitions[ident]
         nodes: list[dict[str, Any]] = []
         child_owners: list[str] = []
-        for node in current.get("nodes", []):
+        for node in current.get("nodes", []) + [{**n, "type": "agent"} for n in current.get("on_demand_nodes", [])]:
             if node.get("type") == "agent":
                 for position, node_candidate in enumerate([node["agent"], *node["agent"].get("fallbacks", [])]):
                     nodes.append({"workflow_id": ident, "node_id": node["id"], "title": node.get("title") or node["id"], "freedom": effective_freedom(node, freedom, permission_policy=permission_policy), "network": node_network(node, network), "node": node, "candidate": {key: value for key, value in node_candidate.items() if key != "fallbacks"}, "candidate_position": position, "parallel": any(n.get("type") == "parallel_start" for n in current.get("nodes", []))})

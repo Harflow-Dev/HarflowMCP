@@ -2,6 +2,7 @@
 import asyncio
 import copy
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -117,7 +118,7 @@ async def run_flow(storage, tmp_path, definition=None, registry=None, *, guided=
 
 async def test_assignment_isolation_display_and_durable_result(storage, tmp_path):
     run, registry = await run_flow(storage, tmp_path)
-    assert run["status"] == "completed"
+    assert run["status"] == "completed", run.get("attention_reason") or run.get("failure_reason")
     assert run["execution_contract"] == "delegation"
     assert len(registry.contexts) == 3  # Start, worker routing, End completion
     workers = [(p, k) for p, k in registry.calls if "Assignment:\n" in p]
@@ -133,6 +134,62 @@ async def test_assignment_isolation_display_and_durable_result(storage, tmp_path
     assert json.loads(activation["raw_output"])["result"]["summary"] == "Done"
     assert all(c["original_request"] == "ORIGINAL PRIVATE REQUEST" for c in registry.contexts)
     assert not run["settling"]
+
+
+@pytest.mark.parametrize("guided", [False, True])
+async def test_on_demand_specialist_calls_return_to_checkpoint_and_do_not_touch_canvas(storage, tmp_path, guided):
+    definition = graph()
+    definition["on_demand_nodes"] = [{
+        "id": "research", "title": "API researcher", "instructions": "Return API evidence.",
+        "call_condition": "Call when API behaviour needs verification.", "agent": {"backend": "codex"},
+        "freedom": "read_only", "session_mode": "fresh", "execution_mode": "headless",
+    }]
+    calls = {"count": 0}
+
+    def policy(context, registry):
+        if calls["count"] < 2:
+            calls["count"] += 1
+            return {
+                "decision_id": context["decision_id"], "action": "call_on_demand",
+                "node_id": context["on_demand_nodes"][0]["node_id"],
+                "assignment": f"Verify API pass {calls['count']}", "reason": "Need specialist evidence",
+            }
+        return default_decision(context, registry)
+
+    run, registry = await run_flow(storage, tmp_path, definition, Registry(storage.root, policy), guided=guided)
+    assert run["status"] == "completed", run.get("attention_reason") or run.get("failure_reason")
+    assert len(run["on_demand_calls"]) == 2
+    assert all(call["status"] == "succeeded" for call in run["on_demand_calls"])
+    assert len([a for a in run["activations"] if a.get("on_demand_call_id")]) == 2
+    assert len([a for a in run["activations"] if a["role"] == "node" and not a.get("on_demand_call_id")]) == 1
+    assert calls["count"] == 2
+
+
+async def test_on_demand_allowance_exhaustion_resume_resets_checkpoint_counter(storage, tmp_path):
+    definition = graph()
+    definition["on_demand_nodes"] = [{
+        "id": "research", "title": "API researcher", "instructions": "Return API evidence.",
+        "call_condition": "Call when API behaviour needs verification.", "agent": {"backend": "codex"},
+        "freedom": "read_only", "session_mode": "fresh", "execution_mode": "headless",
+    }]
+    definition["max_on_demand_calls"] = 5
+    calls = {"count": 0}
+
+    def policy(context, registry):
+        calls["count"] += 1
+        return {
+            "decision_id": context["decision_id"], "action": "call_on_demand",
+            "node_id": context["on_demand_nodes"][0]["node_id"],
+            "assignment": f"Verify API pass {calls['count']}", "reason": "Need specialist evidence",
+        }
+
+    run, registry = await run_flow(storage, tmp_path, definition, Registry(storage.root, policy))
+    assert run["status"] == "needs_attention"
+    assert run["pending"][0]["on_demand_count"] == 5
+    assert "allowance exhausted" in run["attention_reason"]
+    storage.control(run["workflow_run_id"], "resume", instructions="Continue with a fresh allowance")
+    resumed = storage.get_run(run["workflow_run_id"])
+    assert resumed["pending"][0]["on_demand_count"] == 0
 
 
 @pytest.mark.parametrize("bad", [0, 11, True, "3"])
@@ -622,6 +679,102 @@ async def test_worker_question_resumes_same_execution_and_shows_answer(storage, 
     assert nodes[0]["tasks"][1]["assignment_prompt"] == "Use JSON format"
     assert turns[1][1]["display_prompt"] == "Use JSON format"
     assert nodes[0]["assignment_prompt"] == "Focused assignment for work"
+
+
+async def test_on_demand_call_at_worker_question_returns_to_same_question_checkpoint(storage, tmp_path):
+    definition = graph()
+    definition["on_demand_nodes"] = [{
+        "id": "research", "title": "API researcher", "instructions": "Return API evidence.",
+        "call_condition": "Call when API behaviour needs verification.", "agent": {"backend": "codex"},
+        "freedom": "read_only", "session_mode": "fresh", "execution_mode": "headless",
+    }]
+    specialist_called = False
+    worker_turns = 0
+
+    def policy(context, registry):
+        nonlocal specialist_called
+        if context["current_stage"]["phase"] == "clarification" and not specialist_called:
+            specialist_called = True
+            return {"decision_id": context["decision_id"], "action": "call_on_demand", "node_id": context["on_demand_nodes"][0]["node_id"], "assignment": "Verify parser guidance", "reason": "Need specialist evidence"}
+        if context["current_stage"]["phase"] == "clarification":
+            question = context["worker_question"]
+            return {"decision_id": context["decision_id"], "action": "answer", "question_id": question["question_id"], "answer": "Use JSON", "reason": "Specialist evidence supports JSON"}
+        return default_decision(context, registry)
+
+    def worker(prompt, kwargs):
+        nonlocal worker_turns
+        worker_turns += 1
+        if worker_turns == 1:
+            return {"status": "asking", "result": {"question": "Which parser format?", "context": "Two formats"}, "evidence": ["Parser source"]}
+        return {"status": "succeeded", "result": {"summary": "Implemented JSON parser"}, "evidence": ["Tests passed"]}
+
+    run, registry = await run_flow(storage, tmp_path, definition, Registry(storage.root, policy, {"work": worker}))
+    assert run["status"] == "completed"
+    assert len(run["on_demand_calls"]) == 1
+    assert run["on_demand_calls"][0]["origin"]["kind"] == "node_question"
+    assert run["on_demand_calls"][0]["status"] == "succeeded"
+    worker_activation = next(a for a in run["activations"] if a["role"] == "node" and a["node_id"] == "work")
+    assert worker_activation["questions"][0]["status"] == "answered"
+
+
+async def test_inflight_on_demand_call_cancels_once_with_root_workflow(storage, tmp_path, monkeypatch):
+    definition = graph()
+    definition["on_demand_nodes"] = [{
+        "id": "research", "title": "API researcher", "instructions": "Return API evidence.",
+        "call_condition": "Call when API behaviour needs verification.", "agent": {"backend": "codex"},
+        "freedom": "read_only", "session_mode": "fresh", "execution_mode": "headless",
+    }]
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = {"specialist": 0}
+    cancellation_calls = []
+
+    def policy(context, registry):
+        if calls["specialist"] == 0:
+            calls["specialist"] += 1
+            return {"decision_id": context["decision_id"], "action": "call_on_demand", "node_id": context["on_demand_nodes"][0]["node_id"], "assignment": "Verify API", "reason": "Need evidence"}
+        return default_decision(context, registry)
+
+    class HeldSpecialist(Registry):
+        async def start(self, prompt, repo, **kwargs):
+            task = await super().start(prompt, repo, **kwargs)
+            if "Execute the specialist assignment." in prompt:
+                task.done = release
+                task.result["status"] = "running"
+                from polybridge import store as task_store
+                record = task_store.read(self._log_dir, task.task_id)
+                task_store.write(self._log_dir, replace(record, status="running", exit_code=None))
+                started.set()
+            return task
+
+        async def cancel_cascade(self, *args, **kwargs):
+            cancellation_calls.append(args[0] if args else None)
+            requested = args[0] if args else None
+            for task_id, task in self.tasks.items():
+                if requested and task_id != requested:
+                    continue
+                task.result["status"] = "cancelled"
+                from polybridge import store as task_store
+                record = task_store.read(self._log_dir, task_id)
+                task_store.write(self._log_dir, replace(record, status="cancelled", exit_code=-15))
+            release.set()
+            return await super().cancel_cascade(*args, **kwargs)
+
+    registry = HeldSpecialist(storage.root, policy)
+    run = storage.create_run(w.validate_definition(definition), "Request", tmp_path)
+    execution = asyncio.create_task(w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]))
+    await asyncio.wait_for(started.wait(), 3)
+    from polybridge import identity
+    monkeypatch.setattr(identity, "identity_check", lambda _identity: "dead")
+    storage.control(run["workflow_run_id"], "cancel")
+    await asyncio.wait_for(execution, 5)
+    observed = storage.get_run(run["workflow_run_id"])
+    assert observed["status"] == "cancelled", observed.get("attention_reason") or observed.get("failure_reason")
+    assert len(observed["on_demand_calls"]) == 1
+    assert observed["on_demand_calls"][0]["status"] == "cancelled"
+    assert len(cancellation_calls) == 1
+    assert len([a for a in observed["activations"] if a.get("on_demand_call_id")]) == 1
+    assert not any(a.get("role") == "node" and not a.get("on_demand_call_id") for a in observed["activations"])
 
 
 async def test_worker_question_caller_input_requires_matching_decision(storage, tmp_path):

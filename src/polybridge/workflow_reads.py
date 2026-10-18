@@ -41,7 +41,7 @@ async def bounded_caller(directory: Path):
 
 def managed_run_summary(run: dict[str, Any]) -> dict[str, Any]:
     """Expose current routing state; goal history remains in paged detail reads."""
-    keys = ("workflow_run_id", "name", "kind", "status", "goal", "goal_revision", "goal_assessment", "goal_replanning_required", "parent_goal", "definition", "revision", "prompt", "execution_contract", "tasks", "checklist_disposition", "decisions", "transitions", "settling", "input_question", "input_decision_id", "interaction_owner", "reason", "instructions", "created_at", "updated_at")
+    keys = ("workflow_run_id", "name", "kind", "status", "goal", "goal_revision", "goal_assessment", "goal_replanning_required", "parent_goal", "definition", "revision", "prompt", "execution_contract", "tasks", "checklist_disposition", "decisions", "transitions", "settling", "input_question", "input_decision_id", "interaction_owner", "reason", "instructions", "created_at", "updated_at", "on_demand_nodes", "on_demand_calls", "on_demand_state")
     summary = {key: run[key] for key in keys if key in run}
     if isinstance(run.get("technical_plan"), str):
         summary.update(technical_plan=run["technical_plan"][:16000], technical_plan_truncated=len(run["technical_plan"]) > 16000, technical_plan_execution_id=run.get("technical_plan_execution_id"))
@@ -79,6 +79,7 @@ async def call(action: str, *, directory: Path, reader: Callable[[], Awaitable[A
             managed = await reader()
     if managed is not None:
         association, owned_run = managed
+        owned_run = await _read(on_demand_projection, workflows.WorkflowStore(directory.parent), owned_run)
         if action in {'list_run_page', 'get_run_header'}:
             if association['role'] not in {'builder', 'orchestrator'}:
                 raise ValueError('Worker nodes cannot inspect workflow context')
@@ -153,9 +154,11 @@ async def call(action: str, *, directory: Path, reader: Callable[[], Awaitable[A
     if action == "detail":
         from .workflow_responses import detail
         run = await _read(store_.get_run, kwargs["run_id"])
+        run = await _read(on_demand_projection, store_, run)
         return _project(detail, run, kwargs["view"], kwargs.get("cursor"), kwargs.get("limit", 8000))
     if action == "status":
-        return await _read(store_.get_run, kwargs["run_id"])
+        run = await _read(store_.get_run, kwargs["run_id"])
+        return await _read(on_demand_projection, store_, run)
 
 
 async def cli_read(action: str, args: Any, directory: Path) -> Any:
@@ -204,3 +207,10 @@ async def cli_read(action: str, args: Any, directory: Path) -> Any:
             return run
         return _project(monitor, await asyncio.to_thread(_project, monitor_projection, WorkflowStore(), run))
     return await read(action, run_id=args.workflow_run_id)
+
+
+def on_demand_projection(storage: Any, run: dict[str, Any]) -> dict[str, Any]:
+    from .workflow_on_demand import projection
+    if run.get("kind") == "builder":
+        return run
+    return {**run, **projection(storage, run)}

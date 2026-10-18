@@ -80,6 +80,8 @@ def parse_contract(text: str, *, guided: bool = False) -> dict[str, Any]:
 
 def normalize_decision(run: dict[str, Any], node: dict[str, Any], token: dict[str, Any], decision: dict[str, Any], execute: bool = False, *, clarification: bool = False, root: Path | None = None) -> tuple[dict[str, Any], list[str]]:
     """Ignore harmless presentation fields without discarding dispatch meaning."""
+    if decision.get("action") == "call_on_demand":
+        return decision, []
     if run.get("runner_policy") != "guided":
         return decision, []
     value = copy.deepcopy(decision)
@@ -150,6 +152,7 @@ def decision_prompt(context: dict[str, Any]) -> str:
         "structural_continue": {**base, "action": "continue", "next": [{"continuation_id": "issued structural continuation ID"}]},
         "agent_continue": {**base, "action": "continue", "next": [{"continuation_id": "issued executable continuation ID", "prompt": "Focused assignment", "session_mode": "fresh"}]},
         "inspect": {**base, "action": "inspect", "requests": [{"execution_id": "settled execution ID", "view": "result"}]},
+        "call_on_demand": {**base, "action": "call_on_demand", "node_id": "issued on-demand node ID", "assignment": "Focused specialist assignment", "session_mode": "fresh"},
         "needs_input": {**base, "action": "needs_input", "question": "Question for the caller"},
         "failed": {**base, "action": "failed"},
         "complete": {**base, "action": "complete"},
@@ -646,7 +649,10 @@ def decision_context(run: dict[str, Any], node: dict[str, Any], token: dict[str,
         workflow_scope = {"boundary": run["workflow_run_id"], "child_workflow_run_id": run["workflow_run_id"], "parent_workflow_run_id": link.get("workflow_run_id"), "parent_node_id": link.get("node_id"), "workflow_name": run.get("name", ""), "orchestrator_mode": "current", "assignment": run.get("prompt", "")}
     from .workflow_goals import context as goal_context
     extra = {"artifact_references": artifact_references} if artifact_references else {}
-    return {**extra, **goal_context(run, root=root), "workflow_run_id": run["workflow_run_id"], "decision_id": token["decision_id"], "routing_mode": run["definition"].get("routing_mode", "legacy"), "routing_rules": "Ordinary nodes choose exactly one continuation; Parallel start defaults to all forward branches; branch_selection orchestrator selects one or more applicable entries with selection_reason explaining selections and exclusions. Parallel end waits for exactly the persisted selected set; no harness runs for structural nodes." if run["definition"].get("routing_mode") == "explicit" else "Select legal continuations", "original_request": run["prompt"], "workflow_purpose": next(n.get("prompt", "") for n in run["definition"]["nodes"] if n["type"] == "start"), "current_stage": {"node_id": node["id"], "phase": "assignment" if execute else "routing", "token_id": token["id"]}, "workflow_graph": {"nodes": graph, "connections": run["definition"]["connections"]}, "input_results": result_inputs(run, refs, root=root), "workflow_scope": workflow_scope, "settled_executions": [{"execution_id": a["id"], "result_ref": a["id"], "node_id": a["node_id"], "status": a["node_result"]["status"], "attempts": [{"task_id": t["task_id"], "status": t["status"], "candidate": t.get("candidate", {}), "harness_metadata": t.get("harness_metadata", {})} for t in a["tasks"]]} for a in run["activations"] if a["role"] == "node" and settled(a) and a.get("node_result")], "technical_plan": run.get("technical_plan", "")[:16000], "technical_plan_truncated": len(run.get("technical_plan", "")) > 16000, "technical_plan_execution_id": run.get("technical_plan_execution_id"), "checklist": run.get("tasks", []), "checklist_disposition": run.get("checklist_disposition"), "recent_decisions": run["decisions"][-10:], "valid_continuations": continuations(run, node, token, execute, root=root), "continuation_blockers": blockers, "recovery_instructions": run.get("instructions", ""), "transitions_remaining": run["definition"]["max_transitions"] + run.get("transition_grant", 0) - run["transitions"], "inspection_results": token.get("inspection_results", [])[-1:], "inspection_history": [{"request": item["request"], "summary": item.get("summary", ""), "metadata": {k: item["response"][k] for k in ("execution_id", "task_id", "content_sha256", "offset", "next_cursor", "has_more") if k in item["response"]}} for item in token.get("inspection_results", [])[-20:]], "inspections_remaining": run["definition"].get("max_inspections", 20) - token.get("inspection_count", 0), "inspection": "Return final JSON action inspect with requests [{execution_id:<result_ref>,workflow_run_id:optional child run,view:result|activity,task_id:optional,cursor:optional,limit:optional,before_seq:optional,after_seq:optional}]. Polybridge retrieves settled results and returns inspection_results in the next decision. Request exactly one page per inspect action; preserve relevant findings in reason for subsequent Fresh decisions. No MCP inspection is required. Result response chunk is JSON text; concatenate pages until next_cursor is null then decode {node_result,raw_output,permission_denials?,optional_skip?,optional_skip_ancestors?}. All settled executions in this run, and in linked child runs, are inspectable."}
+    if root is not None:
+        from .workflow_on_demand import context as on_demand_context
+        extra.update(on_demand_context(w.WorkflowStore(root), run, token))
+    return {**extra, **goal_context(run, root=root), "workflow_run_id": run["workflow_run_id"], "decision_id": token["decision_id"], "routing_mode": run["definition"].get("routing_mode", "legacy"), "routing_rules": "Ordinary nodes choose exactly one continuation; Parallel start defaults to all forward branches; branch_selection orchestrator selects one or more applicable entries with selection_reason explaining selections and exclusions. Parallel end waits for exactly the persisted selected set; no harness runs for structural nodes." if run["definition"].get("routing_mode") == "explicit" else "Select legal continuations", "original_request": run["prompt"], "workflow_purpose": run["definition"].get("orchestrator", {}).get("instructions", next(n.get("prompt", "") for n in run["definition"]["nodes"] if n["type"] == "start")), "current_stage": {"node_id": node["id"], "phase": "assignment" if execute else "routing", "token_id": token["id"]}, "workflow_graph": {"nodes": graph, "connections": run["definition"]["connections"]}, "input_results": result_inputs(run, refs, root=root), "workflow_scope": workflow_scope, "settled_executions": [{"execution_id": a["id"], "result_ref": a["id"], "node_id": a["node_id"], "status": a["node_result"]["status"], "attempts": [{"task_id": t["task_id"], "status": t["status"], "candidate": t.get("candidate", {}), "harness_metadata": t.get("harness_metadata", {})} for t in a["tasks"]]} for a in run["activations"] if a["role"] == "node" and settled(a) and a.get("node_result")], "technical_plan": run.get("technical_plan", "")[:16000], "technical_plan_truncated": len(run.get("technical_plan", "")) > 16000, "technical_plan_execution_id": run.get("technical_plan_execution_id"), "checklist": run.get("tasks", []), "checklist_disposition": run.get("checklist_disposition"), "recent_decisions": run["decisions"][-10:], "valid_continuations": continuations(run, node, token, execute, root=root), "continuation_blockers": blockers, "recovery_instructions": run.get("instructions", ""), "transitions_remaining": run["definition"]["max_transitions"] + run.get("transition_grant", 0) - run["transitions"], "inspection_results": token.get("inspection_results", [])[-1:], "inspection_history": [{"request": item["request"], "summary": item.get("summary", ""), "metadata": {k: item["response"][k] for k in ("execution_id", "task_id", "content_sha256", "offset", "next_cursor", "has_more") if k in item["response"]}} for item in token.get("inspection_results", [])[-20:]], "inspections_remaining": run["definition"].get("max_inspections", 20) - token.get("inspection_count", 0), "inspection": "Return final JSON action inspect with requests [{execution_id:<result_ref>,workflow_run_id:optional child run,view:result|activity,task_id:optional,cursor:optional,limit:optional,before_seq:optional,after_seq:optional}]. Polybridge retrieves settled results and returns inspection_results in the next decision. Request exactly one page per inspect action; preserve relevant findings in reason for subsequent Fresh decisions. No MCP inspection is required. Result response chunk is JSON text; concatenate pages until next_cursor is null then decode {node_result,raw_output,permission_denials?,optional_skip?,optional_skip_ancestors?}. All settled executions in this run, and in linked child runs, are inspectable."}
 
 
 def completion_evidence(run: dict[str, Any], node: dict[str, Any], token: dict[str, Any], task_id: str) -> dict[str, Any] | None:
@@ -871,12 +877,13 @@ def validate_decision(run: dict[str, Any], node: dict[str, Any], token: dict[str
 
 async def decide(supervisor: Any, node: dict[str, Any], token: dict[str, Any], *, execute: bool = False) -> list[dict[str, Any]] | None:
     w = _w()
-    async with supervisor.decision_lock:
+    from .workflow_on_demand import decision_lock
+    async with decision_lock(supervisor):
         current = next((t for t in supervisor.run()["pending"] if t["id"] == token["id"]), None)
         if current is None or not supervisor.tree.tree_running(supervisor.run()):
             return None
         if not current.get("decision_id"):
-            supervisor.update(lambda r: next(t for t in r["pending"] if t["id"] == token["id"]).update(decision_id=uuid.uuid4().hex, decision_attempts=0), "decision_checkpoint")
+            supervisor.update(lambda r: next(t for t in r["pending"] if t["id"] == token["id"]).update(decision_id=uuid.uuid4().hex, decision_attempts=0, on_demand_count=0, on_demand_results=[]), "decision_checkpoint")
         while True:
             run = supervisor.run()
             token = next(t for t in run["pending"] if t["id"] == token["id"])
@@ -902,6 +909,13 @@ async def decide(supervisor: Any, node: dict[str, Any], token: dict[str, Any], *
             try:
                 decision = parse_contract(raw, guided=run.get("runner_policy") == "guided")
                 decision, protocol_warnings = normalize_decision(run, node, token, decision, execute, root=supervisor.store.root)
+                if decision.get("action") == "call_on_demand":
+                    from .workflow_on_demand import call
+                    if not await call(supervisor, node, token, token, decision, activation["id"]):
+                        return None
+                    from .workflow_prompt_delivery import accept_ack
+                    accept_ack(supervisor, activation["id"], decision)
+                    continue
                 if decision.get("action") == "inspect":
                     inspect_decision(supervisor, decision, token, activation["id"], protocol_warnings=protocol_warnings)
                     from .workflow_prompt_delivery import accept_ack
@@ -928,6 +942,7 @@ async def decide(supervisor: Any, node: dict[str, Any], token: dict[str, Any], *
                     r.pop("exhausted_retry_edges", None)
                     r["decisions"].append({**decision, "node_id": node["id"], "activation_id": activation["id"], "selected_join_id": join, "protocol_warnings": protocol_warnings})
                     action = decision["action"]
+                    t["on_demand_count"] = 0
                     source = next((item for item in r["activations"] if item["id"] == t.get("execution_activation_id")), None)
                     explicit_retry = any(key.startswith(("retry:", "recover:", "recover_child:")) for key in assignments)
                     if action == "continue" and not explicit_retry and node.get("role") == "planning" and source and source.get("node_result", {}).get("status") == "succeeded":
@@ -1421,6 +1436,10 @@ def reconcile_delegation(run: dict[str, Any]) -> None:
     """Reconnect proven outcomes; leave every ambiguous reservation uncertain."""
     nodes = {n["id"]: n for n in run["definition"]["nodes"]}
     for activation in run["activations"]:
+        if activation.get("on_demand_call_id"):
+            continue
+        if activation.get("invocation") and any(q.get("child_question") for q in activation.get("questions", [])):
+            continue
         owner = next((t for t in run["pending"] if t["id"] == (activation.get("token") or {}).get("id")), None)
         if activation["role"] == "node" and owner and (owner.get("execution_activation_id") not in {None, activation["id"]} or owner.get("retry_of_execution_id") == activation["id"] or activation.get("resolved_by_execution_id")):
             continue  # Superseded executions never mutate a retry checkpoint.

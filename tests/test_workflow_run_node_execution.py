@@ -221,6 +221,60 @@ async def test_child_mode_prompt_assignment_and_isolation(two_level, tmp_path):
     assert all(ref["workflow_run_id"] == child["workflow_run_id"] for ref in outcome["final_result_refs"])
 
 
+@pytest.mark.parametrize("repeat_question", [False, True])
+async def test_child_question_parent_specialist_bridge_answers_exact_child_checkpoint(tmp_path, monkeypatch, repeat_question):
+    monkeypatch.setattr(w.backends, "is_installed", lambda backend: True)
+    monkeypatch.setattr(w, "_launch", lambda *args: None)
+    store = w.WorkflowStore(tmp_path)
+    child = child_graph("child")
+    saved_child = store.save("child", child)
+    parent = parent_graph(saved_child["workflow_id"], mode="child")
+    parent["on_demand_nodes"] = [{"id": "research", "title": "API researcher", "instructions": "Return evidence.", "call_condition": "Call when evidence is needed.", "agent": {"backend": "codex"}, "freedom": "read_only", "session_mode": "fresh", "execution_mode": "headless"}]
+    store.save("parent", parent)
+    specialist_called = False
+    worker_turns = 0
+
+    def policy(context, registry):
+        nonlocal specialist_called
+        if context.get("current_stage", {}).get("phase") == "clarification" and context.get("worker_question"):
+            if not context.get("on_demand_nodes"):
+                if context.get("recovery_instructions") and not repeat_question:
+                    question = context["worker_question"]
+                    return {"decision_id": context["decision_id"], "action": "answer", "question_id": question["question_id"], "answer": context["recovery_instructions"], "session_mode": "fresh", "reason": "Parent supplied the answer"}
+                return {"decision_id": context["decision_id"], "action": "needs_input", "question": context["worker_question"]["question"], "reason": "Child needs parent guidance"}
+            if not specialist_called:
+                specialist_called = True
+                return {"decision_id": context["decision_id"], "action": "call_on_demand", "node_id": context["on_demand_nodes"][0]["node_id"], "assignment": "Check the child question", "reason": "Need evidence before answering"}
+            question = context["worker_question"]
+            return {"decision_id": context["decision_id"], "action": "answer", "question_id": question["question_id"], "answer": "Use JSON", "reason": "Specialist evidence supports this answer"}
+        return workflow_policy(context, registry)
+
+    def worker(prompt, kwargs):
+        nonlocal worker_turns
+        worker_turns += 1
+        if kwargs.get("title", "").endswith("work") and worker_turns == 1:
+            return {"status": "asking", "result": {"question": "Which format?", "context": "Two formats"}, "evidence": ["Child evidence"]}
+        return {"status": "succeeded", "result": {"summary": "Done"}, "evidence": ["Observed"]}
+
+    registry = TreeRegistry(store.root, policy=policy, outputs={"work": worker})
+    run, _ = await run_tree(store, tmp_path, "parent", registry)
+    if repeat_question:
+        assert run["status"] == "needs_attention"
+        assert child_runs(store, run)[0]["workflow_run_id"] in run.get("attention_reason", "")
+        assert child_runs(store, run)[0].get("input_decision_id", "") in run.get("attention_reason", "")
+    else:
+        assert run["status"] == "completed", run.get("attention_reason") or run.get("failure_reason")
+    child_run = child_runs(store, run)[0]
+    assert child_run["orchestrator_mode"] == "child"
+    assert not any(entry["node_id"].startswith(child_run["workflow_run_id"] + ":") for entry in run.get("on_demand_nodes", []))
+    assert len(run.get("on_demand_calls", [])) == 1
+    assert run["on_demand_calls"][0]["origin"]["kind"] == "child_question"
+    assert run["on_demand_calls"][0]["checkpoint"]["question_id"] is not None
+    assert run["on_demand_calls"][0]["origin"]["workflow_run_id"] == run["workflow_run_id"]
+    if not repeat_question:
+        assert child_run.get("input_decision_id") is None
+
+
 async def test_child_mode_inputs_arrive_complete_and_worker_sees_them(tmp_path, monkeypatch):
     monkeypatch.setattr(w.backends, "is_installed", lambda backend: True)
     monkeypatch.setattr(w, "_launch", lambda *args: None)

@@ -808,6 +808,8 @@ async def run_child(supervisor: Any, node: dict[str, Any], token: dict[str, Any]
 
     supervisor.update(reserve, "invocation_reserved")
     activation = next(a for a in supervisor.run()["activations"] if a["id"] == token.get("execution_activation_id") or (a.get("invocation") or {}).get("stage") == "preparing" and a["node_id"] == node["id"] and a.get("token", {}).get("id") == token["id"])
+    from .workflow_child_questions import recover_answers
+    recover_answers(supervisor, activation["id"])
     invocation = dict(activation.get("invocation") or {})
     invocation.setdefault("workflow_id", node["workflow_ref"]["workflow_id"])
     invocation.setdefault("workflow_name", node.get("workflow_name", ""))
@@ -883,6 +885,7 @@ async def run_child(supervisor: Any, node: dict[str, Any], token: dict[str, Any]
             r.pop("failed_decision_id", None)
             for pending in r.get("pending", []):
                 pending["decision_attempts"] = 0
+                pending["on_demand_count"] = 0
                 pending.pop("decision_error", None)
         store.update_run(child_id, reopen_child, "child_decision_reopened", {"parent_execution": activation["id"]})
 
@@ -974,6 +977,14 @@ async def run_child(supervisor: Any, node: dict[str, Any], token: dict[str, Any]
         stage_update("settled", "child_timeout_uncertain")
         return
     if child_final is not None and child_final.get("status") == "needs_input":
+        from .workflow_child_questions import handle as handle_child_question
+        handling = await handle_child_question(supervisor, node, token, activation["id"], child_final)
+        if handling == "answered":
+            stage_update("created", "child_answer_ready")
+            return
+        if handling == "suspended":
+            stage_update("waiting", "child_question_suspended")
+            return
         try:
             await asyncio.to_thread(publish_input, store, child_final)
         except _w().WorkflowError as exc:

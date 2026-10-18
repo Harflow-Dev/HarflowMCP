@@ -19,7 +19,7 @@ POLICY = "native_workers_plus_control_v1"
 
 def scheduling_policy(definition: dict[str, Any], tree: dict[str, Any] | None = None) -> str:
     definitions = [definition] + [entry["definition"] for entry in (tree or {}).get("workflows", {}).values()]
-    return POLICY if any(n.get("execution_mode") == "prefer_subagent" for d in definitions for n in d.get("nodes", [])) else "legacy"
+    return POLICY if any(n.get("execution_mode") == "prefer_subagent" for d in definitions for n in d.get("nodes", []) + d.get("on_demand_nodes", [])) else "legacy"
 
 
 def merge_denials(existing: list[dict[str, Any]], incoming: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -72,7 +72,7 @@ async def _prepare_native(supervisor: Any, node: dict[str, Any], assignment: str
         return f"Owning orchestrator permission contract is unavailable: {exc}"
     if owner_run.get("owner_contracts"):
         from .workflow_references import workflow_identity
-        planned = next((item for item in contract.get("nodes", []) if item["workflow_id"] == workflow_identity(run["definition"]) and item["node_id"] == node["id"] and _candidate_key(item.get("candidate", node["agent"])) == _candidate_key(node["agent"])), None)
+        planned = next((item for item in contract.get("nodes", []) if item["workflow_id"] == (node.get("_source_workflow_id") or workflow_identity(run["definition"])) and item["node_id"] == node.get("_local_node_id", node["id"]) and _candidate_key(item.get("candidate", node["agent"])) == _candidate_key(node["agent"])), None)
         if planned is None or planned.get("execution_kind") != "native_subagent":
             return (planned or {}).get("fallback_reason") or "Node is not included in the pinned native permission plan"
     if record.freedom != contract["freedom"] or record.network != contract["network"]:

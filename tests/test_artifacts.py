@@ -181,7 +181,7 @@ async def test_mcp_cli_parity_and_no_registry_launch(setup, monkeypatch, capsys)
     item = await server.register_artifact(str(target), 'report', ' exact note ')
     assert ctl.main(['task-artifacts', record.task_id, '--json']) == 0
     result = json.loads(capsys.readouterr().out)
-    assert result['v'] == 13
+    assert result['v'] == 14
     assert result['result']['items'][0]['artifact_id'] == item['artifact_id']
     assert ctl.main(['register-artifact', str(target), '--kind', 'report', '--note', ' exact note ', '--json']) == 0
     assert json.loads(capsys.readouterr().out)['result']['artifact_id'] == item['artifact_id']

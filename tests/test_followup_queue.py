@@ -786,7 +786,7 @@ def test_ctl_send_and_the_mcp_tool_share_the_dispatcher(
     put_record(ctl_home)
     assert ctl.main(["send", SRC, "from the cli", "--json"]) == 0
     doc = json.loads(capsys.readouterr().out)
-    assert doc["v"] == 13 and doc["result"]["delivery"] == "next_continuation" and doc["result"]["seq"] == 1
+    assert doc["v"] == 14 and doc["result"]["delivery"] == "next_continuation" and doc["result"]["seq"] == 1
     assert state_doc(ctl_home)["items"][0]["text"] == "from the cli"
     assert ctl.main(["send", SRC, "x" * (followups.MAX_MESSAGE_BYTES + 1), "--json"]) == 1
     assert json.loads(capsys.readouterr().out)["error"]["code"] == "message_too_large"
@@ -811,7 +811,7 @@ def test_ctl_status_json_carries_the_ledger(ctl_home: Path, capsys: pytest.Captu
     followups.send(ctl_home, SRC, "visible", by=None)
     assert ctl.main(["status", SRC, "--json"]) == 0
     doc = json.loads(capsys.readouterr().out)
-    assert doc["v"] == 13 and doc["task"]["queued_followups"]["items"][0]["text"] == "visible"
+    assert doc["v"] == 14 and doc["task"]["queued_followups"]["items"][0]["text"] == "visible"
 
 
 async def test_ctl_resume_consumes_and_its_text_is_optional(

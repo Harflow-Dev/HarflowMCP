@@ -201,7 +201,8 @@ def validate_definition(raw: dict[str, Any]) -> dict[str, Any]:
     """Validate and normalize a structured graph, including nested fork/join regions."""
     if not isinstance(raw, dict):
         raise WorkflowError("Workflow definition must be an object")
-    d = copy.deepcopy(raw)
+    from .workflow_migration import migrate_orchestrator_instructions
+    d = migrate_orchestrator_instructions(raw)
     d["name"] = _workflow_name(d.get("name"))
     d["schema_version"] = SCHEMA_VERSION
     context_delivery = d.get("context_delivery", "optimized_v1")
@@ -212,7 +213,13 @@ def validate_definition(raw: dict[str, Any]) -> dict[str, Any]:
     d.setdefault("description", "")
     if not isinstance(d["description"], str):
         raise WorkflowError("Description must be text")
-    d["orchestrator"] = _candidate(d.get("orchestrator", {"backend": "codex"}))
+    if not isinstance(d.get("orchestrator"), dict):
+        raise WorkflowError("Orchestrator must be an agent object")
+    instructions = d["orchestrator"].get("instructions", "") if isinstance(d.get("orchestrator"), dict) else ""
+    if not isinstance(instructions, str):
+        raise WorkflowError("Orchestrator instructions must be text")
+    d["orchestrator"] = {**_candidate({k: v for k, v in d.get("orchestrator", {"backend": "codex"}).items() if k != "instructions"}), "instructions": instructions}
+    d["max_on_demand_calls"] = _positive(d.get("max_on_demand_calls", 5), "max_on_demand_calls", 50)
     d["max_parallel"] = _positive(d.get("max_parallel", 4), "max_parallel", 64)
     d["max_transitions"] = _positive(d.get("max_transitions", 100), "max_transitions")
     d["max_decision_attempts"] = _positive(d.get("max_decision_attempts", 3), "max_decision_attempts", 10)
@@ -233,10 +240,6 @@ def validate_definition(raw: dict[str, Any]) -> dict[str, Any]:
             raise WorkflowError(f"Invalid node type: {node_id}")
         if node["type"] in {"parallel_start", "parallel_end"} and d.get("routing_mode") != "explicit":
             raise WorkflowError("Parallel boundaries require explicit routing_mode")
-        if node["type"] == "start":
-            node.setdefault("prompt", "")
-            if not isinstance(node["prompt"], str):
-                raise WorkflowError("Start prompt must be a string")
         if node["type"] == "parallel_start":
             node.setdefault("branch_selection", "all")
             if not isinstance(node["branch_selection"], str) or node["branch_selection"] not in {"all", "orchestrator"}:
@@ -313,6 +316,8 @@ def validate_definition(raw: dict[str, Any]) -> dict[str, Any]:
             if timeout is not None and (isinstance(timeout, bool) or not isinstance(timeout, int) or timeout < 0):
                 raise WorkflowError("timeout_seconds must be a nonnegative integer")
             node["max_context_questions"] = _positive(node.get("max_context_questions", 10), "max_context_questions", 100)
+    from .workflow_on_demand import validate_nodes
+    d["on_demand_nodes"] = validate_nodes(d.get("on_demand_nodes", []), set(by_id))
     starts = [n["id"] for n in nodes if n["type"] == "start"]
     if len(starts) != 1 or not any(n["type"] == "end" for n in nodes):
         raise WorkflowError("Workflow needs exactly one Start and at least one End")
@@ -687,7 +692,8 @@ class WorkflowStore:
 
     def get(self, name: str) -> dict[str, Any]:
         from .workflow_references import workflow_identity
-        definition = json.loads((self.definitions / f"{_workflow_name(name)}.json").read_text())
+        from .workflow_migration import migrate_orchestrator_instructions
+        definition = migrate_orchestrator_instructions(json.loads((self.definitions / f"{_workflow_name(name)}.json").read_text()))
         definition.setdefault("workflow_id", workflow_identity(definition))
         for node in definition.get("nodes", []):
             if node.get("type") == "agent":
@@ -696,7 +702,8 @@ class WorkflowStore:
 
     def list(self) -> list[dict[str, Any]]:
         from .workflow_references import workflow_identity
-        definitions = [json.loads(p.read_text()) for p in sorted(self.definitions.glob("*.json"))]
+        from .workflow_migration import migrate_orchestrator_instructions
+        definitions = [migrate_orchestrator_instructions(json.loads(p.read_text())) for p in sorted(self.definitions.glob("*.json"))]
         for definition in definitions:
             definition.setdefault("workflow_id", workflow_identity(definition))
             for node in definition.get("nodes", []):
@@ -1028,7 +1035,7 @@ class WorkflowStore:
             self._index_run(run, previous_directory_mtime=previous_directory_mtime, written_source=written_source)
         return run
 
-    def control(self, run_id: str, action: str, instructions: str | None = None, additional_attempts: int = 0, *, decision_id: str | None = None, allow_optional_review_skip: bool = False, interaction_owner: str | None = None, _internal: bool = False, _delivery: dict[str, Any] | None = None) -> dict[str, Any]:
+    def control(self, run_id: str, action: str, instructions: str | None = None, additional_attempts: int = 0, *, decision_id: str | None = None, allow_optional_review_skip: bool = False, interaction_owner: str | None = None, _internal: bool = False, _delivery: dict[str, Any] | None = None, _ordinary_answer: bool = False) -> dict[str, Any]:
         if action not in {"pause", "resume", "cancel", "recover"}:
             raise WorkflowError("Unknown workflow action")
         if not isinstance(additional_attempts, int) or isinstance(additional_attempts, bool) or additional_attempts < 0:
@@ -1037,7 +1044,13 @@ class WorkflowStore:
             raise WorkflowError("allow_optional_review_skip must be a boolean")
         if allow_optional_review_skip and action != "resume":
             raise WorkflowError("Optional review skip consent is only available when resuming needs_input")
+        if _ordinary_answer and (not _internal or action != "resume" or additional_attempts or allow_optional_review_skip):
+            raise WorkflowError("Parent answers cannot grant caller recovery authority")
         observed = self.get_run(run_id)
+        if _ordinary_answer:
+            from .workflow_child_questions import protected_input
+            if protected_input(self, observed):
+                raise WorkflowError("This child question requires caller authority")
         if _delivery is not None:
             if not _internal:
                 raise WorkflowError("Forwarded delivery is internal only")
@@ -1134,7 +1147,7 @@ class WorkflowStore:
             # The answer belongs to the source run; it grants no fresh child and no
             # attempts beyond the attention source.
             delivery = prepare_delivery(source_id, "resume", observed["input_source"])
-            self.control(source_id, "resume", instructions=instructions, additional_attempts=additional_attempts, decision_id=decision_id, allow_optional_review_skip=allow_optional_review_skip, interaction_owner=interaction_owner, _internal=True, _delivery=delivery)
+            self.control(source_id, "resume", instructions=instructions, additional_attempts=additional_attempts, decision_id=decision_id, allow_optional_review_skip=allow_optional_review_skip, interaction_owner=interaction_owner, _internal=True, _delivery=delivery, _ordinary_answer=_ordinary_answer)
             def clear_forwarded(r: dict[str, Any]) -> None:
                 if r.get("status") != "needs_input" or r.get("input_decision_id") != decision_id or r.get("input_source") != observed.get("input_source") or r.get("forwarded_delivery") != delivery:
                     raise WorkflowError("The forwarded question moved on; re-read the current question and answer again")
@@ -1149,6 +1162,7 @@ class WorkflowStore:
                 r["suppressed_candidates"] = []
                 for token in r.get("pending", []):
                     token["decision_attempts"] = 0
+                    token["on_demand_count"] = 0
                     token.pop("decision_error", None)
             result = self.update_run(run_id, clear_forwarded, "forwarded_input_answered", {"source": source_id})
             if not _supervisor_present(result) and not result.get("parent_link"):
@@ -1192,6 +1206,10 @@ class WorkflowStore:
         def change(r: dict[str, Any]) -> None:
             if _delivery is not None and r.get("forwarded_delivery_receipt") == _delivery:
                 return
+            if _ordinary_answer:
+                from .workflow_child_questions import caller_authority_required
+                if caller_authority_required(r):
+                    raise WorkflowError("This child question requires caller authority")
             if action == "cancel" and interaction_owner == "monitor":
                 from .workflow_cancellation import eligibility
                 allowed, reason = eligibility(self, r)
@@ -1265,11 +1283,13 @@ class WorkflowStore:
                 r["instructions"] = instructions or ""
                 for token in r.get("pending", []):
                     token["decision_attempts"] = 0
+                    token["on_demand_count"] = 0
                     token.pop("decision_error", None)
                 for activation in r["activations"]:
                     for question in activation.get("questions", []):
                         if question["status"] == "waiting" or question.get("answer_delivery_state") == "not_started":
                             question["decision_attempts"] = 0
+                            question["on_demand_count"] = 0
                             question.pop("decision_error", None)
                 r.pop("input_question", None)
                 r.pop("input_decision_id", None)
@@ -1403,7 +1423,7 @@ class WorkflowStore:
                         if not liveness["outcome_known"]:
                             snapshot.update(status="failed", outcome_unknown=True, recovery_reason="Managed process is dead but its owner did not record an authoritative outcome")
                         if task.get("timeout_requested_at") and liveness["outcome_known"] and snapshot.get("status") != "completed":
-                            node = next(n for n in r["definition"]["nodes"] if n["id"] == activation["node_id"])
+                            node = activation.get("on_demand_node") or next(n for n in r["definition"]["nodes"] if n["id"] == activation["node_id"])
                             snapshot.update(status="failed", timed_out=True, failure_kind="timeout", timeout_seconds=node.get("timeout_seconds"), summary="Node timed out; cancellation settled after supervisor interruption")
                         update_task_state(activation, task, {"status": snapshot["status"], "result": snapshot, "liveness": liveness})
                     elif record is None and task.get("dispatch_stage") == "preparing":
@@ -1419,6 +1439,8 @@ class WorkflowStore:
                     continue
                 if activation["status"] in {"running", "reserved", "uncertain"} and all(t["status"] not in {"reserved", "running", "uncertain"} for t in activation["tasks"]):
                     activation["status"] = "completed" if activation["tasks"] and activation["tasks"][-1]["status"] == "completed" else "failed"
+                if activation.get("on_demand_call_id"):
+                    continue
                 if activation["role"] == "node":
                     owner = next((t for t in r["pending"] if t["id"] == (activation.get("token") or {}).get("id")), None)
                     if owner and (owner.get("execution_activation_id") not in {None, activation["id"]} or owner.get("retry_of_execution_id") == activation["id"] or activation.get("resolved_by_execution_id")):
@@ -1429,7 +1451,7 @@ class WorkflowStore:
                         token.update(recovered_result=activation["tasks"][-1]["result"], execution_activation_id=activation["id"])
                         token.pop("recovered_failed_result", None)
                 if activation["role"] == "node" and activation["status"] == "failed" and activation["tasks"]:
-                    node = next(n for n in r["definition"]["nodes"] if n["id"] == activation["node_id"])
+                    node = activation.get("on_demand_node") or next(n for n in r["definition"]["nodes"] if n["id"] == activation["node_id"])
                     observed = activation["tasks"][-1].get("result", {})
                     token = next((t for t in r["pending"] if t["id"] == (activation.get("token") or {}).get("id")), None)
                     if node.get("optional", False) and observed.get("status") == "failed" and token and not token.get("execution_complete") and optional_failure_join({**r, "status": "running"}, node, token):
@@ -1601,7 +1623,7 @@ def _editing_context(value: Any, field: str) -> dict[str, Any]:
     if len(encoded.encode("utf-8")) > 1024 * 1024:
         raise WorkflowError(f"{field} exceeds the one-megabyte context limit")
     sanitized = json.loads(encoded)
-    for key in ("nodes", "connections"):
+    for key in ("nodes", "connections", "on_demand_nodes"):
         if key in sanitized and (not isinstance(sanitized[key], list) or any(not isinstance(item, dict) for item in sanitized[key])):
             raise WorkflowError(f"{field}.{key} must be an array of objects")
     return sanitized
@@ -1609,7 +1631,8 @@ def _editing_context(value: Any, field: str) -> dict[str, Any]:
 
 def validate_builder_preview(value: Any, name: str) -> dict[str, Any]:
     """Render-safe incomplete graph; runnable topology is validated at finalization."""
-    draft = _editing_context(value, "definition")
+    from .workflow_migration import migrate_orchestrator_instructions
+    draft = migrate_orchestrator_instructions(_editing_context(value, "definition"))
     draft["name"] = name
     draft.setdefault("routing_mode", "explicit")
     draft.pop("revision", None)
@@ -1645,10 +1668,6 @@ def validate_builder_preview(value: Any, name: str) -> dict[str, Any]:
                 raise WorkflowError(f"timeout_seconds must be a nonnegative integer: {nid}")
             if "max_attempts" in node:
                 _positive(node["max_attempts"], "max_attempts")
-        if node["type"] == "start":
-            node.setdefault("prompt", "")
-            if not isinstance(node["prompt"], str):
-                raise WorkflowError("Start prompt must be a string")
         node.setdefault("title", nid)
         node.setdefault("position", {"x": 80 + 260 * index, "y": 80})
         position = node["position"]
@@ -1683,7 +1702,15 @@ def validate_builder_preview(value: Any, name: str) -> dict[str, Any]:
             if "network" in node and node["network"] not in (None, True, False):
                 raise WorkflowError(f"Invalid network: {nid}")
     if "orchestrator" in draft:
-        draft["orchestrator"] = _candidate(draft["orchestrator"])
+        if not isinstance(draft["orchestrator"], dict):
+            raise WorkflowError("Orchestrator must be an agent object")
+        instructions = draft["orchestrator"].get("instructions", "")
+        if not isinstance(instructions, str):
+            raise WorkflowError("Orchestrator instructions must be text")
+        draft["orchestrator"] = {**_candidate({k: v for k, v in draft["orchestrator"].items() if k != "instructions"}), "instructions": instructions}
+    from .workflow_on_demand import validate_nodes
+    draft["on_demand_nodes"] = validate_nodes(draft.get("on_demand_nodes", []), ids, allow_incomplete=True)
+    _positive(draft.get("max_on_demand_calls", 5), "max_on_demand_calls", 50)
     for field in ("description",):
         if field in draft and not isinstance(draft[field], str):
             raise WorkflowError(f"Invalid {field}")
@@ -2231,6 +2258,11 @@ class WorkflowSupervisor:
             source = next((t for a in run["activations"] if (a["node_id"] == node["id"] or activation.get("continue_previous")) and a["role"] == "node" for t in a["tasks"] if t["task_id"] == activation["resume_task_id"]), None)
             if source:
                 previous = {"task_id": source["task_id"], "candidate": key + ":" + _candidate_key(source["candidate"]), "session_id": source.get("result", {}).get("session_id")}
+        if activation.get("on_demand_call_id") and activation.get("execution_session_mode") == "resume":
+            source = next((t for a in run["activations"] if a["node_id"] == node["id"] for t in a["tasks"] if t["task_id"] == activation.get("resume_task_id")), None)
+            if source is None:
+                return {"status": "failed", "execution_failure": "Issued specialist Resume session is no longer available"}
+            candidates = [copy.deepcopy(source["candidate"])]
         persistent_orchestrator = role == "orchestrator" and run.get("runner_policy") == "guided"
         inherited = run.get("inherited_orchestrator_binding") if role == "orchestrator" and orchestrator_override is None and not run.get("sessions", {}).get("orchestrator") else None
         recovered_inherited_turn = role == "orchestrator" and run.get("recovered_inherited_turn") is True
@@ -2303,7 +2335,7 @@ class WorkflowSupervisor:
         if role == "node" and run.get("execution_contract") == "delegation" and node.get("session_mode") == "resume" and not activation.get("continue_previous"):
             from .workflow_delegation import recovered_resume_outage, require_fresh_checkpoint
             current_activation = next(a for a in run["activations"] if a["id"] == activation["id"])
-            outage = recovered_resume_outage(run, current_activation)
+            outage = recovered_resume_outage(run, current_activation) if not activation.get("on_demand_call_id") else None
             if outage:
                 self.update(lambda r: require_fresh_checkpoint(r, activation["id"], *outage), "recovered_resume_requires_fresh")
                 return None
@@ -2587,6 +2619,8 @@ class WorkflowSupervisor:
                     return self._usage_limit_outcome(snapshot, node, role, activation, candidate, candidates)
                 reason = availability_failure(snapshot)
                 if reason:
+                    if activation.get("on_demand_call_id") and activation.get("execution_session_mode") == "resume":
+                        return {**snapshot, "execution_failure": "Selected specialist Resume unavailable; choose an explicit Fresh call: " + reason}
                     if strict_child_resume:
                         child_resume_refused("Child Resume unavailable: " + reason + "; explicit Fresh selection required")
                         return None
@@ -2750,7 +2784,7 @@ class WorkflowSupervisor:
             graph = {"name": r["name"], "nodes": graph_nodes, "connections": r["definition"]["connections"]}
             targets = {n["id"]: n for n in graph_nodes}
             legal = [{**edge, "target_node": targets[edge["target"]], **(retry_budget(r, edge) if edge.get("backward") else {})} for edge in edges]
-            context = {"task": r["prompt"], "workflow_purpose": next((n.get("prompt", "") for n in r["definition"]["nodes"] if n["type"] == "start"), ""), "instructions": r["instructions"], "node": node, "result": _bounded(result), "tasks": r.get("tasks", []), "workflow_graph": graph, "legal_connections": legal, "recent_decisions": r["decisions"][-10:], "branch": token, "transitions_remaining": r["definition"]["max_transitions"] + r.get("transition_grant", 0) - r["transitions"]}
+            context = {"task": r["prompt"], "workflow_purpose": r["definition"].get("orchestrator", {}).get("instructions", next((n.get("prompt", "") for n in r["definition"]["nodes"] if n["type"] == "start"), "")), "instructions": r["instructions"], "node": node, "result": _bounded(result), "tasks": r.get("tasks", []), "workflow_graph": graph, "legal_connections": legal, "recent_decisions": r["decisions"][-10:], "branch": token, "transitions_remaining": r["definition"]["max_transitions"] + r.get("transition_grant", 0) - r["transitions"]}
             routing = "Choose one or multiple legal forward connections according to the conditions, result evidence and workflow guide. Blank conditions are available unconditional paths, not a requirement to select every path. A retry/backward connection must be the only selected connection."
             routing += " Never select a retry whose retry_remaining is zero; choose a justified alternative or needs_attention. Retry limits count traversals across the entire run. Selected parallel paths must not overlap before their shared convergence. A retry must stay within every active parallel branch."
             if node.get("branch_mode") == "choose_one":
@@ -3053,6 +3087,8 @@ class WorkflowSupervisor:
     async def reconcile(self) -> bool:
         """A new supervisor may inspect records but cannot adopt missing pipe owners."""
         self.store.reconcile_run(self.run_id)
+        from .workflow_on_demand import reconcile as reconcile_on_demand
+        reconcile_on_demand(self.store, self.run())
         self.tree.release_held(self.run_id)
         if any(a.get("invocation") and a.get("status") == "uncertain" for a in self.run()["activations"]):
             # An unreadable or mismatched child puts the tree in needs_attention.
@@ -3132,6 +3168,8 @@ class WorkflowSupervisor:
                         else:
                             def cancelled(r: dict[str, Any]) -> None:
                                 r["status"] = "cancelled"
+                                from .workflow_on_demand import cancel_reservations
+                                cancel_reservations(r)
                                 for activation in r["activations"]:
                                     if activation["role"] == "node" and activation.get("pending_question_id") and not activation.get("node_result"):
                                         activation["status"] = "cancelled"
@@ -3224,7 +3262,7 @@ class WorkflowSupervisor:
         self.update(lambda r: r.update(status="running", supervisor_pid=os.getpid(), supervisor_identity=identity.own_identity()), "builder_started")
         a = self._activation("builder", "builder")
         self.update(lambda r: next(x for x in r["activations"] if x["id"] == a["id"]).update(feedback_ids=r.get("builder_turn_feedback_ids", [])), "builder_feedback_associated")
-        prompt = "Create a Polybridge workflow definition. Do not write files or dispatch agents. Return ONLY a JSON object. Schema: " + json.dumps({"name": self.run()["name"], "routing_mode": "explicit", "orchestrator": {"backend": "codex", "fallbacks": []}, "nodes": [{"id": "start", "type": "start", "position": {"x": 80, "y": 80}, "branch_mode": "auto", "prompt": "Optional workflow purpose for the orchestrator"}, {"id": "work", "type": "agent", "position": {"x": 220, "y": 80}, "instructions": "...", "agent": {"backend": "codex"}, "session_mode": "agent_decides", "execution_mode": "prefer_subagent", "branch_mode": "auto", "max_attempts": 3, "max_context_questions": 10}, {"id": "end", "type": "end", "position": {"x": 480, "y": 80}, "branch_mode": "auto"}], "connections": [{"id": "begin", "source": "start", "target": "work"}, {"id": "finish", "source": "work", "target": "end"}], "max_parallel": 4, "max_transitions": 100}) + "\nStart may contain an optional prompt string describing the workflow purpose; Polybridge supplies it to orchestrator decisions alongside the runtime user request. Set routing_mode to explicit. Ordinary nodes choose exactly one outgoing path. For parallel execution use structural parallel_start and parallel_end nodes sharing parallel_group_id. Parallel start defaults to branch_selection all. Set branch_selection orchestrator and optional selection_guidance when applicability should be chosen for each group invocation. Selection chooses one or more branch entries and records a reason explaining selections and exclusions; every configured branch must reach its matching end. Branches may contain multiple steps and properly nested parallel groups. Do not create Join nodes. Conditions for choosing a group belong on incoming alternatives; split outgoing instructions describe branch purpose. Applicability selection is available only on Orchestrator selects groups; an empty selection is forbidden, so skipping a whole group uses an incoming alternative. Retry arrows return to an earlier ancestor step; Polybridge infers loops from topology, so do not set a backward flag. For task revision loops and task branches, put explicit task-specific rework and continue conditions on arrows. A retry connection may set max_retries to a nonnegative integer: this caps actual traversals of that arrow across the entire run; 0 disables retry, and an absent value adds no edge cap. Node max_attempts and max_transitions still apply and may stop earlier. A retry is selected exclusively and must stay inside its parallel region. Agent nodes may set optional:true only inside a safe parallel branch with an actually selected required sibling and no required successor before convergence. Optional steps still execute; only definitive failures or exhausted available candidates bypass to that convergence with failure evidence. Do not make sequential steps or all branches optional. Agent roles are planning, implementation, review and task; supply custom step instructions, while Polybridge adds the role guidance and result protocol. Request: " + self.run().get("builder_turn_prompt", self.run()["prompt"])
+        prompt = "Create a Polybridge workflow definition. Do not write files or dispatch agents. Return ONLY a JSON object. Schema: " + json.dumps({"name": self.run()["name"], "routing_mode": "explicit", "orchestrator": {"backend": "codex", "fallbacks": [], "instructions": "Optional workflow purpose"}, "on_demand_nodes": [], "max_on_demand_calls": 5, "nodes": [{"id": "start", "type": "start", "position": {"x": 80, "y": 80}, "branch_mode": "auto"}, {"id": "work", "type": "agent", "position": {"x": 220, "y": 80}, "instructions": "...", "agent": {"backend": "codex"}, "session_mode": "agent_decides", "execution_mode": "prefer_subagent", "branch_mode": "auto", "max_attempts": 3, "max_context_questions": 10}, {"id": "end", "type": "end", "position": {"x": 480, "y": 80}, "branch_mode": "auto"}], "connections": [{"id": "begin", "source": "start", "target": "work"}, {"id": "finish", "source": "work", "target": "end"}], "max_parallel": 4, "max_transitions": 100}) + "\nOrchestrator instructions describe the workflow purpose; Start and End are structural and have no settings. Optional on_demand_nodes are standalone workers with no connections or position: {id,title,instructions,call_condition,agent,freedom,network,session_mode,execution_mode}. Required nonempty instructions guide the worker; optional call_condition is separate When to call guidance for the orchestrator, never an automatic trigger. Add, edit and remove these in the separate list with IDs unique across both node lists. session_mode is agent_decides (default), fresh or resume; execution_mode is headless or prefer_subagent. max_on_demand_calls defaults to 5 (1–50) per routing or clarification checkpoint; no per-node or per-run call cap exists. Do not invent connected orchestration steps for specialist calls. Set routing_mode to explicit. Ordinary nodes choose exactly one outgoing path. For parallel execution use structural parallel_start and parallel_end nodes sharing parallel_group_id. Parallel start defaults to branch_selection all. Set branch_selection orchestrator and optional selection_guidance when applicability should be chosen for each group invocation. Selection chooses one or more branch entries and records a reason explaining selections and exclusions; every configured branch must reach its matching end. Branches may contain multiple steps and properly nested parallel groups. Do not create Join nodes. Conditions for choosing a group belong on incoming alternatives; split outgoing instructions describe branch purpose. Applicability selection is available only on Orchestrator selects groups; an empty selection is forbidden, so skipping a whole group uses an incoming alternative. Retry arrows return to an earlier ancestor step; Polybridge infers loops from topology, so do not set a backward flag. For task revision loops and task branches, put explicit task-specific rework and continue conditions on arrows. A retry connection may set max_retries to a nonnegative integer: this caps actual traversals of that arrow across the entire run; 0 disables retry, and an absent value adds no edge cap. Node max_attempts and max_transitions still apply and may stop earlier. A retry is selected exclusively and must stay inside its parallel region. Agent nodes may set optional:true only inside a safe parallel branch with an actually selected required sibling and no required successor before convergence. Optional steps still execute; only definitive failures or exhausted available candidates bypass to that convergence with failure evidence. Do not make sequential steps or all branches optional. Agent roles are planning, implementation, review and task; supply custom step instructions, while Polybridge adds the role guidance and result protocol. Request: " + self.run().get("builder_turn_prompt", self.run()["prompt"])
         prompt += "\n" + BUILDER_AUTHORING_GUIDANCE
         prompt += "\n" + BUILDER_LAYOUT_GUIDANCE
         prompt += "\nRun workflow nodes (type workflow) reference a saved workflow by workflow_ref.workflow_id. Preserve any existing Run workflow nodes exactly as supplied: keep their workflow_ref, orchestrator_mode, child_session_policy, max_attempts, timeout_seconds, optional flag and instructions unchanged. Never author new Run workflow nodes, change their references, or convert them to agent nodes."

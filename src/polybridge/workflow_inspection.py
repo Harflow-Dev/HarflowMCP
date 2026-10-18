@@ -377,7 +377,25 @@ def inspect_request(run: dict[str, Any], root: Any, request: dict[str, Any]) -> 
             raise ValueError("workflow_run_id must be a nonempty string")
         if target_id != run["workflow_run_id"]:
             # Only a verified parent_link chain up to a direct child is inspectable.
-            target_run = _authorized_linked_run(run, root, target_id)
+            try:
+                target_run = _authorized_linked_run(run, root, target_id)
+            except ValueError as ancestry_error:
+                # Only an exact owner-held specialist reference can use this
+                # additional authority path. Preserve ancestry refusals otherwise.
+                from .workflow_on_demand import owner_id, scope_runs
+                from .workflows import WorkflowStore
+                if target_id != owner_id(run):
+                    raise
+                storage = WorkflowStore(root)
+                try:
+                    owner = storage.get_run(target_id)
+                    issued = any(c.get("execution_id") == execution_id and c.get("checkpoint", {}).get("workflow_run_id") == run["workflow_run_id"] for c in owner.get("on_demand_calls", []))
+                    if not issued:
+                        raise ancestry_error
+                    scope_runs(storage, run)
+                except (OSError, ValueError, KeyError, TypeError):
+                    raise ancestry_error from None
+                target_run = owner
     view = request.get("view", "result")
     limit = request.get("limit")
     if view == "result":
@@ -431,12 +449,12 @@ def guard_saved_workflow_authority(caller: Any, value: Any) -> None:
             configs = []
             if ident == value["root_workflow_id"] or ident in child_reached:
                 configs.append((definition["orchestrator"], "read_only", None))
-            configs.extend((node["agent"], workflows.effective_freedom(node, "unrestricted", permission_policy="saved_node"), node.get("network")) for node in definition["nodes"] if node["type"] == "agent")
+            configs.extend((node["agent"], workflows.effective_freedom(node, "unrestricted", permission_policy="saved_node"), node.get("network")) for node in definition["nodes"] + [{**n, "type": "agent"} for n in definition.get("on_demand_nodes", [])] if node["type"] == "agent")
             _check_configs(record, configs)
         return
     definition = value
     configs = [(definition["orchestrator"], "read_only", None)]
-    configs.extend((node["agent"], workflows.effective_freedom(node, "unrestricted", permission_policy="saved_node"), node.get("network")) for node in definition["nodes"] if node["type"] == "agent")
+    configs.extend((node["agent"], workflows.effective_freedom(node, "unrestricted", permission_policy="saved_node"), node.get("network")) for node in definition["nodes"] + [{**n, "type": "agent"} for n in definition.get("on_demand_nodes", [])] if node["type"] == "agent")
     _check_configs(record, configs)
 
 

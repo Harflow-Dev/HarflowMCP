@@ -64,6 +64,12 @@ def worker_input_refs(run: dict[str, Any], root: Any, token: dict[str, Any]) -> 
 def render_worker_inputs(prompt: str, run: dict[str, Any], node: dict[str, Any], activation: dict[str, Any], *, root: Any) -> tuple[str, dict[str, Any]]:
     """Preserve required text, replace large evidence only with issued lossless refs."""
     from .workflow_delegation import result_inputs, worker_prompt
+    if activation.get('on_demand_call_id'):
+        # Standalone assignments are complete worker prompts and do not carry
+        # graph-token evidence refs or checklist assignment authority.
+        accounting = account_legacy_prompt(prompt, role='node')
+        accounting['compatibility_reasons'] = ['on-demand assignment retains complete context']
+        return prompt, accounting
     token = activation.get('token', {})
     refs = token.get('input_result_refs', []) + token.get('additional_result_refs', [])
     if token.get('resume_source_execution_id'):

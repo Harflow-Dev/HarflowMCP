@@ -35,18 +35,18 @@ def definition_sha256(definition: dict[str, Any]) -> str:
 def access_summary(definition: dict[str, Any], depth: int) -> dict[str, Any]:
     """A bounded view of what a pinned definition can do; never widened."""
     w = _w()
-    freedoms = [w.effective_freedom(node, "unrestricted", permission_policy="saved_node") for node in definition.get("nodes", []) if node.get("type") == "agent"]
+    freedoms = [w.effective_freedom(node, "unrestricted", permission_policy="saved_node") for node in definition.get("nodes", []) + [{**n, "type": "agent"} for n in definition.get("on_demand_nodes", [])] if node.get("type") == "agent"]
     backends: set[str] = set()
     orchestrator = definition.get("orchestrator", {})
     if isinstance(orchestrator, dict) and orchestrator.get("backend"):
         backends.add(str(orchestrator["backend"]))
-    for node in definition.get("nodes", []):
+    for node in definition.get("nodes", []) + [{**n, "type": "agent"} for n in definition.get("on_demand_nodes", [])]:
         if node.get("type") != "agent":
             continue
         for candidate in [node.get("agent", {})] + node.get("agent", {}).get("fallbacks", []):
             if isinstance(candidate, dict) and candidate.get("backend"):
                 backends.add(str(candidate["backend"]))
-    network = any(node.get("network") is True for node in definition.get("nodes", []) if node.get("type") == "agent")
+    network = any(node.get("network") is True for node in definition.get("nodes", []) + [{**n, "type": "agent"} for n in definition.get("on_demand_nodes", [])] if node.get("type") == "agent")
     return {
         "max_freedom": max(freedoms, key=lambda f: w.FREEDOMS.index(f)) if freedoms else "read_only",
         "network": network,

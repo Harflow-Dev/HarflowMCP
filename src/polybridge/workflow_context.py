@@ -105,6 +105,9 @@ def _guidance(context: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         examples["child_continue"] = {**base, "action": "continue", "next": [child_entry]}
     if any(choice.get("branch_continuations") for choice in choices):
         text += " A continuation entering Parallel start requires branch_assignments in the issued entry shape: all branches requires every issued branch; orchestrator selection requires one or more entries and selection_reason explaining selections and exclusions. Give each executable branch its own assignment; do not select downstream nodes independently."
+    if context.get("on_demand_nodes"):
+        text += " " + context.get("on_demand_guidance", "")
+        examples["call_on_demand"] = {**base, "action": "call_on_demand", "node_id": "issued on-demand node ID", "assignment": "Focused specialist assignment", "session_mode": "fresh"}
     if context.get("inspections_remaining", 0) > 0 and context.get("settled_executions"):
         text += " Inspect exactly one page of a settled execution; inspection consumes no decision attempt and cannot select continuations or update tasks. Follow inspection context for complete retrieval."
         examples["inspect"] = {**base, "action": "inspect", "requests": [{"execution_id": "settled execution ID", "view": "result"}]}

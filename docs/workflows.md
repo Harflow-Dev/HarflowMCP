@@ -359,7 +359,9 @@ Read complete run content with `get_workflow_run_detail(workflow_run_id, view, c
 Views include `executions`, `decisions`, `checklist`, `technical_plan`, `definition`,
 `builder_draft`, `generated_definition`, `question`, `reason` and `wait_reason`. Builder status
 also includes the authoritative `draft_revision`, so a builder can resolve preview conflicts
-without fetching a complete graph in every status response.
+without fetching a complete graph in every status response. Builder previews preserve unfinished
+on-demand nodes, including blank instructions, while showing their standalone cards and read-only
+inspectors. Saving or finalizing a proposal still requires complete specialist instructions.
 Concatenate each response's `chunk` until `next_cursor` is null, then decode JSON. Each chunk
 is bounded, including a single large result. Cursors bind the run, view and content hash;
 if content changes, restart that view. Managed orchestrators can read their own run only;
@@ -429,7 +431,7 @@ global checklist. The immediate predecessor result is attached automatically; co
 branches supply all incoming results. The orchestrator can reference older settled results and
 assign specific checklist tasks without exposing global checklist status. Planning creates pending tasks, implementation reports task IDs
 and evidence, review gives a verdict and concrete findings, and task steps report observed
-results. Only the orchestrator changes checklist statuses. Select Start to edit workflow
+results. Only the orchestrator changes checklist statuses. Select the standalone Orchestrator to edit workflow
 settings, including the orchestrator, fallback agents, and limits.
 
 ## Run workflow nodes
@@ -1238,10 +1240,11 @@ previous file. Harness deny/ask rules, agent profiles and project configuration 
 precedence. New sessions load updated configuration. Removing an approval restores the harness's
 fallback policy rather than restoring a previous explicit per-tool policy.
 
-Start steps may contain an optional `prompt` describing the workflow's purpose.
-Polybridge includes that purpose in orchestrator decision context alongside the
-request supplied when running the workflow. It complements the runtime request;
-the overall workflow shows that request, while each node shows its orchestrator assignment.
+The standalone Orchestrator owns `orchestrator.instructions`, describing the workflow's purpose.
+Polybridge includes these instructions in decision context alongside the runtime request.
+Start and End are structural nodes with no settings. Workflow name and description are in the
+editor's ⋯ menu. Saved legacy Start `prompt` text moves verbatim to orchestrator instructions
+unless explicit instructions already exist. Historical run snapshots retain their original shape.
 
 A candidate can also fall back when Polybridge positively refuses a harness capability before
 starting its process, such as an unsupported turn cap or reasoning control. An unsupported primary
@@ -1576,3 +1579,85 @@ webhooks as work, and webhook failure never changes a run. Read state with
 `get_workflow_notifications` or `polybridge-ctl workflow-notifications <run_id> --json`.
 Subscription management is MCP-only and is not exposed in the Monitor. See
 [notification delivery, history bounds and payloads](task-notifications.md#root-workflow-notifications).
+
+
+### On-demand specialists
+
+`on_demand_nodes` is an ordered list of standalone workers, separate from the connected `nodes`
+graph. They have no positions, ports or connections and run only when called by the orchestrator.
+An unused specialist never blocks completion. The editor adds a blank specialist; supply required
+worker `instructions` before saving. Optional `call_condition` (**When to call**) guides the
+orchestrator's selection, separately from worker instructions; it is not an automatic trigger.
+
+```json
+{
+  "on_demand_nodes": [{
+    "id": "research", "title": "API researcher",
+    "instructions": "Verify the assigned API and return evidence.",
+    "call_condition": "Call when API behavior needs verification.",
+    "agent": {"backend": "codex", "fallbacks": []},
+    "freedom": "read_only", "network": true,
+    "session_mode": "agent_decides", "execution_mode": "headless"
+  }],
+  "max_on_demand_calls": 5
+}
+```
+
+The example is a fragment of a full workflow definition. IDs must be unique across both lists.
+Agent candidates, fallbacks, freedom, network and execution preferences follow ordinary worker
+contracts. `session_mode` supports `agent_decides` (default), `fresh` and `resume`.
+
+At routing and worker-question checkpoints, the orchestrator receives a catalog with issued
+run-qualified `node_id` values, available specialist sessions, `on_demand_calls_remaining`, and
+results. It may return:
+
+```json
+{
+  "decision_id": "issued checkpoint ID", "action": "call_on_demand",
+  "node_id": "issued-run-id:research", "assignment": "Verify the response contract.",
+  "reason": "The next step needs confirmed API behavior.", "session_mode": "fresh"
+}
+```
+
+Calls accept only these fields, optional `resume_task_id`, and the existing optimized delivery
+`context_ack` receipt when requested. They cannot route, update checklist tasks or override
+permissions or candidates. Calls return to the same checkpoint; the latest result is supplied in
+full and older results are summarized with inspection references. Failures are evidence for the
+orchestrator to judge before routing or answering. Settled specialist executions remain inspectable.
+
+The sole call allowance is `max_on_demand_calls`, default **5**, range **1–50**, per checkpoint.
+Accepted calls refund their orchestrator decision attempt and do not spend the independent
+inspection allowance. Invalid call decisions spend decision attempts. Reaching the call allowance
+pauses with `needs_attention`, naming the specialist and last assignment; resume grants a fresh
+allowance. There is no per-node or per-run call cap. One specialist executes at a time for each
+orchestrator owner; parallel branches continue and questions queue while the owner waits.
+
+Fixed Fresh always starts Fresh. Fixed Resume uses its latest issued compatible session, or
+bootstraps Fresh when none exists. Agent decides must explicitly select Fresh or Resume whenever
+a compatible session is issued; otherwise omission starts Fresh. Resume requires an issued
+`resume_task_id` (fixed Resume may select its sole issued session automatically); Fresh forbids
+that field. A selected Resume never silently becomes Fresh after an outage: the failure returns
+to the checkpoint for an explicit new choice. Fresh calls can use configured availability fallbacks.
+
+Current-orchestrator children retain separate graphs, checklists and run boundaries, but share
+the owner's specialist catalog, one-call lock and specialist sessions. Catalogs contain only the
+owner and instantiated, positively linked Current descendants. Runtime identities combine the
+source run ID and definition-local node ID, so repeated child invocations cannot share sessions
+accidentally. Child-orchestrator boundaries are isolated. When the parent has on-demand specialists,
+an ordinary Child-orchestrator question creates a durable parent checkpoint: the parent may call
+its own specialists, answer the exact child question, or forward that unchanged question and its
+input ID to the caller. Answer delivery is receipt-bound and idempotent. Usage-limit recovery,
+permission or retry grants, optional-review overrides and goal revisions remain caller decisions.
+Without configured on-demand specialists, existing direct caller forwarding is preserved.
+
+The owner ledger persists call authorization before acknowledging its origin checkpoint and before
+requesting dispatch. Recovery repairs missing receipts and result delivery idempotently. It never
+replays an uncertain dispatch; interrupted or mismatched origins require attention. Cancellation
+follows owner reservations, including those interrupted before origin acknowledgement.
+
+Full run status and Monitor snapshots expose `on_demand_nodes`, chronological `on_demand_calls`,
+and `on_demand_state`. Each call records its per-specialist number, assignment, reason, source
+scope, routing/question origin, checkpoint, status, timing, execution/result reference and task ID
+(nullable for native execution). `polybridge-ctl workflow detail RUN --view on_demand_calls`
+provides lossless paged calls; `on_demand_nodes` and `on_demand_state` are detail views too.
+The CTL JSON contract is version 14. Historical records without these fields remain readable.

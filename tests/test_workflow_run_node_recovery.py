@@ -377,6 +377,23 @@ async def test_child_question_answer_routes_exact_checkpoint_without_repeating_w
     assert not final['attempt_grants'] and not after['attempt_grants']
 
 
+def test_completed_child_with_caller_decision_block_remains_caller_authority_after_specialist_context(store, tmp_path):
+    from polybridge.workflow_child_questions import caller_authority_required, protected_input
+
+    parent_run = store.create_run(w.validate_definition(store.get("parent")), "go", tmp_path, permission_policy="saved_node", dependency_tree=refs.resolve_dependencies(store, definition=store.get("parent")))
+    child = {
+        "workflow_run_id": "blocked-child", "status": "needs_input", "input_decision_id": "decision-1",
+        "input_question": "Approve the blocked result?", "input_source": {"workflow_run_id": parent_run["workflow_run_id"]},
+        "pending": [{"id": "token", "decision_id": "decision-1", "execution_activation_id": "blocked-exec"}],
+        "activations": [{"id": "blocked-exec", "node_id": "work", "role": "node", "status": "failed", "tasks": [], "node_result": {"status": "blocked", "result": {"blocker_category": "decision", "failure_kind": "authority"}}}],
+        "blocker_retry_authorizations": {}, "definition": store.get("child"),
+    }
+    write_run(store, child)
+    assert caller_authority_required(child)
+    assert protected_input(store, child)
+    assert child["blocker_retry_authorizations"] == {}
+
+
 async def test_parallel_questions_preserve_first_identity_and_route_each_answer(store, tmp_path):
     # Use linked runtime-created children, then suspend both at their own durable
     # checkpoints to exercise concurrent publication and the public control seam.
