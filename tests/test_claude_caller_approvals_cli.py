@@ -115,7 +115,7 @@ async def test_real_claude_taskregistry_caller_approval_roundtrip(tmp_path: Path
         monkeypatch.setenv("ANTHROPIC_API_KEY", "local-fake-key")
         monkeypatch.setenv("ANTHROPIC_BASE_URL", base_url)
         monkeypatch.setenv("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
-        registry = TaskRegistry(log_dir=tmp_path / "logs", open_monitor=False)
+        registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks", open_monitor=False)
         task = await registry.start("run one exact Bash action", repo, backend=get("claude"), freedom="write_in_repo", caller_approvals=True)
         try:
             row = await _wait_for_request(registry, task.task_id)

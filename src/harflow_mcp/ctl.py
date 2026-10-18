@@ -76,7 +76,7 @@ class _ArgumentParser(argparse.ArgumentParser):
 
 
 def _build_parser() -> tuple[_ArgumentParser, ...]:
-    parser = _ArgumentParser(prog="harflow-ctl")
+    parser = _ArgumentParser(prog="harflow-ctl", epilog="State root: HARFLOW_STATE_ROOT, otherwise Path.home()/.harflow. Public task layout: <root>/tasks.")
     sub = parser.add_subparsers(dest="command", required=True, parser_class=_ArgumentParser)
     info = sub.add_parser("version-info", help="report side-effect-free Harflow v1 compatibility")
     info.add_argument("--json", action="store_true")
@@ -793,6 +793,7 @@ def _cmd_detached(args: argparse.Namespace, action: Any) -> int:
     outcome = detached.run_detached(
         action,
         log_path=_ctl_log_path(),
+        log_dir=log_dir,
         # No retention and no open-app: the app drives these commands itself.
         registry_factory=lambda: tasks_module.TaskRegistry(log_dir=log_dir, open_monitor=False),
     )
@@ -856,7 +857,7 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
                 from .workflow_references import DependencyError, resolve_dependencies
                 from .workflows import WorkflowStore
                 try:
-                    tree = resolve_dependencies(WorkflowStore(), definition=canonical, substitute_name=canonical.get("name"))
+                    tree = resolve_dependencies(WorkflowStore(default_log_dir().parent), definition=canonical, substitute_name=canonical.get("name"))
                     dependencies = {"root_workflow_id": tree["root_workflow_id"], "workflows": {ident: {"name": entry["name"], "revision": entry["revision"], "definition_sha256": entry["definition_sha256"]} for ident, entry in tree["workflows"].items()}, "edges": tree["edges"], "access": tree["access"]}
                 except DependencyError as exc:
                     error = str(exc)
@@ -877,8 +878,8 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
             managed = managed_reader(default_log_dir())
             try:
                 if action == "assigned-input":
-                    return await asyncio.to_thread(workflow_node_reads.assigned_input_node, managed, args.workflow_run_id, args.execution_id, source_run_id=args.source_run_id, task_id=args.task_id, cursor=args.cursor, limit=args.limit)
-                return await asyncio.to_thread(workflow_node_reads.inspect_node, managed, args.workflow_run_id, execution_id=args.execution_id, task_id=args.task_id, view=args.view, cursor=args.cursor, limit=args.limit, before_seq=args.before_seq, after_seq=args.after_seq)
+                    return await asyncio.to_thread(workflow_node_reads.assigned_input_node, managed, args.workflow_run_id, args.execution_id, source_run_id=args.source_run_id, task_id=args.task_id, cursor=args.cursor, limit=args.limit, root=default_log_dir().parent)
+                return await asyncio.to_thread(workflow_node_reads.inspect_node, managed, args.workflow_run_id, execution_id=args.execution_id, task_id=args.task_id, view=args.view, cursor=args.cursor, limit=args.limit, before_seq=args.before_seq, after_seq=args.after_seq, root=default_log_dir().parent)
             except (ValueError, KeyError, OSError, backends.UnsupportedCapability) as exc:
                 # Only the exception set the server path converts; anything else reaches the outer
                 # handler as for other commands. The same message/data mapping the MCP path applies, so the CLI reports
@@ -903,7 +904,7 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
             refusal = await asyncio.to_thread(caller_refusal, default_log_dir())
             if refusal is not None:
                 raise ValueError("Only a verified human may abandon an uncertain dispatch: " + refusal[1])
-            return await asyncio.to_thread(WorkflowStore().abandon_dispatch, args.workflow_run_id, args.execution_id, args.task_id, args.reason, args.confirm_no_process)
+            return await asyncio.to_thread(WorkflowStore(default_log_dir().parent).abandon_dispatch, args.workflow_run_id, args.execution_id, args.task_id, args.reason, args.confirm_no_process)
         from . import server
         # Registry-backed helpers below get a registry without maintenance or notifications: ctl
         # has no MCP session, and its asyncio.run loop would cancel a notification worker anyway.
@@ -992,6 +993,14 @@ def _main(argv: list[str] | None = None) -> int:
         from .cli import version_info_main
         return version_info_main(argv[1:])
     json_requested = "--json" in argv
+    if "--help" not in argv and "-h" not in argv:
+        from .state_layout import InvalidStateRoot, resolve_layout
+        try:
+            resolve_layout()
+        except InvalidStateRoot as exc:
+            parser = _ArgumentParser(prog="harflow-ctl")
+            parser.json_requested = json_requested
+            parser.error(str(exc))
 
     parsers = _build_parser()
     for each in parsers:

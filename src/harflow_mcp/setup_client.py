@@ -266,6 +266,7 @@ def _main(argv: list[str]) -> int:
     parser = _SetupArgumentParser(
         prog="harflow-setup",
         description="Register HarflowMCP with the Claude desktop app and each agent CLI found.",
+        epilog="State root: HARFLOW_STATE_ROOT, otherwise Path.home()/.harflow. Invalid overrides refuse before setup actions.",
     )
     parser.add_argument(
         "--client",
@@ -306,6 +307,11 @@ def _main(argv: list[str]) -> int:
     )
     parser.json_requested = "--json" in argv
     args = parser.parse_args(argv)
+    from .state_layout import InvalidStateRoot, resolve_layout
+    try:
+        resolve_layout()
+    except InvalidStateRoot as exc:
+        parser.error(str(exc))
 
     # Rejected with --uninstall too: there is no removal preview, and a dry run that quietly
     # removed things would be the worst possible reading of the flag.

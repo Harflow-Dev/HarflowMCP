@@ -54,23 +54,24 @@ def test_proven_resume_ancestor_chain_is_not_a_successor(tmp_path):
 @pytest.mark.parametrize("path", ["live", "record"])
 @pytest.mark.parametrize("strict", [True, False])
 async def test_successor_arriving_between_validation_and_session_lock(tmp_path, monkeypatch, path, strict):
-    registry = TaskRegistry(log_dir=tmp_path)
-    parent = make_task(tmp_path, "source", session_id="conversation", finished=True)
+    state = tmp_path / "state" / "tasks"
+    registry = TaskRegistry(log_dir=state)
+    parent = make_task(state, "source", session_id="conversation", finished=True)
     registry._tasks[parent.task_id] = parent
     registry.persist(parent)
-    source = store.read(tmp_path, parent.task_id)
-    assert store.session_successor_task_ids(tmp_path, source.task_id, source.session_id) == set()
+    source = store.read(state, parent.task_id)
+    assert store.session_successor_task_ids(state, source.task_id, source.session_id) == set()
     original_lock = control.session_lock
     @asynccontextmanager
     async def inject(log_dir, session_id, **kwargs):
         async with original_lock(log_dir, session_id, **kwargs):
-            store.write(tmp_path, record(tmp_path, "successor", parent_task_id=source.task_id, session_id=None))
+            store.write(state, record(state, "successor", parent_task_id=source.task_id, session_id=None))
             yield
     monkeypatch.setattr(control, "session_lock", inject)
     spawns = []
     async def fake_spawn(invocation, **kwargs):
         spawns.append(kwargs)
-        return make_task(tmp_path, "next", session_id="conversation", finished=True)
+        return make_task(state, "next", session_id="conversation", finished=True)
     monkeypatch.setattr(registry, "_spawn", fake_spawn)
     async def resume():
         target = parent if path == "live" else source

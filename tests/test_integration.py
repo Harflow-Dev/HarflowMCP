@@ -39,7 +39,7 @@ async def test_a_trivial_read_only_run_completes(name: str, git_repo: Path, tmp_
     if not backends.is_installed(backend):
         pytest.skip(f"the {backend.binary} CLI is not on PATH")
 
-    registry = TaskRegistry(log_dir=tmp_path / "streams")
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     task = await registry.start(PROMPT, git_repo, backend=backend, freedom="read_only")
 
     try:
@@ -78,7 +78,7 @@ async def test_a_claude_run_streams_partial_messages(git_repo: Path, tmp_path: P
     if not backends.is_installed(backend):
         pytest.skip("the claude CLI is not on PATH")
 
-    registry = TaskRegistry(log_dir=tmp_path / "streams")
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     task = await registry.start(PROMPT, git_repo, backend=backend, freedom="read_only")
 
     try:

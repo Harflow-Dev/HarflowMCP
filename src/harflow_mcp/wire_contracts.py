@@ -61,18 +61,8 @@ def validate_envelope(document: Mapping[str, Any], format: str, *, live: bool = 
 
 def version_info(environ: Mapping[str, str] | None = None) -> dict[str, Any]:
     """Describe this engine without reading configuration, state or harnesses."""
-    env = os.environ if environ is None else environ
-    home = env.get("HOME")
-    if os.name == "posix":
-        if home is None:
-            import pwd
-            home = pwd.getpwuid(os.getuid()).pw_dir
-        home = home.rstrip("/") or "/"
-    elif home is None:
-        home = os.path.expanduser("~")
-    state_root = os.path.abspath(os.path.join(home, ".harflow"))
-    if os.name == "posix":
-        state_root = "/" + state_root.lstrip("/")
+    from .state_layout import resolve_layout
+    state_root = str(resolve_layout(environ=environ).root)
     return envelope(VERSION_INFO_FORMAT, {
         "component": "engine",
         "contracts": {"ctl": {"format": CTL_FORMAT, "v": WIRE_VERSION}, "setup": {"format": SETUP_FORMAT, "v": WIRE_VERSION}, "events": {"format": EVENT_FORMAT, "v": WIRE_VERSION}},

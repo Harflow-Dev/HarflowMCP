@@ -188,6 +188,74 @@ async def test_managed_orchestrator_goal_history_is_only_paged(tmp_path):
     assert json.loads(''.join(chunks)) == history
 
 
+async def test_server_workflow_wrappers_use_selected_registry_root(tmp_path, monkeypatch):
+    """All server workflow wrappers must stay on the registry-selected root."""
+    from harflow_mcp import workflows
+    from harflow_mcp.tasks import TaskRegistry
+
+    selected = tmp_path / "root-a"
+    ambient = tmp_path / "root-b"
+    monkeypatch.setenv("HARFLOW_STATE_ROOT", str(ambient))
+    definition = {
+        "nodes": [
+            {"id": "start", "type": "start"},
+            {"id": "end", "type": "end"},
+        ],
+        "connections": [{"id": "finish", "source": "start", "target": "end"}],
+    }
+    selected_store = workflows.WorkflowStore(root=selected)
+    ambient_store = workflows.WorkflowStore(root=ambient)
+    selected_definition = selected_store.save("only-a", definition)
+    ambient_store.save("only-b", definition)
+    run = selected_store.create_run(selected_definition, "selected run", tmp_path)
+    registry = TaskRegistry(log_dir=selected / "tasks", owner={})
+    monkeypatch.setattr(server, "_registry", registry)
+
+    listed = await server.list_workflows()
+    assert [item["name"] for item in listed] == ["only-a"]
+    assert (await server.get_workflow("only-a"))["name"] == "only-a"
+    runs = await server.list_workflow_runs()
+    assert [item["workflow_run_id"] for item in runs["runs"]] == [run["workflow_run_id"]]
+    status = await server.get_workflow_status(run["workflow_run_id"])
+    assert status["workflow_run_id"] == run["workflow_run_id"]
+
+    await server.save_workflow("saved-a", definition)
+    assert (selected / "workflows" / "saved-a.json").is_file()
+    assert not (ambient / "workflows" / "saved-a.json").exists()
+    assert [item["name"] for item in ambient_store.list()] == ["only-b"]
+
+
+async def test_server_node_reads_forward_selected_root(monkeypatch, tmp_path):
+    from harflow_mcp import workflow_node_reads
+    from harflow_mcp.tasks import TaskRegistry
+
+    selected = tmp_path / "root-a"
+    ambient = tmp_path / "root-b"
+    monkeypatch.setenv("HARFLOW_STATE_ROOT", str(ambient))
+    registry = TaskRegistry(log_dir=selected / "tasks", owner={})
+    monkeypatch.setattr(server, "_registry", registry)
+
+    async def no_managed_reader():
+        return None
+
+    observed = {}
+    monkeypatch.setattr(server, "_managed_workflow_reader", no_managed_reader)
+
+    def inspect(*args, **kwargs):
+        observed["inspect"] = kwargs["root"]
+        return {"chunk": "{}", "has_more": False}
+
+    def assigned(*args, **kwargs):
+        observed["assigned"] = kwargs["root"]
+        return {"chunk": "{}", "has_more": False}
+
+    monkeypatch.setattr(workflow_node_reads, "inspect_node", inspect)
+    monkeypatch.setattr(workflow_node_reads, "assigned_input_node", assigned)
+    await server.inspect_workflow_node("run", "execution")
+    await server.read_workflow_assigned_input("run", "execution")
+    assert observed == {"inspect": selected, "assigned": selected}
+
+
 async def test_goal_history_detail_does_not_expand_worker_authority(tmp_path):
     async def reader():
         return ({'role': 'node'}, {'workflow_run_id': 'owned'})

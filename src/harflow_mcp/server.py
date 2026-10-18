@@ -164,6 +164,14 @@ async def _guard_mutation() -> None:
     directory = _registry.log_dir if _registry is not None else default_log_dir()
     await asyncio.to_thread(require_mutation, directory, environ=environ)
 
+def _guard_launch_layout() -> None:
+    """Reject unsupported injected layouts before registry activation or launch preparation."""
+    from .state_layout import require_dispatch_layout
+    from .tasks import default_log_dir
+    directory = _registry.log_dir if _registry is not None else default_log_dir()
+    require_dispatch_layout(directory)
+
+
 def _reg() -> TaskRegistry:
     # Built lazily so its asyncio primitives belong to the loop `mcp.run()` creates.
     global _registry
@@ -490,6 +498,7 @@ async def start_task(
     best-effort, not a sandbox boundary — nothing stops an agent from dispatching outside
     harflow_mcp entirely.
     """
+    _guard_launch_layout()
     from .caller_policy import require_mutation
     await _guard_mutation()
     if not prompt or not prompt.strip():
@@ -1149,6 +1158,7 @@ async def continue_task(task_id: str, extra_prompt: str | None = None, notes_pat
     notes are the same request whatever is queued: the queue is read once, when the successor is
     reserved, and a retry returns that successor. An automatic continuation never consumes.
     """
+    _guard_launch_layout()
     from .caller_policy import require_mutation
     await _guard_mutation()
     await _guard_task_read(task_id)
@@ -1201,6 +1211,7 @@ async def resume_task(
     doing so, its conversation cannot be continued and this says so rather than starting a
     disconnected one.
     """
+    _guard_launch_layout()
     from .caller_policy import require_mutation
     await _guard_mutation()
     if followup_prompt is not None and (not isinstance(followup_prompt, str) or not followup_prompt.strip()):
@@ -1711,6 +1722,8 @@ def _guard_saved_workflow_authority(caller: Any, definition: dict[str, Any]) -> 
 
 @bounded_request
 async def _workflow_call(action: str, **kwargs: Any) -> Any:
+    if action in {"start", "build", "builder_followup", "resume", "recover", "cancel", "abandon_dispatch"}:
+        _guard_launch_layout()
     from .caller_policy import require_mutation
     from .workflow_reads import READ_ACTIONS
     if action not in READ_ACTIONS:
@@ -1733,7 +1746,7 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
                 from .workflow_hooks import refuse_managed
                 refuse_managed(_reg().log_dir, caller.record.task_id)
             kwargs["repo_path"] = await _validate_repo_path(kwargs["repo_path"])
-            return await asyncio.to_thread(workflows.preview_workflow_run, **kwargs)
+            return await asyncio.to_thread(workflows.preview_workflow_run, root=_reg().log_dir.parent, **kwargs)
         if action in {"pause", "resume", "recover", "revise_goal"}:
             kwargs.setdefault("interaction_owner", "caller")
         if action not in {"list", "list_runs", "list_run_page", "get_run_header", "get", "status", "inspect", "assigned_input", "detail"}:
@@ -1749,7 +1762,7 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
         if action == "start":
             if kwargs.get("freedom") is not None:
                 raise ValueError("Workflow access is defined by saved nodes; caller freedom overrides are not supported")
-            store_ = workflows.WorkflowStore()
+            store_ = workflows.WorkflowStore(_reg().log_dir.parent)
             kwargs["definition_snapshot"] = await asyncio.to_thread(store_.get, kwargs["name"])
             kwargs["definition_snapshot"] = workflows.launch_definition(kwargs["definition_snapshot"], kwargs.get("overrides"))
             # Resolve once: the pinned tree feeds both authority and the run.
@@ -1762,7 +1775,7 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
                 workflows._candidate({**kwargs["agent"], "fallbacks": kwargs.get("fallbacks") or kwargs["agent"].get("fallbacks", [])})
             caller = await _verified_workflow_caller()
             if caller is not None:
-                path = await _validate_repo_path(kwargs["repo_path"]) if kwargs.get("repo_path") is not None else workflows.builder_workspace(workflows.WorkflowStore())
+                path = await _validate_repo_path(kwargs["repo_path"]) if kwargs.get("repo_path") is not None else workflows.builder_workspace(workflows.WorkflowStore(_reg().log_dir.parent))
                 if action == "start":
                     # Authority walks the resolved tree: every pinned node candidate at
                     # its saved freedom with the run's network, and an orchestrator only
@@ -1803,17 +1816,17 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
                             _reg()._resolve_lineage(caller, child_enforcement=enforcement, child_backend=backend_.name, child_repo=path)
         if action == "start":
             kwargs["repo_path"] = await _validate_repo_path(kwargs["repo_path"])
-            return await workflows.start_workflow(**kwargs, _verified_caller=caller)
+            return await workflows.start_workflow(root=_reg().log_dir.parent, **kwargs, _verified_caller=caller)
         if action == "build":
             if kwargs.get("repo_path") is not None:
                 kwargs["repo_path"] = await _validate_repo_path(kwargs["repo_path"])
-            return await workflows.build_workflow(**kwargs, _verified_caller=caller)
+            return await workflows.build_workflow(root=_reg().log_dir.parent, **kwargs, _verified_caller=caller)
         if action == "builder_followup":
-            return await workflows.followup_workflow_builder(**kwargs)
+            return await workflows.followup_workflow_builder(root=_reg().log_dir.parent, **kwargs)
         managed = await _managed_workflow_reader()
         if action == "assigned_input":
             from .workflow_node_reads import assigned_input_node
-            return await asyncio.to_thread(assigned_input_node, managed, kwargs["run_id"], kwargs["execution_id"], source_run_id=kwargs.get("source_run_id"), task_id=kwargs.get("task_id"), cursor=kwargs.get("cursor"), limit=kwargs.get("limit", 16000))
+            return await asyncio.to_thread(assigned_input_node, managed, kwargs["run_id"], kwargs["execution_id"], source_run_id=kwargs.get("source_run_id"), task_id=kwargs.get("task_id"), cursor=kwargs.get("cursor"), limit=kwargs.get("limit", 16000), root=_reg().log_dir.parent)
         if managed is not None:
             association, owned_run = managed
             if association["role"] == "builder":
@@ -1824,7 +1837,7 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
                 raise ValueError("Worker nodes cannot inspect workflow context")
             if action == "inspect" and kwargs["run_id"] != owned_run["workflow_run_id"]:
                 raise ValueError("Orchestrators may only inspect their own workflow run")
-        store_ = workflows.WorkflowStore()
+        store_ = workflows.WorkflowStore(_reg().log_dir.parent)
         if action == "revise_goal":
             from .workflow_goals import revise
             return await asyncio.to_thread(revise, store_, **kwargs)
@@ -1834,7 +1847,7 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
             return await asyncio.to_thread(store_.delete, kwargs["name"])
         if action == "inspect":
             from .workflow_node_reads import inspect_node
-            return await asyncio.to_thread(inspect_node, managed, kwargs["run_id"], execution_id=kwargs["execution_id"], task_id=kwargs.get("task_id"), view=kwargs.get("view", "result"), cursor=kwargs.get("cursor"), limit=kwargs.get("limit"), before_seq=kwargs.get("before_seq"), after_seq=kwargs.get("after_seq"))
+            return await asyncio.to_thread(inspect_node, managed, kwargs["run_id"], execution_id=kwargs["execution_id"], task_id=kwargs.get("task_id"), view=kwargs.get("view", "result"), cursor=kwargs.get("cursor"), limit=kwargs.get("limit"), before_seq=kwargs.get("before_seq"), after_seq=kwargs.get("after_seq"), root=_reg().log_dir.parent)
         return await asyncio.to_thread(store_.control, action=action, **kwargs)
     except (ValueError, KeyError, OSError, backends.UnsupportedCapability) as exc:
         data = None
@@ -1943,6 +1956,7 @@ async def workflow_builder(name: str, prompt: str, repo_path: str | None = None,
     immediate parent run, with fresh workflow state; explicit Resume never falls back Fresh.
     The canvas expands automatically; there is no fixed right or bottom boundary.
     """
+    _guard_launch_layout()
     from .caller_policy import require_mutation
     await _guard_mutation()
     if agent is None:
@@ -1963,6 +1977,7 @@ async def followup_workflow_builder(run_id: str, prompt: str) -> dict[str, Any]:
     Preserve spaces and word boundaries in prompt rather than compressing natural
     prose; the caller's source text is retained unchanged before builder input assembly.
     """
+    _guard_launch_layout()
     from .caller_policy import require_mutation
     await _guard_mutation()
     return await _workflow_call("builder_followup", run_id=run_id, prompt=prompt)
@@ -1992,7 +2007,7 @@ async def apply_workflow_draft(definition: dict[str, Any], expected_draft_revisi
     from . import workflows
     try:
         caller = await _reg()._detect_caller()
-        return await workflows.apply_workflow_draft(definition, expected_draft_revision, caller=caller)
+        return await workflows.apply_workflow_draft(definition, expected_draft_revision, caller=caller, root=_reg().log_dir.parent)
     except (ValueError, KeyError, OSError) as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
 
@@ -2027,6 +2042,7 @@ async def start_workflow(name: str, prompt: str, repo_path: str, overrides: dict
     Completion requires an assessment
     with evidence for the current goal revision; conflicts or unverifiable criteria need input.
     """
+    _guard_launch_layout()
     from .caller_policy import require_mutation
     await _guard_mutation()
     from .workflow_responses import compact
@@ -2064,7 +2080,7 @@ async def start_workflow(name: str, prompt: str, repo_path: str, overrides: dict
             from .catalog import METADATA_BYTES, metadata_request
             def read_created_run():
                 with metadata_request() as budget:
-                    return WorkflowStore().get_run(reserved_id, metadata_byte_limit=METADATA_BYTES, metadata_budget=budget)
+                    return WorkflowStore(_reg().log_dir.parent).get_run(reserved_id, metadata_byte_limit=METADATA_BYTES, metadata_budget=budget)
             run = await asyncio.to_thread(read_created_run)
         except FileNotFoundError:
             await _notification_io(notifications.discard_unstarted, _reg().log_dir, reserved_id)
@@ -2347,6 +2363,7 @@ async def resume_workflow(workflow_run_id: str, instructions: str | None = None,
     Each accepted answer replaces previous skip consent at that checkpoint: the default
     False revokes it, while True renews it with the latest answer as its reason.
     """
+    _guard_launch_layout()
     from .workflow_responses import compact
     return compact(await _workflow_call("resume", run_id=workflow_run_id, instructions=instructions, additional_attempts=additional_attempts, decision_id=decision_id, allow_optional_review_skip=allow_optional_review_skip))
 
@@ -2391,6 +2408,7 @@ async def recover_workflow(workflow_run_id: str, reason: str, additional_attempt
     Preserve spaces and word boundaries in reason rather than compressing natural
     prose; the caller's source text is retained unchanged before workflow input assembly.
     """
+    _guard_launch_layout()
     from .caller_policy import require_mutation
     await _guard_mutation()
     if not reason or not reason.strip():
@@ -2409,6 +2427,7 @@ async def cancel_workflow(workflow_run_id: str) -> dict[str, Any]:
     Human Monitor cancellation uses the local CLI verified-human boundary; it does
     not transfer the original caller's answer, retry, or continuation ownership.
     """
+    _guard_launch_layout()
     from .caller_policy import require_mutation
     await _guard_mutation()
     from .workflow_responses import compact
@@ -2417,6 +2436,15 @@ async def cancel_workflow(workflow_run_id: str) -> dict[str, Any]:
 
 def main() -> None:
     """Entry point for the `harflow-server` console script."""
+    if "--help" in sys.argv[1:] or "-h" in sys.argv[1:]:
+        print("HarflowMCP stdio server; state root: HARFLOW_STATE_ROOT or HOME/.harflow")
+        return
+    from .state_layout import InvalidStateRoot, resolve_layout
+    try:
+        resolve_layout()
+    except InvalidStateRoot as exc:
+        print(f"harflow-server: error: {exc}", file=sys.stderr)
+        raise SystemExit(2) from None
     logging.basicConfig(
         level=os.environ.get("HARFLOW_LOG_LEVEL", "INFO").upper(),
         # stderr, never stdout: stdout is the MCP wire.

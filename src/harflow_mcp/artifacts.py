@@ -370,7 +370,13 @@ def _target(log_dir, record, spelling):
     if not own_scratch:
         # Backend state and bridge state are never user artifact authority.
         forbidden = ('.harflow', '.polybridge', '.codex', '.claude', '.vibe', '.config', '.git')
-        if target.is_relative_to(log_dir.parent.resolve()) or any(part in forbidden for part in target.parts):
+        from .state_layout import protected_roots
+        from .runtime_paths import _chain
+        protected = [(root, _chain(root)[1]) for root in protected_roots(log_dir=log_dir)]
+        lexical = Path(spelling) if Path(spelling).is_absolute() else recorded_repo / spelling
+        traversed, _ = _chain(lexical)
+        traversed.add(target)
+        if any(hop.is_relative_to(root) or hop.is_relative_to(resolved) for root, resolved in protected for hop in traversed) or any(part in forbidden for hop in traversed for part in hop.parts):
             raise ValueError('Artifact is in protected bridge or backend state')
         from . import backends
         from .runtime_paths import _chain

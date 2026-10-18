@@ -65,6 +65,24 @@ def test_path_authority(setup):
         artifacts.register(logs, '.codex/config.toml', 'other')
 
 
+def test_custom_state_symlink_spelling_is_protected_but_direct_repo_artifact_is_allowed(
+    setup, monkeypatch
+):
+    logs, repo, record = setup
+    custom_state = repo.parent / 'custom_state'
+    (custom_state / 'tasks').mkdir(parents=True)
+    outbound = custom_state / 'outbound'
+    outbound.symlink_to(repo, target_is_directory=True)
+    monkeypatch.setenv('HARFLOW_STATE_ROOT', str(custom_state))
+    direct = repo / 'report'
+    direct.write_text('direct')
+
+    target, _ = artifacts._target(logs, record, str(direct))
+    assert target == direct
+    with pytest.raises(ValueError, match='protected'):
+        artifacts._target(logs, record, str(outbound / 'report'))
+
+
 def test_manifest_corrupt_symlink_fifo(setup):
     logs, repo, record = setup
     target = repo / 'report'

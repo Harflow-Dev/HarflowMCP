@@ -125,6 +125,7 @@ async def test_missing_descendant_cancellation_does_not_report_success(run_store
     storage, rid = run_store
     storage.update_run(rid, lambda r: r.update(status="cancelling", activations=[{"id": "invocation", "node_id": "work", "status": "failed", "role": "node", "tasks": [], "invocation": {"stage": "settled", "child_workflow_run_id": "missing"}}]), "fixture")
     class Registry:
+        log_dir = storage.root / "tasks"
         async def cancel_cascade(self, task_id, **kwargs):
             return {}
     supervisor = w.WorkflowSupervisor(Registry(), storage)
@@ -142,6 +143,7 @@ async def test_descendant_cascade_failures_are_reported(run_store):
     w._write(storage.runs / "child.json", child)
     storage.update_run(rid, lambda r: r.update(activations=[{"id": "invocation", "status": "failed", "tasks": [], "invocation": {"stage": "settled", "child_workflow_run_id": "child"}}]), "fixture")
     class Registry:
+        log_dir = storage.root / "tasks"
         calls = []
         async def cancel_cascade(self, task_id, **kwargs):
             self.calls.append(task_id)
@@ -200,6 +202,7 @@ async def test_tracked_task_settlement_requires_cascade_descendant_owner_settlem
     }]), "fixture")
 
     class Registry:
+        log_dir = storage.root / "tasks"
         calls = []
         async def cancel_cascade(self, task_id, **kwargs):
             self.calls.append(task_id)

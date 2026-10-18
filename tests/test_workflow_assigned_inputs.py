@@ -98,7 +98,7 @@ async def test_server_worker_reader_and_inspection_restriction(tmp_path, monkeyp
     async def reader():
         return managed
     monkeypatch.setattr(server, "_managed_workflow_reader", reader)
-    monkeypatch.setattr(WorkflowStore, "__init__", lambda self: setattr(self, "root", tmp_path))
+    monkeypatch.setattr(WorkflowStore, "__init__", lambda self, root=None: setattr(self, "root", root or tmp_path))
     page = await server.read_workflow_assigned_input("run", "source", limit=13)
     assert len(page["chunk"]) == 13
     with pytest.raises(Exception, match="cannot inspect workflow context"):
@@ -110,7 +110,7 @@ def test_cli_assigned_input_parity(monkeypatch, capsys):
     seen = []
     managed = object()
     monkeypatch.setattr(workflow_inspection, "managed_reader", lambda log_dir: managed)
-    def read(resolved, run_id, execution_id, *, source_run_id, task_id, cursor, limit):
+    def read(resolved, run_id, execution_id, *, source_run_id, task_id, cursor, limit, root=None):
         seen.append((resolved, run_id, execution_id, source_run_id, task_id, cursor, limit))
         return {"chunk": "ok"}
     monkeypatch.setattr(workflow_node_reads, "assigned_input_node", read)
@@ -125,7 +125,7 @@ def test_cli_inspect_parity(monkeypatch, capsys):
     seen = []
     managed = object()
     monkeypatch.setattr(workflow_inspection, "managed_reader", lambda log_dir: managed)
-    def inspect(resolved, run_id, *, execution_id, task_id, view, cursor, limit, before_seq, after_seq):
+    def inspect(resolved, run_id, *, execution_id, task_id, view, cursor, limit, before_seq, after_seq, root=None):
         seen.append((resolved, run_id, execution_id, task_id, view, cursor, limit, before_seq, after_seq))
         return {"chunk": "ok"}
     monkeypatch.setattr(workflow_node_reads, "inspect_node", inspect)

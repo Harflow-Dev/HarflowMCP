@@ -669,7 +669,8 @@ def _now() -> datetime:
 
 
 def default_log_dir() -> Path:
-    return Path.home() / ".harflow" / "tasks"
+    from .state_layout import resolve_layout
+    return resolve_layout().tasks_directory
 
 
 @dataclass
@@ -962,7 +963,9 @@ class TaskRegistry:
         self._monitor_launcher = monitor_launcher
         # Strong references to the background `open` jobs (see `_maybe_open_monitor`).
         self._monitor_jobs: set[asyncio.Task[Any]] = set()
-        self._log_dir = log_dir or default_log_dir()
+        from .state_layout import resolve_layout
+        self.state_layout = resolve_layout(log_dir=log_dir)
+        self._log_dir = self.state_layout.tasks_directory
         self._max_tasks = max_tasks
         # Computed once per registry rather than per task: every task this registry spawns shares
         # the same owning server process. `owner` is accepted as a parameter so tests can inject a
@@ -1177,6 +1180,8 @@ class TaskRegistry:
 
         `message_ids` are the queued follow-ups a continuation consumed; its `task_started` event
         carries them."""
+        from .state_layout import require_dispatch_layout
+        require_dispatch_layout(self._log_dir)
         with _before_spawn():
             from .task_continuation import validate_budget
             validate_budget(auto_continue)
@@ -1267,6 +1272,8 @@ class TaskRegistry:
 
         `consume_followups` is set by the caller-facing paths only; an automatic continuation never
         consumes."""
+        from .state_layout import require_dispatch_layout
+        require_dispatch_layout(self._log_dir)
         from .task_continuation import continue_task
         return await continue_task(self, task_id, extra_prompt, notes_path, automatic=automatic, consume_followups=consume_followups)
 
@@ -1293,6 +1300,8 @@ class TaskRegistry:
         `followup_prompt`, which may be omitted only when something is queued. It is a flag of its
         own, never inferred from `task_id`, which keeps marking supervisor-owned resumes.
         """
+        from .state_layout import require_dispatch_layout
+        require_dispatch_layout(self._log_dir)
         if followup_prompt is None and not consume_followups:
             raise ValueError("followup_prompt is required")
         if parent.session_id is None:
@@ -1556,6 +1565,8 @@ class TaskRegistry:
         # only ever run with the pipe it was built for (claude without a turn cap, and every
         # antigravity run, is live). Classic runs use DEVNULL or a backend-validated one-shot
         # prompt pipe which closes immediately at EOF, without a live-input pump.
+        from .state_layout import require_dispatch_layout
+        require_dispatch_layout(self._log_dir)
         with _before_spawn():
             from . import approval_runtime
             approval_runtime.validate(backend, caller_approvals, freedom, max_turns, invocation.native_subagent)
@@ -1683,8 +1694,9 @@ class TaskRegistry:
             # claude/opencode subprocess) can find its way back to this task via
             # `lineage.detect_caller`'s HARFLOW_TASK_ID method, when the environment survives that far.
             # Built here, synchronously, so it introduces no await into the no-await window below.
+            from .state_layout import child_environment
             spawn_env = {
-                **os.environ,
+                **child_environment(self.state_layout),
                 lineage.ENV_TASK_ID: task_id,
                 lineage.ENV_ROOT_TASK_ID: root_task_id,
                 lineage.ENV_DEPTH: str(depth),
@@ -3302,6 +3314,8 @@ class TaskRegistry:
         consume_followups: bool = False,
     ) -> Task:
         """Continue the session of a task recovered from disk (see `resume` for the flags)."""
+        from .state_layout import require_dispatch_layout
+        require_dispatch_layout(self._log_dir)
         if followup_prompt is None and not consume_followups:
             raise ValueError("followup_prompt is required")
         if not record.session_id:

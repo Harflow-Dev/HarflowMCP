@@ -96,6 +96,8 @@ async def stop_chain(registry: Any, task_id: str) -> None:
 
 
 async def continue_task(registry: Any, task_id: str, extra_prompt: str | None = None, notes_path: str | None = None, *, automatic: bool = False, consume_followups: bool = False) -> Any:
+    from .state_layout import require_dispatch_layout
+    require_dispatch_layout(registry.log_dir)
     store.validate_task_id(task_id)
     if extra_prompt is not None and not isinstance(extra_prompt, str):
         raise ValueError('extra_prompt must be text')

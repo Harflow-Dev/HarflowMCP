@@ -13,7 +13,7 @@ from harflow_mcp.extra_paths import normalize_paths
 
 @pytest.fixture(autouse=True)
 def separate_bridge_state(monkeypatch, tmp_path_factory):
-    monkeypatch.setattr(server._reg(), '_log_dir', tmp_path_factory.mktemp('bridge-state') / 'streams')
+    monkeypatch.setattr(server._reg(), '_log_dir', tmp_path_factory.mktemp('bridge-state') / 'state' / 'tasks')
 
 
 @pytest.fixture

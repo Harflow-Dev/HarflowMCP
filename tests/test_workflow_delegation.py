@@ -39,6 +39,7 @@ class Task:
 class Registry:
     def __init__(self, root, policy=None, outputs=None):
         self._log_dir = root / "tasks"
+        self.log_dir = self._log_dir
         self.calls = []
         self.contexts = []
         self.policy = policy or default_decision

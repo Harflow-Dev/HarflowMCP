@@ -28,6 +28,7 @@ class FakeTask:
 class FakeRegistry:
     def __init__(self, root, responses):
         self._log_dir = root / "tasks"
+        self.log_dir = self._log_dir
         self.responses = iter(responses)
         self.calls = []
         self.tasks = {}
@@ -1455,7 +1456,9 @@ async def test_builder_invalid_agent_does_not_create_default_workspace(storage):
 async def test_registry_display_projection_keeps_full_backend_prompt_and_normalized_timeline(tmp_path, monkeypatch):
     from datetime import datetime, timezone
     from harflow_mcp import tasks, store
-    registry = tasks.TaskRegistry(log_dir=tmp_path)
+    state = tmp_path / "state" / "tasks"
+    state.mkdir(parents=True)
+    registry = tasks.TaskRegistry(log_dir=state)
     captured = {}
     async def spawn(invocation, **kwargs):
         captured.update(kwargs, argv=invocation.argv)
@@ -1467,8 +1470,8 @@ async def test_registry_display_projection_keeps_full_backend_prompt_and_normali
     assert captured["prompt"] == full and captured["display_prompt"] == "USER REQUEST"
     task = tasks.Task(task_id="display", backend="codex", session_id="s", repo_path=tmp_path, prompt=full, display_prompt="USER REQUEST", workflow_builder=True, max_turns=5, log_path=tmp_path / "raw", started_at=datetime.now(timezone.utc))
     registry.persist(task)
-    assert store.read(tmp_path, "display").prompt == "USER REQUEST"
-    assert store.read(tmp_path, "display").workflow_builder is True
+    assert store.read(state, "display").prompt == "USER REQUEST"
+    assert store.read(state, "display").workflow_builder is True
     assert task.brief()["workflow_builder"] is True
     events = []
     task.events = SimpleNamespace(write=lambda kind, fields, **kw: events.append((kind, fields)))
@@ -1482,8 +1485,10 @@ async def test_registry_display_projection_keeps_full_backend_prompt_and_normali
 async def test_registry_workflow_followup_display_keeps_full_resume_input(tmp_path, monkeypatch, recovered):
     from datetime import datetime, timezone
     from harflow_mcp import tasks, store
-    registry = tasks.TaskRegistry(log_dir=tmp_path)
-    parent = tasks.Task(task_id="parent", backend="claude", session_id="session", repo_path=tmp_path, prompt="Previous full prompt", display_prompt="Previous user request", max_turns=5, log_path=tmp_path / "parent.log", started_at=datetime.now(timezone.utc))
+    state = tmp_path / "state" / "tasks"
+    state.mkdir(parents=True)
+    registry = tasks.TaskRegistry(log_dir=state)
+    parent = tasks.Task(task_id="parent", backend="claude", session_id="session", repo_path=tmp_path, prompt="Previous full prompt", display_prompt="Previous user request", max_turns=5, log_path=state / "parent.log", started_at=datetime.now(timezone.utc))
     parent.status = "completed"; parent.done.set()
     registry._tasks[parent.task_id] = parent
     registry.persist(parent)
@@ -1494,7 +1499,7 @@ async def test_registry_workflow_followup_display_keeps_full_resume_input(tmp_pa
     monkeypatch.setattr(registry, "_spawn", spawn)
     full = "Actual feedback\nLatest private graph context"
     if recovered:
-        await registry.resume_record(store.read(tmp_path, "parent"), full, display_prompt="Actual feedback", workflow_builder=True)
+        await registry.resume_record(store.read(state, "parent"), full, display_prompt="Actual feedback", workflow_builder=True)
     else:
         await registry.resume(parent, full, display_prompt="Actual feedback", workflow_builder=True)
     assert full in observed["argv"] or full == json.loads(observed["initial_input"].decode())["message"]["content"][0]["text"]

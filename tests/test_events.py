@@ -63,6 +63,11 @@ class _RecordingBackend:
         return self._classify_result
 
 
+def task_root(tmp_path: Path) -> Path:
+    """Use the public isolated state/tasks layout for process-launch fixtures."""
+    return tmp_path / "state" / "tasks"
+
+
 @pytest.fixture
 def registered(monkeypatch: pytest.MonkeyPatch):
     """Register a `_RecordingBackend` under `backends.BACKENDS` so `get_backend` (used by the
@@ -88,19 +93,47 @@ async def test_seq_zero_is_always_task_started_and_seqs_are_contiguous(
             normalize_fn=lambda event, acc: [{"kind": "notice", "text": event.get("type")}],
         )
     )
-    registry = TaskRegistry(log_dir=tmp_path, owner={"pid": 1, "start_time": "t", "markers": []})
+    registry = TaskRegistry(log_dir=task_root(tmp_path), owner={"pid": 1, "start_time": "t", "markers": []})
 
     task = await registry.start("hi", tmp_path, backend=backend)
     await task.done.wait()
 
     lines = [
         json.loads(line)
-        for line in events_path(tmp_path, task.task_id).read_text().splitlines()
+        for line in events_path(task_root(tmp_path), task.task_id).read_text().splitlines()
     ]
     assert lines[0]["kind"] == "task_started"
     assert lines[0]["seq"] == 0
     assert [line["seq"] for line in lines] == list(range(len(lines)))
     assert lines[-1]["kind"] == "task_finished"
+
+
+@pytest.mark.parametrize("resume", [False, True])
+async def test_process_launch_propagates_selected_state_root_without_rewriting_vendor_home(
+    tmp_path: Path, registered, monkeypatch, resume
+) -> None:
+    state = task_root(tmp_path)
+    vendor_home = tmp_path / "vendor-home"
+    ambient = tmp_path / "ambient"
+    monkeypatch.setenv("HARFLOW_STATE_ROOT", str(ambient))
+    monkeypatch.setenv("HOME", str(vendor_home))
+    script = "printf '{\"state_root\":\"%s\",\"home\":\"%s\"}\\n' \"$HARFLOW_STATE_ROOT\" \"$HOME\""
+    backend = registered(_RecordingBackend(script))
+    registry = TaskRegistry(log_dir=state, owner={"pid": 1, "start_time": "t", "markers": []})
+    if resume:
+        invocation = backend.build_resume_argv("continue", session_id="session", repo=tmp_path)
+        task = await registry._spawn(
+            invocation, backend=backend, prompt="continue", repo_path=tmp_path,
+            session_id="session", freedom="read_only", max_turns=None, model=None,
+            reasoning_effort=None,
+        )
+    else:
+        task = await registry.start("assignment", tmp_path, backend=backend, freedom="read_only")
+    await task.done.wait()
+    output = [json.loads(line) for line in task.log_path.read_text().splitlines()]
+    payload = next(item for item in output if "state_root" in item)
+    assert payload["state_root"] == str(state.parent)
+    assert payload["home"] == str(vendor_home)
 
 
 async def test_raw_offset_matches_the_raw_logs_byte_length_through_that_line(
@@ -112,7 +145,7 @@ async def test_raw_offset_matches_the_raw_logs_byte_length_through_that_line(
             normalize_fn=lambda event, acc: [{"kind": "notice", "text": event.get("type")}],
         )
     )
-    registry = TaskRegistry(log_dir=tmp_path)
+    registry = TaskRegistry(log_dir=task_root(tmp_path))
 
     task = await registry.start("hi", tmp_path, backend=backend)
     await task.done.wait()
@@ -124,7 +157,7 @@ async def test_raw_offset_matches_the_raw_logs_byte_length_through_that_line(
 
     notices = [
         json.loads(line)
-        for line in events_path(tmp_path, task.task_id).read_text().splitlines()
+        for line in events_path(task_root(tmp_path), task.task_id).read_text().splitlines()
         if json.loads(line)["kind"] == "notice"
     ]
     assert [n["raw_offset"] for n in notices] == expected_offsets
@@ -139,21 +172,21 @@ async def test_raw_offset_is_null_when_the_raw_log_cannot_be_opened(
             normalize_fn=lambda event, acc: [{"kind": "notice", "text": event.get("type")}],
         )
     )
-    registry = TaskRegistry(log_dir=tmp_path)
+    registry = TaskRegistry(log_dir=task_root(tmp_path))
 
     # Pre-create the raw log path *as a directory* so `Path.open("ab")` fails with an OSError —
     # the same failure mode the drainer already tolerates for a broken disk. `uuid4` is patched to
     # a fixed value so the task's log path is known ahead of spawning it.
     fixed_id = "11111111-1111-4111-8111-111111111111"
     monkeypatch.setattr(tasks_module.uuid, "uuid4", lambda: fixed_id)
-    (tmp_path / f"{fixed_id}.jsonl").mkdir()
+    (task_root(tmp_path) / f"{fixed_id}.jsonl").mkdir(parents=True)
 
     task = await registry.start("hi", tmp_path, backend=backend)
     await task.done.wait()
 
     notices = [
         json.loads(line)
-        for line in events_path(tmp_path, task.task_id).read_text().splitlines()
+        for line in events_path(task_root(tmp_path), task.task_id).read_text().splitlines()
         if json.loads(line)["kind"] == "notice"
     ]
     assert notices, "the normalized events must still be recorded despite the raw log failing"
@@ -170,7 +203,7 @@ async def test_raw_offset_is_null_after_the_raw_log_handle_is_dropped(
             normalize_fn=lambda event, acc: [{"kind": "notice", "text": event.get("type")}],
         )
     )
-    registry = TaskRegistry(log_dir=tmp_path)
+    registry = TaskRegistry(log_dir=task_root(tmp_path))
 
     class _FlakyHandle:
         def __init__(self, real):
@@ -207,7 +240,7 @@ async def test_raw_offset_is_null_after_the_raw_log_handle_is_dropped(
 
     notices = [
         json.loads(line)
-        for line in events_path(tmp_path, task.task_id).read_text().splitlines()
+        for line in events_path(task_root(tmp_path), task.task_id).read_text().splitlines()
         if json.loads(line)["kind"] == "notice"
     ]
     assert len(notices) == 2
@@ -224,8 +257,7 @@ async def test_a_raising_normalizer_bumps_normalize_errors_and_never_touches_sta
     backend = registered(
         _RecordingBackend(_two_line_script(), normalize_fn=boom, classify_result="completed")
     )
-    registry = TaskRegistry(log_dir=tmp_path)
-
+    registry = TaskRegistry(log_dir=task_root(tmp_path))
     task = await registry.start("hi", tmp_path, backend=backend)
     await task.done.wait()
 
@@ -238,7 +270,8 @@ async def test_no_task_finished_event_on_the_abandoned_path(tmp_path: Path) -> N
     """A torn-down server's monitor must not write `task_finished` for a run it never observed
     the end of — mirrors `test_a_cancelled_monitor_leaves_a_live_run_recorded_as_running` in
     test_registry.py, plus the events-log assertion that test does not need."""
-    registry = TaskRegistry(log_dir=tmp_path)
+    registry = TaskRegistry(log_dir=task_root(tmp_path))
+    task_root(tmp_path).mkdir(parents=True, exist_ok=True)
     proc = await asyncio.create_subprocess_exec(
         "sleep",
         "30",
@@ -253,12 +286,12 @@ async def test_no_task_finished_event_on_the_abandoned_path(tmp_path: Path) -> N
         repo_path=tmp_path,
         prompt="x",
         max_turns=5,
-        log_path=tmp_path / "abandoned-task.jsonl",
+        log_path=task_root(tmp_path) / "abandoned-task.jsonl",
         started_at=datetime.now(timezone.utc),
     )
     task.proc = proc
     task.pgid = proc.pid
-    task.events = EventLog(events_path(tmp_path, task.task_id), task.task_id)
+    task.events = EventLog(events_path(task_root(tmp_path), task.task_id), task.task_id)
     task.events.write("task_started", {"backend": "claude"})
     registry._tasks[task.task_id] = task
 
@@ -270,7 +303,7 @@ async def test_no_task_finished_event_on_the_abandoned_path(tmp_path: Path) -> N
     assert task.status == "running"
     kinds = [
         json.loads(line)["kind"]
-        for line in events_path(tmp_path, task.task_id).read_text().splitlines()
+        for line in events_path(task_root(tmp_path), task.task_id).read_text().splitlines()
     ]
     assert "task_finished" not in kinds
 
@@ -283,20 +316,20 @@ async def test_exactly_one_task_finished_event_on_the_normal_path(
     tmp_path: Path, registered
 ) -> None:
     backend = registered(_RecordingBackend(_two_line_script()))
-    registry = TaskRegistry(log_dir=tmp_path)
+    registry = TaskRegistry(log_dir=task_root(tmp_path))
 
     task = await registry.start("hi", tmp_path, backend=backend)
     await task.done.wait()
 
     kinds = [
         json.loads(line)["kind"]
-        for line in events_path(tmp_path, task.task_id).read_text().splitlines()
+        for line in events_path(task_root(tmp_path), task.task_id).read_text().splitlines()
     ]
     assert kinds.count("task_finished") == 1
     finished = json.loads(
         [
             line
-            for line in events_path(tmp_path, task.task_id).read_text().splitlines()
+            for line in events_path(task_root(tmp_path), task.task_id).read_text().splitlines()
             if json.loads(line)["kind"] == "task_finished"
         ][0]
     )
@@ -311,7 +344,7 @@ async def test_exactly_one_task_finished_event_on_the_normal_path(
 async def test_git_baseline_succeeds_in_a_clean_repo(git_repo: Path, registered) -> None:
     subprocess.run(["git", "-C", str(git_repo), "commit", "-qm", "x", "--allow-empty"], check=True)
     backend = registered(_RecordingBackend(_two_line_script()))
-    registry = TaskRegistry(log_dir=git_repo / ".streams")
+    registry = TaskRegistry(log_dir=task_root(git_repo.parent))
 
     task = await registry.start("hi", git_repo, backend=backend)
     await task.done.wait()
@@ -325,7 +358,7 @@ async def test_git_baseline_safely_probes_a_dirty_worktree(git_repo: Path, regis
     subprocess.run(["git", "-C", str(git_repo), "commit", "-qm", "x", "--allow-empty"], check=True)
     (git_repo / "untracked.txt").write_text("hi")
     backend = registered(_RecordingBackend(_two_line_script()))
-    registry = TaskRegistry(log_dir=git_repo / ".streams")
+    registry = TaskRegistry(log_dir=task_root(git_repo.parent))
 
     task = await registry.start("hi", git_repo, backend=backend)
     await task.done.wait()
@@ -336,7 +369,7 @@ async def test_git_baseline_safely_probes_a_dirty_worktree(git_repo: Path, regis
 
 async def test_git_baseline_is_null_outside_a_repo(tmp_path: Path, registered) -> None:
     backend = registered(_RecordingBackend(_two_line_script()))
-    registry = TaskRegistry(log_dir=tmp_path / ".streams")
+    registry = TaskRegistry(log_dir=task_root(tmp_path))
 
     task = await registry.start("hi", tmp_path, backend=backend)
     await task.done.wait()
@@ -360,7 +393,7 @@ async def test_a_hanging_git_baseline_is_cut_off_by_its_own_budget(
     from harflow_mcp import task_outcomes
     monkeypatch.setattr(task_outcomes, "baseline", hang)
     backend = registered(_RecordingBackend(_two_line_script()))
-    registry = TaskRegistry(log_dir=git_repo / ".streams")
+    registry = TaskRegistry(log_dir=task_root(git_repo.parent))
 
     task = await asyncio.wait_for(
         registry.start("hi", git_repo, backend=backend), timeout=2
@@ -383,7 +416,7 @@ async def test_owner_and_start_time_land_in_the_persisted_record(
     # A brief sleep so the process is still alive when `_spawn` captures its own start time —
     # the plain two-line script can exit and be reaped before that capture runs.
     backend = registered(_RecordingBackend("printf '%s\\n' '{\"type\":\"x\"}'; sleep 0.3"))
-    registry = TaskRegistry(log_dir=tmp_path, owner=owner)
+    registry = TaskRegistry(log_dir=task_root(tmp_path), owner=owner)
 
     task = await registry.start("hi", tmp_path, backend=backend)
     await task.done.wait()
@@ -391,7 +424,7 @@ async def test_owner_and_start_time_land_in_the_persisted_record(
     assert task.owner == owner
     assert task.start_time is not None
 
-    record = store.read(tmp_path, task.task_id)
+    record = store.read(task_root(tmp_path), task.task_id)
     assert record is not None
     assert record.owner == owner
     assert record.start_time == task.start_time

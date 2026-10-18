@@ -216,9 +216,9 @@
     "count": 5
   },
   {
-    "file": "src/harflow_mcp/bridge_state.py",
+    "file": "src/harflow_mcp/state_layout.py",
     "literal": "polybridge",
-    "reason": "Protect legacy product state from writable path authority.",
+    "reason": "Protect legacy state alongside selected and default state roots.",
     "count": 1
   },
   {
@@ -286,5 +286,23 @@
     "literal": "PB_MAX_DEPTH",
     "reason": "Verify that the lower legacy dispatch budget remains effective.",
     "count": 2
+  },
+  {
+    "file": "tests/test_state_layout.py",
+    "literal": "polybridge",
+    "reason": "Verify legacy state remains protected alongside default and selected custom state.",
+    "count": 1
+  },
+  {
+    "file": "tests/test_state_root_entrypoints.py",
+    "literal": "PB_TASK_ID",
+    "reason": "Clear inherited legacy caller signals in isolated startup contract tests.",
+    "count": 1
+  },
+  {
+    "file": "tests/test_state_root_entrypoints.py",
+    "literal": "polybridge",
+    "reason": "Assert invalid startup never creates legacy product state.",
+    "count": 1
   }
 ]

@@ -52,7 +52,7 @@ def make_task(
 
 
 async def test_prune_trims_finished_tasks_oldest_first(tmp_path: Path) -> None:
-    registry = TaskRegistry(log_dir=tmp_path, max_tasks=2)
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks", max_tasks=2)
     for index in range(4):
         task = make_task(tmp_path, f"t{index}", finished=True, age_seconds=100 - index)
         registry._tasks[task.task_id] = task
@@ -63,7 +63,7 @@ async def test_prune_trims_finished_tasks_oldest_first(tmp_path: Path) -> None:
 
 
 async def test_prune_never_evicts_a_live_task(tmp_path: Path) -> None:
-    registry = TaskRegistry(log_dir=tmp_path, max_tasks=1)
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks", max_tasks=1)
     live = make_task(tmp_path, "live", age_seconds=100)
     finished = make_task(tmp_path, "finished", finished=True, age_seconds=50)
     registry._tasks[live.task_id] = live
@@ -76,7 +76,7 @@ async def test_prune_never_evicts_a_live_task(tmp_path: Path) -> None:
 
 
 async def test_registry_may_exceed_capacity_while_everything_is_live(tmp_path: Path) -> None:
-    registry = TaskRegistry(log_dir=tmp_path, max_tasks=1)
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks", max_tasks=1)
     for index in range(3):
         task = make_task(tmp_path, f"t{index}")
         registry._tasks[task.task_id] = task
@@ -88,7 +88,7 @@ async def test_registry_may_exceed_capacity_while_everything_is_live(tmp_path: P
 
 async def test_a_finishing_task_makes_room(tmp_path: Path) -> None:
     """Eviction must not depend on a new task being started."""
-    registry = TaskRegistry(log_dir=tmp_path, max_tasks=1)
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks", max_tasks=1)
     for index in range(3):
         task = make_task(tmp_path, f"t{index}", age_seconds=100 - index)
         registry._tasks[task.task_id] = task
@@ -102,7 +102,7 @@ async def test_a_finishing_task_makes_room(tmp_path: Path) -> None:
 
 
 def test_session_is_busy_only_while_a_run_is_live(tmp_path: Path) -> None:
-    registry = TaskRegistry(log_dir=tmp_path)
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     task = make_task(tmp_path, "t0", session_id="s1")
     registry._tasks[task.task_id] = task
 
@@ -115,7 +115,7 @@ def test_session_is_busy_only_while_a_run_is_live(tmp_path: Path) -> None:
 
 async def test_resume_refuses_while_the_session_has_a_live_run(tmp_path: Path) -> None:
     """Two processes on one --resume session would fight over the same conversation state."""
-    registry = TaskRegistry(log_dir=tmp_path)
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     parent = make_task(tmp_path, "parent", session_id="s1", finished=True)
     sibling = make_task(tmp_path, "sibling", session_id="s1")
     registry._tasks[parent.task_id] = parent
@@ -135,7 +135,7 @@ async def test_resume_runs_at_the_parents_reasoning_effort(
     resume that built the argv without the effort flag but still reported the metadata kwarg would
     have passed the weaker check this replaces.
     """
-    registry = TaskRegistry(log_dir=tmp_path)
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     parent = make_task(tmp_path, "parent", session_id="s1", finished=True)
     parent.reasoning_effort = "high"
     registry._tasks[parent.task_id] = parent
@@ -167,7 +167,7 @@ async def test_resume_record_runs_at_the_recorded_reasoning_effort(
 ) -> None:
     """Same carry-over, via the path recovering a task this process never spawned. Also asserts on
     the argv, not just the kwargs — see test_resume_runs_at_the_parents_reasoning_effort."""
-    registry = TaskRegistry(log_dir=tmp_path)
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     record = store.TaskRecord(
         task_id="old",
         backend="claude",
@@ -206,7 +206,7 @@ async def test_resume_record_with_no_stored_effort_can_still_resume(
     """A record persisted before this field existed deserializes reasoning_effort to None (the
     dataclass default) rather than failing to load — and that record must still be resumable, with
     no effort flag reaching the child's argv at all."""
-    registry = TaskRegistry(log_dir=tmp_path)
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     # No reasoning_effort kwarg at all: stands in for a pre-change on-disk record.
     record = store.TaskRecord(
         task_id="old",
@@ -267,7 +267,7 @@ async def test_a_cancelled_monitor_leaves_a_live_run_recorded_as_running(tmp_pat
     record, so no later server can see the process is still going. Uses a plain `sleep` process
     rather than a real agent run.
     """
-    registry = TaskRegistry(log_dir=tmp_path)
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     proc = await asyncio.create_subprocess_exec(
         "sleep",
         "30",
@@ -292,7 +292,7 @@ async def test_a_cancelled_monitor_leaves_a_live_run_recorded_as_running(tmp_pat
 
     assert task.status == "running"
     assert not task.finished
-    assert store.read(tmp_path, task.task_id).status == "running"
+    assert store.read(registry.log_dir, task.task_id).status == "running"
 
     tasks_module._signal_group(task, signal.SIGKILL)
     for watcher in task.watchers:
@@ -308,7 +308,7 @@ async def test_a_teardown_mid_cancellation_still_records_the_cancellation(tmp_pa
     server infer `failed` and lose the fact that someone asked for this. Safe to record because a
     `cancelled` record carries no exit code, so it is rechecked against the process.
     """
-    registry = TaskRegistry(log_dir=tmp_path)
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     proc = await asyncio.create_subprocess_exec(
         "sleep",
         "30",
@@ -329,7 +329,7 @@ async def test_a_teardown_mid_cancellation_still_records_the_cancellation(tmp_pa
     await asyncio.gather(monitor, return_exceptions=True)
 
     assert task.status == "cancelled"
-    assert store.read(tmp_path, task.task_id).status == "cancelled"
+    assert store.read(registry.log_dir, task.task_id).status == "cancelled"
 
     tasks_module._signal_group(task, signal.SIGKILL)
     await proc.wait()
@@ -343,7 +343,7 @@ async def test_a_monitor_that_crashes_still_publishes_a_terminal_status(
     The cancellation path deliberately leaves the task running, so the `finally` backstop is still
     load-bearing for every other way the monitor can fail.
     """
-    registry = TaskRegistry(log_dir=tmp_path)
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     proc = await asyncio.create_subprocess_exec("true", start_new_session=True)
     task = make_task(tmp_path, "t0")
     task.proc = proc
@@ -359,7 +359,7 @@ async def test_a_monitor_that_crashes_still_publishes_a_terminal_status(
 
     assert task.finished
     assert task.status == "failed"
-    assert store.read(tmp_path, task.task_id).status == "failed"
+    assert store.read(registry.log_dir, task.task_id).status == "failed"
 
 
 async def test_cancel_recovered_does_not_claim_success_it_cannot_deliver(
@@ -371,7 +371,7 @@ async def test_cancel_recovered_does_not_claim_success_it_cannot_deliver(
     no `pgid` recorded there is nothing to signal, regardless of what the leader identity check
     says, so the record is left untouched.
     """
-    registry = TaskRegistry(log_dir=tmp_path)
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     record = store.TaskRecord(
         task_id="orphan",
         backend="claude",
@@ -382,14 +382,14 @@ async def test_cancel_recovered_does_not_claim_success_it_cannot_deliver(
         pid=1234,
         pgid=None,  # nothing to signal
     )
-    store.write(tmp_path, record)
+    store.write(registry.log_dir, record)
     monkeypatch.setattr(identity, "check_detail", lambda ident: ("alive", "start_time_match"))
     monkeypatch.setattr(identity, "may_signal", lambda ident: True)
 
     result = await registry.cancel_recovered(record)
 
     assert result.status == "running"
-    assert store.read(tmp_path, "orphan").status == "running"
+    assert store.read(registry.log_dir, "orphan").status == "running"
 
 
 async def test_cancel_recovered_waits_for_the_sigkill_to_land(
@@ -405,7 +405,7 @@ async def test_cancel_recovered_waits_for_the_sigkill_to_land(
     """
     monkeypatch.setattr(tasks_module, "SIGKILL_GRACE_SECONDS", 0.05)
     monkeypatch.setattr(tasks_module, "CANCEL_VERDICT_POLL_SECONDS", 0.01)
-    registry = TaskRegistry(log_dir=tmp_path)
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     record = store.TaskRecord(
         task_id="orphan",
         backend="claude",
@@ -416,7 +416,7 @@ async def test_cancel_recovered_waits_for_the_sigkill_to_land(
         pid=1234,
         pgid=1234,
     )
-    store.write(tmp_path, record)
+    store.write(registry.log_dir, record)
 
     killed = False
 
@@ -445,7 +445,7 @@ async def test_cancel_recovered_waits_for_the_sigkill_to_land(
 
 
 async def test_cancel_recovered_of_an_already_dead_task_changes_nothing(tmp_path: Path) -> None:
-    registry = TaskRegistry(log_dir=tmp_path)
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     record = store.TaskRecord(
         task_id="orphan",
         backend="claude",
@@ -468,7 +468,7 @@ async def test_cancel_recovered_does_not_write_cancelled_for_a_live_owner(
     monkeypatch.setattr(tasks_module, "SIGKILL_GRACE_SECONDS", 0.02)
     monkeypatch.setattr(tasks_module, "DRAIN_GRACE_SECONDS", 0.02)
     monkeypatch.setattr(tasks_module, "CANCEL_VERDICT_POLL_SECONDS", 0.01)
-    registry = TaskRegistry(log_dir=tmp_path)
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     record = store.TaskRecord(
         task_id="orphan",
         backend="claude",
@@ -479,7 +479,7 @@ async def test_cancel_recovered_does_not_write_cancelled_for_a_live_owner(
         pid=1234,
         pgid=1234,
     )
-    store.write(tmp_path, record)
+    store.write(registry.log_dir, record)
 
     monkeypatch.setattr(tasks_module, "_signal_recorded_group", lambda record, sig: True)
     monkeypatch.setattr(identity, "check_detail", lambda ident: ("alive", "start_time_match"))
@@ -490,17 +490,17 @@ async def test_cancel_recovered_does_not_write_cancelled_for_a_live_owner(
     result = await registry.cancel_recovered(record)
 
     assert result.status == "running"
-    assert store.read(tmp_path, "orphan").status == "running"
+    assert store.read(registry.log_dir, "orphan").status == "running"
 
 
 async def test_session_exclusivity_spans_server_processes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Another process's live run on this session must also block a resume."""
-    registry = TaskRegistry(log_dir=tmp_path)
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     monkeypatch.setattr(identity, "identity_check", lambda ident: "alive")
     store.write(
-        tmp_path,
+        registry.log_dir,
         store.TaskRecord(
             task_id="elsewhere",
             backend="claude",
@@ -517,7 +517,7 @@ async def test_session_exclusivity_spans_server_processes(
 
 
 async def test_resuming_a_task_whose_repo_is_gone_fails_clearly(tmp_path: Path) -> None:
-    registry = TaskRegistry(log_dir=tmp_path)
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     record = store.TaskRecord(
         task_id="old",
         backend="claude",
@@ -541,7 +541,7 @@ async def test_resume_record_refuses_when_the_parent_record_vanished_before_the_
     async def fake_spawn(argv, **kwargs):
         raise AssertionError("must not reach spawn")
 
-    registry = TaskRegistry(log_dir=tmp_path)
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     record = store.TaskRecord(
         task_id="old",
         backend="claude",
@@ -568,7 +568,7 @@ async def test_resume_refuses_when_the_parents_record_vanished_before_the_lock(
     async def fake_spawn(argv, **kwargs):
         raise AssertionError("must not reach spawn")
 
-    registry = TaskRegistry(log_dir=tmp_path)
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     parent = make_task(tmp_path, "parent", session_id="s1", finished=True)
     registry._tasks[parent.task_id] = parent
     registry.persist(parent)
@@ -584,7 +584,7 @@ async def test_resume_still_runs_for_a_live_parent_whose_record_never_landed(
 ) -> None:
     """A record that was never written is not one retention deleted: `store.write` never fails a
     dispatch, so a finished in-memory task can have no record at all and must stay resumable."""
-    registry = TaskRegistry(log_dir=tmp_path)
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     parent = make_task(tmp_path, "parent", session_id="s1", finished=True)
     registry._tasks[parent.task_id] = parent
     spawned: list[str] = []
@@ -602,7 +602,7 @@ async def test_resume_still_runs_for_a_live_parent_whose_record_never_landed(
 
 
 async def test_cancelling_a_finished_task_is_a_no_op(tmp_path: Path) -> None:
-    registry = TaskRegistry(log_dir=tmp_path)
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     task = make_task(tmp_path, "t0", finished=True)
     registry._tasks[task.task_id] = task
 
@@ -913,7 +913,7 @@ async def test_a_dispatch_below_publish_pays_no_thread_hop_for_the_branch_check(
 
     monkeypatch.setattr(asyncio, "to_thread", counting_to_thread)
 
-    registry = TaskRegistry(log_dir=tmp_path / "streams")
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     task = await registry.start("x", git_repo, backend=_TrivialBackend(), freedom="write_in_repo")
     await task.done.wait()
 
@@ -976,7 +976,7 @@ async def test_resume_inherits_the_parents_network_request(
     Asserts on the argv, not just the metadata kwarg: a resume that reported `network` while
     building an argv without the `-c` pair would pass a weaker check.
     """
-    registry = TaskRegistry(log_dir=tmp_path)
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     parent = make_task(tmp_path, "parent", session_id="s1", finished=True)
     parent.backend = "codex"
     parent.freedom = "write_in_repo"
@@ -1005,7 +1005,7 @@ async def test_an_explicit_network_on_resume_overrides_the_parents(
 ) -> None:
     """Network is a per-run sandbox setting, so changing it on a continuation cannot misrepresent
     the reply the parent already gave — unlike model or freedom, which are inherited outright."""
-    registry = TaskRegistry(log_dir=tmp_path)
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     parent = make_task(tmp_path, "parent", session_id="s1", finished=True)
     parent.backend = "codex"
     parent.freedom = "write_in_repo"
@@ -1033,7 +1033,7 @@ async def test_resume_record_inherits_the_recorded_network_request(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Same carry-over through the path recovering a task this process never spawned."""
-    registry = TaskRegistry(log_dir=tmp_path)
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     record = store.TaskRecord(
         task_id="old",
         backend="codex",
@@ -1068,7 +1068,7 @@ async def test_a_pre_change_record_resumes_at_the_freedoms_historical_default(
 ) -> None:
     """A record written before this parameter existed deserializes `network` to None, and must
     resume exactly as it always did — network blocked at write_in_repo."""
-    registry = TaskRegistry(log_dir=tmp_path)
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     record = store.TaskRecord(
         task_id="old",
         backend="codex",
@@ -1102,7 +1102,7 @@ async def test_resume_refuses_a_network_request_the_parents_freedom_cannot_honou
 ) -> None:
     """An override has to fail as loudly on resume as it would on start_task — silently dropping
     it is the failure mode the parameter exists to avoid."""
-    registry = TaskRegistry(log_dir=tmp_path)
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     parent = make_task(tmp_path, "parent", session_id="s1", finished=True)
     parent.backend = "codex"
     parent.freedom = "read_only"
@@ -1122,7 +1122,7 @@ async def test_resume_record_honours_an_explicit_network_override(
 ) -> None:
     """The recovered path needs the override half too, not just inheritance — a resume of a task
     this process never spawned is exactly where a silently-ignored override would go unnoticed."""
-    registry = TaskRegistry(log_dir=tmp_path)
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     record = store.TaskRecord(
         task_id="old",
         backend="codex",
@@ -1156,7 +1156,7 @@ async def test_resume_record_refuses_an_override_the_recorded_freedom_cannot_hon
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Same loud refusal as the live-parent path — reached through the recovered record."""
-    registry = TaskRegistry(log_dir=tmp_path)
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     record = store.TaskRecord(
         task_id="old",
         backend="codex",
@@ -1187,7 +1187,7 @@ async def test_a_network_request_with_no_barrier_is_disclosed_and_persisted(
     outright, and duplicated a round trip test_store.py already owns. Here the notice has to be
     produced by the dispatch to exist at all.
     """
-    registry = TaskRegistry(log_dir=tmp_path)
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
 
     task = await registry.start(
         "x", git_repo, backend=_NoBarrierBackend(), freedom="write_in_repo", network=True
@@ -1195,7 +1195,7 @@ async def test_a_network_request_with_no_barrier_is_disclosed_and_persisted(
     await task.done.wait()
 
     assert any("no network barrier" in n for n in task.bridge_notices), task.bridge_notices
-    record = store.read(tmp_path, task.task_id)
+    record = store.read(tmp_path / "state" / "tasks", task.task_id)
     assert record is not None
     assert record.network is True
     assert any("no network barrier" in n for n in record.bridge_notices)
@@ -1203,7 +1203,7 @@ async def test_a_network_request_with_no_barrier_is_disclosed_and_persisted(
 
 async def test_no_such_notice_when_nothing_was_asked(git_repo: Path, tmp_path: Path) -> None:
     """The other direction: omitting `network` must not manufacture a disclosure about it."""
-    registry = TaskRegistry(log_dir=tmp_path)
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
 
     task = await registry.start("x", git_repo, backend=_NoBarrierBackend(), freedom="write_in_repo")
     await task.done.wait()
@@ -1221,7 +1221,7 @@ async def test_the_enforcement_reported_and_persisted_reflects_the_network_reque
     would report `network_access: "blocked"` for a run whose argv enables the network — the
     payload contradicting the process, which is precisely the overclaim this repo forbids.
     """
-    registry = TaskRegistry(log_dir=tmp_path)
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
 
     task = await registry.start(
         "x", git_repo, backend=_NetworkAwareBackend(), freedom="write_in_repo", network=True
@@ -1229,7 +1229,7 @@ async def test_the_enforcement_reported_and_persisted_reflects_the_network_reque
     await task.done.wait()
 
     assert task.enforcement["network_access"] == "enabled"
-    record = store.read(tmp_path, task.task_id)
+    record = store.read(tmp_path / "state" / "tasks", task.task_id)
     assert record is not None
     assert record.enforcement["network_access"] == "enabled"
 

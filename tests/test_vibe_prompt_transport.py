@@ -47,7 +47,7 @@ async def test_large_vibe_stdin_delivers_exact_bytes_then_eof(tmp_path, monkeypa
         code = 'import sys,pathlib;pathlib.Path(sys.argv[1]).write_bytes(sys.stdin.buffer.read());print(\'{"role":"assistant","content":"done"}\')'
         return await create(sys.executable, "-c", code, str(received), **kwargs)
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
-    registry = TaskRegistry(log_dir=tmp_path / "logs")
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     task = await registry._spawn(invocation, backend=backend, prompt=prompt, repo_path=tmp_path, session_id="native-session" if resume else None, freedom="read_only", max_turns=None, model=None, reasoning_effort=None)
     await asyncio.wait_for(task.proc.wait(), timeout=5)
     assert received.read_bytes() == prompt.encode()

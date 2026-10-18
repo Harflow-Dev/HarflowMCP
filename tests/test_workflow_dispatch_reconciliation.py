@@ -92,7 +92,7 @@ async def test_dispatch_failure_distinguishes_proven_not_started(tmp_path, monke
 async def test_registry_marks_only_proven_exec_refusal(tmp_path, monkeypatch, duplicate):
     from harflow_mcp import tasks
     from harflow_mcp.backends.codex import CodexBackend
-    registry = tasks.TaskRegistry(log_dir=tmp_path, open_monitor=False)
+    registry = tasks.TaskRegistry(log_dir=tmp_path / 'state' / 'tasks', open_monitor=False)
     backend = CodexBackend()
     invocation = backend.build_start_argv('work', repo=tmp_path, freedom='read_only', session_id=None, model=None, max_turns=None, reasoning_effort=None)
     async def failed_exec(*a, **kw):
@@ -105,7 +105,7 @@ async def test_registry_marks_only_proven_exec_refusal(tmp_path, monkeypatch, du
             session_id=None, freedom='read_only', max_turns=None, model=None,
             reasoning_effort=None, task_id='known')
     assert caught.value.harflow_not_started is True
-    assert not (tmp_path/'known.meta.json').exists()
+    assert not (tmp_path/'state'/'tasks'/'known.meta.json').exists()
 
 @pytest.mark.parametrize('operation', ['reconcile', 'abandon'])
 def test_recordless_answer_recovery_updates_question_delivery(tmp_path, monkeypatch, operation):

@@ -20,7 +20,7 @@ def qualified_native_adapter(monkeypatch):
 
 async def failing_transport(tmp_path, task_id, backend, event, observer, monkeypatch, *, storage_failure=False):
     monkeypatch.setattr(tasks, "SIGKILL_GRACE_SECONDS", 0.05)
-    registry = tasks.TaskRegistry(log_dir=tmp_path, owner=OWNER, open_monitor=False)
+    registry = tasks.TaskRegistry(log_dir=tmp_path / "state" / "tasks", owner=OWNER, open_monitor=False)
     registry._workflow_native_observers = {task_id: observer}
     if storage_failure:
         monkeypatch.setattr(registry, "_deliver_local_cancel", lambda _: (_ for _ in ()).throw(OSError("cancel storage failed")))
@@ -63,6 +63,10 @@ async def test_unissued_parent_tool_stops_transport_and_keeps_native_uncertain(t
     storage = w.WorkflowStore(tmp_path)
 
     class InvalidRegistry(NativeRegistry):
+        def __init__(self, root):
+            super().__init__(root)
+            self.log_dir = self._log_dir
+
         async def resume(self, previous, prompt, **kwargs):
             if not kwargs.get("native_subagent"):
                 return await super().resume(previous, prompt, **kwargs)

@@ -667,7 +667,9 @@ def _write(path: Path, value: Any) -> os.stat_result:
 
 class WorkflowStore:
     def __init__(self, root: Path | None = None):
-        self.root = Path(root) if root is not None else Path.home() / ".harflow"
+        from .state_layout import resolve_layout
+        self.state_layout = resolve_layout(root=root)
+        self.root = self.state_layout.root
         self.definitions = self.root / "workflows"
         self.runs = self.root / "workflow-runs"
         self.leases = self.root / "workflow-leases"
@@ -1519,12 +1521,14 @@ def _require_no_active_historical_runs(storage: WorkflowStore) -> None:
 
 
 def _launch(storage: WorkflowStore, run_id: str) -> None:
+    from .state_layout import require_canonical_layout, child_environment
+    require_canonical_layout(storage.state_layout)
     reservation = storage.get_run(run_id)
     log = storage.runs / f"{run_id}.supervisor.log"
     output = None
     try:
         output = log.open("ab")
-        subprocess.Popen([sys.executable, "-m", "harflow_mcp.workflows", "supervise", run_id, "--root", str(storage.root)], stdin=subprocess.DEVNULL, stdout=output, stderr=output, start_new_session=True, close_fds=True)
+        subprocess.Popen([sys.executable, "-m", "harflow_mcp.workflows", "supervise", run_id, "--root", str(storage.root)], stdin=subprocess.DEVNULL, stdout=output, stderr=output, start_new_session=True, close_fds=True, env=child_environment(storage.state_layout))
     except OSError as exc:
         # These failures precede a successfully returned child process. Keep the
         # reservation and its owner recoverable instead of leaving a phantom start.
@@ -2134,6 +2138,8 @@ class CheckoutLease:
 
 class WorkflowSupervisor:
     def __init__(self, registry: Any, storage: WorkflowStore, tree: Any = None):
+        from .state_layout import require_dispatch_layout
+        require_dispatch_layout(registry.log_dir)
         from .workflow_invocation import WorkflowTree
         self.registry = registry
         self.store = storage
@@ -2232,6 +2238,8 @@ class WorkflowSupervisor:
         return True
 
     async def _dispatch(self, node: dict[str, Any], prompt: str, role: str, activation: dict[str, Any]) -> dict[str, Any] | None:
+        from .state_layout import require_dispatch_layout
+        require_dispatch_layout(self.registry.log_dir)
         from .tasks import SessionUnknownError, SessionBusyError, RepoUnavailableError
         decision_context = activation.get("_decision_context")
         run = self.run()
@@ -3107,6 +3115,8 @@ class WorkflowSupervisor:
         return True
 
     async def execute(self, run_id: str) -> None:
+        from .state_layout import require_dispatch_layout
+        require_dispatch_layout(self.registry.log_dir)
         self.run_id = run_id
         if not await self.reconcile() and self.run()["status"] != "cancelling":
             return
@@ -3219,6 +3229,8 @@ class WorkflowSupervisor:
             self.update(lambda r: r.update(supervisor_pid=None, supervisor_identity=None), "supervisor_stopped")
 
     async def build(self, run_id: str) -> None:
+        from .state_layout import require_dispatch_layout
+        require_dispatch_layout(self.registry.log_dir)
         self.run_id = run_id
         recovered_forwarding = False
         def recover_feedback(r: dict[str, Any]) -> None:
@@ -3332,7 +3344,10 @@ def _bounded(value: Any, limit: int = 24000) -> Any:
 
 async def _main(args: Any) -> None:
     from .tasks import TaskRegistry
-    storage = WorkflowStore(Path(args.root))
+    from .state_layout import resolve_layout, child_environment
+    layout = resolve_layout(root=args.root)
+    os.environ.update(child_environment(layout))
+    storage = WorkflowStore(layout.root)
     # Exclusive nonblocking run lock prevents duplicate supervisors. Separate from short
     # state locks so control operations remain available while agents are running.
     with (storage.runs / f"{_identifier(args.run_id)}.supervisor.lock").open("a") as lock:
@@ -3375,8 +3390,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("command", choices=["supervise"])
     parser.add_argument("run_id")
-    parser.add_argument("--root", required=True)
-    asyncio.run(_main(parser.parse_args()))
+    parser.add_argument("--root", required=True, help="selected state root; authoritative over HARFLOW_STATE_ROOT and normalized lexically")
+    args = parser.parse_args()
+    from .state_layout import InvalidStateRoot, resolve_layout
+    try:
+        resolve_layout(root=args.root)
+    except InvalidStateRoot as exc:
+        parser.error(str(exc))
+    asyncio.run(_main(args))
 
 
 def builder_feedback_ids(log_dir: Path, task_id: str) -> list[str]:

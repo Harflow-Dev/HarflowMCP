@@ -316,7 +316,7 @@ async def test_harflow_mcp_two_message_run_end_to_end(git_repo: Path, tmp_path: 
     from harflow_mcp.events import events_path
     from harflow_mcp.tasks import TaskRegistry
 
-    registry = TaskRegistry(log_dir=tmp_path / "streams")
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     task = await registry.start(
         "Run the bash command `sleep 8` in the foreground (not in the background), then answer: "
         "what is 2+2? Reply briefly.",

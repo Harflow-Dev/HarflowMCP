@@ -75,7 +75,7 @@ async def test_large_codex_stdin_delivers_all_bytes_then_eof(tmp_path, monkeypat
         code = 'import sys,pathlib;pathlib.Path(sys.argv[1]).write_bytes(sys.stdin.buffer.read());print(\'{"type":"turn.completed"}\')'
         return await create(sys.executable, '-c', code, str(received), **kwargs)
     monkeypatch.setattr(asyncio, 'create_subprocess_exec', fake_exec)
-    registry = TaskRegistry(log_dir=tmp_path/'logs')
+    registry = TaskRegistry(log_dir=tmp_path/'state'/'tasks')
     task = await registry._spawn(invocation, backend=backend, prompt=prompt, repo_path=tmp_path,
                                  session_id=None, freedom='read_only', max_turns=None, model=None,
                                  reasoning_effort=None)

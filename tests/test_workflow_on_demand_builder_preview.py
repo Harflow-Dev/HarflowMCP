@@ -63,6 +63,7 @@ class FakeTask:
 class FakeRegistry:
     def __init__(self, root, response):
         self._log_dir = root / "tasks"
+        self.log_dir = self._log_dir
         self.response = response
         self.tasks = {}
 

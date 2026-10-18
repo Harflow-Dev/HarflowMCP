@@ -12,8 +12,10 @@ from harflow_mcp.tasks import TaskRegistry
 
 @pytest.fixture(autouse=True)
 def isolated_registry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Give each test a fresh registry writing its stream logs under tmp_path."""
-    monkeypatch.setattr(server, "_registry", TaskRegistry(log_dir=tmp_path / "streams"))
+    """Give each test a fresh registry at the canonical isolated state layout."""
+    monkeypatch.setattr(
+        server, "_registry", TaskRegistry(log_dir=tmp_path / "state" / "tasks")
+    )
     yield
     monkeypatch.setattr(server, "_registry", None)
 
@@ -47,7 +49,7 @@ def no_caller_detected(monkeypatch: pytest.MonkeyPatch):
     # variables; clear all of them to keep test isolation. Tests of the boundary set them after
     # this fixture has run.
     for name in (
-        "HARFLOW_TASK_ID", "HARFLOW_ROOT_TASK_ID", "HARFLOW_DEPTH",
+        "HARFLOW_STATE_ROOT", "HARFLOW_TASK_ID", "HARFLOW_ROOT_TASK_ID", "HARFLOW_DEPTH",
         "HARFLOW_MAX_DEPTH", "PB_TASK_ID", "PB_ROOT_TASK_ID", "PB_DEPTH", "PB_MAX_DEPTH",
     ):
         monkeypatch.delenv(name, raising=False)

@@ -283,7 +283,7 @@ async def test_builder_apply_uses_verified_caller_and_revision(monkeypatch):
     marker = object()
     async def detect(*args, **kwargs):
         return marker
-    async def apply(definition, expected_draft_revision, *, caller):
+    async def apply(definition, expected_draft_revision, *, caller, root=None):
         assert definition == {"nodes": []}
         assert expected_draft_revision == 2
         assert caller is marker

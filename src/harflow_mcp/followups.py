@@ -868,6 +868,8 @@ async def begin(
     """Reserve the queued messages of `task_id` for `successor_id`. An attempt with no items means
     nothing was queued (a lock round trip, no write). Raises a `ValueError` flagged
     `harflow_not_started` when the ledger cannot be reserved."""
+    from .state_layout import require_dispatch_layout
+    require_dispatch_layout(log_dir)
     attempt = Attempt(log_dir, task_id, successor_id)
     # The lock is taken even with no ledger yet, so a send during the reservation is ordered by it.
     # A send landing right after an empty begin() is accepted, and later resolves to `undeliverable`

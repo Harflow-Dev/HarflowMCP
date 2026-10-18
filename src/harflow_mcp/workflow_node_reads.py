@@ -54,6 +54,7 @@ def inspect_node(
     limit: int | None = None,
     before_seq: int | None = None,
     after_seq: int | None = None,
+    root: Any = None,
 ) -> dict[str, Any]:
     """One settled node execution's result or activity page, for either transport."""
     # The same pre-flight the MCP tool applies, so a bad request is refused before any role check.
@@ -62,7 +63,7 @@ def inspect_node(
     _guard_inspect(managed, run_id)
     from .workflow_inspection import inspect_request
     from .workflows import WorkflowStore
-    store_ = WorkflowStore()
+    store_ = WorkflowStore(root)
     run = store_.get_run(run_id)
     request = {
         "execution_id": execution_id,
@@ -85,13 +86,14 @@ def assigned_input_node(
     task_id: str | None = None,
     cursor: str | None = None,
     limit: int = 16000,
+    root: Any = None,
 ) -> dict[str, Any]:
     """One digest-bound immutable input page, for a verified managed worker on either transport."""
     from .workflow_inspection import assigned_input_page
     from .workflows import WorkflowStore
     return assigned_input_page(
         managed,
-        WorkflowStore().root,
+        WorkflowStore(root).root,
         run_id,
         execution_id,
         source_run_id=source_run_id,

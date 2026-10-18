@@ -11,6 +11,10 @@ from harflow_mcp.backends.base import Accumulator
 from harflow_mcp.task_continuation import context, continue_task, validate_budget
 
 
+def state_dir(tmp_path):
+    return tmp_path if tmp_path.name == "tasks" else tmp_path / "state" / "tasks"
+
+
 @pytest.mark.parametrize('value', [-1, 11, True, 1.0, '1', None])
 def test_budget_refuses_noncanonical(value):
     with pytest.raises(ValueError):
@@ -34,13 +38,13 @@ def test_cutoff_is_backend_owned_and_narrow():
 
 def record(tmp_path, **kwargs):
     source = store.TaskRecord(task_id='a' * 32, backend='claude', session_id='old', repo_path=str(tmp_path), started_at='2026-01-01T00:00:00+00:00', prompt='Original  prose\n preserved.', status='completed', exit_code=0, finished_at='2026-01-01T00:01:00+00:00', output_drained=True, **kwargs)
-    assert store.write_landed(tmp_path, source)
+    assert store.write_landed(state_dir(tmp_path), source)
     return source
 
 
 class Registry:
     def __init__(self, root):
-        self.log_dir = root
+        self.log_dir = root if root.name == "tasks" else state_dir(root)
         self._mutation_caller = AsyncMock(return_value=None)
         self.start = AsyncMock(side_effect=self.spawn)
         self.children = {}
@@ -80,9 +84,9 @@ async def test_manual_preserves_settings_and_is_idempotent(tmp_path, monkeypatch
 async def test_missing_drain_evidence_refuses_old_record(tmp_path, monkeypatch):
     monkeypatch.setattr('harflow_mcp.workflow_hooks.refuse_managed', lambda *args: None)
     source = record(tmp_path)
-    payload = json.loads(store.record_path(tmp_path, source.task_id).read_text())
+    payload = json.loads(store.record_path(state_dir(tmp_path), source.task_id).read_text())
     payload.pop('output_drained')
-    store.record_path(tmp_path, source.task_id).write_text(json.dumps(payload))
+    store.record_path(state_dir(tmp_path), source.task_id).write_text(json.dumps(payload))
     registry = Registry(tmp_path)
     with pytest.raises(ValueError, match='fully drained'):
         await continue_task(registry, source.task_id)
@@ -93,7 +97,7 @@ async def test_missing_drain_evidence_refuses_old_record(tmp_path, monkeypatch):
 async def test_interrupted_reservation_refuses_duplicate(tmp_path, monkeypatch):
     monkeypatch.setattr('harflow_mcp.workflow_hooks.refuse_managed', lambda *args: None)
     source = record(tmp_path)
-    (tmp_path / f'{source.task_id}.continuation.json').write_text(json.dumps({'task_id': 'd' * 32, 'state': 'reserved', 'request_fingerprint': __import__('hashlib').sha256(json.dumps({'prompt': context(Registry(tmp_path), source, None, None), 'automatic': False}, ensure_ascii=False).encode()).hexdigest()}))
+    (state_dir(tmp_path) / f'{source.task_id}.continuation.json').write_text(json.dumps({'task_id': 'd' * 32, 'state': 'reserved', 'request_fingerprint': __import__('hashlib').sha256(json.dumps({'prompt': context(Registry(tmp_path), source, None, None), 'automatic': False}, ensure_ascii=False).encode()).hexdigest()}))
     registry = Registry(tmp_path)
     with pytest.raises(ValueError, match='unsettled'):
         await continue_task(registry, source.task_id)
@@ -131,7 +135,7 @@ async def test_proven_not_started_can_retry_same_reserved_id(tmp_path, monkeypat
     registry.start.side_effect = failure
     with pytest.raises(OSError):
         await continue_task(registry, source.task_id)
-    reservation = json.loads((tmp_path / f'{source.task_id}.continuation.json').read_text())
+    reservation = json.loads((state_dir(tmp_path) / f'{source.task_id}.continuation.json').read_text())
     assert reservation['state'] == 'not_started'
     registry.start.side_effect = registry.spawn
     child = await continue_task(registry, source.task_id)
@@ -154,7 +158,7 @@ async def test_manual_recovers_failed_automatic_preflight_once(tmp_path, monkeyp
     registry.start.side_effect = failure
     with pytest.raises(OSError):
         await continue_task(registry, source.task_id, automatic=True)
-    path = tmp_path / f'{source.task_id}.continuation.json'
+    path = state_dir(tmp_path) / f'{source.task_id}.continuation.json'
     reservation = json.loads(path.read_text())
     assert reservation['state'] == 'not_started'
     if not legacy:
@@ -180,12 +184,12 @@ async def test_manual_cannot_take_over_different_or_launched_automatic_request(t
     identifier = 'd' * 32
     fingerprint = hashlib.sha256(json.dumps({'prompt': context(registry, source, None, None), 'automatic': True}, ensure_ascii=False).encode()).hexdigest()
     state = 'reserved' if changed == 'uncertain' else 'started' if changed == 'started' else 'not_started'
-    (tmp_path / f'{source.task_id}.continuation.json').write_text(json.dumps({'task_id': identifier, 'state': state, 'request_fingerprint': fingerprint}))
+    (state_dir(tmp_path) / f'{source.task_id}.continuation.json').write_text(json.dumps({'task_id': identifier, 'state': state, 'request_fingerprint': fingerprint}))
     if changed == 'live_child':
         registry.children[identifier] = SimpleNamespace(task_id=identifier)
     if changed == 'durable_child':
         from dataclasses import replace
-        assert store.write_landed(tmp_path, replace(source, task_id=identifier))
+        assert store.write_landed(state_dir(tmp_path), replace(source, task_id=identifier))
     notes = tmp_path / 'notes.txt'
     notes.write_text('Additional notes')
     with pytest.raises(ValueError, match='different caller request'):
@@ -311,10 +315,11 @@ async def test_cancel_waits_for_other_process_first_manual_reservation(tmp_path,
     from harflow_mcp import control
     from harflow_mcp.task_continuation import stop_chain
     from harflow_mcp.tasks import TaskRegistry
-    source = record(tmp_path)  # No automatic budget or reservation yet.
-    lock = control.session_lock_path(tmp_path, 'continuation-' + source.task_id)
+    state = state_dir(tmp_path)
+    source = record(state)  # No automatic budget or reservation yet.
+    lock = control.session_lock_path(state, 'continuation-' + source.task_id)
     lock.parent.mkdir(parents=True, exist_ok=True)
-    reservation = tmp_path / f'{source.task_id}.continuation.json'
+    reservation = state / f'{source.task_id}.continuation.json'
     script = '''import fcntl,json,sys
 from dataclasses import replace
 from pathlib import Path
@@ -332,7 +337,7 @@ with open(sys.argv[1], 'a') as lock:
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE)
     try:
         assert await proc.stdout.readline() == b'locked\n'
-        registry = TaskRegistry(log_dir=tmp_path, open_monitor=False) if end_to_end else Registry(tmp_path)
+        registry = TaskRegistry(log_dir=state, open_monitor=False) if end_to_end else Registry(state)
         observed_targets = []
         if end_to_end:
             triage = registry._triage_target
@@ -349,8 +354,8 @@ with open(sys.argv[1], 'a') as lock:
         await proc.stdin.drain()
         await proc.wait()
         result = await cancellation
-        assert (tmp_path / f'{source.task_id}.continuation-stopped.json').exists()
-        assert 'd' * 32 in TaskRegistry._cascade_targets(SimpleNamespace(_log_dir=tmp_path), source.task_id, [])
+        assert (state / f'{source.task_id}.continuation-stopped.json').exists()
+        assert 'd' * 32 in TaskRegistry._cascade_targets(SimpleNamespace(_log_dir=state), source.task_id, [])
         if end_to_end:
             assert set(observed_targets) == {source.task_id, 'd' * 32}
             assert result['rounds'] == 2

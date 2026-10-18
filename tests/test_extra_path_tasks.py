@@ -68,7 +68,7 @@ async def test_non_live_record_send_revalidates_authority_before_queueing(tmp_pa
 
 def _state_logs(repo):
     # State is independently located, outside the repository/grant fixture.
-    return repo.parent / (repo.name + '-bridge-state') / 'logs'
+    return repo.parent / (repo.name + '-bridge-state') / 'tasks'
 
 
 class Certified(_TrivialBackend):

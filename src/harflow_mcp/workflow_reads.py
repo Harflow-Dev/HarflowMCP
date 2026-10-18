@@ -132,7 +132,7 @@ async def call(action: str, *, directory: Path, reader: Callable[[], Awaitable[A
             return _project(detail, owned_run, kwargs["view"], kwargs.get("cursor"), kwargs.get("limit", 8000))
         if action == "status":
             return managed_run_summary(owned_run)
-    store_ = workflows.WorkflowStore()
+    store_ = workflows.WorkflowStore(directory.parent)
     if action == "list":
         return await _read(store_.list)
     if action == "list_runs":
@@ -208,12 +208,12 @@ async def cli_read(action: str, args: Any, directory: Path) -> Any:
             if run is not None and run.get('catalog_state', {}).get('status') in {'preparing', 'blocked'}:
                 return run
             if run is not None:
-                run = await asyncio.to_thread(_project, monitor_projection, WorkflowStore(), run)
+                run = await asyncio.to_thread(_project, monitor_projection, WorkflowStore(directory.parent), run)
             return _project(monitor_snapshot, run, args.workflow_run_id, directory.parent / "monitor_snapshots", args.cursor)
         run = await read("status", run_id=args.workflow_run_id, _bounded_read=True)
         if run.get('catalog_state', {}).get('status') in {'preparing', 'blocked'}:
             return run
-        return _project(monitor, await asyncio.to_thread(_project, monitor_projection, WorkflowStore(), run))
+        return _project(monitor, await asyncio.to_thread(_project, monitor_projection, WorkflowStore(directory.parent), run))
     return await read(action, run_id=args.workflow_run_id)
 
 

@@ -2,6 +2,7 @@
 import asyncio
 import copy
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -590,8 +591,9 @@ async def test_pooled_checkout_lease_is_shared_and_another_tree_waits(tmp_path):
     repo.mkdir()
     tree_one = WorkflowTree(store, permits=1)
     tree_two = WorkflowTree(store, permits=1)
-    supervisor_one = w.WorkflowSupervisor(None, store, tree=tree_one)
-    supervisor_two = w.WorkflowSupervisor(None, store, tree=tree_two)
+    registry = SimpleNamespace(log_dir=store.root / "tasks")
+    supervisor_one = w.WorkflowSupervisor(registry, store, tree=tree_one)
+    supervisor_two = w.WorkflowSupervisor(registry, store, tree=tree_two)
     assert supervisor_one.checkout_leases is tree_one.leases
     assert supervisor_two.checkout_leases is tree_two.leases
     waits: list[dict] = []

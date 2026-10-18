@@ -142,7 +142,7 @@ async def test_root_task_gets_default_lineage_everywhere_it_is_reported(
     show up identically on the live `Task`, its persisted `TaskRecord`, and its `task_started`
     event."""
     monkeypatch.setenv("HARFLOW_MAX_DEPTH", "7")
-    registry = TaskRegistry(log_dir=tmp_path / "streams")
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     fake = _FakeBackend()
     monkeypatch.setitem(backends.BACKENDS, fake.name, fake)
 
@@ -203,7 +203,7 @@ async def test_max_depth_default_falls_back_when_env_is_unset(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("HARFLOW_MAX_DEPTH", raising=False)
-    registry = TaskRegistry(log_dir=tmp_path / "streams")
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     fake = _FakeBackend()
     monkeypatch.setitem(backends.BACKENDS, fake.name, fake)
 
@@ -219,7 +219,7 @@ async def test_max_depth_default_falls_back_when_env_is_unset(
 async def test_child_inherits_lineage_from_a_detected_caller(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    registry = TaskRegistry(log_dir=tmp_path / "streams")
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     fake = _FakeBackend(enforcement_kwargs={"writable_roots": ("/tmp",)})
     monkeypatch.setitem(backends.BACKENDS, fake.name, fake)
 
@@ -252,7 +252,7 @@ async def test_child_inherits_lineage_from_a_detected_caller(
 async def test_explicit_group_overrides_the_callers_group(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    registry = TaskRegistry(log_dir=tmp_path / "streams")
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     fake = _FakeBackend(enforcement_kwargs={"writable_roots": ("/tmp",)})
     monkeypatch.setitem(backends.BACKENDS, fake.name, fake)
 
@@ -280,7 +280,7 @@ async def test_root_task_id_is_inherited_through_a_grandchild(
 ) -> None:
     """A caller one level below the root reports its own `root_task_id` (inherited from *its*
     caller, not its own id) — the grandchild must carry that same root forward."""
-    registry = TaskRegistry(log_dir=tmp_path / "streams")
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     fake = _FakeBackend(enforcement_kwargs={"writable_roots": ("/tmp",)})
     monkeypatch.setitem(backends.BACKENDS, fake.name, fake)
 
@@ -326,7 +326,7 @@ async def test_lineage_env_vars_reach_the_spawned_process(
         argv=[sys.executable, "-c", script, str(out_path)],
         enforcement_kwargs={"writable_roots": ("/tmp",)},
     )
-    registry = TaskRegistry(log_dir=tmp_path / "streams")
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     monkeypatch.setitem(backends.BACKENDS, fake.name, fake)
 
     parent = make_lineage_record(
@@ -359,7 +359,7 @@ async def test_lineage_env_vars_reach_the_spawned_process(
 async def test_caps_refuse_a_weaker_start_on_writable_roots(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    registry = TaskRegistry(log_dir=tmp_path / "streams")
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     codex = BACKENDS["codex"]
     parent = make_lineage_record(
         tmp_path,
@@ -384,7 +384,7 @@ async def test_caps_refuse_a_weaker_start_on_writable_roots(
 async def test_caps_refuse_when_the_depth_budget_is_exhausted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    registry = TaskRegistry(log_dir=tmp_path / "streams")
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     fake = _FakeBackend()
     monkeypatch.setitem(backends.BACKENDS, fake.name, fake)
 
@@ -410,7 +410,7 @@ async def test_caps_refuse_when_the_depth_budget_is_exhausted(
 async def test_caps_allow_a_dispatch_no_weaker_than_its_caller(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    registry = TaskRegistry(log_dir=tmp_path / "streams")
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     fake = _FakeBackend(enforcement_kwargs={"writable_roots": ("/tmp",)})
     monkeypatch.setitem(backends.BACKENDS, fake.name, fake)
 
@@ -439,7 +439,7 @@ async def test_caps_allow_a_dispatch_no_weaker_than_its_caller(
 async def test_caps_refuse_a_weaker_resume_record_on_writable_roots(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    registry = TaskRegistry(log_dir=tmp_path / "streams")
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     codex = BACKENDS["codex"]
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -562,7 +562,7 @@ def _started_event(registry: TaskRegistry, task_id: str) -> dict:
 async def test_a_title_reaches_the_task_its_record_and_the_task_started_event(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    registry = TaskRegistry(log_dir=tmp_path / "streams")
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     fake = _FakeBackend()
     monkeypatch.setitem(backends.BACKENDS, fake.name, fake)
 
@@ -583,7 +583,7 @@ async def test_a_title_reaches_the_task_its_record_and_the_task_started_event(
 async def test_a_task_started_without_a_title_has_none_everywhere(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    registry = TaskRegistry(log_dir=tmp_path / "streams")
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     fake = _FakeBackend()
     monkeypatch.setitem(backends.BACKENDS, fake.name, fake)
 
@@ -601,7 +601,7 @@ async def test_a_task_started_without_a_title_has_none_everywhere(
 async def test_a_spawned_task_under_a_titled_caller_gets_no_title(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    registry = TaskRegistry(log_dir=tmp_path / "streams")
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     fake = _FakeBackend(enforcement_kwargs={"writable_roots": ("/tmp",)})
     monkeypatch.setitem(backends.BACKENDS, fake.name, fake)
     parent = make_lineage_record(
@@ -624,7 +624,7 @@ async def test_a_spawned_task_under_a_titled_caller_gets_no_title(
 async def test_an_explicit_title_is_kept_under_a_titled_caller(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    registry = TaskRegistry(log_dir=tmp_path / "streams")
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     fake = _FakeBackend(enforcement_kwargs={"writable_roots": ("/tmp",)})
     monkeypatch.setitem(backends.BACKENDS, fake.name, fake)
     parent = make_lineage_record(
@@ -648,7 +648,7 @@ async def test_an_explicit_title_is_kept_under_a_titled_caller(
 async def test_a_live_resume_carries_the_resumed_tasks_title_not_the_callers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    registry = TaskRegistry(log_dir=tmp_path / "streams")
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     fake = _FakeBackend(enforcement_kwargs={"writable_roots": ("/tmp",)})
     monkeypatch.setitem(backends.BACKENDS, fake.name, fake)
     parent = await registry.start("hi", tmp_path, backend=fake, title="B")
@@ -676,7 +676,7 @@ async def test_a_live_resume_carries_the_resumed_tasks_title_not_the_callers(
 async def test_a_recovered_resume_carries_the_recorded_title_not_the_callers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    registry = TaskRegistry(log_dir=tmp_path / "streams")
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     fake = _FakeBackend(enforcement_kwargs={"writable_roots": ("/tmp",)})
     monkeypatch.setitem(backends.BACKENDS, fake.name, fake)
     resumed = make_lineage_record(
@@ -743,7 +743,7 @@ def test_normalize_title_rejects_control_characters(bad: str) -> None:
 async def test_session_lock_serialises_concurrent_resume_record_calls(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    registry = TaskRegistry(log_dir=tmp_path / "streams")
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     repo = tmp_path / "repo"
     repo.mkdir()
     record = store.TaskRecord(
@@ -811,7 +811,7 @@ async def test_session_lock_serialises_concurrent_resume_record_calls(
 async def test_session_lock_timeout_becomes_a_session_busy_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    registry = TaskRegistry(log_dir=tmp_path / "streams")
+    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     repo = tmp_path / "repo"
     repo.mkdir()
     record = store.TaskRecord(

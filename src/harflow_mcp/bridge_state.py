@@ -11,7 +11,8 @@ def assert_state_outside_writes(log_dir: Path, repo: Path, grants, scratch_direc
     Caller-supplied grants and repositories never receive that exception.
     """
     from .runtime_paths import _chain
-    roots = {Path.home() / '.harflow', Path.home() / '.polybridge', Path(log_dir).absolute().parent}
+    from .state_layout import protected_roots
+    roots = protected_roots(log_dir=log_dir)
     scopes = [(canonical(Path(repo)), 'directory')]
     scopes.extend((Path(grant.path), grant.kind) for grant in grants)
     protected = []

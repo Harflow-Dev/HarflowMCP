@@ -584,7 +584,7 @@ async def test_selected_workflow_polling_never_scans_retained_task_history(tmp_p
     legacy_tasks(directory, 250)
     monkeypatch.setattr(server, '_reg', lambda: SimpleNamespace(log_dir=directory))
     storage = workflows.WorkflowStore(root=tmp_path)
-    monkeypatch.setattr(workflows, 'WorkflowStore', lambda **kwargs: storage)
+    monkeypatch.setattr(workflows, 'WorkflowStore', lambda *args, **kwargs: storage)
     monkeypatch.setattr(storage, 'get_run', lambda identifier, **kwargs: {'workflow_run_id': identifier, 'status': 'completed', 'definition': {}})
     for _ in range(3):
         pending = await server._workflow_call('status', run_id='selected', _bounded_read=True)
@@ -674,7 +674,7 @@ def test_monitor_definition_list_uses_bounded_authority_but_public_first_read_is
     monkeypatch.setattr(ctl, 'default_log_dir', lambda: directory)
     monkeypatch.setattr(server, '_reg', lambda: SimpleNamespace(log_dir=directory))
     storage = workflows.WorkflowStore(root=tmp_path)
-    monkeypatch.setattr(workflows, 'WorkflowStore', lambda **kwargs: storage)
+    monkeypatch.setattr(workflows, 'WorkflowStore', lambda *args, **kwargs: storage)
     monkeypatch.setattr(storage, 'list', lambda: [{'name': 'saved'}])
     legacy = Mock(return_value=None)
     monkeypatch.setattr(workflow_inspection, 'managed_reader', legacy)
@@ -715,7 +715,7 @@ async def test_public_definition_list_does_not_require_catalog_bootstrap(tmp_pat
     monkeypatch.setattr(server, '_managed_workflow_reader', AsyncMock(return_value=None))
     monkeypatch.setattr(workflow_inspection, 'managed_page_reader', lambda *args: pytest.fail('private Monitor reader'))
     storage = workflows.WorkflowStore(root=tmp_path)
-    monkeypatch.setattr(workflows, 'WorkflowStore', lambda **kwargs: storage)
+    monkeypatch.setattr(workflows, 'WorkflowStore', lambda *args, **kwargs: storage)
     monkeypatch.setattr(storage, 'list', lambda: [{'name': 'public'}])
     assert await server.list_workflows() == [{'name': 'public'}]
 
@@ -1258,7 +1258,7 @@ async def test_workflow_related_transport_retries_deferred_ancestry(tmp_path, mo
     monkeypatch.setattr(server, '_reg', lambda: SimpleNamespace(log_dir=directory))
     storage = workflows.WorkflowStore(tmp_path)
     identifiers = large_ancestry(storage, tmp_path)
-    monkeypatch.setattr(workflows, 'WorkflowStore', lambda: storage)
+    monkeypatch.setattr(workflows, 'WorkflowStore', lambda *args, **kwargs: storage)
     request = {'related_run_id': identifiers[0]} if route == 'related' else {'run_ids': identifiers[:1]}
     page = await server.list_workflow_run_page(**request)
     assert len(page['related_headers']) == (2 if route == 'related' else 1)
@@ -1283,7 +1283,7 @@ async def test_workflow_page_propagates_blocked_parent_headers(tmp_path, monkeyp
     directory = tmp_path / 'tasks'
     directory.mkdir()
     monkeypatch.setattr(server, '_reg', lambda: SimpleNamespace(log_dir=directory))
-    monkeypatch.setattr(workflows, 'WorkflowStore', lambda: storage)
+    monkeypatch.setattr(workflows, 'WorkflowStore', lambda *args, **kwargs: storage)
     for _ in range(2):
         page = await server.list_workflow_run_page(run_ids=[identifier])
         assert page['items'][0]['workflow_run_id'] == identifier

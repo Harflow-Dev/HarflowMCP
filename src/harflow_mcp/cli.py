@@ -22,10 +22,15 @@ class _VersionParser(argparse.ArgumentParser):
 
 def version_info_main(argv: list[str]) -> int:
     parser = _VersionParser(json_requested="--json" in argv)
-    parser.add_argument("--json", action="store_true", help="print the Harflow v1 compatibility document")
+    parser.add_argument("--json", action="store_true", help="print the Harflow v1 compatibility document, including the selected HARFLOW_STATE_ROOT or home default")
     args = parser.parse_args(argv)
+    from .state_layout import InvalidStateRoot
+    try:
+        info = version_info()
+    except InvalidStateRoot as exc:
+        parser.error(str(exc))
     if args.json:
-        print(json.dumps(version_info()))
+        print(json.dumps(info))
     else:
         print(f"HarflowMCP {PRODUCT_VERSION}")
     return 0

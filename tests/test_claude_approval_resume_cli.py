@@ -127,7 +127,7 @@ async def test_claude_caller_approvals_survive_persisted_session_resume(tmp_path
         monkeypatch.setenv("ANTHROPIC_API_KEY", "local-fake-key")
         monkeypatch.setenv("ANTHROPIC_BASE_URL", base_url)
         monkeypatch.setenv("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
-        registry = TaskRegistry(log_dir=tmp_path / "logs", open_monitor=False)
+        registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks", open_monitor=False)
         task = await registry.start("run initial approval action", repo, backend=get("claude"), freedom="write_in_repo", caller_approvals=True)
         resumed = None
         try:

@@ -4,7 +4,7 @@ A task needs a process to own it for as long as it runs — to drain its pipes (
 the agent) and publish its outcome — but the Monitor app wants a CLI call that returns as soon as
 the task exists. So the command forks:
 
-* the **child** points stdin at /dev/null and stdout/stderr at `~/.harflow/ctl.log` *first*, so
+* the **child** points stdin at /dev/null and stdout/stderr at the selected state root's `ctl.log` *first*, so
   whatever reads the parent's stdout (the app) sees EOF the moment the parent exits; then it calls
   `os.setsid()`, builds a `TaskRegistry` inside its own running loop — no retention, no open-app —
   starts or resumes the task, sends one line down a pipe (`{"task_id"}` or `{"error"}`), and stays
@@ -91,10 +91,24 @@ def run_detached(
     *,
     log_path: Path,
     registry_factory: Callable[[], Any],
+    log_dir: Path | None = None,
     timeout: float = HANDSHAKE_TIMEOUT_SECONDS,
 ) -> Outcome:
     """Fork; the child runs `action(registry)` (which returns the started `Task`) and owns the task
-    until it settles; the parent returns once the handshake arrives, or after `timeout`."""
+    until it settles; the parent returns once the handshake arrives, or after `timeout`.
+
+    `log_dir` supplies the already-selected task directory without constructing a parent registry.
+    The child factory must select the same layout; embedding callers may omit it for preflight
+    discovery through their factory.
+    """
+    from .state_layout import require_dispatch_layout, child_environment
+    selected = require_dispatch_layout(log_dir if log_dir is not None else registry_factory().log_dir)
+    def selected_factory():
+        registry = registry_factory()
+        if require_dispatch_layout(registry.log_dir) != selected:
+            from .state_layout import UnsupportedStateLayout
+            raise UnsupportedStateLayout("Unsupported state layout: detached child root differs from its selected parent layout")
+        return registry
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.flush()
@@ -106,9 +120,10 @@ def run_detached(
         code = 1
         try:
             os.close(read_fd)
+            os.environ.update(child_environment(selected))
             _detach_stdio(log_path)
             os.setsid()
-            code = asyncio.run(_child(action, write_fd, registry_factory))
+            code = asyncio.run(_child(action, write_fd, selected_factory))
         except BaseException:
             try:
                 traceback.print_exc()
@@ -274,6 +289,8 @@ async def _child(action: Action, write_fd: int, registry_factory: Callable[[], A
         loop.add_signal_handler(sig, main.cancel)
 
     registry = registry_factory()
+    from .state_layout import require_dispatch_layout
+    require_dispatch_layout(registry.log_dir)
     pending_fd: int | None = write_fd
 
     def send(message: dict[str, Any]) -> None:

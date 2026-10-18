@@ -177,8 +177,13 @@ def decision_error_path(message: str) -> str:
     return "$"
 
 
-def context_read_denials_only(activation: dict[str, Any], run: dict[str, Any]) -> bool:
+def context_read_denials_only(activation: dict[str, Any], run: dict[str, Any], *, root: Path | None = None) -> bool:
     """Recognize denied reads of existing run context, never broader permissions."""
+    from .state_layout import resolve_layout, default_home
+    root = resolve_layout(root=root).root
+    read_roots = {str(root)}
+    if root == resolve_layout(root=default_home() / ".harflow").root:
+        read_roots.add("~/.harflow")
     task_ids = {t["task_id"] for a in run["activations"] for t in a.get("tasks", [])}
     execution_ids = {a["id"] for a in run["activations"]}
     def command_is_context_read(command: Any) -> bool:
@@ -203,9 +208,9 @@ def context_read_denials_only(activation: dict[str, Any], run: dict[str, Any]) -
                 continue
             if parts == ["echo"]:
                 continue
-            if len(parts) == 2 and parts[0] == "ls" and parts[1] in {"~/.harflow", str(Path.home() / ".harflow")}:
+            if len(parts) == 2 and parts[0] == "ls" and parts[1] in read_roots:
                 continue
-            if len(parts) == 4 and parts[:2] == ["grep", "-rl"] and parts[2] in execution_ids and parts[3] in {"~/.harflow", str(Path.home() / ".harflow")}:
+            if len(parts) == 4 and parts[:2] == ["grep", "-rl"] and parts[2] in execution_ids and parts[3] in read_roots:
                 continue
             if len(parts) in {3, 4} and parts[:2] == ["harflow-ctl", "status"] and parts[2] in task_ids and (len(parts) == 3 or parts[3] == "--json"):
                 continue
@@ -266,7 +271,7 @@ def caller_decision_block(activation: dict[str, Any]) -> bool:
     return terminal.get("status") == "completed" and not terminal.get("is_error") and terminal.get("exit_code") in {None, 0}
 
 
-def retry_eligible(activation: dict[str, Any], *, guided: bool = False, node: dict[str, Any] | None = None, run: dict[str, Any] | None = None) -> bool:
+def retry_eligible(activation: dict[str, Any], *, guided: bool = False, node: dict[str, Any] | None = None, run: dict[str, Any] | None = None, root: Path | None = None) -> bool:
     """Only positively settled failures can be explicitly reassigned."""
     if activation.get("invocation"):
         from .workflow_invocation import invocation_retry_eligible
@@ -292,7 +297,7 @@ def retry_eligible(activation: dict[str, Any], *, guided: bool = False, node: di
         authorization = (run or {}).get("protocol_retry_authorizations", {}).get(activation.get("id"), {})
         if guided and result.get("result", {}).get("failure_kind") == "protocol" and authorization.get("node_id") == activation.get("node_id") and isinstance(authorization.get("reason"), str) and authorization["reason"].strip():
             return True  # A correction keeps saved access; it never approves denied tools.
-        return bool(guided and run and str(run.get("instructions", "")).strip() and result.get("status") == "blocked" and result.get("result", {}).get("blocker_category") == "missing_context" and context_read_denials_only(activation, run))
+        return bool(guided and run and str(run.get("instructions", "")).strip() and result.get("status") == "blocked" and result.get("result", {}).get("blocker_category") == "missing_context" and context_read_denials_only(activation, run, root=root))
     return True
 
 
@@ -394,7 +399,7 @@ def result_inputs(run: dict[str, Any], refs: list[str], *, preview: bool = True,
         evidence = result_evidence(activation, run)
         serialized = json.dumps({"node_result": value, **evidence}, ensure_ascii=False)
         truncated = preview and len(serialized) > 16000
-        data = {"harness_attempts": [{"task_id": t["task_id"], "metadata": t.get("harness_metadata", {})} for t in activation.get("tasks", [])], "retry_eligible": retry_eligible(activation, guided=run.get("runner_policy") == "guided", node=nodes[activation["node_id"]], run=run), "result_ref": ref, "execution_id": ref, "node_id": activation["node_id"], "role": nodes[activation["node_id"]].get("role"), "status": value["status"], "attempt": activation.get("attempt_in_visit", 1 + sum(a["role"] == "node" and a["node_id"] == activation["node_id"] for a in run["activations"][:run["activations"].index(activation)])), "truncated": truncated}
+        data = {"harness_attempts": [{"task_id": t["task_id"], "metadata": t.get("harness_metadata", {})} for t in activation.get("tasks", [])], "retry_eligible": retry_eligible(activation, guided=run.get("runner_policy") == "guided", node=nodes[activation["node_id"]], run=run, root=root), "result_ref": ref, "execution_id": ref, "node_id": activation["node_id"], "role": nodes[activation["node_id"]].get("role"), "status": value["status"], "attempt": activation.get("attempt_in_visit", 1 + sum(a["role"] == "node" and a["node_id"] == activation["node_id"] for a in run["activations"][:run["activations"].index(activation)])), "truncated": truncated}
         if truncated:
             data["result_preview"] = serialized[:16000]
             data["inspect"] = "Inspect this execution_id with view=result to retrieve complete node_result, permission_denials and optional_skip/optional_skip_ancestors context"
@@ -408,7 +413,7 @@ def invocation_result_input(run: dict[str, Any], activation: dict[str, Any], val
     """A child invocation presents its outcome and leaf refs within a preview budget."""
     from .workflow_invocation import INVOCATION_PREVIEW_BUDGET, INVOCATION_PREVIEW_REF_LIMIT
     outcome = value.get("result", {}).get("child_outcome", {})
-    data: dict[str, Any] = {"result_ref": activation["id"], "execution_id": activation["id"], "node_id": activation["node_id"], "role": nodes.get(activation["node_id"], {}).get("role"), "status": value["status"], "child_outcome": copy.deepcopy(outcome), "retry_eligible": retry_eligible(activation, guided=run.get("runner_policy") == "guided", node=nodes.get(activation["node_id"], {}), run=run)}
+    data: dict[str, Any] = {"result_ref": activation["id"], "execution_id": activation["id"], "node_id": activation["node_id"], "role": nodes.get(activation["node_id"], {}).get("role"), "status": value["status"], "child_outcome": copy.deepcopy(outcome), "retry_eligible": retry_eligible(activation, guided=run.get("runner_policy") == "guided", node=nodes.get(activation["node_id"], {}), run=run, root=root)}
     if not preview:
         data["node_result"] = value
     if root is None:
@@ -542,7 +547,7 @@ def continuations(run: dict[str, Any], node: dict[str, Any], token: dict[str, An
         if node["type"] == "workflow":
             outcome = ((activation or {}).get("node_result", {}).get("result", {}) or {}).get("child_outcome", {})
             kind = outcome.get("kind")
-            if activation and kind and retry_eligible(activation, guided=run.get("runner_policy") == "guided", node=node, run=run):
+            if activation and kind and retry_eligible(activation, guided=run.get("runner_policy") == "guided", node=node, run=run, root=root):
                 from .workflow_execution_policy import attempts_used
                 used = attempts_used(run, node, token)
                 remaining = max(0, node["max_attempts"] + run.get("attempt_grants", {}).get(node["id"], 0) - used)
@@ -554,7 +559,7 @@ def continuations(run: dict[str, Any], node: dict[str, Any], token: dict[str, An
                     choices.append({"continuation_id": "recover_child:" + activation["id"], "node_id": node["id"], "kind": "retry_execution", "requires_prompt": True, "execution_id": activation["id"], "recovery_from_checkpoint": True, "reopen_child": True, "attempts_remaining": remaining})
         else:
             candidates_available = any(node["id"] + ":" + w._candidate_key(c) not in run.get("suppressed_candidates", []) for c in [node["agent"]] + node["agent"].get("fallbacks", []))
-            if activation and retry_eligible(activation, guided=run.get("runner_policy") == "guided", node=node, run=run) and candidates_available:
+            if activation and retry_eligible(activation, guided=run.get("runner_policy") == "guided", node=node, run=run, root=root) and candidates_available:
                 choices.append({"continuation_id": "retry:" + activation["id"], "node_id": node["id"], "kind": "retry_execution", "requires_prompt": True, "execution_id": activation["id"]})
     if run.get("runner_policy") == "guided" and not execute:
         issued = {choice.get("execution_id") for choice in choices if choice["kind"] == "retry_execution"}
@@ -563,7 +568,7 @@ def continuations(run: dict[str, Any], node: dict[str, Any], token: dict[str, An
             if target.get("type") == "workflow":
                 continue  # Workflow nodes recover through retry/recover_child continuations.
             candidates_available = any(target["id"] + ":" + w._candidate_key(c) not in run.get("suppressed_candidates", []) for c in [target["agent"]] + target["agent"].get("fallbacks", []))
-            if activation["id"] not in issued and candidates_available and retry_eligible(activation, guided=True, node=target, run=run):
+            if activation["id"] not in issued and candidates_available and retry_eligible(activation, guided=True, node=target, run=run, root=root):
                 choices.append({"continuation_id": "recover:" + activation["id"], "node_id": target["id"], "kind": "retry_execution", "requires_prompt": True, "execution_id": activation["id"], "recovery_from_checkpoint": True})
     for choice in choices:
         target = next(n for n in run["definition"]["nodes"] if n["id"] == choice["node_id"])
@@ -768,7 +773,7 @@ def validate_decision(run: dict[str, Any], node: dict[str, Any], token: dict[str
             raise w.WorkflowError("assigned_task_ids must identify unique known checklist tasks")
         if not isinstance(refs, list) or any(not isinstance(ref, str) for ref in refs) or len(set(refs)) != len(refs):
             raise w.WorkflowError("additional_result_refs must be unique execution IDs")
-        result_inputs(run, refs, preview=False)
+        result_inputs(run, refs, preview=False, root=root)
         assignment = {"assignment_prompt": entry.get("prompt", ""), "assigned_task_ids": assigned, "additional_result_refs": refs}
         if "artifact_refs" in entry:
             from .workflow_artifact_refs import resolve_refs
