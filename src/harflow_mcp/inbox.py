@@ -24,6 +24,9 @@ loop (via `control.acquire`); the sync one sleeps between tries and is meant for
 
 from __future__ import annotations
 
+from .state_access import task_operation, task_layout, assert_task_owned, open_descriptor, OwnedDescriptor, require_state_path
+from .state_ownership import StateOwnershipError, state_session
+
 import fcntl
 import json
 import os
@@ -93,6 +96,7 @@ def _is_seal(entry: Any) -> bool:
     return isinstance(entry, dict) and entry.get("closed") is True and "id" not in entry
 
 
+@task_operation
 def is_closed(log_dir: Path, task_id: str) -> bool:
     """Input is closed: the marker exists, or — where the marker could not be created — the inbox
     itself carries a seal line (see `seal`)."""
@@ -113,6 +117,7 @@ def is_closed(log_dir: Path, task_id: str) -> bool:
     return False
 
 
+@task_operation
 def mark_closed(log_dir: Path, task_id: str) -> None:
     """Create the closed marker (idempotent). Raises `OSError` if it cannot be written."""
     path = closed_path(log_dir, task_id)
@@ -128,6 +133,7 @@ def mark_closed(log_dir: Path, task_id: str) -> None:
     control._fsync_dir(log_dir)
 
 
+@task_operation
 def seal(log_dir: Path, task_id: str) -> None:
     """Close input durably, so every sender sees it: the marker, or — if the directory refuses a new
     file — a seal line appended to the inbox itself, which `is_closed` also honours. Call with the
@@ -140,16 +146,18 @@ def seal(log_dir: Path, task_id: str) -> None:
     append_locked(log_dir, task_id, {"closed": True, "at": _now_iso()})
 
 
+@task_operation
 async def lock_async(log_dir: Path, task_id: str, timeout: float = LOCK_TIMEOUT_SECONDS) -> int:
     """The inbox lock, without ever blocking the event loop. Raises `control.LockTimeout`."""
-    return await control.acquire(inbox_path(log_dir, task_id), timeout)
+    return await control.acquire(inbox_path(log_dir, task_id), timeout, layout=task_layout(log_dir))
 
 
+@task_operation
 def lock_sync(log_dir: Path, task_id: str, timeout: float = LOCK_TIMEOUT_SECONDS) -> int:
     """The inbox lock, for a worker thread or a CLI. Raises `control.LockTimeout`."""
     path = inbox_path(log_dir, task_id)
     log_dir.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
+    fd = open_descriptor(path, os.O_CREAT | os.O_RDWR, 0o644, layout=task_layout(log_dir))
     deadline = time.monotonic() + timeout
     try:
         while True:
@@ -161,7 +169,7 @@ def lock_sync(log_dir: Path, task_id: str, timeout: float = LOCK_TIMEOUT_SECONDS
                     raise control.LockTimeout(f"timed out acquiring inbox lock {path}") from None
                 time.sleep(_LOCK_POLL_SECONDS)
     except BaseException:
-        os.close(fd)
+        fd.close()
         raise
 
 
@@ -169,6 +177,7 @@ def unlock(fd: int) -> None:
     control.release(fd)
 
 
+@task_operation
 def has_unread(log_dir: Path, task_id: str, offset: int) -> bool:
     """A cheap, lock-free hint that another process appended past `offset`."""
     try:
@@ -177,6 +186,7 @@ def has_unread(log_dir: Path, task_id: str, offset: int) -> bool:
         return False
 
 
+@task_operation
 def read_new(log_dir: Path, task_id: str, offset: int) -> tuple[list[dict[str, Any]], int]:
     """Messages appended after byte `offset`, and the offset just past the last complete line.
 
@@ -208,6 +218,7 @@ def read_new(log_dir: Path, task_id: str, offset: int) -> tuple[list[dict[str, A
     return messages, offset + end + 1
 
 
+@task_operation
 def append_locked(log_dir: Path, task_id: str, message: dict[str, Any]) -> None:
     """Append one message line, durably. Call with the lock held.
 
@@ -229,6 +240,7 @@ def append_locked(log_dir: Path, task_id: str, message: dict[str, Any]) -> None:
         os.fsync(handle.fileno())
 
 
+@task_operation
 def send_to_record(
     log_dir: Path,
     task_id: str,
@@ -279,6 +291,7 @@ def send_to_record(
 
 
 def _check_open(log_dir: Path, record: store.TaskRecord) -> None:
+    assert_task_owned(log_dir)
     task_id = record.task_id
     if not record.live_input:
         raise SendRefused(
@@ -313,7 +326,8 @@ def _check_open(log_dir: Path, record: store.TaskRecord) -> None:
         )
 
 
-def _json_rows(path: Path, incomplete: list[bool] | None = None):
+def _json_rows(path: Path, incomplete: list[bool] | None = None, *, layout):
+    require_state_path(layout, path)
     """Stream complete bounded lines; never parse torn/oversized records."""
     try:
         with path.open("rb") as handle:
@@ -344,11 +358,12 @@ def _json_rows(path: Path, incomplete: list[bool] | None = None):
         return
 
 
+@task_operation
 def delivered_ids(log_dir: Path, task_id: str) -> set[str] | None:
     from . import events
     ids: set[str] = set()
     incomplete = [False]
-    for event in _json_rows(events.events_path(log_dir, task_id), incomplete):
+    for event in _json_rows(events.events_path(log_dir, task_id), incomplete, layout=task_layout(log_dir)):
         if event.get("kind") in {"user_message", "undelivered", "task_started"}:
             mid = event.get("message_id")
             if isinstance(mid, str):
@@ -359,8 +374,9 @@ def delivered_ids(log_dir: Path, task_id: str) -> set[str] | None:
     return None if incomplete[0] else ids
 
 
+@task_operation
 def pending_messages(log_dir: Path, task_id: str) -> list[dict[str, Any]]:
-    queued = {m["id"]: m for m in _json_rows(inbox_path(log_dir, task_id)) if isinstance(m.get("id"), str) and isinstance(m.get("text"), str)}
+    queued = {m["id"]: m for m in _json_rows(inbox_path(log_dir, task_id), layout=task_layout(log_dir)) if isinstance(m.get("id"), str) and isinstance(m.get("text"), str)}
     if not queued:
         return []
     terminal = delivered_ids(log_dir, task_id)

@@ -4,6 +4,16 @@ import json
 import pytest
 
 from harflow_mcp import ctl, server
+from harflow_mcp import state_ownership
+from harflow_mcp.state_layout import resolve_layout
+
+
+@pytest.fixture(autouse=True)
+def owned_cli_state(tmp_path, monkeypatch):
+    root = tmp_path / "state"
+    monkeypatch.setenv("HARFLOW_STATE_ROOT", str(root))
+    with state_ownership.state_session(resolve_layout(root=root)):
+        pass
 
 
 async def test_start_task_workflow_has_explicit_run_identity(monkeypatch):
@@ -121,7 +131,8 @@ def test_cli_workflow_collections_are_result_objects(action, key, monkeypatch, c
 async def test_registry_honors_reserved_id_and_refuses_reuse(tmp_path, git_repo, fake_backend_clis):
     from harflow_mcp import backends, store
     from harflow_mcp.tasks import TaskRegistry
-    registry = TaskRegistry(log_dir=tmp_path / "tasks", owner={}, open_monitor=False)
+    state_root = tmp_path / "state"
+    registry = TaskRegistry(log_dir=state_root / "tasks", owner={}, open_monitor=False)
     task = await registry.start("test", git_repo, backend=backends.get("claude"), task_id="reserved-id")
     await task.done.wait()
     assert task.task_id == "reserved-id"

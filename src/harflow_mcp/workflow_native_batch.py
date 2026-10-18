@@ -9,7 +9,11 @@ import time
 import uuid
 from typing import Any
 
+from .state_access import storage_operation
+from .state_ownership import StateOwnershipError, owned_job, run_owned_worker
 
+
+@storage_operation
 async def dispatch_batch(supervisor: Any, node: dict[str, Any], assignment: str, activation: dict[str, Any], prepared: dict[str, Any]) -> tuple[bool, dict[str, Any] | None]:
     tree = supervisor.tree
     pending = getattr(tree, "native_batches", None)
@@ -23,7 +27,29 @@ async def dispatch_batch(supervisor: Any, node: dict[str, Any], assignment: str,
         queue = pending[key] = []
         # Collect siblings made ready by the same graph transition without
         # holding control permits or checkout leases while they prepare.
-        asyncio.get_running_loop().call_later(.01, lambda: asyncio.create_task(_drain(tree, key)))
+        async def delayed_drain() -> None:
+            await asyncio.sleep(.01)
+            await _drain(tree, key)
+        try:
+            job = owned_job(supervisor.state_layout, delayed_drain(), name="harflow-native-batch")
+        except BaseException:
+            if pending.get(key) is queue:
+                pending.pop(key)
+            raise
+        def settle_waiters(done) -> None:
+            error = None if done.cancelled() else done.exception()
+            if not done.cancelled() and error is None:
+                return
+            if pending.get(key) is queue:
+                pending.pop(key)
+            for request in queue:
+                if request["future"].done():
+                    continue
+                if done.cancelled():
+                    request["future"].cancel()
+                else:
+                    request["future"].set_exception(error)
+        job.add_done_callback(settle_waiters)
     queue.append(request)
     return await asyncio.shield(future)
 
@@ -43,6 +69,8 @@ async def _drain(tree: Any, key: Any) -> None:
             for request in batch:
                 if not request["future"].done():
                     request["future"].set_exception(exc)
+            if isinstance(exc, StateOwnershipError):
+                raise
             continue
         for request, result in zip(batch, results, strict=True):
             if not request["future"].done():
@@ -117,7 +145,7 @@ async def _execute(requests: list[dict[str, Any]]) -> list[tuple[bool, dict[str,
             reserved = True
             for item in children:
                 item["state"]["batch_entries"] = entries
-                log = events.EventLog(events.events_path(supervisor.registry._log_dir, item["child"]["task_id"]), item["child"]["task_id"])
+                log = events.EventLog(events.events_path(supervisor.registry._log_dir, item["child"]["task_id"]), item["child"]["task_id"], layout=supervisor.registry.state_layout)
                 item["log"] = log
                 logs.append(log)
 
@@ -196,7 +224,7 @@ async def _execute(requests: list[dict[str, Any]]) -> list[tuple[bool, dict[str,
                 finalize = getattr(native, "finalize", None)
                 if finalize is not None:
                     for item in children:
-                        publish(item, await asyncio.to_thread(finalize, item["nonce"], item["state"]))
+                        publish(item, await run_owned_worker(supervisor.state_layout, finalize, item["nonce"], item["state"]))
             results = dict(fallbacks)
             for item in children:
                 state = item["state"]
@@ -215,6 +243,8 @@ async def _execute(requests: list[dict[str, Any]]) -> list[tuple[bool, dict[str,
             return [results[index] for index in range(len(requests))]
     except DispatchNotStarted:
         return [(True, None) for _ in requests]
+    except StateOwnershipError:
+        raise
     except BaseException as exc:
         no_spawn = isinstance(exc, (SessionBusyError, SessionUnknownError, RepoUnavailableError, backends.NestedDispatchRefused, backends.UnsupportedCapability)) or getattr(exc, "harflow_not_started", False) is True
         uncertain = reserved and (launched or not no_spawn)

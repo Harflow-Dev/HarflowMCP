@@ -55,6 +55,8 @@ from .backends import resume_command
 from .extra_paths import has_extra_path_authority
 from .events import EVENTS_SUFFIX, EventLog, events_path
 from .runtime_paths import MONITOR_BUNDLE
+from .state_access import layout_operation, task_layout, assert_task_owned, open_descriptor
+from .state_ownership import StateOwnershipError, state_session, assert_owned, owned_job, run_owned_worker
 from .stream import parse_line
 
 log = logging.getLogger(__name__)
@@ -567,6 +569,8 @@ def _publish_branch_notice(
         return None
     try:
         return _detect_publish_branch_notice(freedom, repo_path, enforcement)
+    except StateOwnershipError:
+        raise
     except Exception:
         log.warning(
             "could not determine publish-branch exposure for %s; reporting that rather than the "
@@ -595,6 +599,8 @@ async def _launch_monitor(url: str) -> int:
     try:
         installed = await asyncio.wait_for(asyncio.to_thread(MONITOR_BUNDLE.is_dir),
                                            timeout=MONITOR_OPEN_TIMEOUT_SECONDS)
+    except StateOwnershipError:
+        raise
     except Exception:
         return 1
     if not installed:
@@ -742,6 +748,7 @@ class Task:
     finished_at: datetime | None = None
 
     proc: asyncio.subprocess.Process | None = None
+    _process_owner_pid: int = field(default_factory=os.getpid, init=False, repr=False, compare=False)
     # `start_new_session=True` makes the child its own group leader, so its pid is the group id.
     # Stored rather than looked up with getpgid() later: after the child is reaped its pid may
     # already name an unrelated process, and signalling that process's group would be a disaster.
@@ -750,6 +757,7 @@ class Task:
     events: EventLog | None = None
     """The task's normalized event log — see `events.py`. None only in tests that build a `Task`
     directly without going through `_spawn`."""
+    _events_cleanup_armed: bool = False
     start_time: str | None = None
     """This task's own process start time, from `identity.capture` shortly after spawn. Null
     ("pending") until that capture lands — see `_spawn` — so `identity.identity_check` on a record
@@ -832,6 +840,10 @@ class Task:
     termination: asyncio.Task[Any] | None = None
 
     @property
+    def state_layout(self):
+        return task_layout(self.log_path.parent)
+
+    @property
     def finished(self) -> bool:
         """True once the process is gone, its output fully read, and its status published."""
         return self.done.is_set()
@@ -846,6 +858,7 @@ class Task:
         dispatch rather than the run. Neither source list is mutated."""
         return [*self.bridge_notices, *self.acc.notices]
 
+    @layout_operation
     def brief(self) -> dict[str, Any]:
         """The listing shape: identity and state, without stream detail.
 
@@ -890,6 +903,7 @@ class Task:
             "owned_by_live_server": (True if not self.finished else None),
         } | control.taken_over_fields(self.log_path.parent, self.task_id)
 
+    @layout_operation
     def snapshot(self) -> dict[str, Any]:
         """Full current state of the run, safe to call at any point."""
         from . import artifacts
@@ -998,6 +1012,8 @@ class TaskRegistry:
             return self._caller_override
         try:
             return await asyncio.to_thread(lineage.detect_caller, self._log_dir, candidates=candidates)
+        except StateOwnershipError:
+            raise
         except Exception:
             log.debug("caller detection failed", exc_info=True)
             return None
@@ -1010,6 +1026,8 @@ class TaskRegistry:
             return lineage.Detection(caller)
         try:
             result = await asyncio.to_thread(lineage.detect_caller_detail, self._log_dir)
+        except StateOwnershipError:
+            raise
         except Exception as exc:
             return lineage.Detection(None, f"caller detection failed: {exc}")
         if result.caller is None and os.environ.get(lineage.ENV_TASK_ID):
@@ -1122,6 +1140,7 @@ class TaskRegistry:
                                    invocation.scratch_directory if invocation is not None else None)
 
     @_with_authority_check_budget
+    @layout_operation
     async def preview_permissions(self, repo_path: Path, *, backend: Backend, freedom: str = "write_in_repo", network: bool | None = None, caller_approvals: bool = False, extra_writable_paths: list[str] | None = None) -> dict[str, Any]:
         from .extra_paths import serialize_paths
         from . import approval_runtime
@@ -1151,6 +1170,7 @@ class TaskRegistry:
         return {"backend": backend.name, "caller_approvals": caller_approvals, "caller_approval_support": backend.caller_approval_support() if getattr(backend.capabilities, "supports_caller_approvals", False) else {"supported": False}, "approval_scope": "exact_action_once" if caller_approvals else None, "approval_transport": "stdio_control" if caller_approvals else None, "approval_limitations": "Exact original Bash input only; saved harness rules remain effective. Claude has no bridge OS sandbox.", "freedom": freedom, "network": network, "repo_path": str(repo_path), "extra_writable_paths": serialize_paths(grants), "extra_path_certification": backend.extra_path_support().get("certification") if grants else None, "enforcement": enforcement.as_dict(), "limitations": "Existing typed path identities are checked before launch; grants are unavailable to native workflows and interactive takeover."}
 
     @_with_authority_check_budget
+    @layout_operation
     async def start(
         self,
         prompt: str,
@@ -1267,6 +1287,7 @@ class TaskRegistry:
         )
 
     @_with_authority_check_budget
+    @layout_operation
     async def continue_task(self, task_id: str, extra_prompt: str | None = None, notes_path: str | None = None, *, automatic: bool = False, consume_followups: bool = False) -> Task:
         """Start a fresh session from a durably settled task without broadening access.
 
@@ -1278,6 +1299,7 @@ class TaskRegistry:
         return await continue_task(self, task_id, extra_prompt, notes_path, automatic=automatic, consume_followups=consume_followups)
 
     @_with_authority_check_budget
+    @layout_operation
     async def resume(
         self,
         parent: Task,
@@ -1480,6 +1502,8 @@ class TaskRegistry:
                         raise ValueError("No certified native adapter")
                     try:
                         invocation = native.configure(invocation, native_settings) if native_settings is not None else native.configure(invocation)
+                    except StateOwnershipError:
+                        raise
                     except Exception as exc:
                         exc.harflow_not_started = True
                         raise
@@ -1519,6 +1543,7 @@ class TaskRegistry:
             await attempt.consumed(self, task)
         return task
 
+    @layout_operation
     async def _spawn(
         self,
         invocation: Invocation,
@@ -1659,6 +1684,8 @@ class TaskRegistry:
                 base_commit = git_baseline["head"]
                 observed_status = git_baseline["working_tree_status"]
                 start_dirty = bool(observed_status) if observed_status is not None else None
+            except StateOwnershipError:
+                raise
             except Exception:
                 base_commit, start_dirty = None, None
                 git_baseline = None
@@ -1781,13 +1808,20 @@ class TaskRegistry:
 
         # Written before anything can go wrong, so even a task whose server dies immediately is
         # discoverable by whichever process comes next.
-        self.persist(task)
-
-        task.watchers = [
-            asyncio.create_task(_drain_stdout(task, self), name=f"harflow-stdout-{task_id}"),
-            asyncio.create_task(_drain_stderr(task, self), name=f"harflow-stderr-{task_id}"),
-        ]
-        task.monitor = asyncio.create_task(_monitor(task, self), name=f"harflow-monitor-{task_id}")
+        try:
+            self.persist(task)
+            for drain, name in [
+                (_drain_stdout, f"harflow-stdout-{task_id}"),
+                (_drain_stderr, f"harflow-stderr-{task_id}"),
+            ]:
+                watcher = owned_job(self.state_layout, drain(task, self), name=name)
+                task.watchers.append(watcher)
+            task.monitor = owned_job(self.state_layout, _monitor(task, self), name=f"harflow-monitor-{task_id}")
+            task.monitor.add_done_callback(lambda done: _close_events_after_writers(task))
+        except StateOwnershipError:
+            _stop_failed_drainer(task)
+            _close_events_after_writers(task)
+            raise
 
         # Registered without awaiting anything in between: an await here could be cancelled (a
         # client disconnecting mid-call) and leave a live agent process no tool can reach.
@@ -1798,7 +1832,7 @@ class TaskRegistry:
         # no await has run yet and the drainer tasks just created cannot have executed, so this is
         # always seq 0. Guarded on its own: a broken event log must not cost the dispatch itself.
         try:
-            task.events = EventLog(events_path(self._log_dir, task_id), task_id)
+            task.events = EventLog(events_path(self._log_dir, task_id), task_id, layout=self.state_layout)
             _write_event(
                 task,
                 "task_started",
@@ -1823,22 +1857,29 @@ class TaskRegistry:
                     **({"message_ids": list(message_ids)} if message_ids else {}),
                 },
             )
+        except StateOwnershipError:
+            _stop_failed_drainer(task)
+            raise
         except Exception:
             log.exception("task %s: could not write task_started event", task_id)
 
         # Outside the no-await window, and still before any await: the prompt is the first stdin
         # line of a live-input run (a positional would be ignored), written synchronously so it is
         # queued ahead of anything else, then flushed below.
-        if invocation.stdin_mode == "pipe_once":
-            self._write_initial_input(task, invocation.initial_input or b"")
-            try:
+        try:
+            if invocation.stdin_mode == "pipe_once":
+                self._write_initial_input(task, invocation.initial_input or b"")
+                try:
+                    await self._flush_stdin(task)
+                finally:
+                    _close_stdin(task)
+            elif invocation.live_input:
+                self._write_initial_input(task, invocation.initial_input or b"")
+                task.pump = owned_job(self.state_layout, self._pump(task), name=f"harflow-pump-{task_id}")
                 await self._flush_stdin(task)
-            finally:
-                _close_stdin(task)
-        elif invocation.live_input:
-            self._write_initial_input(task, invocation.initial_input or b"")
-            task.pump = asyncio.create_task(self._pump(task), name=f"harflow-pump-{task_id}")
-            await self._flush_stdin(task)
+        except StateOwnershipError:
+            _stop_failed_drainer(task)
+            raise
 
         # Best-effort start-time capture, so a later server can tell this pid apart from a reused
         # one (see `identity.identity_check`). `except Exception`, not `BaseException`: a
@@ -1848,6 +1889,9 @@ class TaskRegistry:
             captured = await asyncio.wait_for(
                 asyncio.to_thread(identity.capture, proc.pid, task.markers), timeout=2.0
             )
+        except StateOwnershipError:
+            _stop_failed_drainer(task)
+            raise
         except Exception:
             captured = None
         if captured is not None:
@@ -1859,6 +1903,9 @@ class TaskRegistry:
         # whatever the monitor last wrote rather than clobbering it with stale spawn-time data.
         try:
             self.persist(task)
+        except StateOwnershipError:
+            _stop_failed_drainer(task)
+            raise
         except Exception:
             log.exception("task %s: could not persist after identity capture", task_id)
 
@@ -1897,11 +1944,14 @@ class TaskRegistry:
                 return
             if sys.platform != "darwin" or os.environ.get(OPEN_MONITOR_ENV) != "1":
                 return
-            job = asyncio.create_task(
+            job = owned_job(self.state_layout,
                 self._open_monitor_job(task), name=f"harflow-open-monitor-{task.task_id}"
             )
             self._monitor_jobs.add(job)
             job.add_done_callback(self._monitor_jobs.discard)
+        except StateOwnershipError:
+            _stop_failed_drainer(task)
+            raise
         except Exception:
             log.debug("task %s: could not schedule opening the Monitor", task.task_id, exc_info=True)
 
@@ -1909,6 +1959,8 @@ class TaskRegistry:
         launcher = self._monitor_launcher or _launch_monitor
         try:
             code = await launcher(MONITOR_URL.format(task_id=task.task_id))
+        except StateOwnershipError:
+            raise
         except Exception as exc:
             notice = (
                 f"The Monitor app could not be opened ({type(exc).__name__}: {exc}); the task "
@@ -1924,6 +1976,8 @@ class TaskRegistry:
         task.bridge_notices.append(notice)
         try:
             self.persist(task)
+        except StateOwnershipError:
+            raise
         except Exception:
             log.exception("task %s: could not persist the Monitor notice", task.task_id)
 
@@ -1942,6 +1996,7 @@ class TaskRegistry:
 
     # --- live input: send, pump, close protocol ------------------------------------------------
 
+    @layout_operation
     def workflow_notice(self, task_id: str, text: str) -> None:
         """Supervisor-owned presentation event; never changes the observed task outcome."""
         task = self.get(task_id)
@@ -1951,6 +2006,7 @@ class TaskRegistry:
             except (OSError, ValueError):
                 log.warning("Workflow notice unavailable for %s", task_id, exc_info=True)
 
+    @layout_operation
     async def send_message(self, task: Task, text: str) -> dict[str, Any]:
         """Queue `text` for a live-input task this server owns. Returns "queued", never
         "delivered": the pump writes it, and the event log records whether it did.
@@ -1991,6 +2047,7 @@ class TaskRegistry:
         task.pump_wake.set()
         return inbox.queued_response(task.task_id, message)
 
+    @layout_operation
     async def send_to_record(self, task_id: str, text: str) -> dict[str, Any]:
         """Queue `text` for a live-input task another server owns, via its on-disk inbox."""
         from .workflow_hooks import refuse_direct_message
@@ -2005,6 +2062,7 @@ class TaskRegistry:
             inbox.send_to_record, self._log_dir, task_id, text, by=self._owner
         )
 
+    @layout_operation
     async def queue_followup(self, task_id: str, source: Any, text: str) -> dict[str, Any]:
         """Queue `text` for the next continuation of a task without live input. `source` is the
         live `Task` or recovered record, for the extra-path authority check. Returns "queued"
@@ -2014,6 +2072,7 @@ class TaskRegistry:
             await self._resolve_extra_paths_async(caller, None, get_backend(source.backend), source)
         return await asyncio.to_thread(followups.send, self._log_dir, task_id, text, by=self._owner)
 
+    @layout_operation
     async def cancel_queued_followup(self, task_id: str, message_id: str) -> dict[str, Any]:
         """Cancel a still-queued follow-up, under the checks a send takes."""
         from .workflow_hooks import refuse_direct_message
@@ -2046,6 +2105,8 @@ class TaskRegistry:
         for index, message in enumerate(messages):
             try:
                 data = backend.encode_live_message(message["text"])
+            except StateOwnershipError:
+                raise
             except Exception:
                 log.warning("task %s: could not encode a message", task.task_id, exc_info=True)
                 self._report_undelivered(task, [message], "it could not be encoded for this run")
@@ -2114,6 +2175,8 @@ class TaskRegistry:
             task.results_owed = task.acc.result_count + 1
         try:
             self.persist(task)
+        except StateOwnershipError:
+            raise
         except Exception:
             log.warning("task %s: could not record the written input", task.task_id, exc_info=True)
 
@@ -2364,6 +2427,8 @@ class TaskRegistry:
                     pass
         except asyncio.CancelledError:
             raise
+        except StateOwnershipError:
+            raise
         except Exception:
             log.exception("task %s: input pump failed", task.task_id)
             if task.caller_approvals:
@@ -2394,6 +2459,8 @@ class TaskRegistry:
                 pump.cancel()
                 await asyncio.gather(pump, return_exceptions=True)
             except asyncio.CancelledError:
+                raise
+            except StateOwnershipError:
                 raise
             except Exception:
                 log.debug("task %s: input pump ended with an error", task.task_id, exc_info=True)
@@ -2442,6 +2509,7 @@ class TaskRegistry:
     def log_dir(self) -> Path:
         return self._log_dir
 
+    @layout_operation
     def persist(self, task: Task) -> None:
         landed = store.write_landed(
             self._log_dir,
@@ -2504,10 +2572,12 @@ class TaskRegistry:
     def get(self, task_id: str) -> Task | None:
         return self._tasks.get(task_id)
 
+    @layout_operation
     def recover(self, task_id: str) -> store.TaskRecord | None:
         """A task this process did not spawn, read back from disk."""
         return store.read(self._log_dir, task_id)
 
+    @layout_operation
     def recovered_briefs(self, exclude: set[str]) -> list[dict[str, Any]]:
         """Listing entries for on-disk tasks not held in memory."""
         return [
@@ -2522,6 +2592,7 @@ class TaskRegistry:
             return tasks
         return [t for t in tasks if t.status == status]
 
+    @layout_operation
     def session_has_live_run(self, session_id: str | None) -> bool:
         """Whether any run on this session is live, including ones another server process started.
 
@@ -2590,7 +2661,7 @@ class TaskRegistry:
         self.persist(task)
         task.pump_wake.set()
         if task.usage_settlement is None or task.usage_settlement.done():
-            task.usage_settlement = asyncio.create_task(self._settle_usage_limit(task))
+            task.usage_settlement = owned_job(self.state_layout, self._settle_usage_limit(task))
 
     async def _settle_usage_limit(self, task: Task) -> None:
         deadline = time.monotonic() + 5.0
@@ -2616,6 +2687,8 @@ class TaskRegistry:
         """Stop an invalid native control turn without waiting on its stdout drainer."""
         try:
             self._deliver_local_cancel(task)
+        except StateOwnershipError:
+            raise
         except Exception:
             # Failed evidence/control storage must not leave an invalid owner
             # running. Retain the failure and stop the owned process directly.
@@ -2623,8 +2696,9 @@ class TaskRegistry:
             _signal_group(task, signal.SIGTERM)
             log.warning("task %s: native transport cancel bookkeeping failed", task.task_id, exc_info=True)
         if task.proc is not None and (task.termination is None or task.termination.done()):
-            task.termination = asyncio.create_task(_escalate(task), name=f"harflow-native-terminate-{task.task_id}")
+            task.termination = owned_job(self.state_layout, _escalate(task), name=f"harflow-native-terminate-{task.task_id}")
 
+    @layout_operation
     async def cancel(self, task: Task) -> Task:
         """Stop a run, waiting for it to actually die before returning.
 
@@ -2646,7 +2720,7 @@ class TaskRegistry:
         self._deliver_local_cancel(task)
 
         if task.termination is None or task.termination.done():
-            task.termination = asyncio.create_task(
+            task.termination = owned_job(self.state_layout,
                 _escalate(task), name=f"harflow-terminate-{task.task_id}"
             )
         # Shielded so a disconnecting client cannot abandon the escalation to SIGKILL.
@@ -2665,6 +2739,7 @@ class TaskRegistry:
             log.info("task %s cancelled", task.task_id)
         return task
 
+    @layout_operation
     def _cascade_targets(
         self, task_id: str, local_lineage: list[tuple[str, str | None, str | None]]
     ) -> set[str]:
@@ -2687,6 +2762,7 @@ class TaskRegistry:
         lineage_rows.extend(local_lineage)
         return lineage.lineage_closure(lineage_rows, task_id)
 
+    @layout_operation
     def _triage_target(self, task_id: str) -> tuple[str, Any]:
         """Decide what a non-local cascade target needs. Blocking (`ps`, disk), so run in a thread.
 
@@ -2711,6 +2787,7 @@ class TaskRegistry:
             return "case3", record
         return "case2", record
 
+    @layout_operation
     def _deliver_recorded_cancel(
         self, record: store.TaskRecord, *, already_signalled: bool = False
     ) -> tuple[str, str | None]:
@@ -2806,6 +2883,7 @@ class TaskRegistry:
             return "gone", None
         return "not_signalled", undelivered_reason
 
+    @layout_operation
     def _record_delivery(
         self,
         task_id: str,
@@ -2823,6 +2901,7 @@ class TaskRegistry:
             task_id, n, "sig", {"leader_alive": leader_alive}, inline_attempts=inline_attempts
         )
 
+    @layout_operation
     def _record_phase(
         self,
         task_id: str,
@@ -2878,8 +2957,63 @@ class TaskRegistry:
         if on_loop:
             self._start_phase_retry(task_id, n, phase, payload)
         else:
-            loop.call_soon_threadsafe(self._start_phase_retry, task_id, n, phase, payload)
+            transfer = assert_owned(self.state_layout).retain()
+            gate = threading.Lock()
+            acknowledged = threading.Event()
+            active = True
+            failure: list[BaseException] = []
+            def schedule() -> None:
+                nonlocal active
+                with gate:
+                    if not active:
+                        return
+                    active = False
+                    try:
+                        with transfer:
+                            self._start_phase_retry(task_id, n, phase, payload)
+                    except BaseException as exc:
+                        failure.append(exc)
+                    finally:
+                        transfer.close()
+                        acknowledged.set()
+            try:
+                callback = loop.call_soon_threadsafe(schedule)
+            except BaseException:
+                transfer.close()
+                raise
+            if not acknowledged.wait(1.0):
+                def watch_handoff() -> None:
+                    nonlocal active
+                    while not acknowledged.wait(0.05):
+                        if loop.is_closed():
+                            with gate:
+                                if active:
+                                    active = False
+                                    callback.cancel()
+                                    transfer.close()
+                                    acknowledged.set()
+                                    log.error("cancel of %s: event loop closed before phase retry", task_id)
+                            return
+                    if failure:
+                        exc = failure[0]
+                        detail = "ownership validation failed" if isinstance(exc, StateOwnershipError) else "scheduling failed"
+                        log.error("cancel of %s: phase retry %s", task_id, detail,
+                                  exc_info=(type(exc), exc, exc.__traceback__))
+                try:
+                    watcher = threading.Thread(target=watch_handoff,
+                                               name="harflow-phase-handoff", daemon=True)
+                    watcher.start()
+                except BaseException as exc:
+                    with gate:
+                        if active:
+                            active = False
+                            callback.cancel()
+                            transfer.close()
+                            raise control.PhaseWriteError("cannot monitor pending cancel phase retry") from exc
+            if failure:
+                raise failure[0]
 
+    @layout_operation
     def _start_phase_retry(
         self, task_id: str, n: int, phase: str, payload: dict[str, Any]
     ) -> None:
@@ -2889,7 +3023,7 @@ class TaskRegistry:
         running = self._phase_retries.get(key)
         if running is not None and not running.done():
             return
-        job = asyncio.create_task(
+        job = owned_job(self.state_layout,
             self._retry_phase(task_id, n, phase, payload), name=f"harflow-phase-retry-{task_id}-{n}-{phase}"
         )
         self._phase_retries[key] = job
@@ -2902,6 +3036,7 @@ class TaskRegistry:
 
         job.add_done_callback(_release)
 
+    @layout_operation
     async def settle_phase_writes(self, timeout: float) -> list[str]:
         """Wait up to `timeout` for outstanding cancel phase-write retries (`_retry_phase`), and
         return a description of each still pending.
@@ -2951,6 +3086,8 @@ class TaskRegistry:
                 return
             except control.PhaseWriteError:
                 delay = min(delay * 2, SIG_RETRY_MAX_SECONDS)
+            except StateOwnershipError:
+                raise
             except Exception:
                 log.warning("cancel of %s: %s retry failed unexpectedly", task_id, phase, exc_info=True)
                 delay = min(delay * 2, SIG_RETRY_MAX_SECONDS)
@@ -2964,6 +3101,7 @@ class TaskRegistry:
             return False
         return _signal_recorded_group(record, signal.SIGKILL)
 
+    @layout_operation
     def _settled_record(self, task_id: str) -> store.TaskRecord | None:
         """The record if its owner has settled it — terminal and observed, or terminal with the
         leader confirmed dead. An unobserved terminal status (a torn-down server's backstop) can
@@ -3107,6 +3245,7 @@ class TaskRegistry:
 
         return outcomes
 
+    @layout_operation
     async def cancel_cascade(self, task_id: str, *, workflow_control: bool = False) -> dict[str, Any]:
         """Run `_cancel_cascade` as a registry-held task, shielded from the caller.
 
@@ -3124,7 +3263,7 @@ class TaskRegistry:
 
     async def _shielded(self, coro: Any, name: str) -> Any:
         self._loop = asyncio.get_running_loop()
-        job = asyncio.create_task(coro, name=name)
+        job = owned_job(self.state_layout, coro, name=name)
         self._control_jobs.add(job)
         job.add_done_callback(self._control_jobs.discard)
         return await asyncio.shield(job)
@@ -3267,6 +3406,7 @@ class TaskRegistry:
             "unconverged": unconverged,
         }
 
+    @layout_operation
     async def cancel_recovered(self, record: store.TaskRecord) -> store.TaskRecord:
         """Shielded like `cancel_cascade`, for the same reason — see `_cancel_recovered`."""
         return await self._shielded(
@@ -3298,6 +3438,7 @@ class TaskRegistry:
         return store.read(self._log_dir, record.task_id) or record
 
     @_with_authority_check_budget
+    @layout_operation
     async def resume_record(
         self,
         record: store.TaskRecord,
@@ -3433,6 +3574,7 @@ class TaskRegistry:
             del self._tasks[task.task_id]
             log.debug("evicted finished task %s", task.task_id)
 
+    @layout_operation
     def start_maintenance(self) -> None:
         """Kick off a background retention sweep, at most once per registry instance.
 
@@ -3449,8 +3591,8 @@ class TaskRegistry:
         except RuntimeError:
             return
 
-        task = loop.create_task(
-            asyncio.to_thread(retention.maybe_sweep, self._log_dir), name="harflow-maintenance"
+        task = owned_job(self.state_layout,
+            run_owned_worker(self.state_layout, retention.maybe_sweep, self._log_dir), name="harflow-maintenance"
         )
         self._maintenance = task
 
@@ -3540,6 +3682,7 @@ def _close_stdin(task: Task) -> None:
 
 def _write_event(task: Task, kind: str, fields: dict[str, Any]) -> None:
     """One bridge-written event, guarded: a broken event log never changes an outcome."""
+    assert_task_owned(task.log_path.parent)
     if task.events is None:
         return
     try:
@@ -3547,9 +3690,13 @@ def _write_event(task: Task, kind: str, fields: dict[str, Any]) -> None:
             from .workflows import builder_feedback_ids
             try:
                 fields = {**fields, "message_ids": builder_feedback_ids(task.log_path.parent, task.task_id)}
+            except StateOwnershipError:
+                raise
             except Exception:
                 log.debug("task %s: builder feedback association unavailable", task.task_id, exc_info=True)
         task.events.write(kind, fields)
+    except StateOwnershipError:
+        raise
     except Exception:
         log.debug("task %s: could not write a %s event", task.task_id, kind, exc_info=True)
 
@@ -3608,6 +3755,15 @@ async def _escalate(task: Task) -> None:
     _signal_group(task, signal.SIGKILL)
 
 
+def _stop_failed_drainer(task: Task) -> None:
+    """Stop a still-live process owned here after its reader loses state authority."""
+    task.drain_failed = True
+    process = task.proc
+    if (task._process_owner_pid == os.getpid() and process is not None
+            and process.returncode is None and task.pgid == process.pid):
+        _signal_group(task, signal.SIGKILL)
+
+
 async def _drain_stdout(task: Task, registry: TaskRegistry) -> None:
     """Continuously consume the event stream.
 
@@ -3618,16 +3774,19 @@ async def _drain_stdout(task: Task, registry: TaskRegistry) -> None:
     assert task.proc is not None and task.proc.stdout is not None
     reader = task.proc.stdout
     handle = None
+    descriptor = None
     try:
-        # Binary, not text mode: `raw_offset` below is `handle.tell()`, which counts bytes, and a
-        # text-mode handle's tell() is not a reliable byte offset. `text` is still encoded with the
-        # same `errors="replace"` decoding used for everything else here, so the file on disk stays
-        # valid UTF-8 and `replay_log` reads it exactly as before.
-        handle = task.log_path.open("ab")
-    except OSError:
-        log.warning("task %s: cannot open %s; continuing without a raw log", task.task_id, task.log_path)
+        assert_owned(registry.state_layout)
+        try:
+            # Binary, not text mode: `raw_offset` below is `handle.tell()`, which counts bytes, and a
+            # text-mode handle's tell() is not a reliable byte offset. `text` is still encoded with the
+            # same `errors="replace"` decoding used for everything else here, so the file on disk stays
+            # valid UTF-8 and `replay_log` reads it exactly as before.
+            descriptor = open_descriptor(task.log_path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600, layout=registry.state_layout)
+            handle = os.fdopen(descriptor, "ab", closefd=False)
+        except OSError:
+            log.warning("task %s: cannot open %s; continuing without a raw log", task.task_id, task.log_path)
 
-    try:
         # Set once this drain sees the stream report a session other than the one a resume asked
         # for, so the bridge notice below is appended exactly once per run however many events
         # carry the different id.
@@ -3656,6 +3815,7 @@ async def _drain_stdout(task: Task, registry: TaskRegistry) -> None:
             raw_offset: int | None = None
             if handle is not None:
                 try:
+                    descriptor.lease.validate()
                     handle.write(text.encode("utf-8"))
                     handle.flush()
                     raw_offset = handle.tell()
@@ -3682,6 +3842,8 @@ async def _drain_stdout(task: Task, registry: TaskRegistry) -> None:
             if observer is not None:
                 try:
                     observer(event)
+                except StateOwnershipError:
+                    raise
                 except Exception as exc:
                     failures = getattr(registry, "_workflow_native_failures", None)
                     if failures is None:
@@ -3740,14 +3902,21 @@ async def _drain_stdout(task: Task, registry: TaskRegistry) -> None:
                 registry.persist(task)
     except asyncio.CancelledError:
         raise
+    except StateOwnershipError:
+        _stop_failed_drainer(task)
+        raise
     except Exception:
         log.exception("task %s: stdout drainer failed", task.task_id)
         task.drain_failed = True
         # Nobody is reading the pipe any more, so the run would hang forever. End it instead.
         _signal_group(task, signal.SIGKILL)
     finally:
-        if handle is not None:
-            handle.close()
+        try:
+            if handle is not None:
+                handle.close()
+        finally:
+            if descriptor is not None:
+                descriptor.close()
 
 
 def _record_events(task: Task, backend: Backend, event: dict[str, Any], raw_offset: int | None) -> None:
@@ -3758,10 +3927,13 @@ def _record_events(task: Task, backend: Backend, event: dict[str, Any], raw_offs
     `ingest` have already faithfully advanced regardless of what this does. Written after the raw
     line it derives from, never before, so `raw_offset` always points at bytes already on disk.
     """
+    assert_task_owned(task.log_path.parent)
     if task.events is None:
         return
     try:
         normalized = backend.normalize(event, task.acc)  # type: ignore[attr-defined]
+    except StateOwnershipError:
+        raise
     except Exception:
         task.acc.normalize_errors += 1
         log.debug("task %s: normalize() failed for one event", task.task_id, exc_info=True)
@@ -3779,10 +3951,14 @@ def _record_events(task: Task, backend: Backend, event: dict[str, Any], raw_offs
             from .task_outcomes import observe
             root = (task.git_baseline or {}).get("repository_root")
             observe(task.outcome_evidence, kind, fields, task.repo_path, Path(root) if root else None)
+        except StateOwnershipError:
+            raise
         except Exception:
             log.debug("task %s: outcome evidence unavailable", task.task_id, exc_info=True)
         try:
             task.events.write(kind, fields, raw_offset=raw_offset, source_ts=source_ts)
+        except StateOwnershipError:
+            raise
         except Exception:
             task.acc.normalize_errors += 1
             log.debug("task %s: could not write a normalized event", task.task_id, exc_info=True)
@@ -3792,6 +3968,7 @@ async def _drain_stderr(task: Task, registry: TaskRegistry | None = None) -> Non
     assert task.proc is not None and task.proc.stderr is not None
     reader = task.proc.stderr
     try:
+        assert_owned(registry.state_layout if registry is not None else task.state_layout)
         while True:
             try:
                 raw = await reader.readline()
@@ -3810,6 +3987,9 @@ async def _drain_stderr(task: Task, registry: TaskRegistry | None = None) -> Non
                     if registry is not None:
                         registry._record_usage_limit(task)
     except asyncio.CancelledError:
+        raise
+    except StateOwnershipError:
+        _stop_failed_drainer(task)
         raise
     except Exception:
         log.exception("task %s: stderr drainer failed", task.task_id)
@@ -3861,6 +4041,8 @@ async def _await_cancel_verdict(task: Task, registry: TaskRegistry) -> str:
             verdict = await asyncio.to_thread(
                 control.cancel_verdict, registry.log_dir, task.task_id
             )
+        except StateOwnershipError:
+            raise
         except Exception:
             log.warning(
                 "task %s: could not read the cross-process cancel verdict; treating as none",
@@ -3878,6 +4060,7 @@ async def _monitor(task: Task, registry: TaskRegistry) -> None:
 
     The sole writer of terminal status and of `Task.done`.
     """
+    assert_owned(registry.state_layout)
     assert task.proc is not None
     abandoned = False
     try:
@@ -3925,6 +4108,8 @@ async def _monitor(task: Task, registry: TaskRegistry) -> None:
                 task.acc.total_cost_usd,
                 len(task.acc.denials),
             )
+        except StateOwnershipError:
+            raise
         except Exception:  # pragma: no cover - logging must never change an outcome
             log.exception("task %s: could not log its completion", task.task_id)
     except asyncio.CancelledError:
@@ -3952,53 +4137,83 @@ async def _monitor(task: Task, registry: TaskRegistry) -> None:
             "running, for a later server process to resolve" if abandoned else "cancelled as asked",
         )
         raise
+    except StateOwnershipError:
+        raise
     except Exception:
         log.exception("task %s: monitor failed", task.task_id)
         task.finished_at = _now()
         task.status = "cancelled" if task.cancel_requested else "failed"
     finally:
-        # Skipped when abandoned, which is the one case where a task is left non-terminal: `done`
-        # alongside a non-terminal status is only unobservable because the loop that could observe
-        # it is the one being torn down.
-        if not abandoned:
-            if task.status not in TERMINAL_STATUSES:
-                task.status = "cancelled" if task.cancel_requested else "failed"
-                task.finished_at = task.finished_at or _now()
-            if task.exit_code is not None:
+        try:
+            # Skipped when abandoned, which is the one case where a task is left non-terminal: `done`
+            # alongside a non-terminal status is only unobservable because the loop that could observe
+            # it is the one being torn down.
+            if not abandoned:
+                if task.status not in TERMINAL_STATUSES:
+                    task.status = "cancelled" if task.cancel_requested else "failed"
+                    task.finished_at = task.finished_at or _now()
+                if task.exit_code is not None:
+                    try:
+                        from .task_outcomes import capture
+                        task.outcome = await asyncio.to_thread(capture, task.repo_path, task.git_baseline, task.outcome_evidence)
+                        task.outcome["structured_evidence_complete"] = task.output_drained and not task.acc.normalize_errors
+                    except StateOwnershipError:
+                        task.done.set()
+                        raise
+                    except Exception:
+                        log.warning("task %s: outcome inspection unavailable", task.task_id, exc_info=True)
+                if task.caller_approvals and task.exit_code is not None and task.output_drained:
+                    task.approval_view = {"pending_count": 0, "delivery_uncertain_count": 0, "interaction_state": None, "requests": [], "uncertainty_requests": []}
+                task.done.set()
                 try:
-                    from .task_outcomes import capture
-                    task.outcome = await asyncio.to_thread(capture, task.repo_path, task.git_baseline, task.outcome_evidence)
-                    task.outcome["structured_evidence_complete"] = task.output_drained and not task.acc.normalize_errors
+                    registry.persist(task)
+                    if task.auto_continue and task.output_drained:
+                        from .task_continuation import schedule_automatic
+                        schedule_automatic(registry, task)
+                    else:
+                        registry.prune()
+                except StateOwnershipError:
+                    raise
+                except Exception:  # pragma: no cover - bookkeeping must never mask a finished run
+                    log.exception("task %s: recording the finished run failed", task.task_id)
+                # Guarded separately from the persist/prune above: a broken event log must not affect
+                # whether the run's terminal status and record landed, which is already done by here.
+                try:
+                    if task.events is not None:
+                        task.events.write(
+                            "task_finished",
+                            {
+                                "status": task.status,
+                                "exit_code": task.exit_code,
+                                "summary": task.acc.summary,
+                                "observed": task.exit_code is not None,
+                            },
+                        )
+                except StateOwnershipError:
+                    raise
                 except Exception:
-                    log.warning("task %s: outcome inspection unavailable", task.task_id, exc_info=True)
-            if task.caller_approvals and task.exit_code is not None and task.output_drained:
-                task.approval_view = {"pending_count": 0, "delivery_uncertain_count": 0, "interaction_state": None, "requests": [], "uncertainty_requests": []}
-            task.done.set()
-            try:
-                registry.persist(task)
-                if task.auto_continue and task.output_drained:
-                    from .task_continuation import schedule_automatic
-                    schedule_automatic(registry, task)
-                else:
-                    registry.prune()
-            except Exception:  # pragma: no cover - bookkeeping must never mask a finished run
-                log.exception("task %s: recording the finished run failed", task.task_id)
-            # Guarded separately from the persist/prune above: a broken event log must not affect
-            # whether the run's terminal status and record landed, which is already done by here.
-            try:
-                if task.events is not None:
-                    task.events.write(
-                        "task_finished",
-                        {
-                            "status": task.status,
-                            "exit_code": task.exit_code,
-                            "summary": task.acc.summary,
-                            "observed": task.exit_code is not None,
-                        },
-                    )
-                    task.events.close()
-            except Exception:
-                log.exception("task %s: could not write the task_finished event", task.task_id)
+                    log.exception("task %s: could not write the task_finished event", task.task_id)
+        finally:
+            _close_events_after_writers(task)
+
+
+def _close_events_after_writers(task: Task) -> None:
+    """Close the event resource once the monitor and remaining pipe writers settle."""
+    if task._events_cleanup_armed:
+        return
+    task._events_cleanup_armed = True
+    pending = {writer for writer in [*task.watchers, task.pump]
+               if writer is not None and not writer.done()}
+
+    def settled(done=None) -> None:
+        pending.discard(done)
+        if not pending and task.events is not None:
+            task.events.close()
+
+    for writer in pending:
+        writer.add_done_callback(settled)
+    if not pending:
+        settled()
 
 
 def _classify(task: Task, exit_code: int) -> Status:

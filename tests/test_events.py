@@ -16,6 +16,8 @@ from harflow_mcp import backends, tasks as tasks_module
 from harflow_mcp.backends import Invocation
 from harflow_mcp.backends.base import Enforcement
 from harflow_mcp.events import EventLog, events_path
+from harflow_mcp import state_ownership
+from harflow_mcp.state_layout import resolve_layout
 from harflow_mcp.tasks import Task, TaskRegistry
 
 
@@ -65,7 +67,16 @@ class _RecordingBackend:
 
 def task_root(tmp_path: Path) -> Path:
     """Use the public isolated state/tasks layout for process-launch fixtures."""
-    return tmp_path / "state" / "tasks"
+    return tmp_path / "tasks"
+
+
+@pytest.fixture
+def tmp_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    root = tmp_path_factory.mktemp("events") / "state"
+    with state_ownership.state_session(resolve_layout(root=root)):
+        tasks = root / "tasks"
+        tasks.mkdir()
+        yield root
 
 
 @pytest.fixture
@@ -225,15 +236,26 @@ async def test_raw_offset_is_null_after_the_raw_log_handle_is_dropped(
         def close(self):
             self._real.close()
 
-    real_open = Path.open
+    real_fdopen = tasks_module.os.fdopen
+    real_open_descriptor = tasks_module.open_descriptor
+    raw_open_pending = False
 
-    def flaky_open(self, mode="r", *args, **kwargs):
-        handle = real_open(self, mode, *args, **kwargs)
-        if mode == "ab" and self.name.endswith(".jsonl") and ".events." not in self.name:
+    def capture_raw_open(path, *args, **kwargs):
+        nonlocal raw_open_pending
+        raw_open_pending = Path(path).suffix == ".jsonl" and ".events." not in Path(path).name
+        return real_open_descriptor(path, *args, **kwargs)
+
+    monkeypatch.setattr(tasks_module, "open_descriptor", capture_raw_open)
+
+    def flaky_fdopen(fd, mode="r", *args, **kwargs):
+        nonlocal raw_open_pending
+        handle = real_fdopen(fd, mode, *args, **kwargs)
+        if mode == "ab" and raw_open_pending:
+            raw_open_pending = False
             return _FlakyHandle(handle)
         return handle
 
-    monkeypatch.setattr(Path, "open", flaky_open)
+    monkeypatch.setattr(tasks_module.os, "fdopen", flaky_fdopen)
 
     task = await registry.start("hi", tmp_path, backend=backend)
     await task.done.wait()

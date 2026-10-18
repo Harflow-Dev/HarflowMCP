@@ -5,6 +5,9 @@ seeks directly to an issued byte boundary and never scans the complete log.
 """
 from __future__ import annotations
 
+from .state_access import path_operation, require_state_path
+from .state_ownership import current_owned
+
 import base64
 import hashlib
 import json
@@ -87,8 +90,9 @@ def _output(event: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+@path_operation
 def read_cursor_page(path: Path, *, cursor: str | None = None, limit: int = DEFAULT_LIMIT,
-                     kinds: list[str] | None = None) -> CursorEventPage:
+                     kinds: list[str] | None = None, layout=None) -> CursorEventPage:
     """Newest page, or one older page from ``next_cursor``, oldest first.
 
     Each call reads at most 1 MiB plus four 64-byte integrity anchors and decodes
@@ -99,6 +103,8 @@ def read_cursor_page(path: Path, *, cursor: str | None = None, limit: int = DEFA
     deliberately reload the newest page. A partial final line remains available
     to a live tail beginning at ``live_offset``.
     """
+    layout = layout if layout is not None else current_owned().layout
+    require_state_path(layout, path)
     if type(limit) is not int or not 1 <= limit <= 200:
         raise ValueError("limit must be 1..200")
     if kinds is not None and (not isinstance(kinds, list) or not kinds or

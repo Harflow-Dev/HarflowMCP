@@ -23,7 +23,9 @@ import pytest
 from mcp import MCPError
 
 from harflow_mcp import backends, control, ctl, followups, inbox, retention, server, store
+from harflow_mcp import state_ownership
 from harflow_mcp.events import events_path
+from harflow_mcp.state_layout import resolve_layout
 from harflow_mcp.tasks import SessionBusyError, TaskRegistry
 
 from test_registry import make_task
@@ -124,8 +126,15 @@ def spawns(registry: TaskRegistry, monkeypatch: pytest.MonkeyPatch) -> Spawns:
 
 
 @pytest.fixture
-def log_dir(registry: TaskRegistry) -> Path:
-    return registry.log_dir
+def log_dir(registry: TaskRegistry, tmp_path: Path) -> Path:
+    """Use an isolated, explicitly initialized current state root for ledger tests."""
+    directory = tmp_path / "state" / "tasks"
+    with state_ownership.state_session(resolve_layout(root=tmp_path / "state")):
+        pass
+    directory.mkdir(parents=True, exist_ok=True)
+    registry._log_dir = directory
+    registry.state_layout = resolve_layout(log_dir=directory)
+    return directory
 
 
 def send(log_dir: Path, text: str = "hello", task_id: str = SRC, **kwargs) -> dict:
@@ -775,6 +784,10 @@ async def test_status_carries_queued_followups_live_and_recovered(
 @pytest.fixture
 def ctl_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    state_root = tmp_path / "state"
+    monkeypatch.setenv("HARFLOW_STATE_ROOT", str(state_root))
+    with state_ownership.state_session(resolve_layout(root=state_root)):
+        pass
     from harflow_mcp.tasks import default_log_dir
 
     return default_log_dir()

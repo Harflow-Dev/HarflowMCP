@@ -5,6 +5,16 @@ from unittest.mock import AsyncMock
 import pytest
 
 from harflow_mcp import ctl, server
+from harflow_mcp import state_ownership
+from harflow_mcp.state_layout import resolve_layout
+
+
+@pytest.fixture(autouse=True)
+def owned_cli_state(tmp_path, monkeypatch):
+    root = tmp_path / "state"
+    monkeypatch.setenv("HARFLOW_STATE_ROOT", str(root))
+    with state_ownership.state_session(resolve_layout(root=root)):
+        pass
 
 
 def test_cli_build_reads_large_definition_and_source_files(monkeypatch, tmp_path, capsys):

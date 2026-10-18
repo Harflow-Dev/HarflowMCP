@@ -5,6 +5,16 @@ import pytest
 
 from harflow_mcp import event_history as history
 from harflow_mcp.events import PAGE_BUDGET_BYTES
+from harflow_mcp import state_ownership
+from harflow_mcp.state_layout import resolve_layout
+
+
+@pytest.fixture
+def tmp_path(tmp_path_factory: pytest.TempPathFactory):
+    root = tmp_path_factory.mktemp("event-history") / "state"
+    with state_ownership.state_session(resolve_layout(root=root)):
+        (root / "tasks").mkdir()
+        yield root
 
 
 def event_json(value):
@@ -219,8 +229,10 @@ async def test_server_page_reads_exact_task_without_legacy_scan(tmp_path, monkey
     monkeypatch.setattr(workflow_inspection, 'managed_page_reader', lambda _: (True, None))
     monkeypatch.setattr(store, 'read', lambda *a, **k: object())
     monkeypatch.setattr(server, '_guard_task_read', lambda *a: pytest.fail('legacy authority scan'))
-    monkeypatch.setattr(server._reg(), '_log_dir', tmp_path)
-    write(events_path(tmp_path, 'task-1'), 250)
+    registry = server._reg()
+    monkeypatch.setattr(registry, '_log_dir', tmp_path / 'tasks')
+    registry.state_layout = resolve_layout(log_dir=tmp_path / 'tasks')
+    write(events_path(tmp_path / 'tasks', 'task-1'), 250)
     first = await server.get_task_event_page('task-1')
     second = await server.get_task_event_page('task-1', cursor=first['next_cursor'])
     assert len(first['events']) == len(second['events']) == 100
@@ -272,7 +284,9 @@ async def test_server_event_page_caps_direct_metadata_read(tmp_path, monkeypatch
     from harflow_mcp import server, workflow_inspection, store
     from harflow_mcp.catalog import METADATA_BYTES
     monkeypatch.setattr(workflow_inspection, 'managed_page_reader', lambda _: (True, None))
-    monkeypatch.setattr(server._reg(), '_log_dir', tmp_path)
+    registry = server._reg()
+    monkeypatch.setattr(registry, '_log_dir', tmp_path / 'tasks')
+    registry.state_layout = resolve_layout(log_dir=tmp_path / 'tasks')
     seen = []
     def bounded(*args, **kwargs):
         seen.append(kwargs)

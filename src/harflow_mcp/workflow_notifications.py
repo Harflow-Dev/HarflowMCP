@@ -1,6 +1,9 @@
 """Durable root-workflow notification subscriptions and frozen delivery intents."""
 from __future__ import annotations
 
+from .state_access import task_operation, assert_task_owned, OwnedConnection
+from .state_ownership import StateOwnershipError, StateIncompatible
+
 import json
 import math
 import sqlite3
@@ -15,6 +18,9 @@ from .workflows import WorkflowStore, _identifier
 
 
 def initialize(db):
+    if not isinstance(db, OwnedConnection):
+        raise StateIncompatible("Notification schema requires an owned state connection")
+    db._assert()
     db.execute('''CREATE TABLE IF NOT EXISTS workflow_subscriptions (
         id TEXT PRIMARY KEY, workflow_run_id TEXT NOT NULL, destination TEXT NOT NULL,
         events TEXT NOT NULL, state TEXT NOT NULL, from_sequence INTEGER NOT NULL,
@@ -37,10 +43,12 @@ def _events(events):
 
 
 def _storage(log_dir):
+    assert_task_owned(log_dir)
     return WorkflowStore(root=Path(log_dir).parent)
 
 
 def _run(log_dir, run_id):
+    assert_task_owned(log_dir)
     from .catalog import METADATA_BYTES, metadata_request
     with metadata_request() as budget:
         run = _storage(log_dir).get_run(_identifier(run_id), metadata_byte_limit=METADATA_BYTES, metadata_budget=budget)
@@ -55,6 +63,7 @@ def _public(row):
     return {k: (json.loads(row[k]) if k == 'events' else row[k]) for k in ('id', 'workflow_run_id', 'destination', 'events', 'state', 'from_sequence', 'last_point_sequence')}
 
 
+@task_operation
 def subscribe(log_dir, workflow_run_id, notify, events=None, *, reservation=False):
     transport.preflight(notify)
     _identifier(workflow_run_id)
@@ -84,12 +93,14 @@ def subscribe(log_dir, workflow_run_id, notify, events=None, *, reservation=Fals
         return result
 
 
+@task_operation
 def activate(log_dir, run_id):
     _run(log_dir, run_id)
     with transport._db(log_dir) as db:
         db.execute("UPDATE workflow_subscriptions SET state='active',updated=? WHERE workflow_run_id=? AND state='reserved'", (time.time(), run_id))
 
 
+@task_operation
 def discard_unstarted(log_dir, run_id):
     if (_storage(log_dir).runs / f'{_identifier(run_id)}.json').exists():
         return False
@@ -97,6 +108,7 @@ def discard_unstarted(log_dir, run_id):
         return bool(db.execute("DELETE FROM workflow_subscriptions WHERE workflow_run_id=? AND state='reserved'", (run_id,)).rowcount)
 
 
+@task_operation
 def status(log_dir, workflow_run_id):
     _identifier(workflow_run_id)
     connection = transport._existing_db(log_dir, 'ro')
@@ -111,6 +123,7 @@ def status(log_dir, workflow_run_id):
         return {'subscriptions': subscriptions, 'deliveries': deliveries}
 
 
+@task_operation
 def unsubscribe(log_dir, workflow_run_id, notify=None):
     _identifier(workflow_run_id)
     with transport._db(log_dir) as db:
@@ -132,6 +145,7 @@ def _synthetic(run, source):
 
 
 def _artifacts(log_dir, run_id):
+    assert_task_owned(log_dir)
     from . import artifacts
     from .catalog import metadata_request
     result = {'observed_at': time.time(), 'items': [], 'truncated': False, 'detail_ref': {'tool': 'get_workflow_artifacts', 'workflow_run_id': run_id}}
@@ -140,12 +154,15 @@ def _artifacts(log_dir, run_id):
             page = artifacts.workflow_page(log_dir, run_id, cursor=None, limit=10)
         result['items'] = [{k: item.get(k) if k not in ('node_id', 'execution_id', 'task_id') else (item.get('workflow') or {}).get(k, item.get(k)) for k in ('artifact_id', 'kind', 'path', 'node_id', 'execution_id', 'task_id', 'availability')} for item in page.get('items', [])]
         result['truncated'] = bool(page.get('next_cursor') or page.get('has_more') or page.get('owners')) or page.get('state') == 'unavailable'
+    except StateOwnershipError:
+        raise
     except Exception:
         result['truncated'] = True
     return result
 
 
 def _payload(log_dir, subscription, point, missed):
+    assert_task_owned(log_dir)
     identifier = str(uuid.uuid4())
     snapshot = point.get('snapshot')
     # A missing historical snapshot must never be rebuilt from a later run state.
@@ -171,6 +188,7 @@ def _payload(log_dir, subscription, point, missed):
 
 
 def _detect(log_dir, subscription):
+    assert_task_owned(log_dir)
     storage = _storage(log_dir)
     path = storage.runs / (subscription['workflow_run_id'] + '.json')
     try:
@@ -228,11 +246,13 @@ def _detect(log_dir, subscription):
 
 
 def _defer(log_dir, identifier):
+    assert_task_owned(log_dir)
     now = time.time()
     with transport._db(log_dir) as db:
         db.execute("UPDATE workflow_deliveries SET updated=? WHERE id=? AND state IN ('pending','retry','delivering') AND lease_until<=?", (now, identifier, now))
 
 
+@task_operation
 def tick(log_dir):
     now = time.time()
     with transport._db(log_dir) as db:
@@ -244,6 +264,8 @@ def tick(log_dir):
     for subscription in subscriptions:
         try:
             _detect(log_dir, subscription)
+        except StateOwnershipError:
+            raise
         except Exception:
             continue
     with transport._db(log_dir) as db:
@@ -256,6 +278,8 @@ def tick(log_dir):
         try:
             run = _run(log_dir, row['workflow_run_id'])
             current_key = points.point_key(run)
+        except StateOwnershipError:
+            raise
         except Exception:
             _defer(log_dir, row['id'])
             continue
@@ -280,6 +304,8 @@ def tick(log_dir):
         error = None
         try:
             transport._deliver(transport.preflight(row['destination']), row['id'], body)
+        except StateOwnershipError:
+            raise
         except Exception:
             error = 'delivery attempt failed'
         attempts = claimed['attempts']

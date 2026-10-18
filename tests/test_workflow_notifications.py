@@ -7,8 +7,17 @@ from pathlib import Path
 import pytest
 
 from harflow_mcp import workflow_notifications as wn, workflow_notification_points as points
+from harflow_mcp import state_ownership
+from harflow_mcp.state_layout import resolve_layout
 
 ORIGINAL_RUN = wn._run
+
+
+@pytest.fixture
+def tmp_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    root = tmp_path_factory.mktemp("workflow-notifications") / "state"
+    with state_ownership.state_session(resolve_layout(root=root)):
+        yield root
 
 
 @pytest.fixture

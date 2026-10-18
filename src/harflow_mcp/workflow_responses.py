@@ -187,17 +187,17 @@ def detail(run: dict[str, Any], view: str, cursor: str | None = None, limit: int
     return {"response_version": 1, "workflow_run_id": run["workflow_run_id"], "view": view, "encoding": "json", "content_sha256": digest, "offset": offset, "total_characters": len(serialized), "chunk": chunk, "next_cursor": next_cursor}
 
 
-def monitor_snapshot(run, run_id, cache, cursor=None):
+def monitor_snapshot(run, run_id, cache, cursor=None, *, layout=None):
     """Local CLI-only lossless paging of a stable Monitor transport snapshot."""
     from .workflow_monitor_snapshot import snapshot
     captured = run | {"monitor_digests": monitor(run)["monitor_digests"]} if run is not None else None
-    return snapshot(captured, run_id, cache, cursor)
+    return snapshot(captured, run_id, cache, cursor, layout=layout)
 
 
-def monitor_detail(run, run_id, view, cache, cursor=None):
+def monitor_detail(run, run_id, view, cache, cursor=None, *, layout=None):
     """CLI-only frozen view transport; managed/public detail semantics remain unchanged."""
     from .workflow_monitor_snapshot import snapshot
     serialized = _serialize(_view_value(run, view)).encode('ascii') if run is not None else None
-    page = snapshot(run, run_id, cache, cursor, view=view, serialized=serialized)
+    page = snapshot(run, run_id, cache, cursor, view=view, serialized=serialized, layout=layout)
     page.pop('monitor_snapshot')
     return {**page, 'response_version': 1, 'view': view, 'encoding': 'json'}

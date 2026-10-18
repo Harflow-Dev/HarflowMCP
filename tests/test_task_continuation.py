@@ -9,6 +9,7 @@ from harflow_mcp import store
 from harflow_mcp.backends import get
 from harflow_mcp.backends.base import Accumulator
 from harflow_mcp.task_continuation import context, continue_task, validate_budget
+from harflow_mcp.state_layout import resolve_layout
 
 
 def state_dir(tmp_path):
@@ -45,6 +46,7 @@ def record(tmp_path, **kwargs):
 class Registry:
     def __init__(self, root):
         self.log_dir = root if root.name == "tasks" else state_dir(root)
+        self.state_layout = resolve_layout(log_dir=self.log_dir)
         self._mutation_caller = AsyncMock(return_value=None)
         self.start = AsyncMock(side_effect=self.spawn)
         self.children = {}
@@ -355,7 +357,11 @@ with open(sys.argv[1], 'a') as lock:
         await proc.wait()
         result = await cancellation
         assert (state / f'{source.task_id}.continuation-stopped.json').exists()
-        assert 'd' * 32 in TaskRegistry._cascade_targets(SimpleNamespace(_log_dir=state), source.task_id, [])
+        assert 'd' * 32 in TaskRegistry._cascade_targets(
+            SimpleNamespace(_log_dir=state, state_layout=resolve_layout(log_dir=state)),
+            source.task_id,
+            [],
+        )
         if end_to_end:
             assert set(observed_targets) == {source.task_id, 'd' * 32}
             assert result['rounds'] == 2

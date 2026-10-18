@@ -24,6 +24,10 @@ reports compatibility without importing the task runtime through the installed l
 
 from __future__ import annotations
 
+from .state_ownership import state_session, StateOwnershipError
+
+from .state_access import task_layout
+
 import argparse
 import asyncio
 import json
@@ -440,6 +444,8 @@ def _cmd_list(args: argparse.Namespace, parser: _ArgumentParser) -> int:
     from .workflow_inspection import filter_task_reads, managed_reader
     try:
         entries = filter_task_reads(entries, managed_reader(log_dir))
+    except StateOwnershipError:
+        raise
     except Exception as exc:
         return _fail(args, "workflow_read_refused", str(exc))
     if args.json:
@@ -487,6 +493,8 @@ def _status_snapshot(log_dir: Path, task_id: str, managed: Any) -> dict[str, Any
     from .workflow_inspection import guard_task_read
     try:
         guard_task_read(task_id, managed)
+    except StateOwnershipError:
+        raise
     except Exception as exc:
         raise _StatusReadRefused("workflow_read_refused", str(exc)) from None
     record = store.read(log_dir, task_id)
@@ -506,6 +514,8 @@ def _cmd_status(args: argparse.Namespace) -> int:
     from .workflow_inspection import managed_reader
     try:
         managed = managed_reader(log_dir)
+    except StateOwnershipError:
+        raise
     except Exception as exc:
         return _fail(args, "workflow_read_refused", str(exc))
 
@@ -517,7 +527,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
     if getattr(args, 'brief', False):
         from .task_reads import brief_status
         from .events import events_path, read_recent
-        snapshot['recent_activity'] = read_recent(events_path(log_dir, task_id), limit=3)
+        snapshot['recent_activity'] = read_recent(events_path(log_dir, task_id), limit=3, layout=task_layout(log_dir))
         snapshot = brief_status(snapshot)
     if args.json:
         print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "task": snapshot})))
@@ -553,6 +563,8 @@ def _cmd_status_batch(args: argparse.Namespace) -> int:
     from .workflow_inspection import managed_reader
     try:
         managed = managed_reader(log_dir)
+    except StateOwnershipError:
+        raise
     except Exception as exc:
         # Undecidable caller authority refuses the whole batch — never partial data.
         return _fail(args, "workflow_read_refused", str(exc))
@@ -590,6 +602,8 @@ def _cmd_send(args: argparse.Namespace) -> int:
 
     try:
         by = identity.own_identity()
+    except StateOwnershipError:
+        raise
     except Exception:
         by = None
     try:
@@ -835,7 +849,7 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
             from .catalog import Catalog
             from .workflow_inspection import page_indexing_response
             directory = default_log_dir()
-            if not Catalog(directory, store.RECORD_SUFFIX).ready():
+            if not Catalog(directory, store.RECORD_SUFFIX, layout=task_layout(directory)).ready():
                 await asyncio.to_thread(store.bootstrap_catalog, directory)
                 pending = page_indexing_response(directory)
                 if action == 'list':
@@ -967,6 +981,8 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
         return await server._workflow_call(action, run_id=args.workflow_run_id, **({"interaction_owner": "monitor"} if getattr(args, "monitor", False) else {}))
     try:
         result = asyncio.run(invoke())
+    except StateOwnershipError:
+        raise
     except Exception as exc:
         return _fail(args, "workflow_error", str(exc), getattr(getattr(exc, "error", None), "data", None))
     from .read_metrics import span
@@ -1008,6 +1024,19 @@ def _main(argv: list[str] | None = None) -> int:
     parser, list_p = parsers[0], parsers[1]
 
     args = parser.parse_args(argv)
+    # Informational backend/config inspection does not access engine state.
+    config_only = args.command == "backends" or (
+        args.command == "mcp-allowlist" and args.allow is None and args.remove is None)
+    if config_only:
+        return _execute(args, list_p)
+    try:
+        with state_session(task_layout(default_log_dir())):
+            return _execute(args, list_p)
+    except StateOwnershipError as exc:
+        return _fail(args, getattr(exc, "code", "state_incompatible"), str(exc))
+
+
+def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
     mutation_commands = {"run", "resume", "continue", "send", "cancel", "takeover", "takeover-attach", "approval-respond", "register-artifact"}
     from .workflow_reads import READ_ONLY_CLI_COMMANDS
     if args.command in mutation_commands or args.command.startswith("workflow-") and args.command not in READ_ONLY_CLI_COMMANDS or args.command == "mcp-allowlist" and (args.allow is not None or args.remove is not None):
@@ -1030,6 +1059,8 @@ def _main(argv: list[str] | None = None) -> int:
             return await approval_runtime.respond_request(reg, args.task_id, args.request_id, args.action_digest, args.owner_revision, args.decision, owner)
         try:
             result = asyncio.run(approval_action())
+        except StateOwnershipError:
+            raise
         except Exception as exc:
             return _fail(args, "approval_error", str(exc))
         print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": result})) if args.json else json.dumps(result, indent=2))
@@ -1069,6 +1100,8 @@ def _main(argv: list[str] | None = None) -> int:
                 network=_network(args.network), extra_writable_paths=args.extra_writable_path,
                 caller_approvals=args.caller_approvals,
             ))
+        except StateOwnershipError:
+            raise
         except Exception as exc:
             return _fail(args, "invalid_params", str(exc))
         print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": result})) if args.json else json.dumps(result, indent=2))

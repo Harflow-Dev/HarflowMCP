@@ -9,8 +9,12 @@ design, so no locking is needed here the way `retention.py` needs it for cross-p
 
 from __future__ import annotations
 
+from .state_access import open_descriptor, require_state_path, path_operation
+from .state_ownership import state_session, current_owned, StateOwnershipError, assert_owned
+
 import json
 import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from collections import deque
@@ -90,21 +94,31 @@ def _now_iso() -> str:
 class EventLog:
     """Append-only writer for one task's normalized event stream.
 
-    Every failure mode disables the log rather than raising: a normalized event is a convenience
+    Ordinary I/O failures disable the log; ownership failures raise: a normalized event is a convenience
     view over the raw stream, and losing it must never touch a run's outcome (CLAUDE.md:
     bookkeeping must never change an outcome).
     """
 
-    def __init__(self, path: Path, task_id: str) -> None:
+    def __init__(self, path: Path, task_id: str, *, layout=None) -> None:
         self._task_id = task_id
         self._seq = 0
         self._handle = None
-        try:
-            self._handle = path.open("ab")
-        except OSError:
-            log.warning(
-                "task %s: cannot open %s; events will not be recorded", task_id, path, exc_info=True
-            )
+        self._descriptor = None
+        selected = layout if layout is not None else current_owned().layout
+        with state_session(selected):
+            require_state_path(selected, path)
+            try:
+                self._descriptor = open_descriptor(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+                                                   0o600, layout=selected)
+                self._handle = os.fdopen(self._descriptor, "ab", buffering=0, closefd=False)
+            except BaseException as exc:
+                if self._descriptor is not None:
+                    self._descriptor.close()
+                    self._descriptor = None
+                if not isinstance(exc, OSError):
+                    raise
+                log.warning("task %s: cannot open %s; events will not be recorded",
+                            task_id, path, exc_info=True)
 
     def write(
         self,
@@ -115,7 +129,7 @@ class EventLog:
         source_ts: str | None = None,
     ) -> bool:
         """Append one envelope. False if the log is disabled or the write failed. Raises
-        `UnknownEventKind` for a `kind` outside `EVENT_KINDS` — the only thing it ever raises.
+        `UnknownEventKind` for an unsupported kind and ownership errors for an invalid lease.
 
         Envelope keys win over any same-named key in `fields`, so a caller can pass a backend's own
         normalized dict straight through without stripping fields that happen to collide.
@@ -127,6 +141,7 @@ class EventLog:
             raise UnknownEventKind(f"{kind!r} is not a v1 event kind; see events.EVENT_KINDS")
         if self._handle is None:
             return False
+        self._descriptor.lease.validate()
         envelope: dict[str, Any] = wire_envelope(EVENT_FORMAT, {
             "seq": self._seq,
             "observed_at": _now_iso(),
@@ -155,12 +170,17 @@ class EventLog:
         return True
 
     def close(self) -> None:
-        if self._handle is not None:
-            try:
-                self._handle.close()
-            except OSError:
-                pass
-            self._handle = None
+        try:
+            if self._handle is not None:
+                try:
+                    self._handle.close()
+                except OSError:
+                    pass
+                self._handle = None
+        finally:
+            if self._descriptor is not None:
+                self._descriptor.close()
+                self._descriptor = None
 
 
 # --- Bounded readers for events.log -----------------------------------------------------------
@@ -246,7 +266,8 @@ def _parse_event_line(line_bytes: bytes) -> dict[str, Any] | None:
     return event
 
 
-def _iter_events_forward(path: Path, skipped: list[int]) -> Iterator[dict[str, Any]]:
+@path_operation
+def _iter_events_forward(path: Path, skipped: list[int], *, layout=None) -> Iterator[dict[str, Any]]:
     """Parsed events oldest first, up to the size the file had when opened.
 
     Stopping at that size keeps a busy writer from stretching the scan, and only newline-terminated
@@ -254,16 +275,19 @@ def _iter_events_forward(path: Path, skipped: list[int]) -> Iterator[dict[str, A
     `MAX_LINE_BYTES` is discarded as it streams past — never buffered whole — and counted in
     `skipped[0]`. Stops quietly on an I/O error.
     """
+    layout = layout if layout is not None else current_owned().layout
+    require_state_path(layout, path)
     try:
         with path.open("rb") as handle:
-            yield from _iter_open_log(handle, skipped)
+            yield from _iter_open_log(handle, skipped, layout=layout)
     except OSError:
         return
 
 
-def _iter_open_log(handle: Any, skipped: list[int]) -> Iterator[dict[str, Any]]:
+def _iter_open_log(handle: Any, skipped: list[int], *, layout) -> Iterator[dict[str, Any]]:
     """`_iter_events_forward`'s loop over an open log — split out so one `try` covers the whole
     life of the file, closing included."""
+    assert_owned(layout)
     try:
         remaining = handle.seek(0, 2)
         handle.seek(0)
@@ -272,6 +296,7 @@ def _iter_open_log(handle: Any, skipped: list[int]) -> Iterator[dict[str, Any]]:
     fragment = b""
     discarding = False
     while remaining > 0:
+        assert_owned(layout)
         try:
             chunk = handle.read(min(CHUNK_SIZE, remaining))
         except OSError:
@@ -303,7 +328,8 @@ def _iter_open_log(handle: Any, skipped: list[int]) -> Iterator[dict[str, Any]]:
                 yield event
 
 
-def _stream_events_backward(path: Path) -> list[dict[str, Any]]:
+@path_operation
+def _stream_events_backward(path: Path, *, layout=None) -> list[dict[str, Any]]:
     """The events in the last `RECENT_ACTIVITY_MAX_BYTES` of the log, newest first.
 
     One bounded read of the tail rather than chunked seeks: at ≤ 1 MiB it is cheap, and a single
@@ -312,6 +338,8 @@ def _stream_events_backward(path: Path) -> list[dict[str, Any]]:
     newline are a line the owner is still appending. Splitting at `\n` bytes never cuts a UTF-8
     sequence. Never raises.
     """
+    layout = layout if layout is not None else current_owned().layout
+    require_state_path(layout, path)
     try:
         with path.open("rb") as handle:
             end = handle.seek(0, 2)
@@ -411,17 +439,20 @@ def _format_single_event(event: dict[str, Any], tool_names: dict[str, str]) -> s
     return line
 
 
-def read_recent(path: Path, limit: int = RECENT_ACTIVITY_LIMIT) -> list[str]:
+@path_operation
+def read_recent(path: Path, limit: int = RECENT_ACTIVITY_LIMIT, *, layout=None) -> list[str]:
     """The last `limit` meaningful events as one-line strings, oldest first.
 
     Scans the log backwards (`_stream_events_backward`: 64 KiB chunks, ≤ 1 MiB, whole lines only,
     oversized and unparsable lines skipped). A block still being streamed shows as one `text…`
-    line at the position of its newest delta. Never raises: a missing or unreadable log is `[]`.
+    line at the position of its newest delta. Ownership failures raise; missing or unreadable logs return `[]`.
     """
+    layout = layout if layout is not None else current_owned().layout
+    require_state_path(layout, path)
     if limit <= 0:
         return []
     try:
-        events = list(reversed(_stream_events_backward(path)))
+        events = list(reversed(_stream_events_backward(path, layout=layout)))
         tool_names = {
             str(e["call_id"]): str(e.get("tool") or "a tool call")
             for e in events
@@ -438,17 +469,21 @@ def read_recent(path: Path, limit: int = RECENT_ACTIVITY_LIMIT) -> list[str]:
                 timeline.append(event)
         lines = [line for e in timeline if (line := _format_single_event(e, tool_names))]
         return lines[-limit:]
+    except StateOwnershipError:
+        raise
     except Exception:  # bookkeeping must never change an outcome — a status call still answers
         log.debug("could not summarise recent activity from %s", path, exc_info=True)
         return []
 
 
+@path_operation
 def read_page(
     path: Path,
     limit: int,
     before_seq: int | None = None,
     after_seq: int | None = None,
     kinds: list[str] | None = None,
+    *, layout=None,
 ) -> PageResult:
     """Read a page of events from the events log.
 
@@ -475,6 +510,8 @@ def read_page(
     Missing file returns empty list, has_more=False.
     Never raises on I/O problems.
     """
+    layout = layout if layout is not None else current_owned().layout
+    require_state_path(layout, path)
     # Validate parameters
     if limit < 1 or limit > 200:
         raise ValueError(f"limit must be 1..200, got {limit}")
@@ -520,7 +557,7 @@ def read_page(
     matching = 0
     if after_seq is not None:
         events_to_return: list[dict[str, Any]] = []
-        for event in _iter_events_forward(path, skipped):
+        for event in _iter_events_forward(path, skipped, layout=layout):
             if matches(event):
                 matching += 1
                 if len(events_to_return) == limit:
@@ -528,7 +565,7 @@ def read_page(
                 events_to_return.append(event)
     else:
         window: deque[dict[str, Any]] = deque(maxlen=limit)
-        for event in _iter_events_forward(path, skipped):
+        for event in _iter_events_forward(path, skipped, layout=layout):
             if matches(event):
                 matching += 1
                 window.append(event)

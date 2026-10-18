@@ -6,6 +6,22 @@ import time
 import pytest
 
 from harflow_mcp import workflow_responses
+from harflow_mcp import ctl
+from harflow_mcp import state_ownership
+from harflow_mcp.state_layout import resolve_layout
+
+
+@pytest.fixture
+def tmp_path(tmp_path_factory: pytest.TempPathFactory):
+    root = tmp_path_factory.mktemp("workflow-snapshot") / "state"
+    with state_ownership.state_session(resolve_layout(root=root)):
+        (root / "tasks").mkdir()
+        yield root / "tasks"
+
+
+@pytest.fixture(autouse=True)
+def isolated_cli_state(tmp_path, monkeypatch):
+    monkeypatch.setattr(ctl, "default_log_dir", lambda: tmp_path)
 
 
 def test_snapshot_pages_remain_lossless_when_live_run_changes(tmp_path):
@@ -56,13 +72,13 @@ def test_finished_paging_removes_snapshot_file(tmp_path):
     page = workflow_responses.monitor_snapshot({"workflow_run_id": "run", "summary": "x" * 400000}, "run", tmp_path)
     while page["next_cursor"]:
         page = workflow_responses.monitor_snapshot(None, "run", tmp_path, page["next_cursor"])
-    assert not list(tmp_path.iterdir())
+    assert [path for path in tmp_path.iterdir() if path.name != ".harflow-store.json"] == []
 
 
 def test_cli_snapshot_pages_do_not_reload_changing_run(monkeypatch, tmp_path, capsys):
     from harflow_mcp import ctl, workflow_reads
     from unittest.mock import AsyncMock
-    monkeypatch.setattr(ctl, "default_log_dir", lambda: tmp_path / "tasks")
+    monkeypatch.setattr(ctl, "default_log_dir", lambda: tmp_path)
     monkeypatch.setattr(workflow_reads, "bounded_caller", AsyncMock(return_value=None))
     read = AsyncMock(return_value={"workflow_run_id": "run", "summary": "x" * 400000})
     monkeypatch.setattr(workflow_reads, "call", read)
@@ -75,7 +91,7 @@ def test_cli_snapshot_pages_do_not_reload_changing_run(monkeypatch, tmp_path, ca
 def test_managed_cli_snapshot_is_refused_before_any_content(monkeypatch, tmp_path, capsys):
     from harflow_mcp import ctl, workflow_reads
     from unittest.mock import AsyncMock
-    monkeypatch.setattr(ctl, "default_log_dir", lambda: tmp_path / "tasks")
+    monkeypatch.setattr(ctl, "default_log_dir", lambda: tmp_path)
     monkeypatch.setattr(workflow_reads, "bounded_caller", AsyncMock(return_value=object()))
     read = AsyncMock()
     monkeypatch.setattr(workflow_reads, "call", read)
@@ -150,7 +166,7 @@ def test_fresh_snapshot_provider_reads_only_requested_chunk_and_bounded_receipt(
 def test_monitor_detail_cli_freezes_only_view_and_never_reloads_on_continuations(monkeypatch, tmp_path, capsys):
     from harflow_mcp import ctl, workflow_reads
     from unittest.mock import AsyncMock
-    monkeypatch.setattr(ctl, 'default_log_dir', lambda: tmp_path / 'tasks')
+    monkeypatch.setattr(ctl, 'default_log_dir', lambda: tmp_path)
     guard = AsyncMock(return_value=None)
     monkeypatch.setattr(workflow_reads, 'bounded_caller', guard)
     run = {'workflow_run_id': 'run', 'summary': 'x' * 400000, 'definition': {'name': 'untouched'}}
@@ -180,7 +196,7 @@ def test_monitor_detail_cursor_cannot_change_view_or_bypass_managed_guard(monkey
     page = workflow_responses.monitor_detail({'workflow_run_id': 'run', 'summary': 'x' * 400000}, 'run', 'summary', tmp_path)
     with pytest.raises(ValueError):
         workflow_responses.monitor_detail(None, 'run', 'definition', tmp_path, page['next_cursor'])
-    monkeypatch.setattr(ctl, 'default_log_dir', lambda: tmp_path / 'tasks')
+    monkeypatch.setattr(ctl, 'default_log_dir', lambda: tmp_path)
     monkeypatch.setattr(workflow_reads, 'bounded_caller', AsyncMock(return_value=object()))
     read = AsyncMock()
     monkeypatch.setattr(workflow_reads, 'call', read)
@@ -189,10 +205,11 @@ def test_monitor_detail_cursor_cannot_change_view_or_bypass_managed_guard(monkey
     assert read.await_count == 0
 
 
-def test_default_workflow_detail_cli_keeps_public_cursor_semantics(monkeypatch, capsys):
+def test_default_workflow_detail_cli_keeps_public_cursor_semantics(monkeypatch, tmp_path, capsys):
     from harflow_mcp import ctl, workflow_reads
     from unittest.mock import AsyncMock
     public = AsyncMock(return_value={'legacy': True})
+    monkeypatch.setattr(ctl, 'default_log_dir', lambda: tmp_path)
     monkeypatch.setattr(workflow_reads, 'call', public)
     assert ctl.main(['workflow-detail', 'run', '--view', 'summary', '--cursor', 'public-cursor', '--json']) == 0
     assert json.loads(capsys.readouterr().out)['result'] == {'legacy': True}
@@ -207,8 +224,7 @@ def test_monitor_cli_cold_and_unknown_authority_never_uses_legacy_detection(monk
     from harflow_mcp import ctl, lineage, store, workflow_reads, workflow_inspection
     from dataclasses import asdict
     import os
-    directory = tmp_path / 'tasks'
-    directory.mkdir()
+    directory = tmp_path
     for number in range(103):
         task = store.TaskRecord(f'cold{number:03}', 'codex', 'session', '/repo', '2026-10-01T00:00:00+00:00', status='completed', exit_code=0)
         (directory / f'{task.task_id}.meta.json').write_text(json.dumps(asdict(task)))

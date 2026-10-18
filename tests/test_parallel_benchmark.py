@@ -1,6 +1,7 @@
 """Parallel baselines are deterministic and isolated, with actual normalized event logs."""
 import importlib.util
 import json
+from harflow_mcp.state_layout import resolve_layout
 from pathlib import Path
 import pytest
 
@@ -108,7 +109,10 @@ def test_workflow_associates_every_checkpoint_with_selected_node(tmp_path):
     associations = run['activations'][0]['tasks']
     assert len(associations) == 128
     assert {entry['task_id'] for entry in associations} == {path.name.removesuffix('.meta.json') for path in (tmp_path / '.harflow/tasks').glob('*.meta.json')}
-    snapshot = workflow_responses.monitor_snapshot(run, 'parallel-run', tmp_path / '.harflow/monitor_snapshots')
+    snapshot = workflow_responses.monitor_snapshot(
+        run, 'parallel-run', tmp_path / '.harflow/monitor_snapshots',
+        layout=resolve_layout(root=tmp_path / '.harflow'),
+    )
     assert snapshot['monitor_snapshot']
     marker = json.loads((tmp_path / 'monitor-benchmark-fixture.json').read_text())
     assert marker['definitions'] == marker['runs'] == 1

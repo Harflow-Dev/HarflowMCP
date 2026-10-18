@@ -4,6 +4,16 @@ import json
 import pytest
 
 from harflow_mcp import ctl, server
+from harflow_mcp import state_ownership
+from harflow_mcp.state_layout import resolve_layout
+
+
+@pytest.fixture(autouse=True)
+def owned_cli_state(tmp_path, monkeypatch):
+    root = tmp_path / "state"
+    monkeypatch.setenv("HARFLOW_STATE_ROOT", str(root))
+    with state_ownership.state_session(resolve_layout(root=root)):
+        pass
 
 
 @pytest.mark.parametrize('action,field', [('resume', 'instructions'), ('recover', 'reason')])

@@ -9,6 +9,15 @@ from types import SimpleNamespace
 import pytest
 
 from harflow_mcp import ctl, lineage, server, workflow_inspection, workflow_reads
+from harflow_mcp import state_ownership
+from harflow_mcp.state_layout import resolve_layout
+
+
+@pytest.fixture
+def tmp_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    root = tmp_path_factory.mktemp("workflow-reads") / "state"
+    with state_ownership.state_session(resolve_layout(root=root)):
+        yield root
 
 
 @pytest.mark.parametrize('command', [
@@ -159,6 +168,8 @@ async def test_verified_human_reads_real_saved_definition(monkeypatch, tmp_path,
 
 
 async def test_managed_orchestrator_goal_history_is_only_paged(tmp_path):
+    directory = tmp_path / "tasks"
+    directory.mkdir()
     history = [{'revision': i + 1, 'goal': 'é' * 32768, 'created_at': i} for i in range(16)]
     run = {'workflow_run_id': 'owned', 'name': 'feature', 'kind': 'workflow',
            'status': 'paused', 'goal': history[-1]['goal'], 'goal_revision': 16,
@@ -168,7 +179,7 @@ async def test_managed_orchestrator_goal_history_is_only_paged(tmp_path):
     async def reader():
         return ({'role': 'orchestrator'}, run)
     for action in ('status', 'list_runs'):
-        result = await workflow_reads.call(action, directory=tmp_path, reader=reader,
+        result = await workflow_reads.call(action, directory=directory, reader=reader,
                                            **({'run_id': 'owned'} if action == 'status' else {}))
         summary = result if action == 'status' else result[0]
         assert 'goal_history' not in summary
@@ -177,8 +188,8 @@ async def test_managed_orchestrator_goal_history_is_only_paged(tmp_path):
     chunks = []
     cursor = None
     while True:
-        page = await workflow_reads.call('detail', directory=tmp_path, reader=reader,
-                                        run_id='owned', view='goal_history', cursor=cursor, limit=8000)
+        page = await workflow_reads.call('detail', directory=directory, reader=reader,
+                                         run_id='owned', view='goal_history', cursor=cursor, limit=8000)
         assert len(page['chunk']) <= 8000
         chunks.append(page['chunk'])
         cursor = page['next_cursor']
@@ -257,8 +268,10 @@ async def test_server_node_reads_forward_selected_root(monkeypatch, tmp_path):
 
 
 async def test_goal_history_detail_does_not_expand_worker_authority(tmp_path):
+    directory = tmp_path / 'tasks'
+    directory.mkdir()
     async def reader():
         return ({'role': 'node'}, {'workflow_run_id': 'owned'})
     with pytest.raises(ValueError, match='Worker nodes cannot inspect workflow context'):
-        await workflow_reads.call('detail', directory=tmp_path, reader=reader,
+        await workflow_reads.call('detail', directory=directory, reader=reader,
                                   run_id='owned', view='goal_history')

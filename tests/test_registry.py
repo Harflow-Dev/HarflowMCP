@@ -27,10 +27,22 @@ from harflow_mcp.tasks import (
 )
 
 
+@pytest.fixture
+def tmp_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    workspace = tmp_path_factory.mktemp("registry")
+    root = workspace / "state"
+    from harflow_mcp import state_ownership
+    from harflow_mcp.state_layout import resolve_layout
+    with state_ownership.state_session(resolve_layout(root=root)):
+        (root / "tasks").mkdir(exist_ok=True)
+        yield workspace
+
+
 def make_task(
     tmp_path: Path,
     task_id: str,
     *,
+    log_dir: Path | None = None,
     session_id: str = "session",
     finished: bool = False,
     age_seconds: int = 0,
@@ -42,7 +54,7 @@ def make_task(
         repo_path=tmp_path,
         prompt="x",
         max_turns=5,
-        log_path=tmp_path / f"{task_id}.jsonl",
+        log_path=(log_dir or tmp_path) / f"{task_id}.jsonl",
         started_at=datetime.now(timezone.utc) - timedelta(seconds=age_seconds),
     )
     if finished:
@@ -51,10 +63,14 @@ def make_task(
     return task
 
 
+def registry_task(tmp_path: Path, task_id: str, **overrides) -> Task:
+    return make_task(tmp_path, task_id, log_dir=tmp_path / "state" / "tasks", **overrides)
+
+
 async def test_prune_trims_finished_tasks_oldest_first(tmp_path: Path) -> None:
     registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks", max_tasks=2)
     for index in range(4):
-        task = make_task(tmp_path, f"t{index}", finished=True, age_seconds=100 - index)
+        task = registry_task(tmp_path, f"t{index}", finished=True, age_seconds=100 - index)
         registry._tasks[task.task_id] = task
 
     registry.prune()
@@ -64,8 +80,8 @@ async def test_prune_trims_finished_tasks_oldest_first(tmp_path: Path) -> None:
 
 async def test_prune_never_evicts_a_live_task(tmp_path: Path) -> None:
     registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks", max_tasks=1)
-    live = make_task(tmp_path, "live", age_seconds=100)
-    finished = make_task(tmp_path, "finished", finished=True, age_seconds=50)
+    live = registry_task(tmp_path, "live", age_seconds=100)
+    finished = registry_task(tmp_path, "finished", finished=True, age_seconds=50)
     registry._tasks[live.task_id] = live
     registry._tasks[finished.task_id] = finished
 
@@ -78,7 +94,7 @@ async def test_prune_never_evicts_a_live_task(tmp_path: Path) -> None:
 async def test_registry_may_exceed_capacity_while_everything_is_live(tmp_path: Path) -> None:
     registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks", max_tasks=1)
     for index in range(3):
-        task = make_task(tmp_path, f"t{index}")
+        task = registry_task(tmp_path, f"t{index}")
         registry._tasks[task.task_id] = task
 
     registry.prune()
@@ -90,7 +106,7 @@ async def test_a_finishing_task_makes_room(tmp_path: Path) -> None:
     """Eviction must not depend on a new task being started."""
     registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks", max_tasks=1)
     for index in range(3):
-        task = make_task(tmp_path, f"t{index}", age_seconds=100 - index)
+        task = registry_task(tmp_path, f"t{index}", age_seconds=100 - index)
         registry._tasks[task.task_id] = task
 
     for task in registry.list():
@@ -103,7 +119,7 @@ async def test_a_finishing_task_makes_room(tmp_path: Path) -> None:
 
 def test_session_is_busy_only_while_a_run_is_live(tmp_path: Path) -> None:
     registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
-    task = make_task(tmp_path, "t0", session_id="s1")
+    task = registry_task(tmp_path, "t0", session_id="s1")
     registry._tasks[task.task_id] = task
 
     assert registry.session_has_live_run("s1")
@@ -116,8 +132,8 @@ def test_session_is_busy_only_while_a_run_is_live(tmp_path: Path) -> None:
 async def test_resume_refuses_while_the_session_has_a_live_run(tmp_path: Path) -> None:
     """Two processes on one --resume session would fight over the same conversation state."""
     registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
-    parent = make_task(tmp_path, "parent", session_id="s1", finished=True)
-    sibling = make_task(tmp_path, "sibling", session_id="s1")
+    parent = registry_task(tmp_path, "parent", session_id="s1", finished=True)
+    sibling = registry_task(tmp_path, "sibling", session_id="s1")
     registry._tasks[parent.task_id] = parent
     registry._tasks[sibling.task_id] = sibling
 
@@ -136,7 +152,7 @@ async def test_resume_runs_at_the_parents_reasoning_effort(
     have passed the weaker check this replaces.
     """
     registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
-    parent = make_task(tmp_path, "parent", session_id="s1", finished=True)
+    parent = registry_task(tmp_path, "parent", session_id="s1", finished=True)
     parent.reasoning_effort = "high"
     registry._tasks[parent.task_id] = parent
     registry.persist(parent)
@@ -147,7 +163,7 @@ async def test_resume_runs_at_the_parents_reasoning_effort(
         captured["argv"] = invocation.argv
         captured["invocation"] = invocation
         captured.update(kwargs)
-        child = make_task(tmp_path, "child", session_id="s1")
+        child = registry_task(tmp_path, "child", session_id="s1")
         child.reasoning_effort = kwargs.get("reasoning_effort")
         return child
 
@@ -186,7 +202,7 @@ async def test_resume_record_runs_at_the_recorded_reasoning_effort(
         captured["argv"] = invocation.argv
         captured["invocation"] = invocation
         captured.update(kwargs)
-        child = make_task(tmp_path, "child", session_id="s1")
+        child = registry_task(tmp_path, "child", session_id="s1")
         child.reasoning_effort = kwargs.get("reasoning_effort")
         return child
 
@@ -226,7 +242,7 @@ async def test_resume_record_with_no_stored_effort_can_still_resume(
         captured["argv"] = invocation.argv
         captured["invocation"] = invocation
         captured.update(kwargs)
-        return make_task(tmp_path, "child", session_id="s1")
+        return registry_task(tmp_path, "child", session_id="s1")
 
     monkeypatch.setattr(registry, "_spawn", fake_spawn)
 
@@ -241,7 +257,7 @@ async def test_finish_draining_abandons_pipes_held_open_after_exit(
 ) -> None:
     """A grandchild holding stdout open must not make a task unfinishable."""
     monkeypatch.setattr(tasks_module, "DRAIN_GRACE_SECONDS", 0.05)
-    task = make_task(tmp_path, "t0")
+    task = registry_task(tmp_path, "t0")
     never_eof = asyncio.create_task(asyncio.sleep(3600))
     task.watchers = [never_eof]
 
@@ -251,7 +267,7 @@ async def test_finish_draining_abandons_pipes_held_open_after_exit(
 
 
 async def test_finish_draining_returns_as_soon_as_the_drainers_do(tmp_path: Path) -> None:
-    task = make_task(tmp_path, "t0")
+    task = registry_task(tmp_path, "t0")
     task.watchers = [asyncio.create_task(asyncio.sleep(0))]
 
     await asyncio.wait_for(tasks_module._finish_draining(task), timeout=1)
@@ -275,7 +291,7 @@ async def test_a_cancelled_monitor_leaves_a_live_run_recorded_as_running(tmp_pat
         stderr=asyncio.subprocess.PIPE,
         start_new_session=True,
     )
-    task = make_task(tmp_path, "t0")
+    task = registry_task(tmp_path, "t0")
     task.proc = proc
     task.pgid = proc.pid
     registry._tasks[task.task_id] = task
@@ -316,7 +332,7 @@ async def test_a_teardown_mid_cancellation_still_records_the_cancellation(tmp_pa
         stderr=asyncio.subprocess.PIPE,
         start_new_session=True,
     )
-    task = make_task(tmp_path, "t0")
+    task = registry_task(tmp_path, "t0")
     task.proc = proc
     task.pgid = proc.pid
     task.cancel_requested = True
@@ -345,7 +361,7 @@ async def test_a_monitor_that_crashes_still_publishes_a_terminal_status(
     """
     registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
     proc = await asyncio.create_subprocess_exec("true", start_new_session=True)
-    task = make_task(tmp_path, "t0")
+    task = registry_task(tmp_path, "t0")
     task.proc = proc
     task.pgid = proc.pid
     registry._tasks[task.task_id] = task
@@ -441,7 +457,7 @@ async def test_cancel_recovered_waits_for_the_sigkill_to_land(
 
     assert killed
     assert result.status == "cancelled"
-    assert store.resolve_status(tmp_path, result)[0] == "cancelled"
+    assert store.resolve_status(registry.log_dir, result)[0] == "cancelled"
 
 
 async def test_cancel_recovered_of_an_already_dead_task_changes_nothing(tmp_path: Path) -> None:
@@ -569,7 +585,7 @@ async def test_resume_refuses_when_the_parents_record_vanished_before_the_lock(
         raise AssertionError("must not reach spawn")
 
     registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
-    parent = make_task(tmp_path, "parent", session_id="s1", finished=True)
+    parent = registry_task(tmp_path, "parent", session_id="s1", finished=True)
     registry._tasks[parent.task_id] = parent
     registry.persist(parent)
     store.record_path(registry.log_dir, parent.task_id).unlink()
@@ -585,13 +601,13 @@ async def test_resume_still_runs_for_a_live_parent_whose_record_never_landed(
     """A record that was never written is not one retention deleted: `store.write` never fails a
     dispatch, so a finished in-memory task can have no record at all and must stay resumable."""
     registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
-    parent = make_task(tmp_path, "parent", session_id="s1", finished=True)
+    parent = registry_task(tmp_path, "parent", session_id="s1", finished=True)
     registry._tasks[parent.task_id] = parent
     spawned: list[str] = []
 
     async def fake_spawn(invocation, **kwargs):
         spawned.append(kwargs["parent_task_id"])
-        return make_task(tmp_path, "child", session_id="s1")
+        return registry_task(tmp_path, "child", session_id="s1")
 
     monkeypatch.setattr(registry, "_spawn", fake_spawn)
 
@@ -603,7 +619,7 @@ async def test_resume_still_runs_for_a_live_parent_whose_record_never_landed(
 
 async def test_cancelling_a_finished_task_is_a_no_op(tmp_path: Path) -> None:
     registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
-    task = make_task(tmp_path, "t0", finished=True)
+    task = registry_task(tmp_path, "t0", finished=True)
     registry._tasks[task.task_id] = task
 
     await registry.cancel(task)
@@ -977,7 +993,7 @@ async def test_resume_inherits_the_parents_network_request(
     building an argv without the `-c` pair would pass a weaker check.
     """
     registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
-    parent = make_task(tmp_path, "parent", session_id="s1", finished=True)
+    parent = registry_task(tmp_path, "parent", session_id="s1", finished=True)
     parent.backend = "codex"
     parent.freedom = "write_in_repo"
     parent.network = True
@@ -990,7 +1006,7 @@ async def test_resume_inherits_the_parents_network_request(
         captured["argv"] = invocation.argv
         captured["invocation"] = invocation
         captured.update(kwargs)
-        return make_task(tmp_path, "child", session_id="s1")
+        return registry_task(tmp_path, "child", session_id="s1")
 
     monkeypatch.setattr(registry, "_spawn", fake_spawn)
 
@@ -1006,7 +1022,7 @@ async def test_an_explicit_network_on_resume_overrides_the_parents(
     """Network is a per-run sandbox setting, so changing it on a continuation cannot misrepresent
     the reply the parent already gave — unlike model or freedom, which are inherited outright."""
     registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
-    parent = make_task(tmp_path, "parent", session_id="s1", finished=True)
+    parent = registry_task(tmp_path, "parent", session_id="s1", finished=True)
     parent.backend = "codex"
     parent.freedom = "write_in_repo"
     parent.network = True
@@ -1019,7 +1035,7 @@ async def test_an_explicit_network_on_resume_overrides_the_parents(
         captured["argv"] = invocation.argv
         captured["invocation"] = invocation
         captured.update(kwargs)
-        return make_task(tmp_path, "child", session_id="s1")
+        return registry_task(tmp_path, "child", session_id="s1")
 
     monkeypatch.setattr(registry, "_spawn", fake_spawn)
 
@@ -1053,7 +1069,7 @@ async def test_resume_record_inherits_the_recorded_network_request(
         captured["argv"] = invocation.argv
         captured["invocation"] = invocation
         captured.update(kwargs)
-        return make_task(tmp_path, "child", session_id="s1")
+        return registry_task(tmp_path, "child", session_id="s1")
 
     monkeypatch.setattr(registry, "_spawn", fake_spawn)
 
@@ -1087,7 +1103,7 @@ async def test_a_pre_change_record_resumes_at_the_freedoms_historical_default(
         captured["argv"] = invocation.argv
         captured["invocation"] = invocation
         captured.update(kwargs)
-        return make_task(tmp_path, "child", session_id="s1")
+        return registry_task(tmp_path, "child", session_id="s1")
 
     monkeypatch.setattr(registry, "_spawn", fake_spawn)
 
@@ -1103,7 +1119,7 @@ async def test_resume_refuses_a_network_request_the_parents_freedom_cannot_honou
     """An override has to fail as loudly on resume as it would on start_task — silently dropping
     it is the failure mode the parameter exists to avoid."""
     registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
-    parent = make_task(tmp_path, "parent", session_id="s1", finished=True)
+    parent = registry_task(tmp_path, "parent", session_id="s1", finished=True)
     parent.backend = "codex"
     parent.freedom = "read_only"
     registry._tasks[parent.task_id] = parent
@@ -1142,7 +1158,7 @@ async def test_resume_record_honours_an_explicit_network_override(
         captured["argv"] = invocation.argv
         captured["invocation"] = invocation
         captured.update(kwargs)
-        return make_task(tmp_path, "child", session_id="s1")
+        return registry_task(tmp_path, "child", session_id="s1")
 
     monkeypatch.setattr(registry, "_spawn", fake_spawn)
 

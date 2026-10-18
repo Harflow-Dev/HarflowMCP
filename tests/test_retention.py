@@ -11,6 +11,15 @@ from pathlib import Path
 import pytest
 
 from harflow_mcp import control, retention, store
+from harflow_mcp import state_ownership
+from harflow_mcp.state_layout import resolve_layout
+
+
+@pytest.fixture
+def tmp_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    root = tmp_path_factory.mktemp("retention")
+    with state_ownership.state_session(resolve_layout(root=root)):
+        yield root
 
 
 def _iso(dt: datetime) -> str:
@@ -68,7 +77,12 @@ def test_continuation_original_assignment_survives_retained_members(tmp_path, mo
             assert store.read(log_dir, 'root') is not None
             retained = store.read(log_dir, 'grandchild' if case == 'deeper' else 'child')
             assert retained is not None
-            assert 'Original assignment' in context(SimpleNamespace(log_dir=log_dir, get=lambda _: None), retained, None, None)
+            assert 'Original assignment' in context(
+                SimpleNamespace(log_dir=log_dir, state_layout=resolve_layout(log_dir=log_dir), get=lambda _: None),
+                retained,
+                None,
+                None,
+            )
     finally:
         if lock_fd is not None:
             os.close(lock_fd)
@@ -823,14 +837,16 @@ def test_supported_retention_removal_waits_for_catalog_decode_before_unlinking(t
     import threading
     from concurrent.futures import ThreadPoolExecutor
     from harflow_mcp.catalog import Catalog
+    log_dir = tmp_path / "tasks"
+    log_dir.mkdir()
     task = make_record(status='completed', exit_code=0)
-    store.write(tmp_path, task)
-    path = store.record_path(tmp_path, task.task_id)
+    store.write(log_dir, task)
+    path = store.record_path(log_dir, task.task_id)
     entered, release = threading.Event(), threading.Event()
     def load(identifier):
         entered.set()
         assert release.wait(5)
-        persisted = store.read(tmp_path, identifier)
+        persisted = store.read(log_dir, identifier)
         assert persisted is not None
         return store.listing_header(persisted)
     # Make the header require a real metadata decode inside the reader's catalog lock.
@@ -838,24 +854,28 @@ def test_supported_retention_removal_waits_for_catalog_decode_before_unlinking(t
     payload['title'] = 'refresh'
     path.write_text(json.dumps(payload))
     with ThreadPoolExecutor(max_workers=2) as pool:
-        reader = pool.submit(Catalog(tmp_path, store.RECORD_SUFFIX).header_page, [task.task_id], load)
+        reader = pool.submit(Catalog(log_dir, store.RECORD_SUFFIX).header_page, [task.task_id], load)
         assert entered.wait(5)
-        removal = pool.submit(retention._delete_task_files, tmp_path, task.task_id)
+        def remove():
+            with state_ownership.state_session(resolve_layout(log_dir=log_dir)):
+                return retention._delete_task_files(log_dir, task.task_id)
+
+        removal = pool.submit(remove)
         assert not removal.done() and path.exists()
         release.set()
         read_page = reader.result(timeout=5)
         assert read_page['items'][0]['title'] == 'refresh'
         assert removal.result(timeout=5)
     assert not path.exists()
-    recovered = store.list_page(tmp_path)
+    recovered = store.list_page(log_dir)
     assert recovered['items'] == [] and recovered['catalog_state']['status'] == 'ready'
 
 
 def _artifact_family(tmp_path, monkeypatch, edge="spawned_by"):
     from harflow_mcp import artifacts, identity, workflow_hooks
-    log_dir = tmp_path / 'bridge' / 'tasks'
+    log_dir = tmp_path / 'tasks'
     log_dir.mkdir(parents=True)
-    repo = tmp_path / 'repo'
+    repo = tmp_path.parent / f"{tmp_path.name}-repo"
     repo.mkdir()
     target = repo / 'report'
     target.write_text('retained report')

@@ -51,7 +51,7 @@ def validate_branch_assignments(run: dict[str, Any], choice: dict[str, Any], tok
     return {"selected_connections": [edge["id"] for edge in selected], "assignments": copy.deepcopy(assignments), "structural_transition_cost": transition_cost, "selection_reason": reason, "selection_decision_id": token["decision_id"]}
 
 
-def automatic_edges(run: dict[str, Any], node: dict[str, Any], token: dict[str, Any]) -> list[dict[str, Any]] | None:
+def automatic_edges(run: dict[str, Any], node: dict[str, Any], token: dict[str, Any], *, root: Path | None = None) -> list[dict[str, Any]] | None:
     """Skip only a structural, unconditional, single path with no assignment."""
     if run.get("runner_policy") != "guided":
         return None
@@ -65,12 +65,12 @@ def automatic_edges(run: dict[str, Any], node: dict[str, Any], token: dict[str, 
         if any(a["id"] in refs and not a.get("resolved_by_execution_id") and not a.get("optional_failure") for a in run["activations"]):
             return None
     from .workflow_delegation import continuations
-    choices = continuations(run, node, token, False)
+    choices = continuations(run, node, token, False, root=root)
     if len(choices) != 1 or choices[0]["requires_prompt"] or choices[0]["connection"].get("condition") or choices[0]["connection"].get("backward"):
         return None
     if worker_end and next(n for n in run["definition"]["nodes"] if n["id"] == choices[0]["node_id"])["type"] != "end":
         return None
     # A split needs branch assignments even though it has no worker itself.
-    if branch_choices(run, choices[0], token) is not None:
+    if branch_choices(run, choices[0], token, root=root) is not None:
         return None
     return [choices[0]["connection"]]

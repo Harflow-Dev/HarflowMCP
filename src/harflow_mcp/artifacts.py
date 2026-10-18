@@ -1,5 +1,8 @@
 """Bounded metadata-only references owned by verified task processes, standalone or workflow-bound."""
 from __future__ import annotations
+
+from .state_access import task_operation, task_layout, assert_task_owned, open_descriptor
+from .state_ownership import StateOwnershipError, state_session
 import base64
 from contextlib import contextmanager
 import fcntl
@@ -26,6 +29,7 @@ PAGE_BYTES = 63000
 
 
 def _read_owner(log_dir, task_id):
+    assert_task_owned(log_dir)
     return store.read(log_dir, task_id, include_prompt=False,
                       metadata_byte_limit=METADATA_BYTES,
                       metadata_budget=current_metadata_budget())
@@ -33,6 +37,7 @@ def _read_owner(log_dir, task_id):
 
 def _owner_record_missing(log_dir, task_id):
     """Only observed absence establishes removal; unreadable/corrupt records do not."""
+    assert_task_owned(log_dir)
     try:
         store.record_path(log_dir, task_id).lstat()
     except FileNotFoundError:
@@ -58,6 +63,7 @@ def _workflow_owner(log_dir, task_id, *, strict=True):
     A task's own receipt is returned as ``{'receipt': ...}`` so a caller can bind to it; a catalog
     association without a receipt is ``{'managed_or_unverifiable': True}``.
     """
+    assert_task_owned(log_dir)
     import sqlite3
     from .bounded_io import read_receipt
     from .workflows import WorkflowStore
@@ -80,11 +86,12 @@ def _workflow_owner(log_dir, task_id, *, strict=True):
         if page.get('bootstrap_pending') or page.get('history_incomplete'):
             raise ValueError('Workflow ownership preparation is incomplete; retry the request')
         index = storage._ownership_catalog()
-        with index.connect() as db:
-            index._discover(db)
-            if index.state(db)['status'] != 'ready':
-                raise ValueError('Workflow ownership is unavailable')
-            row = db.execute('SELECT 1 FROM associations WHERE id=? LIMIT 1', (task_id,)).fetchone()
+        with state_session(storage.state_layout):
+            with index.connect() as db:
+                index._discover(db)
+                if index.state(db)['status'] != 'ready':
+                    raise ValueError('Workflow ownership is unavailable')
+                row = db.execute('SELECT 1 FROM associations WHERE id=? LIMIT 1', (task_id,)).fetchone()
         return {'managed_or_unverifiable': True} if row else None
     except (OSError, sqlite3.Error, TypeError, KeyError) as exc:
         raise ValueError('Workflow ownership is unavailable') from exc
@@ -92,6 +99,7 @@ def _workflow_owner(log_dir, task_id, *, strict=True):
 
 def _bind(log_dir, record, receipt, *, registering):
     """Snapshot the immutable workflow binding from the task's own receipt and its run."""
+    assert_task_owned(log_dir)
     from .workflows import WorkflowStore
     storage = WorkflowStore(root=log_dir.parent)
     mismatch = 'Workflow ownership receipt no longer matches its run'
@@ -138,6 +146,7 @@ def _authority(log_dir, record, *, registering=False):
     The caller's own matching receipt binds it. Ancestors may be managed only inside the same
     root tree; an inherited descendant, a receipt mismatch and a builder are refused.
     """
+    assert_task_owned(log_dir)
     pending, seen, binding = [(record, frozenset())], set(), None
     while pending:
         current, ancestors = pending.pop()
@@ -174,6 +183,7 @@ def _authority(log_dir, record, *, registering=False):
 @metadata_request()
 def _caller(log_dir):
     # Unlike best-effort dispatch lineage, authorization rejects ambiguity and spoofed hints.
+    assert_task_owned(log_dir)
     table = lineage._default_process_table()
     if table is None or os.getpid() not in table:
         raise ValueError('Caller ancestry is unavailable')
@@ -249,6 +259,7 @@ def _check_binding(binding, task_id):
 
 
 def _load(log_dir: Path, task_id: str, directory_fd: int | None = None):
+    assert_task_owned(log_dir)
     path = _path(log_dir, task_id)
     budget = current_metadata_budget()
     if budget is not None and budget.metadata_decodes >= 100:
@@ -257,8 +268,8 @@ def _load(log_dir: Path, task_id: str, directory_fd: int | None = None):
     if log_dir.is_symlink() or canonical(log_dir) != log_dir.absolute():
         raise ValueError('Artifact storage directory is unsafe')
     try:
-        fd = os.open(path if directory_fd is None else path.name,
-                     os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd)
+        fd = open_descriptor(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                             dir_fd=directory_fd, layout=task_layout(log_dir))
     except FileNotFoundError:
         return [], b''
     try:
@@ -302,10 +313,11 @@ def _load(log_dir: Path, task_id: str, directory_fd: int | None = None):
             raise ValueError('Artifact manifest provenance is unavailable')
         return items, raw
     finally:
-        os.close(fd)
+        fd.close()
 
 
 @metadata_request()
+@task_operation
 def summary(log_dir: Path, task_id: str) -> dict:
     """Summarize supported standalone or workflow-bound metadata without caller or target-file probes.
 
@@ -318,6 +330,8 @@ def summary(log_dir: Path, task_id: str) -> dict:
         if record is None:
             raise ValueError('Artifact owner is unavailable')
         _authority(log_dir, record)
+    except StateOwnershipError:
+        raise
     except Exception:
         return {'count': 0, 'state': 'unavailable'}
     try:
@@ -355,6 +369,7 @@ def _regular_stat(path):
 
 
 def _target(log_dir, record, spelling):
+    assert_task_owned(log_dir)
     _text(spelling, 'path')
     recorded_repo = Path(record.repo_path)
     try:
@@ -411,20 +426,21 @@ def _target(log_dir, record, spelling):
 @contextmanager
 def _task_lock(log_dir, task_id):
     """Use the existing task flock inode, refusing symlinks and special files."""
-    directory_fd = os.open(log_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    assert_task_owned(log_dir)
+    directory_fd = open_descriptor(log_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, layout=task_layout(log_dir))
     fd = None
     try:
         lock_name = f'{task_id}.lock'
         flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK
         # Release the catalog lock before waiting for the lifecycle flock.
-        with catalog_lock(log_dir):
+        with catalog_lock(log_dir, layout=task_layout(log_dir)):
             try:
                 # Darwin can return ENOENT when O_CREAT|O_NOFOLLOW races another initial
                 # creator. Exclusive creation, then a no-create open of its inode, avoids it.
-                fd = os.open(lock_name, flags | os.O_CREAT | os.O_EXCL, 0o644,
-                             dir_fd=directory_fd)
+                fd = open_descriptor(log_dir / lock_name, flags | os.O_CREAT | os.O_EXCL, 0o644,
+                                     dir_fd=directory_fd, layout=task_layout(log_dir))
             except FileExistsError:
-                fd = os.open(lock_name, flags, dir_fd=directory_fd)
+                fd = open_descriptor(log_dir / lock_name, flags, dir_fd=directory_fd, layout=task_layout(log_dir))
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
             raise ValueError('Task lock is unsafe')
@@ -447,11 +463,12 @@ def _task_lock(log_dir, task_id):
         yield directory_fd
     finally:
         if fd is not None:
-            os.close(fd)
-        os.close(directory_fd)
+            fd.close()
+        directory_fd.close()
 
 
 @metadata_request()
+@task_operation
 def register(log_dir: Path, path: str, kind: str, note: str = '') -> dict:
     """Append an immutable reference under the owner's existing task flock.
 
@@ -495,11 +512,11 @@ def register(log_dir: Path, path: str, kind: str, note: str = '') -> dict:
             raise ValueError('Task artifact manifest limit reached')
         name = f'{record.task_id}.artifacts-{uuid.uuid4().hex}.tmp'
         # Catalog discovery needs a stable directory snapshot, including sidecars.
-        with catalog_lock(log_dir):
-            fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-                         0o600, dir_fd=storage_fd)
+        with catalog_lock(log_dir, layout=task_layout(log_dir)):
+            fd = open_descriptor(log_dir / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                 0o600, dir_fd=storage_fd, layout=task_layout(log_dir))
             try:
-                with os.fdopen(fd, 'wb') as output:
+                with os.fdopen(fd, 'wb', closefd=False) as output:
                     output.write(raw)
                     output.flush()
                     os.fsync(output.fileno())
@@ -507,6 +524,7 @@ def register(log_dir: Path, path: str, kind: str, note: str = '') -> dict:
                            src_dir_fd=storage_fd, dst_dir_fd=storage_fd)
                 os.fsync(storage_fd)
             finally:
+                fd.close()
                 try:
                     os.unlink(name, dir_fd=storage_fd)
                 except FileNotFoundError:
@@ -516,6 +534,7 @@ def register(log_dir: Path, path: str, kind: str, note: str = '') -> dict:
 
 def _availability(log_dir, record, item):
     """Stat-only availability of one reference; never reads contents."""
+    assert_task_owned(log_dir)
     state = 'unavailable'
     path = Path(item['path'])
     try:
@@ -540,6 +559,7 @@ def _availability(log_dir, record, item):
 
 
 @metadata_request()
+@task_operation
 def get(log_dir: Path, task_id: str, cursor: str | None = None, limit: int = 20) -> dict:
     """Read a bounded reference page and observe target metadata without reading contents."""
     store.validate_task_id(task_id)
@@ -566,6 +586,8 @@ def get(log_dir: Path, task_id: str, cursor: str | None = None, limit: int = 20)
             owner, saved, offset = json.loads(base64.urlsafe_b64decode(cursor))
             if owner != task_id or saved != digest or type(offset) is not int or not 0 <= offset <= len(items):
                 raise ValueError()
+        except StateOwnershipError:
+            raise
         except Exception as exc:
             raise ValueError('Invalid or stale artifact cursor') from exc
     for item in items[offset:offset + limit]:
@@ -598,6 +620,8 @@ def _read_page_cursor(cursor, workflow_run_id):
         if owner is None and (activation_index != 0 or task_index != 0 or last is not None):
             raise ValueError()
         return run_id, activation_index, task_index, owner, last
+    except StateOwnershipError:
+        raise
     except Exception as exc:
         raise ValueError('Invalid or stale workflow artifact cursor') from exc
 
@@ -613,6 +637,7 @@ def _budget_exhausted():
 
 
 @metadata_request()
+@task_operation
 def workflow_page(log_dir: Path, workflow_run_id: str, *, cursor: str | None = None, limit: int = 20,
                   execution_id: str | None = None, task_id: str | None = None) -> dict:
     """Page the references registered by every attempt in a run's tree, in a stable owner order.
@@ -803,6 +828,7 @@ def workflow_page(log_dir: Path, workflow_run_id: str, *, cursor: str | None = N
 
 
 @metadata_request()
+@task_operation
 def owner_references(log_dir: Path, owner_task_id: str) -> list[dict]:
     """Current references of one owner with availability; empty when it has none.
 

@@ -9,6 +9,17 @@ import pytest
 from mcp import MCPError
 
 from harflow_mcp import backends, notifications, server, store, workflow_notifications
+from harflow_mcp.state_layout import resolve_layout
+from harflow_mcp.state_ownership import state_session
+
+
+def _initialize_registry(registry):
+    """Initialize the fixture registry's empty canonical root before direct storage calls."""
+    root = registry.log_dir.parent
+    if registry.log_dir.exists() and not any(registry.log_dir.iterdir()):
+        registry.log_dir.rmdir()
+    with state_session(resolve_layout(root=root)):
+        registry.log_dir.mkdir(parents=True, exist_ok=True)
 
 
 @pytest.fixture
@@ -252,6 +263,8 @@ async def test_capability_refusal_keeps_uncertain_identity(configured, monkeypat
 
 async def test_pristine_configless_registry_starts_no_notification_worker(monkeypatch):
     registry = server._reg()
+    _initialize_registry(registry)
+    monkeypatch.setenv("HARFLOW_STATE_ROOT", str(registry.log_dir.parent))
     monkeypatch.delenv('HARFLOW_NOTIFY_DESTINATIONS', raising=False)
     monkeypatch.setattr(server, '_registry', None)
     monkeypatch.setattr(server, 'TaskRegistry', lambda: registry)
@@ -263,6 +276,8 @@ async def test_pristine_configless_registry_starts_no_notification_worker(monkey
 
 async def test_configured_registry_starts_notification_worker_once(monkeypatch):
     registry = server._reg()
+    _initialize_registry(registry)
+    monkeypatch.setenv("HARFLOW_STATE_ROOT", str(registry.log_dir.parent))
     monkeypatch.setenv('HARFLOW_NOTIFY_DESTINATIONS', json.dumps({'hook': {'url': 'https://example.com/hook'}}))
     started = []
     async def worker(logs):
@@ -287,6 +302,8 @@ async def test_configured_registry_starts_notification_worker_once(monkeypatch):
 
 async def test_existing_database_cleanup_resumes_without_configuration(monkeypatch):
     registry = server._reg()
+    _initialize_registry(registry)
+    monkeypatch.setenv("HARFLOW_STATE_ROOT", str(registry.log_dir.parent))
     logs = registry.log_dir
     monkeypatch.setenv('HARFLOW_NOTIFY_DESTINATIONS', json.dumps({'hook': {'url': 'https://example.com/hook'}}))
     for task_id in ('expired', 'final', 'unexpired'):
@@ -295,9 +312,10 @@ async def test_existing_database_cleanup_resumes_without_configuration(monkeypat
             status='completed', exit_code=0, finished_at='2026-10-14T00:00:00Z'))
         notifications.subscribe(logs, task_id, 'hook')
     old = time.time() - notifications.RETENTION_SECONDS - 60
-    with notifications._db(logs) as db:
-        db.execute("UPDATE subscriptions SET created=? WHERE task_id='expired'", (old,))
-        db.execute("UPDATE subscriptions SET state='delivered',updated=? WHERE task_id='final'", (old,))
+    with state_session(resolve_layout(root=logs.parent)):
+        with notifications._db(logs) as db:
+            db.execute("UPDATE subscriptions SET created=? WHERE task_id='expired'", (old,))
+            db.execute("UPDATE subscriptions SET state='delivered',updated=? WHERE task_id='final'", (old,))
     assert 'expired' in notifications.pinned_tasks(logs)
     monkeypatch.delenv('HARFLOW_NOTIFY_DESTINATIONS')
     monkeypatch.setattr(notifications, '_deliver', lambda *a: pytest.fail('delivery without current configuration'))
@@ -382,6 +400,8 @@ async def test_notification_status_absent_does_not_create_storage_or_worker(monk
 
 async def test_unsubscribe_absent_does_not_create_storage_or_future_worker(monkeypatch):
     registry = server._reg()
+    _initialize_registry(registry)
+    monkeypatch.setenv("HARFLOW_STATE_ROOT", str(registry.log_dir.parent))
     monkeypatch.delenv('HARFLOW_NOTIFY_DESTINATIONS', raising=False)
     assert await server.unsubscribe('absent') == []
     assert not (registry.log_dir.parent / 'notifications.sqlite3').exists()

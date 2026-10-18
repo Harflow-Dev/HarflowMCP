@@ -10,7 +10,9 @@ from pathlib import Path
 import pytest
 
 from harflow_mcp import backends, lineage, server, store
+from harflow_mcp import state_ownership
 from harflow_mcp.backends import Enforcement, Invocation
+from harflow_mcp.state_layout import resolve_layout
 from harflow_mcp.tasks import TaskRegistry
 
 
@@ -75,6 +77,14 @@ class Launcher:
         return self.result
 
 
+@pytest.fixture
+def owned_state(tmp_path: Path):
+    root = tmp_path / "state"
+    with state_ownership.state_session(resolve_layout(root=root)):
+        pass
+    return root / "tasks"
+
+
 async def _start(registry: TaskRegistry, repo: Path, backend: _Backend):
     task = await registry.start("hi", repo, backend=backend)
     await asyncio.wait_for(task.done.wait(), timeout=10)
@@ -83,10 +93,10 @@ async def _start(registry: TaskRegistry, repo: Path, backend: _Backend):
 
 
 async def test_a_root_task_does_not_open_monitor_automatically(
-    tmp_path: Path, git_repo: Path, backend: _Backend, opening_enabled
+    tmp_path: Path, git_repo: Path, backend: _Backend, opening_enabled, owned_state: Path
 ) -> None:
     launcher = Launcher()
-    registry = TaskRegistry(log_dir=tmp_path / "tasks", monitor_launcher=launcher)
+    registry = TaskRegistry(log_dir=owned_state, monitor_launcher=launcher)
 
     task = await _start(registry, git_repo, backend)
 
@@ -95,7 +105,7 @@ async def test_a_root_task_does_not_open_monitor_automatically(
 
 
 async def test_a_nested_task_does_not_open_the_monitor(
-    tmp_path: Path, git_repo: Path, backend: _Backend, opening_enabled, monkeypatch
+    tmp_path: Path, git_repo: Path, backend: _Backend, opening_enabled, monkeypatch, owned_state: Path
 ) -> None:
     parent = store.TaskRecord(
         task_id="parent",
@@ -109,7 +119,7 @@ async def test_a_nested_task_does_not_open_the_monitor(
     )
     monkeypatch.setattr(lineage, "detect_caller", lambda *a, **k: lineage.Caller(parent, "session"))
     launcher = Launcher()
-    registry = TaskRegistry(log_dir=tmp_path / "tasks", monitor_launcher=launcher)
+    registry = TaskRegistry(log_dir=owned_state, monitor_launcher=launcher)
 
     task = await _start(registry, git_repo, backend)
 
@@ -119,7 +129,7 @@ async def test_a_nested_task_does_not_open_the_monitor(
 
 @pytest.mark.parametrize("skip", ["harflow_task_id", "env_off", "env_unset", "not_darwin", "registry_off"])
 async def test_opening_is_skipped(
-    tmp_path: Path, git_repo: Path, backend: _Backend, opening_enabled, monkeypatch, skip: str
+    tmp_path: Path, git_repo: Path, backend: _Backend, opening_enabled, monkeypatch, skip: str, owned_state: Path
 ) -> None:
     if skip == "harflow_task_id":
         monkeypatch.setenv("HARFLOW_TASK_ID", "someone")
@@ -131,7 +141,7 @@ async def test_opening_is_skipped(
         monkeypatch.setattr(sys, "platform", "linux")
     launcher = Launcher()
     registry = TaskRegistry(
-        log_dir=tmp_path / "tasks", monitor_launcher=launcher, open_monitor=skip != "registry_off"
+        log_dir=owned_state, monitor_launcher=launcher, open_monitor=skip != "registry_off"
     )
 
     if skip == "harflow_task_id":
@@ -145,21 +155,21 @@ async def test_opening_is_skipped(
 
 @pytest.mark.parametrize("result", [1, OSError("no such app"), RuntimeError("boom")])
 async def test_monitor_launcher_is_unused_and_adds_no_notice(
-    tmp_path: Path, git_repo: Path, backend: _Backend, opening_enabled, result
+    tmp_path: Path, git_repo: Path, backend: _Backend, opening_enabled, result, owned_state: Path
 ) -> None:
     launcher = Launcher(result)
-    registry = TaskRegistry(log_dir=tmp_path / "tasks", monitor_launcher=launcher)
+    registry = TaskRegistry(log_dir=owned_state, monitor_launcher=launcher)
 
     task = await _start(registry, git_repo, backend)
 
     assert task.status == "completed"
     assert task.bridge_notices == []
-    assert store.read(tmp_path / "tasks", task.task_id).bridge_notices == []
+    assert store.read(owned_state, task.task_id).bridge_notices == []
 
 
 @pytest.mark.parametrize("result", [0, 1, OSError("no app")])
 async def test_start_task_response_is_the_same_whatever_the_launcher_does(
-    tmp_path: Path, git_repo: Path, backend: _Backend, opening_enabled, monkeypatch, result
+    tmp_path: Path, git_repo: Path, backend: _Backend, opening_enabled, monkeypatch, result, owned_state: Path
 ) -> None:
     """The launcher is scheduled as `_spawn`'s last step with no await before the response is
     built, so even one that fails instantly cannot reach the response — which never mentions the
@@ -167,7 +177,7 @@ async def test_start_task_response_is_the_same_whatever_the_launcher_does(
     the response of `start_task`.)"""
     monkeypatch.setattr(server.backends, "is_installed", lambda b: True)
     launcher = Launcher(result)
-    registry = TaskRegistry(log_dir=tmp_path / "tasks", monitor_launcher=launcher)
+    registry = TaskRegistry(log_dir=owned_state, monitor_launcher=launcher)
     monkeypatch.setattr(server, "_registry", registry)
 
     response = await server.start_task("hi", str(git_repo), backend="fake-open")

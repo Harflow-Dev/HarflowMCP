@@ -89,6 +89,17 @@ def workflow_policy(context, registry):
     return {"decision_id": context["decision_id"], "action": "continue", "reason": "Evidence supports continuation", "next": [assignment_for(choice) for choice in choices]}
 
 
+
+@pytest.fixture
+def tmp_path(tmp_path_factory: pytest.TempPathFactory):
+    workspace = tmp_path_factory.mktemp("workflow-node")
+    root = workspace / "state"
+    from harflow_mcp import state_ownership
+    from harflow_mcp.state_layout import resolve_layout
+    with state_ownership.state_session(resolve_layout(root=root)):
+        (root / "tasks").mkdir(exist_ok=True)
+        yield workspace
+
 class TreeRegistry(Registry):
     """Fake registry that records every dispatch and can hold or fail one mid-flight."""
 
@@ -185,7 +196,7 @@ def invocation_activation(run):
 def two_level(tmp_path, monkeypatch):
     monkeypatch.setattr(w.backends, "is_installed", lambda backend: True)
     monkeypatch.setattr(w, "_launch", lambda *args: None)
-    store = w.WorkflowStore(tmp_path)
+    store = w.WorkflowStore(tmp_path / "state")
     child = store.save("child", child_graph("child"))
     store.save("parent", parent_graph(child["workflow_id"]))
     return store
@@ -222,11 +233,65 @@ async def test_child_mode_prompt_assignment_and_isolation(two_level, tmp_path):
     assert all(ref["workflow_run_id"] == child["workflow_run_id"] for ref in outcome["final_result_refs"])
 
 
+async def test_child_execution_propagates_explicit_state_root_when_ambient_root_is_foreign(two_level, tmp_path, monkeypatch):
+    """Nested continuation lookup must retain the caller's state root."""
+    ambient = tmp_path / "ambient-home" / ".harflow"
+    ambient.mkdir(parents=True)
+    sentinel = ambient / "foreign-sentinel"
+    sentinel.write_bytes(b"foreign-root-bytes")
+    monkeypatch.setenv("HOME", str(tmp_path / "ambient-home"))
+    monkeypatch.delenv("HARFLOW_STATE_ROOT", raising=False)
+
+    run, _ = await run_tree(two_level, tmp_path, "parent")
+
+    assert run["status"] == "completed", run.get("attention_reason")
+    assert sentinel.read_bytes() == b"foreign-root-bytes"
+
+
+async def test_parallel_child_continuations_keep_explicit_state_root(two_level, tmp_path, monkeypatch):
+    ambient = tmp_path / "ambient-home" / ".harflow"
+    ambient.mkdir(parents=True)
+    sentinel = ambient / "foreign-sentinel"
+    sentinel.write_bytes(b"foreign-root-bytes")
+    monkeypatch.setenv("HOME", str(tmp_path / "ambient-home"))
+    monkeypatch.delenv("HARFLOW_STATE_ROOT", raising=False)
+    child_id = two_level.get("child")["workflow_id"]
+    parent = two_level.get("parent")
+    two_level.save("parent", parent_graph(child_id, branches=2, max_parallel=2), expected_revision=parent["revision"])
+
+    run, _ = await run_tree(two_level, tmp_path, "parent")
+
+    assert run["status"] == "completed", run.get("attention_reason")
+    assert sentinel.read_bytes() == b"foreign-root-bytes"
+
+
+def test_automatic_edges_forwards_explicit_state_root_to_nested_continuations(two_level, tmp_path, monkeypatch):
+    ambient = tmp_path / "ambient-home" / ".harflow"
+    ambient.mkdir(parents=True)
+    sentinel = ambient / "foreign-sentinel"
+    sentinel.write_bytes(b"foreign-root-bytes")
+    monkeypatch.setenv("HOME", str(tmp_path / "ambient-home"))
+    monkeypatch.delenv("HARFLOW_STATE_ROOT", raising=False)
+    child_id = two_level.get("child")["workflow_id"]
+    parent = two_level.get("parent")
+    definition = parent_graph(child_id, prep=True)
+    saved = two_level.save("parent", definition, expected_revision=parent["revision"])
+    tree = refs.resolve_dependencies(two_level, definition=saved)
+    run = two_level.create_run(w.validate_definition(saved), "parent", tmp_path, dependency_tree=tree)
+    prep = next(node for node in saved["nodes"] if node["id"] == "prep")
+    from harflow_mcp.workflow_traversal import automatic_edges
+
+    selected = automatic_edges(run, prep, {"id": "token", "execution_complete": True, "result": {"status": "succeeded"}}, root=two_level.root)
+
+    assert selected is None
+    assert sentinel.read_bytes() == b"foreign-root-bytes"
+
+
 @pytest.mark.parametrize("repeat_question", [False, True])
 async def test_child_question_parent_specialist_bridge_answers_exact_child_checkpoint(tmp_path, monkeypatch, repeat_question):
     monkeypatch.setattr(w.backends, "is_installed", lambda backend: True)
     monkeypatch.setattr(w, "_launch", lambda *args: None)
-    store = w.WorkflowStore(tmp_path)
+    store = w.WorkflowStore(tmp_path / "state")
     child = child_graph("child")
     saved_child = store.save("child", child)
     parent = parent_graph(saved_child["workflow_id"], mode="child")
@@ -279,7 +344,7 @@ async def test_child_question_parent_specialist_bridge_answers_exact_child_check
 async def test_child_mode_inputs_arrive_complete_and_worker_sees_them(tmp_path, monkeypatch):
     monkeypatch.setattr(w.backends, "is_installed", lambda backend: True)
     monkeypatch.setattr(w, "_launch", lambda *args: None)
-    store = w.WorkflowStore(tmp_path)
+    store = w.WorkflowStore(tmp_path / "state")
     child = store.save("child", child_graph("child"))
     store.save("parent", parent_graph(child["workflow_id"], prep=True))
     outputs = {"prep": {"status": "succeeded", "result": {"summary": "Prepared " + "x" * 40000}, "evidence": []}}
@@ -391,7 +456,7 @@ async def test_current_mode_workflow_scope_in_child_context(two_level, tmp_path)
 async def test_current_of_current_resolves_to_nearest_owner(tmp_path, monkeypatch):
     monkeypatch.setattr(w.backends, "is_installed", lambda backend: True)
     monkeypatch.setattr(w, "_launch", lambda *args: None)
-    store = w.WorkflowStore(tmp_path)
+    store = w.WorkflowStore(tmp_path / "state")
     grandchild = store.save("grandchild", child_graph("grandchild"))
     middle = store.save("middle", parent_graph(grandchild["workflow_id"], name="middle", mode="current"))
     store.save("root", parent_graph(middle["workflow_id"], name="root", mode="current"))
@@ -409,7 +474,7 @@ async def test_current_of_current_resolves_to_nearest_owner(tmp_path, monkeypatc
 async def test_parallel_current_children_never_overlap_turns(tmp_path, monkeypatch):
     monkeypatch.setattr(w.backends, "is_installed", lambda backend: True)
     monkeypatch.setattr(w, "_launch", lambda *args: None)
-    store = w.WorkflowStore(tmp_path)
+    store = w.WorkflowStore(tmp_path / "state")
     child = store.save("child", child_graph("child"))
     store.save("parent", parent_graph(child["workflow_id"], mode="current", branches=2))
     registry = SessionRegistry(store.root)
@@ -440,7 +505,7 @@ async def _wait_until(predicate, timeout: float = 10.0):
 async def test_n4_pause_mid_flight_settles_worker_and_ignores_spanned_decision(tmp_path, monkeypatch):
     monkeypatch.setattr(w.backends, "is_installed", lambda backend: True)
     monkeypatch.setattr(w, "_launch", lambda *args: None)
-    store = w.WorkflowStore(tmp_path)
+    store = w.WorkflowStore(tmp_path / "state")
     c1 = store.save("c1", child_graph("c1"))
     c2 = store.save("c2", child_graph("c2"))
     store.save("parent", parent_multi([c1["workflow_id"], c2["workflow_id"]], max_parallel=4))
@@ -482,7 +547,7 @@ def _child_id(store, run, name):
 async def test_n4_uncertain_attempt_holds_the_only_slot_and_the_waiter_returns(tmp_path, monkeypatch):
     monkeypatch.setattr(w.backends, "is_installed", lambda backend: True)
     monkeypatch.setattr(w, "_launch", lambda *args: None)
-    store = w.WorkflowStore(tmp_path)
+    store = w.WorkflowStore(tmp_path / "state")
     c1 = store.save("c1", child_graph("c1"))
     c2 = store.save("c2", child_graph("c2"))
     store.save("parent", parent_multi([c1["workflow_id"], c2["workflow_id"]], max_parallel=1))
@@ -515,7 +580,7 @@ async def test_n4_uncertain_attempt_holds_the_only_slot_and_the_waiter_returns(t
 async def test_nested_parallel_inside_child_and_parallel_end_waits_for_child(tmp_path, monkeypatch):
     monkeypatch.setattr(w.backends, "is_installed", lambda backend: True)
     monkeypatch.setattr(w, "_launch", lambda *args: None)
-    store = w.WorkflowStore(tmp_path)
+    store = w.WorkflowStore(tmp_path / "state")
     child = store.save("child", child_graph("child", parallel=True, work_count=2))
     store.save("parent", parent_graph(child["workflow_id"]))
     run, registry = await run_tree(store, tmp_path, "parent")
@@ -531,7 +596,7 @@ async def test_nested_parallel_inside_child_and_parallel_end_waits_for_child(tmp
 async def test_max_parallel_two_bounds_2x2_workers(tmp_path, monkeypatch):
     monkeypatch.setattr(w.backends, "is_installed", lambda backend: True)
     monkeypatch.setattr(w, "_launch", lambda *args: None)
-    store = w.WorkflowStore(tmp_path)
+    store = w.WorkflowStore(tmp_path / "state")
     child = store.save("child", child_graph("child", parallel=True, work_count=2))
     store.save("parent", parent_graph(child["workflow_id"], branches=2, max_parallel=2))
     run, registry = await run_tree(store, tmp_path, "parent")
@@ -544,7 +609,7 @@ async def test_max_parallel_two_bounds_2x2_workers(tmp_path, monkeypatch):
 async def test_max_parallel_one_with_two_children_never_deadlocks(tmp_path, monkeypatch):
     monkeypatch.setattr(w.backends, "is_installed", lambda backend: True)
     monkeypatch.setattr(w, "_launch", lambda *args: None)
-    store = w.WorkflowStore(tmp_path)
+    store = w.WorkflowStore(tmp_path / "state")
     c1 = store.save("c1", child_graph("c1"))
     c2 = store.save("c2", child_graph("c2"))
     store.save("parent", parent_multi([c1["workflow_id"], c2["workflow_id"]], max_parallel=1))
@@ -557,7 +622,7 @@ async def test_max_parallel_one_with_two_children_never_deadlocks(tmp_path, monk
 async def test_no_workflow_nodes_at_max_parallel_one_goes_fresh_and_tries_fallback(tmp_path, monkeypatch):
     monkeypatch.setattr(w.backends, "is_installed", lambda backend: True)
     monkeypatch.setattr(w, "_launch", lambda *args: None)
-    store = w.WorkflowStore(tmp_path)
+    store = w.WorkflowStore(tmp_path / "state")
     graph = {"name": "plain", "routing_mode": "explicit", "max_parallel": 1, "orchestrator": {"backend": "codex"}, "nodes": [{"id": "start", "type": "start"}, {"id": "work", "type": "agent", "role": "task", "instructions": "Do the work", "session_mode": "resume", "agent": {"backend": "codex", "max_turns": 5, "fallbacks": [{"backend": "claude"}]}}, {"id": "end", "type": "end"}], "connections": [{"id": "begin", "source": "start", "target": "work"}, {"id": "finish", "source": "work", "target": "end"}]}
     saved = store.save("plain", graph)
     run_record, registry = await run_tree(store, tmp_path, "plain")
@@ -573,7 +638,7 @@ async def test_read_only_child_uses_writer_roots_pooled_checkout_strength(tmp_pa
     # TreeRegistry simulates dispatch; this lease regression requires no installed CLI.
     monkeypatch.setattr(w.backends, 'is_installed', lambda backend: True)
     monkeypatch.setattr(w, '_launch', lambda *args: None)
-    storage = w.WorkflowStore(tmp_path)
+    storage = w.WorkflowStore(tmp_path / "state")
     child = child_graph()
     next(n for n in child['nodes'] if n['id'] == 'work')['freedom'] = 'read_only'
     saved = storage.save('child', child)
@@ -586,7 +651,7 @@ async def test_read_only_child_uses_writer_roots_pooled_checkout_strength(tmp_pa
 async def test_pooled_checkout_lease_is_shared_and_another_tree_waits(tmp_path):
     from harflow_mcp.workflow_invocation import WorkflowTree
 
-    store = w.WorkflowStore(tmp_path)
+    store = w.WorkflowStore(tmp_path / "state")
     repo = tmp_path / "repo"
     repo.mkdir()
     tree_one = WorkflowTree(store, permits=1)

@@ -1,9 +1,19 @@
 import subprocess
 import pytest
 from pathlib import Path
+from harflow_mcp import state_ownership
+from harflow_mcp.state_layout import resolve_layout
 
 from harflow_mcp.task_outcomes import baseline, capture, observe, GIT_LOCAL_ENV
 from harflow_mcp import store
+
+
+@pytest.fixture
+def tmp_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    root = tmp_path_factory.mktemp("task-outcomes") / "state"
+    with state_ownership.state_session(resolve_layout(root=root)):
+        (root / "tasks").mkdir()
+        yield root / "tasks"
 
 
 @pytest.mark.parametrize('command', ['rg pytest tests', 'echo pytest', 'echo "hi; pytest"',

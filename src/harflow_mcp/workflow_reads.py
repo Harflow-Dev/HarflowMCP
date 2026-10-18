@@ -5,6 +5,9 @@ same verified readers as task inspection, never from a CLI Monitor flag.
 """
 from __future__ import annotations
 
+from .state_access import task_operation, task_layout
+from .state_ownership import StateOwnershipError
+
 import asyncio
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -33,12 +36,13 @@ async def _read(function, *args, **kwargs):
         return await asyncio.to_thread(function, *args, **kwargs)
 
 
+@task_operation(parameter="directory")
 async def bounded_caller(directory: Path):
     """Verify frozen Monitor snapshot readers without replaying retained metadata."""
     with span("authority"):
         from . import lineage, store
         from .catalog import Catalog
-        if not Catalog(directory, store.RECORD_SUFFIX).ready():
+        if not Catalog(directory, store.RECORD_SUFFIX, layout=task_layout(directory)).ready():
             await asyncio.to_thread(store.bootstrap_catalog, directory)
             raise ValueError("Workflow caller authority indexing is incomplete; retry after bounded indexing progresses")
         detection = await asyncio.to_thread(lineage.detect_catalog_caller, directory)
@@ -58,6 +62,7 @@ def managed_run_summary(run: dict[str, Any]) -> dict[str, Any]:
 
 
 @bounded_request
+@task_operation(parameter="directory")
 async def call(action: str, *, directory: Path, reader: Callable[[], Awaitable[Any]] | None = None, **kwargs: Any) -> Any:
     """Read with an aggregate metadata budget and preserved managed-role restrictions."""
     with span("import"):
@@ -169,6 +174,7 @@ async def call(action: str, *, directory: Path, reader: Callable[[], Awaitable[A
         return await _read(on_demand_projection, store_, run)
 
 
+@task_operation(parameter="directory")
 async def cli_read(action: str, args: Any, directory: Path) -> Any:
     """Preserve CLI projections and human-only frozen Monitor snapshot access."""
     async def read(action, **kwargs):

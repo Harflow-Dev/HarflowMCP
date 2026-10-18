@@ -4,12 +4,16 @@ import json
 import os
 from pathlib import Path
 import pytest
-from harflow_mcp import artifacts, identity, lineage, store, workflow_hooks
+from harflow_mcp import artifacts, identity, lineage, state_ownership, store, workflow_hooks
+from harflow_mcp.state_layout import resolve_layout
 
 
 @pytest.fixture
 def setup(tmp_path, monkeypatch):
-    logs = tmp_path / 'bridge' / 'tasks'
+    state_root = tmp_path / 'bridge'
+    logs = state_root / 'tasks'
+    ownership = state_ownership.state_session(resolve_layout(root=state_root))
+    ownership.__enter__()
     logs.mkdir(parents=True)
     repo = tmp_path / 'repo'
     repo.mkdir()
@@ -19,7 +23,10 @@ def setup(tmp_path, monkeypatch):
     monkeypatch.setattr(identity, 'identity_check', lambda _: 'alive')
     monkeypatch.delenv('HARFLOW_TASK_ID', raising=False)
     monkeypatch.delenv('HARFLOW_ROOT_TASK_ID', raising=False)
-    return logs, repo, record
+    try:
+        yield logs, repo, record
+    finally:
+        ownership.__exit__(None, None, None)
 
 
 def test_reference_idempotency_and_observation(setup):
@@ -452,9 +459,10 @@ def test_concurrent_initial_lock_creation_uses_one_inode(setup):
         gate = Barrier(8)
         def acquire(_):
             gate.wait(timeout=5)
-            with artifacts._task_lock(logs, f'fresh-{index}') as directory_fd:
-                info = os.stat(f'fresh-{index}.lock', dir_fd=directory_fd, follow_symlinks=False)
-                return info.st_dev, info.st_ino
+            with state_ownership.state_session(resolve_layout(log_dir=logs)):
+                with artifacts._task_lock(logs, f'fresh-{index}') as directory_fd:
+                    info = os.stat(f'fresh-{index}.lock', dir_fd=directory_fd, follow_symlinks=False)
+                    return info.st_dev, info.st_ino
         with ThreadPoolExecutor(max_workers=8) as pool:
             identities = list(pool.map(acquire, range(8)))
         assert len(set(identities)) == 1
@@ -876,9 +884,9 @@ def test_artifact_directory_mutations_share_catalog_lock_without_flock_inversion
     depth = 0
     mutations = []
     @contextmanager
-    def tracked_lock(directory):
+    def tracked_lock(directory, **kwargs):
         nonlocal depth
-        with catalog_lock(directory):
+        with catalog_lock(directory, **kwargs):
             depth += 1
             try:
                 yield
@@ -922,14 +930,15 @@ def test_initial_task_lock_creation_waits_for_catalog_discovery(setup, monkeypat
     logs, _, record = setup
     attempted = Event()
     @contextmanager
-    def observed_lock(directory):
+    def observed_lock(directory, **kwargs):
         attempted.set()
-        with catalog_lock(directory):
+        with catalog_lock(directory, **kwargs):
             yield
     monkeypatch.setattr(artifacts, 'catalog_lock', observed_lock)
     def create():
-        with artifacts._task_lock(logs, record.task_id):
-            pass
+        with state_ownership.state_session(resolve_layout(log_dir=logs)):
+            with artifacts._task_lock(logs, record.task_id):
+                pass
     with ThreadPoolExecutor(max_workers=1) as pool:
         with catalog_lock(logs):
             future = pool.submit(create)

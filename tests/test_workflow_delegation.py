@@ -9,6 +9,8 @@ import pytest
 
 from harflow_mcp import workflows as w
 from harflow_mcp import workflow_delegation as d
+from harflow_mcp import state_ownership
+from harflow_mcp.state_layout import resolve_layout
 
 
 def graph(role="task"):
@@ -40,6 +42,7 @@ class Registry:
     def __init__(self, root, policy=None, outputs=None):
         self._log_dir = root / "tasks"
         self.log_dir = self._log_dir
+        self.state_layout = resolve_layout(log_dir=self.log_dir)
         self.calls = []
         self.contexts = []
         self.policy = policy or default_decision
@@ -385,18 +388,19 @@ def test_migration_backup_preserves_graph_and_revision(storage, tmp_path):
     original["nodes"][1]["session_mode"] = "resume"
     saved = storage.save("delegation", original)
     saved.pop("execution_contract")
-    w._write(storage.definitions / "delegation.json", saved)
-    before = copy.deepcopy(saved)
-    result = w.migrate_workflows(tmp_path)
-    assert result["migrated"] == ["delegation"]
-    assert json.loads(Path(result["backups"][0]).read_text()) == before
-    migrated = storage.get("delegation")
-    assert migrated["revision"] == before["revision"] + 1
-    assert migrated["connections"] == before["connections"]
-    assert migrated["nodes"][0] == before["nodes"][0]
-    expected = {**before["nodes"][1], "session_mode": "agent_decides"}
-    assert migrated["nodes"][1] == expected
-    assert w.migrate_workflows(tmp_path)["migrated"] == []
+    with state_ownership.state_session(storage.state_layout):
+        w._write(storage.definitions / "delegation.json", saved, layout=storage.state_layout)
+        before = copy.deepcopy(saved)
+        result = w.migrate_workflows(tmp_path)
+        assert result["migrated"] == ["delegation"]
+        assert json.loads(Path(result["backups"][0]).read_text()) == before
+        migrated = storage.get("delegation")
+        assert migrated["revision"] == before["revision"] + 1
+        assert migrated["connections"] == before["connections"]
+        assert migrated["nodes"][0] == before["nodes"][0]
+        expected = {**before["nodes"][1], "session_mode": "agent_decides"}
+        assert migrated["nodes"][1] == expected
+        assert w.migrate_workflows(tmp_path)["migrated"] == []
 
 
 def test_migration_refuses_active_historical_runs(storage, tmp_path):
@@ -621,7 +625,12 @@ async def test_explicit_recovery_grant_unlocks_exhausted_retry(storage, tmp_path
 
 @pytest.mark.parametrize("control", ["pause", "cancel"])
 @pytest.mark.parametrize("late_action", ["continue", "failed", "needs_input"])
-async def test_late_decision_cannot_override_human_control(storage, tmp_path, control, late_action):
+async def test_late_decision_cannot_override_human_control(storage, tmp_path, control, late_action, monkeypatch):
+    # The test models an active supervisor whose late result races a human
+    # control action; keep that identity deterministic across process-table
+    # restricted test environments.
+    monkeypatch.setattr(w, "_supervisor_present", lambda run: True)
+    monkeypatch.setattr("harflow_mcp.identity.identity_check", lambda identity: "alive")
     started = asyncio.Event()
     release = asyncio.Event()
     def policy(c, registry):

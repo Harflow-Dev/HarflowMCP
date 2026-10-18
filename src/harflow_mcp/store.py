@@ -10,6 +10,9 @@ back, replay the log for the outcome, and check whether the process is still ali
 
 from __future__ import annotations
 
+from .state_access import task_operation, task_layout, assert_task_owned
+from .state_ownership import StateOwnershipError
+
 import json
 import hashlib
 import logging
@@ -172,8 +175,11 @@ def log_path(log_dir: Path, task_id: str) -> Path:
     return log_dir / f"{validate_task_id(task_id)}.jsonl"
 
 
+@task_operation
 def write(log_dir: Path, record: TaskRecord) -> None:
-    """Persist a record, atomically. Never raises — losing a record must not fail a dispatch.
+    """Persist a record atomically; ordinary persistence failures remain best effort.
+
+    Ownership failures raise StateOwnershipError before state access.
 
     Refuses to move a task backwards: with several server processes writing, a stale "running"
     record must not overwrite an already-recorded outcome.
@@ -181,6 +187,7 @@ def write(log_dir: Path, record: TaskRecord) -> None:
     write_landed(log_dir, record)
 
 
+@task_operation
 def write_landed(log_dir: Path, record: TaskRecord) -> bool:
     from .catalog import catalog_lock
     import sqlite3
@@ -190,7 +197,7 @@ def write_landed(log_dir: Path, record: TaskRecord) -> bool:
         log.warning('refusing to persist a record for an invalid task id')
         return False
     try:
-        with catalog_lock(log_dir):
+        with catalog_lock(log_dir, layout=task_layout(log_dir)):
             return _write_landed_locked(log_dir, record)
     except (OSError, sqlite3.Error):
         log.warning("could not lock record for task %s", record.task_id, exc_info=True)
@@ -203,6 +210,7 @@ def _write_landed_locked(log_dir: Path, record: TaskRecord) -> bool:
     Same never-raise contract; False for an invalid id, a refused backwards move, or an I/O
     failure. For a caller that must tell the user when a status it published did not stick.
     """
+    assert_task_owned(log_dir)
     previous_directory_mtime = log_dir.stat().st_mtime_ns if log_dir.exists() else None
     try:
         target = record_path(log_dir, record.task_id)
@@ -226,7 +234,7 @@ def _write_landed_locked(log_dir: Path, record: TaskRecord) -> bool:
 
     try:
         from .catalog import Catalog
-        Catalog(log_dir, RECORD_SUFFIX).invalidate(record.task_id)
+        Catalog(log_dir, RECORD_SUFFIX, layout=task_layout(log_dir)).invalidate(record.task_id)
         log_dir.mkdir(parents=True, exist_ok=True)
         payload = asdict(record)
         if len(record.prompt) > PROMPT_PREVIEW_CHARS:
@@ -265,10 +273,11 @@ def _write_landed_locked(log_dir: Path, record: TaskRecord) -> bool:
     header, stamp, active = listing_header(record)
     from .catalog import source_identity
     header['_source_identity'] = source_identity(written_source)
-    Catalog(log_dir, RECORD_SUFFIX).record(header, stamp, active, record.task_id, previous_directory_mtime=previous_directory_mtime)
+    Catalog(log_dir, RECORD_SUFFIX, layout=task_layout(log_dir)).record(header, stamp, active, record.task_id, previous_directory_mtime=previous_directory_mtime)
     return True
 
 
+@task_operation
 def read(log_dir: Path, task_id: str, *, include_prompt: bool = True, metadata_byte_limit: int | None = None, metadata_budget: Any = None) -> TaskRecord | None:
     path = record_path(log_dir, task_id)
     try:
@@ -319,6 +328,7 @@ def read(log_dir: Path, task_id: str, *, include_prompt: bool = True, metadata_b
         return None
 
 
+@task_operation
 def read_all(log_dir: Path) -> list[TaskRecord]:
     try:
         paths = sorted(log_dir.glob(f"*{RECORD_SUFFIX}"))
@@ -357,13 +367,14 @@ def listing_header(record: TaskRecord) -> tuple[dict[str, Any], float, bool]:
     return header, stamp, unobserved
 
 
+@task_operation
 def bootstrap_catalog(log_dir: Path) -> bool:
     from .catalog import Catalog, DeferredRead
     def load(identifier: str, *, _metadata_budget=None):
         record = read(log_dir, identifier, include_prompt=False, metadata_byte_limit=4 * 1024 * 1024, metadata_budget=_metadata_budget)
         return listing_header(record) if record is not None else None
     load.bounded_metadata = True
-    catalog = Catalog(log_dir, RECORD_SUFFIX)
+    catalog = Catalog(log_dir, RECORD_SUFFIX, layout=task_layout(log_dir))
     with catalog.connect() as db:
         return catalog.bootstrap(db, load)
 
@@ -394,13 +405,14 @@ def _project_indexed_status(header: dict[str, Any], record: TaskRecord) -> bool:
     return active
 
 
+@task_operation
 def list_page(log_dir: Path, *, limit: int = 100, cursor: str | None = None, active_only: bool = False, session_id: str | None = None, task_ids: list[str] | None = None, filters: dict[str, Any] | None = None) -> dict[str, Any]:
     from .catalog import Catalog, DeferredRead, apply_read_state
     def load(identifier: str, *, _metadata_budget=None):
         record = read(log_dir, identifier, include_prompt=False, metadata_byte_limit=4 * 1024 * 1024, metadata_budget=_metadata_budget)
         return listing_header(record) if record is not None else None
     load.bounded_metadata = True
-    catalog = Catalog(log_dir, RECORD_SUFFIX)
+    catalog = Catalog(log_dir, RECORD_SUFFIX, layout=task_layout(log_dir))
     with catalog.connect() as db:
         # Upgrade existing headers without decoding metadata or losing chronology.
         db.execute("UPDATE entries SET active=1,payload=json_set(payload,'$.needs_reconciliation',json('true'),'$.observed_exit',json('false'),'$.persisted_status',json_extract(payload,'$.status'),'$.status','running') WHERE id IN (SELECT id FROM callers WHERE terminal=0) AND json_type(payload,'$.needs_reconciliation') IS NULL")
@@ -414,7 +426,7 @@ def list_page(log_dir: Path, *, limit: int = 100, cursor: str | None = None, act
         page = catalog.page(load, limit=limit, cursor=cursor, active_only=active_only, session_id=session_id, filters=filters)
     from .workflows import WorkflowStore
     workflow_storage = WorkflowStore(log_dir.parent)
-    workflow_catalog = Catalog(workflow_storage.runs, '.json')
+    workflow_catalog = Catalog(workflow_storage.runs, '.json', layout=workflow_storage.state_layout)
     workflow_catalog.share_budget(catalog)
     for item in page['items']:
         try:
@@ -589,6 +601,7 @@ def record_process_alive(record: TaskRecord) -> bool:
     return process_alive(pid, record.markers)
 
 
+@task_operation
 def replay_log(log_dir: Path, task_id: str, backend_name: str) -> tuple[Accumulator, list[str]]:
     """Rebuild what the stream said, so a recovered task reports the same fields as a live one."""
     backend = get_backend(backend_name)
@@ -643,6 +656,7 @@ _OWNED_BY_LIVE_SERVER_NOTE = (
 )
 
 
+@task_operation
 def resolve_status(
     log_dir: Path, record: TaskRecord, *, detail: bool = True
 ) -> tuple[str, str, Accumulator, list[str]]:
@@ -665,6 +679,7 @@ def _resolve(
     """Same as `resolve_status`, plus whether a live owning server was found — see
     `identity.identity_check`. Kept private so `resolve_status` can keep its existing 4-tuple
     shape for every caller and test that predates ownership."""
+    assert_task_owned(log_dir)
     unobserved = outcome_unobserved(record)
 
     if not detail and record.status in TERMINAL_RECORD_STATUSES and not unobserved:
@@ -731,6 +746,8 @@ def _resolve(
         # than reconstructing a status from a stream that has no result event for this either way.
         try:
             authorized = control.cancel_verdict(log_dir, record.task_id) == "authorized"
+        except StateOwnershipError:
+            raise
         except Exception:
             log.warning(
                 "could not read the cross-process cancel verdict for task %s", record.task_id,
@@ -838,6 +855,8 @@ def _enforcement(record: TaskRecord) -> dict[str, Any]:
                 "cannot be restated"
             ),
         }
+    except StateOwnershipError:
+        raise
     except Exception:
         # Malformed data in an old or hand-edited record must not break recovery.
         log.debug("could not resolve enforcement for task %s", record.task_id)
@@ -850,6 +869,7 @@ def _notices(record: TaskRecord, state: Accumulator) -> list[str]:
     return [*record.bridge_notices, *([record.prompt_error] if record.prompt_error else []), *state.notices]
 
 
+@task_operation
 def snapshot(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
     """A recovered task's state, shaped like a live snapshot so callers need no special casing."""
     from . import artifacts
@@ -869,7 +889,7 @@ def snapshot(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
     header.update(status=status, needs_reconciliation=False, status_reconciled=True)
     if captured_source is not None:
         header['_source_identity'] = captured_source
-        Catalog(log_dir, RECORD_SUFFIX).record(header, stamp, status == 'running', record.task_id)
+        Catalog(log_dir, RECORD_SUFFIX, layout=task_layout(log_dir)).record(header, stamp, status == 'running', record.task_id)
     from . import inbox
     pending = inbox.pending_messages(log_dir, record.task_id)
     if record.workflow_builder:
@@ -947,6 +967,7 @@ def snapshot(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
     } | control.taken_over_fields(log_dir, record.task_id)
 
 
+@task_operation
 def brief(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
     """Listing shape for a recovered task, using the same status resolution as `snapshot`.
 
@@ -1006,6 +1027,7 @@ def _record_holds_session(record: TaskRecord) -> bool:
     )
 
 
+@task_operation
 def live_session_task_ids(log_dir: Path, session_id: str) -> set[str]:
     """Ids of the records whose run may still hold `session_id` — see `_record_holds_session`.
     Records only: takeover reservations are `control.takeover_reservations`."""
@@ -1016,6 +1038,7 @@ def live_session_task_ids(log_dir: Path, session_id: str) -> set[str]:
     }
 
 
+@task_operation
 def live_session_ids(log_dir: Path) -> set[str]:
     """Sessions with a still-running task according to disk, whichever server started it, plus
     sessions a takeover currently holds (`control.takeover_reservations`: from a takeover's `.req`
@@ -1041,6 +1064,7 @@ def live_session_ids(log_dir: Path) -> set[str]:
     return live
 
 
+@task_operation
 def session_successor_task_ids(log_dir: Path, task_id: str, session_id: str) -> set[str]:
     """Find writes after a selected conversation checkpoint, including settled ones.
 

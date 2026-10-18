@@ -12,6 +12,8 @@ from pathlib import Path
 import pytest
 
 from harflow_mcp import events
+from harflow_mcp import state_ownership
+from harflow_mcp.state_layout import resolve_layout
 from harflow_mcp.wire_contracts import (
     EVENT_FORMAT,
     MAX_VERSION_COMPONENT,
@@ -19,6 +21,13 @@ from harflow_mcp.wire_contracts import (
     parse_version,
     validate_envelope,
 )
+
+
+@pytest.fixture
+def tmp_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    root = tmp_path_factory.mktemp("wire-contracts") / "state"
+    with state_ownership.state_session(resolve_layout(root=root)):
+        yield root
 
 
 def test_version_parser_rejects_bool_float_overflow_prerelease_and_long_metadata():

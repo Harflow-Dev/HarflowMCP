@@ -40,6 +40,11 @@ session lock while holding it.
 
 from __future__ import annotations
 
+from .state_access import task_operation, task_layout, assert_task_owned, open_descriptor, layout_operation
+from .state_ownership import owned_job, run_owned_worker, StateOwnershipError
+
+from .state_layout import resolve_layout
+
 import asyncio
 import contextlib
 import fcntl
@@ -163,6 +168,7 @@ def _valid(doc: Any) -> bool:
 
 def _load(log_dir: Path, task_id: str) -> dict[str, Any]:
     """The ledger, or an empty one when none exists. Raises `Unavailable`."""
+    assert_task_owned(log_dir)
     path = state_path(log_dir, task_id)
     try:
         with path.open("rb") as handle:
@@ -207,6 +213,7 @@ def _compact(doc: dict[str, Any]) -> None:
 
 def _store(log_dir: Path, task_id: str, doc: dict[str, Any], limit: int = READ_BUDGET_BYTES) -> None:
     """Replace the document atomically. Raises `_TooLarge` or `OSError`."""
+    assert_task_owned(log_dir)
     _compact(doc)
     data = _serialize(doc)
     if len(data) > limit:
@@ -231,12 +238,14 @@ def _store(log_dir: Path, task_id: str, doc: dict[str, Any], limit: int = READ_B
 def _locked(log_dir: Path, task_id: str, timeout: float = LOCK_TIMEOUT_SECONDS) -> Iterator[None]:
     """The follow-up lock, with any terminal write this process still owes for the task retried
     first. Raises `control.LockTimeout`."""
-    with control._flock_sync(lock_path(log_dir, task_id), timeout, f"follow-up lock for {task_id}"):
+    assert_task_owned(log_dir)
+    with control._flock_sync(lock_path(log_dir, task_id), timeout, f"follow-up lock for {task_id}", layout=resolve_layout(log_dir=log_dir)):
         _retry_pending(log_dir, task_id)
         yield
 
 
 def _retry_pending(log_dir: Path, task_id: str) -> None:
+    assert_task_owned(log_dir)
     key = _key(log_dir, task_id)
     with _PENDING_GUARD:
         pending = list(_PENDING.get(key, ()))
@@ -261,6 +270,8 @@ def _is_this_process(owner: Any) -> bool:
         return False
     try:
         mine = identity.own_identity().get("start_time")
+    except StateOwnershipError:
+        raise
     except Exception:
         mine = None
     theirs = owner.get("start_time")
@@ -269,6 +280,7 @@ def _is_this_process(owner: Any) -> bool:
 
 def _reserved_verdict(log_dir: Path, item: dict[str, Any]) -> str | None:
     """What a `reserved` item has become, or None while it is still genuinely in progress."""
+    assert_task_owned(log_dir)
     successor = item.get("successor_task_id")
     if not isinstance(successor, str):
         return DELIVERY_UNKNOWN
@@ -286,11 +298,14 @@ def _reserved_verdict(log_dir: Path, item: dict[str, Any]) -> str | None:
     try:
         if identity.identity_check(owner) == "dead":
             return DELIVERY_UNKNOWN
+    except StateOwnershipError:
+        raise
     except Exception:
         pass
     return None  # another live (or unprovable) owner: truthfully in progress or unresolved
 
 
+@task_operation
 def successor_candidates(log_dir: Path, record: store.TaskRecord, *, cached: bool = False) -> list[str]:
     """Same-session successors and continuations of `record`, oldest first."""
     key = _key(log_dir, record.task_id)
@@ -330,6 +345,7 @@ def _resolve(
 ) -> bool:
     """Apply the read-time rules to `doc` in place; whether anything changed. These only repair
     what a crash or a failed terminal write left behind."""
+    assert_task_owned(log_dir)
     changed = False
     now = _now()
     verdicts: dict[str, str] = {}
@@ -414,10 +430,12 @@ def _refused_superseded(task_id: str, successor: str) -> inbox.SendRefused:
 
 
 def _guard(log_dir: Path, task_id: str) -> None:
+    assert_task_owned(log_dir)
     from .workflow_hooks import refuse_direct_message
     refuse_direct_message(log_dir, task_id)
 
 
+@task_operation
 def send(
     log_dir: Path, task_id: str, text: str, *, by: dict[str, Any] | None,
     timeout: float = LOCK_TIMEOUT_SECONDS,
@@ -504,12 +522,14 @@ def send(
 
 def _persist(log_dir: Path, task_id: str, doc: dict[str, Any]) -> None:
     """Write resolution changes. A failure is not an outcome: the next lock holder repeats them."""
+    assert_task_owned(log_dir)
     try:
         _store(log_dir, task_id, doc)
     except (_TooLarge, OSError):
         log.warning("task %s: could not persist follow-up resolution", task_id, exc_info=True)
 
 
+@task_operation
 def dispatch_send(
     log_dir: Path, task_id: str, text: str, *, by: dict[str, Any] | None,
     timeout: float = LOCK_TIMEOUT_SECONDS,
@@ -523,6 +543,7 @@ def dispatch_send(
     return inbox.send_to_record(log_dir, task_id, text, by=by, timeout=timeout)
 
 
+@task_operation
 def cancel(
     log_dir: Path, task_id: str, message_id: str, *, timeout: float = LOCK_TIMEOUT_SECONDS
 ) -> dict[str, Any]:
@@ -589,9 +610,10 @@ def _present(doc: dict[str, Any]) -> dict[str, Any]:
     return {"state": "available", "items": items, "omitted_final": doc["omitted_final"]}
 
 
+@task_operation
 def view(log_dir: Path, task_id: str) -> dict[str, Any]:
     """`queued_followups` for a status document. Blocking file reads: run it off the event loop.
-    Never raises (an unreadable ledger is reported as such) and never writes: terminal writes this
+    Ownership failures raise; unreadable ledgers are reported without writes: terminal writes this
     process still owes are applied to what is shown, and resolutions this read observes are
     persisted by the next lock holder (send, cancel, a consuming continuation, retention)."""
     try:
@@ -608,6 +630,8 @@ def view(log_dir: Path, task_id: str) -> dict[str, Any]:
         return _present(doc)
     except Unavailable:
         return dict(_UNAVAILABLE_VIEW)
+    except StateOwnershipError:
+        raise
     except Exception:
         log.warning("task %s: follow-up status unavailable", task_id, exc_info=True)
         return dict(_UNAVAILABLE_VIEW)
@@ -620,6 +644,7 @@ def count_outstanding(view_document: dict[str, Any]) -> int | None:
     return sum(1 for item in view_document["items"] if item["status"] in OUTSTANDING_STATUSES)
 
 
+@task_operation
 def outstanding_count(log_dir: Path, task_id: str) -> int | None:
     """Outstanding items for a listing: 0 with no ledger, None when it cannot be read. Cheap, and
     without the read-time rules."""
@@ -634,6 +659,7 @@ def outstanding_count(log_dir: Path, task_id: str) -> int | None:
 
 # --- retention ----------------------------------------------------------------------------------
 
+@task_operation
 def reconcile_all(log_dir: Path) -> None:
     """Persist read-time resolutions for every task with a ledger, so retention protects only what
     is genuinely outstanding. Each ledger is taken without waiting: a busy one is skipped and stays
@@ -655,10 +681,13 @@ def reconcile_all(log_dir: Path) -> None:
                     _persist(log_dir, task_id, doc)
         except (control.LockTimeout, Unavailable, store.InvalidTaskId, OSError):
             continue
+        except StateOwnershipError:
+            raise
         except Exception:
             log.warning("task %s: follow-up reconciliation failed", path.name, exc_info=True)
 
 
+@task_operation
 def protected_task_ids(log_dir: Path) -> set[str]:
     """Tasks retention must keep: those with queued or reserved items, the successors a
     reservation names, and any whose ledger cannot be read (unreadable is not provably empty)."""
@@ -687,13 +716,14 @@ def protected_task_ids(log_dir: Path) -> set[str]:
 
 
 @contextlib.contextmanager
+@task_operation
 def hold_for_delete(log_dir: Path, task_id: str) -> Iterator[str]:
     """Hold the follow-up lock across a task's deletion. Yields `ok` when it may go ahead, `busy`
     when the lock is taken, `blocked` when something is queued or reserved (or the ledger cannot be
     read). The caller must delete the state file and the record while inside, and leaves the lock
     file in place."""
     try:
-        fd = os.open(lock_path(log_dir, task_id), os.O_CREAT | os.O_RDWR, 0o644)
+        fd = open_descriptor(lock_path(log_dir, task_id), os.O_CREAT | os.O_RDWR, 0o644, layout=task_layout(log_dir))
     except OSError:
         yield "busy"
         return
@@ -718,11 +748,7 @@ def hold_for_delete(log_dir: Path, task_id: str) -> Iterator[str]:
             return
         yield "ok"
     finally:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        except OSError:
-            pass
-        os.close(fd)
+        control.release(fd)
 
 
 # --- consumption --------------------------------------------------------------------------------
@@ -749,6 +775,7 @@ def _not_started(message: str) -> ValueError:
     return error
 
 
+@task_operation
 def _reserve(
     log_dir: Path, task_id: str, successor: str, owner: dict[str, Any] | None
 ) -> list[dict[str, Any]]:
@@ -785,11 +812,12 @@ def _reserve(
         ) from None
 
 
+@task_operation
 def finish(
     log_dir: Path, task_id: str, successor: str, ids: list[str], outcome: str, reason: str | None = None
 ) -> bool:
     """Write an attempt's terminal state (`consumed`, `released` or `delivery_unknown`). Blocking.
-    Never raises: a write that cannot land is remembered and retried at the next lock acquisition,
+    Ownership failures raise; ordinary failed writes are remembered and retried at the next lock acquisition,
     and false is returned."""
     try:
         with _locked(log_dir, task_id):
@@ -816,28 +844,39 @@ class Attempt:
     items: list[dict[str, Any]] = field(default_factory=list)
 
     @property
+    def state_layout(self):
+        return task_layout(self.log_dir)
+
+    @property
     def ids(self) -> list[str]:
         return [item["id"] for item in self.items]
 
     def compose(self, explicit_prompt: str | None) -> str:
         return compose(self.items, explicit_prompt)
 
+    @layout_operation
     async def _terminal(self, outcome: str, reason: str | None = None) -> bool:
-        work = asyncio.ensure_future(asyncio.to_thread(
+        work = owned_job(self.state_layout, run_owned_worker(self.state_layout,
             finish, self.log_dir, self.task_id, self.successor_id, self.ids, outcome, reason))
         try:
             return await asyncio.shield(work)
         except asyncio.CancelledError:
-            with contextlib.suppress(Exception):
+            try:
                 await work
+            except StateOwnershipError:
+                raise
+            except Exception:
+                pass
             raise
 
+    @layout_operation
     async def consumed(self, registry: Any, task: Any) -> None:
         """The successor started: record the consumption. A write that fails is a notice on the
         successor, never an error."""
         if not await self._terminal(CONSUMED):
             self._notice(registry, task)
 
+    @layout_operation
     async def fail(self, registry: Any, error: BaseException, spawn_called: bool) -> None:
         """The launch failed. Provably not started releases the messages, a successor that exists
         consumes them, and anything else leaves them `delivery_unknown`."""
@@ -851,6 +890,7 @@ class Attempt:
                 "messages were handed to it; they may have reached an agent, so inspect before "
                 "resending"))
 
+    @layout_operation
     def _notice(self, registry: Any, task: Any) -> None:
         try:
             task.bridge_notices.append(
@@ -858,10 +898,13 @@ class Attempt:
                 "them consumed failed; they read as consumed once the ledger is next repaired."
             )
             registry.persist(task)
+        except StateOwnershipError:
+            raise
         except Exception:
             log.debug("could not record the follow-up notice", exc_info=True)
 
 
+@task_operation
 async def begin(
     log_dir: Path, task_id: str, successor_id: str, owner: dict[str, Any] | None
 ) -> Attempt:
@@ -874,15 +917,19 @@ async def begin(
     # The lock is taken even with no ledger yet, so a send during the reservation is ordered by it.
     # A send landing right after an empty begin() is accepted, and later resolves to `undeliverable`
     # (superseded by this continuation) with its text kept.
-    work = asyncio.ensure_future(asyncio.to_thread(_reserve, log_dir, task_id, successor_id, owner))
+    work = owned_job(task_layout(log_dir), run_owned_worker(task_layout(log_dir), _reserve, log_dir, task_id, successor_id, owner))
     try:
         attempt.items = await asyncio.shield(work)
     except asyncio.CancelledError:
         # The worker cannot be interrupted: let it settle, then undo a reservation it made.
-        with contextlib.suppress(Exception):
+        try:
             reserved = await work
             if reserved:
-                await asyncio.shield(asyncio.to_thread(
-                    finish, log_dir, task_id, successor_id, [item["id"] for item in reserved], "released"))
+                await asyncio.shield(owned_job(task_layout(log_dir), run_owned_worker(task_layout(log_dir),
+                    finish, log_dir, task_id, successor_id, [item["id"] for item in reserved], "released")))
+        except StateOwnershipError:
+            raise
+        except Exception:
+            pass
         raise
     return attempt

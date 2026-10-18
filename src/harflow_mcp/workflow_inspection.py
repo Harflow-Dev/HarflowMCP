@@ -1,6 +1,11 @@
 """Bounded inspection of durable, fully settled workflow executions."""
 from __future__ import annotations
 
+from .state_access import task_operation, task_layout, root_operation
+from .state_ownership import StateOwnershipError, state_session
+
+from .state_layout import resolve_layout
+
 import base64
 import hashlib
 import json
@@ -33,6 +38,7 @@ def selected_task(activation: dict[str, Any], task_id: str | None) -> dict[str, 
     return task
 
 
+@root_operation
 def make_assigned_input_ref(run: dict[str, Any], root: Any, execution_id: str, *, source_run_id: str | None = None, task_id: str | None = None) -> dict[str, Any]:
     """Create the immutable authorization manifest from the reader's exact payload."""
     target_id = source_run_id or run["workflow_run_id"]
@@ -41,6 +47,7 @@ def make_assigned_input_ref(run: dict[str, Any], root: Any, execution_id: str, *
     return {"workflow_run_id": target_id, "execution_id": execution_id, "task_id": task_id, "content_sha256": page["content_sha256"], "total_characters": page["total_characters"], "encoding": "json"}
 
 
+@root_operation
 def assigned_input_page(managed: tuple[dict[str, Any], dict[str, Any]] | None, root: Any, workflow_run_id: str, execution_id: str, *, source_run_id: str | None = None, task_id: str | None = None, cursor: str | None = None, limit: int = 16000) -> dict[str, Any]:
     """Read only digest-bound immutable inputs assigned to this verified worker."""
     if managed is None or managed[0].get("role") != "node":
@@ -92,6 +99,7 @@ def result_page(run: dict[str, Any], execution_id: str, *, task_id: str | None =
     return {"workflow_run_id": run["workflow_run_id"], "execution_id": execution_id, "node_id": activation["node_id"], "status": activation["status"], "task_id": task.get("task_id") if task else None, "attempts": [{"task_id": t.get("task_id"), "status": t.get("status")} for t in activation.get("tasks", [])], "encoding": "json", "content_sha256": digest, "offset": offset, "total_characters": len(serialized), "chunk": chunk, "next_cursor": next_cursor, "has_more": next_cursor is not None}
 
 
+@task_operation(parameter="log_dir")
 def decorate_tasks(entries: list[dict[str, Any]], log_dir: Any) -> list[dict[str, Any]]:
     """Resolve requested task receipts and ancestors; never scan run history."""
     import logging
@@ -159,12 +167,13 @@ def decorate_tasks(entries: list[dict[str, Any]], log_dir: Any) -> list[dict[str
     return [{**entry, **(owner(entry["task_id"], set()) or {})} if entry.get("task_id") else entry for entry in entries]
 
 
+@task_operation(parameter="log_dir")
 def managed_page_reader(log_dir: Any) -> tuple[bool, tuple[dict[str, Any], dict[str, Any]] | None]:
     """Prepare bounded caller index, then preserve managed read authority without scans."""
     from . import lineage, store
     from .catalog import Catalog, set_authority_preparation
     from .workflows import WorkflowStore
-    task_catalog = Catalog(log_dir, store.RECORD_SUFFIX)
+    task_catalog = Catalog(log_dir, store.RECORD_SUFFIX, layout=task_layout(log_dir))
     set_authority_preparation(None, log_dir)
     if not task_catalog.ready():
         store.bootstrap_catalog(log_dir)
@@ -188,7 +197,7 @@ def managed_page_reader(log_dir: Any) -> tuple[bool, tuple[dict[str, Any], dict[
             set_authority_preparation(preparation, log_dir)
             return False, None
         queue, visited, association = [(detection.caller.record.task_id, set())], set(), None
-        with storage._ownership_catalog().connect() as ownership_db, Catalog(log_dir, store.RECORD_SUFFIX).connect() as task_db:
+        with storage._ownership_catalog().connect() as ownership_db, Catalog(log_dir, store.RECORD_SUFFIX, layout=task_layout(log_dir)).connect() as task_db:
             while queue and len(visited) < 64:
                 identifier, path = queue.pop(0)
                 if identifier in path:
@@ -215,14 +224,15 @@ def managed_page_reader(log_dir: Any) -> tuple[bool, tuple[dict[str, Any], dict[
     # Decode once, with the same aggregate budget as the subsequent page reader.
     # Receipt verification must not hide a second unbudgeted run decode.
     from .catalog import DeferredRead
-    budget = Catalog(storage.runs, '.json')
+    budget = Catalog(storage.runs, '.json', layout=storage.state_layout)
     budget.share_budget(task_catalog)
     def load_run(identifier, *, _metadata_budget=None):
         run_value = storage.get_run(identifier, metadata_byte_limit=4 * 1024 * 1024, metadata_budget=_metadata_budget)
         return run_value, float(run_value['created_at']), run_value.get('status') not in {'completed', 'failed', 'cancelled'}
     load_run.bounded_metadata = True
     try:
-        loaded = budget._load_bounded(association['workflow_run_id'], load_run)
+        with state_session(storage.state_layout):
+            loaded = budget._load_bounded(association['workflow_run_id'], load_run)
     except DeferredRead:
         preparation = {'status': 'preparing', 'source': 'caller_authority', 'reason': 'Preparing bounded workflow ownership metadata', 'pending_records': 1, 'blocked_records': 0}
         set_authority_preparation(preparation, log_dir)
@@ -243,11 +253,12 @@ def managed_page_reader(log_dir: Any) -> tuple[bool, tuple[dict[str, Any], dict[
     return True, (association, run) if association.get('role') == 'builder' or run.get('execution_contract') == 'delegation' else None
 
 
+@task_operation(parameter="log_dir")
 def page_indexing_response(log_dir: Any) -> dict[str, Any]:
     """No identifiers are exposed while bounded caller authority is incomplete."""
     from .catalog import Catalog, get_authority_preparation
     from . import store
-    state = Catalog(log_dir, store.RECORD_SUFFIX).state()
+    state = Catalog(log_dir, store.RECORD_SUFFIX, layout=task_layout(log_dir)).state()
     if state['status'] == 'ready':
         saved = get_authority_preparation(log_dir)
         if saved:
@@ -264,6 +275,7 @@ def page_indexing_response(log_dir: Any) -> dict[str, Any]:
     return result
 
 
+@task_operation(parameter="log_dir")
 def managed_reader(log_dir: Any) -> tuple[dict[str, Any], dict[str, Any]] | None:
     """CLI caller verification without constructing a registry or running maintenance."""
     from . import lineage
@@ -320,6 +332,7 @@ def filter_task_reads(entries: list[dict[str, Any]], managed: tuple[dict[str, An
     return [entry for entry in entries if entry["task_id"] in allowed]
 
 
+@root_operation
 def _authorized_linked_run(run: dict[str, Any], root: Any, target_id: str) -> dict[str, Any]:
     """Authorize inspection of a linked child run through a verified parent chain."""
     from .workflows import WorkflowStore
@@ -356,6 +369,7 @@ def _authorized_linked_run(run: dict[str, Any], root: Any, target_id: str) -> di
     raise ValueError("Linked workflow chain exceeds the nesting limit")
 
 
+@root_operation
 def inspect_request(run: dict[str, Any], root: Any, request: dict[str, Any]) -> dict[str, Any]:
     """Runner-side inspection, with no MCP server, registry, or agent tool dependency."""
     from .events import events_path, read_page
@@ -425,7 +439,7 @@ def inspect_request(run: dict[str, Any], root: Any, request: dict[str, Any]) -> 
         activation = execution(target_run, execution_id)
     if task is None:
         raise ValueError("Node execution has no dispatched task activity")
-    page = read_page(events_path(root / "tasks", task["task_id"]), limit=limit, before_seq=before, after_seq=after)
+    page = read_page(events_path(root / "tasks", task["task_id"]), limit=limit, before_seq=before, after_seq=after, layout=resolve_layout(root=root))
     return {"workflow_run_id": target_run["workflow_run_id"], "execution_id": execution_id, "node_id": activation["node_id"], "task_id": task["task_id"], "events": page.events, "has_more": page.has_more, "next_before_seq": page.next_before_seq, "next_after_seq": page.next_after_seq, "skipped_oversized": page.skipped_oversized}
 
 

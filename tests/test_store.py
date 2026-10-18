@@ -11,9 +11,19 @@ from pathlib import Path
 import pytest
 
 from harflow_mcp import control, identity, store
+from harflow_mcp import state_ownership
+from harflow_mcp.state_layout import resolve_layout
 from harflow_mcp.store import TaskRecord
 
 SESSION = "0b4147f7-3a0e-4fe1-8399-d8c9964ccb2e"
+
+
+@pytest.fixture
+def tmp_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    root = tmp_path_factory.mktemp("store") / "state"
+    with state_ownership.state_session(resolve_layout(root=root)):
+        (root / "tasks").mkdir()
+        yield root / "tasks"
 
 RESULT_EVENT = {
     "type": "result",
@@ -329,10 +339,10 @@ def test_read_all_is_ordered_by_start_time(tmp_path: Path) -> None:
 
 def test_writing_a_record_never_raises_on_a_bad_directory(tmp_path: Path) -> None:
     """Losing a record must not fail the dispatch it belongs to."""
-    blocker = tmp_path / "not-a-dir"
+    blocker = tmp_path.parent / "not-a-dir"
     blocker.write_text("x")
 
-    store.write(blocker, make_record())
+    assert store.write(blocker, make_record()) is None
 
 
 @pytest.mark.parametrize("pid", [None, 999_999_999])

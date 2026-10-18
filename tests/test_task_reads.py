@@ -3,8 +3,25 @@ import time
 from dataclasses import replace
 
 import pytest
+from pathlib import Path
 
-from harflow_mcp import store, task_reads
+from harflow_mcp import server, store, task_reads
+from harflow_mcp.tasks import TaskRegistry
+from harflow_mcp import state_ownership
+from harflow_mcp.state_layout import resolve_layout
+
+
+@pytest.fixture
+def tmp_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    root = tmp_path_factory.mktemp("task-reads") / "state"
+    with state_ownership.state_session(resolve_layout(root=root)):
+        (root / "tasks").mkdir()
+        yield root / "tasks"
+
+
+@pytest.fixture(autouse=True)
+def isolated_registry(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "_registry", TaskRegistry(log_dir=tmp_path))
 
 
 def record(identifier, **kw):
@@ -129,14 +146,15 @@ def test_status_filter_reports_unchecked_active_inventory(tmp_path, monkeypatch)
         assert page['status_reconciliation_pending'] and page['history_incomplete']
         assert not page['counts_complete']
 
-async def test_mcp_compact_projection_and_page(tmp_path):
-    from harflow_mcp import server
+async def test_mcp_compact_projection_and_page(tmp_path, monkeypatch):
+    from harflow_mcp import server, workflow_inspection
     from harflow_mcp.tasks import Task
     from datetime import datetime, timezone
     task = Task(task_id='compact', backend='codex', session_id=None, repo_path=tmp_path,
         prompt='exact caller prose', max_turns=None, log_path=tmp_path / 'compact.jsonl',
         started_at=datetime.now(timezone.utc))
     task.acc.summary = '界' * 10000
+    monkeypatch.setattr(workflow_inspection, 'managed_page_reader', lambda _: (True, None))
     server._reg()._tasks[task.task_id] = task
     brief = await server.get_task_status(task.task_id, brief=True, include_tail=True)
     assert len(json.dumps(brief).encode()) <= task_reads.BRIEF_BYTES

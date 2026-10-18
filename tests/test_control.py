@@ -12,6 +12,17 @@ from pathlib import Path
 import pytest
 
 from harflow_mcp import control, store
+from harflow_mcp import state_ownership
+from harflow_mcp.state_layout import resolve_layout
+
+
+@pytest.fixture
+def tmp_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    root = tmp_path_factory.mktemp("control") / "state"
+    with state_ownership.state_session(resolve_layout(root=root)):
+        tasks = root / "tasks"
+        tasks.mkdir()
+    return tasks
 
 
 def make_record(**overrides) -> store.TaskRecord:
@@ -379,8 +390,8 @@ def test_cancel_attempt_active_false_and_read_only_for_an_abandoned_controller(
 
 
 def test_write_record_if_open_returns_none_when_the_record_is_missing(tmp_path: Path) -> None:
-    log_dir = tmp_path / "tasks"
-    log_dir.mkdir()
+    log_dir = tmp_path
+    log_dir.mkdir(exist_ok=True)
 
     assert control.write_record_if_open(log_dir, "does-not-exist", lambda r: r) is None
 
@@ -388,8 +399,8 @@ def test_write_record_if_open_returns_none_when_the_record_is_missing(tmp_path: 
 def test_write_record_if_open_refuses_a_terminal_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    log_dir = tmp_path / "tasks"
-    log_dir.mkdir()
+    log_dir = tmp_path
+    log_dir.mkdir(exist_ok=True)
     record = make_record(
         status="completed", exit_code=0, owner={"pid": 1, "start_time": "x", "markers": []}
     )
@@ -405,8 +416,8 @@ def test_write_record_if_open_refuses_a_terminal_record(
 def test_write_record_if_open_refuses_when_the_owner_is_alive(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    log_dir = tmp_path / "tasks"
-    log_dir.mkdir()
+    log_dir = tmp_path
+    log_dir.mkdir(exist_ok=True)
     record = make_record(owner={"pid": 1, "start_time": "x", "markers": []})
     store.write(log_dir, record)
     monkeypatch.setattr(control.identity, "identity_check", lambda ident: "alive")
@@ -418,8 +429,8 @@ def test_write_record_if_open_refuses_when_the_owner_is_alive(
 
 
 def test_write_record_if_open_refuses_when_the_owner_is_undecidable(tmp_path: Path) -> None:
-    log_dir = tmp_path / "tasks"
-    log_dir.mkdir()
+    log_dir = tmp_path
+    log_dir.mkdir(exist_ok=True)
     record = make_record(owner=None)  # identity_check(None) is "undecidable", no monkeypatch needed
     store.write(log_dir, record)
 
@@ -432,8 +443,8 @@ def test_write_record_if_open_refuses_when_the_owner_is_undecidable(tmp_path: Pa
 def test_write_record_if_open_writes_when_the_owner_is_dead(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    log_dir = tmp_path / "tasks"
-    log_dir.mkdir()
+    log_dir = tmp_path
+    log_dir.mkdir(exist_ok=True)
     record = make_record(owner={"pid": 1, "start_time": "x", "markers": []})
     store.write(log_dir, record)
     monkeypatch.setattr(control.identity, "identity_check", lambda ident: "dead")
@@ -448,8 +459,8 @@ def test_write_record_if_open_writes_when_the_owner_is_dead(
 
 
 def test_write_record_if_open_times_out_when_locked_by_another_holder(tmp_path: Path) -> None:
-    log_dir = tmp_path / "tasks"
-    log_dir.mkdir()
+    log_dir = tmp_path
+    log_dir.mkdir(exist_ok=True)
     lock_path = control.record_lock_path(log_dir, "task-1")
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -495,7 +506,7 @@ def test_session_lock_path_is_stable_for_the_same_unsafe_id(tmp_path: Path) -> N
 async def test_acquire_and_release_round_trip(tmp_path: Path) -> None:
     path = tmp_path / "x.lock"
 
-    fd = await control.acquire(path, timeout=1)
+    fd = await control.acquire(path, timeout=1, layout=resolve_layout(log_dir=tmp_path))
     control.release(fd)
 
     assert path.exists()
@@ -503,17 +514,17 @@ async def test_acquire_and_release_round_trip(tmp_path: Path) -> None:
 
 async def test_acquire_times_out_when_already_held(tmp_path: Path) -> None:
     path = tmp_path / "x.lock"
-    holder_fd = await control.acquire(path, timeout=1)
+    holder_fd = await control.acquire(path, timeout=1, layout=resolve_layout(log_dir=tmp_path))
     try:
         with pytest.raises(control.LockTimeout):
-            await control.acquire(path, timeout=0.2)
+            await control.acquire(path, timeout=0.2, layout=resolve_layout(log_dir=tmp_path))
     finally:
         control.release(holder_fd)
 
 
 async def test_session_lock_serialises_two_coroutines(tmp_path: Path) -> None:
-    log_dir = tmp_path / "tasks"
-    log_dir.mkdir()
+    log_dir = tmp_path
+    log_dir.mkdir(exist_ok=True)
     events: list[str] = []
 
     async def worker(name: str, hold_seconds: float) -> None:
@@ -530,9 +541,9 @@ async def test_session_lock_serialises_two_coroutines(tmp_path: Path) -> None:
 
 
 async def test_session_lock_times_out_when_already_held(tmp_path: Path) -> None:
-    log_dir = tmp_path / "tasks"
-    log_dir.mkdir()
-    holder_fd = await control.acquire(control.session_lock_path(log_dir, "session-1"), timeout=1)
+    log_dir = tmp_path
+    log_dir.mkdir(exist_ok=True)
+    holder_fd = await control.acquire(control.session_lock_path(log_dir, "session-1"), timeout=1, layout=resolve_layout(log_dir=log_dir))
     try:
         with pytest.raises(control.LockTimeout):
             async with control.session_lock(log_dir, "session-1", timeout=0.2):
@@ -542,16 +553,16 @@ async def test_session_lock_times_out_when_already_held(tmp_path: Path) -> None:
 
 
 async def test_lock_files_are_never_deleted(tmp_path: Path) -> None:
-    log_dir = tmp_path / "tasks"
-    log_dir.mkdir()
+    log_dir = tmp_path
+    log_dir.mkdir(exist_ok=True)
     path = control.session_lock_path(log_dir, "session-1")
 
-    fd = await control.acquire(path, timeout=1)
+    fd = await control.acquire(path, timeout=1, layout=resolve_layout(log_dir=tmp_path))
     control.release(fd)
     assert path.exists()
 
     # Re-acquiring works against the same file rather than a freshly recreated one.
-    fd2 = await control.acquire(path, timeout=1)
+    fd2 = await control.acquire(path, timeout=1, layout=resolve_layout(log_dir=tmp_path))
     control.release(fd2)
     assert path.exists()
 
@@ -562,12 +573,18 @@ async def test_a_cancelled_lock_waiter_closes_its_descriptor(
     """The context manager's `finally` never receives the fd of an acquire cancelled mid-retry, so
     acquire itself must close it — or repeated cancelled resumes exhaust descriptors."""
     path = tmp_path / "x.lock"
-    holder_fd = await control.acquire(path, timeout=1)
-    closed: list[int] = []
-    real_close = os.close
-    monkeypatch.setattr(control.os, "close", lambda fd: (closed.append(fd), real_close(fd)))
+    holder_fd = await control.acquire(path, timeout=1, layout=resolve_layout(log_dir=tmp_path))
+    real_open_descriptor = control.open_descriptor
+    opened = []
+
+    def capture_open_descriptor(*args, **kwargs):
+        descriptor = real_open_descriptor(*args, **kwargs)
+        opened.append(descriptor)
+        return descriptor
+
+    monkeypatch.setattr(control, "open_descriptor", capture_open_descriptor)
     try:
-        waiter = asyncio.create_task(control.acquire(path, timeout=5))
+        waiter = asyncio.create_task(control.acquire(path, timeout=5, layout=resolve_layout(log_dir=tmp_path)))
         await asyncio.sleep(0.15)
         waiter.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -576,7 +593,13 @@ async def test_a_cancelled_lock_waiter_closes_its_descriptor(
         monkeypatch.undo()
         control.release(holder_fd)
 
-    assert len(closed) == 1
+    assert len(opened) == 1
+    waiter_fd = opened[0]
+    assert waiter_fd.closed is True
+    with pytest.raises(OSError):
+        os.fstat(int(waiter_fd))
+    with state_ownership.exclusive_session(resolve_layout(log_dir=tmp_path)):
+        pass
 
 
 def test_write_phase_wraps_a_temp_file_creation_failure(

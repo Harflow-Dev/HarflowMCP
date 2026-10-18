@@ -5,6 +5,8 @@ import pytest
 from harflow_mcp.workflow_inspection import assigned_input_page, guard_task_read, make_assigned_input_ref
 
 
+
+
 def fixture_run():
     return {"workflow_run_id": "run", "execution_contract": "delegation", "activations": [
         {"id": "source", "role": "node", "node_id": "before", "status": "completed", "node_result": {"status": "succeeded", "summary": "雪🙂" * 100}, "raw_output": "日本語\n" * 100, "tasks": [{"task_id": "old", "status": "completed", "result": {"summary": "attempt"}}]},
@@ -105,9 +107,10 @@ async def test_server_worker_reader_and_inspection_restriction(tmp_path, monkeyp
         await server.inspect_workflow_node("run", "source")
 
 
-def test_cli_assigned_input_parity(monkeypatch, capsys):
+def test_cli_assigned_input_parity(monkeypatch, capsys, tmp_path):
     from harflow_mcp import ctl, workflow_inspection, workflow_node_reads
     seen = []
+    monkeypatch.setenv("HARFLOW_STATE_ROOT", str(tmp_path / "state"))
     managed = object()
     monkeypatch.setattr(workflow_inspection, "managed_reader", lambda log_dir: managed)
     def read(resolved, run_id, execution_id, *, source_run_id, task_id, cursor, limit, root=None):
@@ -119,10 +122,11 @@ def test_cli_assigned_input_parity(monkeypatch, capsys):
     assert json.loads(capsys.readouterr().out)["result"]["chunk"] == "ok"
 
 
-def test_cli_inspect_parity(monkeypatch, capsys):
+def test_cli_inspect_parity(monkeypatch, capsys, tmp_path):
     """`workflow-inspect` routes through the shared node-read body, never the server module."""
     from harflow_mcp import ctl, workflow_inspection, workflow_node_reads
     seen = []
+    monkeypatch.setenv("HARFLOW_STATE_ROOT", str(tmp_path / "state"))
     managed = object()
     monkeypatch.setattr(workflow_inspection, "managed_reader", lambda log_dir: managed)
     def inspect(resolved, run_id, *, execution_id, task_id, view, cursor, limit, before_seq, after_seq, root=None):

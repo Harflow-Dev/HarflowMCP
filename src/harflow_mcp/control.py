@@ -32,6 +32,9 @@ of a file nobody can see anymore.
 
 from __future__ import annotations
 
+from .state_access import task_operation, task_layout, assert_task_owned, open_descriptor, OwnedDescriptor, require_state_path
+from .state_ownership import StateOwnershipError, state_session
+
 import asyncio
 import fcntl
 import hashlib
@@ -102,6 +105,7 @@ def phase_path(log_dir: Path, task_id: str, family: str, n: int, phase: str) -> 
 
 
 def _fsync_dir(log_dir: Path) -> None:
+    assert_task_owned(log_dir)
     """Best-effort: some platforms refuse to fsync a directory at all, and that must not be
     mistaken for the link itself having failed — the link's own errors are never swallowed here."""
     try:
@@ -116,6 +120,7 @@ def _fsync_dir(log_dir: Path) -> None:
         os.close(fd)
 
 
+@task_operation
 def write_phase(log_dir: Path, task_id: str, family: str, n: int, phase: str, payload: dict) -> bool:
     """Create `<task_id>.<family>.<n>.<phase>` atomically, exactly once.
 
@@ -147,6 +152,7 @@ def write_phase(log_dir: Path, task_id: str, family: str, n: int, phase: str, pa
     return True
 
 
+@task_operation
 def read_phase(log_dir: Path, task_id: str, family: str, n: int, phase: str) -> dict | None | Any:
     """The phase file's payload: None if it does not exist, `UNPARSABLE` if it exists but cannot be
     trusted (unreadable, not JSON, or not a JSON object), else the parsed dict."""
@@ -166,6 +172,7 @@ def read_phase(log_dir: Path, task_id: str, family: str, n: int, phase: str) -> 
     return data
 
 
+@task_operation
 def latest_attempt(log_dir: Path, task_id: str, family: str) -> int | None:
     """The highest validly-numbered attempt on disk for `task_id`/`family`, or None if there is
     none. An unparsable `n` is silently skipped here — see `_ATTEMPT_N_RE`."""
@@ -190,6 +197,7 @@ def latest_attempt(log_dir: Path, task_id: str, family: str) -> int | None:
     return best
 
 
+@task_operation
 def attempt_outcome(log_dir: Path, task_id: str, family: str, n: int) -> str:
     """`"sig"` if the attempt's signal was delivered, else `"failed"` if it gave up (its own
     controller, or a later recovery), else `"pending"`. Existence alone decides this — a payload is
@@ -210,6 +218,7 @@ class JoinsUnreadable(OSError):
     """The task directory could not be enumerated, so which joiner intents exist is unknown."""
 
 
+@task_operation
 def join_tokens(log_dir: Path, task_id: str, family: str, n: int) -> list[str]:
     """Tokens of every joiner intent (`<id>.<family>.<n>.join-<token>`) recorded for attempt `n`.
 
@@ -234,6 +243,7 @@ def join_tokens(log_dir: Path, task_id: str, family: str, n: int) -> list[str]:
     return tokens
 
 
+@task_operation
 def joins_outstanding(
     log_dir: Path, task_id: str, family: str, n: int, now: datetime | None = None
 ) -> bool:
@@ -262,6 +272,7 @@ def joins_outstanding(
     return False
 
 
+@task_operation
 def attempt_state(
     log_dir: Path, task_id: str, family: str, n: int, now: datetime | None = None
 ) -> str:
@@ -278,6 +289,7 @@ def attempt_state(
     return attempt_outcome(log_dir, task_id, family, n)
 
 
+@task_operation
 def begin_join(
     log_dir: Path, task_id: str, family: str, n: int, controller: dict, now: datetime | None = None
 ) -> str:
@@ -327,6 +339,7 @@ def controller_abandoned(req_payload: Any, now: datetime) -> bool:
     return identity.identity_check(req_payload.get("by")) == "dead"
 
 
+@task_operation
 def recover_abandoned(
     log_dir: Path, task_id: str, family: str, n: int, now: datetime | None = None
 ) -> bool:
@@ -350,6 +363,7 @@ def recover_abandoned(
     return True
 
 
+@task_operation
 def begin_attempt(
     log_dir: Path, task_id: str, family: str, controller: dict, now: datetime | None = None
 ) -> Attempt:
@@ -379,6 +393,7 @@ def begin_attempt(
     return Attempt(n=n, owned=created)
 
 
+@task_operation
 def cancel_verdict(log_dir: Path, task_id: str, now: datetime | None = None) -> str:
     """Whether a cross-process cancel is authorized for `task_id`.
 
@@ -407,6 +422,7 @@ def cancel_verdict(log_dir: Path, task_id: str, now: datetime | None = None) -> 
     return "pending"
 
 
+@task_operation
 def mark_signalled(
     log_dir: Path, task_id: str, family: str, n: int, *, leader_alive: bool, now: datetime | None = None
 ) -> bool:
@@ -416,6 +432,7 @@ def mark_signalled(
     )
 
 
+@task_operation
 def mark_failed(
     log_dir: Path, task_id: str, family: str, n: int, *, reason: str, now: datetime | None = None
 ) -> bool:
@@ -423,6 +440,7 @@ def mark_failed(
     return write_phase(log_dir, task_id, family, n, "failed", {"at": resolved_now.isoformat(), "reason": reason})
 
 
+@task_operation
 def cancel_attempt_active(log_dir: Path, task_id: str, now: datetime | None = None) -> bool:
     """For retention: whether `task_id` has a cancel attempt still worth keeping the task for.
 
@@ -458,11 +476,13 @@ def _hash_session_id(session_id: str) -> str:
     return "h-" + hashlib.sha256(str(session_id).encode("utf-8")).hexdigest()[:32]
 
 
-async def acquire(path: Path, timeout: float) -> int:
+async def acquire(path: Path, timeout: float, *, layout) -> int:
     """Take an exclusive `flock` on `path`, creating it if needed. Never blocks the event loop: a
     contended lock is retried on a short `asyncio.sleep`, not a blocking wait."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
+    with state_session(layout):
+        require_state_path(layout, path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = open_descriptor(path, os.O_CREAT | os.O_RDWR, 0o644, layout=layout)
     deadline = time.monotonic() + timeout
     try:
         while True:
@@ -476,11 +496,14 @@ async def acquire(path: Path, timeout: float) -> int:
     except BaseException:
         # Including a cancellation during the retry sleep: the caller's `finally` never received
         # this descriptor, so nobody else can close it.
-        os.close(fd)
+        fd.close()
         raise
 
 
 def release(fd: int) -> None:
+    if isinstance(fd, OwnedDescriptor):
+        fd.close(unlock=True)
+        return
     try:
         fcntl.flock(fd, fcntl.LOCK_UN)
     except OSError:
@@ -493,13 +516,14 @@ async def session_lock(log_dir: Path, session_id: str, timeout: float = 30.0):
     """Serialises `resume`/`resume_record` for one session across every server process — held
     across the check-and-spawn it protects, not just the check; see the plan's Notes on why that is
     fine even though nothing else here awaits while holding a lock."""
-    fd = await acquire(session_lock_path(log_dir, session_id), timeout)
+    fd = await acquire(session_lock_path(log_dir, session_id), timeout, layout=task_layout(log_dir))
     try:
         yield
     finally:
         release(fd)
 
 
+@task_operation
 def write_record_if_open(
     log_dir: Path,
     task_id: str,
@@ -512,6 +536,7 @@ def write_record_if_open(
     return record if outcome == "written" else None
 
 
+@task_operation
 def close_record_if_open(
     log_dir: Path,
     task_id: str,
@@ -530,7 +555,7 @@ def close_record_if_open(
     one (something already settled it); `"missing"`; `"owner_not_dead"`; or `"write_failed"` when
     the write did not land on disk. Raises `LockTimeout` if the lock cannot be taken.
     """
-    fd = os.open(record_lock_path(log_dir, task_id), os.O_CREAT | os.O_RDWR, 0o644)
+    fd = open_descriptor(record_lock_path(log_dir, task_id), os.O_CREAT | os.O_RDWR, 0o644, layout=task_layout(log_dir))
     deadline = time.monotonic() + timeout
     try:
         while True:
@@ -554,11 +579,7 @@ def close_record_if_open(
             return "write_failed", None
         return "written", updated
     finally:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        except OSError:
-            pass
-        os.close(fd)
+        release(fd)
 
 
 # --- takeover (A4.1) -----------------------------------------------------------------------------
@@ -597,6 +618,7 @@ class TakeoverAttempt:
     attach: Any
 
 
+@task_operation
 def takeover_attempt(log_dir: Path, task_id: str, n: int | None = None) -> TakeoverAttempt | None:
     """Attempt `n` (default: the latest), or None when there is none."""
     if n is None:
@@ -663,11 +685,13 @@ def takeover_busy(attempt: TakeoverAttempt | None, now: datetime | None = None) 
     return takeover_window_open(attempt, resolved_now)
 
 
+@task_operation
 def takeover_attempt_active(log_dir: Path, task_id: str, now: datetime | None = None) -> bool:
     """For retention: whether the latest takeover attempt still holds its session."""
     return takeover_busy(takeover_attempt(log_dir, task_id), now)
 
 
+@task_operation
 def taken_over(log_dir: Path, task_id: str) -> bool:
     """The latest attempt has `.ready` and no `.failed`. One `stat` when there was never an
     attempt: attempts are numbered from 1, so no `.takeover.1.req` means none ever started."""
@@ -677,17 +701,21 @@ def taken_over(log_dir: Path, task_id: str) -> bool:
     return attempt is not None and attempt.ready is not None and not attempt.failed
 
 
+@task_operation
 def taken_over_fields(log_dir: Path, task_id: str) -> dict[str, Any]:
     """The listing keys for a taken-over task, or `{}` — only present when true, so no existing
     shape changes. Never raises: bookkeeping must not break a listing."""
     try:
         if taken_over(log_dir, task_id):
             return {"taken_over": True, "taken_over_note": TAKEN_OVER_NOTE}
+    except StateOwnershipError:
+        raise
     except Exception:
         log.debug("could not read the takeover state of %s", task_id, exc_info=True)
     return {}
 
 
+@task_operation
 def takeover_reservations(log_dir: Path, now: datetime | None = None) -> dict[str, str | None]:
     """`task_id -> session_id` for every task whose latest takeover attempt holds its session.
 
@@ -725,6 +753,7 @@ def takeover_reservations(log_dir: Path, now: datetime | None = None) -> dict[st
     return reserved
 
 
+@task_operation
 def begin_takeover(
     log_dir: Path,
     task_id: str,
@@ -786,6 +815,7 @@ def begin_takeover(
     return n
 
 
+@task_operation
 def mark_takeover_failed(
     log_dir: Path, task_id: str, n: int, reason: str, *, now: datetime | None = None
 ) -> bool:
@@ -795,16 +825,19 @@ def mark_takeover_failed(
     )
 
 
+@task_operation
 def mark_takeover_ready(log_dir: Path, task_id: str, n: int, *, now: datetime | None = None) -> bool:
     resolved_now = now or datetime.now(timezone.utc)
     return write_phase(log_dir, task_id, TAKEOVER, n, "ready", {"at": resolved_now.isoformat()})
 
 
 @contextmanager
-def _flock_sync(path: Path, timeout: float, what: str):
+def _flock_sync(path: Path, timeout: float, what: str, *, layout):
     """A blocking-with-timeout `flock` for synchronous callers (a CLI, or a worker thread)."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
+    with state_session(layout):
+        require_state_path(layout, path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = open_descriptor(path, os.O_CREAT | os.O_RDWR, 0o644, layout=layout)
     try:
         deadline = time.monotonic() + timeout
         while True:
@@ -817,18 +850,14 @@ def _flock_sync(path: Path, timeout: float, what: str):
                 time.sleep(_LOCK_POLL_SECONDS)
         yield
     finally:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        except OSError:
-            pass
-        os.close(fd)
+        release(fd)
 
 
 def session_lock_sync(log_dir: Path, session_id: str, timeout: float = 30.0):
     """`session_lock` for a synchronous caller — the same lock file."""
-    return _flock_sync(session_lock_path(log_dir, session_id), timeout, f"session lock for {session_id}")
+    return _flock_sync(session_lock_path(log_dir, session_id), timeout, f"session lock for {session_id}", layout=task_layout(log_dir))
 
 
 def record_lock_sync(log_dir: Path, task_id: str, timeout: float = RECORD_LOCK_TIMEOUT_SECONDS):
     """`<id>.lock` for a synchronous caller — the same lock `close_record_if_open` takes."""
-    return _flock_sync(record_lock_path(log_dir, task_id), timeout, f"record lock for {task_id}")
+    return _flock_sync(record_lock_path(log_dir, task_id), timeout, f"record lock for {task_id}", layout=task_layout(log_dir))

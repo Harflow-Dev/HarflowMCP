@@ -9,7 +9,7 @@ def store(tmp_path, monkeypatch):
     monkeypatch.setattr(w.backends, "is_installed", lambda _: True)
     # This suite counts supervisor spawns, independently of adapter certification.
     monkeypatch.setattr(w.backends, "version", lambda _: None)
-    return w.WorkflowStore(tmp_path)
+    return w.WorkflowStore(tmp_path / "state")
 
 
 @pytest.mark.parametrize("failure", ["open", "spawn"])
@@ -36,6 +36,17 @@ def test_definite_launch_failure_retains_owned_recoverable_run(store, tmp_path, 
     w._launch(store, rid)
     assert len(calls) == 1
     assert len(store.list_runs()) == 1
+
+
+@pytest.fixture
+def tmp_path(tmp_path_factory: pytest.TempPathFactory):
+    workspace = tmp_path_factory.mktemp("workflow-node")
+    root = workspace / "state"
+    from harflow_mcp import state_ownership
+    from harflow_mcp.state_layout import resolve_layout
+    with state_ownership.state_session(resolve_layout(root=root)):
+        (root / "tasks").mkdir(exist_ok=True)
+        yield workspace
 
 
 def test_ambiguous_launch_exception_does_not_claim_definite_failure(store, tmp_path, monkeypatch):

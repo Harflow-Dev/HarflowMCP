@@ -1,4 +1,6 @@
 """Task-owned artifacts retained with their recoverable task records."""
+
+from .state_access import task_operation
 from pathlib import Path
 import shutil
 from .store import validate_task_id
@@ -9,6 +11,7 @@ def directory(log_dir: Path, task_id: str) -> Path:
     return log_dir.parent / 'scratch' / task_id
 
 
+@task_operation
 def create(log_dir: Path, task_id: str) -> Path:
     path = directory(log_dir, task_id)
     if path.parent.is_symlink() or path.is_symlink():
@@ -18,6 +21,7 @@ def create(log_dir: Path, task_id: str) -> Path:
     return path.resolve()
 
 
+@task_operation
 def remove(log_dir: Path, task_id: str) -> None:
     path = directory(log_dir, task_id)
     if path.parent.is_symlink():

@@ -6,9 +6,19 @@ from datetime import datetime, timezone
 import pytest
 
 from harflow_mcp import control, retention, store
+from harflow_mcp import state_ownership
+from harflow_mcp.state_layout import resolve_layout
 from harflow_mcp.tasks import SessionBusyError, TaskRegistry
 from harflow_mcp.workflows import WorkflowStore
 from test_registry import make_task
+
+
+@pytest.fixture
+def tmp_path(tmp_path_factory: pytest.TempPathFactory):
+    root = tmp_path_factory.mktemp("session-successors") / "state"
+    with state_ownership.state_session(resolve_layout(root=root)):
+        (root / "tasks").mkdir()
+        yield root / "tasks"
 
 
 def record(tmp_path, task_id="source", **changes):
@@ -54,7 +64,7 @@ def test_proven_resume_ancestor_chain_is_not_a_successor(tmp_path):
 @pytest.mark.parametrize("path", ["live", "record"])
 @pytest.mark.parametrize("strict", [True, False])
 async def test_successor_arriving_between_validation_and_session_lock(tmp_path, monkeypatch, path, strict):
-    state = tmp_path / "state" / "tasks"
+    state = tmp_path
     registry = TaskRegistry(log_dir=state)
     parent = make_task(state, "source", session_id="conversation", finished=True)
     registry._tasks[parent.task_id] = parent

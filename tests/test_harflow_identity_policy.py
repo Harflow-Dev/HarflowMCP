@@ -6,7 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from harflow_mcp import artifacts, backends, caller_policy, server, takeover
+from harflow_mcp import artifacts, backends, caller_policy, server, takeover, state_ownership
+from harflow_mcp.state_layout import resolve_layout
 from harflow_mcp.backends.base import UnsupportedCapability
 
 
@@ -122,17 +123,21 @@ async def test_mutating_server_entrypoints_refuse_worker_without_authority(entry
 def test_artifact_targets_protect_both_harflow_and_polybridge_namespaces(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
-    tasks = tmp_path / "tasks"
+    root = tmp_path / "state"
+    tasks = root / "tasks"
+    with state_ownership.state_session(resolve_layout(root=root)):
+        pass
     tasks.mkdir()
     record = SimpleNamespace(
         repo_path=str(repo), task_id=VALID_ID, enforcement={}, extra_writable_paths=[]
     )
-    for name in (".harflow", ".polybridge"):
-        target = repo / name / "state.json"
-        target.parent.mkdir()
-        target.write_text("state")
-        with pytest.raises(ValueError, match="protected"):
-            artifacts._target(tasks, record, str(target))
+    with state_ownership.state_session(resolve_layout(root=root)):
+        for name in (".harflow", ".polybridge"):
+            target = repo / name / "state.json"
+            target.parent.mkdir()
+            target.write_text("state")
+            with pytest.raises(ValueError, match="protected"):
+                artifacts._target(tasks, record, str(target))
 
 
 @pytest.mark.parametrize("name", ["claude", "codex"])

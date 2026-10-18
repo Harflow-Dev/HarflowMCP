@@ -8,6 +8,8 @@ from dataclasses import replace
 import pytest
 
 from harflow_mcp import tasks, store, workflows as w
+from harflow_mcp import state_ownership
+from harflow_mcp.state_layout import resolve_layout
 from test_cancel import make_task, OWNER
 from test_workflow_delegation import Task
 from test_workflow_native import NativeRegistry, native_graph
@@ -20,18 +22,28 @@ def qualified_native_adapter(monkeypatch):
 
 async def failing_transport(tmp_path, task_id, backend, event, observer, monkeypatch, *, storage_failure=False):
     monkeypatch.setattr(tasks, "SIGKILL_GRACE_SECONDS", 0.05)
-    registry = tasks.TaskRegistry(log_dir=tmp_path / "state" / "tasks", owner=OWNER, open_monitor=False)
+    root = tmp_path / "state"
+    with state_ownership.state_session(resolve_layout(root=root)):
+        pass
+    registry = tasks.TaskRegistry(log_dir=root / "tasks", owner=OWNER, open_monitor=False)
     registry._workflow_native_observers = {task_id: observer}
     if storage_failure:
         monkeypatch.setattr(registry, "_deliver_local_cancel", lambda _: (_ for _ in ()).throw(OSError("cancel storage failed")))
     script = "import signal,time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\nprint(" + repr(json.dumps(event)) + ", flush=True)\nwhile True: time.sleep(0.01)\n"
     proc = await asyncio.create_subprocess_exec(sys.executable, "-c", script, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, start_new_session=True)
-    task = make_task(tmp_path, task_id, backend=backend)
+    task = make_task(root / "tasks", task_id, backend=backend)
     task.proc, task.pgid = proc, proc.pid
     registry._tasks[task_id] = task
     registry.persist(task)
-    task.watchers = [asyncio.create_task(tasks._drain_stdout(task, registry)), asyncio.create_task(tasks._drain_stderr(task))]
-    task.monitor = asyncio.create_task(tasks._monitor(task, registry))
+    # These are real registry lifecycle jobs: each must acquire an independent
+    # ownership reference before the caller's setup scope exits.
+    layout = registry.state_layout
+    with state_ownership.state_session(layout):
+        task.watchers = [
+            state_ownership.owned_job(layout, tasks._drain_stdout(task, registry), name=f"drain-{task_id}"),
+            state_ownership.owned_job(layout, tasks._drain_stderr(task), name=f"stderr-{task_id}"),
+        ]
+        task.monitor = state_ownership.owned_job(layout, tasks._monitor(task, registry), name=f"monitor-{task_id}")
     try:
         await asyncio.wait_for(task.done.wait(), 2)
         await task.monitor
@@ -60,7 +72,10 @@ async def test_observer_failure_terminates_still_running_transport(tmp_path, mon
 async def test_unissued_parent_tool_stops_transport_and_keeps_native_uncertain(tmp_path, monkeypatch):
     monkeypatch.setattr(w.backends, "is_installed", lambda _: True)
     monkeypatch.setattr(w.backends, "version", lambda _: "2.1.295 (Claude Code)")
-    storage = w.WorkflowStore(tmp_path)
+    root = tmp_path / "state"
+    with state_ownership.state_session(resolve_layout(root=root)):
+        pass
+    storage = w.WorkflowStore(root)
 
     class InvalidRegistry(NativeRegistry):
         def __init__(self, root):
@@ -73,7 +88,7 @@ async def test_unissued_parent_tool_stops_transport_and_keeps_native_uncertain(t
             self.native_calls.append(kwargs)
             record = store.read(self._log_dir, previous.task_id)
             event = {"type": "assistant", "session_id": record.session_id, "message": {"content": [{"type": "tool_use", "name": "Bash", "id": "unissued", "input": {"command": "echo unissued"}}]}}
-            failure = await failing_transport(self._log_dir, kwargs["task_id"], "claude", event, self._workflow_native_observers[kwargs["task_id"]], monkeypatch)
+            failure = await failing_transport(tmp_path, kwargs["task_id"], "claude", event, self._workflow_native_observers[kwargs["task_id"]], monkeypatch)
             self._workflow_native_failures = {kwargs["task_id"]: failure}
             task = Task(kwargs["task_id"], {"status": "cancelled", "summary": "Native transport stopped", "backend": "claude", "session_id": record.session_id})
             task.kwargs, task.repo = previous.kwargs, previous.repo
@@ -81,8 +96,8 @@ async def test_unissued_parent_tool_stops_transport_and_keeps_native_uncertain(t
             store.write(self._log_dir, replace(record, task_id=task.task_id, status="cancelled"))
             return task
 
-    registry = InvalidRegistry(tmp_path)
-    run = storage.create_run(w.validate_definition(native_graph()), "Review", tmp_path)
+    registry = InvalidRegistry(root)
+    run = storage.create_run(w.validate_definition(native_graph()), "Review", root)
     await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]), 5)
     observed = storage.get_run(run["workflow_run_id"])
     assert observed["status"] == "needs_attention"

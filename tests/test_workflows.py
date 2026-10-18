@@ -14,6 +14,17 @@ def definition(role="task"):
     return {"name": "example", "orchestrator": {"backend": "codex"}, "nodes": [{"id": "start", "type": "start"}, {"id": "work", "type": "agent", "role": role, "agent": {"backend": "codex"}, "instructions": "Work"}, {"id": "end", "type": "end"}], "connections": [{"id": "begin", "source": "start", "target": "work"}, {"id": "finish", "source": "work", "target": "end"}]}
 
 
+
+@pytest.fixture
+def tmp_path(tmp_path_factory: pytest.TempPathFactory):
+    workspace = tmp_path_factory.mktemp("workflow-node")
+    root = workspace / "state"
+    from harflow_mcp import state_ownership
+    from harflow_mcp.state_layout import resolve_layout
+    with state_ownership.state_session(resolve_layout(root=root)):
+        (root / "tasks").mkdir(exist_ok=True)
+        yield workspace
+
 class FakeTask:
     def __init__(self, task_id, summary, backend="codex", status="completed", stderr=None):
         self.task_id = task_id
@@ -53,7 +64,7 @@ class FakeRegistry:
 @pytest.fixture
 def storage(tmp_path, monkeypatch):
     monkeypatch.setattr(w.backends, "is_installed", lambda b: True)
-    storage = w.WorkflowStore(tmp_path)
+    storage = w.WorkflowStore(tmp_path / "state")
     # This suite preserves the historical routing engine and builder regression
     # fixtures. Public delegation control eligibility is tested separately; these
     # snapshots represent the pre-cutover supervisor, not newly launched runs.
@@ -1457,7 +1468,7 @@ async def test_registry_display_projection_keeps_full_backend_prompt_and_normali
     from datetime import datetime, timezone
     from harflow_mcp import tasks, store
     state = tmp_path / "state" / "tasks"
-    state.mkdir(parents=True)
+    state.mkdir(parents=True, exist_ok=True)
     registry = tasks.TaskRegistry(log_dir=state)
     captured = {}
     async def spawn(invocation, **kwargs):
@@ -1468,7 +1479,7 @@ async def test_registry_display_projection_keeps_full_backend_prompt_and_normali
     await registry.start(full, tmp_path, backend=w.backends.get("codex"), freedom="read_only", display_prompt="USER REQUEST")
     assert full in captured["argv"]
     assert captured["prompt"] == full and captured["display_prompt"] == "USER REQUEST"
-    task = tasks.Task(task_id="display", backend="codex", session_id="s", repo_path=tmp_path, prompt=full, display_prompt="USER REQUEST", workflow_builder=True, max_turns=5, log_path=tmp_path / "raw", started_at=datetime.now(timezone.utc))
+    task = tasks.Task(task_id="display", backend="codex", session_id="s", repo_path=tmp_path, prompt=full, display_prompt="USER REQUEST", workflow_builder=True, max_turns=5, log_path=state / "raw", started_at=datetime.now(timezone.utc))
     registry.persist(task)
     assert store.read(state, "display").prompt == "USER REQUEST"
     assert store.read(state, "display").workflow_builder is True
@@ -1486,7 +1497,7 @@ async def test_registry_workflow_followup_display_keeps_full_resume_input(tmp_pa
     from datetime import datetime, timezone
     from harflow_mcp import tasks, store
     state = tmp_path / "state" / "tasks"
-    state.mkdir(parents=True)
+    state.mkdir(parents=True, exist_ok=True)
     registry = tasks.TaskRegistry(log_dir=state)
     parent = tasks.Task(task_id="parent", backend="claude", session_id="session", repo_path=tmp_path, prompt="Previous full prompt", display_prompt="Previous user request", max_turns=5, log_path=state / "parent.log", started_at=datetime.now(timezone.utc))
     parent.status = "completed"; parent.done.set()
@@ -1582,14 +1593,15 @@ def test_failure_diagnostic_removes_injected_prompt_echo_and_bounds_output():
 def test_failed_stderr_survives_registry_persistence_and_recovered_snapshot(tmp_path):
     from datetime import datetime, timezone
     from harflow_mcp import tasks, store
-    registry = tasks.TaskRegistry(log_dir=tmp_path)
-    task = tasks.Task(task_id="failed", backend="codex", session_id=None, repo_path=tmp_path, prompt="Prompt", max_turns=5, log_path=tmp_path / "failed.jsonl", started_at=datetime.now(timezone.utc))
+    state = tmp_path / "state" / "tasks"
+    registry = tasks.TaskRegistry(log_dir=state)
+    task = tasks.Task(task_id="failed", backend="codex", session_id=None, repo_path=tmp_path, prompt="Prompt", max_turns=5, log_path=state / "failed.jsonl", started_at=datetime.now(timezone.utc))
     task.status = "failed"; task.exit_code = 1; task.finished_at = datetime.now(timezone.utc)
     task.stderr_tail.append("Not inside a trusted directory")
     registry.persist(task)
-    record = store.read(tmp_path, "failed")
+    record = store.read(state, "failed")
     assert record.stderr_tail == ["Not inside a trusted directory"]
-    assert store.snapshot(tmp_path, record)["stderr_tail"] == record.stderr_tail
+    assert store.snapshot(state, record)["stderr_tail"] == record.stderr_tail
 
 
 def test_authoritative_opencode_auth_failure_reason_excludes_headers_and_tool_claims(tmp_path):

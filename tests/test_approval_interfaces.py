@@ -8,8 +8,9 @@ from types import SimpleNamespace
 import pytest
 from mcp.shared.exceptions import MCPError
 
-from harflow_mcp import approvals, server, store
+from harflow_mcp import approvals, server, state_ownership, store
 from harflow_mcp.backends import get
+from harflow_mcp.state_layout import resolve_layout
 
 
 def _row(directory: Path) -> dict:
@@ -34,6 +35,7 @@ def _row(directory: Path) -> dict:
 class Registry:
     def __init__(self, directory: Path):
         self.log_dir = directory
+        self.state_layout = resolve_layout(log_dir=directory)
         self.task = SimpleNamespace(pump_wake=SimpleNamespace(set=lambda: None))
 
     async def _mutation_caller(self):
@@ -45,8 +47,11 @@ class Registry:
 
 @pytest.mark.asyncio
 async def test_public_list_get_respond_roundtrip_and_strict_revision(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    row = _row(tmp_path)
-    registry = Registry(tmp_path)
+    directory = tmp_path / "state" / "tasks"
+    with state_ownership.state_session(resolve_layout(root=directory.parent)):
+        directory.mkdir(parents=True)
+    row = _row(directory)
+    registry = Registry(directory)
     monkeypatch.setattr(server, "_registry", registry)
     monkeypatch.setattr("harflow_mcp.approval_runtime.identity.identity_check", lambda _value: "alive")
 

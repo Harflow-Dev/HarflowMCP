@@ -7,7 +7,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 from harflow_mcp import detached, followups, server, workflows
-from harflow_mcp.state_layout import UnsupportedStateLayout
+from harflow_mcp.state_layout import UnsupportedStateLayout, resolve_layout
+from harflow_mcp.state_ownership import LOCK_NAME, MARKER_NAME, state_session
 from harflow_mcp.tasks import TaskRegistry
 
 UNSUPPORTED_LAYOUT_MESSAGE = (
@@ -23,7 +24,10 @@ async def test_followup_begin_refuses_before_reservation(tmp_path, monkeypatch):
     before = sorted(path.relative_to(tmp_path) for path in tmp_path.rglob("*"))
     with pytest.raises(UnsupportedStateLayout):
         await followups.begin(log_dir, "task", "successor", None)
-    assert sorted(path.relative_to(tmp_path) for path in tmp_path.rglob("*")) == before
+    after = sorted(path.relative_to(tmp_path) for path in tmp_path.rglob("*"))
+    assert after == [log_dir.parent.relative_to(tmp_path) / MARKER_NAME,
+                     log_dir.parent.relative_to(tmp_path) / LOCK_NAME]
+    assert after != before
 
 
 def test_detached_parent_uses_selected_log_dir_without_constructing_registry(tmp_path, monkeypatch):
@@ -39,7 +43,7 @@ def test_detached_parent_uses_selected_log_dir_without_constructing_registry(tmp
         pass
 
     monkeypatch.setattr(detached, "_child", child)
-    monkeypatch.setattr(detached, "_detach_stdio", lambda _path: None)
+    monkeypatch.setattr(detached, "_detach_stdio", lambda _path, **kwargs: None)
     monkeypatch.setattr(detached.os, "pipe", lambda: (10, 11))
     monkeypatch.setattr(detached.os, "fork", lambda: 0)
     monkeypatch.setattr(detached.os, "close", lambda _fd: None)
@@ -188,7 +192,7 @@ def test_detached_child_receives_selected_root_and_vendor_home(tmp_path, monkeyp
         pass
 
     monkeypatch.setattr(detached, "_child", fake_child)
-    monkeypatch.setattr(detached, "_detach_stdio", lambda _path: None)
+    monkeypatch.setattr(detached, "_detach_stdio", lambda _path, **kwargs: None)
     monkeypatch.setattr(detached.os, "pipe", lambda: (10, 11))
     monkeypatch.setattr(detached.os, "fork", lambda: 0)
     monkeypatch.setattr(detached.os, "close", lambda _fd: None)
@@ -202,35 +206,36 @@ def test_detached_child_receives_selected_root_and_vendor_home(tmp_path, monkeyp
 def test_workflow_supervisor_child_receives_selected_root_and_vendor_home(tmp_path, monkeypatch):
     selected = tmp_path / "root-a"
     ambient = tmp_path / "root-b"
-    storage = workflows.WorkflowStore(root=selected)
-    definition = storage.save(
-        "launch",
-        {
-            "nodes": [{"id": "start", "type": "start"}, {"id": "end", "type": "end"}],
-            "connections": [{"id": "finish", "source": "start", "target": "end"}],
-        },
-    )
-    run = storage.create_run(definition, "launch", tmp_path)
-    monkeypatch.setenv("HARFLOW_STATE_ROOT", str(ambient))
-    vendor_home = tmp_path / "vendor-home"
-    monkeypatch.setenv("HOME", str(vendor_home))
-    captured = {}
+    with state_session(resolve_layout(root=selected)):
+        storage = workflows.WorkflowStore(root=selected)
+        definition = storage.save(
+            "launch",
+            {
+                "nodes": [{"id": "start", "type": "start"}, {"id": "end", "type": "end"}],
+                "connections": [{"id": "finish", "source": "start", "target": "end"}],
+            },
+        )
+        run = storage.create_run(definition, "launch", tmp_path)
+        monkeypatch.setenv("HARFLOW_STATE_ROOT", str(ambient))
+        vendor_home = tmp_path / "vendor-home"
+        monkeypatch.setenv("HOME", str(vendor_home))
+        captured = {}
 
-    class Process:
-        pass
+        class Process:
+            pass
 
-    def popen(argv, **kwargs):
-        captured["argv"] = argv
-        captured.update(kwargs["env"])
-        return Process()
+        def popen(argv, **kwargs):
+            captured["argv"] = argv
+            captured.update(kwargs["env"])
+            return Process()
 
-    monkeypatch.setattr(workflows.subprocess, "Popen", popen)
-    workflows._launch(storage, run["workflow_run_id"])
-    assert captured["HARFLOW_STATE_ROOT"] == str(selected)
-    assert captured["HOME"] == str(vendor_home)
-    assert captured["argv"][-2:] == ["--root", str(selected)]
-    assert os.environ["HARFLOW_STATE_ROOT"] == str(ambient)
-    assert os.environ["HOME"] == str(vendor_home)
+        monkeypatch.setattr(workflows.subprocess, "Popen", popen)
+        workflows._launch(storage, run["workflow_run_id"])
+        assert captured["HARFLOW_STATE_ROOT"] == str(selected)
+        assert captured["HOME"] == str(vendor_home)
+        assert captured["argv"][-2:] == ["--root", str(selected)]
+        assert os.environ["HARFLOW_STATE_ROOT"] == str(ambient)
+        assert os.environ["HOME"] == str(vendor_home)
 
 
 @pytest.mark.asyncio
@@ -324,38 +329,39 @@ async def test_public_recover_relaunch_uses_selected_root_and_vendor_home(tmp_pa
 async def test_workflow_main_selects_explicit_root_before_registry_construction(tmp_path, monkeypatch):
     selected = tmp_path / "root-a"
     ambient = tmp_path / "root-b"
-    storage = workflows.WorkflowStore(root=selected)
-    definition = storage.save(
-        "main",
-        {
-            "nodes": [{"id": "start", "type": "start"}, {"id": "end", "type": "end"}],
-            "connections": [{"id": "finish", "source": "start", "target": "end"}],
-        },
-    )
-    run = storage.create_run(definition, "main", tmp_path)
-    monkeypatch.setenv("HARFLOW_STATE_ROOT", str(ambient))
-    vendor_home = tmp_path / "vendor-home"
-    monkeypatch.setenv("HOME", str(vendor_home))
-    observed = {}
+    with state_session(resolve_layout(root=selected)):
+        storage = workflows.WorkflowStore(root=selected)
+        definition = storage.save(
+            "main",
+            {
+                "nodes": [{"id": "start", "type": "start"}, {"id": "end", "type": "end"}],
+                "connections": [{"id": "finish", "source": "start", "target": "end"}],
+            },
+        )
+        run = storage.create_run(definition, "main", tmp_path)
+        monkeypatch.setenv("HARFLOW_STATE_ROOT", str(ambient))
+        vendor_home = tmp_path / "vendor-home"
+        monkeypatch.setenv("HOME", str(vendor_home))
+        observed = {}
 
-    class FakeRegistry:
-        def __init__(self, *, log_dir, **_kwargs):
-            observed["registry"] = log_dir
+        class FakeRegistry:
+            def __init__(self, *, log_dir, **_kwargs):
+                observed["registry"] = log_dir
 
-    class FakeSupervisor:
-        def __init__(self, registry, _storage):
-            observed["supervisor"] = registry
+        class FakeSupervisor:
+            def __init__(self, registry, _storage):
+                observed["supervisor"] = registry
 
-        async def execute(self, _run_id):
-            observed["env"] = os.environ.copy()
+            async def execute(self, _run_id):
+                observed["env"] = os.environ.copy()
 
-        def attention(self, _reason):
-            raise AssertionError("unexpected supervisor failure")
+            def attention(self, _reason):
+                raise AssertionError("unexpected supervisor failure")
 
-    monkeypatch.setattr("harflow_mcp.tasks.TaskRegistry", FakeRegistry)
-    monkeypatch.setattr(workflows, "WorkflowSupervisor", FakeSupervisor)
-    await workflows._main(SimpleNamespace(root=str(selected), run_id=run["workflow_run_id"]))
-    assert observed["registry"] == selected / "tasks"
-    assert observed["env"]["HARFLOW_STATE_ROOT"] == str(selected)
-    assert observed["env"]["HOME"] == str(vendor_home)
-    assert os.environ["HARFLOW_STATE_ROOT"] == str(selected)
+        monkeypatch.setattr("harflow_mcp.tasks.TaskRegistry", FakeRegistry)
+        monkeypatch.setattr(workflows, "WorkflowSupervisor", FakeSupervisor)
+        await workflows._main(SimpleNamespace(root=str(selected), run_id=run["workflow_run_id"]))
+        assert observed["registry"] == selected / "tasks"
+        assert observed["env"]["HARFLOW_STATE_ROOT"] == str(selected)
+        assert observed["env"]["HOME"] == str(vendor_home)
+        assert os.environ["HARFLOW_STATE_ROOT"] == str(selected)

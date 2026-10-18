@@ -5,11 +5,29 @@ import pytest
 
 from harflow_mcp import workflows as w
 from harflow_mcp import workflow_delegation as d
-from test_workflow_delegation import Registry, graph, run_flow, storage, default_decision
+from test_workflow_delegation import Registry, graph, run_flow, default_decision
+
+
+@pytest.fixture
+def storage(tmp_path, monkeypatch):
+    monkeypatch.setattr(w.backends, "is_installed", lambda backend: True)
+    monkeypatch.setattr(w, "_launch", lambda *args: None)
+    return w.WorkflowStore(tmp_path / "state")
 
 
 LIMIT = {"status": "failed", "summary": "Partial progress retained", "failure_diagnostic": {"category": "usage_limit", "reason": "Provider usage exhausted", "source": "stream:error", "reset_at": "2026-10-10T00:00:00Z"}}
 
+
+
+@pytest.fixture
+def tmp_path(tmp_path_factory: pytest.TempPathFactory):
+    workspace = tmp_path_factory.mktemp("workflow-node")
+    root = workspace / "state"
+    from harflow_mcp import state_ownership
+    from harflow_mcp.state_layout import resolve_layout
+    with state_ownership.state_session(resolve_layout(root=root)):
+        (root / "tasks").mkdir(exist_ok=True)
+        yield workspace
 
 class LimitedRegistry(Registry):
     def __init__(self, root, policy=None, *, limited_role="worker", unknown=False):
@@ -329,7 +347,7 @@ def test_restart_quota_authority_requires_confirmed_dead_process(tmp_path, monke
     record = SimpleNamespace(status='running', exit_code=None, pid=123, start_time='old', markers=[])
     monkeypatch.setattr(identity, 'check_detail', lambda *_: (verdict, 'fixture'))
     monkeypatch.setattr(w.task_store, 'resolve_status', lambda *a, **k: ('failed', 'Recovered', Accumulator(failure_diagnostic=diagnostic), []))
-    observed = w.task_liveness(tmp_path, record)
+    observed = w.task_liveness(tmp_path / "state" / "tasks", record)
     assert observed['outcome_known'] is (known and diagnostic == LIMIT['failure_diagnostic'])
     assert observed['process_alive'] is {'dead': False, 'alive': True, 'undecidable': None}[verdict]
 

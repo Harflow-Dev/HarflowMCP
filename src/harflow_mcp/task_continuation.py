@@ -12,6 +12,8 @@ from typing import Any
 
 from . import control, followups, store
 from .backends import get as get_backend
+from .state_access import storage_operation, require_state_path
+from .state_ownership import StateOwnershipError, owned_job, run_owned_worker
 
 CONTEXT_BYTES = 64 * 1024
 NOTES_BYTES = 64 * 1024
@@ -22,7 +24,8 @@ def validate_budget(value: int) -> None:
         raise ValueError("auto_continue must be an integer from 0 to 10")
 
 
-def _write(path: Path, value: dict[str, Any]) -> None:
+def _write(path: Path, value: dict[str, Any], *, layout) -> None:
+    require_state_path(layout, path)
     temporary = path.with_name(path.name + '.' + uuid.uuid4().hex + '.tmp')
     try:
         with temporary.open('x', encoding='utf-8') as file:
@@ -46,6 +49,7 @@ def _section(label: str, text: str, reference: str) -> str:
     return f'{label}:\n{text}\n'
 
 
+@storage_operation
 def context(registry: Any, record: store.TaskRecord, extra_prompt: str | None, notes_path: str | None, queued: list[dict[str, Any]] | None = None) -> str:
     root = store.read(registry.log_dir, record.chain_root_task_id) if record.chain_root_task_id else record
     if root is None or root.prompt_error or root.prompt_truncated:
@@ -82,6 +86,7 @@ def context(registry: Any, record: store.TaskRecord, extra_prompt: str | None, n
     return '\n'.join(parts)
 
 
+@storage_operation
 async def stop_chain(registry: Any, task_id: str) -> None:
     """Serialize cancellation with reservation/spawn so an acknowledged stop cannot restart."""
     source = store.read(registry.log_dir, task_id)
@@ -92,9 +97,10 @@ async def stop_chain(registry: Any, task_id: str) -> None:
         source = store.read(registry.log_dir, task_id)
         if source is None or not (source.auto_continue or source.continuation_of_task_id or (registry.log_dir / f'{task_id}.continuation.json').exists()):
             return
-        _write(registry.log_dir / f'{root}.continuation-stopped.json', {'cancelled_task_id': task_id})
+        _write(registry.log_dir / f'{root}.continuation-stopped.json', {'cancelled_task_id': task_id}, layout=registry.state_layout)
 
 
+@storage_operation
 async def continue_task(registry: Any, task_id: str, extra_prompt: str | None = None, notes_path: str | None = None, *, automatic: bool = False, consume_followups: bool = False) -> Any:
     from .state_layout import require_dispatch_layout
     require_dispatch_layout(registry.log_dir)
@@ -125,7 +131,7 @@ async def continue_task(registry: Any, task_id: str, extra_prompt: str | None = 
         if source.prompt_error or source.prompt_truncated:
             raise ValueError('Original assignment unavailable; continuation refused')
         path = registry.log_dir / f'{task_id}.continuation.json'
-        prompt = await asyncio.to_thread(context, registry, source, extra_prompt, notes_path)
+        prompt = await run_owned_worker(registry.state_layout, context, registry, source, extra_prompt, notes_path)
         fingerprint = hashlib.sha256(json.dumps({'prompt': prompt, 'automatic': automatic}, ensure_ascii=False).encode('utf-8')).hexdigest()
         reservation = None
         if path.exists():
@@ -174,8 +180,8 @@ async def continue_task(registry: Any, task_id: str, extra_prompt: str | None = 
                 # context() appends one structural newline after the last section; drop exactly that
                 # one (the caller's own prose stays verbatim) so a large consuming prompt does not end
                 # in it, which vibe refuses over 32 KiB. The fingerprint above never saw these ids.
-                prompt = (await asyncio.to_thread(context, registry, source, extra_prompt, notes_path, attempt.items)).removesuffix('\n')
-            _write(path, {'task_id': identifier, 'state': 'reserved', 'chain_root_task_id': root, 'automatic': automatic, 'request_fingerprint': fingerprint})
+                prompt = (await run_owned_worker(registry.state_layout, context, registry, source, extra_prompt, notes_path, attempt.items)).removesuffix('\n')
+            _write(path, {'task_id': identifier, 'state': 'reserved', 'chain_root_task_id': root, 'automatic': automatic, 'request_fingerprint': fingerprint}, layout=registry.state_layout)
             try:
                 spawn_called = True
                 child = await registry.start(prompt, Path(source.repo_path), backend=get_backend(source.backend), freedom=source.freedom, model=source.model, reasoning_effort=source.reasoning_effort, network=source.network, caller_approvals=source.caller_approvals, interaction_owner=source.interaction_owner, max_turns=source.max_turns, group=source.group, title=source.title, task_id=identifier, auto_continue=max(source.auto_continue - 1, 0) if automatic else 0, continuation_of_task_id=task_id, chain_root_task_id=root, chain_prompt=None, **({'message_ids': attempt.ids} if attempt is not None else {}))
@@ -185,9 +191,9 @@ async def continue_task(registry: Any, task_id: str, extra_prompt: str | None = 
                 registry.persist(child)
             except BaseException as exc:
                 if getattr(exc, 'harflow_not_started', False):
-                    _write(path, {'task_id': identifier, 'state': 'not_started', 'chain_root_task_id': root, 'request_fingerprint': fingerprint})
+                    _write(path, {'task_id': identifier, 'state': 'not_started', 'chain_root_task_id': root, 'request_fingerprint': fingerprint}, layout=registry.state_layout)
                 raise
-            _write(path, {'task_id': identifier, 'state': 'started', 'chain_root_task_id': root, 'request_fingerprint': fingerprint})
+            _write(path, {'task_id': identifier, 'state': 'started', 'chain_root_task_id': root, 'request_fingerprint': fingerprint}, layout=registry.state_layout)
         except BaseException as exc:
             if attempt is not None:
                 await attempt.fail(registry, exc, spawn_called)
@@ -197,6 +203,7 @@ async def continue_task(registry: Any, task_id: str, extra_prompt: str | None = 
         return child
 
 
+@storage_operation
 def schedule_automatic(registry: Any, task: Any) -> None:
     """Run after durable settlement; retain the source until the reservation resolves."""
     if task.status == 'cancelled' or task.cancel_requested or task.acc.denials or task.acc.failure_diagnostic or get_backend(task.backend).continuation_reason(task.acc, task.exit_code) is None:
@@ -209,6 +216,8 @@ def schedule_automatic(registry: Any, task: Any) -> None:
     async def launch() -> None:
         try:
             await continue_task(registry, task.task_id, automatic=True)
+        except StateOwnershipError:
+            raise
         except Exception as exc:
             task.bridge_notices.append(f'Automatic continuation was not started: {exc}')
             registry.persist(task)
@@ -218,6 +227,11 @@ def schedule_automatic(registry: Any, task: Any) -> None:
     pending = getattr(registry, '_continuations', None)
     if pending is None:
         pending = registry._continuations = set()
-    successor = asyncio.create_task(launch())
+    try:
+        successor = owned_job(registry.state_layout, launch(), name=f"harflow-continuation-{task.task_id}")
+    except BaseException:
+        sources.discard(task.task_id)
+        raise
+    successor.add_done_callback(lambda done: sources.discard(task.task_id))
     pending.add(successor)
     successor.add_done_callback(pending.discard)

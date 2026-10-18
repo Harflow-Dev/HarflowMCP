@@ -4,7 +4,8 @@ from types import SimpleNamespace
 import pytest
 from mcp import MCPError
 
-from harflow_mcp import ctl, server
+from harflow_mcp import ctl, server, state_ownership
+from harflow_mcp.state_layout import resolve_layout
 
 
 @pytest.mark.parametrize("budget", [True, -1, 11, 1.5, "1"])
@@ -40,6 +41,10 @@ def test_continue_cli_file_preserves_prose(tmp_path, monkeypatch):
     text = "  next\r\nstep  "
     path = tmp_path / "followup"
     path.write_bytes(text.encode("utf-8"))
+    state_root = tmp_path / "engine-state"
+    with state_ownership.state_session(resolve_layout(root=state_root)):
+        pass
+    monkeypatch.setenv("HARFLOW_STATE_ROOT", str(state_root))
     observed = []
 
     async def continue_task(task_id, extra_prompt, notes_path, *, consume_followups=False):

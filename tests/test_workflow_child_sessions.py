@@ -11,9 +11,16 @@ from harflow_mcp import store as tasks
 from harflow_mcp import workflow_child_sessions as reuse
 from harflow_mcp import workflow_invocation as inv
 from harflow_mcp import workflows as w
+from harflow_mcp import state_ownership
 from test_workflow_delegation import Task
 from test_workflow_run_node_recovery import seed_parent, store, write_run
 from test_workflow_run_node_execution import TreeRegistry
+
+
+@pytest.fixture(autouse=True)
+def owned_workflow_scope(store):
+    with state_ownership.state_session(store.state_layout):
+        yield
 
 
 @pytest.fixture

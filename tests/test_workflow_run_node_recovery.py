@@ -13,8 +13,34 @@ from harflow_mcp import workflows as w
 from test_workflow_run_node_execution import (TreeRegistry, _child_id, _start_tree, _wait_until, assignment_for, child_graph, child_runs, invocation_activation, parent_graph, run_tree, workflow_policy)
 
 
+@pytest.fixture
+def tmp_path(tmp_path_factory: pytest.TempPathFactory):
+    workspace = tmp_path_factory.mktemp("workflow-node")
+    root = workspace / "state"
+    from harflow_mcp import state_ownership
+    from harflow_mcp.state_layout import resolve_layout
+    with state_ownership.state_session(resolve_layout(root=root)):
+        (root / "tasks").mkdir(exist_ok=True)
+        yield workspace
+
+
+@pytest.fixture
+def foreign_default_state(tmp_path, monkeypatch):
+    home = tmp_path / "foreign-home"
+    root = home / ".harflow"
+    root.mkdir(parents=True)
+    sentinel = root / "foreign-sentinel"
+    sentinel.write_bytes(b"foreign-root-bytes")
+    before = (tuple(sorted(path.name for path in root.iterdir())), sentinel.read_bytes())
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("HARFLOW_STATE_ROOT", raising=False)
+    yield
+    assert tuple(sorted(path.name for path in root.iterdir())) == before[0]
+    assert sentinel.read_bytes() == before[1]
+
+
 def write_run(store, run):
-    w._write(store.runs / f"{run['workflow_run_id']}.json", run)
+    w._write(store.runs / f"{run['workflow_run_id']}.json", run, layout=store.state_layout)
 
 
 def seed_parent(store, tmp_path, parent_name, *, stage, child_id=None, child_run=None):
@@ -60,7 +86,7 @@ def finished_child(store, parent_run, activation, *, status="completed", summary
 def store(tmp_path, monkeypatch):
     monkeypatch.setattr(w.backends, "is_installed", lambda backend: True)
     monkeypatch.setattr(w, "_launch", lambda *args: None)
-    s = w.WorkflowStore(tmp_path)
+    s = w.WorkflowStore(tmp_path / "state")
     child = s.save("child", child_graph("child"))
     s.save("parent", parent_graph(child["workflow_id"]))
     return s
@@ -195,7 +221,7 @@ async def test_cancel_propagates_to_descendants_and_the_root_settles(store, tmp_
                 pass
 
 
-async def test_timeout_accrues_only_while_the_child_executes(store, tmp_path):
+async def test_timeout_accrues_only_while_the_child_executes(store, tmp_path, foreign_default_state):
     registry = TreeRegistry(store.root)
     definition = store.get("parent")
     definition["nodes"][1]["timeout_seconds"] = 30
@@ -435,7 +461,7 @@ async def test_parallel_questions_preserve_first_identity_and_route_each_answer(
 
 
 @pytest.mark.parametrize("watch_interval", [0.1, 2.0])
-async def test_invocation_timeout_cancels_live_child_and_classifies_timeout(store, tmp_path, monkeypatch, watch_interval):
+async def test_invocation_timeout_cancels_live_child_and_classifies_timeout(store, tmp_path, monkeypatch, watch_interval, foreign_default_state):
     monkeypatch.setattr(inv, "INVOCATION_WATCH_INTERVAL", watch_interval)
     definition = store.get('parent')
     definition['nodes'][1]['timeout_seconds'] = 1

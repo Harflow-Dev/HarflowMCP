@@ -5,6 +5,8 @@ before advancing the graph; execution reservations are persisted before spawn.
 """
 from __future__ import annotations
 
+from .state_access import storage_operation
+
 import copy
 import json
 import re
@@ -1043,7 +1045,7 @@ async def decide(supervisor: Any, node: dict[str, Any], token: dict[str, Any], *
                 return selected if decision["action"] == "continue" and not any(key.startswith(("retry:", "recover:", "recover_child:", "skip_optional:")) for key in assignments) else None
             except (ValueError, TypeError, AttributeError) as exc:
                 def reject(r: dict[str, Any]) -> None:
-                    diagnostic = {"decision_id": token["decision_id"], "attempt": token.get("decision_attempts", 0), "category": "harness" if outcome.get("execution_failure") else "validation", "field_path": decision_error_path(str(exc)), "error": str(exc), "valid_continuations": continuations(r, node, token, execute)}
+                    diagnostic = {"decision_id": token["decision_id"], "attempt": token.get("decision_attempts", 0), "category": "harness" if outcome.get("execution_failure") else "validation", "field_path": decision_error_path(str(exc)), "error": str(exc), "valid_continuations": continuations(r, node, token, execute, root=supervisor.store.root)}
                     next(a for a in r["activations"] if a["id"] == activation["id"]).update(status="failed", raw_output=raw, result_error=str(exc), decision_diagnostic=diagnostic)
                     r.setdefault("decision_errors", []).append(diagnostic)
                     if r["status"] != "running" or not supervisor.tree.tree_running(r):
@@ -1512,6 +1514,7 @@ def reconcile_delegation(run: dict[str, Any]) -> None:
                     token.pop("recovered_result", None)
 
 
+@storage_operation
 def migrate(storage: Any) -> dict[str, Any]:
     w = _w()
     with storage.lock("delegation-migration"):
@@ -1531,7 +1534,7 @@ def migrate(storage: Any) -> dict[str, Any]:
                         raise w.WorkflowError(f"Stale workflow revision while migrating {name}")
                     backup = storage.root / "workflow-backups" / (name + "." + str(current.get("revision", 0)) + "." + uuid.uuid4().hex + ".json")
                     backup.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                    w._write(backup, current)
+                    w._write(backup, current, layout=storage.state_layout)
                     changed = copy.deepcopy(current)
                     changed["execution_contract"] = "delegation"
                     changed.setdefault("max_decision_attempts", 3)
@@ -1542,7 +1545,7 @@ def migrate(storage: Any) -> dict[str, Any]:
                             node.setdefault("max_context_questions", 10)
                     changed["revision"] = current.get("revision", 0) + 1
                     changed["updated_at"] = time.time()
-                    w._write(storage.definitions / (name + ".json"), changed)
+                    w._write(storage.definitions / (name + ".json"), changed, layout=storage.state_layout)
                     result["migrated"].append(name)
                     result["backups"].append(str(backup))
             return result

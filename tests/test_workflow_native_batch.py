@@ -6,6 +6,8 @@ from dataclasses import replace
 import pytest
 
 from harflow_mcp import store, workflows as w
+from harflow_mcp import state_ownership
+from harflow_mcp.state_layout import resolve_layout
 from test_workflow_native import NativeRegistry, MODEL, native_events
 from test_workflow_delegation import Task
 from test_workflow_explicit_parallel import explicit
@@ -20,6 +22,7 @@ def qualified_native_adapter(monkeypatch):
 class BatchRegistry(NativeRegistry):
     def __init__(self, root, *, missing_child=False, parent_denials=None):
         super().__init__(root)
+        self.state_layout = resolve_layout(log_dir=self._log_dir)
         self.policy = policy
         self.batches = []
         self.missing_child = missing_child
@@ -112,7 +115,7 @@ async def test_batch_queue_splits_at_adapter_limit_before_reserving(monkeypatch)
     assert all(r["future"].result()[0] for r in requests)
 
 
-async def test_batch_queue_separates_timeout_policies(monkeypatch):
+async def test_batch_queue_separates_timeout_policies(monkeypatch, tmp_path):
     from types import SimpleNamespace
     from harflow_mcp import workflow_native_batch as batch
     seen = []
@@ -120,12 +123,79 @@ async def test_batch_queue_separates_timeout_policies(monkeypatch):
         seen.append([r["node"].get("timeout_seconds") for r in requests])
         return [(True, {"status": "completed"}) for _ in requests]
     monkeypatch.setattr(batch, "_execute", execute)
+    layout = resolve_layout(root=tmp_path / "state")
+    with state_ownership.state_session(layout):
+        pass
     tree = SimpleNamespace(worker_capacity=4)
-    supervisor = SimpleNamespace(tree=tree, run_id="run")
+    supervisor = SimpleNamespace(tree=tree, run_id="run", state_layout=layout)
     prepared = {"owner_run": {"workflow_run_id": "owner"}, "settings": {}, "run": {"definition": {"max_parallel": 4}}, "native": SimpleNamespace(max_batch_size=16)}
-    await asyncio.gather(*(batch.dispatch_batch(supervisor, {"timeout_seconds": timeout}, "assignment", {}, prepared) for timeout in [1, 10, None, 10]))
+    async with _async_owned(layout):
+        await asyncio.gather(*(batch.dispatch_batch(supervisor, {"timeout_seconds": timeout}, "assignment", {}, prepared) for timeout in [1, 10, None, 10]))
     assert sorted(map(len, seen)) == [1, 1, 2]
     assert all(len(set(values)) == 1 for values in seen)
+
+
+async def test_cancelled_batch_controller_settles_old_waiters_before_replacement(monkeypatch, tmp_path):
+    """A cancelled drain cannot strand its original callers or consume a replacement queue."""
+    from types import SimpleNamespace
+    from harflow_mcp import workflow_native_batch as batch
+
+    root = tmp_path / "state"
+    layout = resolve_layout(root=root)
+    with state_ownership.state_session(layout):
+        pass
+    tree = SimpleNamespace(native_batches={}, worker_capacity=1)
+    supervisor = SimpleNamespace(
+        tree=tree,
+        run_id="run",
+        state_layout=layout,
+    )
+    prepared = {
+        "owner_run": {"workflow_run_id": "owner"},
+        "settings": {},
+        "run": {"definition": {"max_parallel": 1}},
+        "native": SimpleNamespace(max_batch_size=1),
+    }
+    jobs = []
+    original_owned_job = batch.owned_job
+
+    def capture_job(layout, coroutine, *, name=None):
+        job = original_owned_job(layout, coroutine, name=name)
+        jobs.append(job)
+        return job
+
+    monkeypatch.setattr(batch, "owned_job", capture_job)
+    async def execute(_requests):
+        return [(True, {"status": "completed"})]
+
+    monkeypatch.setattr(batch, "_execute", execute)
+
+    async with _async_owned(layout):
+        first = asyncio.create_task(batch.dispatch_batch(supervisor, {}, "first", {}, prepared))
+        deadline = asyncio.get_running_loop().time() + 1
+        while not jobs and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.005)
+        assert jobs
+        jobs[0].cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(first, 1)
+
+        replacement = await asyncio.wait_for(
+            batch.dispatch_batch(supervisor, {}, "replacement", {}, prepared), 1
+        )
+        assert replacement == (True, {"status": "completed"})
+
+
+class _async_owned:
+    def __init__(self, layout):
+        self.layout = layout
+
+    async def __aenter__(self):
+        self.manager = state_ownership.state_session(self.layout)
+        return self.manager.__enter__()
+
+    async def __aexit__(self, *exc):
+        return self.manager.__exit__(*exc)
 
 
 def test_batch_parent_denials_are_attributed_only_to_child_tools():

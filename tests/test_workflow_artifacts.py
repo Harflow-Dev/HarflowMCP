@@ -7,6 +7,16 @@ import pytest
 
 from harflow_mcp import artifacts, store, workflows
 from harflow_mcp.bounded_io import ReadLimit
+from harflow_mcp import state_ownership
+from harflow_mcp.state_layout import resolve_layout
+
+
+@pytest.fixture
+def tmp_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    root = tmp_path_factory.mktemp("workflow-artifacts") / "state"
+    with state_ownership.state_session(resolve_layout(root=root)):
+        (root / "tasks").mkdir()
+        yield root
 
 
 def _item(task_id: str, *, artifact_id: str = "00000000-0000-4000-8000-000000000001", workflow=None, note="note"):
@@ -41,7 +51,7 @@ def _binding(task_id="worker", *, role="node", run_id="run", execution_id="exec"
 
 def test_manifest_workflow_binding_is_optional_but_strict(tmp_path):
     logs = tmp_path / "tasks"
-    logs.mkdir()
+    logs.mkdir(exist_ok=True)
     task_id = "worker"
     path = logs / f"{task_id}.artifacts.json"
     path.write_text(json.dumps({"v": 1, "task_id": task_id, "items": [_item(task_id, workflow=_binding(task_id))]}))
@@ -66,7 +76,7 @@ def test_tree_members_uses_catalog_without_loading_run_records(tmp_path, monkeyp
                 def fetchall(self): return [("root", 1.0, None, "root")]
             return Rows()
     class Catalog:
-        def __init__(self, *args): pass
+        def __init__(self, *args, **kwargs): pass
         def connect(self): return DB()
         def _discover(self, db): pass
         def state(self, db): return {"status": "ready"}
@@ -166,7 +176,7 @@ def test_workflow_page_keeps_corrupt_existing_owner_as_unavailable(tmp_path, mon
             return {"workflow_run_id": "root", "activations": [{"id": "exec", "node_id": "work", "role": "node", "tasks": [{"task_id": "owner"}]}]}
 
     log_dir = tmp_path / "tasks"
-    log_dir.mkdir()
+    log_dir.mkdir(exist_ok=True)
     (log_dir / "owner.meta.json").write_text("corrupt")
     monkeypatch.setattr(workflows, "WorkflowStore", FakeStore)
     monkeypatch.setattr(artifacts, "_load", lambda *a, **k: ([_item("owner", run_id="root", workflow=_binding("owner", run_id="root"))], b"manifest"))
@@ -326,8 +336,8 @@ def test_inherited_artifact_refs_are_selectable_only_when_explicitly_forwarded(t
 
 
 def test_workflow_retry_registration_keeps_distinct_artifact_ids(tmp_path, monkeypatch):
-    logs = tmp_path / "bridge" / "tasks"; logs.mkdir(parents=True)
-    repo = tmp_path / "repo"; repo.mkdir()
+    logs = tmp_path / "tasks"; logs.mkdir(parents=True, exist_ok=True)
+    repo = tmp_path.parent / f"{tmp_path.name}-repo"; repo.mkdir()
     record = store.TaskRecord("owner", "codex", None, str(repo), "2026-01-01T00:00:00+00:00", pid=123, pgid=456, start_time="start")
     store.write(logs, record)
     from harflow_mcp import identity, lineage

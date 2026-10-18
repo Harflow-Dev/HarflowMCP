@@ -8,6 +8,15 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from harflow_mcp import retention
+from harflow_mcp import state_ownership
+from harflow_mcp.state_layout import resolve_layout
+
+
+@pytest.fixture
+def tmp_path(tmp_path_factory: pytest.TempPathFactory):
+    root = tmp_path_factory.mktemp("native-retention") / "state"
+    with state_ownership.state_session(resolve_layout(root=root)):
+        yield root
 
 
 def fixture(tmp_path, **changes):

@@ -3,13 +3,16 @@ import pytest
 from harflow_mcp.bridge_state import assert_state_outside_writes
 from harflow_mcp.extra_paths import normalize_paths
 from harflow_mcp import tasks, scratch
+from harflow_mcp import state_ownership
+from harflow_mcp.state_layout import resolve_layout
 
 @pytest.fixture
 def layout(tmp_path,monkeypatch):
     home=tmp_path/'home';home.mkdir();monkeypatch.setenv('HOME',str(home))
     repo=tmp_path/'repo';repo.mkdir()
     state=tmp_path/'state';state.mkdir()
-    logs=state/'records';logs.mkdir()
+    with state_ownership.state_session(resolve_layout(root=state)):
+        logs=state/'records';logs.mkdir()
     grant=tmp_path/'grant';grant.mkdir()
     return home,repo,logs,grant
 

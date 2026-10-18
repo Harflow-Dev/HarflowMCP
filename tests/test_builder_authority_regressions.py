@@ -1,8 +1,25 @@
 from types import SimpleNamespace
 import json
 import pytest
+from pathlib import Path
 from harflow_mcp import server, workflows as w, workflow_inspection as wi, backends
-from test_workflows import FakeRegistry, definition
+from harflow_mcp import state_ownership
+from harflow_mcp.state_layout import resolve_layout
+from test_workflows import FakeRegistry as _FakeRegistry, definition
+
+
+class FakeRegistry(_FakeRegistry):
+    @property
+    def state_layout(self):
+        return resolve_layout(log_dir=self.log_dir)
+
+
+@pytest.fixture
+def tmp_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    root = tmp_path_factory.mktemp("builder") / "state"
+    with state_ownership.state_session(resolve_layout(root=root)):
+        (root / "tasks").mkdir()
+    return root
 
 @pytest.mark.parametrize('kind', ['mcp', 'cli'])
 async def test_builder_reader_is_scoped_without_delegation_contract(tmp_path, monkeypatch, kind):
@@ -108,10 +125,10 @@ async def test_verified_builder_caller_survives_transient_redetection(tmp_path, 
     monkeypatch.setattr(lineage,'detect_caller_detail',lambda *a,**k:lineage.Detection(None,'transient process lookup failure'))
     initial_runs=[]
     original_write=w._write
-    def observed_write(path,value):
+    def observed_write(path,value,**kwargs):
         if Path(path).parent==storage.runs and value.get('sequence')==0:
             initial_runs.append(dict(value))
-        return original_write(path,value)
+        return original_write(path,value,**kwargs)
     from pathlib import Path
     monkeypatch.setattr(w,'_write',observed_write)
     result=await server._workflow_call('build',name='example',prompt='Create',repo_path=str(tmp_path),agent={'backend':'codex'})

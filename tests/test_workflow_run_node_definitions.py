@@ -11,6 +11,17 @@ from harflow_mcp import workflows as w
 from harflow_mcp import workflow_references as refs
 
 
+@pytest.fixture
+def tmp_path(tmp_path_factory: pytest.TempPathFactory):
+    workspace = tmp_path_factory.mktemp("workflow-node")
+    root = workspace / "state"
+    from harflow_mcp import state_ownership
+    from harflow_mcp.state_layout import resolve_layout
+    with state_ownership.state_session(resolve_layout(root=root)):
+        (root / "tasks").mkdir(exist_ok=True)
+        yield workspace
+
+
 def child_definition(name: str = "child") -> dict:
     return {"name": name, "routing_mode": "explicit", "orchestrator": {"backend": "codex"}, "nodes": [{"id": "start", "type": "start"}, {"id": "work", "type": "agent", "role": "task", "instructions": "Do the work", "agent": {"backend": "codex"}}, {"id": "end", "type": "end"}], "connections": [{"id": "begin", "source": "start", "target": "work"}, {"id": "finish", "source": "work", "target": "end"}]}
 
@@ -23,7 +34,7 @@ def parent_definition(workflow_id: str, *, name: str = "parent", node_id: str = 
 def storage(tmp_path, monkeypatch):
     monkeypatch.setattr(w.backends, "is_installed", lambda backend: True)
     monkeypatch.setattr(w, "_launch", lambda *args: None)
-    return w.WorkflowStore(tmp_path)
+    return w.WorkflowStore(tmp_path / "state")
 
 
 def test_workflow_ids_are_assigned_preserved_and_caller_supplied_ids_ignored(storage):
@@ -41,7 +52,7 @@ def test_legacy_definitions_report_name_derived_id_and_persist_on_next_save(stor
     raw = w.validate_definition(child_definition("legacy-one"))
     raw["execution_contract"] = "delegation"
     raw["revision"] = 1
-    w._write(storage.definitions / "legacy-one.json", raw)
+    w._write(storage.definitions / "legacy-one.json", raw, layout=storage.state_layout)
     legacy = storage.get("legacy-one")
     assert legacy["workflow_id"] == "legacy-" + refs.workflow_identity(raw).removeprefix("legacy-")
     saved = storage.save("legacy-one", child_definition("legacy-one"), 1)

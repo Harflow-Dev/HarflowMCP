@@ -13,13 +13,21 @@ from pathlib import Path
 
 import pytest
 
-from harflow_mcp import backends, control, identity, lineage, store, takeover
+from harflow_mcp import backends, control, identity, lineage, state_ownership, store, takeover
+from harflow_mcp.state_layout import resolve_layout
 from harflow_mcp.tasks import SessionBusyError, TaskRegistry
 
 CONTROLLER = {"pid": 111_111, "start_time": "Wed Jan  1 00:00:00 2026", "markers": []}
 DEAD_OWNER = {"pid": 222_222, "start_time": "Wed Jan  1 00:00:00 2026", "markers": []}
 SESSION = "0199a3f2-7c1e-7b8a-9d0e-123456789abc"
 _real_identity_check = identity.identity_check
+
+
+@pytest.fixture
+def tmp_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    root = tmp_path_factory.mktemp("takeover") / "state"
+    with state_ownership.state_session(resolve_layout(root=root)):
+        yield root
 
 
 class Verdicts:
@@ -51,7 +59,7 @@ def log_dir(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def repo(tmp_path: Path) -> Path:
-    path = tmp_path / "repo"
+    path = tmp_path.parent / f"{tmp_path.name}-repo"
     path.mkdir()
     return path
 

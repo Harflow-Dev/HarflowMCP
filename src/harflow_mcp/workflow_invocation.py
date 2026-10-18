@@ -7,6 +7,9 @@ tree; the root supervisor awaits the child supervisor over a shared
 """
 from __future__ import annotations
 
+from .state_access import storage_operation, require_state_path
+from .state_ownership import StateOwnershipError, owned_job
+
 import asyncio
 import copy
 import json
@@ -210,6 +213,8 @@ class WorkflowTree:
                         error = cascade_error(outcome)
                         if error:
                             errors.append({"workflow_run_id": current_id, "task_id": task_id, "error": error})
+                    except StateOwnershipError:
+                        raise
                     except Exception as exc:
                         errors.append({"workflow_run_id": current_id, "task_id": task_id, "error": str(exc)[:2000]})
             if selected and observed.get('status') not in _w().TERMINAL:
@@ -235,6 +240,7 @@ def tree_write_strength(run: dict[str, Any], dispatch_freedom: str) -> bool:
     return False
 
 
+@storage_operation
 def tree_state(store: Any, run: dict[str, Any]) -> dict[str, Any]:
     """The root status of a run's tree, and whether anything is still settling.
 
@@ -264,9 +270,11 @@ def session_owner_id(parent_run: dict[str, Any]) -> str:
     return parent_run.get("orchestrator_session_owner_run_id") or parent_run["workflow_run_id"]
 
 
+@storage_operation
 def write_child_run(store: Any, run: dict[str, Any]) -> None:
     """Publish a flushed child record exclusively, never a partially written ID."""
     path = store.runs / f"{run['workflow_run_id']}.json"
+    require_state_path(store.state_layout, path)
     temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     fd, created = None, False
     try:
@@ -499,6 +507,7 @@ def execution_permission(execution: dict[str, Any]) -> str | None:
     return None
 
 
+@storage_operation
 def permission_outcome(store: Any, run: dict[str, Any]) -> str | None:
     """Permission applies only to unresolved, unsuperseded, failed or blocked ends."""
     executions = run.get("activations", [])
@@ -519,6 +528,7 @@ def permission_outcome(store: Any, run: dict[str, Any]) -> str | None:
     return None
 
 
+@storage_operation
 def outcome_for_child(store: Any, parent_run: dict[str, Any], activation: dict[str, Any], node: dict[str, Any]) -> dict[str, Any]:
     """Classify a settled child; precedence is first-match."""
     invocation = activation.get("invocation") or {}
@@ -555,6 +565,7 @@ def outcome_for_child(store: Any, parent_run: dict[str, Any], activation: dict[s
     return invocation_outcome("uncertain", child, invocation, node, failure_reason=f"Child ended {status}")
 
 
+@storage_operation
 def invocation_children_settled(store: Any, run: dict[str, Any], seen: set[str] | None = None) -> bool:
     seen = set(seen or ())
     run_id = run.get("workflow_run_id")
@@ -583,6 +594,7 @@ def child_settled(child: dict[str, Any], *, store: Any = None, seen: set[str] | 
     return not any(a.get("invocation") and a["invocation"].get("stage") != "settled" for a in child.get("activations", []))
 
 
+@storage_operation
 def publish_input(store: Any, source: dict[str, Any]) -> None:
     """Forward a descendant's input question to the root, preserving identity."""
     link = source.get("parent_link") or {}
@@ -594,7 +606,7 @@ def publish_input(store: Any, source: dict[str, Any]) -> None:
     from .bounded_io import ReadLimit
     from .catalog import Catalog
     from .workflow_references import MAX_WORKFLOW_NESTING_DEPTH
-    budget = Catalog(store.runs, '.json')
+    budget = Catalog(store.runs, '.json', layout=store.state_layout)
     exhausted = False
     def read(identifier: str) -> dict[str, Any]:
         return store.get_run(identifier, metadata_byte_limit=4 * 1024 * 1024, metadata_budget=budget)
@@ -695,6 +707,7 @@ def publish_input(store: Any, source: dict[str, Any]) -> None:
     store.update_run(root_id, forward, "child_input_forwarded", {"source": source["workflow_run_id"], "input_decision_id": decision_id})
 
 
+@storage_operation
 def publish_attention(store: Any, source: dict[str, Any]) -> None:
     """Keep suspension authority and attempt grants on the originating child."""
     root_id = (source.get("parent_link") or {}).get("root_workflow_run_id")
@@ -718,6 +731,7 @@ def publish_attention(store: Any, source: dict[str, Any]) -> None:
     store.update_run(root_id, forward, "child_attention_forwarded", {"source": attention_source["workflow_run_id"]})
 
 
+@storage_operation
 def derive_invocation_activation(store: Any, run: dict[str, Any], activation: dict[str, Any], node: dict[str, Any]) -> None:
     """Reconcile one invocation activation from its stage plus its child."""
     invocation = activation.get("invocation") or {}
@@ -776,6 +790,7 @@ def derive_invocation_activation(store: Any, run: dict[str, Any], activation: di
     activation["invocation"] = invocation
 
 
+@storage_operation
 async def run_child(supervisor: Any, node: dict[str, Any], token: dict[str, Any]) -> None:
     """Execute one Run workflow node: create or re-enter the child, then settle."""
     w = _w()
@@ -920,7 +935,7 @@ async def run_child(supervisor: Any, node: dict[str, Any], token: dict[str, Any]
     timed_out = False
     timeout_reason = ""
     try:
-        child_task = asyncio.create_task(child_supervisor.execute(child_id))
+        child_task = owned_job(store.state_layout, child_supervisor.execute(child_id), name=f"harflow-workflow-child-{child_id}")
         timeout_seconds = invocation.get("timeout_seconds")
         last_tick = time.monotonic()
         while not child_task.done():
@@ -947,6 +962,8 @@ async def run_child(supervisor: Any, node: dict[str, Any], token: dict[str, Any]
                         timeout_reason = f"Run workflow node exceeded its {timeout_seconds}s timeout"
                         try:
                             await asyncio.wait_for(supervisor.tree.cancel_descendants(child_id, supervisor.registry, include_self=True), timeout=30)
+                        except StateOwnershipError:
+                            raise
                         except Exception:
                             pass
                         if not child_task.done():

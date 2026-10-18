@@ -16,8 +16,19 @@ from harflow_mcp.backends import STDIN_PIPE, Invocation
 from harflow_mcp.backends.base import Enforcement
 from harflow_mcp.events import events_path
 from harflow_mcp.tasks import TaskRegistry
+from harflow_mcp import state_ownership
+from harflow_mcp.state_layout import resolve_layout
 
 OWNER = {"pid": 1, "start_time": "t", "markers": []}
+
+
+@pytest.fixture
+def tmp_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    workspace = tmp_path_factory.mktemp("live-input")
+    root = workspace / "state"
+    with state_ownership.state_session(resolve_layout(root=root)):
+        (root / "tasks").mkdir()
+        yield workspace
 
 
 RESULT_LINE = '{"type":"result","subtype":"success","is_error":false,"result":"ok"}'
@@ -67,7 +78,14 @@ class _CatDouble:
 
 
 def _events(log_dir: Path, task_id: str) -> list[dict]:
+    log_dir = _task_dir(log_dir)
     return [json.loads(line) for line in events_path(log_dir, task_id).read_text().splitlines()]
+
+
+def _task_dir(path: Path) -> Path:
+    if (path / "state" / "tasks").is_dir():
+        return path / "state" / "tasks"
+    return path / "tasks" if (path / "tasks").is_dir() else path
 
 
 async def test_a_live_invocation_is_spawned_on_a_pipe_carrying_its_prompt(
@@ -76,7 +94,7 @@ async def test_a_live_invocation_is_spawned_on_a_pipe_carrying_its_prompt(
     sink = tmp_path / "stdin.txt"
     backend = _CatDouble(sink)
     monkeypatch.setitem(backends.BACKENDS, backend.name, backend)
-    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks", owner=OWNER)
+    registry = TaskRegistry(log_dir=_task_dir(tmp_path), owner=OWNER)
 
     task = await registry.start("hello there", tmp_path, backend=backend)
     await task.done.wait()
@@ -113,7 +131,7 @@ async def test_live_initial_prompt_preserves_whitespace_in_transport_and_event(
     sink = tmp_path / "stdin.txt"
     backend = _CatDouble(sink)
     monkeypatch.setitem(backends.BACKENDS, backend.name, backend)
-    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks", owner=OWNER)
+    registry = TaskRegistry(log_dir=_task_dir(tmp_path), owner=OWNER)
 
     task = await registry.start(prompt, tmp_path, backend=backend)
     await task.done.wait()
@@ -141,7 +159,7 @@ async def test_a_devnull_invocation_never_gets_a_pipe(
 
     backend = _Devnull(sink)
     monkeypatch.setitem(backends.BACKENDS, backend.name, backend)
-    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks", owner=OWNER)
+    registry = TaskRegistry(log_dir=_task_dir(tmp_path), owner=OWNER)
 
     task = await registry.start("hello", tmp_path, backend=backend)
     await task.done.wait()
@@ -156,7 +174,7 @@ async def test_a_devnull_invocation_never_gets_a_pipe(
 
 
 def test_a_record_written_before_live_input_existed_loads_as_not_live(tmp_path: Path) -> None:
-    path = store.record_path(tmp_path, "old")
+    path = store.record_path(_task_dir(tmp_path), "old")
     path.write_text(
         json.dumps(
             {
@@ -170,7 +188,7 @@ def test_a_record_written_before_live_input_existed_loads_as_not_live(tmp_path: 
             }
         )
     )
-    record = store.read(tmp_path, "old")
+    record = store.read(_task_dir(tmp_path), "old")
     assert record is not None and record.live_input is False
 
 
@@ -540,7 +558,7 @@ def fake(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setitem(backends.BACKENDS, backend.name, backend)
     stdin_log = tmp_path / "agent-stdin.jsonl"
     monkeypatch.setenv("FAKE_CLAUDE_LOG", str(stdin_log))
-    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks", owner=ALIVE_OWNER)
+    registry = TaskRegistry(log_dir=_task_dir(tmp_path), owner=ALIVE_OWNER)
     return SimpleNamespace(backend=backend, registry=registry, stdin_log=stdin_log, repo=tmp_path)
 
 
@@ -684,9 +702,9 @@ async def test_a_run_that_exits_without_a_result_fails_and_closes_its_input(fake
 
 
 async def test_messages_queued_when_the_run_exits_are_reported_undelivered(tmp_path: Path) -> None:
-    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks", owner=OWNER)
+    registry = TaskRegistry(log_dir=_task_dir(tmp_path), owner=OWNER)
     stdin = _Stdin()
-    task = _stub_task(tmp_path, stdin)
+    task = _stub_task(_task_dir(tmp_path), stdin)
     task.proc.returncode = 3
     task.inbox_queue.append(inbox.make_message("never sent", None))
 
@@ -776,6 +794,7 @@ class _Stdin:
 
 
 def _stub_task(log_dir: Path, stdin: _Stdin, task_id: str = "live1") -> Task:
+    log_dir = _task_dir(log_dir)
     from harflow_mcp.events import EventLog
 
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -800,8 +819,8 @@ def _texts(data: list[bytes]) -> list[str]:
 
 
 async def test_an_error_result_drops_every_queued_message_as_undelivered(tmp_path: Path) -> None:
-    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks", owner=OWNER)
-    state = tmp_path / "state" / "tasks"
+    registry = TaskRegistry(log_dir=_task_dir(tmp_path), owner=OWNER)
+    state = _task_dir(tmp_path)
     stdin = _Stdin()
     task = _stub_task(state, stdin)
     task.inbox_queue.extend([inbox.make_message("one", None), inbox.make_message("two", None)])
@@ -821,9 +840,9 @@ async def test_an_error_result_drops_every_queued_message_as_undelivered(tmp_pat
 
 
 async def test_idle_with_nothing_queued_closes_input(tmp_path: Path) -> None:
-    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks", owner=OWNER)
+    registry = TaskRegistry(log_dir=_task_dir(tmp_path), owner=OWNER)
     stdin = _Stdin()
-    task = _stub_task(tmp_path, stdin)
+    task = _stub_task(_task_dir(tmp_path), stdin)
     task.acc.result_count, task.acc.awaiting_input = 1, True
 
     await asyncio.wait_for(registry._pump(task), 5)
@@ -835,7 +854,7 @@ async def test_a_send_racing_the_close_is_either_delivered_or_refused(tmp_path: 
     """The close protocol holds the inbox lock from its last read to the marker: a sender that got
     the lock first is forwarded; one that comes after is refused. Simulated by holding the lock (as
     a sender would) while the pump tries to close, appending, then releasing."""
-    state = tmp_path / "state" / "tasks"
+    state = _task_dir(tmp_path)
     registry = TaskRegistry(log_dir=state, owner=ALIVE_OWNER)
     store.write(
         state,
@@ -872,7 +891,7 @@ async def test_a_send_racing_the_close_is_either_delivered_or_refused(tmp_path: 
 async def test_concurrent_senders_never_lose_an_acknowledged_message(tmp_path: Path) -> None:
     """Many senders race a closing pump: every "queued" message ends up written or reported."""
     owner = ALIVE_OWNER
-    state = tmp_path / "state" / "tasks"
+    state = _task_dir(tmp_path)
     registry = TaskRegistry(log_dir=state, owner=owner)
     store.write(
         state,
@@ -932,9 +951,9 @@ async def test_concurrent_senders_never_lose_an_acknowledged_message(tmp_path: P
 
 @pytest.mark.parametrize("error", [BrokenPipeError(), ConnectionResetError()])
 async def test_a_broken_pipe_on_write_reports_the_rest_undelivered(tmp_path: Path, error) -> None:
-    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks", owner=OWNER)
+    registry = TaskRegistry(log_dir=_task_dir(tmp_path), owner=OWNER)
     stdin = _Stdin(fail_write=error)
-    task = _stub_task(tmp_path, stdin)
+    task = _stub_task(_task_dir(tmp_path), stdin)
     task.inbox_queue.extend([inbox.make_message("a", None), inbox.make_message("b", None)])
 
     await asyncio.wait_for(registry._pump(task), 5)
@@ -946,9 +965,9 @@ async def test_a_broken_pipe_on_write_reports_the_rest_undelivered(tmp_path: Pat
 
 @pytest.mark.parametrize("error", [BrokenPipeError(), ConnectionResetError()])
 async def test_a_broken_pipe_on_drain_stops_the_pump(tmp_path: Path, error) -> None:
-    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks", owner=OWNER)
+    registry = TaskRegistry(log_dir=_task_dir(tmp_path), owner=OWNER)
     stdin = _Stdin(fail_drain=error)
-    task = _stub_task(tmp_path, stdin)
+    task = _stub_task(_task_dir(tmp_path), stdin)
     task.inbox_queue.append(inbox.make_message("a", None))
 
     await asyncio.wait_for(registry._pump(task), 5)
@@ -970,6 +989,7 @@ async def test_a_closing_transport_counts_as_closed(tmp_path: Path) -> None:
 
 
 def _record(tmp_path: Path, **overrides) -> None:
+    tmp_path = _task_dir(tmp_path)
     fields = dict(
         task_id="t1",
         backend="claude",
@@ -997,53 +1017,59 @@ def _record(tmp_path: Path, **overrides) -> None:
     ids=["not-live", "closed", "settled", "owner-dead", "owner-unknown", "owner-legacy"],
 )
 def test_a_non_owner_send_is_refused_in_order(tmp_path: Path, overrides, closed, code) -> None:
+    log_dir = _task_dir(tmp_path)
     _record(tmp_path, **overrides)
     if closed:
-        inbox.mark_closed(tmp_path, "t1")
+        inbox.mark_closed(log_dir, "t1")
     with pytest.raises(inbox.SendRefused) as caught:
-        inbox.send_to_record(tmp_path, "t1", "hi", by=None)
+        inbox.send_to_record(log_dir, "t1", "hi", by=None)
     assert caught.value.code == code
-    assert not inbox.inbox_path(tmp_path, "t1").read_bytes()
+    assert not inbox.inbox_path(log_dir, "t1").read_bytes()
 
 
 def test_a_non_owner_send_to_an_unknown_task(tmp_path: Path) -> None:
+    log_dir = _task_dir(tmp_path)
     with pytest.raises(inbox.SendRefused) as caught:
-        inbox.send_to_record(tmp_path, "nope", "hi", by=None)
+        inbox.send_to_record(log_dir, "nope", "hi", by=None)
     assert caught.value.code == "unknown_task"
 
 
 def test_a_non_owner_send_appends_one_durable_line(tmp_path: Path) -> None:
+    log_dir = _task_dir(tmp_path)
     _record(tmp_path)
-    result = inbox.send_to_record(tmp_path, "t1", "line one\nline two", by={"pid": 7})
+    result = inbox.send_to_record(log_dir, "t1", "line one\nline two", by={"pid": 7})
     assert result["status"] == "queued"
-    messages, offset = inbox.read_new(tmp_path, "t1", 0)
+    messages, offset = inbox.read_new(log_dir, "t1", 0)
     assert [m["text"] for m in messages] == ["line one\nline two"]
     assert messages[0]["id"] == result["message_id"] and messages[0]["by"] == {"pid": 7}
-    assert offset == inbox.inbox_path(tmp_path, "t1").stat().st_size
-    assert inbox.read_new(tmp_path, "t1", offset) == ([], offset)
+    assert offset == inbox.inbox_path(log_dir, "t1").stat().st_size
+    assert inbox.read_new(log_dir, "t1", offset) == ([], offset)
 
 
 def test_read_new_leaves_a_torn_line_unread(tmp_path: Path) -> None:
-    path = inbox.inbox_path(tmp_path, "t1")
+    log_dir = _task_dir(tmp_path)
+    path = inbox.inbox_path(log_dir, "t1")
     good = json.dumps(inbox.make_message("ok", None)) + "\n"
     path.write_text(good + "not json\n" + '{"id": "x", "text": "partial')
-    messages, offset = inbox.read_new(tmp_path, "t1", 0)
+    messages, offset = inbox.read_new(log_dir, "t1", 0)
     assert [m["text"] for m in messages] == ["ok"]
     assert offset == len((good + "not json\n").encode())
 
 
 def test_mark_closed_is_idempotent(tmp_path: Path) -> None:
-    inbox.mark_closed(tmp_path, "t1")
-    inbox.mark_closed(tmp_path, "t1")
-    assert inbox.is_closed(tmp_path, "t1")
+    log_dir = _task_dir(tmp_path)
+    inbox.mark_closed(log_dir, "t1")
+    inbox.mark_closed(log_dir, "t1")
+    assert inbox.is_closed(log_dir, "t1")
 
 
 def test_a_held_inbox_lock_times_out_the_sender(tmp_path: Path) -> None:
+    log_dir = _task_dir(tmp_path)
     _record(tmp_path)
-    fd = inbox.lock_sync(tmp_path, "t1")
+    fd = inbox.lock_sync(log_dir, "t1")
     try:
         with pytest.raises(inbox.SendRefused) as caught:
-            inbox.send_to_record(tmp_path, "t1", "hi", by=None, timeout=0.2)
+            inbox.send_to_record(log_dir, "t1", "hi", by=None, timeout=0.2)
         assert caught.value.code == "lock_timeout"
     finally:
         inbox.unlock(fd)
@@ -1090,21 +1116,21 @@ def test_open_background_work_at_an_unobserved_exit_is_not_a_completion() -> Non
 
 def test_a_torn_inbox_line_does_not_swallow_the_next_message(tmp_path: Path) -> None:
     _record(tmp_path)
-    path = inbox.inbox_path(tmp_path, "t1")
+    path = inbox.inbox_path(_task_dir(tmp_path), "t1")
     path.write_bytes(b'{"id": "crashed", "text": "half a mess')  # a writer died mid-line
-    result = inbox.send_to_record(tmp_path, "t1", "after the crash", by=None)
-    messages, _ = inbox.read_new(tmp_path, "t1", 0)
+    result = inbox.send_to_record(_task_dir(tmp_path), "t1", "after the crash", by=None)
+    messages, _ = inbox.read_new(_task_dir(tmp_path), "t1", 0)
     assert [m["id"] for m in messages] == [result["message_id"]]
 
 
 async def test_an_error_arriving_while_waiting_for_the_lock_stops_forwarding(tmp_path: Path) -> None:
-    registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
+    registry = TaskRegistry(log_dir=_task_dir(tmp_path), owner=OWNER)
     stdin = _Stdin()
     task = _stub_task(tmp_path, stdin)
     task.acc.result_count = 1
     task.inbox_queue.append(inbox.make_message("must not run", None))
 
-    fd = inbox.lock_sync(tmp_path, task.task_id)
+    fd = inbox.lock_sync(_task_dir(tmp_path), task.task_id)
     pump = asyncio.create_task(registry._pump(task))
     await asyncio.sleep(0.2)  # the pump is waiting for the lock to forward
     task.acc.error_result_seen = True
@@ -1122,7 +1148,7 @@ async def test_a_marker_that_cannot_be_created_falls_back_to_a_seal_line(
 ) -> None:
     """Round 2: the inbox itself carries the seal when the directory refuses the marker, and
     every sender honours it."""
-    registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
+    registry = TaskRegistry(log_dir=_task_dir(tmp_path), owner=OWNER)
     stdin = _Stdin()
     task = _stub_task(tmp_path, stdin)
     task.acc.result_count, task.acc.awaiting_input = 1, True
@@ -1134,19 +1160,19 @@ async def test_a_marker_that_cannot_be_created_falls_back_to_a_seal_line(
     await asyncio.wait_for(registry._pump(task), 5)
 
     assert stdin.closed and task.inbox_closed
-    assert not inbox.closed_path(tmp_path, task.task_id).exists()
-    assert inbox.is_closed(tmp_path, task.task_id)  # via the seal line
+    assert not inbox.closed_path(_task_dir(tmp_path), task.task_id).exists()
+    assert inbox.is_closed(_task_dir(tmp_path), task.task_id)  # via the seal line
     _record(tmp_path, task_id=task.task_id)
     with pytest.raises(inbox.SendRefused) as caught:
-        inbox.send_to_record(tmp_path, task.task_id, "hi", by=None)
+        inbox.send_to_record(_task_dir(tmp_path), task.task_id, "hi", by=None)
     assert caught.value.code == "closed"
-    assert inbox.read_new(tmp_path, task.task_id, 0)[0] == []  # the seal is not a message
+    assert inbox.read_new(_task_dir(tmp_path), task.task_id, 0)[0] == []  # the seal is not a message
 
 
 async def test_a_close_that_cannot_seal_keeps_input_open_and_retries(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
+    registry = TaskRegistry(log_dir=_task_dir(tmp_path), owner=OWNER)
     stdin = _Stdin()
     task = _stub_task(tmp_path, stdin)
     task.acc.result_count, task.acc.awaiting_input = 1, True
@@ -1166,14 +1192,14 @@ async def test_a_close_that_cannot_seal_keeps_input_open_and_retries(
     assert not stdin.closed and not task.inbox_closed  # no seal, so input is still open
     await asyncio.wait_for(pump, 5)
     assert failures["left"] == 0
-    assert stdin.closed and task.inbox_closed and inbox.is_closed(tmp_path, task.task_id)
+    assert stdin.closed and task.inbox_closed and inbox.is_closed(_task_dir(tmp_path), task.task_id)
 
 
 async def test_a_close_that_can_never_seal_ends_input_after_the_retry_limit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Round 2: a permanent failure must not keep a finished run from ever reaching EOF."""
-    registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
+    registry = TaskRegistry(log_dir=_task_dir(tmp_path), owner=OWNER)
     stdin = _Stdin()
     task = _stub_task(tmp_path, stdin)
     task.acc.result_count, task.acc.awaiting_input = 1, True
@@ -1197,12 +1223,12 @@ async def test_an_idle_close_whose_idleness_passed_while_waiting_is_abandoned(
     tmp_path: Path,
 ) -> None:
     """Round 2: the idle decision is re-made under the lock."""
-    registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
+    registry = TaskRegistry(log_dir=_task_dir(tmp_path), owner=OWNER)
     stdin = _Stdin()
     task = _stub_task(tmp_path, stdin)
     task.acc.result_count, task.acc.awaiting_input = 1, True
 
-    fd = inbox.lock_sync(tmp_path, task.task_id)
+    fd = inbox.lock_sync(_task_dir(tmp_path), task.task_id)
     pump = asyncio.create_task(registry._pump(task))
     await asyncio.sleep(0.2)  # the pump decided to close and is waiting for the lock
     backends.ClaudeBackend().ingest(ASSISTANT, task.acc)  # a follow-up turn starts meanwhile
@@ -1220,7 +1246,7 @@ async def test_the_idle_bound_is_only_marked_abandoned_when_the_close_happens(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Round 2: an idle-bound close that could not complete abandons nothing."""
-    registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
+    registry = TaskRegistry(log_dir=_task_dir(tmp_path), owner=OWNER)
     stdin = _Stdin()
     task = _stub_task(tmp_path, stdin)
     claude = backends.ClaudeBackend()
@@ -1260,14 +1286,14 @@ def test_a_send_to_a_task_whose_process_has_exited_is_refused(tmp_path: Path, id
     identities.dead(gone.pid)
     _record(tmp_path, pid=gone.pid, start_time="Mon Jan  1 00:00:00 2001", markers=["true"])
     with pytest.raises(inbox.SendRefused) as caught:
-        inbox.send_to_record(tmp_path, "t1", "hi", by=None)
+        inbox.send_to_record(_task_dir(tmp_path), "t1", "hi", by=None)
     assert caught.value.code == "exited"
 
 
 def test_recovery_knows_a_written_message_was_still_owed_a_turn(tmp_path: Path) -> None:
     """Round 2: the bridge's writes are not in the agent's stdout, so the record carries them."""
-    state = tmp_path / "state" / "tasks"
-    state.mkdir(parents=True)
+    state = _task_dir(tmp_path)
+    state.mkdir(parents=True, exist_ok=True)
     raw = [
         {"type": "system", "subtype": "init", "session_id": "s"},
         ASSISTANT,
@@ -1290,20 +1316,20 @@ def test_recovery_knows_a_written_message_was_still_owed_a_turn(tmp_path: Path) 
 
 
 async def test_writing_a_message_records_that_a_turn_is_owed(tmp_path: Path) -> None:
-    registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
+    registry = TaskRegistry(log_dir=_task_dir(tmp_path), owner=OWNER)
     task = _stub_task(tmp_path, _Stdin())
     task.acc.result_count, task.acc.awaiting_input = 2, False
     task.inbox_queue.append(inbox.make_message("more", None))
     assert await registry._forward_pending(task)
     assert task.input_after_result == 2
     assert task.acc.turn_open and not task.acc.awaiting_input
-    assert store.read(tmp_path, task.task_id).input_after_result == 2
+    assert store.read(_task_dir(tmp_path), task.task_id).input_after_result == 2
 
 
 async def test_an_unreadable_inbox_loses_nothing_while_the_run_lives(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
+    registry = TaskRegistry(log_dir=_task_dir(tmp_path), owner=OWNER)
     stdin = _Stdin()
     task = _stub_task(tmp_path, stdin)
     task.inbox_queue.append(inbox.make_message("kept", None))
@@ -1331,13 +1357,13 @@ async def test_after_exit_a_lock_that_stays_busy_falls_back_without_losing_messa
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The last-resort close reads the on-disk inbox too, not only this server's queue."""
-    registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
+    registry = TaskRegistry(log_dir=_task_dir(tmp_path), owner=OWNER)
     stdin = _Stdin()
     task = _stub_task(tmp_path, stdin)
     task.proc.returncode = 3
     task.inbox_queue.append(inbox.make_message("in memory", None))
-    fd = inbox.lock_sync(tmp_path, task.task_id)
-    inbox.append_locked(tmp_path, task.task_id, inbox.make_message("on disk", None))
+    fd = inbox.lock_sync(_task_dir(tmp_path), task.task_id)
+    inbox.append_locked(_task_dir(tmp_path), task.task_id, inbox.make_message("on disk", None))
 
     real_lock = inbox.lock_async
 
@@ -1351,7 +1377,7 @@ async def test_after_exit_a_lock_that_stays_busy_falls_back_without_losing_messa
     finally:
         inbox.unlock(fd)
 
-    assert task.inbox_closed and inbox.is_closed(tmp_path, task.task_id)
+    assert task.inbox_closed and inbox.is_closed(_task_dir(tmp_path), task.task_id)
     undelivered = sorted(
         e["text"] for e in _events(tmp_path, task.task_id) if e["kind"] == "undelivered"
     )
@@ -1359,17 +1385,17 @@ async def test_after_exit_a_lock_that_stays_busy_falls_back_without_losing_messa
 
 
 async def test_finish_pump_fallback_reads_the_disk_inbox(tmp_path: Path) -> None:
-    registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
+    registry = TaskRegistry(log_dir=_task_dir(tmp_path), owner=OWNER)
     task = _stub_task(tmp_path, _Stdin())
     task.proc.returncode = 0
-    fd = inbox.lock_sync(tmp_path, task.task_id)
-    inbox.append_locked(tmp_path, task.task_id, inbox.make_message("on disk", None))
+    fd = inbox.lock_sync(_task_dir(tmp_path), task.task_id)
+    inbox.append_locked(_task_dir(tmp_path), task.task_id, inbox.make_message("on disk", None))
     inbox.unlock(fd)
     # No pump at all (it failed to start, say): the monitor's fallback still accounts for it.
     await registry._finish_pump(task)
     undelivered = [e["text"] for e in _events(tmp_path, task.task_id) if e["kind"] == "undelivered"]
     assert undelivered == ["on disk"]
-    assert inbox.is_closed(tmp_path, task.task_id)
+    assert inbox.is_closed(_task_dir(tmp_path), task.task_id)
 
 
 def test_a_sender_that_finds_the_marker_after_appending_is_refused(
@@ -1386,7 +1412,7 @@ def test_a_sender_that_finds_the_marker_after_appending_is_refused(
 
     monkeypatch.setattr(inbox, "append_locked", append_then_close)
     with pytest.raises(inbox.SendRefused) as caught:
-        inbox.send_to_record(tmp_path, "t1", "hi", by=None)
+        inbox.send_to_record(_task_dir(tmp_path), "t1", "hi", by=None)
     assert caught.value.code == "closed"
 
 
@@ -1397,7 +1423,7 @@ async def test_a_forced_close_with_background_work_open_is_abandonment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """EOF from a forced close kills open background work just as the idle bound's does."""
-    registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
+    registry = TaskRegistry(log_dir=_task_dir(tmp_path), owner=OWNER)
     stdin = _Stdin()
     task = _stub_task(tmp_path, stdin)
     claude = backends.ClaudeBackend()
@@ -1422,12 +1448,12 @@ async def test_a_forced_close_with_background_work_open_is_abandonment(
 async def test_a_forced_close_that_could_not_read_the_inbox_is_reconciled_before_finishing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
+    registry = TaskRegistry(log_dir=_task_dir(tmp_path), owner=OWNER)
     stdin = _Stdin()
     task = _stub_task(tmp_path, stdin)
     task.acc.result_count, task.acc.awaiting_input = 1, True
-    fd = inbox.lock_sync(tmp_path, task.task_id)
-    inbox.append_locked(tmp_path, task.task_id, inbox.make_message("acknowledged on disk", None))
+    fd = inbox.lock_sync(_task_dir(tmp_path), task.task_id)
+    inbox.append_locked(_task_dir(tmp_path), task.task_id, inbox.make_message("acknowledged on disk", None))
     inbox.unlock(fd)
     monkeypatch.setattr(tasks_module, "PUMP_POLL_SECONDS", 0.01)
     real_read = inbox.read_new
@@ -1441,7 +1467,7 @@ async def test_a_forced_close_that_could_not_read_the_inbox_is_reconciled_before
     monkeypatch.setattr(inbox, "read_new", read)
     await asyncio.wait_for(registry._pump(task), 5)
     assert stdin.closed and task.inbox_closed and not task.inbox_reconciled
-    assert inbox.is_closed(tmp_path, task.task_id)  # the forced close still sealed it
+    assert inbox.is_closed(_task_dir(tmp_path), task.task_id)  # the forced close still sealed it
 
     broken["on"] = False  # the disk recovers before the run is published
     task.proc.returncode = 0
@@ -1461,7 +1487,7 @@ async def test_a_message_appended_after_a_forced_close_that_could_not_seal_is_re
     released another process saw no marker, appended, and was told "queued" — and `_finish_pump`
     skipped the reread because the inbox counted as reconciled. It is reconciled only once sealed."""
     owner = ALIVE_OWNER
-    registry = TaskRegistry(log_dir=tmp_path, owner=owner)
+    registry = TaskRegistry(log_dir=_task_dir(tmp_path), owner=owner)
     stdin = _Stdin()
     task = _stub_task(tmp_path, stdin)
     task.owner = owner
@@ -1478,7 +1504,7 @@ async def test_a_message_appended_after_a_forced_close_that_could_not_seal_is_re
     assert stdin.closed and task.inbox_closed
     assert not task.inbox_sealed and not task.inbox_reconciled
 
-    queued = inbox.send_to_record(tmp_path, task.task_id, "sent after the forced close", by=None)
+    queued = inbox.send_to_record(_task_dir(tmp_path), task.task_id, "sent after the forced close", by=None)
     assert queued["status"] == "queued"  # the unsealed inbox still looks open to a sender
 
     task.proc.returncode = 0
@@ -1493,7 +1519,7 @@ async def test_a_message_appended_after_a_forced_close_that_could_not_seal_is_re
 async def test_an_exit_path_close_that_could_not_seal_still_gets_the_final_read(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
+    registry = TaskRegistry(log_dir=_task_dir(tmp_path), owner=OWNER)
     task = _stub_task(tmp_path, _Stdin())
     task.proc.returncode = 0
 
@@ -1504,8 +1530,8 @@ async def test_an_exit_path_close_that_could_not_seal_still_gets_the_final_read(
     await asyncio.wait_for(registry._pump(task), 5)
     assert task.inbox_closed and not task.inbox_reconciled
 
-    fd = inbox.lock_sync(tmp_path, task.task_id)
-    inbox.append_locked(tmp_path, task.task_id, inbox.make_message("late", None))
+    fd = inbox.lock_sync(_task_dir(tmp_path), task.task_id)
+    inbox.append_locked(_task_dir(tmp_path), task.task_id, inbox.make_message("late", None))
     inbox.unlock(fd)
     await registry._finish_pump(task)
     undelivered = [e["text"] for e in _events(tmp_path, task.task_id) if e["kind"] == "undelivered"]
@@ -1513,7 +1539,7 @@ async def test_an_exit_path_close_that_could_not_seal_still_gets_the_final_read(
 
 
 async def test_a_sealed_close_needs_no_final_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
+    registry = TaskRegistry(log_dir=_task_dir(tmp_path), owner=OWNER)
     task = _stub_task(tmp_path, _Stdin())
     task.acc.result_count, task.acc.awaiting_input = 1, True
     await asyncio.wait_for(registry._pump(task), 5)
@@ -1539,7 +1565,7 @@ async def test_a_queued_turn_backend_waits_for_every_owed_result_before_closing(
     The pump must NOT close stdin after the first result — the queued messages were written, so
     their turns have not been answered — and must close the moment result_count reaches
     results_owed."""
-    registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
+    registry = TaskRegistry(log_dir=_task_dir(tmp_path), owner=OWNER)
     stdin = _Stdin()
     task = _stub_task(tmp_path, stdin)
     task.backend = "antigravity"
@@ -1574,7 +1600,7 @@ async def test_claude_still_folds_queued_messages_into_one_owed_result(tmp_path:
     """claude is unchanged by the owed-count change, byte for byte: however many messages are
     written, the run owes result_count + 1 — one further result settles it — and
     input_after_result keeps its old meaning, the result_count at the time of the write."""
-    registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
+    registry = TaskRegistry(log_dir=_task_dir(tmp_path), owner=OWNER)
     stdin = _Stdin()
     task = _stub_task(tmp_path, stdin)  # backend="claude"
     pump = asyncio.create_task(registry._pump(task))
@@ -1668,7 +1694,7 @@ async def test_a_queued_turn_run_delivers_every_message_and_settles(
     sink = tmp_path / "lines.jsonl"
     backend = _PerTurnDouble(sink)
     monkeypatch.setitem(backends.BACKENDS, backend.name, backend)
-    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks", owner=OWNER)
+    registry = TaskRegistry(log_dir=_task_dir(tmp_path), owner=OWNER)
 
     task = await registry.start("one", tmp_path, backend=backend)
     # Written while the first turn is still running (the double sleeps before its first result).
@@ -1691,8 +1717,8 @@ def test_recovery_knows_a_queued_turn_run_was_still_owed_results(tmp_path: Path)
     `result_count <= input_after_result` mean "a turn is still owed" under both shapes. For a
     queued-turn run with two written messages on top of the prompt (owed 3, recorded 2): a replay
     with only two results still owes a turn and must not read completed; the third settles it."""
-    state = tmp_path / "state" / "tasks"
-    state.mkdir(parents=True)
+    state = _task_dir(tmp_path)
+    state.mkdir(parents=True, exist_ok=True)
     import subprocess
 
     def agy_result(turns: int) -> dict:
@@ -1834,7 +1860,7 @@ async def test_confirmed_usage_limit_closes_live_input_and_is_durable(tmp_path, 
             return Invocation([self.binary, '-c', f"head -n 1 > {self.sink}; {limit}; cat > /dev/null"], stdin_mode=STDIN_PIPE, initial_input=self.encode_live_message(prompt))
     backend = Limited(tmp_path / 'sink')
     monkeypatch.setitem(backends.BACKENDS, backend.name, backend)
-    registry = TaskRegistry(log_dir=tmp_path / 'state' / 'tasks', owner=OWNER)
+    registry = TaskRegistry(log_dir=_task_dir(tmp_path), owner=OWNER)
     task = await registry.start('work', tmp_path, backend=backend)
     await asyncio.wait_for(task.done.wait(), 3)
     assert task.status == 'failed'
@@ -1853,7 +1879,7 @@ async def test_usage_limit_process_ignoring_eof_is_locally_settled(tmp_path, mon
             return Invocation([self.binary, '-c', f"head -n 1 > {self.sink}; echo '{rejection}'; exec sleep 60"], stdin_mode=STDIN_PIPE, initial_input=self.encode_live_message(prompt))
     backend = Limited(tmp_path / 'sink')
     monkeypatch.setitem(backends.BACKENDS, backend.name, backend)
-    registry = TaskRegistry(log_dir=tmp_path / 'state' / 'tasks', owner=OWNER)
+    registry = TaskRegistry(log_dir=_task_dir(tmp_path), owner=OWNER)
     task = await registry.start('work', tmp_path, backend=backend)
     await asyncio.wait_for(task.done.wait(), 8)
     assert task.status == 'failed'
@@ -1871,7 +1897,7 @@ async def test_usage_limit_owned_child_settles_despite_retitling_or_unavailable_
     backend = Limited(tmp_path / 'sink')
     monkeypatch.setitem(backends.BACKENDS, backend.name, backend)
     monkeypatch.setattr(identity, 'check_detail', lambda value: identity_result)
-    registry = TaskRegistry(log_dir=tmp_path / 'state' / 'tasks', owner=OWNER)
+    registry = TaskRegistry(log_dir=_task_dir(tmp_path), owner=OWNER)
     # The owned child is real; the identity observation models a CLI changing its
     # argv markers (or ps failing). Neither invalidates our retained child handle.
     original = registry._record_usage_limit
@@ -1901,7 +1927,7 @@ async def test_usage_limit_settlement_does_not_break_a_concurrent_sender_flock(t
     monkeypatch.setitem(backends.BACKENDS, backend.name, backend)
     monkeypatch.setattr(identity, 'check_detail', lambda value: ('alive', 'matched'))
     monkeypatch.setattr(identity, 'signalable', lambda verdict, reason: verdict == 'alive')
-    registry = TaskRegistry(log_dir=tmp_path / 'state' / 'tasks', owner=OWNER)
+    registry = TaskRegistry(log_dir=_task_dir(tmp_path), owner=OWNER)
     held = {}
     original_record = registry._record_usage_limit
     def record_limit(current):

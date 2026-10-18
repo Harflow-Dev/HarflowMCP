@@ -22,48 +22,52 @@ sys.path.insert(0, str(REPO / 'src'))
 
 def fixture(home: Path, size: str) -> dict:
     from harflow_mcp import store, workflows
+    from harflow_mcp.state_layout import resolve_layout
+    from harflow_mcp.state_ownership import state_session
     root = home / '.harflow'
     if root.exists():
         raise ValueError('Fixture destination must be empty')
     definitions, runs, tasks = SIZES[size]
-    storage = workflows.WorkflowStore(root)
-    definition = workflows.validate_definition({'name': 'bench', 'nodes': [
-        {'id': 'start', 'type': 'start'}, {'id': 'work', 'type': 'agent', 'agent': {'backend': 'codex'}},
-        {'id': 'end', 'type': 'end'}], 'connections': [
-        {'id': 'a', 'source': 'start', 'target': 'work'}, {'id': 'b', 'source': 'work', 'target': 'end'}],
-        'orchestrator': {'backend': 'codex'}})
-    for i in range(definitions):
-        value = definition | {'name': f'bench-{i:04}', 'revision': 1, 'workflow_id': f'bench-{i:04}'}
-        (storage.definitions / f'bench-{i:04}.json').write_text(json.dumps(value))
-    for i in range(runs):
-        rid = f'run-{i:04}'
-        run = {'workflow_run_id': rid, 'kind': 'workflow', 'name': 'bench', 'definition': definition,
-               'revision': 1, 'prompt': 'Synthetic benchmark input', 'repo_path': '/benchmark',
-               'freedom': 'read_only', 'status': 'needs_input' if i % 8 == 0 else 'completed',
-               'created_at': 1790812800.0 + i, 'updated_at': 1790812800.0 + i,
-               'sequence': 1, 'activations': [], 'decisions': [], 'sessions': {}, 'pending': [],
-               'tasks': [], 'joins': {}, 'instructions': '', 'supervisor_pid': None,
-               'summary': 'Synthetic summary. ' * (20000 if i == 0 else 20)}
-        if i == 0:
-            run['activations'] = [{'id': f'execution-{n:04}', 'node_id': 'work', 'role': 'node', 'status': 'completed', 'created_at': 1790812800.0 + n, 'tasks': [{'task_id': f'task-{n:04}', 'backend': 'codex', 'status': 'completed', 'summary': 'Synthetic worker summary'}], 'summary': 'Synthetic worker summary', 'node_result': {'status': 'succeeded', 'result': {}, 'evidence': []}} for n in range(8 if size == 'small' else 200)]
-        if i % 2 == 0:
-            run['activations'].append({'id': 'child-call', 'node_id': 'work', 'role': 'node', 'status': 'completed', 'tasks': [], 'invocation': {'child_workflow_run_id': f'run-{i+1:04}', 'workflow_id': 'bench-0000', 'stage': 'settled'}})
-        if i % 2:
-            run['parent_link'] = {'workflow_run_id': f'run-{i-1:04}', 'root_workflow_run_id': f'run-{i-1:04}', 'execution_id': 'child-call'}
-        (storage.runs / f'{rid}.json').write_text(json.dumps(run))
-    directory = root / 'tasks'
-    directory.mkdir()
-    for i in range(tasks):
-        value = store.TaskRecord(f'task-{i:04}', 'codex', 'synthetic-session', '/benchmark',
-                                 '2026-10-01T00:00:00+00:00', status='completed', exit_code=0,
-                                 title=f'Synthetic task {i}')
-        (directory / f'{value.task_id}.meta.json').write_text(json.dumps(asdict(value)))
-        events = [{'type': 'thread.started', 'thread_id': 'synthetic-session'}, {'type': 'item.completed', 'item': {'id': 'answer', 'type': 'agent_message', 'text': f'Synthetic task summary {i}'}}, {'type': 'turn.completed', 'usage': {'input_tokens': 0, 'cached_input_tokens': 0, 'output_tokens': 0}}]
-        (directory / f'{value.task_id}.jsonl').write_text(''.join(json.dumps(event) + '\n' for event in events))
+    with state_session(resolve_layout(root=root)):
+        storage = workflows.WorkflowStore(root)
+        definition = workflows.validate_definition({'name': 'bench', 'nodes': [
+            {'id': 'start', 'type': 'start'}, {'id': 'work', 'type': 'agent', 'agent': {'backend': 'codex'}},
+            {'id': 'end', 'type': 'end'}], 'connections': [
+            {'id': 'a', 'source': 'start', 'target': 'work'}, {'id': 'b', 'source': 'work', 'target': 'end'}],
+            'orchestrator': {'backend': 'codex'}})
+        for i in range(definitions):
+            value = definition | {'name': f'bench-{i:04}', 'revision': 1, 'workflow_id': f'bench-{i:04}'}
+            (storage.definitions / f'bench-{i:04}.json').write_text(json.dumps(value))
+        for i in range(runs):
+            rid = f'run-{i:04}'
+            run = {'workflow_run_id': rid, 'kind': 'workflow', 'name': 'bench', 'definition': definition,
+                   'revision': 1, 'prompt': 'Synthetic benchmark input', 'repo_path': '/benchmark',
+                   'freedom': 'read_only', 'status': 'needs_input' if i % 8 == 0 else 'completed',
+                   'created_at': 1790812800.0 + i, 'updated_at': 1790812800.0 + i,
+                   'sequence': 1, 'activations': [], 'decisions': [], 'sessions': {}, 'pending': [],
+                   'tasks': [], 'joins': {}, 'instructions': '', 'supervisor_pid': None,
+                   'summary': 'Synthetic summary. ' * (20000 if i == 0 else 20)}
+            if i == 0:
+                run['activations'] = [{'id': f'execution-{n:04}', 'node_id': 'work', 'role': 'node', 'status': 'completed', 'created_at': 1790812800.0 + n, 'tasks': [{'task_id': f'task-{n:04}', 'backend': 'codex', 'status': 'completed', 'summary': 'Synthetic worker summary'}], 'summary': 'Synthetic worker summary', 'node_result': {'status': 'succeeded', 'result': {}, 'evidence': []}} for n in range(8 if size == 'small' else 200)]
+            if i % 2 == 0:
+                run['activations'].append({'id': 'child-call', 'node_id': 'work', 'role': 'node', 'status': 'completed', 'tasks': [], 'invocation': {'child_workflow_run_id': f'run-{i+1:04}', 'workflow_id': 'bench-0000', 'stage': 'settled'}})
+            if i % 2:
+                run['parent_link'] = {'workflow_run_id': f'run-{i-1:04}', 'root_workflow_run_id': f'run-{i-1:04}', 'execution_id': 'child-call'}
+            (storage.runs / f'{rid}.json').write_text(json.dumps(run))
+        directory = root / 'tasks'
+        directory.mkdir()
+        for i in range(tasks):
+            value = store.TaskRecord(f'task-{i:04}', 'codex', 'synthetic-session', '/benchmark',
+                                     '2026-10-01T00:00:00+00:00', status='completed', exit_code=0,
+                                     title=f'Synthetic task {i}')
+            (directory / f'{value.task_id}.meta.json').write_text(json.dumps(asdict(value)))
+            events = [{'type': 'thread.started', 'thread_id': 'synthetic-session'}, {'type': 'item.completed', 'item': {'id': 'answer', 'type': 'agent_message', 'text': f'Synthetic task summary {i}'}}, {'type': 'turn.completed', 'usage': {'input_tokens': 0, 'cached_input_tokens': 0, 'output_tokens': 0}}]
+            (directory / f'{value.task_id}.jsonl').write_text(''.join(json.dumps(event) + '\n' for event in events))
     # Persistent malformed history exercises the blocked projection without permission changes.
     blocked = home / 'blocked-fixture' / '.harflow' / 'tasks'
-    blocked.mkdir(parents=True)
-    (blocked / 'blocked.meta.json').write_text('{')
+    with state_session(resolve_layout(root=blocked.parent)):
+        blocked.mkdir()
+        (blocked / 'blocked.meta.json').write_text('{')
     manifest = {'format': 'harflow.monitor-fixture', 'version': 1, 'size': size, 'definitions': definitions, 'runs': runs, 'tasks': tasks,
             'blocked_records': 1, 'nested_runs': runs // 2, 'snapshot_summary_chars': 380000}
     (home / 'monitor-benchmark-fixture.json').write_text(json.dumps(manifest))

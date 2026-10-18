@@ -9,11 +9,17 @@ from harflow_mcp import backends, ctl, server, tasks
 from harflow_mcp.backends.codex import EXTRA_PATHS_VERSION
 from harflow_mcp.backends.base import nested_enforcement_violation
 from harflow_mcp.extra_paths import normalize_paths
+from harflow_mcp import state_ownership
+from harflow_mcp.state_layout import resolve_layout
 
 
 @pytest.fixture(autouse=True)
 def separate_bridge_state(monkeypatch, tmp_path_factory):
-    monkeypatch.setattr(server._reg(), '_log_dir', tmp_path_factory.mktemp('bridge-state') / 'state' / 'tasks')
+    root = tmp_path_factory.mktemp('bridge-state') / 'state'
+    with state_ownership.state_session(resolve_layout(root=root)):
+        pass
+    monkeypatch.setenv('HARFLOW_STATE_ROOT', str(root))
+    monkeypatch.setattr(server._reg(), '_log_dir', root / 'tasks')
 
 
 @pytest.fixture

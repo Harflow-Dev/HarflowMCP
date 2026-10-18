@@ -3,6 +3,7 @@ import importlib.util
 import json
 from pathlib import Path
 import pytest
+from harflow_mcp.state_layout import resolve_layout
 
 spec = importlib.util.spec_from_file_location('monitor_benchmark', Path(__file__).parents[1] / 'scripts/benchmark-monitor.py')
 benchmark = importlib.util.module_from_spec(spec)
@@ -41,7 +42,9 @@ def test_large_fixture_preparation_blocked_nested_and_pagination(tmp_path):
     assert child['parent_link']['workflow_run_id'] == 'run-0000'
     assert child['parent_link']['execution_id'] == 'child-call'
     run = storage.get_run('run-0000')
-    snapshot = workflow_responses.monitor_snapshot(run, 'run-0000', root / 'monitor_snapshots')
+    snapshot = workflow_responses.monitor_snapshot(
+        run, 'run-0000', root / 'monitor_snapshots', layout=resolve_layout(root=root)
+    )
     assert snapshot['next_cursor']
     history = workflow_responses.history_page([run])
     assert history['runs'][0]['activations'][0]['tasks'][0]['task_id'].startswith('task-')

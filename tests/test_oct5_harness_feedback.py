@@ -5,15 +5,21 @@ from harflow_mcp import store
 from harflow_mcp.tasks import Task, TaskRegistry
 from harflow_mcp.backends.base import Accumulator
 from harflow_mcp.backends.claude import ClaudeBackend, ALLOWED_TOOLS
+from harflow_mcp import state_ownership
+from harflow_mcp.state_layout import resolve_layout
 
 
 def test_complete_assignment_persisted(tmp_path):
     prompt = 'review payload ' + 'x' * 42000 + ' final SHA'
+    root = tmp_path / 'state'
+    with state_ownership.state_session(resolve_layout(root=root)):
+        pass
+    directory = root / 'tasks'
     task = Task(task_id='full-prompt', backend='claude', session_id='session', repo_path=tmp_path,
-                prompt=prompt, max_turns=None, log_path=tmp_path/'full-prompt.jsonl',
+                prompt=prompt, max_turns=None, log_path=directory/'full-prompt.jsonl',
                 started_at=datetime.now(timezone.utc))
-    TaskRegistry(log_dir=tmp_path).persist(task)
-    assert store.read(tmp_path, task.task_id).prompt == prompt
+    TaskRegistry(log_dir=directory).persist(task)
+    assert store.read(directory, task.task_id).prompt == prompt
 
 
 def test_claude_safety_shape_denial_retains_reason():
@@ -160,15 +166,19 @@ async def test_positive_not_started_spawn_cleans_scratch(tmp_path, monkeypatch):
 def test_retention_keeps_record_when_scratch_cleanup_fails(tmp_path, monkeypatch):
     from harflow_mcp import retention, scratch
     task_id = 'retained-scratch'
-    log_dir = tmp_path/'tasks'
+    root = tmp_path / 'state'
+    with state_ownership.state_session(resolve_layout(root=root)):
+        pass
+    log_dir = root/'tasks'
     log_dir.mkdir()
     record = log_dir/f'{task_id}.meta.json'
     record.write_text('{}')
     def fail(*args):
         raise OSError('scratch busy')
     monkeypatch.setattr(scratch, 'remove', fail)
-    assert not retention._delete_task_files(log_dir, task_id)
-    assert record.exists()
+    with state_ownership.state_session(resolve_layout(root=root)):
+        assert not retention._delete_task_files(log_dir, task_id)
+        assert record.exists()
 
 
 async def test_uncertain_spawn_retains_scratch(tmp_path, monkeypatch):

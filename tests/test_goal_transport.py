@@ -2,6 +2,8 @@
 import pytest
 
 from harflow_mcp import ctl, server
+from harflow_mcp import state_ownership
+from harflow_mcp.state_layout import resolve_layout
 
 
 @pytest.mark.parametrize("monitor", [False, True])
@@ -10,6 +12,13 @@ def test_goal_files_preserve_multiline_text(tmp_path, monkeypatch, monitor, comm
     text = "  Compare these screens\r\nagainst the supplied reference.\n  "
     path = tmp_path / "goal.txt"
     path.write_bytes(text.encode("utf-8"))
+    # The repository containing the goal is deliberately separate from the
+    # engine state root: a goal file makes the former non-empty, while the
+    # latter must be an explicitly initialized current root.
+    state_root = tmp_path / "state"
+    monkeypatch.setenv("HARFLOW_STATE_ROOT", str(state_root))
+    with state_ownership.state_session(resolve_layout(root=state_root)):
+        pass
     observed = {}
 
     async def call(action, **kwargs):

@@ -6,8 +6,14 @@ import json
 import pytest
 
 from harflow_mcp import workflow_delegation as d, workflow_responses as responses, workflows as w
-from test_workflow_delegation import storage  # noqa: F401
 from test_workflow_optional_refusal import ANSWER, suspended
+
+
+@pytest.fixture
+def storage(tmp_path, monkeypatch):
+    monkeypatch.setattr(w.backends, "is_installed", lambda backend: True)
+    monkeypatch.setattr(w, "_launch", lambda *args: None)
+    return w.WorkflowStore(tmp_path / "state")
 
 
 @pytest.mark.parametrize('answer', ['No, do not proceed without Vibe', 'Proceed without Vibe'])
@@ -137,8 +143,9 @@ async def test_forwarded_ineligible_opt_in_does_not_prepare_delivery(storage, tm
 
 @pytest.mark.parametrize('allow', [False, True])
 @pytest.mark.parametrize('monitor', [False, True])
-def test_cli_passes_explicit_consent_only_when_flag_is_present(monkeypatch, capsys, allow, monitor):
+def test_cli_passes_explicit_consent_only_when_flag_is_present(monkeypatch, capsys, allow, monitor, tmp_path):
     from harflow_mcp import ctl, server
+    monkeypatch.setattr(ctl, "default_log_dir", lambda: tmp_path / "state" / "tasks")
     calls = []
     async def call(action, **kwargs):
         calls.append((action, kwargs))
@@ -212,3 +219,13 @@ async def test_legacy_pending_forwarded_delivery_replays_without_consent(storage
     source = storage.get_run(child['workflow_run_id'])
     assert not source.get('optional_skip_authorizations')
     assert source['forwarded_delivery_receipt'] == delivery
+
+@pytest.fixture
+def tmp_path(tmp_path_factory: pytest.TempPathFactory):
+    workspace = tmp_path_factory.mktemp("workflow-node")
+    root = workspace / "state"
+    from harflow_mcp import state_ownership
+    from harflow_mcp.state_layout import resolve_layout
+    with state_ownership.state_session(resolve_layout(root=root)):
+        (root / "tasks").mkdir(exist_ok=True)
+        yield workspace

@@ -129,6 +129,13 @@ def test_cli_allowlist_never_installs_a_registry_or_notification_worker(
             'hook': {'url': 'https://example.com/hook'},
         }))
     else:
+        # The database is a legitimate current-root fixture.  Initialize the
+        # root before creating it so the test exercises notification behavior,
+        # rather than the state-layout refusal for a marked-but-lockless root.
+        from harflow_mcp import state_ownership
+        from harflow_mcp.state_layout import resolve_layout
+        with state_ownership.state_session(resolve_layout(root=registry.log_dir.parent)):
+            pass
         database = registry.log_dir.parent / 'notifications.sqlite3'
         database.parent.mkdir(parents=True, exist_ok=True)
         database.touch()

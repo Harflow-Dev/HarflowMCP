@@ -18,7 +18,9 @@ def qualified_native_adapter(monkeypatch):
 async def test_readonly_native_descendant_keeps_writer_root_lease(tmp_path, monkeypatch, batch, mode):
     monkeypatch.setattr(w.backends, "is_installed", lambda backend: True)
     monkeypatch.setattr(w.backends, "version", lambda backend: "2.1.295 (Claude Code)")
-    storage = w.WorkflowStore(tmp_path)
+    state_root = tmp_path / "state"
+    monkeypatch.setenv("HARFLOW_STATE_ROOT", str(state_root))
+    storage = w.WorkflowStore(state_root)
     definition = batch_graph() if batch else native_graph()
     definition["name"] = "child"
     saved = storage.save("child", definition)
@@ -26,7 +28,7 @@ async def test_readonly_native_descendant_keeps_writer_root_lease(tmp_path, monk
     parent["orchestrator"] = {"backend": "claude", "model": MODEL}
     parent["nodes"][1]["freedom"] = "write_in_repo"
     storage.save("parent", parent)
-    registry = BatchRegistry(tmp_path)
+    registry = BatchRegistry(state_root)
     registry.policy = workflow_policy
     strengths = []
     original = w.CheckoutLease

@@ -38,6 +38,9 @@ returns None — a task with no detected caller is treated as a root task, not a
 
 from __future__ import annotations
 
+from .state_access import task_operation, task_layout, layout_operation
+from .state_ownership import StateOwnershipError
+
 import json
 
 import logging
@@ -212,6 +215,7 @@ def _confirmed(record: store.TaskRecord, check: Callable[[Mapping[str, Any]], st
     return check(_candidate_identity(record)) == "alive"
 
 
+@task_operation
 def _candidates(log_dir: Path) -> list[store.TaskRecord]:
     """Every record that could still be a live caller: not observed-terminal.
 
@@ -251,10 +255,17 @@ class CandidateScan:
         self._log_dir = log_dir
         self._value: list[store.TaskRecord] | _CandidateReadFailure | None = None
 
+    @property
+    def state_layout(self):
+        return task_layout(self._log_dir)
+
+    @layout_operation
     def resolve(self) -> list[store.TaskRecord] | _CandidateReadFailure:
         if self._value is None:
             try:
                 self._value = _candidates(self._log_dir)
+            except StateOwnershipError:
+                raise
             except Exception as exc:
                 log.debug("caller candidate scan failed", exc_info=True)
                 self._value = _CandidateReadFailure(exc)
@@ -271,6 +282,7 @@ def read_candidates(log_dir: Path) -> CandidateScan:
     return CandidateScan(log_dir)
 
 
+@task_operation
 def _resolve_candidates(
     log_dir: Path, candidates: list[store.TaskRecord] | _CandidateReadFailure | CandidateScan | None
 ) -> list[store.TaskRecord] | _CandidateReadFailure:
@@ -306,6 +318,7 @@ def _matches_ancestry(
     return record.pid in ancestors(getpid(), table)
 
 
+@task_operation
 def _by_harflow_task_id(
     log_dir: Path,
     env: Mapping[str, str],
@@ -367,6 +380,7 @@ def _by_ancestry(
     return None
 
 
+@task_operation
 def detect_caller(
     log_dir: Path,
     *,
@@ -382,7 +396,7 @@ def detect_caller(
     Tries `HARFLOW_TASK_ID` first, then a same-session match, then an ancestry walk — see the module
     docstring for why each exists and what it depends on. Every candidate must independently be
     confirmed `alive` via `check`; precedence among the three methods is fixed regardless of which
-    would find a record first. Never raises: any failure (an unreadable `ps`, a corrupt record, a
+    would find a record first. Ownership failures raise; ordinary failures (an unreadable `ps`, a corrupt record, a
     getsid error) is logged at debug and treated as "no caller found", per CLAUDE.md's rule that
     bookkeeping must never change an outcome.
 
@@ -411,6 +425,8 @@ def detect_caller(
         if found is not None:
             return found
         return _by_ancestry(candidates, getpid, table_fn, check)
+    except StateOwnershipError:
+        raise
     except Exception:
         log.debug("caller detection failed", exc_info=True)
         return None
@@ -433,6 +449,7 @@ class Detection:
     undecidable: str | None = None
 
 
+@task_operation
 def detect_caller_detail(
     log_dir: Path,
     *,
@@ -504,11 +521,14 @@ def detect_caller_detail(
                     "confirmed alive or gone",
                 )
         return Detection(None)
+    except StateOwnershipError:
+        raise
     except Exception as exc:
         log.debug("caller detection failed", exc_info=True)
         return Detection(None, f"caller detection failed: {type(exc).__name__}: {exc}")
 
 
+@task_operation
 def related_catalog_candidates(log_dir: Path, chain: list[int], sid: int) -> list[store.TaskRecord]:
     """Prepare bounded metadata and return at most 100 related caller projections.
 
@@ -522,7 +542,7 @@ def related_catalog_candidates(log_dir: Path, chain: list[int], sid: int) -> lis
             raise ValueError('Caller ancestry exceeds authority bounds')
         if store.bootstrap_catalog(log_dir):
             raise ValueError('Task catalog preparation is incomplete; retry the request')
-        index = Catalog(log_dir, store.RECORD_SUFFIX)
+        index = Catalog(log_dir, store.RECORD_SUFFIX, layout=task_layout(log_dir))
         with index.connect() as db:
             # Manifest/lock creation can change directory mtime after preparation.
             # Reconcile names/stats without another metadata bootstrap batch.
@@ -541,6 +561,7 @@ def related_catalog_candidates(log_dir: Path, chain: list[int], sid: int) -> lis
 
 
 
+@task_operation
 def detect_catalog_caller(log_dir: Path, *, environ: Mapping[str, str] | None = None,
                           getsid: Callable[[int], int] = os.getsid, getpid: Callable[[], int] = os.getpid,
                           process_table: Callable[[], Mapping[int, int] | None] | None = None,
@@ -560,7 +581,7 @@ def detect_catalog_caller(log_dir: Path, *, environ: Mapping[str, str] | None = 
         if table is None or own_pid not in table or sid is None:
             return Detection(None, 'Process ancestry/session cannot be checked')
         chain = ancestors(own_pid, table)[:100]
-        index = Catalog(log_dir, store.RECORD_SUFFIX)
+        index = Catalog(log_dir, store.RECORD_SUFFIX, layout=task_layout(log_dir))
         with index.connect() as db:
             index._discover(db)
             if index.state(db)['status'] != 'ready':
@@ -580,5 +601,7 @@ def detect_catalog_caller(log_dir: Path, *, environ: Mapping[str, str] | None = 
             if check_fn(_candidate_identity(record)) != 'dead':
                 return Detection(None, f'Task {record.task_id} caller identity is uncertain')
         return Detection(None)
+    except StateOwnershipError:
+        raise
     except Exception as exc:
         return Detection(None, f'Catalog caller detection failed: {type(exc).__name__}: {exc}')

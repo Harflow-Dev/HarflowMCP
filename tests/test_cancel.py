@@ -16,8 +16,19 @@ import pytest
 from harflow_mcp import control, identity, store
 from harflow_mcp import tasks as tasks_module
 from harflow_mcp.tasks import Task, TaskRegistry
+from harflow_mcp import state_ownership
+from harflow_mcp.state_layout import resolve_layout
 
 OWNER = {"pid": 1, "start_time": None, "markers": []}
+
+
+@pytest.fixture
+def tmp_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    root = tmp_path_factory.mktemp("cancel") / "state"
+    with state_ownership.state_session(resolve_layout(root=root)):
+        tasks = root / "tasks"
+        tasks.mkdir()
+        yield tasks
 
 
 def _now_iso() -> str:

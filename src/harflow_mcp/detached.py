@@ -4,7 +4,7 @@ A task needs a process to own it for as long as it runs — to drain its pipes (
 the agent) and publish its outcome — but the Monitor app wants a CLI call that returns as soon as
 the task exists. So the command forks:
 
-* the **child** points stdin at /dev/null and stdout/stderr at the selected state root's `ctl.log` *first*, so
+* the **child** acquires its selected-root lease, then points stdin at /dev/null and stdout/stderr at the selected state root's `ctl.log`, so
   whatever reads the parent's stdout (the app) sees EOF the moment the parent exits; then it calls
   `os.setsid()`, builds a `TaskRegistry` inside its own running loop — no retention, no open-app —
   starts or resumes the task, sends one line down a pipe (`{"task_id"}` or `{"error"}`), and stays
@@ -19,6 +19,9 @@ the task exists. So the command forks:
 """
 
 from __future__ import annotations
+
+from .state_access import require_state_path
+from .state_ownership import state_session, current_owned, assert_owned, StateOwnershipError
 
 import asyncio
 import json
@@ -56,8 +59,32 @@ class Outcome:
     child_pid: int
 
 
+class _Handshake:
+    """One idempotently closed pipe endpoint shared by child setup and runtime."""
+
+    def __init__(self, descriptor: int):
+        self.descriptor: int | None = descriptor
+
+    def close(self) -> None:
+        descriptor, self.descriptor = self.descriptor, None
+        if descriptor is not None:
+            os.close(descriptor)
+
+    def send(self, message: dict[str, Any]) -> None:
+        if self.descriptor is None:
+            return
+        try:
+            os.write(self.descriptor, (json.dumps(message) + "\n").encode("utf-8"))
+        except OSError:
+            log.warning("could not report to the waiting harflow-ctl")
+        finally:
+            self.close()
+
+
 def error_doc(exc: BaseException) -> dict[str, str]:
     """A stable `{code, message}` for anything starting or resuming a task can raise."""
+    if isinstance(exc, StateOwnershipError):
+        return {"code": getattr(exc, "code", "state_incompatible"), "message": str(exc)}
     from . import backends
     from .tasks import RepoUnavailableError, SessionBusyError, SessionUnknownError
 
@@ -118,18 +145,24 @@ def run_detached(
     pid = os.fork()
     if pid == 0:  # child — never returns
         code = 1
+        channel = _Handshake(write_fd)
         try:
             os.close(read_fd)
             os.environ.update(child_environment(selected))
-            _detach_stdio(log_path)
-            os.setsid()
-            code = asyncio.run(_child(action, write_fd, selected_factory))
+            with state_session(selected):
+                _detach_stdio(log_path, layout=selected)
+                os.setsid()
+                code = asyncio.run(_child(action, channel, selected_factory))
+        except StateOwnershipError as exc:
+            channel.send({"error": error_doc(exc)})
+            print(f"harflow-ctl: error: {exc}", file=sys.stderr)
         except BaseException:
             try:
                 traceback.print_exc()
             except Exception:
                 pass
         finally:
+            channel.close()
             os._exit(code)
 
     os.close(write_fd)
@@ -165,7 +198,8 @@ def run_detached(
     return Outcome("unknown", {"message": message}, pid)
 
 
-def _detach_stdio(log_path: Path) -> None:
+def _detach_stdio(log_path: Path, *, layout) -> None:
+    require_state_path(layout, log_path)
     devnull = os.open(os.devnull, os.O_RDONLY)
     os.dup2(devnull, 0)
     os.close(devnull)
@@ -273,7 +307,9 @@ async def _release_started(registry: Any) -> None:
                 me.uncancel()
 
 
-async def _child(action: Action, write_fd: int, registry_factory: Callable[[], Any]) -> int:
+async def _child(action: Action, write_fd: int | _Handshake, registry_factory: Callable[[], Any]) -> int:
+    current_owned()
+    channel = write_fd if isinstance(write_fd, _Handshake) else _Handshake(write_fd)
     # The fork copied the parent's cached identity; the owner of these tasks is this process.
     identity.own_identity.cache_clear()
     logging.basicConfig(
@@ -291,25 +327,18 @@ async def _child(action: Action, write_fd: int, registry_factory: Callable[[], A
     registry = registry_factory()
     from .state_layout import require_dispatch_layout
     require_dispatch_layout(registry.log_dir)
-    pending_fd: int | None = write_fd
-
-    def send(message: dict[str, Any]) -> None:
-        nonlocal pending_fd
-        if pending_fd is None:
-            return
-        try:
-            os.write(pending_fd, (json.dumps(message) + "\n").encode("utf-8"))
-        except OSError:
-            log.warning("could not report to the waiting harflow-ctl", exc_info=True)
-        finally:
-            os.close(pending_fd)
-            pending_fd = None
+    assert_owned(require_dispatch_layout(registry.log_dir))
+    send = channel.send
 
     try:
         try:
             task = await action(registry)
         except asyncio.CancelledError:
             raise
+        except StateOwnershipError as exc:
+            log.error("could not start the task: %s", exc)
+            send({"error": error_doc(exc)})
+            return 1
         except Exception as exc:
             log.warning("could not start the task", exc_info=True)
             send({"error": error_doc(exc)})
@@ -328,5 +357,4 @@ async def _child(action: Action, write_fd: int, registry_factory: Callable[[], A
         await _release_started(registry)
         return CANCELLED_EXIT
     finally:
-        if pending_fd is not None:
-            os.close(pending_fd)
+        channel.close()

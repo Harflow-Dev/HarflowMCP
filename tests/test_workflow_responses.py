@@ -2,6 +2,15 @@ import json
 import pytest
 from harflow_mcp.workflow_responses import compact, detail, BUDGET
 from harflow_mcp import server
+from harflow_mcp import state_ownership
+from harflow_mcp.state_layout import resolve_layout
+
+
+@pytest.fixture
+def owned_state(tmp_path):
+    root = tmp_path / "state"
+    with state_ownership.state_session(resolve_layout(root=root)):
+        yield root
 
 
 def test_monitor_history_is_bounded_and_prioritizes_active_runs():
@@ -84,12 +93,12 @@ async def test_workflow_entry_rejects_freedom_before_dispatch(entry):
         await entry(prompt="test", repo_path="/tmp", freedom="unrestricted", **args)
 
 
-async def test_undecidable_workflow_reader_fails_closed(monkeypatch):
+async def test_undecidable_workflow_reader_fails_closed(monkeypatch, owned_state):
     from types import SimpleNamespace
     from harflow_mcp import lineage
     async def caller(*args, **kwargs):
         return None
-    registry = SimpleNamespace(_detect_caller=caller, log_dir=__import__('pathlib').Path('/tmp/tasks'))
+    registry = SimpleNamespace(_detect_caller=caller, log_dir=owned_state / "tasks")
     monkeypatch.setattr(server, '_reg', lambda: registry)
     monkeypatch.setattr(lineage, 'detect_caller_detail', lambda *args, **kwargs: lineage.Detection(None, undecidable='unreadable ancestry'))
     with pytest.raises(Exception, match='undecidable'):

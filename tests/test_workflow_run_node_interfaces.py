@@ -23,10 +23,21 @@ from test_workflow_run_node_recovery import finished_child, seed_parent, write_r
 def store(tmp_path, monkeypatch):
     monkeypatch.setattr(w.backends, "is_installed", lambda backend: True)
     monkeypatch.setattr(w, "_launch", lambda *args: None)
-    s = w.WorkflowStore(tmp_path)
+    s = w.WorkflowStore(tmp_path / "state")
     child = s.save("child", child_graph("child"))
     s.save("parent", parent_graph(child["workflow_id"]))
     return s
+
+
+@pytest.fixture
+def tmp_path(tmp_path_factory: pytest.TempPathFactory):
+    workspace = tmp_path_factory.mktemp("workflow-node")
+    root = workspace / "state"
+    from harflow_mcp import state_ownership
+    from harflow_mcp.state_layout import resolve_layout
+    with state_ownership.state_session(resolve_layout(root=root)):
+        (root / "tasks").mkdir(exist_ok=True)
+        yield workspace
 
 
 def seeded_two_level(store, tmp_path, *, big_result=None):
@@ -96,7 +107,7 @@ async def test_takeover_pause_and_direct_message_use_the_tree_gate(store, tmp_pa
     child["status"] = "running"
     write_run(store, child)
     receipt = store.owners / "kid.json"
-    w._write(receipt, {"workflow_run_id": child["workflow_run_id"]})
+    w._write(receipt, {"workflow_run_id": child["workflow_run_id"]}, layout=store.state_layout)
     # The root is still active: takeover and direct messages are refused.
     with pytest.raises(control.TakeoverRefused):
         workflow_hooks.refuse_takeover(store.root / "tasks", "kid")
@@ -114,7 +125,7 @@ async def test_retention_pins_tasks_of_every_run_in_an_active_tree(store, tmp_pa
     parent_run, activation, child = seeded_two_level(store, tmp_path)
     child["activations"].append({"id": "orch", "node_id": "work", "role": "orchestrator", "status": "completed", "tasks": [{"task_id": "pinned-kid", "status": "completed", "result": {"status": "completed"}}], "created_at": 0.0, "token": {}})
     write_run(store, child)
-    w._write(store.owners / "pinned-kid.json", {"workflow_run_id": child["workflow_run_id"]})
+    w._write(store.owners / "pinned-kid.json", {"workflow_run_id": child["workflow_run_id"]}, layout=store.state_layout)
     assert "pinned-kid" in store.pinned_tasks()
     store.update_run(parent_run["workflow_run_id"], lambda r: r.update(status="completed"), "fixture")
     assert "pinned-kid" not in store.pinned_tasks()
@@ -126,7 +137,7 @@ async def test_decorate_tasks_reports_tree_fields_and_session_owner(store, tmp_p
     child["orchestrator_session_owner_run_id"] = parent_run["workflow_run_id"]
     child["activations"].append({"id": "orch", "node_id": "work", "role": "orchestrator", "status": "completed", "tasks": [{"task_id": "owned-kid", "status": "completed", "result": {"status": "completed"}}], "created_at": 0.0, "token": {}})
     write_run(store, child)
-    w._write(store.owners / "owned-kid.json", {"workflow_run_id": child["workflow_run_id"]})
+    w._write(store.owners / "owned-kid.json", {"workflow_run_id": child["workflow_run_id"]}, layout=store.state_layout)
     decorated = workflow_inspection.decorate_tasks([{"task_id": "owned-kid"}], store.root / "tasks")[0]
     assert decorated["root_workflow_run_id"] == parent_run["workflow_run_id"]
     assert decorated["workflow_session_owner_run_id"] == parent_run["workflow_run_id"]

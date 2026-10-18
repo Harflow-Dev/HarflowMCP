@@ -1,14 +1,20 @@
 from harflow_mcp import scratch, retention
+from harflow_mcp import state_ownership
+from harflow_mcp.state_layout import resolve_layout
 
 def test_task_retention_removes_scratch_without_following_symlinks(tmp_path):
-    log=tmp_path/'tasks';log.mkdir();(log/'worker.meta.json').write_text('{}')
+    root = tmp_path / 'state'
+    with state_ownership.state_session(resolve_layout(root=root)):
+        pass
+    log=root/'tasks';log.mkdir();(log/'worker.meta.json').write_text('{}')
     path=scratch.create(log,'worker');(path/'payload').write_text('review')
-    assert retention._delete_task_files(log,'worker')
-    assert not path.exists()
-    outside=tmp_path/'outside';outside.mkdir();(outside/'keep').write_text('safe')
-    path.symlink_to(outside,target_is_directory=True)
-    assert retention._delete_task_files(log,'worker')
-    assert (outside/'keep').read_text()=='safe'
+    with state_ownership.state_session(resolve_layout(root=root)):
+        assert retention._delete_task_files(log,'worker')
+        assert not path.exists()
+        outside=tmp_path/'outside';outside.mkdir();(outside/'keep').write_text('safe')
+        path.symlink_to(outside,target_is_directory=True)
+        assert retention._delete_task_files(log,'worker')
+        assert (outside/'keep').read_text()=='safe'
 
 
 import asyncio

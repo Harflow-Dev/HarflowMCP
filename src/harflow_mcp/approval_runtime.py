@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from . import approvals, identity, store
+from .state_access import storage_operation, task_operation
+from .state_ownership import StateOwnershipError, run_owned_worker
 
 
 def validate(backend: Any, enabled: bool, freedom: str, max_turns: int | None, native: bool = False) -> None:
@@ -30,6 +32,7 @@ async def configure(backend: Any, invocation: Any, enabled: bool, freedom: str, 
     return result
 
 
+@task_operation
 def context(directory: Path, task_id: str, standalone_owner: str) -> dict[str, Any]:
     from .workflow_hooks import owner
     receipt = owner(directory, task_id, strict=True)
@@ -57,6 +60,7 @@ def context(directory: Path, task_id: str, standalone_owner: str) -> dict[str, A
     return result
 
 
+@storage_operation
 async def authorize(registry: Any, *, interaction_owner: str | None = None) -> None:
     if os.environ.get("HARFLOW_TASK_ID"):
         raise ValueError("Managed tasks cannot inspect or decide caller permission requests")
@@ -71,6 +75,7 @@ async def authorize(registry: Any, *, interaction_owner: str | None = None) -> N
             raise ValueError("Only a verified human Monitor caller can claim monitor ownership: " + refusal[1])
 
 
+@storage_operation
 def _record(registry: Any, task_id: str):
     record = store.read(registry.log_dir, task_id, include_prompt=False, metadata_byte_limit=256 * 1024)
     if record is None:
@@ -78,6 +83,7 @@ def _record(registry: Any, task_id: str):
     return record
 
 
+@storage_operation
 def _reconcile(registry: Any, task_id: str) -> Any:
     record = _record(registry, task_id)
     current = registry.get(task_id)
@@ -89,6 +95,7 @@ def _reconcile(registry: Any, task_id: str) -> Any:
     return record
 
 
+@storage_operation
 async def get_request(registry: Any, task_id: str, request_id: str, *, interaction_owner: str = "caller") -> dict[str, Any]:
     await authorize(registry, interaction_owner=interaction_owner)
     await asyncio.to_thread(_reconcile, registry, task_id)
@@ -103,6 +110,7 @@ def approval_order(row: dict[str, Any]) -> tuple[int, float, str]:
     return rank, row["created_at"], row["request_id"]
 
 
+@storage_operation
 async def list_requests(registry: Any, task_id: str | None = None, workflow_run_id: str | None = None, cursor: str | None = None, limit: int = 16) -> dict[str, Any]:
     await authorize(registry)
     if (task_id is None) == (workflow_run_id is None):
@@ -128,9 +136,10 @@ async def list_requests(registry: Any, task_id: str | None = None, workflow_run_
             result.extend(approvals.metadata(r) for r in approvals.rows(registry.log_dir, identifier))
         result.sort(key=approval_order)
         return {"requests": result[offset:offset + limit], "total": len(result), "next_cursor": str(offset + limit) if offset + limit < len(result) else None}
-    return await asyncio.to_thread(collect)
+    return await run_owned_worker(registry.state_layout, collect)
 
 
+@task_operation
 def workflow_task_ids(directory: Path, workflow_run_id: str) -> list[str]:
     from .workflows import WorkflowStore
     from types import SimpleNamespace
@@ -169,6 +178,7 @@ def workflow_task_ids(directory: Path, workflow_run_id: str) -> list[str]:
     return list(dict.fromkeys(ids))
 
 
+@storage_operation
 async def respond_request(registry: Any, task_id: str, request_id: str, action_digest: str, owner_revision: int, decision: str, interaction_owner: str = "caller") -> dict[str, Any]:
     await authorize(registry, interaction_owner=interaction_owner)
     record = await asyncio.to_thread(_reconcile, registry, task_id)
@@ -190,6 +200,7 @@ async def respond_request(registry: Any, task_id: str, request_id: str, action_d
     return await asyncio.to_thread(approvals.get, registry.log_dir, task_id, request_id)
 
 
+@storage_operation
 async def observe(registry: Any, task: Any, backend: Any, event: dict[str, Any]) -> bool:
     """Consume control events separately; never emit raw actions in shared events/tails."""
     if event.get("type") == "control_request":
@@ -211,6 +222,8 @@ async def observe(registry: Any, task: Any, backend: Any, event: dict[str, Any])
                 registry.persist(task)
             ctx = await asyncio.to_thread(context, registry.log_dir, task.task_id, task.interaction_owner)
             await asyncio.to_thread(approvals.admit, registry.log_dir, task, decoded, ctx)
+        except StateOwnershipError:
+            raise
         except Exception:
             # Preserve bounded audit evidence even when the action cannot be exposed.
             # Full/invalid ledgers may prevent this final record; cancellation remains mandatory.
@@ -222,6 +235,8 @@ async def observe(registry: Any, task: Any, backend: Any, event: dict[str, Any])
                 ctx = await asyncio.to_thread(context, registry.log_dir, task.task_id, task.interaction_owner)
                 row = await asyncio.to_thread(approvals.admit, registry.log_dir, task, audit, ctx)
                 await asyncio.to_thread(approvals.update, registry.log_dir, task.task_id, row["request_id"], row["generation"], disposition="unsupported", delivery="failed")
+            except StateOwnershipError:
+                raise
             except Exception:
                 pass
             task.bridge_notices.append("Unsupported, invalid or over-budget permission request; stopping execution without approval")
@@ -244,6 +259,7 @@ async def observe(registry: Any, task: Any, backend: Any, event: dict[str, Any])
     return False
 
 
+@storage_operation
 async def pump(registry: Any, task: Any) -> bool:
     """Return whether verified requests still require an open stdin pipe."""
     if not task.caller_approvals:
@@ -299,6 +315,7 @@ async def pump(registry: Any, task: Any) -> bool:
     return task.approval_pending
 
 
+@task_operation
 def workflow_summary(directory: Path, run_id: str) -> dict[str, Any]:
     """Bounded metadata only, aggregated through reciprocal root-owned child links."""
     try:

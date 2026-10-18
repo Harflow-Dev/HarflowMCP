@@ -24,6 +24,8 @@ import pytest
 from mcp import Client, MCPError
 
 from harflow_mcp import backends, control, lineage, server, store
+from harflow_mcp import state_ownership
+from harflow_mcp.state_layout import resolve_layout
 from harflow_mcp import tasks as tasks_module
 from harflow_mcp.backends import BACKENDS, NestedDispatchRefused
 from harflow_mcp.backends import Invocation
@@ -142,7 +144,10 @@ async def test_root_task_gets_default_lineage_everywhere_it_is_reported(
     show up identically on the live `Task`, its persisted `TaskRecord`, and its `task_started`
     event."""
     monkeypatch.setenv("HARFLOW_MAX_DEPTH", "7")
-    registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks")
+    root = tmp_path / "state"
+    with state_ownership.state_session(resolve_layout(root=root)):
+        pass
+    registry = TaskRegistry(log_dir=root / "tasks")
     fake = _FakeBackend()
     monkeypatch.setitem(backends.BACKENDS, fake.name, fake)
 
@@ -827,7 +832,7 @@ async def test_session_lock_timeout_becomes_a_session_busy_error(
     monkeypatch.setattr(tasks_module, "SESSION_LOCK_TIMEOUT_SECONDS", 0.05)
 
     lock_path = control.session_lock_path(registry.log_dir, record.session_id)
-    fd = await control.acquire(lock_path, timeout=5.0)
+    fd = await control.acquire(lock_path, timeout=5.0, layout=resolve_layout(log_dir=registry.log_dir))
     try:
         with pytest.raises(SessionBusyError):
             await registry.resume_record(record, "go")

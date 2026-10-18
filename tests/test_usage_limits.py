@@ -1,7 +1,18 @@
 """Authoritative quota envelopes, without model calls."""
 import pytest
+from pathlib import Path
 from harflow_mcp.backends import get as get_backend
 from harflow_mcp.backends.base import Accumulator
+from harflow_mcp import state_ownership
+from harflow_mcp.state_layout import resolve_layout
+
+
+@pytest.fixture
+def tmp_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    root = tmp_path_factory.mktemp("usage-limits") / "state"
+    with state_ownership.state_session(resolve_layout(root=root)):
+        (root / "tasks").mkdir()
+        yield root / "tasks"
 
 @pytest.mark.parametrize('name,envelope', [('claude','error'),('codex','turn.failed'),('opencode','error'),('vibe','error'),('antigravity','result')])
 def test_limit_is_sticky_after_progress_and_success(name, envelope):
@@ -228,16 +239,16 @@ async def test_sensitive_stderr_does_not_enter_durable_public_usage_metadata(tmp
         envelope = 'turn.failed' if name == 'codex' else 'error'
         event = {'event': 'result', 'result': {'status': 'ERROR', 'error': error}} if name == 'antigravity' else {'type': envelope, 'error': error}
         diagnostic = get_backend(name).usage_limit_diagnostic(event)
-    registry = TaskRegistry(log_dir=tmp_path / 'tasks')
+    registry = TaskRegistry(log_dir=tmp_path)
     task = Task(task_id='limited', backend=name, session_id='session', repo_path=tmp_path,
-                prompt='work', max_turns=None, log_path=tmp_path / 'tasks' / 'limited.jsonl',
+                prompt='work', max_turns=None, log_path=tmp_path / 'limited.jsonl',
                 started_at=datetime.now(timezone.utc))
     task.acc.failure_diagnostic = diagnostic
     registry._record_usage_limit(task)
     await task.usage_settlement
     persisted = store.read(registry.log_dir, task.task_id)
     assert persisted.failure_diagnostic == diagnostic
-    storage = w.WorkflowStore(tmp_path)
+    storage = w.WorkflowStore(tmp_path.parent)
     definition = w.validate_definition(graph())
     run = storage.create_run(definition, 'Work', tmp_path)
     supervisor = w.WorkflowSupervisor(registry, storage)

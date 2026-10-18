@@ -6,7 +6,16 @@ from types import SimpleNamespace
 import pytest
 
 from harflow_mcp import ctl, server
+from harflow_mcp import state_ownership
+from harflow_mcp.state_layout import resolve_layout
 from harflow_mcp.workflow_inspection import execution, result_page
+
+
+@pytest.fixture
+def owned_state(tmp_path):
+    root = tmp_path / "state"
+    with state_ownership.state_session(resolve_layout(root=root)):
+        yield root
 
 
 @pytest.fixture
@@ -91,11 +100,12 @@ async def test_human_reads_unchanged(monkeypatch):
     await server._guard_task_read("anything")
 
 
-def test_cli_inspection_parity(monkeypatch, capsys):
+def test_cli_inspection_parity(monkeypatch, capsys, owned_state):
     from harflow_mcp import workflow_inspection, workflow_node_reads
     observed = []
     managed = object()
     monkeypatch.setattr(workflow_inspection, "managed_reader", lambda log_dir: managed)
+    monkeypatch.setattr(ctl, "default_log_dir", lambda: owned_state / "tasks")
     def inspect(resolved, run_id, *, execution_id, task_id, view, cursor, limit, before_seq, after_seq, root=None):
         observed.extend((resolved, run_id, execution_id, task_id, view, cursor, limit, before_seq, after_seq))
         return {"chunk": "{}", "has_more": False}
@@ -105,12 +115,13 @@ def test_cli_inspection_parity(monkeypatch, capsys):
     assert json.loads(capsys.readouterr().out)["result"]["has_more"] is False
 
 
-def test_cli_recovery_parity(monkeypatch, capsys):
+def test_cli_recovery_parity(monkeypatch, capsys, owned_state):
     async def recover(action, **kwargs):
         assert action == "recover"
         assert kwargs == {"run_id": "r1", "instructions": "Inspected the failure", "additional_attempts": 2}
         return {"status": "running"}
     monkeypatch.setattr(server, "_workflow_call", recover)
+    monkeypatch.setattr(ctl, "default_log_dir", lambda: owned_state / "tasks")
     assert ctl.main(["workflow-recover", "r1", "--reason", "Inspected the failure", "--additional-attempts", "2", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["result"]["status"] == "running"
 
@@ -254,12 +265,13 @@ def test_task_prompt_history_prefers_each_answer_attempt(run, monkeypatch, tmp_p
     assert entries[1]["workflow_status"] == "running"
 
 
-def test_cli_monitor_start_and_resume_forward_internal_owner(monkeypatch, capsys):
+def test_cli_monitor_start_and_resume_forward_internal_owner(monkeypatch, capsys, owned_state):
     observed = []
     async def call(action, **kwargs):
         observed.append((action, kwargs))
         return {"status": "running"}
     monkeypatch.setattr(server, "_workflow_call", call)
+    monkeypatch.setattr(ctl, "default_log_dir", lambda: owned_state / "tasks")
     assert ctl.main(["workflow-start", "feature", "--repo", "/tmp/repo", "--prompt", "Work", "--monitor", "--json"]) == 0
     assert observed[-1][1]["interaction_owner"] == "monitor"
     assert ctl.main(["workflow-resume", "r1", "--instructions", "Answer", "--decision-id", "d1", "--monitor", "--json"]) == 0

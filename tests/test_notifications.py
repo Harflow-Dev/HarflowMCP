@@ -6,15 +6,22 @@ from pathlib import Path
 import pytest
 
 from harflow_mcp import notifications as n, store
+from harflow_mcp.state_layout import resolve_layout
+from harflow_mcp.state_ownership import LOCK_NAME, MARKER_NAME, state_session
 
 
 @pytest.fixture
 def setup(tmp_path, monkeypatch):
-    logs = tmp_path / 'tasks'
-    logs.mkdir()
+    logs = tmp_path / 'state' / 'tasks'
+    session = state_session(resolve_layout(root=logs.parent))
+    session.__enter__()
+    logs.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv('HARFLOW_NOTIFY_DESTINATIONS', json.dumps({'test': {'url': 'https://example.com/hook', 'secret_env': 'TEST_SECRET'}}))
     monkeypatch.setenv('TEST_SECRET', 'never-persist-this')
-    return logs
+    try:
+        yield logs
+    finally:
+        session.__exit__(None, None, None)
 
 
 def record(logs, status='completed', exit_code=0, finished_at='2026-10-14T00:00:00+00:00'):
@@ -321,7 +328,10 @@ def test_retention_rechecks_new_subscription_after_pin_snapshot(setup, monkeypat
 def test_status_absent_does_not_create_directories(tmp_path):
     logs = tmp_path / 'missing' / 'tasks'
     assert n.status(logs, 'absent') == []
-    assert not logs.parent.exists()
+    assert logs.parent.exists()
+    assert {p.name for p in logs.parent.iterdir()} == {MARKER_NAME, LOCK_NAME}
+    assert not logs.exists()
+    assert not (logs.parent / 'notifications.sqlite3').exists()
 
 
 def test_status_existing_database_does_not_mutate(setup):
@@ -542,7 +552,10 @@ def test_unsubscribe_absent_does_not_create_storage(tmp_path, monkeypatch, desti
     monkeypatch.delenv('HARFLOW_NOTIFY_DESTINATIONS', raising=False)
     logs = tmp_path / 'missing' / 'tasks'
     assert n.unsubscribe(logs, 'absent', destination) == []
-    assert not logs.parent.exists()
+    assert logs.parent.exists()
+    assert {p.name for p in logs.parent.iterdir()} == {MARKER_NAME, LOCK_NAME}
+    assert not logs.exists()
+    assert not (logs.parent / 'notifications.sqlite3').exists()
 
 
 def test_unsubscribe_database_removed_before_connect_is_not_recreated(setup, monkeypatch):

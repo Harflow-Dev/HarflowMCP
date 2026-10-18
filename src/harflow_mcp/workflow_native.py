@@ -14,6 +14,9 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from .state_access import storage_operation
+from .state_ownership import StateOwnershipError, run_owned_worker
+
 POLICY = "native_workers_plus_control_v1"
 
 
@@ -40,6 +43,7 @@ def _fallback(supervisor: Any, activation: dict[str, Any], reason: str) -> tuple
     return False, None
 
 
+@storage_operation
 async def _prepare_native(supervisor: Any, node: dict[str, Any], assignment: str, activation: dict[str, Any]) -> dict[str, Any] | str:
     from . import backends, store as task_store
     from .backends.native import adapter
@@ -92,6 +96,7 @@ async def _prepare_native(supervisor: Any, node: dict[str, Any], assignment: str
     return {"run": run, "owner_run": owner_run, "owner": owner, "record": record, "candidate": candidate, "native": native, "settings": settings}
 
 
+@storage_operation
 async def dispatch_native(supervisor: Any, node: dict[str, Any], assignment: str, activation: dict[str, Any]) -> tuple[bool, dict[str, Any] | None]:
     prepared = await _prepare_native(supervisor, node, assignment, activation)
     if isinstance(prepared, str):
@@ -102,6 +107,7 @@ async def dispatch_native(supervisor: Any, node: dict[str, Any], assignment: str
     return await _dispatch_native_one(supervisor, node, assignment, activation, prepared)
 
 
+@storage_operation
 async def _dispatch_native_one(supervisor: Any, node: dict[str, Any], assignment: str, activation: dict[str, Any], prepared: dict[str, Any]) -> tuple[bool, dict[str, Any] | None]:
     from . import backends, events
     from .workflows import CheckoutLease, DispatchNotStarted
@@ -136,7 +142,7 @@ async def _dispatch_native_one(supervisor: Any, node: dict[str, Any], assignment
                 r["activations"].append({"id": transport_id, "node_id": "orchestrator", "role": "native_control", "status": "running", "created_at": time.time(), "tasks": [{"task_id": transport_id, "status": "reserved", "dispatch_stage": "preparing", "candidate": {"backend": record.backend, "model": record.model, "reasoning_effort": record.reasoning_effort}, "freedom": record.freedom, "network": record.network, "repo_path": run["repo_path"], "native_owner_execution_id": execution_id}]})
             supervisor.update(reserve, "native_reserved", {"execution_id": execution_id, "nonce": nonce})
             activation.pop("execution_fallback_reason", None)
-            log = events.EventLog(events.events_path(supervisor.registry._log_dir, execution_id), execution_id)
+            log = events.EventLog(events.events_path(supervisor.registry._log_dir, execution_id), execution_id, layout=supervisor.registry.state_layout)
 
             def publish(updates: list[dict[str, Any]]) -> None:
                 for update in updates:
@@ -223,7 +229,7 @@ async def _dispatch_native_one(supervisor: Any, node: dict[str, Any], assignment
             # live updates. A failed or interrupted transport cannot certify it.
             finalize = getattr(native, "finalize", None)
             if finalize is not None and snapshot["status"] == "completed" and not state.get("invalid") and not getattr(supervisor.registry, "_workflow_native_failures", {}).get(transport_id):
-                publish(await asyncio.to_thread(finalize, nonce, state))
+                publish(await run_owned_worker(supervisor.state_layout, finalize, nonce, state))
             if snapshot["status"] != "completed" or "result" not in state or state.get("invalid") or getattr(supervisor.registry, "_workflow_native_failures", {}).get(transport_id):
                 uncertain = "result" not in state or bool(state.get("invalid")) or bool(getattr(supervisor.registry, "_workflow_native_failures", {}).get(transport_id))
                 supervisor._task_update(activation["id"], execution_id, {"status": "uncertain" if uncertain else state["result"]["status"], "error": "Native child or parent turn did not conclusively settle"})
@@ -234,6 +240,8 @@ async def _dispatch_native_one(supervisor: Any, node: dict[str, Any], assignment
             return True, state["result"]
     except DispatchNotStarted:
         return True, None
+    except StateOwnershipError:
+        raise
     except Exception as exc:
         latest = next((t for a in supervisor.run()["activations"] if a["id"] == activation["id"] for t in a["tasks"] if t["task_id"] == execution_id), None)
         if latest is not None:

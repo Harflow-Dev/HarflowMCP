@@ -304,5 +304,35 @@
     "literal": "polybridge",
     "reason": "Assert invalid startup never creates legacy product state.",
     "count": 1
+  },
+  {
+    "file": "docs/contracts.md",
+    "literal": "Polybridge",
+    "reason": "Document the unsupported import of historical product state.",
+    "count": 1
+  },
+  {
+    "file": "tests/test_state_entrypoints.py",
+    "literal": "PB_INTEGRATION",
+    "reason": "Remove legacy paid-test opt-in flags from isolated subprocess environments.",
+    "count": 2
+  },
+  {
+    "file": "tests/test_state_entrypoints.py",
+    "literal": "PB_CLI_INTEGRATION",
+    "reason": "Remove legacy paid-test opt-in flags from isolated subprocess environments.",
+    "count": 1
+  },
+  {
+    "file": "tests/test_state_ownership.py",
+    "literal": "PB_INTEGRATION",
+    "reason": "Remove legacy paid-test opt-in flags from isolated subprocess environments.",
+    "count": 2
+  },
+  {
+    "file": "tests/test_state_ownership.py",
+    "literal": "PB_CLI_INTEGRATION",
+    "reason": "Remove legacy paid-test opt-in flags from isolated subprocess environments.",
+    "count": 2
   }
 ]

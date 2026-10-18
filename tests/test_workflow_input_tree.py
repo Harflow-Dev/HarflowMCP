@@ -3,9 +3,23 @@ import copy
 import uuid
 
 import pytest
+from harflow_mcp import state_ownership
 
 from harflow_mcp import workflow_invocation as inv
 from test_workflow_run_node_recovery import finished_child, seed_parent, store, write_run
+
+
+@pytest.fixture(autouse=True)
+def owned_workflow_scope(store, monkeypatch):
+    monkeypatch.setattr(
+        "test_workflow_input_tree.write_run",
+        lambda storage, run: __import__("harflow_mcp.workflows", fromlist=["_write"])._write(
+            storage.runs / f"{run['workflow_run_id']}.json", run,
+            layout=storage.state_layout,
+        ),
+    )
+    with state_ownership.state_session(store.state_layout):
+        yield
 
 
 def question(store, parent, activation, *, created=0, decision='question'):

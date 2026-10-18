@@ -8,10 +8,26 @@ from types import SimpleNamespace
 import pytest
 from mcp import MCPError
 
-from harflow_mcp import ctl, identity, server, store, task_waiting, wait_policy
-from harflow_mcp.tasks import Task
+from harflow_mcp import ctl, identity, server, state_ownership, store, task_waiting, wait_policy
+from harflow_mcp.state_layout import resolve_layout
+from harflow_mcp.tasks import Task, TaskRegistry
 
 SCALE = 1000.0
+
+
+@pytest.fixture
+def tmp_path(tmp_path_factory: pytest.TempPathFactory):
+    root = tmp_path_factory.mktemp("waits") / "state"
+    with state_ownership.state_session(resolve_layout(root=root)):
+        (root / "tasks").mkdir()
+        yield root
+
+
+@pytest.fixture(autouse=True)
+def isolated_registry(tmp_path, monkeypatch):
+    registry = TaskRegistry(log_dir=tmp_path / "tasks")
+    monkeypatch.setattr(server, "_registry", registry)
+    monkeypatch.setenv("HARFLOW_STATE_ROOT", str(tmp_path))
 
 
 @pytest.fixture
@@ -34,8 +50,8 @@ class Ctx:
 
 
 def add_task(task_id, tmp_path, status="running"):
-    task = Task(task_id=task_id, backend="codex", session_id=None, repo_path=tmp_path,
-                prompt="x", max_turns=None, log_path=tmp_path / f"{task_id}.jsonl",
+    task = Task(task_id=task_id, backend="codex", session_id=None, repo_path=tmp_path.parent,
+                prompt="x", max_turns=None, log_path=tmp_path / "tasks" / f"{task_id}.jsonl",
                 started_at=datetime.now(timezone.utc), status=status)
     if status != "running":
         task.done.set()
@@ -562,6 +578,7 @@ async def test_workflow_settling_that_makes_progress_is_not_stalled(monkeypatch,
 
 
 def test_ctl_workflow_wait_passes_until_and_timeout(monkeypatch, capsys):
+    monkeypatch.setattr(ctl, "default_log_dir", lambda: server._reg().log_dir)
     seen = []
     async def wait(run_id, timeout_seconds, until):
         seen.append((run_id, timeout_seconds, until))

@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from .state_ownership import state_session, StateOwnershipError, owned_job, run_owned_worker
+
+from .state_access import task_layout, task_operation
+
 import asyncio
 import logging
 import os
@@ -76,7 +80,7 @@ def _status_payload(
     if "queued_followups" not in payload:
         # Read here, in the caller's worker thread, rather than in a live snapshot built on the loop.
         payload["queued_followups"] = followups.view(log_dir, task_id)
-    payload["recent_activity"] = read_recent(events_path(log_dir, task_id), limit=RECENT_ACTIVITY_LIMIT)
+    payload["recent_activity"] = read_recent(events_path(log_dir, task_id), limit=RECENT_ACTIVITY_LIMIT, layout=task_layout(log_dir))
     if include_tail:
         return payload
     tail = payload.pop("last_output_tail", None)
@@ -175,23 +179,27 @@ def _guard_launch_layout() -> None:
 def _reg() -> TaskRegistry:
     # Built lazily so its asyncio primitives belong to the loop `mcp.run()` creates.
     global _registry
-    if _registry is None:
-        _registry = TaskRegistry()
-        _registry.start_maintenance()
-        _start_notification_worker(_registry)
-    return _registry
+    from .tasks import default_log_dir
+    layout = task_layout(_registry.log_dir if _registry is not None else default_log_dir())
+    with state_session(layout):
+        if _registry is None:
+            _registry = TaskRegistry()
+            _registry.start_maintenance()
+            _start_notification_worker(_registry)
+        return _registry
 
 
 def _start_notification_worker(registry: TaskRegistry) -> None:
-    configured = bool(os.environ.get('HARFLOW_NOTIFY_DESTINATIONS'))
-    persisted = (registry.log_dir.parent / 'notifications.sqlite3').is_file()
-    if (configured or persisted) and getattr(registry, '_notification_worker', None) is None:
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return
-        from .notifications import worker
-        registry._notification_worker = loop.create_task(worker(registry.log_dir), name='harflow-notifications')
+    with state_session(task_layout(registry.log_dir)):
+        configured = bool(os.environ.get('HARFLOW_NOTIFY_DESTINATIONS'))
+        persisted = (registry.log_dir.parent / 'notifications.sqlite3').is_file()
+        if (configured or persisted) and getattr(registry, '_notification_worker', None) is None:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                return
+            from .notifications import worker
+            registry._notification_worker = owned_job(registry.state_layout, worker(registry.log_dir), name='harflow-notifications')
 
 
 def install_cli_registry(log_dir: Path | None = None) -> TaskRegistry:
@@ -367,9 +375,11 @@ async def list_backends() -> list[dict[str, Any]]:
     return await asyncio.to_thread(backends.describe_all)
 
 
-async def _notification_io(function, *args, **kwargs):
+@task_operation(parameter="directory")
+async def _notification_io(function, directory, *args, **kwargs):
     """Finish an off-loop notification mutation before propagating cancellation."""
-    operation = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+    layout = task_layout(directory)
+    operation = owned_job(layout, run_owned_worker(layout, function, directory, *args, **kwargs), name="harflow-notification-io")
     try:
         return await asyncio.shield(operation)
     except asyncio.CancelledError:
@@ -380,6 +390,8 @@ async def _notification_io(function, *args, **kwargs):
                 await asyncio.shield(operation)
             except asyncio.CancelledError:
                 continue
+            except StateOwnershipError:
+                raise
             except Exception:
                 break
         if not operation.cancelled():
@@ -562,8 +574,12 @@ async def start_task(
             # No dispatch has begun, and the reservation thread has finished committing.
             try:
                 await _notification_io(discard_unstarted, _reg().log_dir, reserved_id)
+            except StateOwnershipError:
+                raise
             except Exception:
                 log.warning('Notification reservation cleanup unavailable for task %s', reserved_id)
+            raise
+        except StateOwnershipError:
             raise
         except Exception:
             raise MCPError(INTERNAL_ERROR, 'Notification reservation failed; no task was started') from None
@@ -594,6 +610,8 @@ async def start_task(
             if not_started and _reg().get(reserved_id) is None:
                 try:
                     cleaned = await _notification_io(discard_unstarted, _reg().log_dir, reserved_id)
+                except StateOwnershipError:
+                    raise
                 except Exception:
                     log.warning('Notification reservation cleanup unavailable for task %s', reserved_id)
             if isinstance(exc, asyncio.CancelledError):
@@ -881,6 +899,8 @@ def _owner_alive(record: store.TaskRecord) -> bool:
     """Whether the harflow_mcp server that owns this record is still running."""
     try:
         return identity.identity_check(record.owner) == "alive"
+    except StateOwnershipError:
+        raise
     except Exception:
         return False
 
@@ -930,6 +950,8 @@ async def _poll_recovered(
         round_failed = False
         try:
             status, gone = await asyncio.to_thread(_recovered_settlement, _reg().log_dir, record)
+        except StateOwnershipError:
+            raise
         except Exception:
             status, gone = None, False
             round_failed = True
@@ -952,6 +974,8 @@ async def _poll_recovered(
 
         try:
             fresh = _reg().recover(record.task_id)
+        except StateOwnershipError:
+            raise
         except Exception:
             fresh = None
         if fresh is not None:
@@ -1033,6 +1057,8 @@ async def wait_for_task(
         record, stop_reason, outcome_observed = await _poll_recovered(record, plan, ctx)
         try:
             snapshot = await asyncio.to_thread(store.snapshot, _reg().log_dir, record)
+        except StateOwnershipError:
+            raise
         except Exception:
             if stop_reason != wait_policy.STOP_UNAVAILABLE:
                 raise
@@ -1081,6 +1107,8 @@ async def wait_for_task(
         payload = await asyncio.to_thread(
             _status_payload, snapshot, include_tail=include_tail, log_dir=_reg().log_dir, task_id=task_id
         )
+    except StateOwnershipError:
+        raise
     except Exception:
         if stop_reason != wait_policy.STOP_UNAVAILABLE:
             raise
@@ -1481,6 +1509,7 @@ async def get_task_events(
     page_result = await asyncio.to_thread(
         read_page,
         events_path(_reg().log_dir, task_id),
+        layout=_reg().state_layout,
         limit=limit,
         before_seq=before_seq,
         after_seq=after_seq,
@@ -1537,7 +1566,7 @@ async def get_task_event_page(
         if _reg().get(task_id) is None and record is None:
             raise ValueError(f"unknown task_id: {task_id}")
         page = await asyncio.to_thread(read_cursor_page, events_path(_reg().log_dir, task_id),
-                                       limit=limit, cursor=cursor, kinds=kinds)
+                                       limit=limit, cursor=cursor, kinds=kinds, layout=_reg().state_layout)
     except ValueError as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
     return {"task_id": task_id, "events": page.events, "has_more": page.has_more,
@@ -2065,6 +2094,8 @@ async def start_workflow(name: str, prompt: str, repo_path: str, overrides: dict
         except asyncio.CancelledError:
             await _notification_io(notifications.discard_unstarted, _reg().log_dir, reserved_id)
             raise
+        except StateOwnershipError:
+            raise
         except Exception:
             raise MCPError(INVALID_PARAMS, 'Notification reservation failed; no workflow was started') from None
     launch_notice = None
@@ -2085,6 +2116,8 @@ async def start_workflow(name: str, prompt: str, repo_path: str, overrides: dict
         except FileNotFoundError:
             await _notification_io(notifications.discard_unstarted, _reg().log_dir, reserved_id)
             raise exc
+        except StateOwnershipError:
+            raise
         except Exception:
             if isinstance(exc, asyncio.CancelledError):
                 raise
@@ -2100,6 +2133,8 @@ async def start_workflow(name: str, prompt: str, repo_path: str, overrides: dict
         try:
             await _notification_io(notifications.activate, _reg().log_dir, reserved_id)
             notification['state'] = 'active'
+        except StateOwnershipError:
+            raise
         except Exception:
             result.setdefault('notices', []).append('Workflow started; notification activation is pending recovery by the server worker')
         result['notification'] = notification
@@ -2263,6 +2298,8 @@ async def _wait_workflow_full(
         if current_revision is None or current_revision != previous_revision:
             try:
                 result = await _workflow_call("status", run_id=workflow_run_id)
+            except StateOwnershipError:
+                raise
             except Exception:
                 # Keep the last good snapshot; only a failure that persists ends the wait.
                 read_ok = False
@@ -2441,27 +2478,33 @@ def main() -> None:
         return
     from .state_layout import InvalidStateRoot, resolve_layout
     try:
-        resolve_layout()
+        layout = resolve_layout()
     except InvalidStateRoot as exc:
         print(f"harflow-server: error: {exc}", file=sys.stderr)
         raise SystemExit(2) from None
-    logging.basicConfig(
-        level=os.environ.get("HARFLOW_LOG_LEVEL", "INFO").upper(),
-        # stderr, never stdout: stdout is the MCP wire.
-        stream=sys.stderr,
-        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
-    )
-    available = [
-        name for name, backend in backends.BACKENDS.items() if shutil.which(backend.binary)
-    ]
-    missing = sorted(set(backends.BACKENDS) - set(available))
-    log.info("harflow_mcp starting (backends available: %s)", ", ".join(available) or "none")
-    if missing:
-        log.warning("backends unavailable, their CLI is not on PATH: %s", ", ".join(missing))
-    # Warmed here rather than left to the first dispatch, so every task's `owner` is computed
-    # once at startup instead of paying a `ps` call on the first `start_task`.
-    identity.own_identity()
-    mcp.run()
+    try:
+        with state_session(layout):
+            logging.basicConfig(
+                level=os.environ.get("HARFLOW_LOG_LEVEL", "INFO").upper(),
+                # stderr, never stdout: stdout is the MCP wire.
+                stream=sys.stderr,
+                format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+            )
+            available = [
+                name for name, backend in backends.BACKENDS.items() if shutil.which(backend.binary)
+            ]
+            missing = sorted(set(backends.BACKENDS) - set(available))
+            log.info("harflow_mcp starting (backends available: %s)", ", ".join(available) or "none")
+            if missing:
+                log.warning("backends unavailable, their CLI is not on PATH: %s", ", ".join(missing))
+            # Warmed here rather than left to the first dispatch, so every task's `owner` is computed
+            # once at startup instead of paying a `ps` call on the first `start_task`.
+            identity.own_identity()
+            mcp.run()
+    except StateOwnershipError as exc:
+        print(f"harflow-server: error: {exc}", file=sys.stderr)
+        raise SystemExit(2) from None
+
 
 
 @mcp.tool()

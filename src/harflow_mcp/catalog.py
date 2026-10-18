@@ -1,6 +1,10 @@
 """Small durable listing index. Historical records are read, never migrated in place."""
 from __future__ import annotations
 
+from .state_layout import StateLayout
+from .state_access import OwnedConnection, bind_connection, require_state_path, layout_operation, open_descriptor
+from .state_ownership import state_session, assert_owned, current_owned, StateIncompatible
+
 import base64
 import hashlib
 import fcntl
@@ -138,29 +142,55 @@ _locks: dict[str, tuple[threading.RLock, threading.local]] = {}
 _locks_guard = threading.Lock()
 
 
+def _catalog_after_child():
+    global _locks, _locks_guard
+    _locks = {}
+    _locks_guard = threading.Lock()
+
+
+os.register_at_fork(after_in_child=_catalog_after_child)
+
+
 @contextmanager
-def catalog_lock(directory: Path):
+def catalog_lock(directory: Path, *, layout: StateLayout | None = None):
     """Stable process/thread lock; nested projections retain the writer's outer lock."""
-    directory.mkdir(parents=True, exist_ok=True)
-    key = str(directory.resolve())
-    with _locks_guard:
-        mutex, local = _locks.setdefault(key, (threading.RLock(), threading.local()))
-    with mutex:
-        depth = getattr(local, 'depth', 0)
-        if not depth:
-            local.handle = (directory / '.listing.lock').open('a+b')
-            fcntl.flock(local.handle.fileno(), fcntl.LOCK_EX)
-        local.depth = depth + 1
-        try:
-            yield
-        finally:
-            local.depth -= 1
-            if not local.depth:
-                fcntl.flock(local.handle.fileno(), fcntl.LOCK_UN)
-                local.handle.close()
+    selected = layout if layout is not None else current_owned().layout
+    # Resource ownership outlives acquisition without retaining a ContextVar
+    # token across API returns (Catalog.connect returns this lock to close).
+    with state_session(selected) as operation:
+        require_state_path(selected, directory)
+        directory.mkdir(parents=True, exist_ok=True)
+        key = str(directory.resolve())
+        with _locks_guard:
+            mutex, local = _locks.setdefault(key, (threading.RLock(), threading.local()))
+        retained = operation.retain()
+    try:
+        with mutex:
+            retained.validate()
+            depth = getattr(local, 'depth', 0)
+            if not depth:
+                # The independent root ref is already live; make it current only
+                # for descriptor creation, never across the resource yield.
+                with state_session(selected):
+                    local.handle = open_descriptor(directory / '.listing.lock', os.O_RDWR | os.O_CREAT, 0o600, layout=selected)
+                try:
+                    fcntl.flock(local.handle, fcntl.LOCK_EX)
+                except BaseException:
+                    local.handle.close()
+                    raise
+            local.depth = depth + 1
+            try:
+                yield
+            finally:
+                local.depth -= 1
+                if not local.depth:
+                    local.handle.close(unlock=True)
+    finally:
+        retained.close()
 
 
-class CatalogConnection(sqlite3.Connection):
+
+class CatalogConnection(OwnedConnection):
     def __exit__(self, *args):
         try:
             return super().__exit__(*args)
@@ -168,6 +198,8 @@ class CatalogConnection(sqlite3.Connection):
             self.close()
 
     def close(self):
+        if self._state_pid is not None and self._state_pid != os.getpid():
+            return  # Do not unwind the parent's inherited catalog lock.
         try:
             super().close()
         finally:
@@ -201,11 +233,14 @@ def bound_header(header: dict[str, Any]) -> dict[str, Any]:
 
 
 class Catalog:
-    def __init__(self, directory: Path, suffix: str):
+    def __init__(self, directory: Path, suffix: str, *, layout: StateLayout | None = None):
+        self.state_layout = layout if layout is not None else current_owned().layout
         self.directory, self.suffix = directory, suffix
         self._budget = _request_budget.get() or MetadataBudget()
         self.deferred_headers: set[str] = set()
-        self.identity = hashlib.sha256(str(directory.resolve()).encode()).hexdigest()[:16]
+        with state_session(self.state_layout):
+            require_state_path(self.state_layout, directory)
+            self.identity = hashlib.sha256(str(directory.resolve()).encode()).hexdigest()[:16]
 
     @property
     def metadata_bytes(self):
@@ -234,6 +269,7 @@ class Catalog:
     def share_budget(self, other: Catalog):
         self._budget = other._budget
 
+    @layout_operation
     def state(self, db: sqlite3.Connection | None = None) -> dict[str, Any]:
         if db is None:
             with self.connect() as connection:
@@ -252,12 +288,14 @@ class Catalog:
             result['reason'] = 'Metadata or caller identity requires direct inspection' if blocked else 'Preparing bounded metadata index'
         return result
 
+    @layout_operation
     def ready(self) -> bool:
         return self.state()['status'] == 'ready'
 
+    @layout_operation
     def invalidate(self, identifier: str) -> None:
         """Repair derivative failures and commit invalidation before replacing metadata."""
-        with catalog_lock(self.directory):
+        with catalog_lock(self.directory, layout=self.state_layout):
             try:
                 self._invalidate_locked(identifier)
             except sqlite3.Error:
@@ -270,11 +308,13 @@ class Catalog:
                     raise
 
     def _invalidate_locked(self, identifier: str) -> None:
+        assert_owned(self.state_layout)
         with self.connect() as db:
             db.execute('INSERT OR IGNORE INTO pending VALUES (?)', (identifier,))
             db.execute("DELETE FROM state WHERE key='complete'")
 
     def _load_bounded(self, identifier: str, loader):
+        assert_owned(self.state_layout)
         path = self.directory / (identifier + self.suffix)
         try:
             initial_source = path.stat()
@@ -316,8 +356,9 @@ class Catalog:
             value[0]['_source_identity'] = source_identity(initial_source)
         return value
 
+    @layout_operation
     def connect(self) -> sqlite3.Connection:
-        lock = catalog_lock(self.directory)
+        lock = catalog_lock(self.directory, layout=self.state_layout)
         lock.__enter__()
         db = None
         try:
@@ -343,6 +384,7 @@ class Catalog:
 
     def _discard_derivative_locked(self) -> None:
         """Drop only this derivative namespace, never metadata or older catalogs."""
+        assert_owned(self.state_layout)
         database = self.directory / '.listing.v9.sqlite3'
         for suffix in ('', '-journal', '-wal', '-shm'):
             Path(str(database) + suffix).unlink(missing_ok=True)
@@ -354,7 +396,8 @@ class Catalog:
             os.close(descriptor)
 
     def _connect_locked(self) -> sqlite3.Connection:
-        db = sqlite3.connect(self.directory / '.listing.v9.sqlite3', timeout=10, factory=CatalogConnection)
+        assert_owned(self.state_layout)
+        db = bind_connection(sqlite3.connect(self.directory / '.listing.v9.sqlite3', timeout=10, factory=CatalogConnection), self.state_layout)
         try:
             return self._initialize(db)
         except BaseException:
@@ -362,6 +405,7 @@ class Catalog:
             raise
 
     def _initialize(self, db: sqlite3.Connection) -> sqlite3.Connection:
+        assert_owned(self.state_layout)
         db.execute('PRAGMA journal_mode=PERSIST')
         db.execute('CREATE TABLE IF NOT EXISTS entries (id TEXT PRIMARY KEY, stamp REAL NOT NULL, active INTEGER NOT NULL, session TEXT, payload TEXT NOT NULL)')
         db.execute('CREATE TABLE IF NOT EXISTS task_groups (id TEXT PRIMARY KEY, label TEXT NOT NULL)')
@@ -411,6 +455,7 @@ class Catalog:
     def _put(self, db: sqlite3.Connection, header: dict[str, Any], stamp: float, active: bool, identifier: str) -> None:
         # A legacy writer can remove or replace metadata despite our advisory
         # lock. Publish all derivative authority only after final validation.
+        assert_owned(self.state_layout)
         db.execute('SAVEPOINT metadata_projection')
         try:
             self._put_projection(db, header, stamp, active, identifier)
@@ -421,6 +466,7 @@ class Catalog:
         db.execute('RELEASE metadata_projection')
 
     def _put_projection(self, db: sqlite3.Connection, header: dict[str, Any], stamp: float, active: bool, identifier: str) -> None:
+        assert_owned(self.state_layout)
         header = dict(header)
         expected_source = header.pop('_source_identity', None)
         if expected_source is not None:
@@ -483,6 +529,7 @@ class Catalog:
             raise DeferredRead() from None
 
     def _changed(self, db: sqlite3.Connection, identifier: str) -> bool:
+        assert_owned(self.state_layout)
         row = db.execute('SELECT mtime,size,inode,device FROM sources WHERE id=?', (identifier,)).fetchone()
         try:
             source = (self.directory / f'{identifier}{self.suffix}').stat()
@@ -492,6 +539,7 @@ class Catalog:
             return True
 
     def _remove(self, db: sqlite3.Connection, identifier: str) -> None:
+        assert_owned(self.state_layout)
         db.execute('DELETE FROM checkout_tasks WHERE run_id=?', (identifier,))
         db.execute("DELETE FROM associations WHERE json_extract(payload,'$.workflow_run_id')=?", (identifier,))
         for table in ('entries', 'callers', 'associations', 'sources', 'seen', 'pending', 'task_groups', 'workflow_links'):
@@ -501,9 +549,11 @@ class Catalog:
         # Older processes do not honor our lock. A matching-file replacement may
         # have overlapped this projection, so only discovery can acknowledge a
         # changed namespace. Keep the prior verified stamp and queued work.
+        assert_owned(self.state_layout)
         if dict(db.execute('SELECT key,value FROM state')).get('directory_mtime') != str(self.directory.stat().st_mtime_ns):
             db.execute("DELETE FROM state WHERE key='complete'")
 
+    @layout_operation
     def record(self, header: dict[str, Any], stamp: float, active: bool, identifier: str, *, previous_directory_mtime: int | None = None) -> None:
         try:
             with self.connect() as db:
@@ -512,11 +562,13 @@ class Catalog:
         except (OSError, sqlite3.Error, DeferredRead):
             logging.getLogger(__name__).warning('Listing catalog update unavailable', exc_info=True)
 
+    @layout_operation
     def remove(self, identifier: str, *, previous_directory_mtime: int | None = None) -> None:
         with self.connect() as db:
             self._remove(db, identifier)
             self._acknowledge_directory(db, previous_directory_mtime)
 
+    @layout_operation
     def headers(self, identifiers: list[str], loader: Callable[[str], tuple[dict[str, Any], float, bool] | None]) -> list[dict[str, Any]]:
         if len(identifiers) > PAGE_LIMIT:
             raise ValueError('At most 100 identifiers may be requested')
@@ -553,6 +605,7 @@ class Catalog:
 
         return result
 
+    @layout_operation
     def requested_preparation(self) -> dict[str, Any]:
         blocked = getattr(self, 'blocked_headers', {})
         state = {'status': 'blocked' if blocked else 'preparing',
@@ -563,6 +616,7 @@ class Catalog:
             state['blocker_types'] = sorted(set(blocked.values()))
         return state
 
+    @layout_operation
     def header_page(self, identifiers: list[str], loader) -> dict[str, Any]:
         headers = self.headers(identifiers, loader)
         pending = bool(self.deferred_headers or self.blocked_headers)
@@ -573,6 +627,7 @@ class Catalog:
 
     def _discover(self, db: sqlite3.Connection) -> None:
         """Stream changed discovery into SQLite; unrelated churn never resets pending work."""
+        assert_owned(self.state_layout)
         directory_mtime = str(self.directory.stat().st_mtime_ns)
         state = dict(db.execute('SELECT key,value FROM state'))
         if state.get('complete') == '1' and state.get('directory_mtime') == directory_mtime:
@@ -636,6 +691,7 @@ class Catalog:
         state = self.state(db)
         return bool(state['pending_records']) or state['status'] == 'preparing'
 
+    @layout_operation
     def page(self, loader: Callable[[str], tuple[dict[str, Any], float, bool] | None], *, limit: int = PAGE_LIMIT,
              cursor: str | None = None, active_only: bool = False, session_id: str | None = None, filters: dict[str, Any] | None = None) -> dict[str, Any]:
         from .task_reads import validate_filters

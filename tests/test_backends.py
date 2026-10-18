@@ -3596,12 +3596,17 @@ def test_vibe_task_payload_carries_the_warning_and_a_recovered_record_stays_fail
     whose exit was never observed stays `failed` — the refusal flag is not terminal evidence."""
     from datetime import datetime, timezone
 
-    from harflow_mcp import store
+    from harflow_mcp import store, state_ownership
+    from harflow_mcp.state_layout import resolve_layout
     from harflow_mcp.tasks import Task
 
     backend = VibeBackend()
 
     # Live: the shape `Task.snapshot` serves once `_monitor` has published a terminal status.
+    state_root = tmp_path / "state"
+    log_dir = state_root / "tasks"
+    with state_ownership.state_session(resolve_layout(root=state_root)):
+        log_dir.mkdir()
     task = Task(
         task_id="t",
         backend="vibe",
@@ -3609,7 +3614,7 @@ def test_vibe_task_payload_carries_the_warning_and_a_recovered_record_stays_fail
         repo_path=tmp_path,
         prompt="x",
         max_turns=None,
-        log_path=tmp_path / "t.jsonl",
+        log_path=log_dir / "t.jsonl",
         started_at=datetime.now(timezone.utc),
     )
     task.acc = ingest(backend, VIBE_DENIED_RUN)
@@ -3638,12 +3643,12 @@ def test_vibe_task_payload_carries_the_warning_and_a_recovered_record_stays_fail
         status="running",
         exit_code=None,
     )
-    store.log_path(tmp_path, record.task_id).write_text(
+    store.log_path(log_dir, record.task_id).write_text(
         "".join(json.dumps(event) + "\n" for event in VIBE_DENIED_RUN), encoding="utf-8"
     )
 
-    status, _note, state, _tail = store.resolve_status(tmp_path, record)
-    recovered = store.snapshot(tmp_path, record)
+    status, _note, state, _tail = store.resolve_status(log_dir, record)
+    recovered = store.snapshot(log_dir, record)
 
     assert status == "failed"
     # The replayed stream still carries the denial and the warning, so the caller can see why.

@@ -2,6 +2,18 @@
 import copy
 
 import pytest
+from pathlib import Path
+from harflow_mcp import ctl
+from harflow_mcp import state_ownership
+from harflow_mcp.state_layout import resolve_layout
+
+
+@pytest.fixture
+def tmp_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    root = tmp_path_factory.mktemp("workflow-cancel") / "state"
+    with state_ownership.state_session(resolve_layout(root=root)):
+        (root / "tasks").mkdir()
+        yield root / "tasks"
 
 from harflow_mcp import workflows as w
 from harflow_mcp.workflow_cancellation import eligibility
@@ -11,9 +23,10 @@ from harflow_mcp.workflow_cancellation import eligibility
 def run_store(tmp_path, monkeypatch):
     monkeypatch.setattr(w.backends, "is_installed", lambda _: True)
     monkeypatch.setattr(w, "_launch", lambda *args: None)
-    storage = w.WorkflowStore(tmp_path)
+    storage = w.WorkflowStore(tmp_path.parent)
+    monkeypatch.setattr(ctl, "default_log_dir", lambda: tmp_path)
     definition = w.validate_definition({"name": "cancel", "orchestrator": {"backend": "codex"}, "nodes": [{"id": "start", "type": "start"}, {"id": "end", "type": "end"}], "connections": [{"id": "done", "source": "start", "target": "end"}]})
-    run = storage.create_run(definition, "cancel test", tmp_path)
+    run = storage.create_run(definition, "cancel test", tmp_path.parent)
     rid = run["workflow_run_id"]
     storage.update_run(rid, lambda r: r.update(status="paused", interaction_owner="caller"), "fixture")
     return storage, rid
@@ -82,7 +95,7 @@ def test_child_reservation_cannot_race_root_cancel(run_store):
     storage, rid = run_store
     child = copy.deepcopy(storage.get_run(rid))
     child.update(workflow_run_id="child", status="running", parent_link={"workflow_run_id": rid, "root_workflow_run_id": rid, "execution_id": "invocation"})
-    w._write(storage.runs / "child.json", child)
+    w._write(storage.runs / "child.json", child, layout=storage.state_layout)
     storage.control(rid, "cancel", interaction_owner="monitor")
     with pytest.raises(w.DispatchNotStarted):
         storage.update_run("child", lambda r: r.update(activations=[]), "dispatch_reserved")
@@ -97,7 +110,7 @@ def test_descendant_reservation_serializes_with_cancel(run_store, monkeypatch, r
     storage, rid = run_store
     child = copy.deepcopy(storage.get_run(rid))
     child.update(workflow_run_id="child", status="running", parent_link={"workflow_run_id": rid, "root_workflow_run_id": rid, "execution_id": "invocation"})
-    w._write(storage.runs / "child.json", child)
+    w._write(storage.runs / "child.json", child, layout=storage.state_layout)
     gate_entered, release_gate, reservation_started = Event(), Event(), Event()
     real_eligibility = workflow_cancellation.eligibility
     def gated(store, run):
@@ -140,7 +153,7 @@ async def test_descendant_cascade_failures_are_reported(run_store):
     storage, rid = run_store
     child = copy.deepcopy(storage.get_run(rid))
     child.update(workflow_run_id="child", status="failed", parent_link={"workflow_run_id": rid, "root_workflow_run_id": rid, "execution_id": "invocation"}, activations=[{"id": "native", "status": "running", "tasks": [{"task_id": "execution", "transport_task_id": "transport", "status": "running"}]}])
-    w._write(storage.runs / "child.json", child)
+    w._write(storage.runs / "child.json", child, layout=storage.state_layout)
     storage.update_run(rid, lambda r: r.update(activations=[{"id": "invocation", "status": "failed", "tasks": [], "invocation": {"stage": "settled", "child_workflow_run_id": "child"}}]), "fixture")
     class Registry:
         log_dir = storage.root / "tasks"
@@ -155,7 +168,7 @@ async def test_descendant_cascade_failures_are_reported(run_store):
     assert "process identity uncertain" in report["errors"][0]["error"]
 
 
-def test_monitor_cli_cancel_retains_verified_human_flag(monkeypatch, capsys):
+def test_monitor_cli_cancel_retains_verified_human_flag(tmp_path, monkeypatch, capsys):
     from harflow_mcp import ctl, server
     import json
     observed = {}
@@ -163,6 +176,7 @@ def test_monitor_cli_cancel_retains_verified_human_flag(monkeypatch, capsys):
         observed.update(action=action, **kwargs)
         return {"status": "cancelling"}
     monkeypatch.setattr(server, "_workflow_call", call)
+    monkeypatch.setattr(ctl, "default_log_dir", lambda: tmp_path / "tasks")
     assert ctl.main(["workflow-cancel", "root", "--monitor", "--json"]) == 0
     assert observed == {"action": "cancel", "run_id": "root", "interaction_owner": "monitor"}
     assert json.loads(capsys.readouterr().out)["result"]["status"] == "cancelling"
@@ -179,7 +193,7 @@ def test_empty_child_waiting_under_paused_root_is_idle(run_store):
     storage, rid = run_store
     child = copy.deepcopy(storage.get_run(rid))
     child.update(workflow_run_id="child", status="running", suspended_via_root=True, parent_link={"workflow_run_id": rid, "root_workflow_run_id": rid, "execution_id": "invocation"}, activations=[])
-    w._write(storage.runs / "child.json", child)
+    w._write(storage.runs / "child.json", child, layout=storage.state_layout)
     storage.update_run(rid, lambda r: r.update(activations=[{"id": "invocation", "status": "waiting_for_child", "tasks": [], "invocation": {"stage": "waiting", "child_workflow_run_id": "child"}}]), "fixture")
     assert eligibility(storage, storage.get_run(rid))[0]
     assert storage.control(rid, "cancel", interaction_owner="monitor")["status"] == "cancelling"
@@ -278,7 +292,7 @@ def cancellation_tree(store, rid, *, breadth=1, levels=2, child_bytes=0):
                     child["summary"] = "x" * child_bytes
                 records[child_id] = child
     for identifier, record in records.items():
-        w._write(store.runs / f"{identifier}.json", record)
+        w._write(store.runs / f"{identifier}.json", record, layout=store.state_layout)
     return root, records
 
 
@@ -353,7 +367,7 @@ def test_cancellation_terminal_descendant_still_checks_active_tasks(run_store):
     root, records = cancellation_tree(storage, rid)
     child = next(record for identifier, record in records.items() if identifier != rid)
     child["activations"] = [{"id": "unfinished", "role": "node", "status": "running", "tasks": [{"task_id": "worker", "status": "running"}]}]
-    w._write(storage.runs / f"{child['workflow_run_id']}.json", child)
+    w._write(storage.runs / f"{child['workflow_run_id']}.json", child, layout=storage.state_layout)
     assert eligibility(storage, root)[0] is False
 
 
@@ -380,5 +394,5 @@ def test_cancellation_bounded_descendant_read_rejects_malformed_records(run_stor
             child["workflow_run_id"] = "unrelated-child"
         else:
             child["parent_link"]["execution_id"] = "unrelated-execution"
-        w._write(path, child)
+        w._write(path, child, layout=storage.state_layout)
     assert eligibility(storage, root)[0] is False

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Mark fresh engine stores and enforce compatible shared ownership across processes, operations and background writers.
+- Refuse nonempty unmarked or incompatible stores with explicit `state_incompatible` errors; report bounded ownership contention as `state_busy`.
+
 - Centralize engine state-root selection and propagate `HARFLOW_STATE_ROOT` to agents and workflow supervisors.
 - Refuse invalid selected roots at startup and unsupported injected task layouts before launch.
 - Normalize relative explicit state paths and relative HOME defaults to absolute lexical paths against the working directory.

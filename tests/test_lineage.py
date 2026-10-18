@@ -18,8 +18,19 @@ from harflow_mcp import lineage, store
 # the real thing, so every call below goes through this name rather than the module attribute.
 from harflow_mcp.lineage import detect_caller as real_detect_caller
 from harflow_mcp.store import TaskRecord
+from harflow_mcp import state_ownership
+from harflow_mcp.state_layout import resolve_layout
 
 NOW = datetime(2026, 9, 24, 12, 0, 0, tzinfo=timezone.utc)
+
+
+@pytest.fixture
+def tmp_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    root = tmp_path_factory.mktemp("lineage") / "state"
+    with state_ownership.state_session(resolve_layout(root=root)):
+        tasks = root / "tasks"
+        tasks.mkdir()
+        yield tasks
 
 
 def make_record(tmp_path: Path, task_id: str, **overrides) -> TaskRecord:

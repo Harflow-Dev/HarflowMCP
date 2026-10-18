@@ -5,9 +5,12 @@ reserved before spawning; an interrupted reservation is never silently replayed.
 """
 from __future__ import annotations
 
+from .state_access import layout_operation, root_operation, storage_operation, task_operation, task_layout, require_state_path, open_descriptor
+from .state_ownership import owned_job, state_session, assert_owned, StateOwnershipError
+
 import argparse
 import asyncio
-from contextlib import contextmanager
+from contextlib import contextmanager, closing
 import copy
 from dataclasses import asdict
 import fcntl
@@ -645,7 +648,8 @@ def validate_selection(definition: dict[str, Any], node: dict[str, Any], selecte
     return join_id
 
 
-def _write(path: Path, value: Any) -> os.stat_result:
+def _write(path: Path, value: Any, *, layout) -> os.stat_result:
+    require_state_path(layout, path)
     temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
         with temp.open("x", encoding="utf-8") as f:
@@ -674,20 +678,23 @@ class WorkflowStore:
         self.runs = self.root / "workflow-runs"
         self.leases = self.root / "workflow-leases"
         self.owners = self.root / "workflow-owners"
-        for directory in (self.definitions, self.runs, self.leases, self.owners):
-            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with state_session(self.state_layout):
+            for directory in (self.definitions, self.runs, self.leases, self.owners):
+                directory.mkdir(parents=True, exist_ok=True, mode=0o700)
 
     @contextmanager
+    @layout_operation
     def lock(self, key: str):
         path = self.root / f".workflow-{hashlib.sha256(key.encode()).hexdigest()}.lock"
-        with path.open("a") as handle:
-            fcntl.flock(handle, fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(handle, fcntl.LOCK_UN)
+        descriptor = open_descriptor(path, os.O_RDWR | os.O_CREAT, 0o600, layout=self.state_layout)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            yield
+        finally:
+            descriptor.close(unlock=True)
 
     @contextmanager
+    @layout_operation
     def definitions_tree_lock(self):
         """Store-wide lock over the definitions dependency graph.
 
@@ -697,6 +704,7 @@ class WorkflowStore:
         with self.lock("definitions-tree"):
             yield
 
+    @layout_operation
     def get(self, name: str) -> dict[str, Any]:
         from .workflow_references import workflow_identity
         from .workflow_migration import migrate_orchestrator_instructions
@@ -707,6 +715,7 @@ class WorkflowStore:
                 node.setdefault("execution_mode", "headless")
         return definition
 
+    @layout_operation
     def list(self) -> list[dict[str, Any]]:
         from .workflow_references import workflow_identity
         from .workflow_migration import migrate_orchestrator_instructions
@@ -718,6 +727,7 @@ class WorkflowStore:
                     node.setdefault("execution_mode", "headless")
         return definitions
 
+    @layout_operation
     def save(self, name: str, definition: dict[str, Any], expected_revision: int | None = None, *, authority_guard: Any = None, expected_workflow_id: str | None = None) -> dict[str, Any]:
         """Validate, resolve and write under the definitions-tree lock.
 
@@ -768,9 +778,10 @@ class WorkflowStore:
                 if authority_guard is not None:
                     authority_guard(resolved)
                 d["updated_at"] = time.time()
-                _write(path, d)
+                _write(path, d, layout=self.state_layout)
         return d
 
+    @layout_operation
     def delete(self, name: str) -> dict[str, Any]:
         from .workflow_references import referencing_definitions, workflow_identity
         name = _workflow_name(name)
@@ -788,6 +799,7 @@ class WorkflowStore:
                 result["notice"] = "This workflow is still referenced by: " + ", ".join(referenced_by)
         return result
 
+    @layout_operation
     def get_run(self, run_id: str, *, metadata_byte_limit: int | None = None, metadata_budget: Any = None) -> dict[str, Any]:
         path = self.runs / f"{_identifier(run_id)}.json"
         from .catalog import source_identity
@@ -800,7 +812,7 @@ class WorkflowStore:
         run["settling"] = any(t.get("status") in {"reserved", "running", "uncertain"} for a in run["activations"] for t in a["tasks"])
         if metadata_byte_limit is None and (self.runs / '.listing.v9.sqlite3').exists():
             from .catalog import Catalog
-            catalog = Catalog(self.runs, '.json')
+            catalog = Catalog(self.runs, '.json', layout=self.state_layout)
             with catalog.connect() as db:
                 placeholder = db.execute("SELECT json_extract(payload,'$.needs_direct_lookup') FROM entries WHERE id=?", (run_id,)).fetchone()
             if placeholder and placeholder[0] and captured_source == source_identity(path.stat()):
@@ -809,6 +821,7 @@ class WorkflowStore:
                 catalog.record(header, float(run['created_at']), run.get('status') not in TERMINAL, run_id)
         return run
 
+    @layout_operation
     def list_runs(self, *, strict: bool = False) -> list[dict[str, Any]]:
         runs = []
         for path in self.runs.glob("*.json"):
@@ -838,16 +851,19 @@ class WorkflowStore:
         return bound_header(result)
 
     def _index_run(self, run: dict[str, Any], *, previous_directory_mtime: int | None = None, written_source: Any = None) -> None:
+        assert_owned(self.state_layout)
         from .catalog import Catalog
         header = self._catalog_run_header(run)
         if written_source is not None:
             from .catalog import source_identity
             header['_source_identity'] = source_identity(written_source)
-        Catalog(self.runs, '.json').record(header, float(run['created_at']), run.get('status') not in TERMINAL, run['workflow_run_id'], previous_directory_mtime=previous_directory_mtime)
+        Catalog(self.runs, '.json', layout=self.state_layout).record(header, float(run['created_at']), run.get('status') not in TERMINAL, run['workflow_run_id'], previous_directory_mtime=previous_directory_mtime)
 
+    @layout_operation
     def _ownership_catalog(self):
+        """Return an idle catalog carrying this store's explicit layout."""
         from .catalog import Catalog
-        return Catalog(self.runs, '.json')
+        return Catalog(self.runs, '.json', layout=self.state_layout)
 
     def _catalog_run_header(self, run: dict[str, Any]) -> dict[str, Any]:
         header = self.run_header(run)
@@ -861,6 +877,7 @@ class WorkflowStore:
                                    for activation in run.get('activations', []) for task in activation.get('tasks', [])}
         return header
 
+    @layout_operation
     def list_run_page(self, *, limit: int = 100, cursor: str | None = None, active_only: bool = False, run_ids: list[str] | None = None) -> dict[str, Any]:
         from .catalog import Catalog
         def load(identifier: str, *, _metadata_budget=None):
@@ -870,12 +887,13 @@ class WorkflowStore:
                 return None
             return self._catalog_run_header(run), float(run['created_at']), run.get('status') not in TERMINAL
         load.bounded_metadata = True
-        catalog = Catalog(self.runs, '.json')
+        catalog = Catalog(self.runs, '.json', layout=self.state_layout)
         if run_ids is not None:
             identifiers = [_identifier(identifier) for identifier in run_ids]
             return catalog.header_page(identifiers, load)
         return catalog.page(load, limit=limit, cursor=cursor, active_only=active_only)
 
+    @layout_operation
     def prepare_run_catalog(self) -> dict[str, Any]:
         """Advance one bounded index-preparation slice, separately from tree discovery.
 
@@ -885,6 +903,7 @@ class WorkflowStore:
         """
         return self.list_run_page(limit=1)
 
+    @layout_operation
     def tree_members(self, run_id: str, limit: int = 65) -> dict[str, Any]:
         """Catalog-only descendants of a run (itself included), without reading any run record.
 
@@ -903,6 +922,7 @@ class WorkflowStore:
                 "JOIN entries e ON e.id=l.id ORDER BY e.stamp, e.id LIMIT ?", (run_id, limit)).fetchall()
         return {"state": "ready", "members": [{"id": r[0], "created_at": r[1], "parent": r[2], "root": r[3]} for r in rows]}
 
+    @layout_operation
     def get_run_header(self, run_id: str, *, _catalog: Any = None) -> dict[str, Any]:
         from .catalog import Catalog
         def load(identifier: str, *, _metadata_budget=None):
@@ -912,7 +932,7 @@ class WorkflowStore:
                 return None
             return self._catalog_run_header(run), float(run['created_at']), run.get('status') not in TERMINAL
         load.bounded_metadata = True
-        catalog = _catalog or Catalog(self.runs, '.json')
+        catalog = _catalog or Catalog(self.runs, '.json', layout=self.state_layout)
         headers = catalog.headers([_identifier(run_id)], load)
         if catalog.deferred_headers or catalog.blocked_headers:
             return {'workflow_run_id': run_id, 'indexing': True, 'catalog_state': catalog.requested_preparation()}
@@ -920,9 +940,10 @@ class WorkflowStore:
             raise FileNotFoundError(f'Workflow run unavailable: {run_id}')
         return headers[0]
 
+    @layout_operation
     def related_run_headers(self, run_ids: list[str], *, byte_budget: int = 64 * 1024) -> list[dict[str, Any]]:
         from .catalog import Catalog, RelatedHeaders, merge_read_state
-        catalog = Catalog(self.runs, '.json')
+        catalog = Catalog(self.runs, '.json', layout=self.state_layout)
         result, seen, queue, used = RelatedHeaders(), set(), list(run_ids), 0
         while queue and len(seen) < 32:
             identifier = queue.pop(0)
@@ -954,15 +975,18 @@ class WorkflowStore:
                 return
             points.update_markers(run, previous_status, event, previous_checkpoint)
             points.record_point(run, event)
+        except StateOwnershipError:
+            raise
         except Exception:
             logging.getLogger(__name__).warning("Unable to record notification point for %s", run.get("workflow_run_id"), exc_info=True)
 
+    @layout_operation
     def update_run(self, run_id: str, mutator: Any, event: str, detail: Any = None) -> dict[str, Any]:
         observed = self.get_run(run_id)
         root_id = (observed.get("parent_link") or {}).get("root_workflow_run_id") or run_id
         # All tree mutations serialize with the human cancellation eligibility check.
         from .catalog import catalog_lock, Catalog
-        with self.lock(f"tree-mutation:{root_id}"), self.lock(f"run:{run_id}"), catalog_lock(self.runs):
+        with self.lock(f"tree-mutation:{root_id}"), self.lock(f"run:{run_id}"), catalog_lock(self.runs, layout=self.state_layout):
             run = self.get_run(run_id)
             if event in {"dispatch_reserved", "native_reserved", "native_batch_reserved", "invocation_reserved", "child_decision_reopened"}:
                 root = run if root_id == run_id else self.get_run(root_id)
@@ -985,14 +1009,14 @@ class WorkflowStore:
             run.pop("can_cancel_from_monitor", None)
             run.pop("monitor_cancel_reason", None)
             previous_directory_mtime = self.runs.stat().st_mtime_ns
-            Catalog(self.runs, '.json').invalidate(run_id)
-            written_source = _write(self.runs / f"{run_id}.json", run)
+            Catalog(self.runs, '.json', layout=self.state_layout).invalidate(run_id)
+            written_source = _write(self.runs / f"{run_id}.json", run, layout=self.state_layout)
             for activation in run.get("activations", []):
                 for task in activation.get("tasks", []):
                     receipt = {"workflow_run_id": run_id, "workflow_node_id": activation.get('node_id'), "workflow_execution_id": activation.get('id'), "workflow_role": activation.get('role'), "workflow_name": run.get('name'), "workflow_status": run.get('status'), "execution_contract": run.get('execution_contract'), "interaction_owner": run.get('interaction_owner', 'caller'), "root_workflow_run_id": (run.get('parent_link') or {}).get('root_workflow_run_id', run_id)}
                     if activation.get('role') == 'orchestrator' and run.get('orchestrator_session_owner_run_id'):
                         receipt['workflow_session_owner_run_id'] = run['orchestrator_session_owner_run_id']
-                    _write(self.owners / f"{_identifier(task['task_id'])}.json", receipt)
+                    _write(self.owners / f"{_identifier(task['task_id'])}.json", receipt, layout=self.state_layout)
             with (self.runs / f"{run_id}.jsonl").open("a", encoding="utf-8") as f:
                 f.write(json.dumps({"sequence": run["sequence"], "time": run["updated_at"], "event": event, "detail": detail}) + "\n")
                 f.flush()
@@ -1001,6 +1025,7 @@ class WorkflowStore:
             run["settling"] = any(t.get("status") in {"reserved", "running", "uncertain"} for a in run["activations"] for t in a["tasks"])
             return run
 
+    @layout_operation
     def create_run(self, definition: dict[str, Any], prompt: str, repo_path: Path, *, freedom: str = "write_in_repo", network: bool | None = None, kind: str = "workflow", permission_policy: str = "legacy_ceiling", caller: Any = None, dependency_tree: dict[str, Any] | None = None, owner_contracts: dict[str, Any] | None = None, goal: str | None = None, run_id: str | None = None) -> dict[str, Any]:
         if permission_policy not in {"saved_node", "legacy_ceiling"}:
             raise WorkflowError("Unknown workflow permission policy")
@@ -1033,15 +1058,16 @@ class WorkflowStore:
         if dependency_tree is not None:
             run["dependency_tree"] = copy.deepcopy(dependency_tree)
         from .catalog import catalog_lock, Catalog
-        with catalog_lock(self.runs):
+        with catalog_lock(self.runs, layout=self.state_layout):
             if (self.runs / f"{rid}.json").exists():
                 raise WorkflowError("Workflow run id already exists")
             previous_directory_mtime = self.runs.stat().st_mtime_ns
-            Catalog(self.runs, '.json').invalidate(rid)
-            written_source = _write(self.runs / f"{rid}.json", run)
+            Catalog(self.runs, '.json', layout=self.state_layout).invalidate(rid)
+            written_source = _write(self.runs / f"{rid}.json", run, layout=self.state_layout)
             self._index_run(run, previous_directory_mtime=previous_directory_mtime, written_source=written_source)
         return run
 
+    @layout_operation
     def control(self, run_id: str, action: str, instructions: str | None = None, additional_attempts: int = 0, *, decision_id: str | None = None, allow_optional_review_skip: bool = False, interaction_owner: str | None = None, _internal: bool = False, _delivery: dict[str, Any] | None = None, _ordinary_answer: bool = False) -> dict[str, Any]:
         if action not in {"pause", "resume", "cancel", "recover"}:
             raise WorkflowError("Unknown workflow action")
@@ -1334,6 +1360,7 @@ class WorkflowStore:
             _launch(self, run_id)
         return result
 
+    @layout_operation
     def pinned_tasks(self) -> set[str]:
         pinned: set[str] = set()
         for r in self.list_runs():
@@ -1350,6 +1377,7 @@ class WorkflowStore:
                 pinned.update(t["task_id"] for a in r["activations"] for t in a["tasks"])
         return pinned
 
+    @layout_operation
     def task_association(self, task_id: str, *, strict: bool = False, _visited: set[str] | None = None, metadata_byte_limit: int | None = None) -> dict[str, Any] | None:
         visited = set() if _visited is None else _visited
         if task_id in visited:
@@ -1380,9 +1408,11 @@ class WorkflowStore:
             self.list_runs(strict=True)
         return None
 
+    @layout_operation
     def task_owner(self, task_id: str, *, strict: bool = False, metadata_byte_limit: int | None = None) -> dict[str, Any] | None:
         return self.task_association(task_id, strict=strict, metadata_byte_limit=metadata_byte_limit)
 
+    @layout_operation
     def abandon_dispatch(self, run_id: str, execution_id: str, task_id: str, reason: str, confirm_no_process: bool) -> dict[str, Any]:
         """Human CLI reconciliation after independently confirming a recordless dispatch is stopped."""
         if confirm_no_process is not True or not isinstance(reason, str) or not reason.strip():
@@ -1409,10 +1439,13 @@ class WorkflowStore:
         try:
             from . import scratch
             scratch.remove(self.root / "tasks", task_id)
+        except StateOwnershipError:
+            raise
         except Exception:
             logging.getLogger(__name__).warning("Unable to remove abandoned dispatch scratch for %s", task_id, exc_info=True)
         return result
 
+    @layout_operation
     def reconcile_run(self, run_id: str) -> dict[str, Any]:
         """Recover recorded outcomes, or authoritative quota failures after confirmed death."""
         def reconcile(r: dict[str, Any]) -> None:
@@ -1484,6 +1517,7 @@ def _require_delegation_control(run: dict[str, Any]) -> None:
         raise WorkflowError("Historical workflow runs cannot resume under the delegation contract; start a new run")
 
 
+@root_operation
 def migrate_workflows(root: Path | None = None) -> dict[str, Any]:
     from .workflow_delegation import migrate
     return migrate(WorkflowStore(root))
@@ -1509,6 +1543,7 @@ def _supervisor_present(run: dict[str, Any]) -> bool:
     return _alive(run.get("supervisor_pid"))
 
 
+@storage_operation
 def _require_no_active_historical_runs(storage: WorkflowStore) -> None:
     # One bounded migration step per attempt; callers retry after indexing settles.
     page = storage.list_run_page(active_only=True)
@@ -1523,6 +1558,7 @@ def _require_no_active_historical_runs(storage: WorkflowStore) -> None:
 def _launch(storage: WorkflowStore, run_id: str) -> None:
     from .state_layout import require_canonical_layout, child_environment
     require_canonical_layout(storage.state_layout)
+    assert_owned(storage.state_layout)
     reservation = storage.get_run(run_id)
     log = storage.runs / f"{run_id}.supervisor.log"
     output = None
@@ -1544,6 +1580,7 @@ def _launch(storage: WorkflowStore, run_id: str) -> None:
             output.close()
 
 
+@root_operation
 async def start_workflow(name: str, prompt: str, repo_path: Path, *, overrides: dict[str, Any] | None = None, freedom: str | None = None, network: bool | None = None, root: Path | None = None, interaction_owner: str = "caller", definition_snapshot: dict[str, Any] | None = None, dependency_tree: dict[str, Any] | None = None, expected_preview_hash: str | None = None, goal: str | None = None, run_id: str | None = None, _verified_caller: Any = _CALLER_UNSET) -> dict[str, Any]:
     from .workflow_goals import validate_goal
     validate_goal(goal)
@@ -1592,6 +1629,7 @@ async def start_workflow(name: str, prompt: str, repo_path: Path, *, overrides: 
     return run
 
 
+@root_operation
 def preview_workflow_run(name: str, repo_path: Path, *, overrides: dict[str, Any] | None = None, network: bool | None = None, root: Path | None = None) -> dict[str, Any]:
     """Read-only launch permissions and compatibility for the same pinned launch inputs."""
     from .workflow_references import definition_sha256, resolve_dependencies
@@ -1742,6 +1780,7 @@ def validate_builder_preview(value: Any, name: str) -> dict[str, Any]:
     return draft
 
 
+@root_operation
 async def apply_workflow_draft(definition: dict[str, Any], expected_draft_revision: int, *, caller: Any, root: Path | None = None) -> dict[str, Any]:
     """The verified caller can publish only its own active builder's preview."""
     if caller is None or not isinstance(expected_draft_revision, int) or isinstance(expected_draft_revision, bool) or expected_draft_revision < 0:
@@ -1765,6 +1804,7 @@ async def apply_workflow_draft(definition: dict[str, Any], expected_draft_revisi
     return {"workflow_run_id": run_id, "draft_revision": run["draft_revision"], "builder_draft": run["builder_draft"]}
 
 
+@root_operation
 async def followup_workflow_builder(run_id: str, prompt: str, *, root: Path | None = None) -> dict[str, Any]:
     if not isinstance(prompt, str) or not prompt.strip() or len(prompt.encode("utf-8")) > 1024 * 1024:
         raise WorkflowError("Builder feedback must be nonempty and at most one megabyte")
@@ -1793,6 +1833,7 @@ async def followup_workflow_builder(run_id: str, prompt: str, *, root: Path | No
     return {"workflow_run_id": run_id, "status": status, **({"task_id": tasks[-1]["task_id"]} if tasks else {})}
 
 
+@storage_operation
 def builder_workspace(storage: WorkflowStore) -> Path:
     workspace = storage.root / "builder-workspace"
     if workspace.is_symlink():
@@ -1803,6 +1844,7 @@ def builder_workspace(storage: WorkflowStore) -> Path:
     return workspace.resolve()
 
 
+@root_operation
 async def build_workflow(name: str, prompt: str, repo_path: Path | None = None, *, agent: dict[str, Any], fallbacks: list[dict[str, Any]] | None = None, definition: dict[str, Any] | None = None, source: dict[str, Any] | None = None, root: Path | None = None, _verified_caller: Any = _CALLER_UNSET) -> dict[str, Any]:
     if not isinstance(prompt, str) or not prompt.strip():
         raise WorkflowError("Builder prompt must be nonempty")
@@ -1940,6 +1982,7 @@ def availability_failure(snapshot: dict[str, Any]) -> str | None:
     return None
 
 
+@task_operation(parameter="log_dir")
 def task_liveness(log_dir: Path, record: Any) -> dict[str, Any]:
     """Process safety and outcome authority are independent recovery facts."""
     from . import identity
@@ -1973,6 +2016,7 @@ class CheckoutLease:
     def __init__(self, storage: WorkflowStore, repo: str, write: bool, should_continue: Any = None, *, wait_seconds: float = 30.0, on_wait: Any = None, pool: dict[str, Any] | None = None):
         self.repo = str(Path(repo).resolve())
         self.store = storage
+        self.state_layout = storage.state_layout
         self.path = storage.leases / (hashlib.sha256(self.repo.encode()).hexdigest() + ".lock")
         self.write = write
         self.should_continue = should_continue
@@ -2000,9 +2044,11 @@ class CheckoutLease:
                 entry["handle"] = self.handle
             else:
                 self.handle = entry["handle"]
+                self.handle.lease.validate()
             entry["users"] += 1
         return self
 
+    @layout_operation
     def _orphan_owner(self) -> dict[str, str] | None:
         """Durable live dispatches remain a barrier when their supervisor dies."""
         from .catalog import Catalog
@@ -2015,7 +2061,7 @@ class CheckoutLease:
             rows = db.execute('SELECT checkout_tasks.payload,sources.mtime,sources.size,checkout_tasks.run_id FROM checkout_tasks LEFT JOIN sources ON sources.id=checkout_tasks.run_id WHERE repo=? ORDER BY checkout_tasks.id LIMIT 101', (self.repo,)).fetchall()
         if len(rows) > 100:
             return {"workflow_run_id": "unknown", "task_id": "too_many_checkout_owners"}
-        budget = Catalog(self.store.root / 'tasks', task_store.RECORD_SUFFIX)
+        budget = Catalog(self.store.root / 'tasks', task_store.RECORD_SUFFIX, layout=self.store.state_layout)
         checked = set()
         for row in rows:
             run_id = row[3]
@@ -2052,8 +2098,9 @@ class CheckoutLease:
                 return {"workflow_run_id": task['workflow_run_id'], "task_id": task['task_id']}
         return None
 
+    @layout_operation
     async def _acquire(self):
-        self.handle = self.path.open("a")
+        self.handle = open_descriptor(self.path, os.O_RDWR | os.O_CREAT, 0o600, layout=self.state_layout)
         deadline = time.monotonic() + self.wait_seconds
         notified = False
         while True:
@@ -2124,6 +2171,9 @@ class CheckoutLease:
                     raise
 
     async def __aexit__(self, *_: Any):
+        if self.handle is not None and self.handle.pid != os.getpid():
+            self.handle.close()
+            return
         if self.entry is not None:
             async with self.entry["guard"]:
                 self.entry["users"] -= 1
@@ -2132,8 +2182,7 @@ class CheckoutLease:
                     return
                 self.entry["handle"] = None
         if self.handle:
-            fcntl.flock(self.handle, fcntl.LOCK_UN)
-            self.handle.close()
+            self.handle.close(unlock=True)
 
 
 class WorkflowSupervisor:
@@ -2157,6 +2206,10 @@ class WorkflowSupervisor:
         # Pooled checkout leases are tree-wide: every supervisor in the tree joins
         # the same descriptor so a child never downgrades the root's protection.
         self.checkout_leases = self.tree.leases
+
+    @property
+    def state_layout(self):
+        return self.store.state_layout
 
     def run(self) -> dict[str, Any]:
         return self.store.get_run(self.run_id)
@@ -2567,6 +2620,8 @@ class WorkflowSupervisor:
                                 if not isinstance(cancellation, dict) or any(cancellation.get(key) for key in ("sigkill_survivors", "survivors", "not_signalled", "owner_still_settling", "cascade_incomplete", "unconverged", "not_recorded")):
                                     raise RuntimeError("Task cancellation cascade has unsettled or unverifiable descendants")
                                 await asyncio.wait_for(task.done.wait(), timeout=10)
+                            except StateOwnershipError:
+                                raise
                             except Exception as exc:
                                 slot_uncertain = True
                                 self._task_update(activation["id"], task_id, {"status": "uncertain", "error": "Timeout cancellation requires reconciliation: " + str(exc)})
@@ -2587,6 +2642,8 @@ class WorkflowSupervisor:
                                     response = await self.registry.send_message(task, message["prompt"])
                                     delivery_id = response.get("message_id") if isinstance(response, dict) else None
                                     status = "queued_to_agent"
+                                except StateOwnershipError:
+                                    raise
                                 except Exception as exc:
                                     from . import inbox
                                     # SendRefused guarantees that no message entered the inbox.
@@ -2722,6 +2779,8 @@ class WorkflowSupervisor:
                 else:
                     self.attention(f"Dispatch configuration refused: {exc}")
                 return None
+            except StateOwnershipError:
+                raise
             except Exception as exc:
                 # Once a dispatch was reserved, only positive evidence that no spawn happened
                 # permits reconciliation. Unknown exceptions remain uncertain.
@@ -2909,7 +2968,7 @@ class WorkflowSupervisor:
             selected = [e for e in r["definition"]["connections"] if e["id"] in token["selected_connections"]]
         else:
             from .workflow_traversal import automatic_edges
-            selected = automatic_edges(r, node, token) if r.get("execution_contract") == "delegation" else None
+            selected = automatic_edges(r, node, token, root=self.store.root) if r.get("execution_contract") == "delegation" else None
             if selected is None:
                 selected = await self._decision(node, result or token.get("context", {}), token)
         if selected is None:
@@ -3097,6 +3156,7 @@ class WorkflowSupervisor:
         self.update(arrive, "join_arrival", token["id"])
         return True
 
+    @layout_operation
     async def reconcile(self) -> bool:
         """A new supervisor may inspect records but cannot adopt missing pipe owners."""
         self.store.reconcile_run(self.run_id)
@@ -3114,6 +3174,7 @@ class WorkflowSupervisor:
         await recover_first_turn(self)
         return True
 
+    @layout_operation
     async def execute(self, run_id: str) -> None:
         from .state_layout import require_dispatch_layout
         require_dispatch_layout(self.registry.log_dir)
@@ -3197,7 +3258,7 @@ class WorkflowSupervisor:
                         if token["id"] in active or busy >= run["definition"]["max_parallel"]:
                             continue
                         if not self._arrive_join(token):
-                            active[token["id"]] = asyncio.create_task(self._node(token))
+                            active[token["id"]] = owned_job(self.state_layout, self._node(token), name=f"harflow-workflow-node-{token['id']}")
                             busy += 1
                     if not self.run()["pending"] and not active:
                         if self.run()["joins"]:
@@ -3220,6 +3281,8 @@ class WorkflowSupervisor:
                         del active[tid]
                         try:
                             await task
+                        except StateOwnershipError:
+                            raise
                         except Exception as exc:
                             self.attention(f"Workflow scheduling failed: {exc}")
         finally:
@@ -3228,6 +3291,7 @@ class WorkflowSupervisor:
             self.tree.release_held(run_id)
             self.update(lambda r: r.update(supervisor_pid=None, supervisor_identity=None), "supervisor_stopped")
 
+    @layout_operation
     async def build(self, run_id: str) -> None:
         from .state_layout import require_dispatch_layout
         require_dispatch_layout(self.registry.log_dir)
@@ -3346,11 +3410,13 @@ async def _main(args: Any) -> None:
     from .tasks import TaskRegistry
     from .state_layout import resolve_layout, child_environment
     layout = resolve_layout(root=args.root)
+    assert_owned(layout)
     os.environ.update(child_environment(layout))
     storage = WorkflowStore(layout.root)
     # Exclusive nonblocking run lock prevents duplicate supervisors. Separate from short
     # state locks so control operations remain available while agents are running.
-    with (storage.runs / f"{_identifier(args.run_id)}.supervisor.lock").open("a") as lock:
+    with closing(open_descriptor(storage.runs / f"{_identifier(args.run_id)}.supervisor.lock",
+                                 os.O_RDWR | os.O_CREAT, 0o600, layout=layout)) as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
@@ -3366,6 +3432,8 @@ async def _main(args: Any) -> None:
                 await supervisor.build(args.run_id)
             else:
                 await supervisor.execute(args.run_id)
+        except StateOwnershipError:
+            raise
         except Exception as exc:
             supervisor.run_id = args.run_id
             if storage.get_run(args.run_id)["status"] == "cancelling":
@@ -3380,26 +3448,38 @@ async def _main(args: Any) -> None:
             else:
                 supervisor.attention(f"Supervisor failure: {exc}")
         finally:
-            fcntl.flock(lock, fcntl.LOCK_UN)
+            lock.close(unlock=True)
             final = storage.get_run(args.run_id)
             if (final["kind"] == "builder" and final["status"] == "starting" and any(m["status"] == "pending" for m in final.get("builder_messages", []))) or (final["kind"] != "builder" and final["status"] in {"running", "cancelling"}):
                 _launch(storage, args.run_id)
 
 
-if __name__ == "__main__":
+def main(argv: list[str] | None = None) -> int:
+    """Run the supervisor with ownership spanning complete event-loop teardown."""
     parser = argparse.ArgumentParser()
     parser.add_argument("command", choices=["supervise"])
     parser.add_argument("run_id")
     parser.add_argument("--root", required=True, help="selected state root; authoritative over HARFLOW_STATE_ROOT and normalized lexically")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     from .state_layout import InvalidStateRoot, resolve_layout
     try:
-        resolve_layout(root=args.root)
+        layout = resolve_layout(root=args.root)
     except InvalidStateRoot as exc:
         parser.error(str(exc))
-    asyncio.run(_main(args))
+    try:
+        with state_session(layout):
+            asyncio.run(_main(args))
+    except StateOwnershipError as exc:
+        print(f"harflow-workflows: error: {exc}", file=sys.stderr)
+        return 2
+    return 0
 
 
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+
+@task_operation(parameter="log_dir")
 def builder_feedback_ids(log_dir: Path, task_id: str) -> list[str]:
     storage = WorkflowStore(log_dir.parent)
     owner = storage.task_owner(task_id)
@@ -3409,6 +3489,7 @@ def builder_feedback_ids(log_dir: Path, task_id: str) -> list[str]:
     return next((a.get("feedback_ids", []) for a in run["activations"] if any(t["task_id"] == task_id for t in a["tasks"])), [])
 
 
+@task_operation(parameter="log_dir")
 def builder_pending_messages(log_dir: Path, task_id: str, regular: list[dict[str, Any]]) -> list[dict[str, Any]]:
     from . import inbox
     storage = WorkflowStore(log_dir.parent)

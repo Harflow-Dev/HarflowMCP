@@ -14,6 +14,8 @@ import pytest
 from mcp import Client, MCPError
 
 from harflow_mcp import identity, server, store, wait_policy
+from harflow_mcp import state_ownership
+from harflow_mcp.state_layout import resolve_layout
 from harflow_mcp.tasks import Task, TAIL_LINES_RETURNED
 
 
@@ -30,6 +32,13 @@ async def call(tool: str, **arguments):
         except MCPError as exc:
             error = exc
     raise error
+
+
+@pytest.fixture(autouse=True)
+def owned_server_state(tmp_path: Path):
+    """Initialize the per-test registry root before tool methods touch storage."""
+    with state_ownership.state_session(resolve_layout(root=tmp_path / "state")):
+        pass
 
 
 def event_json(payload: dict) -> str:
@@ -52,7 +61,7 @@ def fake_task(tmp_path: Path) -> Task:
         repo_path=tmp_path,
         prompt="x",
         max_turns=None,
-        log_path=tmp_path / "task-1.jsonl",
+        log_path=server._reg().log_dir / "task-1.jsonl",
         started_at=datetime.now(timezone.utc),
     )
     server._reg()._tasks[task.task_id] = task
@@ -191,7 +200,7 @@ async def test_valid_reasoning_effort_reaches_the_argv_and_the_persisted_record(
             repo_path=kwargs["repo_path"],
             prompt=kwargs["prompt"],
             max_turns=kwargs.get("max_turns"),
-            log_path=kwargs["repo_path"] / "fake-task.jsonl",
+            log_path=server._reg().log_dir / "fake-task.jsonl",
             started_at=datetime.now(timezone.utc),
             model=kwargs.get("model"),
             reasoning_effort=kwargs.get("reasoning_effort"),
@@ -572,7 +581,7 @@ async def test_a_valid_network_request_reaches_the_argv_enforcement_and_the_reco
             repo_path=kwargs["repo_path"],
             prompt=kwargs["prompt"],
             max_turns=kwargs.get("max_turns"),
-            log_path=kwargs["repo_path"] / "fake-task.jsonl",
+            log_path=server._reg().log_dir / "fake-task.jsonl",
             started_at=datetime.now(timezone.utc),
             model=kwargs.get("model"),
             reasoning_effort=kwargs.get("reasoning_effort"),
@@ -626,7 +635,7 @@ async def test_resume_forwards_network_through_both_server_branches(
             repo_path=kwargs["repo_path"],
             prompt=kwargs["prompt"],
             max_turns=kwargs.get("max_turns"),
-            log_path=kwargs["repo_path"] / "resumed.jsonl",
+            log_path=server._reg().log_dir / "resumed.jsonl",
             started_at=datetime.now(timezone.utc),
             freedom=kwargs.get("freedom", "write_in_repo"),
             network=kwargs.get("network"),

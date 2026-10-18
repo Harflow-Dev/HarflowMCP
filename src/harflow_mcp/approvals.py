@@ -5,6 +5,8 @@ across an await or task/workflow persistence. Only the owning stdin pump sends.
 """
 from __future__ import annotations
 
+from .state_access import task_operation, task_layout, assert_task_owned, open_descriptor, require_state_path
+
 import copy
 import fcntl
 import hashlib
@@ -40,7 +42,8 @@ def _path(directory: Path, task_id: str) -> Path:
     return directory / (validate_task_id(task_id) + ".approvals.json")
 
 
-def _read(path: Path) -> dict[str, Any]:
+def _read(directory: Path, path: Path) -> dict[str, Any]:
+    require_state_path(task_layout(directory), path)
     if not path.exists():
         return {"version": 1, "requests": []}
     if path.stat().st_size > MAX_LEDGER_BYTES:
@@ -57,7 +60,8 @@ def _read(path: Path) -> dict[str, Any]:
     return data
 
 
-def _write(path: Path, data: dict[str, Any]) -> None:
+def _write(directory: Path, path: Path, data: dict[str, Any]) -> None:
+    require_state_path(task_layout(directory), path)
     raw = canonical(data)
     if len(raw) > MAX_LEDGER_BYTES:
         raise ValueError("Approval ledger is full")
@@ -76,8 +80,9 @@ def _write(path: Path, data: dict[str, Any]) -> None:
 
 @contextmanager
 def _locked(directory: Path, task_id: str):
+    assert_task_owned(directory)
     path = _path(directory, task_id)
-    fd = os.open(str(path) + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+    fd = open_descriptor(Path(str(path) + ".lock"), os.O_CREAT | os.O_RDWR, 0o600, layout=task_layout(directory))
     try:
         # Bounded lock contention; a stuck writer cannot stall the event loop forever.
         until = time.monotonic() + 2
@@ -89,22 +94,24 @@ def _locked(directory: Path, task_id: str):
                 if time.monotonic() >= until:
                     raise ValueError("Approval ledger is busy; retry the read or decision")
                 time.sleep(0.01)
-        data = _read(path)
+        data = _read(directory, path)
         yield data
-        _write(path, data)
+        _write(directory, path, data)
     finally:
-        os.close(fd)
+        fd.close(unlock=True)
 
 
 def metadata(row: dict[str, Any]) -> dict[str, Any]:
     return {k: copy.deepcopy(v) for k, v in row.items() if k not in {"action", "bridge_owner", "process_identity"}}
 
 
+@task_operation
 def rows(directory: Path, task_id: str) -> list[dict[str, Any]]:
     # Atomic replacement makes unlocked readers see a complete generation.
-    return copy.deepcopy(_read(_path(directory, task_id))["requests"])
+    return copy.deepcopy(_read(directory, _path(directory, task_id))["requests"])
 
 
+@task_operation
 def summary(directory: Path, task_id: str) -> dict[str, Any]:
     try:
         records = rows(directory, task_id)
@@ -138,6 +145,7 @@ def summary(directory: Path, task_id: str) -> dict[str, Any]:
         return {"pending_count": 0, "delivery_uncertain_count": 0, "interaction_state": "approval_state_uncertain", "requests": [], "uncertainty_requests": [], "error": "Approval ledger unavailable; execution must be reconciled"}
 
 
+@task_operation
 def admit(directory: Path, task: Any, decoded: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
     if len(canonical(decoded)) > MAX_REQUEST_BYTES:
         raise ValueError("Approval request exceeds 64 KiB")
@@ -158,6 +166,7 @@ def admit(directory: Path, task: Any, decoded: dict[str, Any], context: dict[str
     return copy.deepcopy(row)
 
 
+@task_operation
 def get(directory: Path, task_id: str, request_id: str) -> dict[str, Any]:
     for row in rows(directory, task_id):
         if row["request_id"] == request_id:
@@ -165,6 +174,7 @@ def get(directory: Path, task_id: str, request_id: str) -> dict[str, Any]:
     raise ValueError("Approval request not found")
 
 
+@task_operation
 def reserve(directory: Path, task_id: str, request_id: str, action_digest: str, owner_revision: int, decision: str, generation: str) -> dict[str, Any]:
     if decision not in {"approve", "reject"} or type(owner_revision) is not int:
         raise ValueError("A decision must be approve or reject with an integer owner revision")
@@ -181,6 +191,7 @@ def reserve(directory: Path, task_id: str, request_id: str, action_digest: str, 
     return result
 
 
+@task_operation
 def update(directory: Path, task_id: str, request_id: str, generation: str, expected_delivery: str | None = None, **changes: Any) -> dict[str, Any]:
     with _locked(directory, task_id) as data:
         row = next((r for r in data["requests"] if r["request_id"] == request_id), None)
@@ -198,6 +209,7 @@ def update(directory: Path, task_id: str, request_id: str, generation: str, expe
     return result
 
 
+@task_operation
 def invalidate(directory: Path, task_id: str, disposition: str, generation: str | None = None) -> None:
     with _locked(directory, task_id) as data:
         for row in data["requests"]:
@@ -205,6 +217,7 @@ def invalidate(directory: Path, task_id: str, disposition: str, generation: str 
                 row.update(disposition=disposition, delivery="delivery_unknown" if row["delivery"] in {"sending", "sent"} else "failed", owner_revision=row["owner_revision"] + 1)
 
 
+@task_operation
 def observe_outcome(directory: Path, task_id: str, request_id: str, generation: str, outcome: str) -> None:
     """Merge harness evidence without replacing a concurrent local delivery state."""
     with _locked(directory, task_id) as data:
@@ -223,6 +236,7 @@ def observe_outcome(directory: Path, task_id: str, request_id: str, generation: 
         row["owner_revision"] += 1
 
 
+@task_operation
 def finish_delivery(directory: Path, task_id: str, request_id: str, generation: str, written: bool, effective_decision: str, expiry_rejection: bool = False) -> None:
     """Merge a local pipe write with independently observed harness evidence."""
     with _locked(directory, task_id) as data:
@@ -243,6 +257,7 @@ def finish_delivery(directory: Path, task_id: str, request_id: str, generation: 
         row["owner_revision"] += 1
 
 
+@task_operation
 def observe_cancellation(directory: Path, task_id: str, request_id: str, generation: str) -> None:
     """Close harness decision eligibility without guessing whether reserved bytes arrived."""
     with _locked(directory, task_id) as data:

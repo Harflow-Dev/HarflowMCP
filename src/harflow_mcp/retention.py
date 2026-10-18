@@ -10,6 +10,9 @@ with.
 
 from __future__ import annotations
 
+from .state_access import task_operation, assert_task_owned, task_layout, open_descriptor
+from .state_ownership import StateOwnershipError
+
 import contextlib
 import fcntl
 import hashlib
@@ -55,22 +58,26 @@ def retention_days() -> int | None:
     return value
 
 
+@task_operation
 def maybe_sweep(log_dir: Path, *, now: datetime | None = None) -> dict[str, int] | None:
     """Entry point run in a background thread by `TaskRegistry.start_maintenance`.
 
-    Never raises: a failed sweep must not take down the server that kicked it off, nor say
+    Ownership failures raise; ordinary failed sweeps do not take down the server or say
     anything about whether a task actually finished. Returns None when no sweep ran (disabled,
     another process already holds the lock, or the last sweep was too recent) — the caller cannot
     tell those apart from the return value alone, which is fine, since none of them are errors.
     """
     try:
         return _maybe_sweep(log_dir, now=now)
+    except StateOwnershipError:
+        raise
     except Exception:
         log.exception("retention sweep failed")
         return None
 
 
 def _maybe_sweep(log_dir: Path, *, now: datetime | None) -> dict[str, int] | None:
+    assert_task_owned(log_dir)
     days = retention_days()
     if days is None:
         return None
@@ -81,7 +88,7 @@ def _maybe_sweep(log_dir: Path, *, now: datetime | None) -> dict[str, int] | Non
     lock_path = root / "maintenance.lock"
     stamp_path = root / "maintenance.stamp"
 
-    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+    lock_fd = open_descriptor(lock_path, os.O_CREAT | os.O_RDWR, 0o644, layout=task_layout(log_dir))
     try:
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -106,11 +113,7 @@ def _maybe_sweep(log_dir: Path, *, now: datetime | None) -> dict[str, int] | Non
             log.warning("could not write %s after a sweep", stamp_path, exc_info=True)
         return stats
     finally:
-        try:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        except OSError:
-            pass
-        os.close(lock_fd)
+        control.release(lock_fd)
 
 
 def _artifact_ancestor_pins(log_dir: Path, by_id: dict[str, store.TaskRecord]) -> set[str]:
@@ -124,6 +127,7 @@ def _artifact_ancestor_pins(log_dir: Path, by_id: dict[str, store.TaskRecord]) -
     These pins do not propagate to descendants or sessions: an expired artifact
     owner may be collected now, and its ancestors become eligible next sweep.
     """
+    assert_task_owned(log_dir)
     pending = []
     for identifier, record in by_id.items():
         if record.status not in store.TERMINAL_RECORD_STATUSES or store.outcome_unobserved(record):
@@ -152,8 +156,9 @@ def _artifact_ancestor_pins(log_dir: Path, by_id: dict[str, store.TaskRecord]) -
     return pins
 
 
+@task_operation
 def sweep(log_dir: Path, days: int, now: datetime) -> dict[str, int]:
-    """One retention pass. Never raises — the caller (`maybe_sweep`) is the one that guarantees it."""
+    """One retention pass. Ownership failures raise; maybe_sweep handles ordinary sweep failures."""
     stats = {
         "deleted_tasks": 0,
         "kept_live_descendant": 0,
@@ -306,6 +311,7 @@ def _sweep_temp_files(
 ) -> None:
     """Deleted first, while records still exist, so a settled task's own deletion below cannot
     race a leftover temp file check that needs the record to still be readable."""
+    assert_task_owned(log_dir)
     try:
         entries = list(log_dir.iterdir())
     except OSError:
@@ -343,6 +349,7 @@ def _has_active_attempt(log_dir: Path, task_id: str, now: datetime | None = None
     the user's terminal is open). For either family, an attempt number that fails to parse as an int
     still forces this task active regardless, the same conservative fallback both have always had.
     """
+    assert_task_owned(log_dir)
     if control.cancel_attempt_active(log_dir, task_id, now):
         return True
     if control.takeover_attempt_active(log_dir, task_id, now):
@@ -388,6 +395,7 @@ def _has_fresh_descendant(
     the family itself. Only new ids are read, never the whole store again; one that cannot be read
     counts, since unreadable is not provably unrelated.
     """
+    assert_task_owned(log_dir)
     try:
         entries = list(log_dir.iterdir())
     except OSError:
@@ -414,8 +422,9 @@ def _has_fresh_descendant(
 def _retention_catalog_locks(log_dir: Path):
     # Existing session/task (and any owning run) locks precede catalogs. Managed
     # readers take workflow then task catalogs, so removals use that same order.
+    assert_task_owned(log_dir)
     from .catalog import catalog_lock
-    with catalog_lock(log_dir.parent / 'workflow-runs'), catalog_lock(log_dir):
+    with catalog_lock(log_dir.parent / 'workflow-runs', layout=task_layout(log_dir)), catalog_lock(log_dir, layout=task_layout(log_dir)):
         yield
 
 def _delete_task(
@@ -426,6 +435,7 @@ def _delete_task(
     family: frozenset[str],
     by_id: dict[str, store.TaskRecord],
 ) -> None:
+    assert_task_owned(log_dir)
     task_id = record.task_id
     # Session locks first, then `<id>.lock` — the invariant order. A resume holds its session lock
     # across check-and-spawn, and resuming *any* family member creates a descendant of this task, so
@@ -445,7 +455,7 @@ def _delete_task(
                 return
 
         try:
-            lock_fd = os.open(log_dir / f"{task_id}.lock", os.O_CREAT | os.O_RDWR, 0o644)
+            lock_fd = open_descriptor(log_dir / f"{task_id}.lock", os.O_CREAT | os.O_RDWR, 0o644, layout=task_layout(log_dir))
         except OSError:
             # Without the lock nothing may be deleted, but one unopenable lock must not abort the
             # whole sweep — and with it the stamp, which would retry the same failure every start.
@@ -507,11 +517,7 @@ def _delete_task(
                         return
                     stats["deleted_tasks"] += 1
         finally:
-            try:
-                fcntl.flock(lock_fd, fcntl.LOCK_UN)
-            except OSError:
-                pass
-            os.close(lock_fd)
+            control.release(lock_fd)
 
 
 def _empty_inbox(log_dir: Path, task_id: str) -> bool:
@@ -519,9 +525,10 @@ def _empty_inbox(log_dir: Path, task_id: str) -> bool:
     is a lock file, and lock files are never deleted. Done under the inbox's own lock. False when
     that could not be done (the lock is busy, or truncation failed), so the caller keeps the task
     for a later sweep; True when there was no inbox at all."""
+    assert_task_owned(log_dir)
     path = log_dir / f"{task_id}.inbox.jsonl"
     try:
-        fd = os.open(path, os.O_RDWR)
+        fd = open_descriptor(path, os.O_RDWR, layout=task_layout(log_dir))
     except FileNotFoundError:
         return True
     except OSError:
@@ -537,16 +544,12 @@ def _empty_inbox(log_dir: Path, task_id: str) -> bool:
         except OSError:
             log.debug("could not empty the inbox of %s", task_id, exc_info=True)
             return False
-        finally:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_UN)
-            except OSError:
-                pass
     finally:
-        os.close(fd)
+        control.release(fd)
 
 
 def _delete_task_files(log_dir: Path, task_id: str) -> bool:
+    assert_task_owned(log_dir)
     try:
         with _retention_catalog_locks(log_dir):
             return _delete_task_files_locked(log_dir, task_id)
@@ -560,6 +563,7 @@ def _delete_task_files_locked(log_dir: Path, task_id: str) -> bool:
     everything else is gone: the record is what lets a later sweep find this task again, so removing
     it past a failed unlink would orphan that file (prompts, raw output) for good. False when
     anything, the record included, was left behind."""
+    assert_task_owned(log_dir)
     try:
         entries = list(log_dir.iterdir())
     except OSError:
@@ -592,7 +596,7 @@ def _delete_task_files_locked(log_dir: Path, task_id: str) -> bool:
     if record_path is not None:
         try:
             from .catalog import Catalog
-            Catalog(log_dir, store.RECORD_SUFFIX).invalidate(task_id)
+            Catalog(log_dir, store.RECORD_SUFFIX, layout=task_layout(log_dir)).invalidate(task_id)
             record_path.unlink()
         except FileNotFoundError:
             pass
@@ -600,8 +604,10 @@ def _delete_task_files_locked(log_dir: Path, task_id: str) -> bool:
             return False
     try:
         from .catalog import Catalog
-        Catalog(log_dir, store.RECORD_SUFFIX).remove(task_id)
-        Catalog(log_dir.parent / 'workflow-runs', '.json').remove(task_id)
+        Catalog(log_dir, store.RECORD_SUFFIX, layout=task_layout(log_dir)).remove(task_id)
+        Catalog(log_dir.parent / 'workflow-runs', '.json', layout=task_layout(log_dir)).remove(task_id)
+    except StateOwnershipError:
+        raise
     except Exception:
         log.warning('Could not remove retained task from listing indexes: %s', task_id, exc_info=True)
     return True
@@ -616,6 +622,7 @@ _NATIVE_RUN_BYTES = 4 * 1024 * 1024
 
 def _sweep_native_events(log_dir: Path, days: int, now: datetime, stats: dict[str, int]) -> None:
     """Reclaim only exact recordless native event logs; keep durable attempts for retries."""
+    assert_task_owned(log_dir)
     from .bounded_io import read_json
     from .events import events_path
     from .workflows import TERMINAL
@@ -688,9 +695,10 @@ def _sweep_native_events(log_dir: Path, days: int, now: datetime, stats: dict[st
                     for identifier in sorted(tree_ids | {root}):
                         store.validate_task_id(identifier)
                         key = hashlib.sha256(f"run:{identifier}".encode()).hexdigest()
-                        handle = locks.enter_context((log_dir.parent / f".workflow-{key}.lock").open("a"))
-                        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except (OSError, store.InvalidTaskId):
+                        locks.enter_context(control._flock_sync(log_dir.parent / f".workflow-{key}.lock", 0,
+                                                              f"workflow retention lock for {identifier}",
+                                                              layout=task_layout(log_dir)))
+                except (control.LockTimeout, OSError, store.InvalidTaskId):
                     continue
                 # Repeat the bounded inventory under the owning run/root locks: a
                 # resumed tree or newly uncertain receipt must preserve its evidence.

@@ -17,6 +17,17 @@ from harflow_mcp.backends import get
 from harflow_mcp.backends.base import UnsupportedCapability
 from harflow_mcp.backends.claude_approvals import decode, encode, validate
 from harflow_mcp.backends import Accumulator
+from harflow_mcp import state_ownership
+from harflow_mcp.state_layout import resolve_layout
+
+
+@pytest.fixture
+def tmp_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    root = tmp_path_factory.mktemp("caller-approvals") / "state"
+    with state_ownership.state_session(resolve_layout(root=root)):
+        tasks = root / "tasks"
+        tasks.mkdir()
+        yield tasks
 
 
 def _task(tmp_path: Path) -> SimpleNamespace:
@@ -123,28 +134,30 @@ def test_claude_decode_and_encode_preserve_exact_action() -> None:
 
 
 def test_ledger_hides_action_from_metadata_and_requires_exact_cas(tmp_path: Path) -> None:
-    row = _admit(tmp_path)
+    directory = tmp_path
+    row = _admit(directory)
     metadata = approvals.metadata(row)
     assert "action" not in metadata
     assert "bridge_owner" not in metadata
-    full = approvals.get(tmp_path, "task-1", row["request_id"])
+    full = approvals.get(directory, "task-1", row["request_id"])
     assert full["action"] == row["action"] and full["complete"] is True
     with pytest.raises(ValueError, match="Stale"):
-        approvals.reserve(tmp_path, "task-1", row["request_id"], "wrong", row["owner_revision"], "approve", row["generation"])
-    reserved = approvals.reserve(tmp_path, "task-1", row["request_id"], row["action_digest"], row["owner_revision"], "approve", row["generation"])
+        approvals.reserve(directory, "task-1", row["request_id"], "wrong", row["owner_revision"], "approve", row["generation"])
+    reserved = approvals.reserve(directory, "task-1", row["request_id"], row["action_digest"], row["owner_revision"], "approve", row["generation"])
     with pytest.raises(ValueError, match="expired, settled"):
-        approvals.reserve(tmp_path, "task-1", row["request_id"], row["action_digest"], reserved["owner_revision"], "reject", row["generation"])
+        approvals.reserve(directory, "task-1", row["request_id"], row["action_digest"], reserved["owner_revision"], "reject", row["generation"])
 
 
 def test_ledger_rejects_duplicate_native_identity_and_bounds_pending(tmp_path: Path) -> None:
-    first = _admit(tmp_path)
+    directory = tmp_path
+    first = _admit(directory)
     with pytest.raises(ValueError, match="Repeated"):
-        approvals.admit(tmp_path, _task(tmp_path), _request(_task(tmp_path)), {"interaction_owner": "caller"})
+        approvals.admit(directory, _task(directory), _request(_task(directory)), {"interaction_owner": "caller"})
     for index in range(2, approvals.MAX_PENDING + 1):
-        _admit(tmp_path, index)
+        _admit(directory, index)
     with pytest.raises(ValueError, match="count bound"):
-        _admit(tmp_path, approvals.MAX_PENDING + 1)
-    assert len(approvals.rows(tmp_path, "task-1")) == approvals.MAX_PENDING
+        _admit(directory, approvals.MAX_PENDING + 1)
+    assert len(approvals.rows(directory, "task-1")) == approvals.MAX_PENDING
 
 
 def test_cross_process_reservation_has_one_winner(tmp_path: Path) -> None:
@@ -199,6 +212,10 @@ async def test_runtime_admits_only_a_real_control_request_and_keeps_prose_out_of
     class Registry:
         log_dir = tmp_path
 
+        @property
+        def state_layout(self):
+            return resolve_layout(log_dir=self.log_dir)
+
         def persist(self, value):
             return None
 
@@ -237,6 +254,10 @@ async def test_tool_result_racing_local_send_is_reconciled_without_stale_pump_fa
 
     class Registry:
         log_dir = tmp_path
+
+        @property
+        def state_layout(self):
+            return resolve_layout(log_dir=self.log_dir)
 
         def get(self, _task_id):
             return task

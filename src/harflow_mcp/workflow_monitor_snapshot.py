@@ -4,6 +4,9 @@ This cache never updates workflow records and is not a managed-agent read API.
 """
 from __future__ import annotations
 
+from .state_access import path_operation, require_state_path, open_descriptor
+from .state_ownership import current_owned
+
 import base64
 import hashlib
 import json
@@ -22,17 +25,26 @@ def _identity(stat: os.stat_result) -> list[int]:
     return [stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns]
 
 
-def _remove(path: Path) -> None:
+def _remove(path: Path, *, layout) -> None:
+    require_state_path(layout, path)
     for target in (path, path.with_suffix('.meta'), path.with_suffix('.sha')):
         target.unlink(missing_ok=True)
 
 
-def _write(path: Path, content: bytes) -> None:
-    with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'wb') as stream:
-        stream.write(content)
+def _write(path: Path, content: bytes, *, layout) -> None:
+    require_state_path(layout, path)
+    descriptor = open_descriptor(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, layout=layout)
+    try:
+        with os.fdopen(descriptor, 'wb', closefd=False) as stream:
+            stream.write(content)
+    finally:
+        descriptor.close()
 
 
-def snapshot(run: dict | None, run_id: str, cache: Path, cursor: str | None = None, *, view: str | None = None, serialized: bytes | None = None) -> dict:
+@path_operation
+def snapshot(run: dict | None, run_id: str, cache: Path, cursor: str | None = None, *, view: str | None = None, serialized: bytes | None = None, layout=None) -> dict:
+    layout = layout if layout is not None else current_owned().layout
+    require_state_path(layout, cache)
     cache.mkdir(mode=0o700, parents=True, exist_ok=True)
     now = time.time()
     for path in cache.iterdir():
@@ -40,7 +52,7 @@ def snapshot(run: dict | None, run_id: str, cache: Path, cursor: str | None = No
             continue
         try:
             if now - path.stat().st_mtime > TTL:
-                _remove(path.with_suffix('.json'))
+                _remove(path.with_suffix('.json'), layout=layout)
         except FileNotFoundError:
             pass
     offset = 0
@@ -87,21 +99,21 @@ def snapshot(run: dict | None, run_id: str, cache: Path, cursor: str | None = No
         receipt_digest = None
         if total > CHUNK_SIZE:
             try:
-                _write(path, serialized)
+                _write(path, serialized, layout=layout)
                 hashes_path = path.with_suffix('.sha')
-                _write(hashes_path, b''.join(hashlib.sha256(serialized[start:start + CHUNK_SIZE]).digest() for start in range(0, total, CHUNK_SIZE)))
+                _write(hashes_path, b''.join(hashlib.sha256(serialized[start:start + CHUNK_SIZE]).digest() for start in range(0, total, CHUNK_SIZE)), layout=layout)
                 receipt = {'run': run_id, 'view': view, 'digest': digest, 'total': total, 'file': _identity(path.stat()), 'hashes': _identity(hashes_path.stat())}
                 receipt_bytes = json.dumps(receipt, separators=(',', ':')).encode('ascii')
                 if len(receipt_bytes) > RECEIPT_BYTES:
                     raise ValueError('Monitor snapshot receipt exceeds its byte budget')
-                _write(path.with_suffix('.meta'), receipt_bytes)
+                _write(path.with_suffix('.meta'), receipt_bytes, layout=layout)
                 receipt_digest = hashlib.sha256(receipt_bytes).hexdigest()
             except BaseException:
-                _remove(path)
+                _remove(path, layout=layout)
                 raise
         chunk = serialized[:CHUNK_SIZE].decode('ascii')
     end = offset + len(chunk)
     following = base64.urlsafe_b64encode(json.dumps({'snapshot': token, 'offset': end, 'digest': digest, 'run': run_id, 'receipt': receipt_digest, 'view': view}, separators=(',', ':')).encode()).decode() if end < total else None
     if following is None:
-        _remove(path)
+        _remove(path, layout=layout)
     return {'monitor_snapshot': True, 'workflow_run_id': run_id, 'content_sha256': digest, 'offset': offset, 'total_characters': total, 'chunk': chunk, 'next_cursor': following}
