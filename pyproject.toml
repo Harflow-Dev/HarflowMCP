@@ -18,7 +18,7 @@ dependencies = [
 [project.scripts]
 harflow-server = "harflow_mcp.server:main"
 harflow-setup = "harflow_mcp.setup_client:main"
-harflow-ctl = "harflow_mcp.ctl:main"
+harflow-ctl = "harflow_mcp.cli:main"
 
 [dependency-groups]
 dev = ["pytest>=8", "pytest-asyncio>=0.24"]

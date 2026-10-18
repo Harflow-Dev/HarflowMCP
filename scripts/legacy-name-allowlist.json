@@ -258,6 +258,12 @@
     "count": 1
   },
   {
+    "file": "tests/test_installed_version_info.py",
+    "literal": "PB_TASK_ID",
+    "reason": "Exercise stale cross-product caller signals on the lazy version-info path.",
+    "count": 1
+  },
+  {
     "file": "tests/conftest.py",
     "literal": "PB_ROOT_TASK_ID",
     "reason": "Isolate inherited legacy worker signals from unrelated unit tests.",

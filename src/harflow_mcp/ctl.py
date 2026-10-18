@@ -17,22 +17,9 @@ and `resume` fork a process that owns the new task until it settles (`detached.p
 reports the registered backends, whether each binary is on PATH (`backends.is_installed`) and each
 backend's declared capabilities (`backends.capability_metadata`, the same serialization as MCP
 `list_backends` — including bounded extra-path support) — no
-`--version` probe, no subprocess. Every command prints one versioned JSON document
-(`"v": 13`, `CTL_JSON_VERSION`) with `--json`. v13 adds the optional workflow binding to
-`task-artifacts` items, bound-task artifact summaries and the run-level `workflow-artifacts`
-page. v12 adds `queued_followups` to full task snapshots
-and `queued_followup_count` to briefs, and `delivery` to `send` results. v11 adds bounded artifact summaries
-to full task snapshots, standalone self-registration (`register-artifact`), and
-paged metadata references (`task-artifacts`). Unsupported ownership has an unavailable
-summary without a detail reference. v10 adds bounded extra-path grants
-and their capability and enforcement metadata to task/backend documents. v9 adds durable task usage-limit
-diagnostics and workflow recovery choices. v8 adds pinned owner permissions,
-launch previews and preview hash guards. v7 adds separate human Monitor workflow
-cancellation eligibility and refusal metadata. v6 adds native execution
-preference, presentation, availability and frozen scheduling metadata. v5 adds Run workflow node presentation
-metadata: parent/root run links, orchestrator mode and session owner, input source,
-tree settling and suspended-via-root flags, per-execution child invocation status,
-and workflow-validate dependency reports.
+`--version` probe, no subprocess. Every command prints one Harflow ctl v1 JSON document
+with `--json`; command payloads retain their existing fields. The separate version-info command
+reports compatibility without importing the task runtime through the installed lazy entrypoint.
 """
 
 from __future__ import annotations
@@ -52,10 +39,9 @@ from . import backends, control, detached, followups, identity, inbox, store, ta
 from . import tasks as tasks_module
 from .tasks import default_log_dir
 
-# Bumped to 2 when `status`/`list`'s snapshot/brief documents gained `resume_command` (Monitor
-# piece 3/3). `setup` and the event log are separate contracts and stay at v1 — see CLAUDE.md's
-# "The Monitor app is a consumer of three frozen contracts".
-CTL_JSON_VERSION = 14
+from .wire_contracts import CTL_FORMAT, WIRE_VERSION, envelope
+
+CTL_JSON_VERSION = WIRE_VERSION
 
 # How long `cancel`/`takeover` stay alive for a failing `.sig` write to be retried before exiting —
 # the lease (60 s) is what a later recovery waits for anyway.
@@ -84,7 +70,7 @@ class _ArgumentParser(argparse.ArgumentParser):
 
     def error(self, message: str) -> None:
         if self.json_requested:
-            print(json.dumps({"v": CTL_JSON_VERSION, "error": {"code": "usage", "message": message}}))
+            print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "error": {"code": "usage", "message": message}})))
         print(f"{self.prog}: error: {message}", file=sys.stderr)
         raise SystemExit(2)
 
@@ -92,6 +78,8 @@ class _ArgumentParser(argparse.ArgumentParser):
 def _build_parser() -> tuple[_ArgumentParser, ...]:
     parser = _ArgumentParser(prog="harflow-ctl")
     sub = parser.add_subparsers(dest="command", required=True, parser_class=_ArgumentParser)
+    info = sub.add_parser("version-info", help="report side-effect-free Harflow v1 compatibility")
+    info.add_argument("--json", action="store_true")
 
     artifact_p = sub.add_parser('register-artifact', help='register an existing artifact metadata reference for the verified calling task', description='Register an artifact reference. Retry catalog-preparation errors to advance bounded caller indexing.')
     artifact_p.add_argument('path')
@@ -455,7 +443,7 @@ def _cmd_list(args: argparse.Namespace, parser: _ArgumentParser) -> int:
     except Exception as exc:
         return _fail(args, "workflow_read_refused", str(exc))
     if args.json:
-        print(json.dumps({"v": CTL_JSON_VERSION, "tasks": entries}))
+        print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "tasks": entries})))
     else:
         _print_table(entries)
     return 0
@@ -472,7 +460,7 @@ def _cmd_backends(args: argparse.Namespace) -> int:
         for backend in backends.BACKENDS.values()
     ]
     if args.json:
-        print(json.dumps({"v": CTL_JSON_VERSION, "backends": entries}))
+        print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "backends": entries})))
     else:
         for entry in entries:
             state = "installed" if entry["installed"] else "not found on PATH"
@@ -532,7 +520,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
         snapshot['recent_activity'] = read_recent(events_path(log_dir, task_id), limit=3)
         snapshot = brief_status(snapshot)
     if args.json:
-        print(json.dumps({"v": CTL_JSON_VERSION, "task": snapshot}))
+        print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "task": snapshot})))
     else:
         for key, value in snapshot.items():
             print(f"{key}: {value}")
@@ -577,7 +565,7 @@ def _cmd_status_batch(args: argparse.Namespace) -> int:
             errors[task_id] = {"code": exc.code, "message": exc.message}
 
     if args.json:
-        print(json.dumps({"v": CTL_JSON_VERSION, "tasks": tasks, "errors": errors}))
+        print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "tasks": tasks, "errors": errors})))
     else:
         for snapshot in tasks:
             print(f"{snapshot.get('task_id')}: {snapshot.get('status')}")
@@ -590,7 +578,7 @@ def _cmd_send(args: argparse.Namespace) -> int:
     def fail(code: str, message: str) -> int:
         print(f"harflow-ctl: error: {message}", file=sys.stderr)
         if args.json:
-            print(json.dumps({"v": CTL_JSON_VERSION, "error": {"code": code, "message": message}}))
+            print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "error": {"code": code, "message": message}})))
         return 1
 
     try:
@@ -617,7 +605,7 @@ def _cmd_send(args: argparse.Namespace) -> int:
         return fail(exc.code, str(exc))
 
     if args.json:
-        print(json.dumps({"v": CTL_JSON_VERSION, "result": result}))
+        print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": result})))
     elif result.get("delivery") == "next_continuation":
         print(f"queued {result['message_id']} for {task_id} (next continuation; nothing started or delivered)")
     else:
@@ -628,7 +616,7 @@ def _cmd_send(args: argparse.Namespace) -> int:
 def _fail(args: argparse.Namespace, code: str, message: str, data: Any = None) -> int:
     print(f"harflow-ctl: error: {message}", file=sys.stderr)
     if getattr(args, "json", False):
-        print(json.dumps({"v": CTL_JSON_VERSION, "error": {"code": code, "message": message, **({"data": data} if data is not None else {})}}))
+        print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "error": {"code": code, "message": message, **({"data": data} if data is not None else {})}})))
     return 1
 
 
@@ -671,7 +659,7 @@ def _cmd_cancel(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
     if args.json:
-        print(json.dumps({"v": CTL_JSON_VERSION, "result": result}))
+        print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": result})))
     else:
         print(f"{task_id}: {status}")
     return 0
@@ -692,7 +680,7 @@ def _cmd_takeover(args: argparse.Namespace) -> int:
     except control.TakeoverRefused as exc:
         return _fail(args, exc.code, str(exc))
     if args.json:
-        print(json.dumps({"v": CTL_JSON_VERSION, "result": result}))
+        print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": result})))
     else:
         print(f"cd {shlex.quote(result['cwd'])}")
         print(shlex.join(result["argv"]))
@@ -706,7 +694,7 @@ def _cmd_takeover_attach(args: argparse.Namespace) -> int:
     except control.TakeoverRefused as exc:
         return _fail(args, exc.code, str(exc))
     if args.json:
-        print(json.dumps({"v": CTL_JSON_VERSION, "result": result}))
+        print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": result})))
     else:
         print(f"attached pid {result['pid']} to the takeover of {result['task_id']}")
     return 0
@@ -810,7 +798,7 @@ def _cmd_detached(args: argparse.Namespace, action: Any) -> int:
     )
     if outcome.kind == "task":
         if args.json:
-            print(json.dumps({"v": CTL_JSON_VERSION, "result": outcome.payload}))
+            print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": outcome.payload})))
         else:
             print(outcome.payload["task_id"])
         return 0
@@ -822,7 +810,7 @@ def _cmd_detached(args: argparse.Namespace, action: Any) -> int:
         )
     print(f"harflow-ctl: {outcome.payload['message']}", file=sys.stderr)
     if args.json:
-        print(json.dumps({"v": CTL_JSON_VERSION, "unknown": outcome.payload}))
+        print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "unknown": outcome.payload})))
     return 3
 
 
@@ -982,12 +970,16 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
         return _fail(args, "workflow_error", str(exc), getattr(getattr(exc, "error", None), "data", None))
     from .read_metrics import span
     with span("serialization"):
-        output = json.dumps({"v": CTL_JSON_VERSION, "result": result}) if args.json else json.dumps(result, indent=2)
+        output = json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": result})) if args.json else json.dumps(result, indent=2)
     print(output)
     return 0
 
 
 def main(argv=None):
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] == "version-info":
+        from .cli import version_info_main
+        return version_info_main(arguments[1:])
     from .catalog import metadata_request
     with metadata_request():
         return _main(argv)
@@ -996,6 +988,9 @@ def main(argv=None):
 def _main(argv: list[str] | None = None) -> int:
     """Entry point for the `harflow-ctl` console script, which calls `sys.exit(main())`."""
     argv = sys.argv[1:] if argv is None else list(argv)
+    if argv and argv[0] == "version-info":
+        from .cli import version_info_main
+        return version_info_main(argv[1:])
     json_requested = "--json" in argv
 
     parsers = _build_parser()
@@ -1028,7 +1023,7 @@ def _main(argv: list[str] | None = None) -> int:
             result = asyncio.run(approval_action())
         except Exception as exc:
             return _fail(args, "approval_error", str(exc))
-        print(json.dumps({"v": CTL_JSON_VERSION, "result": result}) if args.json else json.dumps(result, indent=2))
+        print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": result})) if args.json else json.dumps(result, indent=2))
         return 0
 
     if args.command == 'workflow-notifications':
@@ -1040,7 +1035,7 @@ def _main(argv: list[str] | None = None) -> int:
             result = status(default_log_dir(), args.workflow_run_id)
         except (OSError, ValueError) as exc:
             return _fail(args, 'notification_error', str(exc))
-        print(json.dumps({'v': CTL_JSON_VERSION, 'result': result}) if args.json else json.dumps(result, indent=2))
+        print(json.dumps(envelope(CTL_FORMAT, {'v': CTL_JSON_VERSION, 'result': result})) if args.json else json.dumps(result, indent=2))
         return 0
 
     if args.command in ('register-artifact', 'task-artifacts'):
@@ -1051,7 +1046,7 @@ def _main(argv: list[str] | None = None) -> int:
                       artifacts.get(default_log_dir(), args.task_id, args.cursor, args.limit))
         except (OSError, ValueError, KeyError, TypeError) as exc:
             return _fail(args, 'artifact_error', str(exc))
-        print(json.dumps({'v': CTL_JSON_VERSION, 'result': result}) if args.json else json.dumps(result, indent=2))
+        print(json.dumps(envelope(CTL_FORMAT, {'v': CTL_JSON_VERSION, 'result': result})) if args.json else json.dumps(result, indent=2))
         return 0
 
     if args.command == "permission-preview":
@@ -1067,7 +1062,7 @@ def _main(argv: list[str] | None = None) -> int:
             ))
         except Exception as exc:
             return _fail(args, "invalid_params", str(exc))
-        print(json.dumps({"v": CTL_JSON_VERSION, "result": result}) if args.json else json.dumps(result, indent=2))
+        print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": result})) if args.json else json.dumps(result, indent=2))
         return 0
 
     if args.command == "mcp-allowlist":
@@ -1079,7 +1074,7 @@ def _main(argv: list[str] | None = None) -> int:
                 if refusal is not None:
                     return _fail(args, "human_only", "Only a verified human may change global MCP approval rules: " + refusal[1])
             result = mcp_allowlist.edit(args.backend, allow=args.allow, remove=args.remove)
-            print(json.dumps({"v": CTL_JSON_VERSION, "result": result}) if args.json else result["detail"])
+            print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": result})) if args.json else result["detail"])
             return 0
         except (ValueError, OSError, TypeError, AttributeError) as exc:
             return _fail(args, "allowlist_error", str(exc))
@@ -1099,7 +1094,7 @@ def _main(argv: list[str] | None = None) -> int:
                 if managed is not None:
                     raise ValueError('Compact task listing is available only to direct callers; managed callers should use task-list-page --task-ids with known task IDs or status reads.')
                 result = list_tasks(default_log_dir(), limit=args.limit, cursor=args.cursor, fields=args.fields.split(',') if args.fields else None, **{key: getattr(args, key) for key in ('group', 'title_contains', 'repo', 'status', 'backend', 'since')})
-            print(json.dumps({'v': CTL_JSON_VERSION, 'result': result}) if args.json else json.dumps(result, indent=2))
+            print(json.dumps(envelope(CTL_FORMAT, {'v': CTL_JSON_VERSION, 'result': result})) if args.json else json.dumps(result, indent=2))
             return 0
         except (ValueError, OSError) as exc:
             return _fail(args, 'invalid_params', str(exc))
@@ -1110,7 +1105,7 @@ def _main(argv: list[str] | None = None) -> int:
             if not ready:
                 from .workflow_inspection import page_indexing_response
                 result = page_indexing_response(default_log_dir())
-                print(json.dumps({'v': CTL_JSON_VERSION, 'result': result}) if args.json else json.dumps(result, indent=2))
+                print(json.dumps(envelope(CTL_FORMAT, {'v': CTL_JSON_VERSION, 'result': result})) if args.json else json.dumps(result, indent=2))
                 return 0
             result = store.list_page(default_log_dir(), limit=args.limit, cursor=args.cursor, active_only=args.active_only, session_id=args.session_id, task_ids=args.task_ids.split(',') if args.task_ids is not None else None)
             result['items'] = filter_task_reads(result['items'], managed)
@@ -1120,7 +1115,7 @@ def _main(argv: list[str] | None = None) -> int:
                 result.pop('total_active_root_count', None)
                 result.pop('total_attention_root_count', None)
                 result.update(next_cursor=None, has_more=False)
-            print(json.dumps({'v': CTL_JSON_VERSION, 'result': result}) if args.json else json.dumps(result, indent=2))
+            print(json.dumps(envelope(CTL_FORMAT, {'v': CTL_JSON_VERSION, 'result': result})) if args.json else json.dumps(result, indent=2))
             return 0
         except (ValueError, OSError) as exc:
             return _fail(args, 'invalid_params', str(exc))

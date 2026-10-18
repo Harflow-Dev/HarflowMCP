@@ -41,12 +41,36 @@ async def test_cancelled_waiter_returns_exactly_one_permit(after_handoff):
     await asyncio.sleep(0)
     if after_handoff:
         slots.release()
-    waiter.cancel()
-    with pytest.raises(asyncio.CancelledError):
+    cancellation_requested = waiter.cancel()
+    assert cancellation_requested is True
+    assert waiter.cancelling() >= 1
+    completed = False
+    try:
         await waiter
-    if not after_handoff:
+    except asyncio.CancelledError:
+        # If cancellation is delivered before the handoff resumes the waiter,
+        # TreeSlots must return the handed-off permit in its cleanup path.
+        pass
+    else:
+        # Python 3.11 can resume the already-completed shield before delivering
+        # cancellation. In that legitimate race the waiter owns the permit.
+        completed = True
+        slots.release()
+    if not after_handoff and not completed:
         slots.release()
     await asyncio.wait_for(slots.acquire(lambda: True), 1)
+    assert slots.free == 0 and not slots.waiters
+    slots.release()
+    assert slots.free == 1
+
+
+async def test_handoff_completes_waiter_and_transfers_exactly_one_permit():
+    slots = TreeSlots(1)
+    await slots.acquire(lambda: True)
+    waiter = asyncio.create_task(slots.acquire(lambda: True))
+    await asyncio.sleep(0)
+    slots.release()
+    assert await waiter is None
     assert slots.free == 0 and not slots.waiters
     slots.release()
     assert slots.free == 1

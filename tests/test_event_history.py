@@ -7,8 +7,19 @@ from harflow_mcp import event_history as history
 from harflow_mcp.events import PAGE_BUDGET_BYTES
 
 
+def event_json(value):
+    """Construct an explicit current event fixture; raw negatives stay raw."""
+    return json.dumps({
+        "product": "harflow",
+        "format": "harflow.event",
+        "v": 1,
+        "product_version": "1.0.0",
+        **value,
+    })
+
+
 def write(path, count=250, text="hello"):
-    path.write_bytes(b"".join((json.dumps({"seq": i, "kind": "assistant_text", "text": text}) + "\n").encode()
+    path.write_bytes(b"".join((event_json({"seq": i, "kind": "assistant_text", "text": text}) + "\n").encode()
                             for i in range(count)))
 
 
@@ -33,7 +44,7 @@ def test_three_pages_live_insert_and_deduplication(tmp_path):
     first = history.read_cursor_page(path)
     assert [e['seq'] for e in first.events] == list(range(150, 250))
     with path.open('ab') as handle:
-        handle.write(b'{"seq":250,"kind":"assistant_text","text":"new"}\n')
+        handle.write((event_json({"seq": 250, "kind": "assistant_text", "text": "new"}) + "\n").encode())
     second = history.read_cursor_page(path, cursor=first.next_cursor)
     third = history.read_cursor_page(path, cursor=second.next_cursor)
     assert [e['seq'] for e in second.events] == list(range(50, 150))
@@ -64,9 +75,9 @@ def test_partial_final_line_and_page_boundary_tool_pair(tmp_path):
     path = tmp_path / 'events'
     write(path, 101)
     with path.open('ab') as handle:
-        handle.write(b'{"seq":101,"kind":"tool_call","call_id":"pair"}\n')
+        handle.write((event_json({"seq": 101, "kind": "tool_call", "call_id": "pair"}) + "\n").encode())
         offset = handle.tell()
-        handle.write(b'{"seq":102,"kind":"tool_result","call_id":"pair"')
+        handle.write(event_json({"seq": 102, "kind": "tool_result", "call_id": "pair"})[:-1].encode())
     first = history.read_cursor_page(path, limit=1)
     assert first.events[0]['kind'] == 'tool_call' and first.live_offset == offset
     second = history.read_cursor_page(path, cursor=first.next_cursor, limit=1)
@@ -113,9 +124,10 @@ def test_large_fixture_bounded_reads_decodes_and_serialized_bytes(tmp_path, monk
 
 def test_oversized_invalid_and_filtered_windows_keep_progress(tmp_path):
     path = tmp_path / 'events'
-    path.write_bytes(b'{"seq":0,"kind":"notice","text":"old"}\n' + b'x' * (history.SCAN_BYTES * 3) + b'\n'
+    path.write_bytes((event_json({"seq": 0, "kind": "notice", "text": "old"}) + "\n").encode()
+                     + b'x' * (history.SCAN_BYTES * 3) + b'\n'
                      + b'{"seq":1,"kind":{},"text":"invalid"}\n'
-                     + b'{"seq":2,"kind":"assistant_text","text":"new"}\n')
+                     + (event_json({"seq": 2, "kind": "assistant_text", "text": "new"}) + "\n").encode())
     pages = all_pages(path, kinds=['notice'])
     assert [e['seq'] for p in reversed(pages) for e in p.events] == [0]
     assert any(not p.events and p.has_more for p in pages)
@@ -143,9 +155,42 @@ def test_filter_change_requires_deliberate_reset(tmp_path):
 def test_unreadable_missing_and_hostile_envelope(tmp_path):
     path = tmp_path / 'events'
     assert not history.read_cursor_page(path).has_more
-    path.write_text(json.dumps({'seq': 0, 'kind': 'notice', 'observed_at': 'x' * 500000}) + '\n')
+    path.write_text(event_json({'seq': 0, 'kind': 'notice', 'observed_at': 'x' * 500000}) + '\n')
     page = history.read_cursor_page(path)
-    assert page.events == [{'seq': 0, 'kind': 'notice', 'observed_at': None}]
+    assert page.events == [{
+        'seq': 0, 'kind': 'notice', 'observed_at': None,
+        'product': 'harflow', 'format': 'harflow.event', 'v': 1,
+        'product_version': '1.0.0',
+    }]
+
+
+def test_cursor_projection_retains_envelope_and_writer_provenance(tmp_path):
+    path = tmp_path / 'events'
+    path.write_text(event_json({
+        'seq': 0, 'kind': 'assistant_text', 'text': 'historical',
+        'product_version': '1.0.7',
+    }) + '\n')
+    page = history.read_cursor_page(path)
+    assert page.events == [{
+        'seq': 0, 'kind': 'assistant_text', 'text': 'historical', 'observed_at': None,
+        'product': 'harflow', 'format': 'harflow.event', 'v': 1,
+        'product_version': '1.0.7',
+    }]
+
+
+def test_cursor_oversized_stub_retains_envelope_and_budget(tmp_path):
+    path = tmp_path / 'events'
+    path.write_text(event_json({
+        'seq': 0, 'kind': 'assistant_text',
+        'metadata': {f'key-{index}': 'value' for index in range(5000)},
+        'product_version': '1.0.8',
+    }) + '\n')
+    page = history.read_cursor_page(path)
+    event = page.events[0]
+    assert event['product'] == 'harflow' and event['format'] == 'harflow.event'
+    assert event['v'] == 1 and event['product_version'] == '1.0.8'
+    assert event['oversized'] is True and event['truncated'] is True
+    assert len(json.dumps(page.events, ensure_ascii=False).encode()) <= PAGE_BUDGET_BYTES
 
 
 async def test_server_page_indexing_discloses_no_records(monkeypatch):

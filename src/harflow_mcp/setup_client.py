@@ -25,6 +25,7 @@ import sys
 from pathlib import Path
 
 from . import backends, clients
+from .wire_contracts import SETUP_FORMAT, WIRE_VERSION, envelope
 
 SERVER_KEY = "harflow"
 SERVER_COMMAND = "harflow-server"
@@ -40,7 +41,7 @@ BASE_PATH_DIRS = (
 )
 
 # Bumped only when the `--json` document changes shape; the Mac app reads this.
-JSON_VERSION = 1
+JSON_VERSION = WIRE_VERSION
 
 SetupError = clients.SetupError
 
@@ -205,7 +206,7 @@ def json_document(
                 "notes": notes,
             }
         )
-    return {"v": JSON_VERSION, "server_path": server_path, "clients": rows}
+    return envelope(SETUP_FORMAT, {"server_path": server_path, "clients": rows})
 
 
 def _print_json(document: dict) -> None:
@@ -240,8 +241,29 @@ def _uninstall(args: argparse.Namespace, selected: list[clients.Client]) -> int:
     return clients.uninstall_exit_code(results)
 
 
+class _SetupArgumentParser(argparse.ArgumentParser):
+    json_requested = False
+
+    def error(self, message: str) -> None:
+        if self.json_requested:
+            _print_json(envelope(SETUP_FORMAT, {"error": {"code": "usage", "message": message}}))
+        print(f"{self.prog}: error: {message}", file=sys.stderr)
+        raise SystemExit(2)
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    try:
+        return _main(arguments)
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        if "--json" in arguments:
+            _print_json(envelope(SETUP_FORMAT, {"error": {"code": "setup_error", "message": str(exc)}}))
+        return 1
+
+
+def _main(argv: list[str]) -> int:
+    parser = _SetupArgumentParser(
         prog="harflow-setup",
         description="Register HarflowMCP with the Claude desktop app and each agent CLI found.",
     )
@@ -280,8 +302,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--json",
         action="store_true",
-        help=f"print one JSON document (version {JSON_VERSION}) instead of the table",
+        help="print one Harflow setup v1 document, including usage/setup_error envelopes",
     )
+    parser.json_requested = "--json" in argv
     args = parser.parse_args(argv)
 
     # Rejected with --uninstall too: there is no removal preview, and a dry run that quietly
@@ -291,9 +314,8 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         selected = _selected(args)
-    except (SetupError, clients.UnknownClient) as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
+    except (SetupError, clients.UnknownClient):
+        raise
 
     if args.status:
         return _status(args, selected)
@@ -302,9 +324,8 @@ def main(argv: list[str] | None = None) -> int:
         from .tasks import default_log_dir
         try:
             require_mutation(default_log_dir())
-        except ValueError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 1
+        except ValueError:
+            raise
     if args.uninstall:
         return _uninstall(args, selected)
     return _install(args, selected)
@@ -313,20 +334,8 @@ def main(argv: list[str] | None = None) -> int:
 def _install(args: argparse.Namespace, selected: list[clients.Client]) -> int:
     try:
         registration = build_registration()
-    except SetupError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        if args.json:
-            # The Mac app parses stdout, so a run that got past argument checking always yields
-            # the document — here with every selected client failed and nothing attempted.
-            reason = str(exc).splitlines()[0]
-            failed = [
-                clients.Result(client.key, "failed", f"nothing was attempted: {reason}")
-                for client in selected
-            ]
-            _print_json(
-                json_document(None, None, clients.inspect_all(selected, SERVER_KEY), failed)
-            )
-        return 1
+    except SetupError:
+        raise
 
     # With --json, stdout carries the document and nothing else; the warnings below go to stderr.
     if not args.json:

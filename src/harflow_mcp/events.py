@@ -19,11 +19,12 @@ from pathlib import Path
 from typing import Any
 
 from . import store
+from .wire_contracts import COMMON_FIELDS, EVENT_FORMAT, WIRE_VERSION, envelope as wire_envelope, validate_envelope
 
 log = logging.getLogger(__name__)
 
 EVENTS_SUFFIX = ".events.jsonl"
-EVENT_LOG_VERSION = 1
+EVENT_LOG_VERSION = WIRE_VERSION
 
 # Constants for bounded reading
 MAX_LINE_BYTES = 1_000_000  # 1 MiB - lines larger than this are skipped
@@ -126,15 +127,14 @@ class EventLog:
             raise UnknownEventKind(f"{kind!r} is not a v1 event kind; see events.EVENT_KINDS")
         if self._handle is None:
             return False
-        envelope: dict[str, Any] = {
-            "v": EVENT_LOG_VERSION,
+        envelope: dict[str, Any] = wire_envelope(EVENT_FORMAT, {
             "seq": self._seq,
             "observed_at": _now_iso(),
             "source_ts": source_ts,
             "raw_offset": raw_offset,
             "task_id": self._task_id,
             "kind": kind,
-        }
+        })
         envelope.update((key, value) for key, value in fields.items() if key not in envelope)
         try:
             line = json.dumps(envelope, ensure_ascii=False, default=str)
@@ -237,6 +237,10 @@ def _parse_event_line(line_bytes: bytes) -> dict[str, Any] | None:
     if not isinstance(event, dict):
         return None
     if "seq" not in event or "kind" not in event:
+        return None
+    try:
+        validate_envelope(event, EVENT_FORMAT, live=False)
+    except ValueError:
         return None
 
     return event
@@ -547,12 +551,13 @@ def read_page(
         data_fields = {
             k: v
             for k, v in event.items()
-            if k not in ("v", "seq", "observed_at", "source_ts", "raw_offset", "task_id", "kind")
+            if k not in COMMON_FIELDS and k not in ("seq", "observed_at", "source_ts", "raw_offset", "task_id", "kind")
         }
         truncated_data, was_truncated = _truncate_value(data_fields)
         if was_truncated:
             output_event["truncated"] = True
         output_event.update(truncated_data)
+        output_event = wire_envelope(EVENT_FORMAT, output_event, product_version=event["product_version"])
         size = len(json.dumps(output_event, ensure_ascii=False, default=str).encode("utf-8"))
         if size > EVENT_MAX_BYTES:
             output_event = {
@@ -563,6 +568,7 @@ def read_page(
                 "oversized": True,
                 "bytes": size,
             }
+            output_event = wire_envelope(EVENT_FORMAT, output_event, product_version=event["product_version"])
             size = len(json.dumps(output_event, default=str).encode("utf-8"))
         if final_events and page_size + size >= PAGE_BUDGET_BYTES:
             break

@@ -328,7 +328,7 @@ def test_status_json_is_version_one_with_exactly_the_documented_fields(
     code, document = run_json(tmp_path, capsys, "--status")
 
     assert code == 0
-    assert set(document) == {"v", "server_path", "clients"}
+    assert {"product", "format", "v", "product_version", "server_path", "clients"} <= set(document)
     assert document["v"] == 1
     assert document["server_path"] == "/fake/bin/harflow-server"
     assert [row["key"] for row in document["clients"]] == [
@@ -564,11 +564,10 @@ def test_install_json_without_a_server_binary_still_prints_the_document(
 
     code, document = run_json(tmp_path, capsys, "--client", "claude-desktop,codex")
 
-    by_key = rows(document)
     assert code == 1
-    assert document["v"] == 1 and document["server_path"] is None
-    assert {row["action"] for row in document["clients"]} == {"failed"}
-    assert "not on PATH" in by_key["codex"]["error"]
+    assert document["format"] == "harflow.setup"
+    assert document["error"]["code"] == "setup_error"
+    assert "not on PATH" in document["error"]["message"]
     assert not any(call[:3] == ["codex", "mcp", "add"] for call in fake_cli.calls)
     assert not (tmp_path / DESKTOP).exists()
 

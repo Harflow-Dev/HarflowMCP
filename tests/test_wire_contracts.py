@@ -1,0 +1,109 @@
+"""Phase 3.1 public wire contract regressions."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from harflow_mcp import events
+from harflow_mcp.wire_contracts import (
+    EVENT_FORMAT,
+    MAX_VERSION_COMPONENT,
+    compatible_line,
+    parse_version,
+    validate_envelope,
+)
+
+
+def test_version_parser_rejects_bool_float_overflow_prerelease_and_long_metadata():
+    for value in (True, 1.0, f"1.0.{MAX_VERSION_COMPONENT + 1}", "1.0.0-alpha", "1.0.0+" + "x" * 256):
+        with pytest.raises(ValueError):
+            parse_version(value)
+
+
+@pytest.mark.parametrize("actual, expected", [("1.2.0", "1.2.7"), ("1.2.7", "1.2.0")])
+def test_compatibility_accepts_patch_differences_in_both_directions(actual, expected):
+    assert compatible_line(actual, expected)
+
+
+def test_event_provenance_accepts_historical_release_line_but_rejects_foreign_complete_line(tmp_path):
+    historical = {"product": "harflow", "format": EVENT_FORMAT, "v": 1, "product_version": "1.1.0", "seq": 1, "kind": "notice", "text": "old"}
+    foreign = {**historical, "product": "other"}
+    path = tmp_path / "events.jsonl"
+    path.write_text(json.dumps(foreign) + "\n" + json.dumps(historical) + "\n" + '{"product":"harflow"')
+    result = events.read_page(path, limit=10)
+    assert [item["text"] for item in result.events] == ["old"]
+
+
+def test_canonical_fixture_manifest_digest_matches_bytes():
+    root = Path(__file__).parents[1] / "contracts" / "v1"
+    manifest = json.loads((root / "manifest.json").read_text())
+    digest = hashlib.sha256((root / "manifest.json").read_bytes()).hexdigest()
+    expected = (root / "manifest.sha256").read_text().split()[0]
+    assert digest == expected
+    assert set(manifest["files"]) == set(manifest["cases"])
+    for name, expected_hash in manifest["files"].items():
+        path = root / name
+        assert path.is_file()
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == expected_hash
+
+
+def test_manifest_cases_reach_the_wire_validator():
+    root = Path(__file__).parents[1] / "contracts" / "v1"
+    manifest = json.loads((root / "manifest.json").read_text())
+    for name, case in manifest["cases"].items():
+        documents = [json.loads(line) for line in (root / name).read_text().splitlines() if line.strip()]
+        for document in documents:
+            live = case["format"] != EVENT_FORMAT
+            if case["valid"]:
+                validate_envelope(document, case["format"], live=live, expected_version=case["expected_product_version"])
+            elif name == "invalid-ctl-inner-event.json":
+                validate_envelope(document, case["format"], live=True)
+                with pytest.raises(ValueError):
+                    validate_envelope(document["result"]["events"][0], EVENT_FORMAT, live=False)
+            elif name == "invalid-missing-capabilities.json":
+                validate_envelope(document, case["format"], live=True)
+                required = {"ctl.v1", "setup.v1", "events.v1", "version-info.v1"}
+                assert not required.issubset(set(document.get("capabilities", [])))
+            else:
+                with pytest.raises(ValueError):
+                    validate_envelope(document, case["format"], live=live, expected_version=case["expected_product_version"])
+
+
+def test_event_validation_requires_current_identity_before_payload_interpretation():
+    for wire_version in (True, 1.0):
+        with pytest.raises(ValueError):
+            validate_envelope({"product": "harflow", "format": EVENT_FORMAT, "v": wire_version, "product_version": "1.0.0", "seq": 1, "kind": "notice"}, EVENT_FORMAT, live=False)
+    with pytest.raises(ValueError):
+        validate_envelope({"v": 1, "seq": 1, "kind": "notice"}, EVENT_FORMAT, live=False)
+
+
+def test_version_info_uses_the_same_effective_home_as_path_home_without_state(tmp_path):
+    entrypoint = Path(sys.executable).with_name("harflow-ctl")
+    assert entrypoint.is_file()
+    for home in (str(tmp_path / "normal"), str(tmp_path / "a" / ".." / "b") + "//", ""):
+        env = dict(os.environ)
+        env.pop("HOME", None)
+        if home != "":
+            env["HOME"] = home
+        control = subprocess.check_output(
+            [sys.executable, "-c", "from pathlib import Path; print(Path.home())"],
+            env=env,
+            text=True,
+        ).strip()
+        state_path = Path(control) / ".harflow"
+        existed_before = state_path.exists()
+        result = subprocess.run(
+            [str(entrypoint), "version-info", "--json"], env=env,
+            text=True, capture_output=True, check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        document = json.loads(result.stdout)
+        assert document["state_root"] == os.path.abspath(os.path.join(control, ".harflow"))
+        assert state_path.exists() is existed_before

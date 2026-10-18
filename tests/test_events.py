@@ -403,7 +403,7 @@ def test_envelope_keys_lead_each_line_and_win_over_colliding_fields(tmp_path: Pa
     log.close()
 
     entry = json.loads((tmp_path / "t.events.jsonl").read_text())
-    assert list(entry)[:7] == ["v", "seq", "observed_at", "source_ts", "raw_offset", "task_id", "kind"]
+    assert list(entry)[:7] == ["seq", "observed_at", "source_ts", "raw_offset", "task_id", "kind", "product"]
     assert (entry["seq"], entry["kind"], entry["raw_offset"], entry["text"]) == (0, "notice", 7, "hi")
 
 
@@ -523,6 +523,16 @@ def test_no_backend_names_an_unlisted_kind_outside_the_normalize_helpers() -> No
 # --- Tests for bounded readers (read_recent, read_page) and formatter -------------------------
 
 
+def event_json(value: dict) -> str:
+    return json.dumps({
+        "product": "harflow",
+        "format": "harflow.event",
+        "v": 1,
+        "product_version": "1.0.0",
+        **value,
+    })
+
+
 def _write_events_file(path: Path, lines: list[str]) -> None:
     """Helper to write test events to a file."""
     path.write_text("\n".join(lines) + "\n")
@@ -549,7 +559,7 @@ class TestReadRecent:
         _write_events_file(
             path,
             [
-                json.dumps(
+                event_json(
                     {
                         "v": 1,
                         "seq": 0,
@@ -558,7 +568,7 @@ class TestReadRecent:
                         "backend": "claude",
                     }
                 ),
-                json.dumps(
+                event_json(
                     {
                         "v": 1,
                         "seq": 1,
@@ -569,7 +579,7 @@ class TestReadRecent:
                         "input_preview": "echo hello",
                     }
                 ),
-                json.dumps(
+                event_json(
                     {
                         "v": 1,
                         "seq": 2,
@@ -591,7 +601,7 @@ class TestReadRecent:
         lines = []
         for i in range(10):
             lines.append(
-                json.dumps(
+                event_json(
                     {
                         "v": 1,
                         "seq": i,
@@ -612,9 +622,9 @@ class TestReadRecent:
         _write_events_file(
             path,
             [
-                json.dumps({"v": 1, "seq": 0, "kind": "task_started", "task_id": "t1"}),
-                json.dumps({"v": 1, "seq": 1, "kind": "usage", "task_id": "t1"}),
-                json.dumps(
+                event_json({"v": 1, "seq": 0, "kind": "task_started", "task_id": "t1"}),
+                event_json({"v": 1, "seq": 1, "kind": "usage", "task_id": "t1"}),
+                event_json(
                     {
                         "v": 1,
                         "seq": 2,
@@ -623,7 +633,7 @@ class TestReadRecent:
                         "text": "chunk",
                     }
                 ),
-                json.dumps(
+                event_json(
                     {
                         "v": 1,
                         "seq": 3,
@@ -632,7 +642,7 @@ class TestReadRecent:
                         "text": "done",
                     }
                 ),
-                json.dumps(
+                event_json(
                     {"v": 1, "seq": 4, "kind": "task_finished", "task_id": "t1"}
                 ),
             ],
@@ -647,11 +657,11 @@ class TestReadRecent:
         _write_events_file(
             path,
             [
-                json.dumps(
+                event_json(
                     {"v": 1, "seq": 0, "kind": "tool_call", "task_id": "t1", "tool": "a"}
                 ),
                 "not valid json",
-                json.dumps(
+                event_json(
                     {"v": 1, "seq": 1, "kind": "tool_call", "task_id": "t1", "tool": "b"}
                 ),
             ],
@@ -663,9 +673,9 @@ class TestReadRecent:
         """A trailing partial line (no newline) is dropped."""
         path = tmp_path / "test.events.jsonl"
         path.write_text(
-            json.dumps({"v": 1, "seq": 0, "kind": "tool_call", "task_id": "t1", "tool": "a"})
+            event_json({"v": 1, "seq": 0, "kind": "tool_call", "task_id": "t1", "tool": "a"})
             + "\n"  # complete line
-            + json.dumps(
+            + event_json(
                 {"v": 1, "seq": 1, "kind": "tool_call", "task_id": "t1", "tool": "b"}
             )[:50]  # partial line
         )
@@ -679,7 +689,7 @@ class TestReadRecent:
         _write_events_file(
             path,
             [
-                json.dumps(
+                event_json(
                     {
                         "v": 1,
                         "seq": 0,
@@ -701,7 +711,7 @@ class TestReadRecent:
         _write_events_file(
             path,
             [
-                json.dumps(
+                event_json(
                     {
                         "v": 1,
                         "seq": 0,
@@ -711,7 +721,7 @@ class TestReadRecent:
                         "tool": "Bash",
                     }
                 ),
-                json.dumps(
+                event_json(
                     {
                         "v": 1,
                         "seq": 1,
@@ -750,9 +760,9 @@ class TestReadPage:
         _write_events_file(
             path,
             [
-                json.dumps({"v": 1, "seq": 0, "kind": "tool_call", "task_id": "t1"}),
-                json.dumps({"v": 1, "seq": 1, "kind": "tool_call", "task_id": "t1"}),
-                json.dumps({"v": 1, "seq": 2, "kind": "tool_call", "task_id": "t1"}),
+                event_json({"v": 1, "seq": 0, "kind": "tool_call", "task_id": "t1"}),
+                event_json({"v": 1, "seq": 1, "kind": "tool_call", "task_id": "t1"}),
+                event_json({"v": 1, "seq": 2, "kind": "tool_call", "task_id": "t1"}),
             ],
         )
         result = events_module.read_page(path, limit=50)
@@ -762,7 +772,7 @@ class TestReadPage:
         path = tmp_path / "test.events.jsonl"
         lines = []
         for i in range(10):
-            lines.append(json.dumps({"v": 1, "seq": i, "kind": "tool_call", "task_id": "t1"}))
+            lines.append(event_json({"v": 1, "seq": i, "kind": "tool_call", "task_id": "t1"}))
         _write_events_file(path, lines)
         result = events_module.read_page(path, limit=5)
         assert len(result.events) == 5
@@ -773,7 +783,7 @@ class TestReadPage:
         path = tmp_path / "test.events.jsonl"
         lines = []
         for i in range(10):
-            lines.append(json.dumps({"v": 1, "seq": i, "kind": "tool_call", "task_id": "t1"}))
+            lines.append(event_json({"v": 1, "seq": i, "kind": "tool_call", "task_id": "t1"}))
         _write_events_file(path, lines)
         result = events_module.read_page(path, limit=50, before_seq=5)
         assert [e["seq"] for e in result.events] == [0, 1, 2, 3, 4]
@@ -782,7 +792,7 @@ class TestReadPage:
         path = tmp_path / "test.events.jsonl"
         lines = []
         for i in range(10):
-            lines.append(json.dumps({"v": 1, "seq": i, "kind": "tool_call", "task_id": "t1"}))
+            lines.append(event_json({"v": 1, "seq": i, "kind": "tool_call", "task_id": "t1"}))
         _write_events_file(path, lines)
         result = events_module.read_page(path, limit=50, after_seq=5)
         assert [e["seq"] for e in result.events] == [6, 7, 8, 9]
@@ -798,13 +808,13 @@ class TestReadPage:
         _write_events_file(
             path,
             [
-                json.dumps(
+                event_json(
                     {"v": 1, "seq": 0, "kind": "tool_call", "task_id": "t1", "tool": "a"}
                 ),
-                json.dumps(
+                event_json(
                     {"v": 1, "seq": 1, "kind": "assistant_text", "task_id": "t1", "text": "hi"}
                 ),
-                json.dumps(
+                event_json(
                     {"v": 1, "seq": 2, "kind": "tool_call", "task_id": "t1", "tool": "b"}
                 ),
             ],
@@ -835,7 +845,7 @@ class TestReadPage:
         _write_events_file(
             path,
             [
-                json.dumps(
+                event_json(
                     {
                         "v": 1,
                         "seq": 0,
@@ -844,7 +854,7 @@ class TestReadPage:
                         "text": "chunk",
                     }
                 ),
-                json.dumps(
+                event_json(
                     {"v": 1, "seq": 1, "kind": "assistant_text", "task_id": "t1", "text": "done"}
                 ),
             ],
@@ -858,7 +868,7 @@ class TestReadPage:
         _write_events_file(
             path,
             [
-                json.dumps(
+                event_json(
                     {
                         "v": 1,
                         "seq": 0,
@@ -877,7 +887,7 @@ class TestReadPage:
         path = tmp_path / "test.events.jsonl"
         lines = []
         for i in range(10):
-            lines.append(json.dumps({"v": 1, "seq": i, "kind": "tool_call", "task_id": "t1"}))
+            lines.append(event_json({"v": 1, "seq": i, "kind": "tool_call", "task_id": "t1"}))
         _write_events_file(path, lines)
         result = events_module.read_page(path, limit=5, after_seq=2)
         # Both cursors are set - next_before_seq is oldest in page, next_after_seq is newest
@@ -888,7 +898,7 @@ class TestReadPage:
         path = tmp_path / "test.events.jsonl"
         lines = []
         for i in range(10):
-            lines.append(json.dumps({"v": 1, "seq": i, "kind": "tool_call", "task_id": "t1"}))
+            lines.append(event_json({"v": 1, "seq": i, "kind": "tool_call", "task_id": "t1"}))
         _write_events_file(path, lines)
         result = events_module.read_page(path, limit=5)
         assert result.has_more is True
@@ -901,7 +911,7 @@ class TestReadPage:
         _write_events_file(
             path,
             [
-                json.dumps(
+                event_json(
                     {
                         "v": 1,
                         "seq": 0,
@@ -920,7 +930,7 @@ class TestReadPage:
     def test_skips_oversized_lines(self, tmp_path: Path) -> None:
         path = tmp_path / "test.events.jsonl"
         # Create a line > 1 MiB
-        huge_line = json.dumps(
+        huge_line = event_json(
             {"v": 1, "seq": 0, "kind": "tool_call", "task_id": "t1", "tool": "x" * 200000}
         )
         # Make it > 1 MiB
@@ -929,9 +939,9 @@ class TestReadPage:
         _write_events_file(
             path,
             [
-                json.dumps({"v": 1, "seq": 0, "kind": "tool_call", "task_id": "t1", "tool": "a"}),
+                event_json({"v": 1, "seq": 0, "kind": "tool_call", "task_id": "t1", "tool": "a"}),
                 huge_line,
-                json.dumps({"v": 1, "seq": 1, "kind": "tool_call", "task_id": "t1", "tool": "b"}),
+                event_json({"v": 1, "seq": 1, "kind": "tool_call", "task_id": "t1", "tool": "b"}),
             ],
         )
         result = events_module.read_page(path, limit=50)
@@ -945,7 +955,16 @@ class TestReadPage:
 
 
 def _line(seq: int, kind: str, **fields) -> str:
-    return json.dumps({"v": 1, "seq": seq, "observed_at": f"t{seq}", "kind": kind, **fields})
+    return json.dumps({
+        "product": "harflow",
+        "format": "harflow.event",
+        "v": 1,
+        "product_version": "1.0.0",
+        "seq": seq,
+        "observed_at": f"t{seq}",
+        "kind": kind,
+        **fields,
+    })
 
 
 def test_read_recent_returns_the_newest_entries_not_the_oldest(tmp_path: Path) -> None:
@@ -1027,10 +1046,10 @@ def test_read_page_budget_keeps_the_newest_events_reachable(
 
     page = events_module.read_page(path, limit=10)
 
-    assert [e["seq"] for e in page.events] == [7, 8, 9]
+    assert [e["seq"] for e in page.events] == [8, 9]
     assert page.has_more is True
     older = events_module.read_page(path, limit=10, before_seq=page.next_before_seq)
-    assert [e["seq"] for e in older.events] == [4, 5, 6]
+    assert [e["seq"] for e in older.events] == [6, 7]
 
 
 def test_read_page_budget_keeps_the_oldest_when_paging_forward(
@@ -1042,7 +1061,7 @@ def test_read_page_budget_keeps_the_oldest_when_paging_forward(
 
     page = events_module.read_page(path, limit=10, after_seq=2)
 
-    assert [e["seq"] for e in page.events] == [3, 4, 5]
+    assert [e["seq"] for e in page.events] == [3, 4]
     assert page.has_more is True
 
 
@@ -1051,7 +1070,8 @@ def test_read_page_keeps_each_events_timestamp(tmp_path: Path) -> None:
     _write_events_file(path, [_line(1, "notice", text="hi")])
 
     assert events_module.read_page(path, limit=5).events == [
-        {"seq": 1, "kind": "notice", "observed_at": "t1", "text": "hi"}
+        {"seq": 1, "kind": "notice", "observed_at": "t1", "text": "hi",
+         "product": "harflow", "format": "harflow.event", "v": 1, "product_version": "1.0.0"}
     ]
 
 

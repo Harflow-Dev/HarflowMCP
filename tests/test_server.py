@@ -32,6 +32,17 @@ async def call(tool: str, **arguments):
     raise error
 
 
+def event_json(payload: dict) -> str:
+    """Author an explicit current event envelope for producer-style fixtures."""
+    return json.dumps({
+        "product": "harflow",
+        "format": "harflow.event",
+        "v": 1,
+        "product_version": "1.0.0",
+        **payload,
+    })
+
+
 @pytest.fixture
 def fake_task(tmp_path: Path) -> Task:
     task = Task(
@@ -858,7 +869,7 @@ async def test_get_task_events_basic(fake_task: Task, tmp_path: Path) -> None:
     # Write events directly as JSONL (simulating what would be written by a real task)
     with event_path.open("w") as f:
         f.write(
-            json.dumps(
+            event_json(
                 {
                     "v": 1,
                     "seq": 0,
@@ -873,7 +884,7 @@ async def test_get_task_events_basic(fake_task: Task, tmp_path: Path) -> None:
             + "\n"
         )
         f.write(
-            json.dumps(
+            event_json(
                 {
                     "v": 1,
                     "seq": 1,
@@ -953,7 +964,7 @@ async def test_get_task_events_kinds_filter(fake_task: Task, tmp_path: Path) -> 
     # Write events directly
     with event_path.open("w") as f:
         f.write(
-            json.dumps(
+            event_json(
                 {
                     "v": 1,
                     "seq": 0,
@@ -966,7 +977,7 @@ async def test_get_task_events_kinds_filter(fake_task: Task, tmp_path: Path) -> 
             + "\n"
         )
         f.write(
-            json.dumps(
+            event_json(
                 {
                     "v": 1,
                     "seq": 1,
@@ -979,7 +990,7 @@ async def test_get_task_events_kinds_filter(fake_task: Task, tmp_path: Path) -> 
             + "\n"
         )
         f.write(
-            json.dumps(
+            event_json(
                 {
                     "v": 1,
                     "seq": 2,
@@ -1017,7 +1028,7 @@ async def test_get_task_events_excludes_assistant_delta_by_default(
     # Write events directly
     with event_path.open("w") as f:
         f.write(
-            json.dumps(
+            event_json(
                 {
                     "v": 1,
                     "seq": 0,
@@ -1032,7 +1043,7 @@ async def test_get_task_events_excludes_assistant_delta_by_default(
             + "\n"
         )
         f.write(
-            json.dumps(
+            event_json(
                 {
                     "v": 1,
                     "seq": 1,
@@ -1071,7 +1082,7 @@ async def test_get_task_events_includes_assistant_delta_when_requested(
     # Write events directly
     with event_path.open("w") as f:
         f.write(
-            json.dumps(
+            event_json(
                 {
                     "v": 1,
                     "seq": 0,
@@ -1110,7 +1121,7 @@ async def test_get_task_events_before_seq(fake_task: Task, tmp_path: Path) -> No
     with event_path.open("w") as f:
         for i in range(10):
             f.write(
-                json.dumps(
+                event_json(
                     {
                         "v": 1,
                         "seq": i,
@@ -1147,7 +1158,7 @@ async def test_get_task_events_after_seq(fake_task: Task, tmp_path: Path) -> Non
     with event_path.open("w") as f:
         for i in range(10):
             f.write(
-                json.dumps(
+                event_json(
                     {
                         "v": 1,
                         "seq": i,
@@ -1184,7 +1195,7 @@ async def test_get_task_events_paging_newest_first(fake_task: Task, tmp_path: Pa
     with event_path.open("w") as f:
         for i in range(10):
             f.write(
-                json.dumps(
+                event_json(
                     {
                         "v": 1,
                         "seq": i,

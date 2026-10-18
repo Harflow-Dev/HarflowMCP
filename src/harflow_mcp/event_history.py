@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .events import EVENT_KINDS, EVENT_MAX_BYTES, PAGE_BUDGET_BYTES, _parse_event_line, _truncate_value
+from .wire_contracts import COMMON_FIELDS, EVENT_FORMAT, envelope
 
 DEFAULT_LIMIT = 100
 SCAN_BYTES = 1_000_000
@@ -72,16 +73,17 @@ def _anchor(handle: Any, end: int, *, head: bool = False) -> bytes:
 
 def _output(event: dict[str, Any]) -> dict[str, Any]:
     fields, truncated = _truncate_value({k: v for k, v in event.items()
-        if k not in {"v", "seq", "kind", "observed_at", "source_ts", "raw_offset", "task_id"}})
+        if k not in COMMON_FIELDS and k not in {"seq", "kind", "observed_at", "source_ts", "raw_offset", "task_id"}})
     observed = event.get("observed_at")
     observed = observed if isinstance(observed, str) and len(observed) <= 128 else None
     result = {**fields, "seq": event["seq"], "kind": event["kind"], "observed_at": observed}
     if truncated:
         result["truncated"] = True
+    result = envelope(EVENT_FORMAT, result, product_version=event["product_version"])
     size = len(json.dumps(result, ensure_ascii=False, default=str).encode())
     if size > EVENT_MAX_BYTES:
-        return {"seq": event["seq"], "kind": event["kind"], "observed_at": observed,
-                "truncated": True, "oversized": True, "bytes": size}
+        return envelope(EVENT_FORMAT, {"seq": event["seq"], "kind": event["kind"], "observed_at": observed,
+                "truncated": True, "oversized": True, "bytes": size}, product_version=event["product_version"])
     return result
 
 

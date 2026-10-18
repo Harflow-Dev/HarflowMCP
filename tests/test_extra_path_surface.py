@@ -36,6 +36,11 @@ def qualified(monkeypatch, fake_backend_clis, tmp_path_factory):
     from harflow_mcp import runtime_paths
     host_paths = {name: sysconfig.get_path(name) for name in ('stdlib', 'purelib', 'platlib')}
     monkeypatch.setattr(runtime_paths.sysconfig, 'get_path', lambda name: host_paths[name])
+    # This surface suite exercises request/enforcement wiring. Runtime graph
+    # protection is covered by the backend tests; use complete deterministic
+    # qualification doubles here so Linux and macOS resolve the same fixture.
+    monkeypatch.setattr(runtime_paths, 'assert_runtime_outside_writes', lambda scopes: None)
+    monkeypatch.setattr(runtime_paths, 'assert_single_link_writable_files', lambda scopes: None)
     # Qualification still resolves/fingerprints a CLI, even with its version stubbed.
     monkeypatch.setattr(backends, 'version', lambda backend, **kwargs: EXTRA_PATHS_VERSION)
     monkeypatch.setattr('harflow_mcp.backends.codex.sys.platform', 'darwin')
