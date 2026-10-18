@@ -2185,10 +2185,13 @@ def main() -> None:
 
 @mcp.tool()
 async def register_artifact(path: str, kind: str, note: str = '') -> dict[str, Any]:
-    """Register an existing regular-file metadata reference for the verified standalone caller.
+    """Register an existing regular-file metadata reference for the verified calling task.
 
     No owner parameter is accepted. Relative paths use the recorded repository; only repository,
-    allocated own scratch, and revalidated saved grants are accepted. Workflow callers are refused.
+    allocated own scratch, and revalidated saved grants are accepted. A standalone task, or a
+    running workflow node, orchestrator turn or native-subagent controller, may register; its
+    reference is bound to that workflow execution. Builders and inherited descendants are refused.
+    A native subagent has no channel of its own: what it registers lands on its controller.
     Notes are preserved verbatim. Kinds: screenshot, log, report, other. Paths and notes are
     at most 4096 UTF-8 bytes; at most 100 references per task and a 1 MiB manifest.
     A reference establishes no content validity, task success, access, copy, or publication
@@ -2208,8 +2211,9 @@ async def register_artifact(path: str, kind: str, note: str = '') -> dict[str, A
 async def get_task_artifacts(task_id: str, cursor: str | None = None, limit: int = 20) -> dict[str, Any]:
     """Page at most 50 artifact references with current stat observations, not content verification.
 
-    Verified human callers can inspect a known standalone task; task callers can inspect only self.
-    Workflow callers and managed tasks are refused. Cursors are task-bound and reject manifest
+    Verified human callers can inspect a known standalone or workflow-bound task; task callers can
+    inspect only self. Workflow-bound items carry a `workflow` binding. Builders and inherited
+    descendants are refused (use get_workflow_artifacts for run-level reads). Cursors are task-bound and reject manifest
     changes. Availability is available/deleted/changed/unavailable at observed_at; available does
     not establish unchanged contents. Missing legacy manifests are empty; corrupt ones unavailable.
     Caller indexing is bounded; retry a catalog-preparation error to advance cold history.
@@ -2219,6 +2223,34 @@ async def get_task_artifacts(task_id: str, cursor: str | None = None, limit: int
     directory = _registry.log_dir if _registry is not None else default_log_dir()
     try:
         return await asyncio.to_thread(artifacts.get, directory, task_id, cursor, limit)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from exc
+
+
+@mcp.tool()
+async def get_workflow_artifacts(workflow_run_id: str, cursor: str | None = None, limit: int = 20,
+                                 execution_id: str | None = None, task_id: str | None = None) -> dict[str, Any]:
+    """Page artifact references registered by the attempts of a workflow run and its linked child runs.
+
+    References are metadata only (path, kind, note, a stat observation); nothing is read, copied or
+    validated. Each item carries `workflow` (run, node, execution, role, attribution) and current
+    `availability`. `execution_id` selects one node execution; a native subagent has no channel of
+    its own, so references its controller registered appear under that execution with
+    `attribution: native_transport`. `owners` lists only owners whose references could not be read
+    (`unavailable`, `record_removed`, `run_unavailable`). `state: unavailable` with `reason`
+    `catalog_preparing` or `catalog_stale` means retry; `tree_bound_exceeded` (over 64 runs) is final.
+    Page with `next_cursor` (positional, so owners appended behind it appear only on a new pass).
+    Authority: a verified human reads any run; a delegation orchestrator reads its own run and
+    linked descendants; workers, native transports, builders and standalone task callers are refused
+    (a worker reads its own task with get_task_artifacts).
+    """
+    from . import workflow_node_reads
+    caller = await _verified_workflow_caller()
+    managed = None if caller is None else await _managed_workflow_reader()
+    try:
+        return await asyncio.to_thread(
+            workflow_node_reads.workflow_artifacts_page, managed, caller is None, _reg().log_dir, workflow_run_id,
+            cursor=cursor, limit=limit, execution_id=execution_id, task_id=task_id)
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from exc
 

@@ -378,12 +378,18 @@ class Catalog:
         db.execute('CREATE TABLE IF NOT EXISTS pending (id TEXT PRIMARY KEY)')
         db.execute('CREATE TABLE IF NOT EXISTS seen (id TEXT PRIMARY KEY,generation INTEGER NOT NULL)')
         db.execute('CREATE TABLE IF NOT EXISTS checkout_tasks (id TEXT PRIMARY KEY,run_id TEXT NOT NULL,repo TEXT NOT NULL,payload TEXT NOT NULL)')
+        # Run-tree links, indexed so tree discovery never loads or decodes a run record.
+        db.execute('CREATE TABLE IF NOT EXISTS workflow_links (id TEXT PRIMARY KEY,root_workflow_run_id TEXT,parent_workflow_run_id TEXT)')
+        db.execute('CREATE INDEX IF NOT EXISTS workflow_link_root ON workflow_links(root_workflow_run_id)')
+        db.execute('CREATE INDEX IF NOT EXISTS workflow_link_parent ON workflow_links(parent_workflow_run_id)')
         db.execute('CREATE INDEX IF NOT EXISTS checkout_repo ON checkout_tasks(repo)')
         db.execute('CREATE INDEX IF NOT EXISTS checkout_run ON checkout_tasks(run_id)')
         version = db.execute("SELECT value FROM state WHERE key='schema_version'").fetchone()
         # Version 9 adds lossless bounded group matching independently of display
-        # truncation. Older derivative projections rebuild through bounded discovery.
-        if version != ('9',):
+        # truncation; version 10 adds the indexed run-tree links. Older derivative
+        # projections rebuild through bounded discovery.
+        if version != ('10',):
+            db.execute('DELETE FROM workflow_links')
             db.execute('DELETE FROM task_groups')
             db.execute('DELETE FROM checkout_tasks')
             db.execute('DELETE FROM entries')
@@ -394,7 +400,7 @@ class Catalog:
             db.execute('DELETE FROM pending')
             db.execute('DELETE FROM seen')
             db.execute('DELETE FROM state')
-            db.execute("INSERT INTO state VALUES ('schema_version','9')")
+            db.execute("INSERT INTO state VALUES ('schema_version','10')")
         # Build only after invalidating old derivative headers. The partial index
         # makes warm authority readiness independent of retained history size.
         db.execute("CREATE INDEX IF NOT EXISTS incomplete_headers ON entries(id) WHERE json_extract(payload,'$.needs_direct_lookup')=1")
@@ -454,6 +460,9 @@ class Catalog:
                 db.execute('DELETE FROM callers WHERE id=?', (identifier,))
                 header.update(status='unknown', needs_direct_lookup=True, index_blocker='unsupported_caller_identity', note='caller identity exceeds bounded index; direct inspection required')
                 active = True
+        if self.suffix == '.json':
+            links = (header.get('root_workflow_run_id') or None, header.get('parent_workflow_run_id') or None)
+            db.execute('INSERT OR REPLACE INTO workflow_links VALUES (?,?,?)', (identifier, *links))
         group = header.get('group')
         db.execute('DELETE FROM task_groups WHERE id=?', (identifier,))
         if isinstance(group, str) and len(group) <= 128:
@@ -485,7 +494,7 @@ class Catalog:
     def _remove(self, db: sqlite3.Connection, identifier: str) -> None:
         db.execute('DELETE FROM checkout_tasks WHERE run_id=?', (identifier,))
         db.execute("DELETE FROM associations WHERE json_extract(payload,'$.workflow_run_id')=?", (identifier,))
-        for table in ('entries', 'callers', 'associations', 'sources', 'seen', 'pending', 'task_groups'):
+        for table in ('entries', 'callers', 'associations', 'sources', 'seen', 'pending', 'task_groups', 'workflow_links'):
             db.execute(f'DELETE FROM {table} WHERE id=?', (identifier,))
 
     def _acknowledge_directory(self, db: sqlite3.Connection, previous_directory_mtime: int | None) -> None:

@@ -18,7 +18,9 @@ reports the registered backends, whether each binary is on PATH (`backends.is_in
 backend's declared capabilities (`backends.capability_metadata`, the same serialization as MCP
 `list_backends` — including bounded extra-path support) — no
 `--version` probe, no subprocess. Every command prints one versioned JSON document
-(`"v": 12`, `CTL_JSON_VERSION`) with `--json`. v12 adds `queued_followups` to full task snapshots
+(`"v": 13`, `CTL_JSON_VERSION`) with `--json`. v13 adds the optional workflow binding to
+`task-artifacts` items, bound-task artifact summaries and the run-level `workflow-artifacts`
+page. v12 adds `queued_followups` to full task snapshots
 and `queued_followup_count` to briefs, and `delivery` to `send` results. v11 adds bounded artifact summaries
 to full task snapshots, standalone self-registration (`register-artifact`), and
 paged metadata references (`task-artifacts`). Unsupported ownership has an unavailable
@@ -53,7 +55,7 @@ from .tasks import default_log_dir
 # Bumped to 2 when `status`/`list`'s snapshot/brief documents gained `resume_command` (Monitor
 # piece 3/3). `setup` and the event log are separate contracts and stay at v1 — see CLAUDE.md's
 # "The Monitor app is a consumer of three frozen contracts".
-CTL_JSON_VERSION = 12
+CTL_JSON_VERSION = 13
 
 # How long `cancel`/`takeover` stay alive for a failing `.sig` write to be retried before exiting —
 # the lease (60 s) is what a later recovery waits for anyway.
@@ -228,7 +230,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     edits.add_argument("--remove")
 
     workflow_parsers = []
-    for action in ("validate", "list", "list-page", "get", "save", "delete", "build", "preview", "start", "list-runs", "status", "detail", "wait", "pause", "resume", "cancel", "revise-goal", "builder-followup", "builder-apply", "inspect", "assigned-input", "recover", "migrate", "abandon-dispatch"):
+    for action in ("validate", "list", "list-page", "get", "save", "delete", "build", "preview", "start", "list-runs", "status", "detail", "wait", "pause", "resume", "cancel", "revise-goal", "builder-followup", "builder-apply", "inspect", "assigned-input", "artifacts", "recover", "migrate", "abandon-dispatch"):
         wp = sub.add_parser("workflow-" + action, help=action + " workflows")
         if action in {"save", "validate"}:
             wp.description = "Workflow nodes accept child_session_policy agent_decides (default), fresh, or resume in Child orchestrator mode. Resume requires the latest completed compatible invocation in the immediate parent run and never silently starts Fresh. Current mode retains its existing session owner."
@@ -240,7 +242,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
         wp.add_argument("--json", action="store_true")
         if action in {"get", "save", "delete", "build", "preview", "start"}:
             wp.add_argument("name")
-        if action in {"status", "detail", "wait", "pause", "resume", "cancel", "revise-goal", "builder-followup", "inspect", "assigned-input", "recover", "abandon-dispatch"}:
+        if action in {"status", "detail", "wait", "pause", "resume", "cancel", "revise-goal", "builder-followup", "inspect", "assigned-input", "artifacts", "recover", "abandon-dispatch"}:
             wp.add_argument("workflow_run_id")
         if action == "list":
             wp.add_argument("--monitor-view", action="store_true")
@@ -263,6 +265,12 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
             wp.add_argument("--task-id")
             wp.add_argument("--cursor")
             wp.add_argument("--limit", type=int, default=16000)
+        if action == "artifacts":
+            wp.description = "Page artifact references (metadata only) registered by the attempts of a workflow run and its linked child runs. A verified human reads any run; a delegation orchestrator reads its own run and linked descendants."
+            wp.add_argument("--execution-id")
+            wp.add_argument("--task-id")
+            wp.add_argument("--cursor")
+            wp.add_argument("--limit", type=int, default=20)
         if action == "inspect":
             wp.add_argument("execution_id")
             wp.add_argument("--task-id")
@@ -864,6 +872,16 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
                 from mcp.types import INVALID_PARAMS
                 message, data = workflow_node_reads.error_payload(exc)
                 raise MCPError(INVALID_PARAMS, message, data=data) from None
+        if action == "artifacts":
+            from . import workflow_node_reads
+            from .takeover import caller_refusal
+            from .workflow_inspection import managed_reader
+            directory = default_log_dir()
+            # The same authority as the MCP tool: a verified human reads any run, a delegation
+            # orchestrator its own tree, and every other caller is refused.
+            human = await asyncio.to_thread(caller_refusal, directory) is None
+            managed = None if human else managed_reader(directory)
+            return await asyncio.to_thread(workflow_node_reads.workflow_artifacts_page, managed, human, directory, args.workflow_run_id, cursor=args.cursor, limit=args.limit, execution_id=args.execution_id, task_id=args.task_id)
         if action == "abandon-dispatch":
             from .workflows import WorkflowStore
             from .takeover import caller_refusal

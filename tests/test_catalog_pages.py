@@ -660,7 +660,7 @@ def test_schema_three_cache_rebuild_is_bounded_without_decoding_old_headers(tmp_
     page = store.list_page(directory)
     assert page['bootstrap_pending'] and len(reads) == 100
     with index.connect() as db:
-        assert db.execute("SELECT value FROM state WHERE key='schema_version'").fetchone() == ('9',)
+        assert db.execute("SELECT value FROM state WHERE key='schema_version'").fetchone() == ('10',)
         assert db.execute("SELECT count(*) FROM entries WHERE id LIKE 'old%'").fetchone() == (0,)
     assert originals == {p.name: p.read_bytes() for p in directory.glob('*.meta.json')}
 
@@ -1494,7 +1494,7 @@ def test_upgrade_rebuilds_previously_acknowledged_source_less_authority(tmp_path
     with upgraded.connect() as db:
         for table in ('entries', 'callers', 'associations', 'checkout_tasks', 'sources'):
             assert db.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0] == 0
-        assert db.execute("SELECT value FROM state WHERE key='schema_version'").fetchone() == ('9',)
+        assert db.execute("SELECT value FROM state WHERE key='schema_version'").fetchone() == ('10',)
     page = upgraded.page(load)
     assert page['catalog_state']['status'] == 'ready'
     assert [item['task_id'] for item in page['items']] == ['retained']

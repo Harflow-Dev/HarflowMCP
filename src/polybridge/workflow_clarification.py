@@ -1,6 +1,7 @@
 """Durable worker questions and orchestrator answers within one node execution."""
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 from pathlib import Path
@@ -83,7 +84,9 @@ async def answer_question(supervisor: Any, node: dict[str, Any], token: dict[str
                 return False
             context_token = {**token, "decision_id": question["decision_id"], "input_result_refs": activation.get("input_result_refs", []), "inspection_count": question.get("inspection_count", 0), "inspection_results": question.get("inspection_results", [])}
             context_token.pop("execution_activation_id", None)
-            context = d.decision_context(run, node, context_token, False, root=supervisor.store.root)
+            from .workflow_artifact_refs import artifact_references
+            references = await asyncio.to_thread(artifact_references, run, supervisor.store.root)
+            context = d.decision_context(run, node, context_token, False, root=supervisor.store.root, artifact_references=references)
             try:
                 source = compatible_origin(run, node, activation, question, root=supervisor.store.root)
                 answer_sessions = [{"task_id": source["task_id"], "candidate": source["candidate"], "session_id": source["result"]["session_id"]}]

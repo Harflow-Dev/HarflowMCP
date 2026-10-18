@@ -350,6 +350,8 @@ def child_run_record(store: Any, parent_run: dict[str, Any], activation: dict[st
         },
         "interaction_owner": parent_run.get("interaction_owner", "caller"),
         "invocation_inputs": invocation.get("inputs", []),
+        # Selected references stay out of the indexed inputs, which seed the child's Start token.
+        **({"invocation_artifact_refs": copy.deepcopy(invocation["artifact_refs"])} if invocation.get("artifact_refs") else {}),
     }
     from .workflow_goals import context as goal_context
     constraints = goal_context(parent_run, root=store.root)
@@ -795,6 +797,8 @@ async def run_child(supervisor: Any, node: dict[str, Any], token: dict[str, Any]
         current = next(t for t in r["pending"] if t["id"] == token["id"])
         if activation is None:
             fresh = {"id": uuid.uuid4().hex, "node_id": node["id"], "role": "node", "status": "running", "tasks": [], "created_at": time.time(), "token": copy.deepcopy(token), "visit_id": visit_id(r, token), "invocation": {"child_workflow_run_id": uuid.uuid4().hex, "stage": "preparing", "workflow_id": node["workflow_ref"]["workflow_id"], "workflow_name": node.get("workflow_name", ""), "orchestrator_mode": node.get("orchestrator_mode", "child"), "timeout_seconds": node.get("timeout_seconds"), "timeout_elapsed_seconds": 0}}
+            if token.get("authorized_artifact_refs"):
+                fresh["authorized_artifact_refs"] = copy.deepcopy(token["authorized_artifact_refs"])
             r["activations"].append(fresh)
             current["execution_activation_id"] = fresh["id"]
             invocation = fresh["invocation"]
@@ -839,6 +843,8 @@ async def run_child(supervisor: Any, node: dict[str, Any], token: dict[str, Any]
         invocation["child_session_selection"] = selection
         invocation["inputs"] = invocation_inputs(run, token, root=store.root)
         invocation["assignment"] = token.get("assignment_prompt", "")
+        if token.get("authorized_artifact_refs"):
+            invocation["artifact_refs"] = copy.deepcopy(token["authorized_artifact_refs"])
         supervisor.update(lambda r: next(a for a in r["activations"] if a["id"] == activation["id"]).update(invocation=copy.deepcopy(invocation)), "child_session_selected", selection)
         child = child_run_record(store, run, activation, node, invocation)
         try:

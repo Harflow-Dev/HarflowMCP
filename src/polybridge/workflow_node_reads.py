@@ -99,3 +99,31 @@ def assigned_input_node(
         cursor=cursor,
         limit=limit,
     )
+
+
+def workflow_artifacts_page(
+    managed: tuple[dict[str, Any], dict[str, Any]] | None,
+    human: bool,
+    log_dir: Any,
+    run_id: str,
+    *,
+    cursor: str | None = None,
+    limit: int = 20,
+    execution_id: str | None = None,
+    task_id: str | None = None,
+) -> dict[str, Any]:
+    """Run-level artifact reads, shared by the MCP tool and ctl so their authority cannot drift.
+
+    A verified human reads any run. A delegation orchestrator reads its own run and the linked
+    descendants of it. Worker nodes and native transports read only their own task through
+    ``get_task_artifacts``; standalone task callers, builders and other managed callers are refused.
+    """
+    from . import artifacts
+    if not human:
+        if managed is None or managed[0].get("role") != "orchestrator":
+            raise ValueError("Run-level artifact reads are available to a human caller or the run's orchestrator")
+        _, owned_run = managed
+        if run_id != owned_run["workflow_run_id"]:
+            from .workflow_inspection import _authorized_linked_run
+            _authorized_linked_run(owned_run, log_dir.parent, run_id)
+    return artifacts.workflow_page(log_dir, run_id, cursor=cursor, limit=limit, execution_id=execution_id, task_id=task_id)

@@ -226,7 +226,7 @@ observations, committed changes, local upstream comparison, and available struct
 and outside-repository edit evidence. These observations do not establish task authorship or
 goal completion; pushed state remains unknown. See [task outcomes](docs/task-outcomes.md).
 
-Standalone dispatched tasks can [`register_artifact(path, kind, note)`](docs/task-artifacts.md)
+Standalone tasks and verified workflow attempts can [`register_artifact(path, kind, note)`](docs/task-artifacts.md)
 to retain bounded screenshot/log/report metadata references. Inspect them with
 `get_task_artifacts` or `polybridge-ctl task-artifacts <task_id> --json`, and in the
 Monitor's task Summary. Registration does not read, copy or publish contents, prove
@@ -314,3 +314,7 @@ Activity uses an owned native table with measured row heights and retained readi
 
 Read [the workflow guide](docs/workflows.md) for definitions and execution contracts, and
 [contributor notes](CLAUDE.md) for architecture and harness behavior.
+
+Workflow artifact references support bounded tree pages through `get_workflow_artifacts` and
+`polybridge-ctl workflow-artifacts <run_id> --json`, plus selected-execution Monitor reads.
+Downstream delivery requires explicit selection; see [artifact ownership and selection](docs/task-artifacts.md#workflow-tree-reads-and-selected-delivery).

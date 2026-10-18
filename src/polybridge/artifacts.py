@@ -1,4 +1,4 @@
-"""Bounded metadata-only references owned by verified standalone task processes."""
+"""Bounded metadata-only references owned by verified task processes, standalone or workflow-bound."""
 from __future__ import annotations
 import base64
 from contextlib import contextmanager
@@ -19,12 +19,27 @@ from .bounded_io import ReadLimit
 
 MAX_BYTES = 1048576
 KINDS = frozenset(('screenshot', 'log', 'report', 'other'))
+BOUND_ROLES = frozenset(('node', 'orchestrator', 'native_control'))
+LIVE_ATTEMPTS = frozenset(('reserved', 'running', 'uncertain'))
+TREE_LIMIT = 64
+PAGE_BYTES = 63000
 
 
 def _read_owner(log_dir, task_id):
     return store.read(log_dir, task_id, include_prompt=False,
                       metadata_byte_limit=METADATA_BYTES,
                       metadata_budget=current_metadata_budget())
+
+
+def _owner_record_missing(log_dir, task_id):
+    """Only observed absence establishes removal; unreadable/corrupt records do not."""
+    try:
+        store.record_path(log_dir, task_id).lstat()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return False
 
 
 def _now():
@@ -38,8 +53,13 @@ def _text(value, label):
 
 
 def _workflow_owner(log_dir, task_id, *, strict=True):
-    """Exclude managed or unverifiable ownership without scanning run history."""
+    """Exclude unverifiable ownership without scanning run history.
+
+    A task's own receipt is returned as ``{'receipt': ...}`` so a caller can bind to it; a catalog
+    association without a receipt is ``{'managed_or_unverifiable': True}``.
+    """
     import sqlite3
+    from .bounded_io import read_receipt
     from .workflows import WorkflowStore
     storage = WorkflowStore(root=log_dir.parent)
     receipt = storage.owners / f'{store.validate_task_id(task_id)}.json'
@@ -50,7 +70,11 @@ def _workflow_owner(log_dir, task_id, *, strict=True):
     except OSError as exc:
         raise ValueError('Workflow ownership is unavailable') from exc
     else:
-        return {'managed_or_unverifiable': True}
+        try:
+            return {'receipt': read_receipt(receipt)}
+        except (OSError, ValueError):
+            # An unreadable receipt proves ownership exists but cannot be verified.
+            return {'managed_or_unverifiable': True}
     try:
         page = storage.list_run_page(limit=1)
         if page.get('bootstrap_pending') or page.get('history_incomplete'):
@@ -66,24 +90,85 @@ def _workflow_owner(log_dir, task_id, *, strict=True):
         raise ValueError('Workflow ownership is unavailable') from exc
 
 
-def _standalone(log_dir, record):
-    pending, seen = [(record, frozenset())], set()
+def _bind(log_dir, record, receipt, *, registering):
+    """Snapshot the immutable workflow binding from the task's own receipt and its run."""
+    from .workflows import WorkflowStore
+    storage = WorkflowStore(root=log_dir.parent)
+    mismatch = 'Workflow ownership receipt no longer matches its run'
+    run_id = receipt.get('workflow_run_id')
+    if not isinstance(run_id, str):
+        raise ValueError(mismatch)
+    try:
+        run = storage.get_run(run_id, metadata_byte_limit=METADATA_BYTES, metadata_budget=current_metadata_budget())
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise ValueError('Workflow ownership is unavailable') from exc
+    if run.get('kind') == 'builder':
+        raise ValueError('Managed workflow artifact access is not supported for builders')
+    activation = next((a for a in run.get('activations', []) if a.get('id') == receipt.get('workflow_execution_id')
+                       and any(t.get('task_id') == record.task_id for t in a.get('tasks', []))), None)
+    if activation is None or activation.get('role') != receipt.get('workflow_role'):
+        raise ValueError(mismatch)
+    root = (run.get('parent_link') or {}).get('root_workflow_run_id') or run['workflow_run_id']
+    if receipt.get('root_workflow_run_id') != root:
+        raise ValueError(mismatch)
+    role = activation['role']
+    if role not in BOUND_ROLES:
+        raise ValueError('Managed workflow artifact access is not supported for this role')
+    attempt = next(t for t in activation['tasks'] if t.get('task_id') == record.task_id)
+    if registering and attempt.get('status') not in LIVE_ATTEMPTS:
+        raise ValueError('Workflow attempt is no longer running; artifact registration is refused')
+    binding = {'root_workflow_run_id': root, 'workflow_run_id': run['workflow_run_id'], 'node_id': activation.get('node_id'),
+               'execution_id': activation['id'], 'role': role, 'task_id': record.task_id,
+               'attribution': 'native_transport' if role == 'native_control' else 'attempt',
+               'provenance': 'workflow_receipt'}
+    for key in ('visit_id', 'attempt_in_visit', 'retry_of_execution_id'):
+        if key in activation:
+            binding[key] = activation[key]
+    if role == 'native_control':
+        hosted = attempt.get('native_owner_execution_ids')
+        if hosted is None:
+            hosted = [attempt['native_owner_execution_id']] if attempt.get('native_owner_execution_id') else []
+        binding['hosted_native_attempt_ids'] = list(hosted)[:32]
+    return binding
+
+
+def _authority(log_dir, record, *, registering=False):
+    """Return the workflow binding of a verified task, None for a standalone one, or refuse.
+
+    The caller's own matching receipt binds it. Ancestors may be managed only inside the same
+    root tree; an inherited descendant, a receipt mismatch and a builder are refused.
+    """
+    pending, seen, binding = [(record, frozenset())], set(), None
     while pending:
-        record, ancestors = pending.pop()
-        if record.task_id in ancestors:
+        current, ancestors = pending.pop()
+        if current.task_id in ancestors:
             raise ValueError('Task ancestry is cyclic')
-        if record.task_id in seen:
+        if current.task_id in seen:
             continue
-        seen.add(record.task_id)
+        seen.add(current.task_id)
         if len(seen) > 100:
             raise ValueError('Task ancestry exceeds authority bounds')
-        if record.workflow_builder or _workflow_owner(log_dir, record.task_id, strict=True) is not None:
+        if current.workflow_builder:
             raise ValueError('Managed workflow artifact access is not supported')
-        for parent in {value for value in (record.spawned_by, record.parent_task_id, record.continuation_of_task_id) if value}:
+        owner = _workflow_owner(log_dir, current.task_id, strict=True)
+        if current is record:
+            if owner is not None:
+                if 'receipt' not in owner:
+                    raise ValueError('Managed workflow artifact access is not supported: ownership is unverifiable')
+                binding = _bind(log_dir, record, owner['receipt'], registering=registering)
+        elif owner is not None:
+            receipt = owner.get('receipt')
+            if binding is None or receipt is None:
+                raise ValueError('Managed workflow artifact access is not supported for inherited descendants')
+            ancestor_binding = _bind(log_dir, current, receipt, registering=False)
+            if ancestor_binding['root_workflow_run_id'] != binding['root_workflow_run_id']:
+                raise ValueError('Task ancestry belongs to another workflow tree')
+        for parent in {value for value in (current.spawned_by, current.parent_task_id, current.continuation_of_task_id) if value}:
             ancestor = _read_owner(log_dir, parent)
             if ancestor is None:
                 raise ValueError('Task ancestry is unavailable')
-            pending.append((ancestor, ancestors | {record.task_id}))
+            pending.append((ancestor, ancestors | {current.task_id}))
+    return binding
 
 
 @metadata_request()
@@ -127,13 +212,40 @@ def _caller(log_dir):
             record.status in store.TERMINAL_RECORD_STATUSES and record.exit_code is not None or
             identity.identity_check(lineage._candidate_identity(record)) != 'alive'):
         raise ValueError('Caller task identity changed or is unavailable')
-    _standalone(log_dir, record)
+    _authority(log_dir, record)
     return record
 
 
 def _path(log_dir, task_id):
     store.validate_task_id(task_id)
     return log_dir / f'{task_id}.artifacts.json'
+
+
+def _check_binding(binding, task_id):
+    """Strict structural validation of a stored workflow binding."""
+    required = {'root_workflow_run_id', 'workflow_run_id', 'node_id', 'execution_id', 'role', 'task_id', 'attribution', 'provenance'}
+    optional = {'visit_id', 'attempt_in_visit', 'retry_of_execution_id', 'hosted_native_attempt_ids'}
+    bad = ValueError('Artifact manifest workflow binding is unavailable')
+    if not isinstance(binding, dict) or not required <= set(binding) <= required | optional:
+        raise bad
+    if binding['task_id'] != task_id or binding['provenance'] != 'workflow_receipt' or binding['role'] not in BOUND_ROLES:
+        raise bad
+    for key in ('root_workflow_run_id', 'workflow_run_id', 'node_id', 'execution_id'):
+        _text(binding[key], key)
+    for key in ('visit_id', 'retry_of_execution_id'):
+        if key in binding and binding[key] is not None:
+            _text(binding[key], key)
+    if 'attempt_in_visit' in binding and type(binding['attempt_in_visit']) is not int:
+        raise bad
+    transport = binding['role'] == 'native_control'
+    if binding['attribution'] != ('native_transport' if transport else 'attempt') or transport != ('hosted_native_attempt_ids' in binding):
+        raise bad
+    if transport:
+        hosted = binding['hosted_native_attempt_ids']
+        if not isinstance(hosted, list) or len(hosted) > 32:
+            raise bad
+        for value in hosted:
+            _text(value, 'hosted_native_attempt_ids')
 
 
 def _load(log_dir: Path, task_id: str, directory_fd: int | None = None):
@@ -171,8 +283,10 @@ def _load(log_dir: Path, task_id: str, directory_fd: int | None = None):
         if not isinstance(items, list) or len(items) > 100:
             raise ValueError('Artifact manifest is unavailable')
         for item in items:
-            if not isinstance(item, dict) or set(item) != {'artifact_id', 'task_id', 'path', 'kind', 'note', 'registered_at', 'provenance', 'registered_observation'} or item.get('task_id') != task_id or item.get('kind') not in KINDS:
+            if not isinstance(item, dict) or set(item) - {'workflow'} != {'artifact_id', 'task_id', 'path', 'kind', 'note', 'registered_at', 'provenance', 'registered_observation'} or item.get('task_id') != task_id or item.get('kind') not in KINDS:
                 raise ValueError('Artifact manifest is unavailable')
+            if 'workflow' in item:
+                _check_binding(item['workflow'], task_id)
             for key in ('path', 'note', 'artifact_id', 'registered_at'):
                 _text(item[key], key)
             uuid.UUID(item['artifact_id'])
@@ -193,7 +307,7 @@ def _load(log_dir: Path, task_id: str, directory_fd: int | None = None):
 
 @metadata_request()
 def summary(log_dir: Path, task_id: str) -> dict:
-    """Summarize supported standalone metadata without caller or target-file probes.
+    """Summarize supported standalone or workflow-bound metadata without caller or target-file probes.
 
     Ownership must be established before opening a manifest. Unsupported or unknown
     ownership offers no detail reference; a supported but corrupt manifest keeps one
@@ -203,7 +317,7 @@ def summary(log_dir: Path, task_id: str) -> dict:
         record = _read_owner(log_dir, task_id)
         if record is None:
             raise ValueError('Artifact owner is unavailable')
-        _standalone(log_dir, record)
+        _authority(log_dir, record)
     except Exception:
         return {'count': 0, 'state': 'unavailable'}
     try:
@@ -333,13 +447,16 @@ def _task_lock(log_dir, task_id):
 
 @metadata_request()
 def register(log_dir: Path, path: str, kind: str, note: str = '') -> dict:
-    """Append an immutable reference under the owner's existing task flock."""
+    """Append an immutable reference under the owner's existing task flock.
+
+    A workflow-bound caller's item carries the immutable binding snapshotted from its receipt.
+    """
     if kind not in KINDS:
         raise ValueError('Unknown artifact kind')
     _text(note, 'note')
     caller = _caller(log_dir)
     if caller is None:
-        raise ValueError('Artifact registration requires a verified standalone task caller')
+        raise ValueError('Artifact registration requires a verified task caller')
     if log_dir.is_symlink() or canonical(log_dir) != log_dir.absolute():
         raise ValueError('Artifact storage directory is unsafe')
     lock = control.record_lock_path(log_dir, caller.task_id)
@@ -354,7 +471,7 @@ def register(log_dir: Path, path: str, kind: str, note: str = '') -> dict:
         current_caller = _caller(log_dir)
         if current_caller is None or current_caller.task_id != record.task_id:
             raise ValueError('Caller identity changed')
-        _standalone(log_dir, record)
+        binding = _authority(log_dir, record, registering=True)
         target, observed = _target(log_dir, record, path)
         if not os.access(target, os.R_OK):
             raise ValueError('Artifact file is inaccessible')
@@ -365,6 +482,8 @@ def register(log_dir: Path, path: str, kind: str, note: str = '') -> dict:
         if len(items) >= 100:
             raise ValueError('Task artifact limit reached')
         item = {'artifact_id': str(uuid.uuid4()), 'task_id': record.task_id, 'path': str(target), 'kind': kind, 'note': note, 'registered_at': _now(), 'provenance': {'method': 'verified_process_lineage', 'task_id': record.task_id}, 'registered_observation': observed}
+        if binding is not None:
+            item['workflow'] = binding
         raw = json.dumps({'v': 1, 'task_id': record.task_id, 'items': items + [item]}, ensure_ascii=False).encode('utf-8')
         if len(raw) > MAX_BYTES:
             raise ValueError('Task artifact manifest limit reached')
@@ -389,6 +508,31 @@ def register(log_dir: Path, path: str, kind: str, note: str = '') -> dict:
         return item
 
 
+def _availability(log_dir, record, item):
+    """Stat-only availability of one reference; never reads contents."""
+    state = 'unavailable'
+    path = Path(item['path'])
+    try:
+        current_path = canonical(path)
+    except FileNotFoundError:
+        # Only absence of the artifact path itself establishes deletion. Missing
+        # authority (repository or saved grant roots) is handled separately below.
+        state = 'deleted'
+    except (OSError, ValueError, RuntimeError):
+        pass
+    else:
+        if current_path != path:
+            state = 'changed'
+        else:
+            try:
+                _, observed = _target(log_dir, record, str(path))
+                if os.access(path, os.R_OK):
+                    state = 'available' if observed == item['registered_observation'] else 'changed'
+            except (OSError, ValueError, RuntimeError):
+                pass
+    return state
+
+
 @metadata_request()
 def get(log_dir: Path, task_id: str, cursor: str | None = None, limit: int = 20) -> dict:
     """Read a bounded reference page and observe target metadata without reading contents."""
@@ -401,7 +545,7 @@ def get(log_dir: Path, task_id: str, cursor: str | None = None, limit: int = 20)
     record = _read_owner(log_dir, task_id)
     if record is None:
         raise ValueError('Unknown task')
-    _standalone(log_dir, record)
+    _authority(log_dir, record)
     result = {'task_id': task_id, 'items': [], 'next_cursor': None, 'has_more': False, 'state': 'available', 'count': 0}
     try:
         items, raw = _load(log_dir, task_id)
@@ -419,26 +563,7 @@ def get(log_dir: Path, task_id: str, cursor: str | None = None, limit: int = 20)
         except Exception as exc:
             raise ValueError('Invalid or stale artifact cursor') from exc
     for item in items[offset:offset + limit]:
-        state = 'unavailable'
-        path = Path(item['path'])
-        try:
-            current_path = canonical(path)
-        except FileNotFoundError:
-            # Only absence of the artifact path itself establishes deletion. Missing
-            # authority (repository or saved grant roots) is handled separately below.
-            state = 'deleted'
-        except (OSError, ValueError, RuntimeError):
-            pass
-        else:
-            if current_path != path:
-                state = 'changed'
-            else:
-                try:
-                    _, observed = _target(log_dir, record, str(path))
-                    if os.access(path, os.R_OK):
-                        state = 'available' if observed == item['registered_observation'] else 'changed'
-                except (OSError, ValueError, RuntimeError):
-                    pass
+        state = _availability(log_dir, record, item)
         entry = item | {'availability': {'state': state, 'observed_at': _now()}}
         if len(json.dumps(result | {'items': result['items'] + [entry]}, ensure_ascii=True).encode()) > 63000:
             break
@@ -448,3 +573,241 @@ def get(log_dir: Path, task_id: str, cursor: str | None = None, limit: int = 20)
     if result['has_more']:
         result['next_cursor'] = base64.urlsafe_b64encode(json.dumps([task_id, digest, end]).encode()).decode()
     return result
+
+
+def _page_cursor(root_id, position, owner_task_id, artifact_id):
+    return base64.urlsafe_b64encode(json.dumps([root_id, position[0], position[1], position[2], owner_task_id, artifact_id],
+                                               separators=(',', ':')).encode()).decode()
+
+
+def _read_page_cursor(cursor, workflow_run_id):
+    try:
+        if not isinstance(cursor, str) or len(cursor) > 512:
+            raise ValueError()
+        root_id, run_id, activation_index, task_index, owner, last = json.loads(base64.urlsafe_b64decode(cursor))
+        if root_id != workflow_run_id or not isinstance(run_id, str) or type(activation_index) is not int or type(task_index) is not int:
+            raise ValueError()
+        if min(activation_index, task_index) < 0 or owner is not None and not isinstance(owner, str) or last is not None and not isinstance(last, str):
+            raise ValueError()
+        if owner is None and (activation_index != 0 or task_index != 0 or last is not None):
+            raise ValueError()
+        return run_id, activation_index, task_index, owner, last
+    except Exception as exc:
+        raise ValueError('Invalid or stale workflow artifact cursor') from exc
+
+
+def _unavailable_page(workflow_run_id, reason):
+    return {'workflow_run_id': workflow_run_id, 'items': [], 'owners': [], 'next_cursor': None, 'has_more': False,
+            'state': 'unavailable', 'reason': reason, 'retry': reason != 'tree_bound_exceeded'}
+
+
+def _budget_exhausted():
+    budget = current_metadata_budget()
+    return budget is not None and (budget.metadata_decodes >= 100 or budget.metadata_bytes >= budget.metadata_limit)
+
+
+@metadata_request()
+def workflow_page(log_dir: Path, workflow_run_id: str, *, cursor: str | None = None, limit: int = 20,
+                  execution_id: str | None = None, task_id: str | None = None) -> dict:
+    """Page the references registered by every attempt in a run's tree, in a stable owner order.
+
+    Authority is the caller's concern (see ``workflow_node_reads.workflow_artifacts_page``). Tree
+    membership comes from the run catalog alone; run records and manifests are read lazily under
+    one metadata budget, so an unreadable run or manifest becomes an owner entry rather than a
+    failed page, and every page makes progress.
+    """
+    from .bounded_io import ReadLimit
+    from .workflows import WorkflowStore
+    if not isinstance(workflow_run_id, str) or not workflow_run_id or any(v is not None and (not isinstance(v, str) or not v) for v in (execution_id, task_id)):
+        raise ValueError('workflow_run_id, execution_id and task_id must be nonempty strings')
+    if type(limit) is not int or not 1 <= limit <= 50:
+        raise ValueError('Artifact limit must be between 1 and 50')
+    storage = WorkflowStore(root=log_dir.parent)
+    tree = storage.tree_members(workflow_run_id, TREE_LIMIT + 1)
+    if tree['state'] != 'ready':
+        # Preparation is a separate bounded phase; discovery itself remains catalog-only.
+        # Return unavailable for this request even if this slice finishes the index.
+        storage.prepare_run_catalog()
+        return _unavailable_page(workflow_run_id, 'catalog_preparing')
+    members = tree['members']
+    if not members:
+        raise ValueError('Unknown workflow run')
+    if len(members) > TREE_LIMIT:
+        return _unavailable_page(workflow_run_id, 'tree_bound_exceeded')
+    member_ids = {member['id'] for member in members}
+    order = [member['id'] for member in members]  # created_at, then id
+    start = ((order[0], 0, 0, None, None) if cursor is None else _read_page_cursor(cursor, workflow_run_id))
+    if start[0] not in member_ids:
+        raise ValueError('Invalid or stale workflow artifact cursor')
+
+    items: list[dict] = []
+    owners: list[dict] = []
+    seen_tasks: set[str] = set()
+    seen_artifacts: set[str] = set()
+    state = {'cursor': None}
+
+    def size(extra_item=None, extra_owner=None):
+        body = {'workflow_run_id': workflow_run_id, 'items': items + ([extra_item] if extra_item else []),
+                'owners': owners + ([extra_owner] if extra_owner else []), 'next_cursor': 'x' * 512,
+                'has_more': True, 'state': 'available'}
+        return len(json.dumps(body, ensure_ascii=True).encode())
+
+    def owner_entry(task, run_id, activation, state_name):
+        return {'task_id': task, 'workflow_run_id': run_id, 'execution_id': activation, 'state': state_name}
+
+    def append_owner(entry, position, owner_id=None, after=None):
+        if len(owners) >= 50 or size(extra_owner=entry) > PAGE_BYTES:
+            state['cursor'] = _page_cursor(workflow_run_id, position, owner_id, after)
+            return False
+        owners.append(entry)
+        return True
+
+    def full():
+        return len(items) >= limit or len(owners) >= 50
+
+    def produced():
+        return bool(items or owners)
+
+    done = True
+    first_run = True
+    for run_id in order[order.index(start[0]):]:
+        position = (run_id, 0, 0)
+        try:
+            run = storage.get_run(run_id, metadata_byte_limit=METADATA_BYTES, metadata_budget=current_metadata_budget())
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            if isinstance(exc, ReadLimit) and produced():
+                state['cursor'] = _page_cursor(workflow_run_id, position, None, None)
+                done = False
+                break
+            if full() or size(extra_owner=owner_entry(None, run_id, None, 'run_unavailable')) > PAGE_BYTES:
+                state['cursor'] = _page_cursor(workflow_run_id, position, None, None)
+                done = False
+                break
+            owners.append({'workflow_run_id': run_id, 'state': 'run_unavailable'})
+            first_run = False
+            continue
+        for child in (a.get('invocation') or {} for a in run.get('activations', [])):
+            child_id = child.get('child_workflow_run_id')
+            if child_id and child_id not in member_ids:
+                return _unavailable_page(workflow_run_id, 'catalog_stale')
+        activations = run.get('activations', [])
+        attempt_ids = {t.get('task_id') for a in activations if execution_id and a.get('id') == execution_id for t in a.get('tasks', [])}
+        # Owner-less cursors restart a run after a budget boundary, not a task position.
+        resume = start if cursor is not None and first_run and start[0] == run_id and start[3] is not None else None
+        first_run = False
+        if resume is not None and (resume[1] >= len(activations) or resume[2] >= len(activations[resume[1]].get('tasks', []))):
+            raise ValueError('Invalid or stale workflow artifact cursor')
+        for ai, activation in enumerate(activations):
+            if resume is not None and ai < resume[1]:
+                continue
+            for ti, attempt in enumerate(activation.get('tasks', [])):
+                if resume is not None and ai == resume[1] and ti < resume[2]:
+                    continue
+                owner_id = attempt.get('task_id')
+                position = (run_id, ai, ti)
+                resumed_here = resume is not None and (ai, ti) == (resume[1], resume[2]) and resume[3] is not None
+                if resumed_here and owner_id != resume[3]:
+                    raise ValueError('Invalid or stale workflow artifact cursor')
+                if not isinstance(owner_id, str) or attempt.get('execution_kind') == 'native_subagent' or owner_id in seen_tasks:
+                    continue
+                if execution_id and activation.get('id') != execution_id:
+                    hosted = {attempt.get('native_owner_execution_id'), *(attempt.get('native_owner_execution_ids') or [])}
+                    if activation.get('role') != 'native_control' or not hosted & attempt_ids:
+                        continue
+                if task_id and owner_id != task_id:
+                    continue
+                if full() or produced() and _budget_exhausted():
+                    state['cursor'] = _page_cursor(workflow_run_id, position, owner_id, None)
+                    done = False
+                    break
+                after = resume[4] if resumed_here else None
+                seen_tasks.add(owner_id)
+                try:
+                    manifest, _ = _load(log_dir, owner_id)
+                except (OSError, ValueError, KeyError, TypeError) as exc:
+                    if isinstance(exc, ReadLimit) and produced():
+                        state['cursor'] = _page_cursor(workflow_run_id, position, owner_id, after)
+                        done = False
+                        break
+                    if not append_owner(owner_entry(owner_id, run_id, activation.get('id'), 'unavailable'), position, owner_id, after):
+                        done = False
+                        break
+                    continue
+                if not manifest:
+                    if _owner_record_missing(log_dir, owner_id):
+                        if not append_owner(owner_entry(owner_id, run_id, activation.get('id'), 'record_removed'), position, owner_id, after):
+                            done = False
+                            break
+                    continue
+                if after is not None:
+                    ids = [item['artifact_id'] for item in manifest]
+                    if after not in ids:
+                        raise ValueError('Invalid or stale workflow artifact cursor')
+                    manifest = manifest[ids.index(after) + 1:]
+                record = None
+                last_emitted = after
+                for item in manifest:
+                    binding = item.get('workflow') or {}
+                    root_id = (run.get('parent_link') or {}).get('root_workflow_run_id') or run_id
+                    if any(binding.get(key) != value for key, value in (
+                        ('task_id', owner_id), ('workflow_run_id', run_id), ('root_workflow_run_id', root_id),
+                        ('execution_id', activation.get('id')), ('node_id', activation.get('node_id')),
+                        ('role', activation.get('role')))):
+                        continue
+                    if execution_id and activation.get('id') != execution_id and not set(binding.get('hosted_native_attempt_ids', [])) & attempt_ids:
+                        continue
+                    if item['artifact_id'] in seen_artifacts:
+                        continue
+                    if record is None:
+                        try:
+                            record = _read_owner(log_dir, owner_id)
+                        except (OSError, ValueError, KeyError, TypeError):
+                            if not append_owner(owner_entry(owner_id, run_id, activation.get('id'), 'unavailable'), position, owner_id, after):
+                                done = False
+                            break
+                        if record is None:
+                            owner_state = 'record_removed' if _owner_record_missing(log_dir, owner_id) else 'unavailable'
+                            if not append_owner(owner_entry(owner_id, run_id, activation.get('id'), owner_state), position, owner_id, after):
+                                done = False
+                            break
+                    entry = item | {'availability': {'state': _availability(log_dir, record, item), 'observed_at': _now()}}
+                    if not items and size(extra_item=entry) > PAGE_BYTES:
+                        # An individually oversized reference must never pin the cursor.
+                        if not append_owner(owner_entry(owner_id, run_id, activation.get('id'), 'unavailable'), position, owner_id, item['artifact_id']):
+                            done = False
+                            break
+                        last_emitted = item['artifact_id']
+                        continue
+                    if len(items) >= limit or size(extra_item=entry) > PAGE_BYTES:
+                        state['cursor'] = _page_cursor(workflow_run_id, position, owner_id, last_emitted)
+                        done = False
+                        break
+                    items.append(entry)
+                    seen_artifacts.add(item['artifact_id'])
+                    last_emitted = item['artifact_id']
+                if not done:
+                    break
+            if not done:
+                break
+        if not done:
+            break
+    result = {'workflow_run_id': workflow_run_id, 'items': items, 'owners': owners, 'next_cursor': state['cursor'],
+              'has_more': not done, 'state': 'available', 'count': len(items)}
+    return result
+
+
+@metadata_request()
+def owner_references(log_dir: Path, owner_task_id: str) -> list[dict]:
+    """Current references of one owner with availability; empty when it has none.
+
+    Used by workflow delivery, which needs the same stat observation as the readers. A manifest or
+    owner record that cannot be read raises ``ValueError`` so a caller never mistakes it for none.
+    """
+    try:
+        items, _ = _load(log_dir, owner_task_id)
+    except (OSError, KeyError, TypeError) as exc:
+        raise ValueError('Artifact manifest is unavailable') from exc
+    if not items:
+        return []
+    record = _read_owner(log_dir, owner_task_id)
+    return [item | {'availability': {'state': 'unavailable' if record is None else _availability(log_dir, record, item), 'observed_at': _now()}} for item in items]

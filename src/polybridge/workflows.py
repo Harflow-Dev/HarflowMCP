@@ -862,6 +862,33 @@ class WorkflowStore:
             return catalog.header_page(identifiers, load)
         return catalog.page(load, limit=limit, cursor=cursor, active_only=active_only)
 
+    def prepare_run_catalog(self) -> dict[str, Any]:
+        """Advance one bounded index-preparation slice, separately from tree discovery.
+
+        The normal listing bootstrap shares the caller's metadata budget and reads at most its
+        configured bootstrap count. A tree read still returns unavailable for this preparation
+        request and discovers membership from catalog rows alone on a later request.
+        """
+        return self.list_run_page(limit=1)
+
+    def tree_members(self, run_id: str, limit: int = 65) -> dict[str, Any]:
+        """Catalog-only descendants of a run (itself included), without reading any run record.
+
+        ``state`` is ``ready`` only for a complete catalog; otherwise ``members`` is empty and the
+        caller retries. At most ``limit`` rows are returned so a caller can detect an oversized tree.
+        """
+        _identifier(run_id)
+        catalog = self._ownership_catalog()
+        with catalog.connect() as db:
+            catalog._discover(db)
+            if catalog.state(db)["status"] != "ready" or db.execute("SELECT 1 FROM entries WHERE json_extract(payload,'$.needs_direct_lookup')=1 LIMIT 1").fetchone() is not None:
+                return {"state": "preparing", "members": []}
+            rows = db.execute(
+                "WITH RECURSIVE tree(id) AS (SELECT ? UNION SELECT l.id FROM workflow_links l JOIN tree t ON l.parent_workflow_run_id=t.id) "
+                "SELECT l.id, e.stamp, l.parent_workflow_run_id, l.root_workflow_run_id FROM tree JOIN workflow_links l ON l.id=tree.id "
+                "JOIN entries e ON e.id=l.id ORDER BY e.stamp, e.id LIMIT ?", (run_id, limit)).fetchall()
+        return {"state": "ready", "members": [{"id": r[0], "created_at": r[1], "parent": r[2], "root": r[3]} for r in rows]}
+
     def get_run_header(self, run_id: str, *, _catalog: Any = None) -> dict[str, Any]:
         from .catalog import Catalog
         def load(identifier: str, *, _metadata_budget=None):
@@ -2820,7 +2847,7 @@ class WorkflowSupervisor:
                 current.update(node_id=join, context={"optional_failure": result, "node_id": node["id"]})
                 if rr.get("execution_contract") == "delegation":
                     current["input_result_refs"] = [current["execution_activation_id"]]
-                    for key in ("assignment_prompt", "assigned_task_ids", "additional_result_refs", "decision_id", "decision_attempts", "decision_error", "assignments"):
+                    for key in ("assignment_prompt", "assigned_task_ids", "additional_result_refs", "authorized_artifact_refs", "decision_id", "decision_attempts", "decision_error", "assignments"):
                         current.pop(key, None)
                 for key in ("execution_complete", "execution_activation_id", "result", "optional_failure_join", "selected_connections", "recovered_result", "recovered_failed_result"):
                     current.pop(key, None)
@@ -2886,7 +2913,7 @@ class WorkflowSupervisor:
                         child["execution_activation_id"] = token["execution_activation_id"]
                         child["completion_source_node_id"] = node["id"]
                     dispatch = token.get("assignments", {}).get(edge["id"], {})
-                    child.update({k: copy.deepcopy(dispatch[k]) for k in ("assignment_prompt", "assigned_task_ids", "additional_result_refs", "execution_session_mode", "resume_task_id", "resume_source_execution_id", "continue_previous", "session_reason", "child_session_mode", "child_session_ref", "child_session_reason") if k in dispatch})
+                    child.update({k: copy.deepcopy(dispatch[k]) for k in ("assignment_prompt", "assigned_task_ids", "additional_result_refs", "authorized_artifact_refs", "execution_session_mode", "resume_task_id", "resume_source_execution_id", "continue_previous", "session_reason", "child_session_mode", "child_session_ref", "child_session_reason") if k in dispatch})
                     if "structural_dispatch" in dispatch:
                         child.update(copy.deepcopy(dispatch["structural_dispatch"]))
                 rr["pending"].append(child)

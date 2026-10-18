@@ -1,6 +1,6 @@
 # Task artifact references
 
-Standalone dispatched tasks can call `register_artifact(path, kind, note)` to retain
+Dispatched standalone tasks and verified workflow attempts can call `register_artifact(path, kind, note)` to retain
 metadata references to screenshots, logs, reports and other regular files. Registration
 does not read, copy, upload, publish or preserve file contents. It is not proof of
 content validity, file authorship, successful execution, or permission to read, copy or
@@ -47,17 +47,24 @@ cover the artifact path; they do not change the separate full status recovery re
 These content bounds do not guarantee constant time for filesystem enumeration,
 stat calls or SQLite operations.
 
-The selected owner's identity and standalone ancestry are checked before authorization.
-Standalone exclusion uses the bounded workflow ownership catalog, checking each
-ancestor and refusing any ownership receipt, including malformed or unavailable
-receipts. Receipt existence is checked without reading its contents. Incomplete
-workflow preparation requires a retry; summaries report `unavailable` until ownership
-can be established. Artifact paths never fall back to scanning full workflow history.
+The selected owner's identity and ancestry are checked before authorization. Workflow
+ownership uses a bounded receipt checked against the run, activation and task. Node,
+orchestrator and native-control attempts may register while reserved, running or uncertain.
+The saved `workflow` binding records root/run/node/execution/task identity, role, visit/retry
+identity when present, and `workflow_receipt` provenance. Resumed ancestors must belong to
+the same root tree. Builders, inherited descendants without their own receipt, mismatched
+receipts and unverifiable catalog associations are refused. A registration may race with
+settlement after the unlocked run check; its immutable binding still identifies the attempt.
+Native children have no registration channel of their own: references registered through
+their hosting transport are labelled `native_transport`, with hosted attempt IDs (including
+batch ambiguity), and never claim child authorship. Workflow extra writable paths remain
+unsupported; workflow scope is the repository and the owning task's scratch directory.
 
-Workflow orchestrators, workers, builders, native children and inherited workflow
-descendants, including continuation successors, are not supported by this standalone
-contract. Workflow ownership and output selection belong to #82; workflow extra
-writable paths belong to #81.
+The MCP channel requires Polybridge registered in that harness and its MCP approval.
+The CLI channel requires a shell able to write `~/.polybridge/tasks` and run `ps`.
+OS sandboxes, including Codex read-only/workspace-write and native profiles with empty
+writable roots, block that CLI path. These are channel requirements, not a claim that every
+harness is certified to support registration. No permission is added by registration.
 
 ## Paths and observations
 
@@ -103,7 +110,7 @@ polybridge-ctl task-artifacts <task_id> --limit 20 --cursor '<next_cursor>' --js
 polybridge-ctl status <task_id> --brief --json
 ```
 
-A verified human caller can inspect a known standalone task. A dispatched standalone
+A verified human caller can inspect a known task, including workflow-bound tasks. A dispatched
 task can inspect its own references. Metadata reads do not grant file-content access.
 Saved extra-path grants are structurally validated together, then each covering grant
 is revalidated independently. One valid
@@ -120,8 +127,8 @@ when concurrent registration makes a cursor stale. Notes remain complete in deta
 pages. No file-content payload is included, regardless of referenced file size.
 
 Supported standalone tasks without a manifest have an empty registration set.
-Unsupported or unverifiable ownership (including workflow builders, managed workers,
-and their descendants) reports an unavailable summary without a detail reference;
+Unsupported or unverifiable ownership (including workflow builders and unbound inherited
+descendants) reports an unavailable summary without a detail reference;
 its manifest is not opened for that summary. An unreadable or
 malformed manifest is reported as unavailable, not as an empty successful result, and
 cannot be overwritten by a new registration.
@@ -151,4 +158,49 @@ expires normally; those ancestors may remain until a subsequent sweep. If owner
 deletion fails, its ancestors remain for the retry. Ancestor preservation does not
 extend the lifetime of the owner's descendants or session peers.
 
-The CLI JSON contract is version 11; setup and event-log versions are unchanged.
+The CLI JSON contract is version 13; setup and event-log versions are unchanged.
+
+## Workflow tree reads and selected delivery
+
+```python
+get_workflow_artifacts(workflow_run_id="<run_id>", execution_id="<execution_id>", limit=20)
+```
+
+```bash
+polybridge-ctl workflow-artifacts <run_id> --execution-id <execution_id> --limit 20 --json
+```
+
+Humans can read any run. Delegation orchestrators can read their own run and linked
+descendants. Nodes and native controls can read only their own task references; standalone
+callers, builders and legacy non-delegation managed callers cannot read run-level pages.
+Task artifact summaries are available for bound tasks and retain the existing summary shape.
+
+Workflow pages use a ready catalog-only tree projection, then lazily read records under the
+shared metadata budget. Cold, invalidated or partially prepared catalogs report
+`catalog_preparing`; each retry advances a separate bounded catalog-preparation slice
+under the same request budget, then a later request queries the ready catalog. Normal run
+listings also prepare the catalog. Missing linked children report
+`catalog_stale`. Trees above 64 runs report `tree_bound_exceeded`. Pages contain at most 50
+items, at most 50 exceptional owner rows, and a serialized envelope of at most 63000 bytes.
+Unreadable records/manifests report `run_unavailable`/`unavailable`; expired owners report
+`record_removed`. Cursors are at most 512 characters and bind run, activation/task position,
+owner identity and last artifact ID. Ordering is run creation time/ID, activation order, then
+task order, with task/artifact deduplication. References appended behind a cursor are visible
+on a fresh pass. Budget-limited pages can contain no items while still advancing past owners.
+
+The Monitor's selected execution has an Artifacts section with explicit paged loading,
+Deleted, Unavailable and Owner record removed rows, and native transport attribution.
+
+Orchestrator context lists whole references of settled executions of the current run, capped
+at 32 items and 8 KiB. It selects at most eight unique `{execution_id, artifact_id}` pairs in
+`next[].artifact_refs`, including branch assignments, retries and workflow invocations.
+Deleted, unavailable, unsettled, unknown and out-of-scope selections are decision errors;
+changed references are allowed and labelled. Frozen references are stored on the activation
+and token and rendered before input results, with notes verbatim and a 16 KiB section cap.
+Only metadata is delivered; no file content is injected. Notes are data, not instructions.
+
+A workflow invocation passes selected references separately from automatic input results.
+Inside the child they are listed as inherited and require selection again before reaching a
+worker or grandchild. Unselected parent references are not exposed. Recovery preserves stored
+bindings and selections; retries retain distinct execution identities. References follow the
+owner task's retention, and workflow tasks remain pinned while their tree is active.

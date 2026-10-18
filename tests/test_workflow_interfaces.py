@@ -46,7 +46,7 @@ def test_cli_workflow_start_envelope(monkeypatch, capsys):
         return {"workflow_run_id": "run-1", "status": "pending"}
     monkeypatch.setattr(server, "_workflow_call", start)
     assert ctl.main(["run", "--workflow", "review", "--repo", "/tmp/repo", "--prompt", "do it", "--json"]) == 0
-    assert json.loads(capsys.readouterr().out) == {"v": 12, "result": {"workflow_run_id": "run-1", "status": "pending"}}
+    assert json.loads(capsys.readouterr().out) == {"v": 13, "result": {"workflow_run_id": "run-1", "status": "pending"}}
     assert observed == {"name": "review", "overrides": None, "network": None, "freedom": None, "prompt": "do it", "repo_path": "/tmp/repo"}
 
 
@@ -190,7 +190,7 @@ async def test_public_mcp_has_no_checklist_completion_mutation():
         "workflow_builder", "preview_workflow_run", "start_workflow", "list_workflow_runs", "list_workflow_run_page",
         "get_workflow_status", "wait_for_workflow", "pause_workflow",
         "resume_workflow", "cancel_workflow", "followup_workflow_builder", "apply_workflow_draft",
-        "recover_workflow", "inspect_workflow_node", "get_workflow_run_detail", "read_workflow_assigned_input", "revise_workflow_goal",
+        "recover_workflow", "inspect_workflow_node", "get_workflow_run_detail", "read_workflow_assigned_input", "revise_workflow_goal", "get_workflow_artifacts",
     }
     for name in ("pause_workflow", "resume_workflow", "cancel_workflow"):
         assert not {"task_updates", "tasks", "completed_task_ids", "status", "completed"} & set(tools[name].input_schema["properties"])

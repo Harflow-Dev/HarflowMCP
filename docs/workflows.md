@@ -1533,3 +1533,34 @@ The run inspector shows the verbatim current goal, its history and assessment ev
 **Revise goal…** is available only for an eligible Monitor-owned root checkpoint. The editor
 keeps its captured revision and text if another caller's edit causes a stale-revision error.
 Successful revisions refresh the inspector and close the editor when the new goal is displayed.
+
+## Artifact references between executions
+
+Workers and orchestrators should register reports, logs and screenshots worth referencing with
+`register_artifact` when that tool is available. Registration records metadata only; it does not
+validate content or success, preserve bytes, or grant permission to read, copy or publish files.
+Notes are stored verbatim and treated as data. Workflow scope is repo plus own scratch; extra
+writable paths are unsupported. MCP registration requires that harness's MCP registration and
+approval; CLI registration requires bridge-state writes and `ps`, which OS sandboxes can block.
+Native children have no independent channel; transport registrations identify the hosting
+transport and do not attribute child authorship.
+
+Use `get_workflow_artifacts` or `polybridge-ctl workflow-artifacts RUN --execution-id EXEC --json`
+for bounded paged reads (including linked child runs). The Monitor shows references for the
+selected execution with explicit loading and availability states. Delegation orchestrators can
+read their run and descendants; workers/native controls can read only their own task references.
+
+Decision context `artifact_references` contains up to 32 whole items / 8 KiB from settled
+executions of this run. Pass up to eight unique pairs in an executable continuation or branch:
+
+```json
+{"continuation_id":"<issued continuation>","prompt":"Review the registered report.","artifact_refs":[{"execution_id":"<settled execution>","artifact_id":"<registered artifact>"}]}
+```
+
+Selections freeze complete metadata on the assignment and activation and appear before input
+results. The selected section is capped at 16 KiB; oversized selections enter the decision repair
+loop. Deleted/unavailable and unsettled/out-of-scope references are refused; changed references
+are labelled. Content is never injected. Invocation selections are separate from automatic
+inputs: a child orchestrator sees only explicitly inherited references and must select again
+before a worker or grandchild receives them. See [artifact references](task-artifacts.md) for
+identity, pagination, budget, race, channel and retention details.
