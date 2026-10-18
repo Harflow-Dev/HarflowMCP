@@ -27,6 +27,13 @@ def qualified(monkeypatch, tmp_path_factory):
     # Native-shaped stand-ins exercise namespace/identity guards, not native loaders.
     monkeypatch.setattr('harflow_mcp.runtime_loaders.qualify_loaders',
                         lambda paths: (set(paths), set()))
+    # Keep Python's host sysconfig snapshot stable while the adapter's platform
+    # seam is exercised as Darwin.  This prevents lazy sysconfig scheme lookup
+    # from selecting a nonexistent Darwin-on-Linux scheme.
+    import sysconfig
+    from harflow_mcp import runtime_paths
+    paths = {name: sysconfig.get_path(name) for name in ('stdlib', 'purelib', 'platlib')}
+    monkeypatch.setattr(runtime_paths.sysconfig, 'get_path', lambda name: paths[name])
     monkeypatch.setattr('harflow_mcp.backends.codex.sys.platform', 'darwin')
     monkeypatch.setattr(backends, 'version', lambda backend, **kwargs: EXTRA_PATHS_VERSION)
     monkeypatch.setattr('harflow_mcp.backends.codex.RENAMED_EXTRA_PATHS_QUALIFIED', True)

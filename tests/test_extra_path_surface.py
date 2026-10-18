@@ -32,6 +32,10 @@ def qualified(monkeypatch, fake_backend_clis, tmp_path_factory):
             (launcher.parent / name).symlink_to(selected)
     monkeypatch.setenv('PATH', str(launcher.parent))
     monkeypatch.setattr('harflow_mcp.runtime_loaders.qualify_loaders', lambda paths: (set(paths), set()))
+    import sysconfig
+    from harflow_mcp import runtime_paths
+    host_paths = {name: sysconfig.get_path(name) for name in ('stdlib', 'purelib', 'platlib')}
+    monkeypatch.setattr(runtime_paths.sysconfig, 'get_path', lambda name: host_paths[name])
     # Qualification still resolves/fingerprints a CLI, even with its version stubbed.
     monkeypatch.setattr(backends, 'version', lambda backend, **kwargs: EXTRA_PATHS_VERSION)
     monkeypatch.setattr('harflow_mcp.backends.codex.sys.platform', 'darwin')

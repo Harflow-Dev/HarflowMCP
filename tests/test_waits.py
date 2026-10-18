@@ -1,5 +1,6 @@
 """The shared wait contract: wait_for_task, wait_for_tasks and wait_for_workflow. No model calls."""
 import asyncio
+import json
 import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -553,7 +554,7 @@ async def test_workflow_settling_that_makes_progress_is_not_stalled(monkeypatch,
     counter = {"n": 0}
     async def call(action, **kwargs):
         counter["n"] += 1
-        run_file.write_text("x" * counter["n"])  # the run file keeps changing while settling
+        run_file.write_text(json.dumps({"workflow_run_id": "r", "revision": counter["n"]}))
         return {"workflow_run_id": "r", "status": "completed", "settling": counter["n"] < 40}
     monkeypatch.setattr(server, "_workflow_call", call)
     result = await server.wait_for_workflow("r", until="terminal")
