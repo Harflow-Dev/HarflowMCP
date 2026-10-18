@@ -987,7 +987,7 @@ class WorkflowStore:
             run["settling"] = any(t.get("status") in {"reserved", "running", "uncertain"} for a in run["activations"] for t in a["tasks"])
             return run
 
-    def create_run(self, definition: dict[str, Any], prompt: str, repo_path: Path, *, freedom: str = "write_in_repo", network: bool | None = None, kind: str = "workflow", permission_policy: str = "legacy_ceiling", caller: Any = None, dependency_tree: dict[str, Any] | None = None, owner_contracts: dict[str, Any] | None = None, goal: str | None = None) -> dict[str, Any]:
+    def create_run(self, definition: dict[str, Any], prompt: str, repo_path: Path, *, freedom: str = "write_in_repo", network: bool | None = None, kind: str = "workflow", permission_policy: str = "legacy_ceiling", caller: Any = None, dependency_tree: dict[str, Any] | None = None, owner_contracts: dict[str, Any] | None = None, goal: str | None = None, run_id: str | None = None) -> dict[str, Any]:
         if permission_policy not in {"saved_node", "legacy_ceiling"}:
             raise WorkflowError("Unknown workflow permission policy")
         if freedom not in FREEDOMS:
@@ -997,7 +997,7 @@ class WorkflowStore:
                 effective_freedom(node, freedom, permission_policy=permission_policy)
         if not Path(repo_path).is_dir():
             raise WorkflowError("Repository directory does not exist")
-        rid = uuid.uuid4().hex
+        rid = _identifier(run_id) if run_id is not None else uuid.uuid4().hex
         run = {"workflow_run_id": rid, "kind": kind, "name": definition["name"], "definition": copy.deepcopy(definition), "revision": definition.get("revision", 0), "prompt": prompt, "repo_path": str(Path(repo_path).resolve()), "freedom": freedom, "network": network, "status": "starting", "created_at": time.time(), "updated_at": time.time(), "sequence": 0, "transitions": 0, "activations": [], "decisions": [], "sessions": {}, "suppressed_candidates": [], "pending": [], "joins": {}, "instructions": "", "attempt_grants": {}, "supervisor_pid": None}
         from .workflow_goals import initialize
         initialize(run, goal)
@@ -1020,6 +1020,8 @@ class WorkflowStore:
             run["dependency_tree"] = copy.deepcopy(dependency_tree)
         from .catalog import catalog_lock, Catalog
         with catalog_lock(self.runs):
+            if (self.runs / f"{rid}.json").exists():
+                raise WorkflowError("Workflow run id already exists")
             previous_directory_mtime = self.runs.stat().st_mtime_ns
             Catalog(self.runs, '.json').invalidate(rid)
             written_source = _write(self.runs / f"{rid}.json", run)
@@ -1511,7 +1513,7 @@ def _launch(storage: WorkflowStore, run_id: str) -> None:
             output.close()
 
 
-async def start_workflow(name: str, prompt: str, repo_path: Path, *, overrides: dict[str, Any] | None = None, freedom: str | None = None, network: bool | None = None, root: Path | None = None, interaction_owner: str = "caller", definition_snapshot: dict[str, Any] | None = None, dependency_tree: dict[str, Any] | None = None, expected_preview_hash: str | None = None, goal: str | None = None, _verified_caller: Any = _CALLER_UNSET) -> dict[str, Any]:
+async def start_workflow(name: str, prompt: str, repo_path: Path, *, overrides: dict[str, Any] | None = None, freedom: str | None = None, network: bool | None = None, root: Path | None = None, interaction_owner: str = "caller", definition_snapshot: dict[str, Any] | None = None, dependency_tree: dict[str, Any] | None = None, expected_preview_hash: str | None = None, goal: str | None = None, run_id: str | None = None, _verified_caller: Any = _CALLER_UNSET) -> dict[str, Any]:
     from .workflow_goals import validate_goal
     validate_goal(goal)
     if interaction_owner not in {"caller", "monitor"}:
@@ -1552,7 +1554,7 @@ async def start_workflow(name: str, prompt: str, repo_path: Path, *, overrides: 
     if expected_preview_hash is not None and preview_hash != expected_preview_hash:
         raise WorkflowError("Workflow launch preview changed; refresh permissions before starting")
     caller = await _capture_caller(storage, None, _verified_caller)
-    run = storage.create_run(definition, prompt, repo_path, freedom="unrestricted", network=network, permission_policy="saved_node", caller=caller, dependency_tree=dependency_tree, owner_contracts=contracts, goal=goal)
+    run = storage.create_run(definition, prompt, repo_path, freedom="unrestricted", network=network, permission_policy="saved_node", caller=caller, dependency_tree=dependency_tree, owner_contracts=contracts, goal=goal, run_id=run_id)
     storage.update_run(run["workflow_run_id"], lambda r: r.update(interaction_owner=interaction_owner, preview_hash=preview_hash), "interaction_owner")
     _launch(storage, run["workflow_run_id"])
     run["preview_hash"] = preview_hash

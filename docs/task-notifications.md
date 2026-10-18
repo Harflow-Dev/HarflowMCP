@@ -59,7 +59,7 @@ Use `start_task(..., notify="builds")` to reserve durable notification intent be
 spawning, or `subscribe(task_id, notify="builds")` for an existing task. These
 actions, `unsubscribe(task_id, notify="builds")`, and `get_task_notifications(task_id)`
 require a direct caller: delegated agents cannot use server HTTP to bypass their
-own network or publishing restrictions. Workflow notifications are unavailable.
+own network or publishing restrictions. Root workflow subscriptions are also supported (see below).
 A known rejected start releases its unused reservation. Cancellation while reserving
 waits for the reservation commit and removes the unused intent before propagating.
 After dispatch begins, cancellation only removes intent when the dispatch explicitly
@@ -85,3 +85,61 @@ Delivery still requires the alias to be present in the current configuration. A
 configless installation without a notification database starts no worker and creates
 no database. A stopped server cannot send notifications. This does not make task
 execution survive server shutdown.
+
+
+## Root workflow notifications
+
+Use `start_workflow(..., notify="builds", notify_events=["terminal", "attention"])`
+to reserve notification intent before run creation, or
+`subscribe_workflow(workflow_run_id, notify="builds", events=["terminal", "attention"])`
+for an existing root run. Omitting events selects both. Repeating a subscription
+updates event selection; an unsubscribed or expired subscription is reactivated.
+Child IDs are refused with their root identity; builder runs are unsupported.
+These MCP tools require a direct caller before destination configuration is read.
+`unsubscribe_workflow(workflow_run_id, notify=None)` stops all aliases, or supply one.
+`get_workflow_notifications(workflow_run_id)` reads subscriptions and at most 50
+recent deliveries. The read-only CLI equivalent is
+`polybridge-ctl workflow-notifications <run_id> --json`; management is MCP-only.
+The Monitor does not expose subscription management or workflow notifications.
+
+`workflow.settled` reports completed, failed, or cancelled root runs after settlement.
+Node completion does not notify. Recovery followed by another failure creates another
+failed episode; reason edits during one failed episode do not. Failed episodes
+recorded before recovery remain deliverable even if recovery occurs between worker
+passes. `workflow.attention` reports questions, attention checkpoints and system
+pauses; caller pauses do not notify. Forwarded nested attention produces one root
+point with source fields when available. An answered or replaced attention point
+is superseded when claimed. Each subscription sends at most 50 attention deliveries;
+terminal deliveries remain enabled. Existing-run subscription starts at the current
+point and future points, without replaying earlier history.
+
+The root stores the newest 32 attention points and 64 terminal points, with eviction
+watermarks. Points evicted before delivery creation cannot be delivered; retained
+points carry `points_missed: true` when selected history was lost. Snapshot bodies
+also share a 256 KiB bound: an evicted or failed snapshot preserves its minimal
+historical identity and never substitutes a later run's result. Attention granularity
+is the durable workflow mutation boundary. Nothing is sent while no server worker
+runs; stored points and delivery intent resume when one starts again.
+
+Payload version 1 is bounded to 16 KiB. It includes stable notification and
+subscription IDs, event key, root identity, status, sequence, observation time,
+bounded question/reason/result fields, definition identity and source fields when
+available. Artifact metadata is frozen when delivery intent is inserted: at most ten
+note-free references, a separate observation timestamp, a truncation indicator and
+a `get_workflow_artifacts` detail reference. Artifact content is never sent.
+A missing legacy field is null. Legacy and reconciled state snapshots are labelled.
+Tree settlement is checked before sending; an unreadable or unwinding tree waits
+up to ten minutes, then carries `tree_settlement_unconfirmed: true`. A historical
+failed point whose run has already recovered can be sent immediately with that flag.
+
+Completed and cancelled subscriptions settle permanently. Failed or idle active
+subscriptions expire after 30 days without a new point. Pending deliveries retry
+independently of subscription settlement, using the same leases, destination
+validation, HMAC, six-attempt limit and retention as task notifications. At-least-once
+applies to created deliveries within those limits; receivers deduplicate on
+`notification_id`. The shared 1000-subscription capacity counts task and workflow
+rows. Delivery only changes notification storage, never workflow state or work.
+A start that creates a run but fails during launch retains its subscription and
+identifies the run; inspect it before retrying. Orphan reservations without a run
+are removed after five lease intervals. If post-start activation fails, the returned
+run includes a notice and the worker recovers the reserved subscription.

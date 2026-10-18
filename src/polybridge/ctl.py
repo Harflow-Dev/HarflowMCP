@@ -103,6 +103,9 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     artifacts_p.add_argument('--cursor')
     artifacts_p.add_argument('--limit', type=int, default=20)
     artifacts_p.add_argument('--json', action='store_true')
+    notification_p = sub.add_parser('workflow-notifications', help='read root workflow subscriptions and up to 50 recent deliveries; direct callers only')
+    notification_p.add_argument('workflow_run_id')
+    notification_p.add_argument('--json', action='store_true')
 
     list_p = sub.add_parser("list", help="list tasks recorded on disk")
     list_p.add_argument(
@@ -367,6 +370,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
         allowlist_p,
         artifact_p,
         artifacts_p,
+        notification_p,
         *workflow_parsers,
     )
 
@@ -977,6 +981,18 @@ def _main(argv: list[str] | None = None) -> int:
     parser, list_p = parsers[0], parsers[1]
 
     args = parser.parse_args(argv)
+
+    if args.command == 'workflow-notifications':
+        from .takeover import caller_refusal
+        from .workflow_notifications import status
+        try:
+            if caller_refusal(default_log_dir()) is not None:
+                raise ValueError('Workflow notifications require a direct caller')
+            result = status(default_log_dir(), args.workflow_run_id)
+        except (OSError, ValueError) as exc:
+            return _fail(args, 'notification_error', str(exc))
+        print(json.dumps({'v': CTL_JSON_VERSION, 'result': result}) if args.json else json.dumps(result, indent=2))
+        return 0
 
     if args.command in ('register-artifact', 'task-artifacts'):
         from . import artifacts

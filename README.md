@@ -220,6 +220,10 @@ restart-safe task supervision.
 Retained subscriptions still expire after destination configuration is removed.
 Ambiguous starts retain notification intent for inspection.
 Webhook connections try validated destination addresses within one bounded attempt.
+Root runs also support `start_workflow(..., notify="builds")` and
+`subscribe_workflow` for settlement and attention webhooks; see
+[workflow notifications and bounded history](docs/task-notifications.md#root-workflow-notifications).
+Read delivery state with `polybridge-ctl workflow-notifications <run_id> --json`.
 
 Settled task status includes a persisted best-effort `outcome`: starting and terminal Git
 observations, committed changes, local upstream comparison, and available structured build/test

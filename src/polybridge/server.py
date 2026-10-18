@@ -1874,7 +1874,7 @@ async def preview_workflow_run(name: str, repo_path: str, overrides: dict[str, A
 
 
 @mcp.tool()
-async def start_workflow(name: str, prompt: str, repo_path: str, overrides: dict[str, Any] | None = None, freedom: str | None = None, network: StrictBool | None = None, expected_preview_hash: str | None = None, goal: str | None = None) -> dict[str, Any]:
+async def start_workflow(name: str, prompt: str, repo_path: str, overrides: dict[str, Any] | None = None, freedom: str | None = None, network: StrictBool | None = None, expected_preview_hash: str | None = None, goal: str | None = None, notify: str | None = None, notify_events: list[str] | None = None) -> dict[str, Any]:
     """Start a durable workflow run; returns workflow_run_id rather than task_id.
 
     Preserve spaces and word boundaries in prompt rather than compressing natural prose;
@@ -1886,11 +1886,111 @@ async def start_workflow(name: str, prompt: str, repo_path: str, overrides: dict
     public controls apply to the root run id only.
 
     goal is optional nonblank text up to 64 KiB UTF-8, preserved verbatim. It complements the
-    saved purpose and request without expanding permissions. Completion requires an assessment
+    saved purpose and request without expanding permissions. notify reserves configured root-run
+    settlement/attention webhooks before creation; notify_events selects terminal, attention,
+    or both (default). Direct callers only; see docs/task-notifications.md.
+    Completion requires an assessment
     with evidence for the current goal revision; conflicts or unverifiable criteria need input.
     """
     from .workflow_responses import compact
-    return compact(await _workflow_call("start", name=name, prompt=prompt, repo_path=repo_path, overrides=overrides, freedom=freedom, network=network, expected_preview_hash=expected_preview_hash, goal=goal))
+    from . import workflow_notifications as notifications
+    if notify is None and notify_events is not None:
+        raise MCPError(INVALID_PARAMS, 'notify_events requires notify')
+    reserved_id = None
+    notification = None
+    if notify is not None:
+        await _notification_authority()
+        try:
+            from .notifications import preflight
+            preflight(notify)
+            notifications._events(notify_events)
+        except ValueError as exc:
+            raise MCPError(INVALID_PARAMS, str(exc)) from None
+        reserved_id = uuid.uuid4().hex
+        try:
+            notification = await _notification_io(notifications.subscribe, _reg().log_dir, reserved_id, notify, notify_events, reservation=True)
+        except asyncio.CancelledError:
+            await _notification_io(notifications.discard_unstarted, _reg().log_dir, reserved_id)
+            raise
+        except Exception:
+            raise MCPError(INVALID_PARAMS, 'Notification reservation failed; no workflow was started') from None
+    launch_notice = None
+    try:
+        run = await _workflow_call("start", name=name, prompt=prompt, repo_path=repo_path, overrides=overrides, freedom=freedom, network=network, expected_preview_hash=expected_preview_hash, goal=goal, **({'run_id': reserved_id} if reserved_id else {}))
+    except (Exception, asyncio.CancelledError) as exc:
+        if reserved_id is None:
+            raise
+        # Launch can persist needs_attention before raising. A launch exception is not proof
+        # that creation failed; retain the durable subscription whenever its run exists.
+        try:
+            from .workflows import WorkflowStore
+            from .catalog import METADATA_BYTES, metadata_request
+            def read_created_run():
+                with metadata_request() as budget:
+                    return WorkflowStore().get_run(reserved_id, metadata_byte_limit=METADATA_BYTES, metadata_budget=budget)
+            run = await asyncio.to_thread(read_created_run)
+        except FileNotFoundError:
+            await _notification_io(notifications.discard_unstarted, _reg().log_dir, reserved_id)
+            raise exc
+        except Exception:
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            raise MCPError(INVALID_PARAMS, f'Start did not return normally; inspect workflow_run_id {reserved_id} before retrying') from None
+        if isinstance(exc, asyncio.CancelledError):
+            _start_notification_worker(_reg())
+            raise
+        launch_notice = 'Workflow run was created but launch did not return normally; inspect its current status before retrying'
+    result = compact(run)
+    if launch_notice is not None:
+        result.setdefault('notices', []).append(launch_notice)
+    if notification is not None:
+        try:
+            await _notification_io(notifications.activate, _reg().log_dir, reserved_id)
+            notification['state'] = 'active'
+        except Exception:
+            result.setdefault('notices', []).append('Workflow started; notification activation is pending recovery by the server worker')
+        result['notification'] = notification
+        _start_notification_worker(_reg())
+    return result
+
+
+@mcp.tool()
+async def subscribe_workflow(workflow_run_id: str, notify: str, events: list[str] | None = None) -> dict[str, Any]:
+    """Subscribe a root workflow to configured webhooks (terminal, attention, or both).
+
+    Direct callers only. Current and future points are delivered; historical points are not
+    replayed. Repeat calls update event selection. Delivery never changes workflow execution.
+    """
+    await _notification_authority()
+    from . import workflow_notifications
+    try:
+        result = await _notification_io(workflow_notifications.subscribe, _reg().log_dir, workflow_run_id, notify, events)
+    except (ValueError, OSError) as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+    _start_notification_worker(_reg())
+    return result
+
+
+@mcp.tool()
+async def unsubscribe_workflow(workflow_run_id: str, notify: str | None = None) -> dict[str, Any]:
+    """Stop future workflow delivery attempts for one configured alias, or every alias."""
+    await _notification_authority()
+    from .workflow_notifications import unsubscribe
+    try:
+        return await _notification_io(unsubscribe, _reg().log_dir, workflow_run_id, notify)
+    except ValueError as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+
+@mcp.tool()
+async def get_workflow_notifications(workflow_run_id: str) -> dict[str, Any]:
+    """Read root workflow subscriptions and at most 50 recent delivery states; direct callers only."""
+    await _notification_authority()
+    from .workflow_notifications import status
+    try:
+        return await asyncio.to_thread(status, _reg().log_dir, workflow_run_id)
+    except ValueError as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
 
 
 @mcp.tool()

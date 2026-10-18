@@ -78,6 +78,8 @@ def _db(log_dir: Path):
         attempts INTEGER NOT NULL DEFAULT 0, due REAL NOT NULL DEFAULT 0,
         lease TEXT, lease_until REAL NOT NULL DEFAULT 0, payload BLOB, error TEXT,
         UNIQUE(task_id,destination))''')
+    from .workflow_notifications import initialize
+    initialize(db)
     return db
 
 
@@ -97,7 +99,7 @@ def subscribe(log_dir: Path, task_id: str, notify: str, *, reservation: bool = F
             existing = db.execute('SELECT * FROM subscriptions WHERE task_id=? AND destination=?', (task_id, notify)).fetchone()
             if existing:
                 return _public(existing)
-            if db.execute('SELECT count(*) FROM subscriptions').fetchone()[0] >= MAX_SUBSCRIPTIONS:
+            if db.execute('SELECT (SELECT count(*) FROM subscriptions)+(SELECT count(*) FROM workflow_subscriptions)').fetchone()[0] >= MAX_SUBSCRIPTIONS:
                 raise ValueError('notification subscription capacity reached')
             db.execute('INSERT INTO subscriptions(id,task_id,destination,state,created,updated) VALUES(?,?,?,?,?,?)',
                        (str(uuid.uuid4()), task_id, notify, 'pending', now, now))
@@ -357,6 +359,8 @@ def _tick(log_dir: Path):
 
 async def tick(log_dir: Path):
     await asyncio.to_thread(_tick, Path(log_dir))
+    from .workflow_notifications import tick as workflow_tick
+    await asyncio.to_thread(workflow_tick, Path(log_dir))
 
 
 async def worker(log_dir: Path):

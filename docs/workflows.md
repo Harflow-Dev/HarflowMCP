@@ -1564,3 +1564,15 @@ are labelled. Content is never injected. Invocation selections are separate from
 inputs: a child orchestrator sees only explicitly inherited references and must select again
 before a worker or grandchild receives them. See [artifact references](task-artifacts.md) for
 identity, pagination, budget, race, channel and retention details.
+
+
+## Root run webhooks
+
+Direct callers can use `start_workflow(..., notify="builds")` or
+`subscribe_workflow(workflow_run_id, notify="builds", events=["terminal", "attention"])`.
+Configured destinations receive root settlement and current attention events;
+node completion and caller pauses do not notify. Workflow recovery never retries
+webhooks as work, and webhook failure never changes a run. Read state with
+`get_workflow_notifications` or `polybridge-ctl workflow-notifications <run_id> --json`.
+Subscription management is MCP-only and is not exposed in the Monitor. See
+[notification delivery, history bounds and payloads](task-notifications.md#root-workflow-notifications).

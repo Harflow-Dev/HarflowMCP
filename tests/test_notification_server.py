@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 from mcp import MCPError
 
-from polybridge import backends, notifications, server, store
+from polybridge import backends, notifications, server, store, workflow_notifications
 
 
 @pytest.fixture
@@ -29,6 +29,73 @@ async def test_start_reserves_before_spawn(configured, monkeypatch, git_repo, fa
     response = await server.start_task('preserve this prose', str(git_repo), backend='codex', notify='hook')
     assert response['task_id'] == seen[0]
     assert response['notification']['task_id'] == seen[0]
+
+
+async def test_start_workflow_requires_notify_for_notify_events(configured):
+    with pytest.raises(MCPError, match='notify_events requires notify'):
+        await server.start_workflow('workflow', 'prompt', '/tmp/repo', notify_events=['attention'])
+
+
+async def test_start_workflow_launch_failure_discards_uncreated_reservation(configured, monkeypatch):
+    seen = []
+    async def fail(command, **kwargs):
+        seen.append(kwargs["run_id"])
+        raise OSError("launch failed")
+    monkeypatch.setattr(server, "_workflow_call", fail)
+    with pytest.raises(OSError, match="launch failed"):
+        await server.start_workflow("workflow", "prompt", "/tmp/repo", notify="hook")
+    assert seen
+    assert workflow_notifications.status(server._reg().log_dir, seen[0])["subscriptions"] == []
+
+
+async def test_start_workflow_created_run_launch_failure_keeps_subscription_and_notice(configured, monkeypatch):
+    seen = []
+    run = {"workflow_run_id": "reserved", "name": "workflow", "kind": "workflow", "status": "running",
+           "sequence": 0, "definition": {}, "activations": [], "created_at": 1, "updated_at": 1}
+    async def fail(command, **kwargs):
+        seen.append(kwargs["run_id"])
+        run["workflow_run_id"] = kwargs["run_id"]
+        raise OSError("launch returned after creation")
+    monkeypatch.setattr(server, "_workflow_call", fail)
+    class ExistingRun:
+        def __init__(self, *args, **kwargs): pass
+        def get_run(self, run_id, **kwargs):
+            run["workflow_run_id"] = run_id
+            return run
+    import polybridge.workflows as workflow_module
+    monkeypatch.setattr(workflow_module, "WorkflowStore", ExistingRun)
+    monkeypatch.setattr(workflow_notifications, "WorkflowStore", ExistingRun)
+    response = await server.start_workflow("workflow", "prompt", "/tmp/repo", notify="hook")
+    assert response["workflow_run_id"] == seen[0]
+    assert any("created" in notice for notice in response.get("notices", []))
+    assert workflow_notifications.status(server._reg().log_dir, seen[0])["subscriptions"][0]["state"] == "active"
+
+
+async def test_start_workflow_activation_failure_returns_notice(configured, monkeypatch):
+    run = {"workflow_run_id": "created", "name": "workflow", "kind": "workflow", "status": "running",
+           "sequence": 0, "definition": {}, "activations": [], "created_at": 1, "updated_at": 1}
+    async def started(command, **kwargs):
+        run["workflow_run_id"] = kwargs["run_id"]
+        return run
+    monkeypatch.setattr(server, "_workflow_call", started)
+    import polybridge.workflow_notifications as workflow_module
+    monkeypatch.setattr(workflow_module, "activate", lambda *args: (_ for _ in ()).throw(OSError("activation down")))
+    response = await server.start_workflow("workflow", "prompt", "/tmp/repo", notify="hook")
+    assert response["workflow_run_id"] == run["workflow_run_id"]
+    assert any("activation" in notice for notice in response.get("notices", []))
+
+
+@pytest.mark.parametrize('method,args', [
+    (server.subscribe_workflow, ('root', 'hook')),
+    (server.unsubscribe_workflow, ('root',)),
+    (server.get_workflow_notifications, ('root',)),
+])
+async def test_workflow_notification_management_requires_direct_caller(configured, monkeypatch, method, args):
+    async def caller():
+        return object()
+    monkeypatch.setattr(server, '_verified_workflow_caller', caller)
+    with pytest.raises(MCPError, match='direct caller'):
+        await method(*args)
 
 
 async def test_failed_reservation_never_spawns(configured, monkeypatch, git_repo, fake_backend_clis):
