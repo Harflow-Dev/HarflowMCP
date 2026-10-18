@@ -49,7 +49,7 @@ async def test_protocol_correction_exhausts_shared_attempt_budget(storage, tmp_p
 
 @pytest.mark.parametrize('unsafe', ['outcome_unknown', 'cancelled', 'permission', 'authority', 'uncertain'])
 def test_protocol_repair_never_reexecutes_unsafe_outcomes(unsafe):
-    from polybridge import workflow_delegation as d
+    from harflow_mcp import workflow_delegation as d
     outcome = {'status': 'completed'}
     if unsafe == 'outcome_unknown':
         outcome[unsafe] = True
@@ -83,7 +83,7 @@ async def test_protocol_repair_without_session_stays_fresh_on_same_candidate(sto
 
 
 async def test_existing_paused_malformed_result_repairs_before_routing(storage, tmp_path, monkeypatch):
-    from polybridge import workflow_delegation as d, workflows as w
+    from harflow_mcp import workflow_delegation as d, workflows as w
     from test_workflow_delegation import default_decision, graph
     original_eligible = d.protocol_repair_eligible
     monkeypatch.setattr(d, 'protocol_repair_eligible', lambda *args: False)
@@ -111,7 +111,7 @@ async def test_existing_paused_malformed_result_repairs_before_routing(storage, 
 
 
 def test_protocol_repair_uses_node_grant_and_does_not_change_historical_policy():
-    from polybridge import workflow_delegation as d
+    from harflow_mcp import workflow_delegation as d
     activation = {'id': 'a', 'result_error': 'Malformed JSON contract', 'role': 'node', 'node_id': 'work', 'status': 'failed', 'tasks': [{'status': 'completed', 'candidate': {'backend': 'codex'}, 'result': {'status': 'completed'}}], 'node_result': {'status': 'failed', 'result': {'failure_kind': 'protocol'}}}
     node = {'id': 'work', 'max_attempts': 1}
     run = {'runner_policy': 'guided', 'activations': [activation]}
@@ -134,7 +134,7 @@ async def test_valid_worker_reported_protocol_failure_is_not_automatically_corre
     assert run['status'] == 'needs_input'
     assert len(attempts) == 1
     assert 'result_error' not in attempts[0]
-    from polybridge import workflows as w
+    from harflow_mcp import workflows as w
     storage.control(run['workflow_run_id'], 'resume', instructions='Adjudicate the reported failure', decision_id=run['input_decision_id'])
     registry = Registry(storage.root, policy, {'work': output})
     await w.WorkflowSupervisor(registry, storage).execute(run['workflow_run_id'])

@@ -1,9 +1,9 @@
 """Backend-owned workflow evidence never trusts assistant/tool prose."""
 import json
 
-from polybridge import workflows as w
-from polybridge.backends.claude import ALLOWED_TOOLS
-from polybridge.backends.vibe import VibeBackend
+from harflow_mcp import workflows as w
+from harflow_mcp.backends.claude import ALLOWED_TOOLS
+from harflow_mcp.backends.vibe import VibeBackend
 
 
 def test_publish_adds_narrow_review_comment_commands_only():
@@ -54,7 +54,7 @@ def test_backend_seam_controls_availability_and_diagnostics(tmp_path, monkeypatc
 
 
 def test_codex_rate_limit_status_requires_explicit_usage_recovery():
-    from polybridge.backends.codex import CodexBackend
+    from harflow_mcp.backends.codex import CodexBackend
     event = {"type": "turn.failed", "error": {"code": "rate_limit_exceeded", "status": 429}}
     assert CodexBackend.workflow_availability_failure(event) is None
     assert CodexBackend.usage_limit_diagnostic(event)["category"] == "usage_limit"
@@ -98,7 +98,7 @@ def test_failed_stream_diagnostics_use_bounded_shared_tail(tmp_path, monkeypatch
 
 
 def test_bounded_stream_cache_refreshes_after_log_growth(tmp_path):
-    from polybridge.backends.workflow_diagnostics import stream_events
+    from harflow_mcp.backends.workflow_diagnostics import stream_events
     path = tmp_path / "growing.jsonl"
     path.write_text('{"type":"assistant"}\n')
     assert stream_events(path) == ({"type": "assistant"},)
@@ -109,7 +109,7 @@ def test_bounded_stream_cache_refreshes_after_log_growth(tmp_path):
 
 
 def test_bounded_stream_skips_oversized_entry_preserves_terminal_error(tmp_path):
-    from polybridge.backends.workflow_diagnostics import stream_events, STREAM_WINDOW_EVENTS
+    from harflow_mcp.backends.workflow_diagnostics import stream_events, STREAM_WINDOW_EVENTS
     path = tmp_path / "oversized.jsonl"
     path.write_bytes(b'{"type":"assistant","text":"' + b'x' * (2 * 1024 * 1024) + b'"}\n' + b'{"type":"error","error":{"status":503}}\n')
     events = stream_events(path)
@@ -118,7 +118,7 @@ def test_bounded_stream_skips_oversized_entry_preserves_terminal_error(tmp_path)
 
 
 def test_small_dense_stream_keeps_terminal_error_after_event_cap(tmp_path):
-    from polybridge.backends.workflow_diagnostics import stream_events, STREAM_WINDOW_EVENTS, STREAM_WINDOW_BYTES
+    from harflow_mcp.backends.workflow_diagnostics import stream_events, STREAM_WINDOW_EVENTS, STREAM_WINDOW_BYTES
     path = tmp_path / "dense.jsonl"
     path.write_bytes(b'{"type":"assistant"}\n' * 700 + b'{"type":"turn.failed","error":{"code":"model_not_found"}}\n')
     assert path.stat().st_size < STREAM_WINDOW_BYTES
@@ -129,7 +129,7 @@ def test_small_dense_stream_keeps_terminal_error_after_event_cap(tmp_path):
 
 
 def test_small_stream_event_windows_do_not_duplicate_overlap(tmp_path):
-    from polybridge.backends.workflow_diagnostics import stream_events
+    from harflow_mcp.backends.workflow_diagnostics import stream_events
     path = tmp_path / "overlap.jsonl"
     path.write_text("".join(json.dumps({"index": index}) + "\n" for index in range(300)))
     assert [event["index"] for event in stream_events(path)] == list(range(300))

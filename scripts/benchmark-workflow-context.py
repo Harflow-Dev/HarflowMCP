@@ -9,8 +9,8 @@ from __future__ import annotations
 import copy
 import json
 
-from polybridge.workflow_context import acknowledged_receipt, context_ack, render_decision_context
-from polybridge.workflow_delegation import decision_prompt
+from harflow_mcp.workflow_context import acknowledged_receipt, context_ack, render_decision_context
+from harflow_mcp.workflow_delegation import decision_prompt
 
 
 def fixtures():

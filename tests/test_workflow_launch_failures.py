@@ -1,6 +1,6 @@
 import pytest
 
-from polybridge import workflows as w
+from harflow_mcp import workflows as w
 from test_workflows import definition
 
 
@@ -86,7 +86,7 @@ def test_guard_fails_closed_during_incomplete_index(store, monkeypatch, flag):
 
 def test_historical_guard_is_indexed_for_more_than_one_page_of_modern_runs(store, tmp_path, monkeypatch):
     import json
-    from polybridge import catalog
+    from harflow_mcp import catalog
     d = w.validate_definition(definition())
     for _ in range(120):
         run = store.create_run(d, 'modern', tmp_path)

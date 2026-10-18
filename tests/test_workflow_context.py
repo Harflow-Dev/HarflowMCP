@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from polybridge.workflow_context import (
+from harflow_mcp.workflow_context import (
     account_legacy_prompt, acknowledged_receipt, compact_recent_decisions,
     context_ack, render_decision_context, validate_context_ack,
 )

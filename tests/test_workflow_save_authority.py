@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from polybridge import backends, server, workflow_hooks, workflows
+from harflow_mcp import backends, server, workflow_hooks, workflows
 
 
 def definition(freedom='read_only', network=None):
@@ -24,7 +24,7 @@ def caller(tmp_path, freedom='read_only', network=False):
 def isolated(monkeypatch, tmp_path):
     monkeypatch.setattr(Path, 'home', classmethod(lambda cls: tmp_path))
     monkeypatch.setattr(backends, 'is_installed', lambda backend: True)
-    monkeypatch.setattr(server, '_reg', lambda: SimpleNamespace(log_dir=tmp_path / '.polybridge' / 'tasks'))
+    monkeypatch.setattr(server, '_reg', lambda: SimpleNamespace(log_dir=tmp_path / '.harflow' / 'tasks'))
     monkeypatch.setattr(workflow_hooks, 'refuse_managed', lambda *args: None)
     async def managed():
         return None
@@ -39,7 +39,7 @@ async def test_ordinary_read_only_caller_cannot_save_stronger_nodes(isolated, mo
     monkeypatch.setattr(server, '_verified_workflow_caller', verified)
     with pytest.raises(Exception, match="cannot exceed the caller's freedom"):
         await server.save_workflow('safe', definition(freedom), 0)
-    assert not (isolated / '.polybridge' / 'workflows' / 'safe.json').exists()
+    assert not (isolated / '.harflow' / 'workflows' / 'safe.json').exists()
 
 
 async def test_ordinary_caller_cannot_enable_network_beyond_recorded_restriction(isolated, monkeypatch):

@@ -1,11 +1,11 @@
 """Drives the real agent CLIs' `build_resume_argv` output through each binary's own parser.
 
-Opt-in, and deliberately *not* under `PB_INTEGRATION`, which means runs that spend money. These are
+Opt-in, and deliberately *not* under `HARFLOW_INTEGRATION`, which means runs that spend money. These are
 designed to spend nothing — see the caveats below for what that design does and does not guarantee —
 but they depend on optional external binaries, and on those binaries' current flag and output shapes,
 which is exactly what the default suite promises not to.
 
-    PB_CLI_INTEGRATION=1 uv run pytest -m cli_integration
+    HARFLOW_CLI_INTEGRATION=1 uv run pytest -m cli_integration
 
 Everything the fake-runner tests in `test_backends.py` assert about *policy* is asserted there, purely
 in-process, against argv this backend built. What can only be learned here is whether the argv still
@@ -82,13 +82,13 @@ from pathlib import Path
 
 import pytest
 
-from polybridge import backends
+from harflow_mcp import backends
 
 pytestmark = [
     pytest.mark.cli_integration,
     pytest.mark.skipif(
-        not os.environ.get("PB_CLI_INTEGRATION"),
-        reason="drives real agent CLIs; opt in with PB_CLI_INTEGRATION=1",
+        not os.environ.get("HARFLOW_CLI_INTEGRATION"),
+        reason="drives real agent CLIs; opt in with HARFLOW_CLI_INTEGRATION=1",
     ),
 ]
 

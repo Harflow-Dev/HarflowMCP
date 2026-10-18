@@ -1,8 +1,8 @@
 from pathlib import Path
 import pytest
-from polybridge import backends
-from polybridge.execution_config import assert_execution_config_outside_writes
-from polybridge.extra_paths import normalize_paths
+from harflow_mcp import backends
+from harflow_mcp.execution_config import assert_execution_config_outside_writes
+from harflow_mcp.extra_paths import normalize_paths
 
 ENVIRONMENT_INPUTS = ('CLAUDE_CONFIG_DIR', 'OPENCODE_CONFIG', 'OPENCODE_CONFIG_DIR',
     'OPENCODE_CONFIG_CONTENT', 'OPENCODE_TEST_HOME', 'OPENCODE_TUI_CONFIG',
@@ -113,7 +113,7 @@ def test_relative_home_refused_with_absolute_codex_home(layout,monkeypatch):
 
 
 def test_new_registered_backend_must_declare_execution_configuration(layout,monkeypatch):
-    from polybridge.backends.base import ExtraPathsUnsupported, UnsupportedCapability
+    from harflow_mcp.backends.base import ExtraPathsUnsupported, UnsupportedCapability
     _,repo,grant=layout
     monkeypatch.setitem(backends.BACKENDS,'unqualified-new-backend',ExtraPathsUnsupported())
     with pytest.raises(UnsupportedCapability,match='namespaces are not qualified'):

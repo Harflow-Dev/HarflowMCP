@@ -17,8 +17,8 @@ def isolated_codex_configuration(tmp_path, monkeypatch):
     # Enforcement reads inherited writable roots; these unit cases use a clean config.
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-config"))
 
-from polybridge import backends
-from polybridge.backends import (
+from harflow_mcp import backends
+from harflow_mcp.backends import (
     STDIN_PIPE,
     Invocation,
     EFFORTS,
@@ -28,27 +28,27 @@ from polybridge.backends import (
     NetworkControl,
     ReasoningEffort,
 )
-from polybridge.backends.antigravity import REJECTED_FLAGS as AGY_REJECTED_FLAGS
-from polybridge.backends.antigravity import AntigravityBackend
-from polybridge.backends.antigravity import UnsafeInvocationError as AntigravityUnsafe
-from polybridge.backends.claude import ALLOWED_TOOLS, DISALLOWED_TOOLS, FORBIDDEN_FLAGS, ClaudeBackend
-from polybridge.backends.claude import UnsafeInvocationError as ClaudeUnsafe
-from polybridge.backends.codex import BINARY as CODEX_BINARY
-from polybridge.backends.codex import EFFORT_KEY as CODEX_EFFORT_KEY
-from polybridge.backends.codex import (
+from harflow_mcp.backends.antigravity import REJECTED_FLAGS as AGY_REJECTED_FLAGS
+from harflow_mcp.backends.antigravity import AntigravityBackend
+from harflow_mcp.backends.antigravity import UnsafeInvocationError as AntigravityUnsafe
+from harflow_mcp.backends.claude import ALLOWED_TOOLS, DISALLOWED_TOOLS, FORBIDDEN_FLAGS, ClaudeBackend
+from harflow_mcp.backends.claude import UnsafeInvocationError as ClaudeUnsafe
+from harflow_mcp.backends.codex import BINARY as CODEX_BINARY
+from harflow_mcp.backends.codex import EFFORT_KEY as CODEX_EFFORT_KEY
+from harflow_mcp.backends.codex import (
     NETWORK_DISABLE_PAIR,
     NETWORK_ENABLE_PAIR,
     NEVER_ASK,
     WRITABLE_ROOTS,
     CodexBackend,
 )
-from polybridge.backends.codex import UnsafeInvocationError as CodexUnsafe
-from polybridge.backends.opencode import REJECTED_FLAGS, OpencodeBackend
-from polybridge.backends.opencode import UnsafeInvocationError as OpencodeUnsafe
-from polybridge.backends.vibe import AGENTS as VIBE_AGENTS
-from polybridge.backends.vibe import REJECTED_FLAGS as VIBE_REJECTED_FLAGS
-from polybridge.backends.vibe import VibeBackend
-from polybridge.backends.vibe import UnsafeInvocationError as VibeUnsafe
+from harflow_mcp.backends.codex import UnsafeInvocationError as CodexUnsafe
+from harflow_mcp.backends.opencode import REJECTED_FLAGS, OpencodeBackend
+from harflow_mcp.backends.opencode import UnsafeInvocationError as OpencodeUnsafe
+from harflow_mcp.backends.vibe import AGENTS as VIBE_AGENTS
+from harflow_mcp.backends.vibe import REJECTED_FLAGS as VIBE_REJECTED_FLAGS
+from harflow_mcp.backends.vibe import VibeBackend
+from harflow_mcp.backends.vibe import UnsafeInvocationError as VibeUnsafe
 
 REPO = Path("/tmp/repo")
 SESSION = "11111111-1111-1111-1111-111111111111"
@@ -418,7 +418,7 @@ def test_publish_attempts_allowed_by_polybridge_matches_the_ladder(backend, free
 
 
 # Exact measured table. claude/opencode/vibe/antigravity impose no sandbox at all, so network
-# reachability is never something polybridge controls there — "not_controlled" at every freedom.
+# reachability is never something harflow_mcp controls there — "not_controlled" at every freedom.
 # codex alone has an OS sandbox with a measured, freedom-dependent effect on network reachability.
 EXPECTED_NETWORK_ACCESS: dict[str, dict[str, str]] = {
     "antigravity": dict.fromkeys(FREEDOMS, "not_controlled"),
@@ -560,7 +560,7 @@ def test_reasoning_effort_reaches_argv_verbatim_under_the_backends_own_flag(
 
 def test_antigravity_refuses_xhigh_because_the_cli_refuses_it_first() -> None:
     """Measured on agy 1.2.14: `--effort xhigh` exits 1 with `invalid --effort "xhigh"` before any
-    model call — so polybridge's own check must be the one that refuses it, with its own message."""
+    model call — so harflow_mcp's own check must be the one that refuses it, with its own message."""
     for build in (start, resume):
         with pytest.raises(backends.UnsupportedCapability, match=r"it accepts \['low', 'medium', 'high'\]"):
             build(AntigravityBackend(), reasoning_effort="xhigh")
@@ -628,7 +628,7 @@ def test_reasoning_effort_flags_match_what_was_actually_measured_per_backend(bac
 @pytest.mark.parametrize("backend", ALL, ids=lambda b: b.name)
 def test_a_backend_with_known_effort_limits_names_them_in_caveats(backend) -> None:
     """Mirrors test_enforcement_never_overclaims: every real backend's effort support has a known
-    gap (claude: CLI-side degradation outside polybridge's own check; codex: no cross-level output
+    gap (claude: CLI-side degradation outside harflow_mcp's own check; codex: no cross-level output
     signal; opencode: per-model support), so accepting the parameter at all must carry a caveat."""
     reasoning = backend.capabilities.reasoning_effort
     if reasoning.accepts_parameter:
@@ -3596,8 +3596,8 @@ def test_vibe_task_payload_carries_the_warning_and_a_recovered_record_stays_fail
     whose exit was never observed stays `failed` — the refusal flag is not terminal evidence."""
     from datetime import datetime, timezone
 
-    from polybridge import store
-    from polybridge.tasks import Task
+    from harflow_mcp import store
+    from harflow_mcp.tasks import Task
 
     backend = VibeBackend()
 

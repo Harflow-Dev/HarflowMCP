@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from polybridge import ctl, workflows as w
+from harflow_mcp import ctl, workflows as w
 from test_workflows import definition
 
 
@@ -16,7 +16,7 @@ def reserved(storage, tmp_path, stage='spawn_requested'):
 def test_pre_spawn_recovery_requires_durable_proof(tmp_path, monkeypatch, stage, expected):
     storage = w.WorkflowStore(tmp_path)
     run = reserved(storage, tmp_path, stage)
-    monkeypatch.setattr('polybridge.workflow_delegation.reconcile_delegation', lambda r: None)
+    monkeypatch.setattr('harflow_mcp.workflow_delegation.reconcile_delegation', lambda r: None)
     recovered = storage.reconcile_run(run['workflow_run_id'])
     assert recovered['activations'][0]['tasks'][0]['status'] == expected
 
@@ -43,7 +43,7 @@ def test_abandon_refuses_without_positive_human_reconciliation(tmp_path, monkeyp
         monkeypatch.setattr(w, '_supervisor_present', lambda r: True)
     if case == 'record':
         monkeypatch.setattr(w.task_store, 'read', lambda *a: SimpleNamespace(status='running'))
-    from polybridge import scratch
+    from harflow_mcp import scratch
     path = scratch.create(storage.root / 'tasks', 'missing')
     (path / 'artifact').write_text('keep unresolved evidence')
     before = (storage.runs/(run['workflow_run_id']+'.json')).read_bytes()
@@ -54,7 +54,7 @@ def test_abandon_refuses_without_positive_human_reconciliation(tmp_path, monkeyp
 
 
 def test_abandon_cli_refuses_agent_caller(monkeypatch, capsys, tmp_path):
-    from polybridge import server, takeover
+    from harflow_mcp import server, takeover
     monkeypatch.setattr(server, '_reg', lambda: SimpleNamespace(log_dir=tmp_path))
     monkeypatch.setattr(takeover, 'caller_refusal', lambda p: ('agent_caller', 'managed task'))
     result = ctl.main(['workflow-abandon-dispatch','run','execution','task','--reason','checked','--confirm-no-process','--json'])
@@ -74,7 +74,7 @@ async def test_dispatch_failure_distinguishes_proven_not_started(tmp_path, monke
     async def fail(*a, **kw):
         exc = OSError('exec refused')
         if proven:
-            exc.polybridge_not_started = True
+            exc.harflow_not_started = True
         raise exc
     registry.start = fail
     supervisor = w.WorkflowSupervisor(registry, storage)
@@ -90,8 +90,8 @@ async def test_dispatch_failure_distinguishes_proven_not_started(tmp_path, monke
 
 @pytest.mark.parametrize('duplicate', [True, False])
 async def test_registry_marks_only_proven_exec_refusal(tmp_path, monkeypatch, duplicate):
-    from polybridge import tasks
-    from polybridge.backends.codex import CodexBackend
+    from harflow_mcp import tasks
+    from harflow_mcp.backends.codex import CodexBackend
     registry = tasks.TaskRegistry(log_dir=tmp_path, open_monitor=False)
     backend = CodexBackend()
     invocation = backend.build_start_argv('work', repo=tmp_path, freedom='read_only', session_id=None, model=None, max_turns=None, reasoning_effort=None)
@@ -104,7 +104,7 @@ async def test_registry_marks_only_proven_exec_refusal(tmp_path, monkeypatch, du
         await registry._spawn(invocation, backend=backend, prompt='work', repo_path=tmp_path,
             session_id=None, freedom='read_only', max_turns=None, model=None,
             reasoning_effort=None, task_id='known')
-    assert caught.value.polybridge_not_started is True
+    assert caught.value.harflow_not_started is True
     assert not (tmp_path/'known.meta.json').exists()
 
 @pytest.mark.parametrize('operation', ['reconcile', 'abandon'])
@@ -115,7 +115,7 @@ def test_recordless_answer_recovery_updates_question_delivery(tmp_path, monkeypa
         a = r['activations'][0]
         a['questions'] = [{'question_id': 'question', 'reply_task_id': 'missing', 'status': 'answered', 'answer_delivery_state': 'reserved'}]
     storage.update_run(run['workflow_run_id'], question, 'fixture')
-    monkeypatch.setattr('polybridge.workflow_delegation.reconcile_delegation', lambda r: None)
+    monkeypatch.setattr('harflow_mcp.workflow_delegation.reconcile_delegation', lambda r: None)
     if operation == 'reconcile':
         result = storage.reconcile_run(run['workflow_run_id'])
     else:
@@ -124,7 +124,7 @@ def test_recordless_answer_recovery_updates_question_delivery(tmp_path, monkeypa
 
 @pytest.mark.parametrize('state', ['not_started', 'reserved', 'running', 'uncertain', 'completed'])
 def test_delegation_repairs_existing_stale_answer_delivery(state):
-    from polybridge import workflow_delegation as d
+    from harflow_mcp import workflow_delegation as d
     from test_workflow_delegation import graph
     question = {'question_id': 'q', 'origin_task_id': 'origin', 'reply_task_id': 'reply', 'status': 'answered', 'answer_delivery_state': 'reserved'}
     reply = {'task_id': 'reply', 'status': state}
@@ -142,7 +142,7 @@ def test_delegation_repairs_existing_stale_answer_delivery(state):
 
 
 def test_abandon_removes_recordless_scratch_only_after_durable_confirmation(tmp_path, monkeypatch):
-    from polybridge import scratch
+    from harflow_mcp import scratch
     storage = w.WorkflowStore(tmp_path)
     run = reserved(storage, tmp_path)
     path = scratch.create(storage.root / 'tasks', 'missing')
@@ -159,7 +159,7 @@ def test_abandon_removes_recordless_scratch_only_after_durable_confirmation(tmp_
 
 
 def test_abandon_failed_persistence_preserves_ambiguous_scratch(tmp_path, monkeypatch):
-    from polybridge import scratch
+    from harflow_mcp import scratch
     storage = w.WorkflowStore(tmp_path)
     run = reserved(storage, tmp_path)
     path = scratch.create(storage.root / 'tasks', 'missing')
@@ -173,7 +173,7 @@ def test_abandon_failed_persistence_preserves_ambiguous_scratch(tmp_path, monkey
 
 
 def test_abandon_cleanup_error_does_not_reverse_durable_reconciliation(tmp_path, monkeypatch, caplog):
-    from polybridge import scratch
+    from harflow_mcp import scratch
     storage = w.WorkflowStore(tmp_path)
     run = reserved(storage, tmp_path)
     def fail(*args):

@@ -2,8 +2,8 @@ import os
 
 import pytest
 
-from polybridge.bounded_io import ReadLimit, read_json
-from polybridge.catalog import MetadataBudget
+from harflow_mcp.bounded_io import ReadLimit, read_json
+from harflow_mcp.catalog import MetadataBudget
 
 
 def test_malformed_input_charges_bytes_and_decode(tmp_path):
@@ -31,7 +31,7 @@ def test_nonregular_input_is_rejected_before_read(tmp_path, kind):
 
 
 def test_decoder_recursion_failure_is_normalized_and_charged(tmp_path, monkeypatch):
-    from polybridge import bounded_io
+    from harflow_mcp import bounded_io
     path = tmp_path / 'metadata'
     raw = b'[[[0]]]'
     def exhausted_decoder(content):
@@ -45,7 +45,7 @@ def test_decoder_recursion_failure_is_normalized_and_charged(tmp_path, monkeypat
 
 
 def test_growth_after_initial_stat_charges_read_bytes(tmp_path, monkeypatch):
-    from polybridge import bounded_io
+    from harflow_mcp import bounded_io
     path = tmp_path / 'metadata'
     path.write_bytes(b'{}')
     original = bounded_io.os.fstat

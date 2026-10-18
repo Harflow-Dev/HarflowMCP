@@ -5,8 +5,8 @@ from dataclasses import replace
 
 import pytest
 
-from polybridge.backends.opencode import OpencodeBackend, UnsafeInvocationError
-from polybridge.tasks import TaskRegistry
+from harflow_mcp.backends.opencode import OpencodeBackend, UnsafeInvocationError
+from harflow_mcp.tasks import TaskRegistry
 
 
 @pytest.mark.parametrize("resume", [False, True])

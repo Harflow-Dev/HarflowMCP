@@ -3,10 +3,15 @@ import asyncio
 
 import pytest
 
-from polybridge import workflows as w
+from harflow_mcp import workflows as w
 from test_workflow_native import MODEL
 from test_workflow_native_batch import BatchRegistry, graph as batch_graph
 from test_workflow_native_fallback_runtime import RuntimeRegistry, fallback_graph
+
+
+@pytest.fixture(autouse=True)
+def qualified_native_adapter(monkeypatch):
+    monkeypatch.setattr("harflow_mcp.backends.claude.RENAMED_NATIVE_QUALIFIED", True)
 
 
 @pytest.fixture
@@ -47,7 +52,7 @@ async def test_cancel_after_batch_preflight_refuses_atomic_reservation(tmp_path,
 
 @pytest.mark.parametrize("batch", [False, True])
 async def test_native_fallback_clears_reason_without_rewriting_failed_attempt(tmp_path, monkeypatch, certified, batch):
-    from polybridge import workflow_native
+    from harflow_mcp import workflow_native
     dispatch = workflow_native.dispatch_native
     local_reasons = []
     async def observe_local(supervisor, node, assignment, activation):

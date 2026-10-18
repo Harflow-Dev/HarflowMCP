@@ -2,7 +2,7 @@ import copy
 
 import pytest
 
-from polybridge.workflow_migration import ParallelMigration, migrate_parallel_boundaries
+from harflow_mcp.workflow_migration import ParallelMigration, migrate_parallel_boundaries
 
 
 def graph():

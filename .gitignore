@@ -5,7 +5,6 @@ dist/
 build/
 *.egg-info/
 .pytest_cache/
-uv.lock
 .DS_Store
 .build/
 DerivedData/

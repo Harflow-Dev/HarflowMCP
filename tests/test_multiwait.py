@@ -7,8 +7,8 @@ from types import SimpleNamespace
 import pytest
 from mcp import MCPError
 
-from polybridge import server, store, task_waiting, wait_policy
-from polybridge.tasks import Task
+from harflow_mcp import server, store, task_waiting, wait_policy
+from harflow_mcp.tasks import Task
 
 
 def add_task(task_id, tmp_path, status="running"):

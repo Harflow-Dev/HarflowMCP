@@ -17,15 +17,15 @@ from pathlib import Path
 
 import pytest
 
-from polybridge import clients
-from polybridge.clients import Registration, Result, RunResult, SetupError, run_cli
-from polybridge.clients.base import CliClient
-from polybridge.clients.antigravity import AntigravityClient
-from polybridge.clients.claude_code import ClaudeCodeClient
-from polybridge.clients.codex import CodexClient
-from polybridge.clients.desktop import DesktopClient
-from polybridge.clients.opencode import OpencodeClient
-from polybridge.clients.vibe import (
+from harflow_mcp import clients
+from harflow_mcp.clients import Registration, Result, RunResult, SetupError, run_cli
+from harflow_mcp.clients.base import CliClient
+from harflow_mcp.clients.antigravity import AntigravityClient
+from harflow_mcp.clients.claude_code import ClaudeCodeClient
+from harflow_mcp.clients.codex import CodexClient
+from harflow_mcp.clients.desktop import DesktopClient
+from harflow_mcp.clients.opencode import OpencodeClient
+from harflow_mcp.clients.vibe import (
     VibeClient,
     says_added,
     says_already_configured,
@@ -33,30 +33,30 @@ from polybridge.clients.vibe import (
     says_removed,
 )
 
-REGISTRATION = Registration(key="polybridge", command="/opt/bin/polybridge-server", path_env="/a:/b")
+REGISTRATION = Registration(key="harflow_mcp", command="/opt/bin/harflow-server", path_env="/a:/b")
 
-ALREADY_EXISTS = "MCP server polybridge already exists in user config"
-NOT_FOUND = 'No MCP server named "polybridge" in user scope'
+ALREADY_EXISTS = "MCP server harflow_mcp already exists in user config"
+NOT_FOUND = 'No MCP server named "harflow_mcp" in user scope'
 
 # vibe's measured wordings, whole — every one of these exits 0 (measured), so the message is the
 # only signal `VibeClient.apply` has to go on.
-VIBE_ADDED = "Added MCP server `polybridge`."
-VIBE_ALREADY_CONFIGURED = "MCP server `polybridge` is already configured."
-VIBE_REMOVED = "Removed MCP server `polybridge`."
-VIBE_NOT_CONFIGURED = "MCP server `polybridge` is not configured in the user config."
+VIBE_ADDED = "Added MCP server `harflow_mcp`."
+VIBE_ALREADY_CONFIGURED = "MCP server `harflow_mcp` is already configured."
+VIBE_REMOVED = "Removed MCP server `harflow_mcp`."
+VIBE_NOT_CONFIGURED = "MCP server `harflow_mcp` is not configured in the user config."
 # The *other* collision, measured: same name with different settings fails through argparse at
 # exit 2, with the extra word "name". Re-adding an identical entry is the exit-0 no-op above.
 VIBE_NAME_CONFLICT = (
     "usage: vibe mcp [-h] {add,remove} ...\n"
-    "vibe mcp: error: MCP server name `polybridge` is already configured."
+    "vibe mcp: error: MCP server name `harflow_mcp` is already configured."
 )
 
 # agy's measured wordings. Its `add` overwrites (measured), so the default judge needs no message
 # at all — these record what a real run prints, and the remove signatures are what the whole-line
 # checks turn on.
-AGY_ADDED = 'Added MCP server "polybridge" (stdio)'
-AGY_REMOVED = 'Removed MCP server "polybridge"'
-AGY_NOT_FOUND = 'Error: MCP server "polybridge" not found'
+AGY_ADDED = 'Added MCP server "harflow_mcp" (stdio)'
+AGY_REMOVED = 'Removed MCP server "harflow_mcp"'
+AGY_NOT_FOUND = 'Error: MCP server "harflow_mcp" not found'
 
 CLI_CLIENTS = [ClaudeCodeClient(), CodexClient(), OpencodeClient()]
 # Everything the shared timeout test also holds for — vibe's `apply` starts with its own `add` call,
@@ -120,8 +120,8 @@ def test_cli_argv_puts_the_command_after_a_separator(client: CliClient) -> None:
     """So the server path can never be parsed as an option by the client's own parser."""
     argv = client.add_argv(REGISTRATION)
     assert argv[0] == client.binary
-    assert argv[1:4] == ["mcp", "add", "polybridge"]
-    assert argv[-2:] == ["--", "/opt/bin/polybridge-server"]
+    assert argv[1:4] == ["mcp", "add", "harflow_mcp"]
+    assert argv[-2:] == ["--", "/opt/bin/harflow-server"]
 
 
 def test_claude_code_registers_at_user_scope() -> None:
@@ -130,13 +130,13 @@ def test_claude_code_registers_at_user_scope() -> None:
         "claude",
         "mcp",
         "add",
-        "polybridge",
+        "harflow_mcp",
         "-s",
         "user",
         "-e",
         "PATH=/a:/b",
         "--",
-        "/opt/bin/polybridge-server",
+        "/opt/bin/harflow-server",
     ]
 
 
@@ -227,8 +227,8 @@ def test_claude_code_tolerates_remove_reporting_the_name_was_absent() -> None:
         "already exists",
         # The one that matters: a *longer* name ending in ours. Matching "<key> already exists"
         # would delete the entry we were asked to protect on someone else's collision.
-        "MCP server not-polybridge already exists in user config",
-        "MCP server polybridge-staging already exists in user config",
+        "MCP server not-harflow_mcp already exists in user config",
+        "MCP server harflow_mcp-staging already exists in user config",
     ],
     ids=["unrelated-resource", "different-server", "bare-phrase", "name-suffix", "name-prefix"],
 )
@@ -246,8 +246,8 @@ def test_only_a_collision_naming_our_own_key_leads_to_a_removal(output: str) -> 
     "output",
     [
         'No MCP server named "something-else" in user scope',
-        'No MCP server named "not-polybridge" in user scope',
-        "No MCP server named. see polybridge docs",
+        'No MCP server named "not-harflow_mcp" in user scope',
+        "No MCP server named. see harflow_mcp docs",
     ],
     ids=["different-server", "name-suffix", "stray-mention"],
 )
@@ -296,10 +296,10 @@ def test_claude_code_says_so_loudly_when_the_replacement_add_fails() -> None:
     result = ClaudeCodeClient().apply(REGISTRATION, runner)
 
     assert result.status == "failed"
-    assert "assume polybridge is NOT registered" in result.detail
+    assert "assume harflow_mcp is NOT registered" in result.detail
     restore = "\n".join(result.diagnostics)
-    assert "claude mcp add polybridge -s user" in restore
-    assert "/opt/bin/polybridge-server" in restore
+    assert "claude mcp add harflow_mcp -s user" in restore
+    assert "/opt/bin/harflow-server" in restore
 
 
 def test_claude_code_reports_unknown_if_the_replacement_add_times_out() -> None:
@@ -339,11 +339,11 @@ def test_vibe_argv_has_no_separator_and_puts_the_command_behind_a_flag() -> None
         "vibe",
         "mcp",
         "add",
-        "polybridge",
+        "harflow_mcp",
         "--transport",
         "stdio",
         "--command",
-        "/opt/bin/polybridge-server",
+        "/opt/bin/harflow-server",
         "--env",
         "PATH=/a:/b",
     ]
@@ -351,7 +351,7 @@ def test_vibe_argv_has_no_separator_and_puts_the_command_behind_a_flag() -> None
 
 
 def test_vibe_remove_argv() -> None:
-    assert VibeClient().remove_argv("polybridge") == ["vibe", "mcp", "remove", "polybridge"]
+    assert VibeClient().remove_argv("harflow_mcp") == ["vibe", "mcp", "remove", "harflow_mcp"]
 
 
 @pytest.mark.parametrize(
@@ -365,22 +365,22 @@ def test_vibe_remove_argv() -> None:
     ids=["added", "already-configured", "removed", "not-configured"],
 )
 def test_vibe_signature_matches_are_case_insensitive(matcher, message: str) -> None:
-    assert matcher(RunResult(("vibe",), 0, message), "polybridge")
-    assert matcher(RunResult(("vibe",), 0, message.upper()), "polybridge")
+    assert matcher(RunResult(("vibe",), 0, message), "harflow_mcp")
+    assert matcher(RunResult(("vibe",), 0, message.upper()), "harflow_mcp")
 
 
 @pytest.mark.parametrize(
     ("matcher", "message"),
     [
-        (says_added, "Added MCP server `polybridge-staging`."),
-        (says_already_configured, "MCP server `polybridge-staging` is already configured."),
-        (says_removed, "Removed MCP server `polybridge-staging`."),
+        (says_added, "Added MCP server `harflow_mcp-staging`."),
+        (says_already_configured, "MCP server `harflow_mcp-staging` is already configured."),
+        (says_removed, "Removed MCP server `harflow_mcp-staging`."),
         (
             says_not_configured,
-            "MCP server `polybridge-staging` is not configured in the user config.",
+            "MCP server `harflow_mcp-staging` is not configured in the user config.",
         ),
-        (says_added, "Added MCP server `not-polybridge`."),
-        (says_already_configured, "MCP server `not-polybridge` is already configured."),
+        (says_added, "Added MCP server `not-harflow_mcp`."),
+        (says_already_configured, "MCP server `not-harflow_mcp` is already configured."),
     ],
     ids=[
         "added-name-suffix",
@@ -393,7 +393,7 @@ def test_vibe_signature_matches_are_case_insensitive(matcher, message: str) -> N
 )
 def test_vibe_signature_matches_do_not_confuse_a_longer_name(matcher, message: str) -> None:
     """The backtick delimiting is the point: a name that merely contains ours must not match."""
-    assert not matcher(RunResult(("vibe",), 0, message), "polybridge")
+    assert not matcher(RunResult(("vibe",), 0, message), "harflow_mcp")
 
 
 @pytest.mark.parametrize(
@@ -401,19 +401,19 @@ def test_vibe_signature_matches_do_not_confuse_a_longer_name(matcher, message: s
 )
 def test_vibe_signature_matches_require_a_zero_exit(matcher) -> None:
     """Every measured wording came with exit 0; a non-zero exit means something else happened."""
-    message = "Added MCP server `polybridge`. Removed MCP server `polybridge`."
-    assert not matcher(RunResult(("vibe",), 1, message), "polybridge")
+    message = "Added MCP server `harflow_mcp`. Removed MCP server `harflow_mcp`."
+    assert not matcher(RunResult(("vibe",), 1, message), "harflow_mcp")
 
 
 @pytest.mark.parametrize(
     ("matcher", "message"),
     [
-        (says_added, "Not added MCP server `polybridge`."),
-        (says_added, "Added MCP server `polybridge` but configuration was not written"),
+        (says_added, "Not added MCP server `harflow_mcp`."),
+        (says_added, "Added MCP server `harflow_mcp` but configuration was not written"),
         # A missing full stop is not the measured sentence either — matching must be whole-line,
         # not "starts with" or "contains".
-        (says_added, "Added MCP server `polybridge`"),
-        (says_already_configured, "MCP server `polybridge` is already configured"),
+        (says_added, "Added MCP server `harflow_mcp`"),
+        (says_already_configured, "MCP server `harflow_mcp` is already configured"),
     ],
     ids=[
         "contradictory-not-added",
@@ -425,7 +425,7 @@ def test_vibe_signature_matches_require_a_zero_exit(matcher) -> None:
 def test_vibe_signature_matches_require_the_whole_line_not_a_fragment(matcher, message: str) -> None:
     """A substring check would also match a sentence that merely contains the expected wording —
     including one whose surrounding words *contradict* it, like "Not added...\""""
-    assert not matcher(RunResult(("vibe",), 0, message), "polybridge")
+    assert not matcher(RunResult(("vibe",), 0, message), "harflow_mcp")
 
 
 def test_vibe_adds_directly_when_the_add_succeeds_outright() -> None:
@@ -496,10 +496,10 @@ def test_vibe_a_differing_settings_conflict_exits_two_and_still_replaces() -> No
 @pytest.mark.parametrize(
     "output",
     [
-        "vibe mcp: error: MCP server name `not-polybridge` is already configured.",
-        "vibe mcp: error: MCP server name `polybridge-two` is already configured.",
+        "vibe mcp: error: MCP server name `not-harflow_mcp` is already configured.",
+        "vibe mcp: error: MCP server name `harflow_mcp-two` is already configured.",
         "vibe mcp: error: unrecognized arguments: --nope",
-        "MCP server `polybridge` is already configured.",
+        "MCP server `harflow_mcp` is already configured.",
     ],
     ids=["longer-name", "suffixed-name", "unrelated-error", "the-exit-zero-wording"],
 )
@@ -614,8 +614,8 @@ def test_vibe_add_reporting_already_configured_right_after_a_remove_is_unknown_n
 
 @pytest.mark.cli_integration
 @pytest.mark.skipif(
-    not os.environ.get("PB_CLI_INTEGRATION"),
-    reason="drives the real vibe CLI; opt in with PB_CLI_INTEGRATION=1",
+    not os.environ.get("HARFLOW_CLI_INTEGRATION"),
+    reason="drives the real vibe CLI; opt in with HARFLOW_CLI_INTEGRATION=1",
 )
 def test_vibe_registration_survives_unrelated_toml_and_replaces_on_a_second_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -645,11 +645,11 @@ def test_vibe_registration_survives_unrelated_toml_and_replaces_on_a_second_run(
     written = tomllib.loads(config.read_text())
     servers = {entry["name"]: entry for entry in written["mcp_servers"]}
     assert servers["unrelated"]["command"] == "/bin/true"
-    assert servers["polybridge"]["command"] == REGISTRATION.command
-    assert servers["polybridge"]["env"]["PATH"] == REGISTRATION.path_env
+    assert servers["harflow_mcp"]["command"] == REGISTRATION.command
+    assert servers["harflow_mcp"]["env"]["PATH"] == REGISTRATION.path_env
 
     moved = Registration(
-        key="polybridge", command="/opt/bin/polybridge-server-v2", path_env="/moved"
+        key="harflow_mcp", command="/opt/bin/harflow-server-v2", path_env="/moved"
     )
     second = VibeClient().apply(moved, run_cli)
 
@@ -657,9 +657,9 @@ def test_vibe_registration_survives_unrelated_toml_and_replaces_on_a_second_run(
     written = tomllib.loads(config.read_text())
     servers = {entry["name"]: entry for entry in written["mcp_servers"]}
     assert servers["unrelated"]["command"] == "/bin/true", "unrelated TOML must survive"
-    assert servers["polybridge"]["command"] == "/opt/bin/polybridge-server-v2"
-    assert servers["polybridge"]["env"]["PATH"] == "/moved"
-    assert len([e for e in written["mcp_servers"] if e["name"] == "polybridge"]) == 1
+    assert servers["harflow_mcp"]["command"] == "/opt/bin/harflow-server-v2"
+    assert servers["harflow_mcp"]["env"]["PATH"] == "/moved"
+    assert len([e for e in written["mcp_servers"] if e["name"] == "harflow_mcp"]) == 1
 
 
 # --- availability and selection ---------------------------------------------------------------
@@ -668,7 +668,7 @@ def test_vibe_registration_survives_unrelated_toml_and_replaces_on_a_second_run(
 def test_a_missing_binary_is_skipped_by_default_but_fails_when_asked_for(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("polybridge.clients.base.shutil.which", lambda _: None)
+    monkeypatch.setattr("harflow_mcp.clients.base.shutil.which", lambda _: None)
     codex = CodexClient()
 
     skipped = clients.register([codex], REGISTRATION, run=FakeRunner())
@@ -703,19 +703,19 @@ def test_a_dry_run_previews_a_client_that_is_not_installed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A preview changes nothing, so refusing to print one would only withhold information."""
-    monkeypatch.setattr("polybridge.clients.base.shutil.which", lambda _: None)
+    monkeypatch.setattr("harflow_mcp.clients.base.shutil.which", lambda _: None)
 
     (result,) = clients.register(
         [CodexClient()], REGISTRATION, dry_run=True, named=frozenset({"codex"})
     )
 
     assert result.status == "previewed"
-    assert "codex mcp add polybridge" in result.detail
+    assert "codex mcp add harflow_mcp" in result.detail
     assert any("not on PATH" in line for line in result.diagnostics)
 
 
 def test_one_clients_failure_does_not_stop_the_others(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("polybridge.clients.base.shutil.which", lambda binary: f"/bin/{binary}")
+    monkeypatch.setattr("harflow_mcp.clients.base.shutil.which", lambda binary: f"/bin/{binary}")
     runner = FakeRunner(fails(2, "nope"), ok())
 
     results = clients.register([CodexClient(), OpencodeClient()], REGISTRATION, run=runner)
@@ -758,7 +758,7 @@ def test_an_exception_from_one_client_still_leaves_the_others_running(
     exc: Exception, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Only enumerated exception types were caught before, which made the guarantee a comment."""
-    monkeypatch.setattr("polybridge.clients.base.shutil.which", lambda binary: f"/bin/{binary}")
+    monkeypatch.setattr("harflow_mcp.clients.base.shutil.which", lambda binary: f"/bin/{binary}")
 
     results = clients.register(
         [Exploding(exc), OpencodeClient()], REGISTRATION, run=FakeRunner(ok())
@@ -771,7 +771,7 @@ def test_an_exception_from_one_client_still_leaves_the_others_running(
 def test_an_exception_with_no_message_still_reports_something(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("polybridge.clients.base.shutil.which", lambda binary: f"/bin/{binary}")
+    monkeypatch.setattr("harflow_mcp.clients.base.shutil.which", lambda binary: f"/bin/{binary}")
 
     (result,) = clients.register([Exploding(RuntimeError())], REGISTRATION, run=FakeRunner())
 
@@ -803,7 +803,7 @@ class Absent(Exploding):
 def test_an_inspect_that_raises_is_that_clients_error_and_the_others_still_run(
     exc: Exception,
 ) -> None:
-    results = clients.inspect_all([Exploding(exc), Absent()], "polybridge", run=FakeRunner())
+    results = clients.inspect_all([Exploding(exc), Absent()], "harflow_mcp", run=FakeRunner())
 
     assert results[0].installed is None
     assert results[0].error
@@ -817,7 +817,7 @@ def test_an_inspect_that_raises_is_that_clients_error_and_the_others_still_run(
     ids=["non-utf8-config", "bug"],
 )
 def test_a_remove_that_raises_is_a_failure_and_the_others_still_run(exc: Exception) -> None:
-    results = clients.unregister([Exploding(exc), Absent()], "polybridge", run=FakeRunner())
+    results = clients.unregister([Exploding(exc), Absent()], "harflow_mcp", run=FakeRunner())
 
     assert [result.status for result in results] == ["failed", "not_installed"]
     assert results[0].detail
@@ -827,9 +827,9 @@ def test_an_unavailable_client_is_not_inspected_and_reads_as_not_checked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`installed=None`, never False: the file was not read, so absence was not observed."""
-    monkeypatch.setattr("polybridge.clients.base.shutil.which", lambda _: None)
+    monkeypatch.setattr("harflow_mcp.clients.base.shutil.which", lambda _: None)
 
-    (inspection,) = clients.inspect_all([CodexClient()], "polybridge", run=FakeRunner())
+    (inspection,) = clients.inspect_all([CodexClient()], "harflow_mcp", run=FakeRunner())
 
     assert inspection.available is False
     assert inspection.installed is None
@@ -843,7 +843,7 @@ def test_an_availability_check_that_crashes_is_an_inspect_error_not_an_absence()
             raise self.exc
 
     (inspection,) = clients.inspect_all(
-        [Broken(RuntimeError("cannot stat"))], "polybridge", run=FakeRunner()
+        [Broken(RuntimeError("cannot stat"))], "harflow_mcp", run=FakeRunner()
     )
 
     assert inspection.available is False
@@ -854,12 +854,12 @@ def test_an_availability_check_that_crashes_is_an_inspect_error_not_an_absence()
 def test_an_absent_client_is_skipped_on_uninstall_unless_it_was_named(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("polybridge.clients.base.shutil.which", lambda _: None)
+    monkeypatch.setattr("harflow_mcp.clients.base.shutil.which", lambda _: None)
     codex = CodexClient()
 
-    skipped = clients.unregister([codex], "polybridge", run=FakeRunner())
+    skipped = clients.unregister([codex], "harflow_mcp", run=FakeRunner())
     failed = clients.unregister(
-        [codex], "polybridge", run=FakeRunner(), named=frozenset({"codex"})
+        [codex], "harflow_mcp", run=FakeRunner(), named=frozenset({"codex"})
     )
 
     assert [result.status for result in skipped] == ["skipped"]
@@ -886,7 +886,7 @@ def test_only_individually_named_clients_are_treated_as_asked_for() -> None:
 def test_a_client_named_alongside_all_is_still_an_error_when_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("polybridge.clients.base.shutil.which", lambda _: None)
+    monkeypatch.setattr("harflow_mcp.clients.base.shutil.which", lambda _: None)
 
     results = clients.register(
         [CodexClient(), OpencodeClient()],
@@ -1031,7 +1031,7 @@ def test_run_cli_runs_from_the_users_home(tmp_path: Path, monkeypatch: pytest.Mo
 
 
 def test_run_cli_reports_a_timeout_as_such(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("polybridge.clients.base.CLI_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr("harflow_mcp.clients.base.CLI_TIMEOUT_SECONDS", 0.2)
 
     result = run_cli(python("import time; time.sleep(30)"))
 
@@ -1041,7 +1041,7 @@ def test_run_cli_reports_a_timeout_as_such(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def test_run_cli_reports_a_binary_that_cannot_be_launched() -> None:
-    result = run_cli(["/nonexistent/polybridge-probe"])
+    result = run_cli(["/nonexistent/harflow_mcp-probe"])
 
     assert not result.ok
     assert not result.timed_out
@@ -1080,8 +1080,8 @@ def test_desktop_writes_the_entry(tmp_path: Path) -> None:
 
     assert result.status == "applied"
     written = json.loads(path.read_text())
-    assert written["mcpServers"]["polybridge"] == {
-        "command": "/opt/bin/polybridge-server",
+    assert written["mcpServers"]["harflow_mcp"] == {
+        "command": "/opt/bin/harflow-server",
         "env": {"PATH": "/a:/b"},
     }
 
@@ -1095,7 +1095,7 @@ def test_desktop_keeps_other_servers_and_other_keys(tmp_path: Path) -> None:
     written = json.loads(path.read_text())
     assert written["theme"] == "dark"
     assert written["mcpServers"]["argent"] == {"command": "argent"}
-    assert "polybridge" in written["mcpServers"]
+    assert "harflow_mcp" in written["mcpServers"]
 
 
 def test_desktop_backs_up_before_overwriting(tmp_path: Path) -> None:
@@ -1150,7 +1150,7 @@ def test_desktop_refuses_when_the_file_changed_underneath_it(
     # Three reads: the baseline, the one `load_config` does, then the final comparison.
     original = path.read_text()
     reads = iter([original, original, '{"mcpServers": {"someone-else": {}}}'])
-    monkeypatch.setattr("polybridge.clients.desktop.read_raw", lambda _: next(reads))
+    monkeypatch.setattr("harflow_mcp.clients.desktop.read_raw", lambda _: next(reads))
 
     result = client.apply(REGISTRATION, FakeRunner())
 
@@ -1198,7 +1198,7 @@ def test_desktop_preview_writes_nothing(tmp_path: Path) -> None:
 
     assert result.status == "previewed"
     assert not path.exists()
-    assert any("polybridge" in line for line in result.diagnostics)
+    assert any("harflow_mcp" in line for line in result.diagnostics)
 
 
 # --- the desktop app: inspect and remove -----------------------------------------------------------
@@ -1207,7 +1207,7 @@ def test_desktop_preview_writes_nothing(tmp_path: Path) -> None:
 def test_desktop_inspect_reports_nothing_registered_when_there_is_no_config(tmp_path: Path) -> None:
     client, path = desktop(tmp_path)
 
-    inspection = client.inspect("polybridge", FakeRunner())
+    inspection = client.inspect("harflow_mcp", FakeRunner())
 
     assert inspection.installed is False
     assert inspection.error is None
@@ -1218,7 +1218,7 @@ def test_desktop_inspect_reads_the_stored_command_and_path(tmp_path: Path) -> No
     client, _ = desktop(tmp_path)
     client.apply(REGISTRATION, FakeRunner())
 
-    inspection = client.inspect("polybridge", FakeRunner())
+    inspection = client.inspect("harflow_mcp", FakeRunner())
 
     assert inspection.installed is True
     assert inspection.command == REGISTRATION.command
@@ -1227,16 +1227,16 @@ def test_desktop_inspect_reads_the_stored_command_and_path(tmp_path: Path) -> No
 
 def test_desktop_inspect_ignores_other_servers(tmp_path: Path) -> None:
     client, path = desktop(tmp_path)
-    path.write_text(json.dumps({"mcpServers": {"not-polybridge": {"command": "x"}}}))
+    path.write_text(json.dumps({"mcpServers": {"not-harflow_mcp": {"command": "x"}}}))
 
-    assert client.inspect("polybridge", FakeRunner()).installed is False
+    assert client.inspect("harflow_mcp", FakeRunner()).installed is False
 
 
 def test_desktop_inspect_of_a_malformed_config_is_an_error_not_an_absence(tmp_path: Path) -> None:
     client, path = desktop(tmp_path)
     path.write_text("{not json")
 
-    (inspection,) = clients.inspect_all([client], "polybridge", run=FakeRunner())
+    (inspection,) = clients.inspect_all([client], "harflow_mcp", run=FakeRunner())
 
     assert inspection.installed is None
     assert "not valid JSON" in inspection.error
@@ -1246,10 +1246,10 @@ def test_desktop_inspect_folds_args_into_the_command(tmp_path: Path) -> None:
     """An entry that passes extra args launches something else, so it must not compare equal."""
     client, path = desktop(tmp_path)
     path.write_text(
-        json.dumps({"mcpServers": {"polybridge": {"command": "/x/server", "args": ["--debug"]}}})
+        json.dumps({"mcpServers": {"harflow_mcp": {"command": "/x/server", "args": ["--debug"]}}})
     )
 
-    assert client.inspect("polybridge", FakeRunner()).command == "/x/server --debug"
+    assert client.inspect("harflow_mcp", FakeRunner()).command == "/x/server --debug"
 
 
 def test_desktop_remove_deletes_only_our_key_and_backs_up_first(tmp_path: Path) -> None:
@@ -1258,7 +1258,7 @@ def test_desktop_remove_deletes_only_our_key_and_backs_up_first(tmp_path: Path) 
     client.apply(REGISTRATION, FakeRunner())
     before = path.read_text()
 
-    result = client.remove("polybridge", FakeRunner())
+    result = client.remove("harflow_mcp", FakeRunner())
 
     assert result.status == "removed"
     written = json.loads(path.read_text())
@@ -1273,7 +1273,7 @@ def test_desktop_remove_with_nothing_registered_writes_nothing(tmp_path: Path) -
     path.write_text(json.dumps({"mcpServers": {"argent": {}}}))
     mtime = path.stat().st_mtime_ns
 
-    result = client.remove("polybridge", FakeRunner())
+    result = client.remove("harflow_mcp", FakeRunner())
 
     assert result.status == "not_installed"
     assert path.stat().st_mtime_ns == mtime
@@ -1283,7 +1283,7 @@ def test_desktop_remove_with_nothing_registered_writes_nothing(tmp_path: Path) -
 def test_desktop_remove_with_no_config_at_all_is_not_installed(tmp_path: Path) -> None:
     client, path = desktop(tmp_path)
 
-    assert client.remove("polybridge", FakeRunner()).status == "not_installed"
+    assert client.remove("harflow_mcp", FakeRunner()).status == "not_installed"
     assert not path.exists()
 
 
@@ -1291,7 +1291,7 @@ def test_desktop_remove_refuses_a_config_it_cannot_parse(tmp_path: Path) -> None
     client, path = desktop(tmp_path)
     path.write_text("{not json")
 
-    (result,) = clients.unregister([client], "polybridge", run=FakeRunner())
+    (result,) = clients.unregister([client], "harflow_mcp", run=FakeRunner())
 
     assert result.status == "failed"
     assert path.read_text() == "{not json"
@@ -1299,12 +1299,12 @@ def test_desktop_remove_refuses_a_config_it_cannot_parse(tmp_path: Path) -> None
 
 def test_desktop_remove_refuses_a_non_object_mcp_servers(tmp_path: Path) -> None:
     client, path = desktop(tmp_path)
-    path.write_text(json.dumps({"mcpServers": ["polybridge"]}))
+    path.write_text(json.dumps({"mcpServers": ["harflow_mcp"]}))
 
-    (result,) = clients.unregister([client], "polybridge", run=FakeRunner())
+    (result,) = clients.unregister([client], "harflow_mcp", run=FakeRunner())
 
     assert result.status == "failed"
-    assert json.loads(path.read_text()) == {"mcpServers": ["polybridge"]}
+    assert json.loads(path.read_text()) == {"mcpServers": ["harflow_mcp"]}
 
 
 def test_desktop_remove_refuses_when_the_file_changed_underneath_it(
@@ -1314,9 +1314,9 @@ def test_desktop_remove_refuses_when_the_file_changed_underneath_it(
     client.apply(REGISTRATION, FakeRunner())
     original = path.read_text()
     reads = iter([original, original, '{"mcpServers": {"someone-else": {}}}'])
-    monkeypatch.setattr("polybridge.clients.desktop.read_raw", lambda _: next(reads))
+    monkeypatch.setattr("harflow_mcp.clients.desktop.read_raw", lambda _: next(reads))
 
-    result = client.remove("polybridge", FakeRunner())
+    result = client.remove("harflow_mcp", FakeRunner())
 
     assert result.status == "failed"
     assert "changed while it was being edited" in result.detail
@@ -1338,13 +1338,13 @@ def test_claude_code_inspect_honours_claude_config_dir(claude_config: Path) -> N
         json.dumps(
             {
                 "mcpServers": {
-                    "polybridge": {"type": "stdio", "command": "/x/s", "args": [], "env": {"PATH": "/p"}}
+                    "harflow_mcp": {"type": "stdio", "command": "/x/s", "args": [], "env": {"PATH": "/p"}}
                 }
             }
         )
     )
 
-    inspection = ClaudeCodeClient().inspect("polybridge", FakeRunner())
+    inspection = ClaudeCodeClient().inspect("harflow_mcp", FakeRunner())
 
     assert inspection.installed is True
     assert inspection.command == "/x/s"
@@ -1357,31 +1357,31 @@ def test_claude_code_inspect_defaults_to_the_home_directory(
 ) -> None:
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
-    (tmp_path / ".claude.json").write_text(json.dumps({"mcpServers": {"polybridge": {"command": "/h"}}}))
+    (tmp_path / ".claude.json").write_text(json.dumps({"mcpServers": {"harflow_mcp": {"command": "/h"}}}))
 
-    assert ClaudeCodeClient().inspect("polybridge", FakeRunner()).command == "/h"
+    assert ClaudeCodeClient().inspect("harflow_mcp", FakeRunner()).command == "/h"
 
 
 def test_claude_code_inspect_ignores_project_scoped_entries(claude_config: Path) -> None:
     """Only user scope is ours; an entry under `projects[*]` was put there by someone else."""
     claude_config.write_text(
-        json.dumps({"projects": {"/repo": {"mcpServers": {"polybridge": {"command": "/x"}}}}})
+        json.dumps({"projects": {"/repo": {"mcpServers": {"harflow_mcp": {"command": "/x"}}}}})
     )
 
-    inspection = ClaudeCodeClient().inspect("polybridge", FakeRunner())
+    inspection = ClaudeCodeClient().inspect("harflow_mcp", FakeRunner())
 
     assert inspection.installed is False
 
 
 def test_claude_code_inspect_with_no_config_is_not_installed(claude_config: Path) -> None:
-    assert ClaudeCodeClient().inspect("polybridge", FakeRunner()).installed is False
+    assert ClaudeCodeClient().inspect("harflow_mcp", FakeRunner()).installed is False
 
 
 def test_claude_code_inspect_never_runs_a_command(claude_config: Path) -> None:
     """`claude mcp get` launches the server, so nothing may be run at all — FakeRunner() raises."""
-    claude_config.write_text(json.dumps({"mcpServers": {"polybridge": {"command": "/x"}}}))
+    claude_config.write_text(json.dumps({"mcpServers": {"harflow_mcp": {"command": "/x"}}}))
 
-    ClaudeCodeClient().inspect("polybridge", FakeRunner())
+    ClaudeCodeClient().inspect("harflow_mcp", FakeRunner())
 
 
 @pytest.mark.parametrize(
@@ -1390,41 +1390,41 @@ def test_claude_code_inspect_never_runs_a_command(claude_config: Path) -> None:
 def test_claude_code_inspect_of_a_malformed_config_is_an_error(claude_config: Path, raw: str) -> None:
     claude_config.write_text(raw)
 
-    inspection = ClaudeCodeClient().inspect("polybridge", FakeRunner())
+    inspection = ClaudeCodeClient().inspect("harflow_mcp", FakeRunner())
 
     assert inspection.installed is None
     assert inspection.error
 
 
 def test_claude_code_remove_is_user_scoped_and_reports_removed() -> None:
-    runner = FakeRunner(ok("Removed MCP server polybridge from user config"))
+    runner = FakeRunner(ok("Removed MCP server harflow_mcp from user config"))
 
-    result = ClaudeCodeClient().remove("polybridge", runner)
+    result = ClaudeCodeClient().remove("harflow_mcp", runner)
 
-    assert runner.calls == [["claude", "mcp", "remove", "polybridge", "-s", "user"]]
+    assert runner.calls == [["claude", "mcp", "remove", "harflow_mcp", "-s", "user"]]
     assert result.status == "removed"
 
 
 def test_claude_code_remove_of_an_absent_entry_is_not_installed() -> None:
-    result = ClaudeCodeClient().remove("polybridge", FakeRunner(fails(1, NOT_FOUND)))
+    result = ClaudeCodeClient().remove("harflow_mcp", FakeRunner(fails(1, NOT_FOUND)))
 
     assert result.status == "not_installed"
 
 
 def test_claude_code_remove_does_not_read_another_names_absence_as_ours() -> None:
     result = ClaudeCodeClient().remove(
-        "polybridge", FakeRunner(fails(1, 'No MCP server named "polybridge-old" in user scope'))
+        "harflow_mcp", FakeRunner(fails(1, 'No MCP server named "harflow_mcp-old" in user scope'))
     )
 
     assert result.status == "failed"
 
 
 def test_claude_code_remove_timeout_is_unknown() -> None:
-    assert ClaudeCodeClient().remove("polybridge", FakeRunner(times_out())).status == "unknown"
+    assert ClaudeCodeClient().remove("harflow_mcp", FakeRunner(times_out())).status == "unknown"
 
 
 def test_claude_code_remove_failure_carries_the_output() -> None:
-    result = ClaudeCodeClient().remove("polybridge", FakeRunner(fails(1, "EACCES")))
+    result = ClaudeCodeClient().remove("harflow_mcp", FakeRunner(fails(1, "EACCES")))
 
     assert result.status == "failed"
     assert "EACCES" in result.diagnostics[0]
@@ -1436,11 +1436,11 @@ CODEX_LISTED = json.dumps(
     [
         {"name": "argent", "transport": {"type": "stdio", "command": "argent", "args": []}},
         {
-            "name": "polybridge",
+            "name": "harflow_mcp",
             "enabled": True,
             "transport": {
                 "type": "stdio",
-                "command": "/x/polybridge-server",
+                "command": "/x/harflow-server",
                 "args": [],
                 "env": {"PATH": "/a:/b"},
                 "env_vars": [],
@@ -1449,54 +1449,54 @@ CODEX_LISTED = json.dumps(
         },
     ]
 )
-CODEX_REMOVED = "Removed global MCP server 'polybridge'."
-CODEX_NOT_FOUND = "No MCP server named 'polybridge' found."
+CODEX_REMOVED = "Removed global MCP server 'harflow_mcp'."
+CODEX_NOT_FOUND = "No MCP server named 'harflow_mcp' found."
 
 
 def test_codex_inspect_runs_list_json_and_reads_the_transport() -> None:
     runner = FakeRunner(ok(CODEX_LISTED))
 
-    inspection = CodexClient().inspect("polybridge", runner)
+    inspection = CodexClient().inspect("harflow_mcp", runner)
 
     assert runner.calls == [["codex", "mcp", "list", "--json"]]
     assert inspection.installed is True
-    assert inspection.command == "/x/polybridge-server"
+    assert inspection.command == "/x/harflow-server"
     assert inspection.path_env == "/a:/b"
 
 
 def test_codex_inspect_of_an_empty_list_is_not_installed() -> None:
-    assert CodexClient().inspect("polybridge", FakeRunner(ok("[]"))).installed is False
+    assert CodexClient().inspect("harflow_mcp", FakeRunner(ok("[]"))).installed is False
 
 
 def test_codex_inspect_parses_stdout_only_so_a_stderr_warning_cannot_corrupt_it() -> None:
     def runner(argv):
         return RunResult(tuple(argv), 0, "[]\nWARNING: something", stdout="[]\n")
 
-    assert CodexClient().inspect("polybridge", runner).installed is False
+    assert CodexClient().inspect("harflow_mcp", runner).installed is False
 
 
 def test_codex_inspect_does_not_match_a_longer_name() -> None:
-    listed = json.dumps([{"name": "polybridge-old", "transport": {"command": "/x"}}])
+    listed = json.dumps([{"name": "harflow_mcp-old", "transport": {"command": "/x"}}])
 
-    assert CodexClient().inspect("polybridge", FakeRunner(ok(listed))).installed is False
+    assert CodexClient().inspect("harflow_mcp", FakeRunner(ok(listed))).installed is False
 
 
 @pytest.mark.parametrize(
     "response",
-    [fails(1, "boom"), times_out(), ok("not json"), ok('{"name": "polybridge"}')],
+    [fails(1, "boom"), times_out(), ok("not json"), ok('{"name": "harflow_mcp"}')],
     ids=["exit-1", "timeout", "not-json", "not-an-array"],
 )
 def test_codex_inspect_that_cannot_tell_is_an_error_not_an_absence(response) -> None:
-    inspection = CodexClient().inspect("polybridge", FakeRunner(response))
+    inspection = CodexClient().inspect("harflow_mcp", FakeRunner(response))
 
     assert inspection.installed is None
     assert inspection.error
 
 
 def test_codex_inspect_of_a_non_stdio_transport_claims_no_command() -> None:
-    listed = json.dumps([{"name": "polybridge", "transport": {"type": "streamable_http"}}])
+    listed = json.dumps([{"name": "harflow_mcp", "transport": {"type": "streamable_http"}}])
 
-    inspection = CodexClient().inspect("polybridge", FakeRunner(ok(listed)))
+    inspection = CodexClient().inspect("harflow_mcp", FakeRunner(ok(listed)))
 
     assert inspection.installed is True
     assert inspection.command is None
@@ -1505,14 +1505,14 @@ def test_codex_inspect_of_a_non_stdio_transport_claims_no_command() -> None:
 def test_codex_remove_reports_removed_on_the_measured_message() -> None:
     runner = FakeRunner(ok(CODEX_REMOVED))
 
-    result = CodexClient().remove("polybridge", runner)
+    result = CodexClient().remove("harflow_mcp", runner)
 
-    assert runner.calls == [["codex", "mcp", "remove", "polybridge"]]
+    assert runner.calls == [["codex", "mcp", "remove", "harflow_mcp"]]
     assert result.status == "removed"
 
 
 def test_codex_remove_of_an_absent_entry_is_not_installed_despite_exit_zero() -> None:
-    assert CodexClient().remove("polybridge", FakeRunner(ok(CODEX_NOT_FOUND))).status == (
+    assert CodexClient().remove("harflow_mcp", FakeRunner(ok(CODEX_NOT_FOUND))).status == (
         "not_installed"
     )
 
@@ -1521,19 +1521,19 @@ def test_codex_remove_of_an_absent_entry_is_not_installed_despite_exit_zero() ->
     "output",
     [
         "something unexpected",
-        "Removed global MCP server 'polybridge-old'.",
-        "No MCP server named 'polybridge-old' found.",
-        "Not removed global MCP server 'polybridge'.",
+        "Removed global MCP server 'harflow_mcp-old'.",
+        "No MCP server named 'harflow_mcp-old' found.",
+        "Not removed global MCP server 'harflow_mcp'.",
     ],
 )
 def test_codex_remove_with_an_unrecognised_message_is_unknown(output: str) -> None:
     """remove exits 0 whether or not anything was there, so wording is all there is."""
-    assert CodexClient().remove("polybridge", FakeRunner(ok(output))).status == "unknown"
+    assert CodexClient().remove("harflow_mcp", FakeRunner(ok(output))).status == "unknown"
 
 
 def test_codex_remove_timeout_is_unknown_and_failure_is_failed() -> None:
-    assert CodexClient().remove("polybridge", FakeRunner(times_out())).status == "unknown"
-    assert CodexClient().remove("polybridge", FakeRunner(fails(1, "boom"))).status == "failed"
+    assert CodexClient().remove("harflow_mcp", FakeRunner(times_out())).status == "unknown"
+    assert CodexClient().remove("harflow_mcp", FakeRunner(fails(1, "boom"))).status == "failed"
 
 
 def test_run_cli_keeps_stdout_apart_for_parsers() -> None:
@@ -1547,7 +1547,7 @@ def test_run_cli_keeps_stdout_apart_for_parsers() -> None:
 
 OPENCODE_ENTRY = {
     "type": "local",
-    "command": ["/x/polybridge-server"],
+    "command": ["/x/harflow-server"],
     "environment": {"PATH": "/a:/b"},
 }
 
@@ -1563,25 +1563,25 @@ def opencode_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def test_opencode_inspect_reads_a_commented_jsonc_config(opencode_dir: Path) -> None:
     (opencode_dir / "opencode.jsonc").write_text(
         '{\n  // hand-written\n  "$schema": "https://opencode.ai/config.json",\n'
-        f'  "mcp": {{"polybridge": {json.dumps(OPENCODE_ENTRY)},}},\n}}\n'
+        f'  "mcp": {{"harflow_mcp": {json.dumps(OPENCODE_ENTRY)},}},\n}}\n'
     )
 
-    inspection = OpencodeClient().inspect("polybridge", FakeRunner())
+    inspection = OpencodeClient().inspect("harflow_mcp", FakeRunner())
 
     assert inspection.installed is True
-    assert inspection.command == "/x/polybridge-server"
+    assert inspection.command == "/x/harflow-server"
     assert inspection.path_env == "/a:/b"
 
 
 @pytest.mark.parametrize("name", ["opencode.json", "config.json"])
 def test_opencode_inspect_reads_each_file_add_may_have_written(opencode_dir: Path, name: str) -> None:
-    (opencode_dir / name).write_text(json.dumps({"mcp": {"polybridge": OPENCODE_ENTRY}}))
+    (opencode_dir / name).write_text(json.dumps({"mcp": {"harflow_mcp": OPENCODE_ENTRY}}))
 
-    assert OpencodeClient().inspect("polybridge", FakeRunner()).installed is True
+    assert OpencodeClient().inspect("harflow_mcp", FakeRunner()).installed is True
 
 
 def test_opencode_inspect_with_no_config_is_not_installed(opencode_dir: Path) -> None:
-    inspection = OpencodeClient().inspect("polybridge", FakeRunner())
+    inspection = OpencodeClient().inspect("harflow_mcp", FakeRunner())
 
     assert inspection.installed is False
     assert inspection.error is None
@@ -1594,21 +1594,21 @@ def test_opencode_inspect_defaults_to_dot_config(
     monkeypatch.setenv("HOME", str(tmp_path))
     (tmp_path / ".config" / "opencode").mkdir(parents=True)
     (tmp_path / ".config" / "opencode" / "opencode.jsonc").write_text(
-        json.dumps({"mcp": {"polybridge": OPENCODE_ENTRY}})
+        json.dumps({"mcp": {"harflow_mcp": OPENCODE_ENTRY}})
     )
 
-    assert OpencodeClient().inspect("polybridge", FakeRunner()).installed is True
+    assert OpencodeClient().inspect("harflow_mcp", FakeRunner()).installed is True
 
 
 def test_opencode_inspect_of_entries_that_differ_between_files_claims_no_command(
     opencode_dir: Path,
 ) -> None:
     """Which file wins is not measured, so no single command is reported."""
-    (opencode_dir / "opencode.json").write_text(json.dumps({"mcp": {"polybridge": OPENCODE_ENTRY}}))
-    other = {**OPENCODE_ENTRY, "command": ["/old/polybridge-server"]}
-    (opencode_dir / "opencode.jsonc").write_text(json.dumps({"mcp": {"polybridge": other}}))
+    (opencode_dir / "opencode.json").write_text(json.dumps({"mcp": {"harflow_mcp": OPENCODE_ENTRY}}))
+    other = {**OPENCODE_ENTRY, "command": ["/old/harflow-server"]}
+    (opencode_dir / "opencode.jsonc").write_text(json.dumps({"mcp": {"harflow_mcp": other}}))
 
-    inspection = OpencodeClient().inspect("polybridge", FakeRunner())
+    inspection = OpencodeClient().inspect("harflow_mcp", FakeRunner())
 
     assert inspection.installed is True
     assert inspection.command is None
@@ -1618,11 +1618,11 @@ def test_opencode_inspect_of_entries_that_differ_between_files_claims_no_command
 def test_opencode_inspect_of_a_multi_part_command_does_not_report_the_bare_binary(
     opencode_dir: Path,
 ) -> None:
-    entry = {**OPENCODE_ENTRY, "command": ["/x/polybridge-server", "--debug"]}
-    (opencode_dir / "opencode.jsonc").write_text(json.dumps({"mcp": {"polybridge": entry}}))
+    entry = {**OPENCODE_ENTRY, "command": ["/x/harflow-server", "--debug"]}
+    (opencode_dir / "opencode.jsonc").write_text(json.dumps({"mcp": {"harflow_mcp": entry}}))
 
-    assert OpencodeClient().inspect("polybridge", FakeRunner()).command == (
-        "/x/polybridge-server --debug"
+    assert OpencodeClient().inspect("harflow_mcp", FakeRunner()).command == (
+        "/x/harflow-server --debug"
     )
 
 
@@ -1633,7 +1633,7 @@ def test_opencode_inspect_of_a_malformed_config_is_an_error(opencode_dir: Path, 
     (opencode_dir / "opencode.jsonc").write_text(raw)
 
     (inspection,) = clients.inspect_all(
-        [OpencodeClient(binary=sys.executable)], "polybridge", run=FakeRunner()
+        [OpencodeClient(binary=sys.executable)], "harflow_mcp", run=FakeRunner()
     )
 
     assert inspection.installed is None
@@ -1642,26 +1642,26 @@ def test_opencode_inspect_of_a_malformed_config_is_an_error(opencode_dir: Path, 
 
 def test_opencode_remove_changes_nothing_and_names_the_file(opencode_dir: Path) -> None:
     config = opencode_dir / "opencode.jsonc"
-    config.write_text(json.dumps({"mcp": {"polybridge": OPENCODE_ENTRY}}))
+    config.write_text(json.dumps({"mcp": {"harflow_mcp": OPENCODE_ENTRY}}))
     before = config.read_text()
 
-    result = OpencodeClient().remove("polybridge", FakeRunner())
+    result = OpencodeClient().remove("harflow_mcp", FakeRunner())
 
     assert result.status == "skipped"
     assert str(config) in result.detail
-    assert "mcp.polybridge" in result.detail and "manually" in result.detail
+    assert "mcp.harflow" in result.detail and "manually" in result.detail
     assert config.read_text() == before
 
 
 def test_opencode_remove_with_nothing_registered_is_not_installed(opencode_dir: Path) -> None:
-    assert OpencodeClient().remove("polybridge", FakeRunner()).status == "not_installed"
+    assert OpencodeClient().remove("harflow_mcp", FakeRunner()).status == "not_installed"
 
 
 def test_opencode_remove_of_a_config_it_cannot_parse_is_a_failure(opencode_dir: Path) -> None:
     (opencode_dir / "opencode.jsonc").write_text("{not json")
 
     (result,) = clients.unregister(
-        [OpencodeClient(binary=sys.executable)], "polybridge", run=FakeRunner()
+        [OpencodeClient(binary=sys.executable)], "harflow_mcp", run=FakeRunner()
     )
 
     assert result.status == "failed"
@@ -1677,9 +1677,9 @@ VIBE_TOML = (
     'command = "/bin/true"\n'
     "\n"
     "[[mcp_servers]]\n"
-    'name = "polybridge"\n'
+    'name = "harflow_mcp"\n'
     'transport = "stdio"\n'
-    'command = "/x/polybridge-server"\n'
+    'command = "/x/harflow-server"\n'
     "\n"
     "[mcp_servers.env]\n"
     'PATH = "/a:/b"\n'
@@ -1696,10 +1696,10 @@ def vibe_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def test_vibe_inspect_honours_vibe_home(vibe_config: Path) -> None:
     vibe_config.write_text(VIBE_TOML)
 
-    inspection = VibeClient().inspect("polybridge", FakeRunner())
+    inspection = VibeClient().inspect("harflow_mcp", FakeRunner())
 
     assert inspection.installed is True
-    assert inspection.command == "/x/polybridge-server"
+    assert inspection.command == "/x/harflow-server"
     assert inspection.path_env == "/a:/b"
 
 
@@ -1709,17 +1709,17 @@ def test_vibe_inspect_defaults_to_dot_vibe(tmp_path: Path, monkeypatch: pytest.M
     (tmp_path / ".vibe").mkdir()
     (tmp_path / ".vibe" / "config.toml").write_text(VIBE_TOML)
 
-    assert VibeClient().inspect("polybridge", FakeRunner()).installed is True
+    assert VibeClient().inspect("harflow_mcp", FakeRunner()).installed is True
 
 
 def test_vibe_inspect_with_only_other_servers_is_not_installed(vibe_config: Path) -> None:
-    vibe_config.write_text(VIBE_TOML.replace('"polybridge"', '"polybridge-old"'))
+    vibe_config.write_text(VIBE_TOML.replace('"harflow_mcp"', '"harflow_mcp-old"'))
 
-    assert VibeClient().inspect("polybridge", FakeRunner()).installed is False
+    assert VibeClient().inspect("harflow_mcp", FakeRunner()).installed is False
 
 
 def test_vibe_inspect_with_no_config_is_not_installed(vibe_config: Path) -> None:
-    assert VibeClient().inspect("polybridge", FakeRunner()).installed is False
+    assert VibeClient().inspect("harflow_mcp", FakeRunner()).installed is False
 
 
 @pytest.mark.parametrize(
@@ -1731,7 +1731,7 @@ def test_vibe_inspect_of_a_malformed_config_is_an_error(vibe_config: Path, raw) 
     else:
         vibe_config.write_text(raw)
 
-    inspection = VibeClient().inspect("polybridge", FakeRunner())
+    inspection = VibeClient().inspect("harflow_mcp", FakeRunner())
 
     assert inspection.installed is None
     assert inspection.error
@@ -1747,7 +1747,7 @@ def test_vibe_remove_backs_up_first_then_removes(vibe_config: Path) -> None:
         seen.extend(p.read_text() for p in backups)
         return RunResult(tuple(argv), 0, VIBE_REMOVED)
 
-    result = VibeClient().remove("polybridge", runner)
+    result = VibeClient().remove("harflow_mcp", runner)
 
     assert result.status == "removed"
     assert seen == [VIBE_TOML]
@@ -1755,13 +1755,13 @@ def test_vibe_remove_backs_up_first_then_removes(vibe_config: Path) -> None:
 
 
 def test_vibe_remove_of_an_absent_entry_is_not_installed(vibe_config: Path) -> None:
-    result = VibeClient().remove("polybridge", FakeRunner(ok(VIBE_NOT_CONFIGURED)))
+    result = VibeClient().remove("harflow_mcp", FakeRunner(ok(VIBE_NOT_CONFIGURED)))
 
     assert result.status == "not_installed"
 
 
 def test_vibe_remove_with_no_config_makes_no_backup(vibe_config: Path) -> None:
-    result = VibeClient().remove("polybridge", FakeRunner(ok(VIBE_NOT_CONFIGURED)))
+    result = VibeClient().remove("harflow_mcp", FakeRunner(ok(VIBE_NOT_CONFIGURED)))
 
     assert result.diagnostics == ()
     assert list(vibe_config.parent.iterdir()) == []
@@ -1773,14 +1773,14 @@ def test_vibe_remove_with_no_config_makes_no_backup(vibe_config: Path) -> None:
         (times_out(), "unknown"),
         (fails(1, "boom"), "failed"),
         (ok("something unexpected"), "unknown"),
-        (ok("Removed MCP server `polybridge-old`."), "unknown"),
+        (ok("Removed MCP server `harflow_mcp-old`."), "unknown"),
     ],
     ids=["timeout", "failure", "unrecognised", "longer-name"],
 )
 def test_vibe_remove_never_claims_more_than_it_saw(vibe_config: Path, response, status) -> None:
     vibe_config.write_text(VIBE_TOML)
 
-    result = VibeClient().remove("polybridge", FakeRunner(response))
+    result = VibeClient().remove("harflow_mcp", FakeRunner(response))
 
     assert result.status == status
     assert any("backed up" in line for line in result.diagnostics), "the backup is still named"
@@ -1794,10 +1794,10 @@ def test_vibe_remove_does_not_run_vibe_when_the_backup_fails(
     def refuse(path):
         raise SetupError("no room for a backup")
 
-    monkeypatch.setattr("polybridge.clients.vibe.back_up", refuse)
+    monkeypatch.setattr("harflow_mcp.clients.vibe.back_up", refuse)
 
     (result,) = clients.unregister(
-        [VibeClient(binary=sys.executable)], "polybridge", run=FakeRunner()
+        [VibeClient(binary=sys.executable)], "harflow_mcp", run=FakeRunner()
     )
 
     assert result.status == "failed"
@@ -1818,11 +1818,11 @@ def test_antigravity_argv_puts_the_env_flag_before_the_name() -> None:
         "add",
         "--env",
         "PATH=/a:/b",
-        "polybridge",
+        "harflow_mcp",
         "--",
-        "/opt/bin/polybridge-server",
+        "/opt/bin/harflow-server",
     ]
-    assert argv.index("polybridge") > argv.index("PATH=/a:/b")
+    assert argv.index("harflow_mcp") > argv.index("PATH=/a:/b")
 
 
 def test_antigravity_add_overwrites_so_one_measured_success_line_is_enough() -> None:
@@ -1845,7 +1845,7 @@ def agy_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def test_antigravity_inspect_with_no_config_is_not_installed(agy_config: Path) -> None:
-    inspection = AntigravityClient().inspect("polybridge", FakeRunner())
+    inspection = AntigravityClient().inspect("harflow_mcp", FakeRunner())
 
     assert inspection.installed is False
     assert inspection.error is None
@@ -1858,7 +1858,7 @@ def test_antigravity_inspect_of_a_config_it_cannot_read_is_an_error(agy_config: 
     agy_config.parent.mkdir(parents=True)
     agy_config.write_text(raw)
 
-    inspection = AntigravityClient().inspect("polybridge", FakeRunner())
+    inspection = AntigravityClient().inspect("harflow_mcp", FakeRunner())
 
     assert inspection.installed is None
     assert inspection.error
@@ -1870,9 +1870,9 @@ def test_antigravity_inspect_reads_the_stored_command_and_path(agy_config: Path)
         json.dumps(
             {
                 "mcpServers": {
-                    "not-polybridge": {"command": "/other/server"},
-                    "polybridge": {
-                        "command": "/x/polybridge-server",
+                    "not-harflow_mcp": {"command": "/other/server"},
+                    "harflow_mcp": {
+                        "command": "/x/harflow-server",
                         "args": [],
                         "env": {"PATH": "/a:/b"},
                     },
@@ -1881,32 +1881,32 @@ def test_antigravity_inspect_reads_the_stored_command_and_path(agy_config: Path)
         )
     )
 
-    inspection = AntigravityClient().inspect("polybridge", FakeRunner())
+    inspection = AntigravityClient().inspect("harflow_mcp", FakeRunner())
 
     assert inspection.installed is True
-    assert inspection.command == "/x/polybridge-server"
+    assert inspection.command == "/x/harflow-server"
     assert inspection.path_env == "/a:/b"
     assert any(str(agy_config) in note for note in inspection.notes)
 
 
 def test_antigravity_inspect_ignores_other_servers(agy_config: Path) -> None:
     agy_config.parent.mkdir(parents=True)
-    agy_config.write_text(json.dumps({"mcpServers": {"not-polybridge": {"command": "/x"}}}))
+    agy_config.write_text(json.dumps({"mcpServers": {"not-harflow_mcp": {"command": "/x"}}}))
 
-    assert AntigravityClient().inspect("polybridge", FakeRunner()).installed is False
+    assert AntigravityClient().inspect("harflow_mcp", FakeRunner()).installed is False
 
 
 def test_antigravity_remove_reports_removed_on_the_measured_message() -> None:
     runner = FakeRunner(ok(AGY_REMOVED))
 
-    result = AntigravityClient().remove("polybridge", runner)
+    result = AntigravityClient().remove("harflow_mcp", runner)
 
-    assert runner.calls == [["agy", "mcp", "remove", "polybridge"]]
+    assert runner.calls == [["agy", "mcp", "remove", "harflow_mcp"]]
     assert result.status == "removed"
 
 
 def test_antigravity_remove_of_an_absent_entry_is_not_installed_despite_exit_one() -> None:
-    result = AntigravityClient().remove("polybridge", FakeRunner(fails(1, AGY_NOT_FOUND)))
+    result = AntigravityClient().remove("harflow_mcp", FakeRunner(fails(1, AGY_NOT_FOUND)))
 
     assert result.status == "not_installed"
 
@@ -1920,13 +1920,13 @@ def test_antigravity_remove_of_an_absent_entry_is_not_installed_despite_exit_one
         (ok("something unexpected"), "unknown"),
         # Not the measured sentence: a longer line that merely contains it must not read as a
         # removal any more than a different server's name may read as ours.
-        (ok('Removed MCP server "polybridge" (and kept a backup)'), "unknown"),
-        (fails(1, 'Error: MCP server "polybridge" not found in some other scope'), "failed"),
+        (ok('Removed MCP server "harflow_mcp" (and kept a backup)'), "unknown"),
+        (fails(1, 'Error: MCP server "harflow_mcp" not found in some other scope'), "failed"),
         # The different-name collisions: whole-line, name-delimited matching must refuse both.
-        (ok('Removed MCP server "not-polybridge"'), "unknown"),
-        (ok('Removed MCP server "polybridge-old"'), "unknown"),
-        (fails(1, 'Error: MCP server "not-polybridge" not found'), "failed"),
-        (fails(1, 'Error: MCP server "polybridge-old" not found'), "failed"),
+        (ok('Removed MCP server "not-harflow_mcp"'), "unknown"),
+        (ok('Removed MCP server "harflow_mcp-old"'), "unknown"),
+        (fails(1, 'Error: MCP server "not-harflow_mcp" not found'), "failed"),
+        (fails(1, 'Error: MCP server "harflow_mcp-old" not found'), "failed"),
     ],
     ids=[
         "timeout",
@@ -1942,7 +1942,7 @@ def test_antigravity_remove_of_an_absent_entry_is_not_installed_despite_exit_one
     ],
 )
 def test_antigravity_remove_never_claims_more_than_it_saw(response, status: str) -> None:
-    result = AntigravityClient().remove("polybridge", FakeRunner(response))
+    result = AntigravityClient().remove("harflow_mcp", FakeRunner(response))
 
     assert result.status == status
 
@@ -2001,7 +2001,7 @@ def test_a_null_server_table_reads_as_nothing_registered_on_every_json_client(
     if isinstance(client, DesktopClient):
         client = client.with_config_path(path)
 
-    inspection = client.inspect("polybridge", FakeRunner())
+    inspection = client.inspect("harflow_mcp", FakeRunner())
 
     assert (inspection.installed, inspection.error) == (False, None)
 
@@ -2023,12 +2023,12 @@ def test_a_relative_vibe_home_is_resolved_where_vibe_resolves_it(
     monkeypatch.setenv("VIBE_HOME", "rel-vibe")
     monkeypatch.chdir(elsewhere)
 
-    result = VibeClient().remove("polybridge", FakeRunner(ok(VIBE_REMOVED)))
+    result = VibeClient().remove("harflow_mcp", FakeRunner(ok(VIBE_REMOVED)))
 
     assert result.status == "removed"
     assert [p.name for p in (home / "rel-vibe").iterdir() if ".bak-" in p.name]
     assert list(elsewhere.iterdir()) == []
-    assert VibeClient().inspect("polybridge", FakeRunner()).installed is True
+    assert VibeClient().inspect("harflow_mcp", FakeRunner()).installed is True
 
 
 def test_a_relative_claude_config_dir_is_resolved_against_home(
@@ -2037,20 +2037,20 @@ def test_a_relative_claude_config_dir_is_resolved_against_home(
     home = tmp_path / "home"
     (home / "rel-claude").mkdir(parents=True)
     (home / "rel-claude" / ".claude.json").write_text(
-        json.dumps({"mcpServers": {"polybridge": {"command": "/x"}}})
+        json.dumps({"mcpServers": {"harflow_mcp": {"command": "/x"}}})
     )
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", "rel-claude")
     monkeypatch.chdir(tmp_path)
 
-    assert ClaudeCodeClient().inspect("polybridge", FakeRunner()).installed is True
+    assert ClaudeCodeClient().inspect("harflow_mcp", FakeRunner()).installed is True
 
 
 @pytest.mark.parametrize(
-    "listed", [[None], [{"server_name": "polybridge"}], [{"name": 3}]], ids=["null", "key", "type"]
+    "listed", [[None], [{"server_name": "harflow_mcp"}], [{"name": 3}]], ids=["null", "key", "type"]
 )
 def test_codex_inspect_of_an_unreadable_entry_is_an_error_not_an_absence(listed) -> None:
-    inspection = CodexClient().inspect("polybridge", FakeRunner(ok(json.dumps(listed))))
+    inspection = CodexClient().inspect("harflow_mcp", FakeRunner(ok(json.dumps(listed))))
 
     assert inspection.installed is None
     assert inspection.error
@@ -2058,7 +2058,7 @@ def test_codex_inspect_of_an_unreadable_entry_is_an_error_not_an_absence(listed)
 
 @pytest.mark.parametrize(
     "raw",
-    ['mcp_servers = ["polybridge"]\n', "[[mcp_servers]]\ncommand = \"/x\"\n"],
+    ['mcp_servers = ["harflow_mcp"]\n', "[[mcp_servers]]\ncommand = \"/x\"\n"],
     ids=["strings", "nameless"],
 )
 def test_vibe_inspect_of_an_unreadable_entry_is_an_error_not_an_absence(
@@ -2066,7 +2066,7 @@ def test_vibe_inspect_of_an_unreadable_entry_is_an_error_not_an_absence(
 ) -> None:
     vibe_config.write_text(raw)
 
-    inspection = VibeClient().inspect("polybridge", FakeRunner())
+    inspection = VibeClient().inspect("harflow_mcp", FakeRunner())
 
     assert inspection.installed is None
     assert inspection.error
@@ -2076,13 +2076,13 @@ def test_is_current_is_unknown_when_the_inspection_could_not_settle_the_command(
     opencode_dir: Path,
 ) -> None:
     """Differing entries, one of them matching: that is not evidence of a mismatch."""
-    (opencode_dir / "opencode.json").write_text(json.dumps({"mcp": {"polybridge": OPENCODE_ENTRY}}))
-    other = {**OPENCODE_ENTRY, "command": ["/old/polybridge-server"]}
-    (opencode_dir / "opencode.jsonc").write_text(json.dumps({"mcp": {"polybridge": other}}))
+    (opencode_dir / "opencode.json").write_text(json.dumps({"mcp": {"harflow_mcp": OPENCODE_ENTRY}}))
+    other = {**OPENCODE_ENTRY, "command": ["/old/harflow-server"]}
+    (opencode_dir / "opencode.jsonc").write_text(json.dumps({"mcp": {"harflow_mcp": other}}))
 
-    inspection = OpencodeClient().inspect("polybridge", FakeRunner())
+    inspection = OpencodeClient().inspect("harflow_mcp", FakeRunner())
 
-    assert clients.is_current(inspection, "/x/polybridge-server", "/a:/b") is None
+    assert clients.is_current(inspection, "/x/harflow-server", "/a:/b") is None
 
 
 def test_is_current_is_unknown_for_an_installed_entry_that_errored() -> None:
@@ -2105,8 +2105,8 @@ def test_follow_up_is_the_clients_own_note_for_changes_only() -> None:
 @pytest.mark.parametrize(
     "client_and_entry",
     [
-        ("desktop", {"command": "/t/First", "args": ["Last/polybridge-server"], "env": {"PATH": "/p"}}),
-        ("opencode", {"type": "local", "command": ["/t/First", "Last/polybridge-server"],
+        ("desktop", {"command": "/t/First", "args": ["Last/harflow-server"], "env": {"PATH": "/p"}}),
+        ("opencode", {"type": "local", "command": ["/t/First", "Last/harflow-server"],
                       "environment": {"PATH": "/p"}}),
     ],
     ids=["args-shape", "opencode-array"],
@@ -2114,34 +2114,34 @@ def test_follow_up_is_the_clients_own_note_for_changes_only() -> None:
 def test_arguments_never_compare_equal_to_a_path_with_a_space(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, client_and_entry
 ) -> None:
-    """`/t/First` + `Last/polybridge-server` flattens to the same string as `/t/First
-    Last/polybridge-server`; the launch argv does not, so it must be what is compared."""
+    """`/t/First` + `Last/harflow-server` flattens to the same string as `/t/First
+    Last/harflow-server`; the launch argv does not, so it must be what is compared."""
     kind, entry = client_and_entry
     if kind == "desktop":
         path = tmp_path / "desktop.json"
-        path.write_text(json.dumps({"mcpServers": {"polybridge": entry}}))
+        path.write_text(json.dumps({"mcpServers": {"harflow_mcp": entry}}))
         client = DesktopClient(config_path=path)
     else:
         monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
         (tmp_path / "config" / "opencode").mkdir(parents=True)
         (tmp_path / "config" / "opencode" / "opencode.jsonc").write_text(
-            json.dumps({"mcp": {"polybridge": entry}})
+            json.dumps({"mcp": {"harflow_mcp": entry}})
         )
         client = OpencodeClient()
 
-    inspection = client.inspect("polybridge", FakeRunner())
+    inspection = client.inspect("harflow_mcp", FakeRunner())
 
-    assert inspection.argv == ("/t/First", "Last/polybridge-server")
-    assert clients.is_current(inspection, "/t/First Last/polybridge-server", "/p") is False
+    assert inspection.argv == ("/t/First", "Last/harflow-server")
+    assert clients.is_current(inspection, "/t/First Last/harflow-server", "/p") is False
     assert clients.is_current(inspection, "/t/First", "/p") is False
 
 
 def test_a_bare_entry_under_a_path_with_a_space_is_current(tmp_path: Path) -> None:
     path = tmp_path / "desktop.json"
-    server = "/t/First Last/polybridge-server"
-    path.write_text(json.dumps({"mcpServers": {"polybridge": {"command": server, "env": {"PATH": "/p"}}}}))
+    server = "/t/First Last/harflow-server"
+    path.write_text(json.dumps({"mcpServers": {"harflow_mcp": {"command": server, "env": {"PATH": "/p"}}}}))
 
-    inspection = DesktopClient(config_path=path).inspect("polybridge", FakeRunner())
+    inspection = DesktopClient(config_path=path).inspect("harflow_mcp", FakeRunner())
 
     assert inspection.command == server
     assert clients.is_current(inspection, server, "/p") is True

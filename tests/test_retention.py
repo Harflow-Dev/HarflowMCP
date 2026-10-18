@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from polybridge import control, retention, store
+from harflow_mcp import control, retention, store
 
 
 def _iso(dt: datetime) -> str:
@@ -36,7 +36,7 @@ def make_record(**overrides) -> store.TaskRecord:
 @pytest.mark.parametrize('case', ['recent', 'deeper', 'expired', 'failed', 'locked'])
 def test_continuation_original_assignment_survives_retained_members(tmp_path, monkeypatch, case):
     from types import SimpleNamespace
-    from polybridge.task_continuation import context
+    from harflow_mcp.task_continuation import context
     log_dir = tmp_path / 'tasks'
     log_dir.mkdir()
     now = datetime.now(timezone.utc)
@@ -78,27 +78,27 @@ def test_continuation_original_assignment_survives_retained_members(tmp_path, mo
 
 
 def test_default_retention_is_30_days(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("PB_RETENTION_DAYS", raising=False)
+    monkeypatch.delenv("HARFLOW_RETENTION_DAYS", raising=False)
     assert retention.retention_days() == 30
 
 
 def test_retention_disabled_by_zero(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("PB_RETENTION_DAYS", "0")
+    monkeypatch.setenv("HARFLOW_RETENTION_DAYS", "0")
     assert retention.retention_days() is None
 
 
 def test_retention_disabled_by_an_invalid_value(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("PB_RETENTION_DAYS", "not-a-number")
+    monkeypatch.setenv("HARFLOW_RETENTION_DAYS", "not-a-number")
     assert retention.retention_days() is None
 
 
 def test_retention_disabled_by_a_negative_value(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("PB_RETENTION_DAYS", "-5")
+    monkeypatch.setenv("HARFLOW_RETENTION_DAYS", "-5")
     assert retention.retention_days() is None
 
 
 def test_a_positive_value_is_honoured(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("PB_RETENTION_DAYS", "7")
+    monkeypatch.setenv("HARFLOW_RETENTION_DAYS", "7")
     assert retention.retention_days() == 7
 
 
@@ -127,7 +127,7 @@ def test_maybe_sweep_writes_the_stamp_after_the_sweep_not_before(
 def test_maybe_sweep_does_nothing_when_disabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("PB_RETENTION_DAYS", "0")
+    monkeypatch.setenv("HARFLOW_RETENTION_DAYS", "0")
     log_dir = tmp_path / "tasks"
 
     assert retention.maybe_sweep(log_dir) is None
@@ -822,7 +822,7 @@ def test_a_failed_artifact_delete_keeps_the_record_for_a_later_sweep(
 def test_supported_retention_removal_waits_for_catalog_decode_before_unlinking(tmp_path):
     import threading
     from concurrent.futures import ThreadPoolExecutor
-    from polybridge.catalog import Catalog
+    from harflow_mcp.catalog import Catalog
     task = make_record(status='completed', exit_code=0)
     store.write(tmp_path, task)
     path = store.record_path(tmp_path, task.task_id)
@@ -852,7 +852,7 @@ def test_supported_retention_removal_waits_for_catalog_decode_before_unlinking(t
 
 
 def _artifact_family(tmp_path, monkeypatch, edge="spawned_by"):
-    from polybridge import artifacts, identity, workflow_hooks
+    from harflow_mcp import artifacts, identity, workflow_hooks
     log_dir = tmp_path / 'bridge' / 'tasks'
     log_dir.mkdir(parents=True)
     repo = tmp_path / 'repo'
@@ -887,7 +887,7 @@ def _artifact_family(tmp_path, monkeypatch, edge="spawned_by"):
 
 @pytest.mark.parametrize('edge', ['spawned_by', 'parent_task_id', 'continuation_of_task_id', 'mixed'])
 def test_artifact_ancestors_survive_until_owner_collection(tmp_path, monkeypatch, edge):
-    from polybridge import artifacts
+    from harflow_mcp import artifacts
     log_dir, now, child, target = _artifact_family(tmp_path, monkeypatch, edge)
     assert retention.sweep(log_dir, 30, now)['deleted_tasks'] == 0
     assert store.read(log_dir, 'grandparent') and store.read(log_dir, 'parent')
@@ -902,7 +902,7 @@ def test_artifact_ancestors_survive_until_owner_collection(tmp_path, monkeypatch
 
 @pytest.mark.parametrize('edge', ['spawned_by', 'parent_task_id', 'continuation_of_task_id', 'mixed'])
 def test_failed_artifact_owner_collection_keeps_ancestors(tmp_path, monkeypatch, edge):
-    from polybridge import artifacts
+    from harflow_mcp import artifacts
     log_dir, now, _, _ = _artifact_family(tmp_path, monkeypatch, edge)
     original = retention._delete_task_files
     monkeypatch.setattr(retention, '_delete_task_files', lambda directory, identifier:
@@ -915,7 +915,7 @@ def test_failed_artifact_owner_collection_keeps_ancestors(tmp_path, monkeypatch,
 
 def test_artifact_retention_cycles_are_bounded_and_workflow_denial_is_preserved(tmp_path, monkeypatch):
     from dataclasses import replace
-    from polybridge import artifacts, workflow_hooks
+    from harflow_mcp import artifacts, workflow_hooks
     log_dir, now, child, _ = _artifact_family(tmp_path, monkeypatch)
     retention.sweep(log_dir, 30, now)
     monkeypatch.setattr(artifacts, '_workflow_owner', lambda directory, task_id, strict:
@@ -946,7 +946,7 @@ def test_symlink_manifest_does_not_establish_retention_ancestry(tmp_path, monkey
 
 def test_late_artifact_registration_and_finish_preserve_snapshot_ancestors(tmp_path, monkeypatch):
     from dataclasses import replace
-    from polybridge import artifacts, identity
+    from harflow_mcp import artifacts, identity
     log_dir, now, child, target = _artifact_family(tmp_path, monkeypatch)
     (log_dir / 'child.artifacts.json').unlink()
     live = replace(child, status='running', exit_code=None, finished_at=None,

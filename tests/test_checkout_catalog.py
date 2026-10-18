@@ -4,7 +4,7 @@ import time
 
 import pytest
 
-from polybridge import workflows as w
+from harflow_mcp import workflows as w
 from test_workflows import definition
 
 
@@ -83,7 +83,7 @@ async def test_checkout_lookup_runs_off_event_loop(storage, tmp_path, monkeypatc
 
 
 def test_checkout_checks_exact_task_identity_without_prompt_or_stream_replay(storage, tmp_path, monkeypatch):
-    from polybridge import identity, store
+    from harflow_mcp import identity, store
     run = seed(storage, tmp_path, task_status='uncertain')
     ready(storage)
     task = store.TaskRecord(run['workflow_run_id'], 'codex', 'session', str(tmp_path), 'now', status='running', pid=123, markers=['worker'], start_time='start')

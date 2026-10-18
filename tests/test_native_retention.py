@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from polybridge import retention
+from harflow_mcp import retention
 
 
 def fixture(tmp_path, **changes):

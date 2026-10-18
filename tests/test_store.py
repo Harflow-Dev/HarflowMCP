@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from polybridge import control, identity, store
-from polybridge.store import TaskRecord
+from harflow_mcp import control, identity, store
+from harflow_mcp.store import TaskRecord
 
 SESSION = "0b4147f7-3a0e-4fe1-8399-d8c9964ccb2e"
 
@@ -106,7 +106,7 @@ def test_a_pre_change_record_with_no_title_key_still_loads_as_none(tmp_path: Pat
 
 
 def test_live_and_recovered_briefs_both_expose_the_same_title(tmp_path: Path) -> None:
-    from polybridge.tasks import Task
+    from harflow_mcp.tasks import Task
 
     record = make_record(title="Fix login", status="completed", exit_code=0)
     write_log(tmp_path, record.task_id, RESULT_EVENT)
@@ -169,7 +169,7 @@ def test_recovered_enforcement_reports_the_persisted_value_not_a_fresh_derivatio
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A backend's current `enforcement()` must never overwrite what this run actually had."""
-    from polybridge.backends.claude import ClaudeBackend
+    from harflow_mcp.backends.claude import ClaudeBackend
 
     def fake_enforcement(self, freedom):
         raise AssertionError("must not re-derive enforcement for a recovered task")
@@ -249,7 +249,7 @@ def test_live_and_recovered_listings_hold_the_same_keys(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A caller listing tasks sees one shape, whichever server started them."""
-    from polybridge.tasks import Task
+    from harflow_mcp.tasks import Task
 
     monkeypatch.setattr(store, "process_alive", lambda pid, markers: False)
     record = make_record(status="failed", exit_code=None)
@@ -273,7 +273,7 @@ def test_live_and_recovered_listings_hold_the_same_keys(
 
 
 def test_live_notices_merge_bridge_first_without_mutating_either_source(tmp_path: Path) -> None:
-    from polybridge.tasks import Task
+    from harflow_mcp.tasks import Task
 
     task = Task(
         task_id="t",
@@ -410,7 +410,7 @@ def test_a_missing_log_does_not_break_recovery(tmp_path: Path) -> None:
 
 def test_recovered_snapshot_matches_the_live_snapshot_shape(tmp_path: Path) -> None:
     """Callers must not need to special-case a recovered task, so the keys line up."""
-    from polybridge.tasks import Task
+    from harflow_mcp.tasks import Task
 
     live = Task(
         task_id="t",
@@ -434,7 +434,7 @@ def test_recovered_snapshot_matches_the_live_snapshot_shape(tmp_path: Path) -> N
 def test_both_snapshot_builders_carry_the_resume_command(tmp_path: Path) -> None:
     """Monitor piece 3/3: `resume_command` is computed by both the live and recovered snapshot
     builders from the same `backends.resume_command`, never stored on the record itself."""
-    from polybridge.tasks import Task
+    from harflow_mcp.tasks import Task
 
     live = Task(
         task_id="t",
@@ -455,7 +455,7 @@ def test_both_snapshot_builders_carry_the_resume_command(tmp_path: Path) -> None
 
 
 def test_both_snapshot_builders_report_null_with_no_session_id(tmp_path: Path) -> None:
-    from polybridge.tasks import Task
+    from harflow_mcp.tasks import Task
 
     live = Task(
         task_id="t",
@@ -1179,7 +1179,7 @@ def test_owned_by_live_server_note_and_flag_when_identity_check_reports_alive(
 
     assert status == "running"
     assert "4242" in note
-    assert "owned by a live polybridge server process" in note
+    assert "owned by a live harflow_mcp server process" in note
 
     snap = store.snapshot(tmp_path, record)
     assert snap["owned_by_live_server"] is True
@@ -1202,7 +1202,7 @@ def test_owned_by_live_server_is_false_when_identity_check_cannot_confirm_it(
     status, note, _, _ = store.resolve_status(tmp_path, record)
 
     assert status == "running"
-    assert "owned by a live polybridge server process" not in note
+    assert "owned by a live harflow_mcp server process" not in note
 
     snap = store.snapshot(tmp_path, record)
     assert snap["owned_by_live_server"] is False
@@ -1230,7 +1230,7 @@ def test_recovered_builder_marker_is_retained_in_listing(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("error", [OSError("disk"), ValueError("record"), KeyError("run"), TypeError("shape")])
 def test_recovered_builder_snapshot_survives_pending_bookkeeping_failure(tmp_path, monkeypatch, error):
-    from polybridge import workflows
+    from harflow_mcp import workflows
     record = make_record(workflow_builder=True, status="completed", exit_code=0)
     write_log(tmp_path, record.task_id, RESULT_EVENT)
     def broken(*args):
@@ -1309,7 +1309,7 @@ def test_missing_or_corrupt_assignment_never_silently_returns_preview(tmp_path,d
 
 
 def test_full_assignment_sidecar_preserves_crlf_unicode_and_retention(tmp_path):
-    from polybridge import retention
+    from harflow_mcp import retention
     prompt=('line\r\n雪🚀\n'*3000)+'final\r'
     record=make_record(prompt=prompt)
     assert store.write_landed(tmp_path,record)

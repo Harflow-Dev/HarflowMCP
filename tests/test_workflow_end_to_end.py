@@ -89,12 +89,12 @@ def workflow_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     fake.chmod(0o755)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ["PATH"])
-    monkeypatch.delenv("PB_TASK_ID", raising=False)
+    monkeypatch.delenv("HARFLOW_TASK_ID", raising=False)
     monkeypatch.setenv("PYTHONPATH", str(Path(__file__).resolve().parents[1] / "src"))
 
     def invoke(*args: str, success: bool = True) -> dict:
         result = subprocess.run(
-            [sys.executable, "-m", "polybridge.ctl", *args, "--json"],
+            [sys.executable, "-m", "harflow_mcp.ctl", *args, "--json"],
             capture_output=True, text=True, env=os.environ.copy(), timeout=40,
         )
         if success:
@@ -159,7 +159,7 @@ def test_cli_supervisor_creates_plan_and_orchestrator_completes_checklist(workfl
     assert run["technical_plan_execution_id"] == planning["id"]
     assert planning["node_result"]["result"]["technical_plan"] == run["technical_plan"]
     assert run["decisions"]
-    assert list((home / ".polybridge" / "tasks").glob("*.events.jsonl"))
+    assert list((home / ".harflow" / "tasks").glob("*.events.jsonl"))
 
 
 def test_cli_loop_limit_stops_after_three_implementation_activations(workflow_cli, tmp_path, git_repo):

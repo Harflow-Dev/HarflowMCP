@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from polybridge import workflow_notifications as wn, workflow_notification_points as points
+from harflow_mcp import workflow_notifications as wn, workflow_notification_points as points
 
 ORIGINAL_RUN = wn._run
 
@@ -15,7 +15,7 @@ ORIGINAL_RUN = wn._run
 def logs(tmp_path, monkeypatch):
     task_dir = tmp_path / "tasks"
     task_dir.mkdir()
-    monkeypatch.setenv("PB_NOTIFY_DESTINATIONS", json.dumps({"hook": {"url": "https://example.test/hook"}}))
+    monkeypatch.setenv("HARFLOW_NOTIFY_DESTINATIONS", json.dumps({"hook": {"url": "https://example.test/hook"}}))
     def direct_run(log_dir, run_id):
         run = json.loads((Path(log_dir).parent / "workflow-runs" / f"{run_id}.json").read_text())
         if run.get("parent_link"):
@@ -236,7 +236,7 @@ def test_failed_delivery_retry_keeps_notification_id_and_run_untouched(logs, mon
 
 
 def test_shared_capacity_counts_task_and_workflow_subscriptions(logs):
-    from polybridge import notifications
+    from harflow_mcp import notifications
     write_run(logs)
     with notifications._db(logs) as db:
         for i in range(notifications.MAX_SUBSCRIPTIONS):
@@ -258,7 +258,7 @@ def test_historical_null_snapshot_is_not_rebuilt_from_current_run(logs):
 
 
 def test_artifact_notes_are_not_in_notification_payload(logs, monkeypatch):
-    from polybridge import artifacts
+    from harflow_mcp import artifacts
     terminal = point("terminal:failed:1", points.SETTLED, 1, "failed")
     write_run(logs, status="failed", sequence=1, terminal_notification_points=[terminal])
     subscribe(logs, events=["terminal"])
@@ -316,7 +316,7 @@ def test_reconciled_attention_with_started_invocation_is_immediate(logs, monkeyp
 
 
 def test_large_real_run_record_is_read_with_notification_metadata_budget(logs):
-    from polybridge.workflows import WorkflowStore
+    from harflow_mcp.workflows import WorkflowStore
     write_run(logs, sequence=1, metadata="x" * (300 * 1024))
     run = ORIGINAL_RUN(logs, "root")
     assert len(run["metadata"]) == 300 * 1024

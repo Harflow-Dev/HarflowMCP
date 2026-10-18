@@ -1,10 +1,10 @@
 """Pins the claude CLI behaviour live input is built on. Real runs; these spend real tokens.
 
-    PB_INTEGRATION=1 uv run pytest tests/test_live_input_real.py
+    HARFLOW_INTEGRATION=1 uv run pytest tests/test_live_input_real.py
 
 Stage A3 of the monitor plan keeps a claude run's stdin open (`--input-format stream-json`) so a
 caller can add messages mid-run, and closes it once the agent is idle so the run still settles. Every
-rule that design relies on is a claim about the CLI, not about polybridge, so each gets a raw-CLI test
+rule that design relies on is a claim about the CLI, not about harflow_mcp, so each gets a raw-CLI test
 here that fails loudly if a claude update changes it:
 
 * a positional prompt next to `--input-format stream-json` is ignored, so the prompt goes on stdin;
@@ -40,12 +40,12 @@ import pytest
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(
-        not os.environ.get("PB_INTEGRATION"),
-        reason="set PB_INTEGRATION=1 to spawn real agent runs (spends real tokens)",
+        not os.environ.get("HARFLOW_INTEGRATION"),
+        reason="set HARFLOW_INTEGRATION=1 to spawn real agent runs (spends real tokens)",
     ),
 ]
 
-MODEL = os.environ.get("PB_LIVE_TEST_MODEL", "haiku")
+MODEL = os.environ.get("HARFLOW_LIVE_TEST_MODEL", "haiku")
 RUN_TIMEOUT_SECONDS = 240.0
 # Measured ~1.2 s from EOF to exit; generous so a slow machine does not flake.
 EXIT_AFTER_EOF_SECONDS = 20.0
@@ -304,17 +304,17 @@ async def test_resume_accepts_live_input(git_repo: Path) -> None:
     assert "PELICAN" in result["result"].upper()
 
 
-# --- through polybridge ---------------------------------------------------------------------------
+# --- through harflow_mcp ---------------------------------------------------------------------------
 
 
-async def test_polybridge_two_message_run_end_to_end(git_repo: Path, tmp_path: Path) -> None:
+async def test_harflow_mcp_two_message_run_end_to_end(git_repo: Path, tmp_path: Path) -> None:
     """The whole live-input path on the real CLI: start, a mid-run `send_message` folded into the
     running turn, the pump closing stdin once idle, `completed`, and a later send refused."""
     import json as _json
 
-    from polybridge import backends, inbox
-    from polybridge.events import events_path
-    from polybridge.tasks import TaskRegistry
+    from harflow_mcp import backends, inbox
+    from harflow_mcp.events import events_path
+    from harflow_mcp.tasks import TaskRegistry
 
     registry = TaskRegistry(log_dir=tmp_path / "streams")
     task = await registry.start(

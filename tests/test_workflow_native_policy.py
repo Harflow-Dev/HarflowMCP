@@ -3,9 +3,9 @@ import copy
 
 import pytest
 
-from polybridge import workflows as w
-from polybridge.workflow_native_policy import plan_owner_contracts, orchestrator_contract
-from polybridge.workflow_references import workflow_identity
+from harflow_mcp import workflows as w
+from harflow_mcp.workflow_native_policy import plan_owner_contracts, orchestrator_contract
+from harflow_mcp.workflow_references import workflow_identity
 from test_workflow_delegation import graph
 
 
@@ -20,7 +20,7 @@ class CertifiedAdapter:
 
 @pytest.fixture
 def certified(monkeypatch):
-    monkeypatch.setattr("polybridge.backends.native.adapter", lambda backend: CertifiedAdapter())
+    monkeypatch.setattr("harflow_mcp.backends.native.adapter", lambda backend: CertifiedAdapter())
     monkeypatch.setattr(w.backends, "version", lambda _: "certified")
 
 

@@ -11,14 +11,14 @@ from pathlib import Path
 
 import pytest
 
-from polybridge import backends
-from polybridge.backends.base import FREEDOMS
-from polybridge.backends import Invocation
-from polybridge.backends.base import Enforcement
-from polybridge.backends.codex import CodexBackend
-from polybridge import identity, store
-from polybridge import tasks as tasks_module
-from polybridge.tasks import (
+from harflow_mcp import backends
+from harflow_mcp.backends.base import FREEDOMS
+from harflow_mcp.backends import Invocation
+from harflow_mcp.backends.base import Enforcement
+from harflow_mcp.backends.codex import CodexBackend
+from harflow_mcp import identity, store
+from harflow_mcp import tasks as tasks_module
+from harflow_mcp.tasks import (
     RepoUnavailableError,
     SessionBusyError,
     SessionUnknownError,

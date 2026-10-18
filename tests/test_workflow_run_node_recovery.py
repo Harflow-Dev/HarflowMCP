@@ -5,10 +5,10 @@ import uuid
 
 import pytest
 
-from polybridge import workflow_delegation as d
-from polybridge import workflow_invocation as inv
-from polybridge import workflow_references as refs
-from polybridge import workflows as w
+from harflow_mcp import workflow_delegation as d
+from harflow_mcp import workflow_invocation as inv
+from harflow_mcp import workflow_references as refs
+from harflow_mcp import workflows as w
 
 from test_workflow_run_node_execution import (TreeRegistry, _child_id, _start_tree, _wait_until, assignment_for, child_graph, child_runs, invocation_activation, parent_graph, run_tree, workflow_policy)
 
@@ -239,7 +239,7 @@ async def test_recovery_crash_before_child_file_creates_exactly_one_child(store,
 async def test_recovery_crash_after_child_file_adopts_the_same_child(store, tmp_path):
     parent_run = seed_parent(store, tmp_path, "parent", stage="created")
     # A real child record exists but its supervisor never started.
-    from polybridge.workflow_invocation import child_run_record, write_child_run
+    from harflow_mcp.workflow_invocation import child_run_record, write_child_run
     activation = parent_run["activations"][0]
     child = child_run_record(store, store.get_run(parent_run["workflow_run_id"]), activation, next(n for n in parent_run["definition"]["nodes"] if n["id"] == "call"), activation["invocation"])
     write_child_run(store, child)
@@ -254,7 +254,7 @@ async def test_recovery_crash_after_child_file_adopts_the_same_child(store, tmp_
 
 async def test_recovery_mismatched_child_puts_the_tree_in_needs_attention(store, tmp_path):
     parent_run = seed_parent(store, tmp_path, "parent", stage="created")
-    from polybridge.workflow_invocation import child_run_record, write_child_run
+    from harflow_mcp.workflow_invocation import child_run_record, write_child_run
     activation = parent_run["activations"][0]
     child = child_run_record(store, store.get_run(parent_run["workflow_run_id"]), activation, next(n for n in parent_run["definition"]["nodes"] if n["id"] == "call"), activation["invocation"])
     child["parent_link"]["workflow_run_id"] = "someone-else"
@@ -378,7 +378,7 @@ async def test_child_question_answer_routes_exact_checkpoint_without_repeating_w
 
 
 def test_completed_child_with_caller_decision_block_remains_caller_authority_after_specialist_context(store, tmp_path):
-    from polybridge.workflow_child_questions import caller_authority_required, protected_input
+    from harflow_mcp.workflow_child_questions import caller_authority_required, protected_input
 
     parent_run = store.create_run(w.validate_definition(store.get("parent")), "go", tmp_path, permission_policy="saved_node", dependency_tree=refs.resolve_dependencies(store, definition=store.get("parent")))
     child = {

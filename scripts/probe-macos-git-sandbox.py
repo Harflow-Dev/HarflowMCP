@@ -32,7 +32,7 @@ def main():
     if selection["exit"] != 0:
         raise SystemExit(json.dumps(selection))
     git = str(Path(selection["stdout"].strip()) / "usr/bin/git")
-    with tempfile.TemporaryDirectory(prefix="pb-git-sandbox-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="harflow-git-sandbox-") as temporary:
         root = Path(temporary)
         config = root / "codex"
         config.mkdir()

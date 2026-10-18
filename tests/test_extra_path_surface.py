@@ -5,10 +5,10 @@ from unittest.mock import AsyncMock
 import pytest
 from mcp import Client, MCPError
 
-from polybridge import backends, ctl, server, tasks
-from polybridge.backends.codex import EXTRA_PATHS_VERSION
-from polybridge.backends.base import nested_enforcement_violation
-from polybridge.extra_paths import normalize_paths
+from harflow_mcp import backends, ctl, server, tasks
+from harflow_mcp.backends.codex import EXTRA_PATHS_VERSION
+from harflow_mcp.backends.base import nested_enforcement_violation
+from harflow_mcp.extra_paths import normalize_paths
 
 
 @pytest.fixture(autouse=True)
@@ -18,7 +18,8 @@ def separate_bridge_state(monkeypatch, tmp_path_factory):
 
 @pytest.fixture
 def qualified(monkeypatch, fake_backend_clis, tmp_path_factory):
-    monkeypatch.setattr('polybridge.backends.codex_config._mdm_absence', lambda: ('managed_preferences_absent',))
+    monkeypatch.setattr('harflow_mcp.backends.codex.RENAMED_EXTRA_PATHS_QUALIFIED', True)
+    monkeypatch.setattr('harflow_mcp.backends.codex_config._mdm_absence', lambda: ('managed_preferences_absent',))
     from test_execution_config import isolate_configuration_environment
     isolate_configuration_environment(monkeypatch, tmp_path_factory.mktemp('backend-home'))
     monkeypatch.setenv("CODEX_HOME", str(tmp_path_factory.mktemp("qualified-config")))
@@ -30,10 +31,10 @@ def qualified(monkeypatch, fake_backend_clis, tmp_path_factory):
         if selected:
             (launcher.parent / name).symlink_to(selected)
     monkeypatch.setenv('PATH', str(launcher.parent))
-    monkeypatch.setattr('polybridge.runtime_loaders.qualify_loaders', lambda paths: (set(paths), set()))
+    monkeypatch.setattr('harflow_mcp.runtime_loaders.qualify_loaders', lambda paths: (set(paths), set()))
     # Qualification still resolves/fingerprints a CLI, even with its version stubbed.
     monkeypatch.setattr(backends, 'version', lambda backend, **kwargs: EXTRA_PATHS_VERSION)
-    monkeypatch.setattr('polybridge.backends.codex.sys.platform', 'darwin')
+    monkeypatch.setattr('harflow_mcp.backends.codex.sys.platform', 'darwin')
 
 
 async def test_preview_exposes_effective_scopes_without_task_or_scratch(git_repo, tmp_path, qualified):
@@ -62,7 +63,7 @@ async def test_preview_discloses_future_scratch_without_allocating(git_repo, mon
     monkeypatch.setattr(registry, '_resolve_lineage', check)
     def refuse(*args, **kwargs):
         raise AssertionError('preview allocated task scratch')
-    monkeypatch.setattr('polybridge.scratch.create', refuse)
+    monkeypatch.setattr('harflow_mcp.scratch.create', refuse)
     result = await server.preview_task_permissions(str(git_repo), backend='codex', freedom=freedom)
     assert (tasks.FUTURE_TASK_SCRATCH_ROOT in result['enforcement']['writable_roots']) == (freedom != 'read_only')
     assert all(tasks.FUTURE_TASK_SCRATCH_ROOT not in roots for roots in lineage)
@@ -151,8 +152,8 @@ def test_nested_enforcement_rejects_legacy_temp_widening(git_repo, tmp_path, qua
 async def test_start_invalid_grants_are_actionable_before_spawn(
     git_repo, tmp_path, monkeypatch, fake_backend_clis, qualified, notify, invalid,
 ):
-    from polybridge import notifications
-    monkeypatch.setenv('PB_NOTIFY_DESTINATIONS', json.dumps({'hook': {'url': 'https://example.com/hook'}}))
+    from harflow_mcp import notifications
+    monkeypatch.setenv('HARFLOW_NOTIFY_DESTINATIONS', json.dumps({'hook': {'url': 'https://example.com/hook'}}))
     monkeypatch.setattr(server, '_start_notification_worker', lambda _: None)
     registry = server._reg()
     spawn = AsyncMock()
@@ -173,8 +174,8 @@ async def test_start_invalid_grants_are_actionable_before_spawn(
 async def test_start_validation_cleanup_failure_preserves_reserved_identity(
     git_repo, monkeypatch, fake_backend_clis, qualified,
 ):
-    from polybridge import notifications
-    monkeypatch.setenv('PB_NOTIFY_DESTINATIONS', json.dumps({'hook': {'url': 'https://example.com/hook'}}))
+    from harflow_mcp import notifications
+    monkeypatch.setenv('HARFLOW_NOTIFY_DESTINATIONS', json.dumps({'hook': {'url': 'https://example.com/hook'}}))
     monkeypatch.setattr(server, '_start_notification_worker', lambda _: None)
     reserved = []
     subscribe = notifications.subscribe
@@ -198,8 +199,8 @@ async def test_resume_saved_authority_failure_is_actionable_before_spawn(
 ):
     from dataclasses import replace
     from types import SimpleNamespace
-    from polybridge import store
-    from polybridge.extra_paths import serialize_paths
+    from harflow_mcp import store
+    from harflow_mcp.extra_paths import serialize_paths
     registry = server._reg()
     backend = backends.get('codex')
     grant = tmp_path / 'exact'
@@ -238,7 +239,7 @@ async def test_resume_saved_authority_failure_is_actionable_before_spawn(
 @pytest.mark.parametrize('recovered', [False, True])
 async def test_resume_unmarked_value_error_is_not_translated(git_repo, monkeypatch, recovered):
     from types import SimpleNamespace
-    from polybridge import store
+    from harflow_mcp import store
     registry = server._reg()
     record = store.TaskRecord(task_id='parent', backend='codex', session_id='session',
         repo_path=str(git_repo), started_at='2026-10-14T00:00:00Z', status='completed', exit_code=0)

@@ -1,9 +1,9 @@
 """A2: ctl workflow node reads share the server's checks without importing the server.
 
 `workflow_node_reads` is the single body behind both the MCP tools (`inspect_workflow_node`,
-`read_workflow_assigned_input`) and `polybridge-ctl workflow inspect` / `assigned-input`, so the
+`read_workflow_assigned_input`) and `harflow-ctl workflow inspect` / `assigned-input`, so the
 two surfaces cannot drift; ctl resolves managed authority itself and never imports
-`polybridge.server`, never starts retention and never starts the notification worker.
+`harflow_mcp.server`, never starts retention and never starts the notification worker.
 """
 
 from __future__ import annotations
@@ -20,8 +20,8 @@ import pytest
 
 from mcp import MCPError
 
-from polybridge import ctl, lineage, server
-from polybridge.tasks import TaskRegistry
+from harflow_mcp import ctl, lineage, server
+from harflow_mcp.tasks import TaskRegistry
 
 
 @pytest.fixture(autouse=True)
@@ -36,7 +36,7 @@ def _caller(task_id: str = "owned-caller") -> SimpleNamespace:
 
 def _owned_run(tmp_path: Path, role: str):
     """A real durable run whose `owned-caller` task sits in a `role` activation."""
-    from polybridge import workflows
+    from harflow_mcp import workflows
 
     storage = workflows.WorkflowStore()
     definition = storage.save(
@@ -92,12 +92,12 @@ def _ctl_error(capsys) -> dict:
 def _run_ctl_subprocess(home: Path, argv: list[str]) -> dict:
     code = (
         "import json, sys\n"
-        "from polybridge import ctl\n"
+        "from harflow_mcp import ctl\n"
         "code = ctl.main(sys.argv[1:])\n"
-        "print(json.dumps({'code': code, 'server_imported': 'polybridge.server' in sys.modules,"
+        "print(json.dumps({'code': code, 'server_imported': 'harflow_mcp.server' in sys.modules,"
         " 'mcp_imported': 'mcp' in sys.modules}))\n"
     )
-    env = {key: value for key, value in os.environ.items() if key != "PB_TASK_ID"}
+    env = {key: value for key, value in os.environ.items() if key != "HARFLOW_TASK_ID"}
     env["HOME"] = str(home)
     result = subprocess.run(
         [sys.executable, "-c", code, *argv], capture_output=True, text=True, env=env, timeout=60
@@ -135,7 +135,7 @@ def test_install_cli_registry_is_idempotent_and_side_effect_free(monkeypatch, tm
 def test_workflow_and_permission_commands_never_start_maintenance_or_retention(
     home, monkeypatch, capsys, fake_backend_clis
 ):
-    from polybridge import retention
+    from harflow_mcp import retention
 
     started = []
     monkeypatch.setattr(TaskRegistry, "start_maintenance", lambda self: started.append("maintenance"))
@@ -199,8 +199,8 @@ async def test_ctl_and_mcp_inspect_agree_per_role(home, monkeypatch, tmp_path, c
 
 
 async def test_ctl_and_mcp_assigned_input_agree(home, monkeypatch, tmp_path, capsys):
-    from polybridge import workflows
-    from polybridge.workflow_inspection import make_assigned_input_ref
+    from harflow_mcp import workflows
+    from harflow_mcp.workflow_inspection import make_assigned_input_ref
 
     storage = workflows.WorkflowStore()
     definition = storage.save(

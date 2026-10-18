@@ -8,8 +8,8 @@ from types import SimpleNamespace
 import pytest
 from mcp.shared.exceptions import MCPError
 
-from polybridge import approvals, server, store
-from polybridge.backends import get
+from harflow_mcp import approvals, server, store
+from harflow_mcp.backends import get
 
 
 def _row(directory: Path) -> dict:
@@ -48,7 +48,7 @@ async def test_public_list_get_respond_roundtrip_and_strict_revision(tmp_path: P
     row = _row(tmp_path)
     registry = Registry(tmp_path)
     monkeypatch.setattr(server, "_registry", registry)
-    monkeypatch.setattr("polybridge.approval_runtime.identity.identity_check", lambda _value: "alive")
+    monkeypatch.setattr("harflow_mcp.approval_runtime.identity.identity_check", lambda _value: "alive")
 
     listed = await server.list_approval_requests(task_id="task-1", limit=16)
     assert listed["requests"][0]["request_id"] == row["request_id"]

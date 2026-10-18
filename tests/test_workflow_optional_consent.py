@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from polybridge import workflow_delegation as d, workflow_responses as responses, workflows as w
+from harflow_mcp import workflow_delegation as d, workflow_responses as responses, workflows as w
 from test_workflow_delegation import storage  # noqa: F401
 from test_workflow_optional_refusal import ANSWER, suspended
 
@@ -138,7 +138,7 @@ async def test_forwarded_ineligible_opt_in_does_not_prepare_delivery(storage, tm
 @pytest.mark.parametrize('allow', [False, True])
 @pytest.mark.parametrize('monitor', [False, True])
 def test_cli_passes_explicit_consent_only_when_flag_is_present(monkeypatch, capsys, allow, monitor):
-    from polybridge import ctl, server
+    from harflow_mcp import ctl, server
     calls = []
     async def call(action, **kwargs):
         calls.append((action, kwargs))
@@ -157,7 +157,7 @@ def test_cli_passes_explicit_consent_only_when_flag_is_present(monkeypatch, caps
 
 @pytest.mark.parametrize('allow', [False, True])
 async def test_mcp_resume_passes_structured_consent(monkeypatch, allow):
-    from polybridge import server
+    from harflow_mcp import server
     calls = []
     async def call(action, **kwargs):
         calls.append(kwargs)
@@ -169,7 +169,7 @@ async def test_mcp_resume_passes_structured_consent(monkeypatch, allow):
 
 @pytest.mark.parametrize('invalid', [None, 0, 1, 'true', 'false'])
 async def test_mcp_binding_does_not_coerce_consent(monkeypatch, invalid):
-    from polybridge import server
+    from harflow_mcp import server
     from test_server import call
     async def unexpected(*args, **kwargs):
         pytest.fail('Invalid consent reached workflow dispatch')
@@ -180,7 +180,7 @@ async def test_mcp_binding_does_not_coerce_consent(monkeypatch, invalid):
 
 @pytest.mark.parametrize('allow', [False, True])
 async def test_mcp_binding_preserves_real_consent_boolean(monkeypatch, allow):
-    from polybridge import server
+    from harflow_mcp import server
     from test_server import call
     calls = []
     async def dispatch(action, **kwargs):

@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from polybridge import workflows as w, workflow_delegation as d
+from harflow_mcp import workflows as w, workflow_delegation as d
 from test_workflow_delegation import Registry, run_flow, storage
 from test_workflow_explicit_parallel import explicit
 from test_workflow_traversal import policy

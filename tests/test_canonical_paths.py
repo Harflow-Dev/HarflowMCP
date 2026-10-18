@@ -10,8 +10,8 @@ import sys
 
 import pytest
 
-from polybridge import canonical_paths
-from polybridge.canonical_paths import canonical, canonical_component_name, kernel_canonical_supported
+from harflow_mcp import canonical_paths
+from harflow_mcp.canonical_paths import canonical, canonical_component_name, kernel_canonical_supported
 
 
 def test_capability_follows_the_actual_open_flags_not_the_platform_name(monkeypatch) -> None:

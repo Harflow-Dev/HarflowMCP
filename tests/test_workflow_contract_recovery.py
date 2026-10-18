@@ -5,8 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from polybridge import workflow_delegation as d
-from polybridge import workflows as w
+from harflow_mcp import workflow_delegation as d
+from harflow_mcp import workflows as w
 
 
 @pytest.mark.parametrize('wrapper', ['{}', 'Finished review.\n{}\nReview complete.', 'Here is the result:\n```json\n{}\n```\nDone.'])
@@ -45,7 +45,7 @@ def test_optional_plan_accepts_brief_and_preserves_existing_technical_plan():
 def test_missing_retained_session_is_not_advertised(monkeypatch):
     node = {'id': 'worker', 'agent': {'backend': 'codex'}, 'freedom': 'read_only'}
     run = {'repo_path': '/repo', 'activations': [{'id': 'execution', 'role': 'node', 'node_id': 'worker', 'status': 'completed', 'tasks': [{'task_id': 'old', 'status': 'completed', 'result': {'session_id': 'session'}, 'repo_path': '/repo', 'freedom': 'read_only', 'network': None, 'candidate': {'backend': 'codex'}}]}]}
-    from polybridge import store
+    from harflow_mcp import store
     monkeypatch.setattr(store, 'read', lambda *args: None)
     assert d.available_sessions(run, node, root=Path('/tmp')) == []
     monkeypatch.setattr(store, 'read', lambda *args: SimpleNamespace(session_id='session', status='completed', repo_path='/repo', freedom='read_only', network=None, backend='codex'))
@@ -248,14 +248,14 @@ def test_no_checklist_replan_is_guided_and_bounded_by_existing_node_attempt_budg
 def test_missing_context_retry_requires_caller_reason_and_read_only_context_denials():
     node = {'id': 'publish', 'role': 'task'}
     result = {'status': 'blocked', 'result': {'blocker_category': 'missing_context'}, 'evidence': []}
-    activation = {'id': 'blocked', 'role': 'node', 'node_id': 'publish', 'status': 'failed', 'node_result': result, 'tasks': [{'task_id': 'publisher', 'status': 'completed', 'result': {'status': 'completed', 'permission_denials': [{'tool_name': 'mcp__polybridge__get_task_status', 'tool_input': {'task_id': 'source'}}]}}]}
+    activation = {'id': 'blocked', 'role': 'node', 'node_id': 'publish', 'status': 'failed', 'node_result': result, 'tasks': [{'task_id': 'publisher', 'status': 'completed', 'result': {'status': 'completed', 'permission_denials': [{'tool_name': 'mcp__harflow__get_task_status', 'tool_input': {'task_id': 'source'}}]}}]}
     run = {'workflow_run_id': 'run', 'activations': [activation, {'id': 'input', 'tasks': [{'task_id': 'source'}]}]}
     assert not d.retry_eligible(activation, guided=True, node=node, run=run)
     run['instructions'] = 'Retry publishing with the full supplied context'
     assert d.retry_eligible(activation, guided=True, node=node, run=run)
     activation['tasks'][0]['result']['permission_denials'] = [{'tool_name': 'Bash', 'tool_input': {'command': 'gh pr review --approve'}}]
     assert not d.retry_eligible(activation, guided=True, node=node, run=run)
-    activation['tasks'][0]['result']['permission_denials'] = [{'tool_name': 'mcp__polybridge__get_task_status', 'tool_input': {'task_id': 'foreign'}}]
+    activation['tasks'][0]['result']['permission_denials'] = [{'tool_name': 'mcp__harflow__get_task_status', 'tool_input': {'task_id': 'foreign'}}]
     assert not d.retry_eligible(activation, guided=True, node=node, run=run)
     activation['tasks'][0]['result']['permission_denials'] = []
     activation['node_result']['result']['failure_kind'] = 'permission'

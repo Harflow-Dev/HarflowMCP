@@ -9,9 +9,9 @@ from pathlib import Path
 
 import pytest
 
-from polybridge import backends, lineage, server, store
-from polybridge.backends import Enforcement, Invocation
-from polybridge.tasks import TaskRegistry
+from harflow_mcp import backends, lineage, server, store
+from harflow_mcp.backends import Enforcement, Invocation
+from harflow_mcp.tasks import TaskRegistry
 
 
 class _Backend:
@@ -58,8 +58,8 @@ def backend(monkeypatch: pytest.MonkeyPatch) -> _Backend:
 
 @pytest.fixture
 def opening_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("PB_OPEN_MONITOR", "1")
-    monkeypatch.delenv("PB_TASK_ID", raising=False)
+    monkeypatch.setenv("HARFLOW_OPEN_MONITOR", "1")
+    monkeypatch.delenv("HARFLOW_TASK_ID", raising=False)
     monkeypatch.setattr(sys, "platform", "darwin")
 
 
@@ -82,7 +82,7 @@ async def _start(registry: TaskRegistry, repo: Path, backend: _Backend):
     return task
 
 
-async def test_a_root_task_opens_the_monitor_on_its_own_url(
+async def test_a_root_task_does_not_open_monitor_automatically(
     tmp_path: Path, git_repo: Path, backend: _Backend, opening_enabled
 ) -> None:
     launcher = Launcher()
@@ -90,7 +90,7 @@ async def test_a_root_task_opens_the_monitor_on_its_own_url(
 
     task = await _start(registry, git_repo, backend)
 
-    assert launcher.urls == [f"polybridge-monitor://task/{task.task_id}"]
+    assert launcher.urls == []
     assert task.bridge_notices == []
 
 
@@ -117,16 +117,16 @@ async def test_a_nested_task_does_not_open_the_monitor(
     assert launcher.urls == []
 
 
-@pytest.mark.parametrize("skip", ["pb_task_id", "env_off", "env_unset", "not_darwin", "registry_off"])
+@pytest.mark.parametrize("skip", ["harflow_task_id", "env_off", "env_unset", "not_darwin", "registry_off"])
 async def test_opening_is_skipped(
     tmp_path: Path, git_repo: Path, backend: _Backend, opening_enabled, monkeypatch, skip: str
 ) -> None:
-    if skip == "pb_task_id":
-        monkeypatch.setenv("PB_TASK_ID", "someone")
+    if skip == "harflow_task_id":
+        monkeypatch.setenv("HARFLOW_TASK_ID", "someone")
     elif skip == "env_off":
-        monkeypatch.setenv("PB_OPEN_MONITOR", "0")
+        monkeypatch.setenv("HARFLOW_OPEN_MONITOR", "0")
     elif skip == "env_unset":
-        monkeypatch.delenv("PB_OPEN_MONITOR", raising=False)
+        monkeypatch.delenv("HARFLOW_OPEN_MONITOR", raising=False)
     elif skip == "not_darwin":
         monkeypatch.setattr(sys, "platform", "linux")
     launcher = Launcher()
@@ -134,9 +134,8 @@ async def test_opening_is_skipped(
         log_dir=tmp_path / "tasks", monitor_launcher=launcher, open_monitor=skip != "registry_off"
     )
 
-    if skip == "pb_task_id":
-        from polybridge.backends import NestedDispatchRefused
-        with pytest.raises(NestedDispatchRefused, match="PB_TASK_ID"):
+    if skip == "harflow_task_id":
+        with pytest.raises(ValueError, match="parent is missing or unconfirmed"):
             await _start(registry, git_repo, backend)
     else:
         await _start(registry, git_repo, backend)
@@ -145,7 +144,7 @@ async def test_opening_is_skipped(
 
 
 @pytest.mark.parametrize("result", [1, OSError("no such app"), RuntimeError("boom")])
-async def test_a_failing_launcher_only_adds_a_notice(
+async def test_monitor_launcher_is_unused_and_adds_no_notice(
     tmp_path: Path, git_repo: Path, backend: _Backend, opening_enabled, result
 ) -> None:
     launcher = Launcher(result)
@@ -154,9 +153,8 @@ async def test_a_failing_launcher_only_adds_a_notice(
     task = await _start(registry, git_repo, backend)
 
     assert task.status == "completed"
-    assert len(task.bridge_notices) == 1
-    assert task.bridge_notices[0].startswith("The Monitor app could not be opened")
-    assert store.read(tmp_path / "tasks", task.task_id).bridge_notices == task.bridge_notices
+    assert task.bridge_notices == []
+    assert store.read(tmp_path / "tasks", task.task_id).bridge_notices == []
 
 
 @pytest.mark.parametrize("result", [0, 1, OSError("no app")])
@@ -179,14 +177,14 @@ async def test_start_task_response_is_the_same_whatever_the_launcher_does(
     task = registry.get(response["task_id"])
     await asyncio.wait_for(task.done.wait(), timeout=10)
     await asyncio.gather(*registry._monitor_jobs, return_exceptions=True)
-    assert launcher.urls == [f"polybridge-monitor://task/{task.task_id}"]
+    assert launcher.urls == []
     assert task.status == "completed"
-    assert len(task.bridge_notices) == (0 if result == 0 else 1)
+    assert task.bridge_notices == []
 
 
 @pytest.mark.parametrize('saturated', [False, True])
 async def test_the_default_launcher_opens_the_fixed_bundle_and_reaps_it(monkeypatch, tmp_path, saturated) -> None:
-    from polybridge import tasks as tasks_module
+    from harflow_mcp import tasks as tasks_module
     import threading
 
     if saturated:
@@ -208,14 +206,14 @@ async def test_the_default_launcher_opens_the_fixed_bundle_and_reaps_it(monkeypa
     monkeypatch.setattr(tasks_module, "MONITOR_BUNDLE", tmp_path)
     monkeypatch.setattr(tasks_module.asyncio, "create_subprocess_exec", fake_exec)
 
-    assert await tasks_module._launch_monitor("polybridge-monitor://task/x") == 0
-    assert calls == [("open", "-g", "-a", str(tmp_path), "polybridge-monitor://task/x")]
+    assert await tasks_module._launch_monitor("harflow://task/x") == 0
+    assert calls == [("open", "-g", "-a", str(tmp_path), "harflow://task/x")]
 
 
 async def test_the_default_launcher_refuses_without_spawning_when_the_bundle_is_absent(
     monkeypatch, tmp_path
 ) -> None:
-    from polybridge import tasks as tasks_module
+    from harflow_mcp import tasks as tasks_module
 
     calls: list[tuple] = []
 
@@ -223,8 +221,8 @@ async def test_the_default_launcher_refuses_without_spawning_when_the_bundle_is_
         calls.append(argv)
         raise AssertionError("nothing may be spawned when the bundle is absent")
 
-    monkeypatch.setattr(tasks_module, "MONITOR_BUNDLE", tmp_path / "Polybridge Monitor.app")
+    monkeypatch.setattr(tasks_module, "MONITOR_BUNDLE", tmp_path / "Harflow.app")
     monkeypatch.setattr(tasks_module.asyncio, "create_subprocess_exec", fake_exec)
 
-    assert await tasks_module._launch_monitor("polybridge-monitor://task/x") != 0
+    assert await tasks_module._launch_monitor("harflow://task/x") != 0
     assert calls == []

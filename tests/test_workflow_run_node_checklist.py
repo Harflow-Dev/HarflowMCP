@@ -1,8 +1,8 @@
 """Parent checklist completion requires explicit, assigned child evidence."""
 import pytest
 
-from polybridge import workflow_delegation as d
-from polybridge import workflows as w
+from harflow_mcp import workflow_delegation as d
+from harflow_mcp import workflows as w
 from test_workflow_run_node_execution import run_tree, child_runs, invocation_activation
 from test_workflow_run_node_recovery import store
 

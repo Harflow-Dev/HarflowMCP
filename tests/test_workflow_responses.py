@@ -1,11 +1,11 @@
 import json
 import pytest
-from polybridge.workflow_responses import compact, detail, BUDGET
-from polybridge import server
+from harflow_mcp.workflow_responses import compact, detail, BUDGET
+from harflow_mcp import server
 
 
 def test_monitor_history_is_bounded_and_prioritizes_active_runs():
-    from polybridge.workflow_responses import history_page
+    from harflow_mcp.workflow_responses import history_page
     runs = [large_run() | {"workflow_run_id": str(i), "status": "completed", "created_at": i} for i in range(120)]
     runs.append(large_run() | {"workflow_run_id": "active", "created_at": 0, "repo_path": "/work/repo", "prompt": "Review parser"})
     page = history_page(runs, limit=100)
@@ -22,7 +22,7 @@ def test_monitor_history_is_bounded_and_prioritizes_active_runs():
 
 @pytest.mark.parametrize("offset,limit", [(-1, 10), (0, 0), (0, 101), (True, 10)])
 def test_monitor_history_rejects_invalid_paging(offset, limit):
-    from polybridge.workflow_responses import history_page
+    from harflow_mcp.workflow_responses import history_page
     with pytest.raises(ValueError):
         history_page([], offset, limit)
 
@@ -86,7 +86,7 @@ async def test_workflow_entry_rejects_freedom_before_dispatch(entry):
 
 async def test_undecidable_workflow_reader_fails_closed(monkeypatch):
     from types import SimpleNamespace
-    from polybridge import lineage
+    from harflow_mcp import lineage
     async def caller(*args, **kwargs):
         return None
     registry = SimpleNamespace(_detect_caller=caller, log_dir=__import__('pathlib').Path('/tmp/tasks'))
@@ -97,7 +97,7 @@ async def test_undecidable_workflow_reader_fails_closed(monkeypatch):
 
 
 async def test_authorized_definition_is_exact_snapshot_launched(monkeypatch, tmp_path):
-    from polybridge import workflows
+    from harflow_mcp import workflows
     monkeypatch.setenv('HOME', str(tmp_path))
     snapshot = {'name': 'example', 'revision': 1, 'routing_mode': 'explicit', 'orchestrator': {'backend': 'codex'}, 'nodes': [{'id': 'start', 'type': 'start'}, {'id': 'end', 'type': 'end'}], 'connections': [{'id': 'go', 'source': 'start', 'target': 'end'}]}
     calls = []
@@ -157,7 +157,7 @@ async def test_in_memory_mcp_client_short_hold_reports_timeout(monkeypatch):
 
 
 def test_builder_compact_revision_and_lossless_draft_views():
-    from polybridge.workflow_responses import compact, detail
+    from harflow_mcp.workflow_responses import compact, detail
     run = {"workflow_run_id": "builder", "kind": "builder", "status": "running", "draft_revision": 7, "builder_draft": {"nodes": [{"instructions": "large" * 10000}]}, "generated_definition": {"name": "Saved proposal"}}
     assert compact(run)["draft_revision"] == 7
     assert "builder_draft" not in compact(run)

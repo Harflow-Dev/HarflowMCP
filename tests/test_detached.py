@@ -4,9 +4,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from polybridge.detached import _wait_started, _release_started, error_doc
-from polybridge import detached, store, tasks
-from polybridge.extra_paths import normalize_paths, serialize_paths
+from harflow_mcp.detached import _wait_started, _release_started, error_doc
+from harflow_mcp import detached, store, tasks
+from harflow_mcp.extra_paths import normalize_paths, serialize_paths
 from test_extra_path_tasks import Certified, _state_logs
 
 
@@ -56,9 +56,9 @@ def _granted_record(task_id, repo, backend, *, certification):
 
 
 def test_error_doc_preserves_more_specific_errors_and_maps_marked_value_errors():
-    from polybridge import backends
+    from harflow_mcp import backends
     marked = ValueError('refused before any process could exist')
-    marked.polybridge_not_started = True
+    marked.harflow_not_started = True
     assert error_doc(marked) == {'code': 'invalid_params', 'message': 'refused before any process could exist'}
     assert error_doc(ValueError('late failure'))['code'] == 'start_failed'
     for exc, code in [
@@ -67,7 +67,7 @@ def test_error_doc_preserves_more_specific_errors_and_maps_marked_value_errors()
         (backends.UnsupportedCapability('nope'), 'unsupported'),
         (backends.UnknownBackend('mystery'), 'unknown_backend'),
     ]:
-        exc.polybridge_not_started = True
+        exc.harflow_not_started = True
         assert error_doc(exc)['code'] == code
 
 
@@ -78,7 +78,7 @@ async def test_run_with_incompatible_saved_grants_reports_invalid_params(tmp_pat
     store.write_landed(registry.log_dir, _granted_record('source', tmp_path, backend, certification='other-v1'))
     with pytest.raises(ValueError, match='certification') as error:
         await registry.start('Task', tmp_path, backend=backend, continuation_of_task_id='source')
-    assert error.value.polybridge_not_started
+    assert error.value.harflow_not_started
     assert detached.error_doc(error.value)['code'] == 'invalid_params'
 
 
@@ -89,13 +89,13 @@ async def test_resume_with_incompatible_saved_grants_reports_invalid_params(tmp_
     record = _granted_record('source', tmp_path, backend, certification='other-v1')
     with pytest.raises(ValueError, match='certification') as error:
         await registry.resume(record, 'Follow up')
-    assert error.value.polybridge_not_started
+    assert error.value.harflow_not_started
     assert detached.error_doc(error.value)['code'] == 'invalid_params'
 
 
 async def test_continue_with_incompatible_saved_grants_reports_invalid_params(tmp_path, monkeypatch, backend):
     import json
-    from polybridge import task_continuation
+    from harflow_mcp import task_continuation
     from unittest.mock import AsyncMock
     monkeypatch.setattr(task_continuation, 'get_backend', lambda _: backend)
     registry = tasks.TaskRegistry(log_dir=_state_logs(tmp_path), open_monitor=False)
@@ -108,7 +108,7 @@ async def test_continue_with_incompatible_saved_grants_reports_invalid_params(tm
     store.write_landed(registry.log_dir, record)
     with pytest.raises(ValueError, match='certification') as error:
         await registry.continue_task('source')
-    assert error.value.polybridge_not_started
+    assert error.value.harflow_not_started
     assert detached.error_doc(error.value)['code'] == 'invalid_params'
     reservation = json.loads((registry.log_dir / 'source.continuation.json').read_text())
     assert reservation['state'] == 'not_started'
@@ -121,5 +121,5 @@ async def test_unmarked_pre_spawn_refusal_remains_start_failed(tmp_path, monkeyp
     record = _granted_record('source', tmp_path, backend, certification='fixture-v1')
     with pytest.raises(ValueError, match='native workflows') as error:
         await registry.resume(record, 'Follow up', native_subagent=True)
-    assert not getattr(error.value, 'polybridge_not_started', False)
+    assert not getattr(error.value, 'harflow_mcp_not_started', False)
     assert detached.error_doc(error.value)['code'] == 'start_failed'

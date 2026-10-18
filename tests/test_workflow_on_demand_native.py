@@ -1,10 +1,16 @@
 """Native execution for standalone on-demand workflow nodes."""
 import asyncio
+import pytest
 
-from polybridge import store, workflows as w
+from harflow_mcp import store, workflows as w
 
 from test_workflow_delegation import default_decision, graph
 from test_workflow_native import MODEL, NativeRegistry
+
+
+@pytest.fixture(autouse=True)
+def qualified_native_adapter(monkeypatch):
+    monkeypatch.setattr("harflow_mcp.backends.claude.RENAMED_NATIVE_QUALIFIED", True)
 
 
 class OnDemandNativeRegistry(NativeRegistry):

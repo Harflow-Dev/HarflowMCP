@@ -3,9 +3,9 @@ import logging
 
 import pytest
 
-from polybridge import wait_policy, workflow_notification_points as points
-from polybridge import workflow_responses as responses
-from polybridge import workflows as w
+from harflow_mcp import wait_policy, workflow_notification_points as points
+from harflow_mcp import workflow_responses as responses
+from harflow_mcp import workflows as w
 
 
 def definition():
@@ -402,13 +402,13 @@ def test_settlement_grace_falls_back_to_updated_at(store, run_id, tmp_path):
 
 @pytest.mark.parametrize("stage", ["running", "starting", "created"])
 def test_settlement_missing_child_pending_at_non_preparing_stage(store, run_id, stage, monkeypatch):
-    monkeypatch.setattr("polybridge.identity.identity_check", lambda rec: "dead")
+    monkeypatch.setattr("harflow_mcp.identity.identity_check", lambda rec: "dead")
     run = root_with(store, run_id, [invocation_activation("x1", "ghost", stage=stage)], supervisor_pid=None)
     assert settle(store, run) == "pending"
 
 
 def test_settlement_missing_child_at_preparing_with_live_supervisor_is_pending(store, run_id, monkeypatch):
-    monkeypatch.setattr("polybridge.identity.identity_check", lambda rec: "alive")
+    monkeypatch.setattr("harflow_mcp.identity.identity_check", lambda rec: "alive")
     monkeypatch.setattr(w, "_alive", lambda pid: True)
     for extra in ({"supervisor_identity": {"pid": 1}}, {"supervisor_pid": 4242}):
         run = root_with(store, run_id, [invocation_activation("x1", "ghost", stage="preparing")], **extra)
@@ -416,7 +416,7 @@ def test_settlement_missing_child_at_preparing_with_live_supervisor_is_pending(s
 
 
 def test_settlement_missing_child_at_preparing_with_dead_supervisor_is_settled(store, run_id, monkeypatch):
-    monkeypatch.setattr("polybridge.identity.identity_check", lambda rec: "dead")
+    monkeypatch.setattr("harflow_mcp.identity.identity_check", lambda rec: "dead")
     monkeypatch.setattr(w, "_alive", lambda pid: False)
     for extra in ({"supervisor_identity": {"pid": 1}}, {"supervisor_pid": 4242}, {"supervisor_pid": None}):
         run = root_with(store, run_id, [invocation_activation("x1", "ghost", stage="preparing")], **extra)
@@ -425,7 +425,7 @@ def test_settlement_missing_child_at_preparing_with_dead_supervisor_is_settled(s
 
 
 def test_settlement_preparing_without_child_id_is_not_settled(store, run_id, monkeypatch):
-    monkeypatch.setattr("polybridge.identity.identity_check", lambda rec: "dead")
+    monkeypatch.setattr("harflow_mcp.identity.identity_check", lambda rec: "dead")
     run = root_with(store, run_id, [invocation_activation("x1", None, stage="preparing")], supervisor_pid=None)
     assert settle(store, run) == "pending"
 
@@ -586,13 +586,13 @@ def test_oversized_child_record_is_unsettled_and_pending_in_grace(store, run_id,
     child = make_child(store, tmp_path, run_id, "x1")
     run = root_with(store, run_id, [invocation_activation("x1", child)])
     assert settle(store, run) == "settled"
-    monkeypatch.setattr("polybridge.catalog.METADATA_BYTES", 64)
+    monkeypatch.setattr("harflow_mcp.catalog.METADATA_BYTES", 64)
     assert settle(store, run) == "pending"
     assert settle(store, run, now=NOW + 601) == "unconfirmed"
 
 
 def test_exhausted_budget_is_unsettled_and_pending_in_grace(store, run_id, tmp_path, monkeypatch):
-    from polybridge import catalog
+    from harflow_mcp import catalog
     real = catalog.MetadataBudget
     child = make_child(store, tmp_path, run_id, "x1")
     run = root_with(store, run_id, [invocation_activation("x1", child)])

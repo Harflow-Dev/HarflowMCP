@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from polybridge import workflows as w, workflow_hooks, control
+from harflow_mcp import workflows as w, workflow_hooks, control
 from test_workflows import definition
 
 
@@ -65,8 +65,8 @@ def test_corrupt_unrelated_run_does_not_break_human_bookkeeping(tmp_path):
 
 @pytest.mark.parametrize("status,settling,allowed", [("running", False, False), ("needs_input", False, False), ("failed", True, False), ("failed", False, True)])
 async def test_direct_messages_respect_workflow_assignment_authority(tmp_path, status, settling, allowed):
-    from polybridge import inbox
-    from polybridge.tasks import TaskRegistry
+    from harflow_mcp import inbox
+    from harflow_mcp.tasks import TaskRegistry
     storage = w.WorkflowStore(tmp_path)
     run = storage.create_run(w.validate_definition(definition()), "go", tmp_path)
     storage.update_run(run["workflow_run_id"], lambda r: r.update(status=status, activations=[{"id": "a", "node_id": "work", "role": "node", "status": "running" if settling else "completed", "tasks": [{"task_id": "child", "status": "running" if settling else "completed"}]}]), "fixture")
@@ -82,19 +82,19 @@ async def test_direct_messages_respect_workflow_assignment_authority(tmp_path, s
 
 
 def test_optional_decoration_survives_missing_owned_run(tmp_path):
-    from polybridge.workflow_inspection import decorate_tasks
+    from harflow_mcp.workflow_inspection import decorate_tasks
     storage = w.WorkflowStore(tmp_path)
     (storage.owners / "child.json").write_text(json.dumps({"workflow_run_id": "missing"}))
     entries = [{"task_id": "child", "parent_task_id": "parent", "status": "completed"}]
     assert decorate_tasks(entries, tmp_path / "tasks") == entries
-    from polybridge import inbox
+    from harflow_mcp import inbox
     with pytest.raises(inbox.SendRefused, match="ownership"):
         workflow_hooks.refuse_direct_message(tmp_path / "tasks", "child")
 
 
 @pytest.mark.parametrize("verdict", ["dead", "alive", "undecidable"])
 async def test_orphan_process_identity_controls_checkout(tmp_path, monkeypatch, verdict):
-    from polybridge import identity, store
+    from harflow_mcp import identity, store
     storage = w.WorkflowStore(tmp_path)
     run = storage.create_run(w.validate_definition(definition()), "go", tmp_path)
     storage.update_run(run["workflow_run_id"], lambda r: r.update(status="needs_attention", activations=[{"id": "a", "node_id": "work", "role": "node", "status": "running", "tasks": [{"task_id": "orphan", "status": "running", "freedom": "write_in_repo"}]}]), "fixture")
@@ -140,9 +140,9 @@ async def test_missing_dispatch_stays_blocking_and_wait_is_bounded(tmp_path):
 
 
 async def test_task_mutation_refuses_undecidable_caller(tmp_path,monkeypatch):
-    from polybridge import lineage
-    from polybridge.tasks import TaskRegistry
-    from polybridge.backends import NestedDispatchRefused
+    from harflow_mcp import lineage
+    from harflow_mcp.tasks import TaskRegistry
+    from harflow_mcp.backends import NestedDispatchRefused
     monkeypatch.setattr(lineage,"detect_caller_detail",lambda *a,**k:lineage.Detection(None,"ps denied"))
     registry=TaskRegistry(log_dir=tmp_path/"tasks")
     with pytest.raises(NestedDispatchRefused,match="ps denied"):
@@ -169,7 +169,7 @@ def test_dead_unobserved_outcome_cannot_recover_as_success(tmp_path,monkeypatch)
     monkeypatch.setattr(w.task_store,"read",lambda *a:SimpleNamespace(status="running"))
     monkeypatch.setattr(w,"task_liveness",lambda *a:{"process_alive":False,"outcome_known":False})
     monkeypatch.setattr(w.task_store,"snapshot",lambda *a:{"status":"completed","summary":"old result"})
-    from polybridge import workflow_delegation
+    from harflow_mcp import workflow_delegation
     monkeypatch.setattr(workflow_delegation,"reconcile_delegation",lambda r:None)
     recovered=storage.reconcile_run(run["workflow_run_id"])["activations"][0]["tasks"][0]
     assert recovered["status"]=="failed"
@@ -189,7 +189,7 @@ def test_known_ownership_receipt_isolated_from_corrupt_other_run(tmp_path):
 
 @pytest.mark.parametrize("verdict,alive",[("dead",False),("alive",True),("undecidable",None)])
 def test_unobserved_liveness_keeps_unknown_distinct(tmp_path,monkeypatch,verdict,alive):
-    from polybridge import identity
+    from harflow_mcp import identity
     record=SimpleNamespace(status="running",exit_code=None,pid=123,start_time="old",markers=[])
     monkeypatch.setattr(identity,"check_detail",lambda *a:(verdict,"evidence"))
     monkeypatch.setattr(w.task_store,"resolve_status",lambda *a,**k:("failed","unobserved",None,[]))
@@ -245,7 +245,7 @@ def test_unsafe_outage_diagnostics_never_authorize_fallback(unsafe):
 
 @pytest.mark.parametrize('checks', [['undecidable'], ['alive','undecidable']])
 def test_cancel_refuses_uncertain_supervisor_without_run_or_history_mutation(tmp_path, monkeypatch, checks):
-    from polybridge import identity
+    from harflow_mcp import identity
     storage=w.WorkflowStore(tmp_path)
     run=storage.create_run(w.validate_definition(definition()),'Run',tmp_path)
     storage.update_run(run['workflow_run_id'],lambda r:r.update(status='running',supervisor_pid=999,supervisor_identity={'pid':999}),'fixture')
@@ -262,7 +262,7 @@ def test_cancel_refuses_uncertain_supervisor_without_run_or_history_mutation(tmp
 
 @pytest.mark.parametrize('identity_state,expected_launch', [('dead', True), ('alive', False)])
 def test_cancel_verified_supervisor_mutates_and_launches_only_for_dead_owner(tmp_path,monkeypatch,identity_state,expected_launch):
-    from polybridge import identity
+    from harflow_mcp import identity
     storage=w.WorkflowStore(tmp_path)
     run=storage.create_run(w.validate_definition(definition()),'Run',tmp_path)
     storage.update_run(run['workflow_run_id'],lambda r:r.update(status='running',supervisor_pid=999,supervisor_identity={'pid':999}),'fixture')

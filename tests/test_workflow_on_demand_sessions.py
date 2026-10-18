@@ -4,12 +4,17 @@ import copy
 
 import pytest
 
-from polybridge import workflows as w
-from polybridge.workflow_on_demand import validate_action
-import polybridge.workflow_on_demand as od
+from harflow_mcp import workflows as w
+from harflow_mcp.workflow_on_demand import validate_action
+import harflow_mcp.workflow_on_demand as od
 from test_workflow_delegation import default_decision, graph
 from test_workflow_native import MODEL, NativeRegistry
 from test_workflow_delegation import Registry
+
+
+@pytest.fixture(autouse=True)
+def qualified_native_adapter(monkeypatch):
+    monkeypatch.setattr("harflow_mcp.backends.claude.RENAMED_NATIVE_QUALIFIED", True)
 
 
 def _run_definition(session_mode="agent_decides"):
@@ -137,7 +142,7 @@ def test_selected_resume_availability_failure_returns_checkpoint_without_fresh_f
 
 
 def test_foreign_and_expired_resume_ids_are_rejected_by_retained_session_lookup(tmp_path):
-    from polybridge import store
+    from harflow_mcp import store
     from test_workflow_on_demand_contract import MemoryStorage, run_fixture
 
     run = run_fixture()

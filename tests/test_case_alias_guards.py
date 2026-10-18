@@ -13,12 +13,12 @@ from pathlib import Path
 
 import pytest
 
-from polybridge import backends
-from polybridge.backends.codex import UnsafeInvocationError
-from polybridge.bridge_state import assert_state_outside_writes
-from polybridge.canonical_paths import kernel_canonical_supported
-from polybridge.extra_paths import normalize_paths, revalidate_paths
-from polybridge.execution_config import assert_execution_config_outside_writes
+from harflow_mcp import backends
+from harflow_mcp.backends.codex import UnsafeInvocationError
+from harflow_mcp.bridge_state import assert_state_outside_writes
+from harflow_mcp.canonical_paths import kernel_canonical_supported
+from harflow_mcp.extra_paths import normalize_paths, revalidate_paths
+from harflow_mcp.execution_config import assert_execution_config_outside_writes
 
 from test_execution_config import isolate_configuration_environment
 from test_extra_path_backends import build as build_invocation, qualified  # noqa: F401
@@ -46,7 +46,7 @@ def test_directory_grant_records_the_actual_case(tmp_path):
 
 def test_unicode_normalization_aliases_share_one_grant(tmp_path):
     import unicodedata
-    from polybridge.canonical_paths import canonical
+    from harflow_mcp.canonical_paths import canonical
 
     real = tmp_path / 'Caf\u00e9'
     real.mkdir()
@@ -75,7 +75,7 @@ def test_case_alias_duplicates_the_real_grant(tmp_path):
 
 
 def test_codex_config_case_alias_grant_refused_before_probe(qualified, monkeypatch, tmp_path):
-    from polybridge.backends.codex import EXTRA_PATHS_VERSION
+    from harflow_mcp.backends.codex import EXTRA_PATHS_VERSION
 
     config_home = tmp_path / "Codex-Home"
     config_home.mkdir()
@@ -98,13 +98,13 @@ def test_state_namespace_case_alias_refused(tmp_path, monkeypatch):
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
-    (home / ".polybridge" / "tasks").mkdir(parents=True)
+    (home / ".harflow" / "tasks").mkdir(parents=True)
     logs = tmp_path / "logs"
     logs.mkdir()
     repo = tmp_path / "repo"
     repo.mkdir()
     with pytest.raises(ValueError, match="bridge task/control state"):
-        assert_state_outside_writes(logs, repo, normalize_paths([str(home / ".POLYBRIDGE")]))
+        assert_state_outside_writes(logs, repo, normalize_paths([str(home / ".HARFLOW")]))
 
 
 def test_implicit_repo_case_alias_cannot_bypass_state(tmp_path, monkeypatch):
@@ -152,7 +152,7 @@ def test_implicit_repo_case_alias_cannot_bypass_execution_config(tmp_path, monke
 def test_monitor_bundle_namespace_case_alias_refused_before_probe(qualified, monkeypatch, spelling, tmp_path):
     if not Path(spelling).exists():
         pytest.skip("the Monitor bundle parent is not present under this spelling")
-    from polybridge.backends.codex import EXTRA_PATHS_VERSION
+    from harflow_mcp.backends.codex import EXTRA_PATHS_VERSION
 
     calls = []
     monkeypatch.setattr(backends, "version", lambda *args, **kwargs: calls.append(1) or EXTRA_PATHS_VERSION)
@@ -169,8 +169,8 @@ def test_monitor_bundle_namespace_case_alias_refused_before_probe(qualified, mon
 
 @pytest.mark.parametrize('existing', [False, True])
 def test_data_firmlink_cannot_hide_existing_or_missing_codex_configuration(tmp_path, monkeypatch, existing):
-    from polybridge.backends import codex_config
-    from polybridge.canonical_paths import canonical
+    from harflow_mcp.backends import codex_config
+    from harflow_mcp.canonical_paths import canonical
 
     repo = tmp_path / 'repo'
     home = tmp_path / 'configuration'

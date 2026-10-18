@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from polybridge import ctl, lineage, server, workflow_inspection, workflow_reads
+from harflow_mcp import ctl, lineage, server, workflow_inspection, workflow_reads
 
 
 @pytest.mark.parametrize('command', [
@@ -22,17 +22,17 @@ from polybridge import ctl, lineage, server, workflow_inspection, workflow_reads
 def test_cli_reads_never_initialize_server_or_registry(tmp_path, command):
     code = '''
 import sys
-from polybridge import ctl, tasks
+from harflow_mcp import ctl, tasks
 class ForbiddenRegistry:
     def __init__(self, *args, **kwargs):
         raise AssertionError("read constructed TaskRegistry")
 tasks.TaskRegistry = ForbiddenRegistry
 ctl.main(__import__('json').loads(sys.argv[1]) + ['--json'])
-assert 'polybridge.server' not in sys.modules
+assert 'harflow_mcp.server' not in sys.modules
 assert not any(name == 'mcp' or name.startswith('mcp.') for name in sys.modules)
 '''
-    environment = {**os.environ, 'HOME': str(tmp_path), 'PYTHONPATH': str(Path('src').resolve()), 'PB_OPEN_MONITOR': '0'}
-    environment.pop('PB_TASK_ID', None)
+    environment = {**os.environ, 'HOME': str(tmp_path), 'PYTHONPATH': str(Path('src').resolve()), 'HARFLOW_OPEN_MONITOR': '0'}
+    environment.pop('HARFLOW_TASK_ID', None)
     result = subprocess.run([sys.executable, '-c', code, json.dumps(command)], env=environment, capture_output=True, text=True, timeout=20)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)['v'] == 14
@@ -83,8 +83,8 @@ async def test_ordinary_cli_authority_fails_closed(monkeypatch, tmp_path, identi
     ['workflow-detail', 'owned', '--view', 'definition', '--monitor-view'],
 ])
 def test_monitor_flag_does_not_grant_human_snapshot_authority(monkeypatch, tmp_path, capsys, command):
-    from polybridge.catalog import Catalog
-    from polybridge import store
+    from harflow_mcp.catalog import Catalog
+    from harflow_mcp import store
     directory = tmp_path / 'tasks'
     store.bootstrap_catalog(directory)
     assert Catalog(directory, store.RECORD_SUFFIX).ready()
@@ -100,7 +100,7 @@ def test_monitor_flag_does_not_grant_human_snapshot_authority(monkeypatch, tmp_p
 @pytest.mark.parametrize('bounded', [False, True])
 async def test_real_ownership_receipt_enforces_expected_read_scope(monkeypatch, tmp_path, role, bounded):
     """Exercise both authority readers without replacing ownership resolution."""
-    from polybridge import store, workflows
+    from harflow_mcp import store, workflows
     monkeypatch.setenv('HOME', str(tmp_path))
     storage = workflows.WorkflowStore()
     definition = storage.save('owned-graph', {
@@ -141,7 +141,7 @@ async def test_real_ownership_receipt_enforces_expected_read_scope(monkeypatch, 
 
 @pytest.mark.parametrize('bounded', [False, True])
 async def test_verified_human_reads_real_saved_definition(monkeypatch, tmp_path, bounded):
-    from polybridge import store, workflows
+    from harflow_mcp import store, workflows
     monkeypatch.setenv('HOME', str(tmp_path))
     monkeypatch.delenv(lineage.ENV_TASK_ID, raising=False)
     storage = workflows.WorkflowStore()

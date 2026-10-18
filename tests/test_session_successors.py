@@ -5,9 +5,9 @@ from datetime import datetime, timezone
 
 import pytest
 
-from polybridge import control, retention, store
-from polybridge.tasks import SessionBusyError, TaskRegistry
-from polybridge.workflows import WorkflowStore
+from harflow_mcp import control, retention, store
+from harflow_mcp.tasks import SessionBusyError, TaskRegistry
+from harflow_mcp.workflows import WorkflowStore
 from test_registry import make_task
 
 

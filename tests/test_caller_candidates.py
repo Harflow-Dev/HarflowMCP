@@ -12,10 +12,10 @@ from pathlib import Path
 
 import pytest
 
-from polybridge import ctl, lineage, server, store
-from polybridge.lineage import detect_caller as real_detect_caller
-from polybridge.lineage import detect_caller_detail as real_detect_caller_detail
-from polybridge.tasks import TaskRegistry
+from harflow_mcp import ctl, lineage, server, store
+from harflow_mcp.lineage import detect_caller as real_detect_caller
+from harflow_mcp.lineage import detect_caller_detail as real_detect_caller_detail
+from harflow_mcp.tasks import TaskRegistry
 
 
 @pytest.fixture(autouse=True)
@@ -25,7 +25,7 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def _log_dir(home: Path) -> Path:
-    from polybridge.tasks import default_log_dir
+    from harflow_mcp.tasks import default_log_dir
 
     return default_log_dir()
 

@@ -1,7 +1,9 @@
 # Harness permissions and workflow setup
 
+> HarflowMCP extraction status: native workflow adapters and extra writable path grants are unavailable pending no-paid requalification. Historical certification details below describe the source implementation, not qualification of the renamed product. Ordinary headless dispatch is supported. Harflow macOS integration is unavailable pending companion runtime integration.
+
 Before using a harness as a workflow node, configure its account, tools, and command permissions
-for the work that node needs. Polybridge selects a permission mode; the harness still uses its own
+for the work that node needs. HarflowMCP selects a permission mode; the harness still uses its own
 configuration and credentials. A headless worker cannot answer an interactive approval prompt.
 
 Standalone tasks can request [extra writable paths](extra-writable-paths.md) on
@@ -9,16 +11,16 @@ version-qualified configurations. File-tool permissions alone do not establish a
 boundary. Workflow and separately certified native-adapter launches do not accept these grants.
 
 Audited **2026-10-06** against this checkout's backend adapters and current vendor documentation.
-Mappings below describe Polybridge's launch behavior. Installed CLI versions can differ from current
+Mappings below describe HarflowMCP's launch behavior. Installed CLI versions can differ from current
 vendor documentation; the Vibe example explicitly covers the locally inspected **2.25.8** version.
 
 ## First-time setup for every harness
 
-1. Install the CLI and make its binary available on the `PATH` used by the Polybridge server or
+1. Install the CLI and make its binary available on the `PATH` used by the HarflowMCP server or
    Monitor service: `claude`, `codex`, `opencode`, `vibe`, or `agy`. A working terminal alone does
    not establish that a desktop-launched process has the same environment.
 2. Complete the harness's interactive login or provider/API-key setup before starting a workflow.
-   Confirm that its configured model is accessible and has quota. Polybridge supplies no accounts.
+   Confirm that its configured model is accessible and has quota. HarflowMCP supplies no accounts.
 3. Prepare the repository, dependencies, build tools, and any required external files. Use a known
    starting Git state so you can attribute changes and inspect the resulting diff.
 4. Register required MCP servers **inside the worker harness**, configure their credentials, and
@@ -28,14 +30,14 @@ vendor documentation; the Vibe example explicitly covers the locally inspected *
 5. Check global settings, project overrides, agent profiles, and managed policies before granting
    commands. Merge additions into existing configuration; do not replace the entire file with an example.
 
-`./install.sh` registers **Polybridge as an MCP server in supported clients**. That enables clients
-to call Polybridge; it does not provision the services, accounts, or approvals used by workers.
+`./install.sh` registers **HarflowMCP as an MCP server in supported clients**. That enables clients
+to call HarflowMCP; it does not provision the services, accounts, or approvals used by workers.
 
 In Monitor, Settings → General shows command-line tool resolution. The Location field remains a
 draft until Return or **Apply** commits it, trimming surrounding whitespace. **Detect** clears the
 saved override and refreshes resolution. Agents run with your login-shell PATH; **Environment
-details** contains the full explanation, including exclusion of `PB_*` variables and
-`PB_OPEN_MONITOR=0`.
+details** contains the full explanation, including exclusion of `HARFLOW_*` variables and
+`HARFLOW_OPEN_MONITOR=0`.
 
 ### Before the first workflow run
 
@@ -87,7 +89,7 @@ These levels authorize an assignment; they do not make the five harnesses equall
 - **Claude:** restrictions use the harness permission layer, with no bridge OS sandbox. Accept-edits
   approves file edits, not arbitrary Bash or MCP calls. Publish adds only direct Git commit/push
   allowances; commands such as `gh pr create` still need their own approval rules. Deny rules win.
-- **Codex:** Polybridge pins `approval_policy="never"`. Missing permission cannot be approved
+- **Codex:** HarflowMCP pins `approval_policy="never"`. Missing permission cannot be approved
   interactively. Workspace writes can include the checkout, temporary directories, configured
   writable roots, and the task scratch grant. There is no per-command commit deny list: a local
   commit can be mechanically possible at `write_in_repo`, even though publishing is not authorized.
@@ -101,7 +103,7 @@ These levels authorize an assignment; they do not make the five harnesses equall
   settings. Builds/tests can be denied as mutating commands unless allowed. Publish bypasses the
   permission layer broadly, including operations outside the repository.
 
-Write-capable workers receive `PB_TASK_SCRATCH`. Claude and Codex also receive an explicit grant for
+Write-capable workers receive `HARFLOW_TASK_SCRATCH`. Claude and Codex also receive an explicit grant for
 that exact directory. A scratch path does not approve Bash commands or grant network access; other
 adapters do not gain confinement or a directory grant merely because the path is provided.
 
@@ -141,21 +143,21 @@ specificity. Compound commands still need approval for their individual operatio
 ### Codex
 
 Complete Codex account/provider setup and inspect `~/.codex/config.toml` (or `CODEX_HOME`), including
-selected profiles, configured writable roots, and MCP server/tool policies. Polybridge explicitly
+selected profiles, configured writable roots, and MCP server/tool policies. HarflowMCP explicitly
 selects the sandbox and disables interactive approvals; changing an interactive approval preference
 does not make a blocked headless command approvable.
 
 Use `write_in_repo` for edits/tests and set the saved network option when dependencies require it.
 The bridge uses `sandbox_workspace_write.network_access` explicitly where applicable. Check reported
 writable roots before assuming repository-only writes. Prepare credentials and approved tools for
-publishing separately. The bridge mappings are documented in the [Codex adapter](../src/polybridge/backends/codex.py).
+publishing separately. The bridge mappings are documented in the [Codex adapter](../src/harflow/backends/codex.py).
 
 ### OpenCode
 
 Complete provider authentication and inspect global `~/.config/opencode/opencode.json` or
 `opencode.jsonc` (`XDG_CONFIG_HOME` can relocate it), together with project and agent overrides.
 Permit the specific shell/MCP operations required by the assignment; verify them with the installed
-version's schema. Polybridge's `build` agent selection does not remove your configured denies.
+version's schema. HarflowMCP's `build` agent selection does not remove your configured denies.
 
 Consult [OpenCode permissions](https://opencode.ai/docs/permissions/). The bridge's global MCP approval
 editor supports the audited 1.x schema and refuses major version 2+ or an unverifiable CLI version;
@@ -165,7 +167,7 @@ it is not a universal configuration editor for every OpenCode release.
 
 Prepare its provider credentials and model in `~/.vibe/config.toml` / provider environment, or the
 directory selected by `VIBE_HOME`. Inspect project `.vibe/config.toml` and agent overrides as well:
-Polybridge supplies `--trust`, so project configuration can affect a worker.
+HarflowMCP supplies `--trust`, so project configuration can affect a worker.
 
 For **installed Vibe 2.25.8**, Bash uses literal command-prefix entries under `allowlist`. Merge
 only the missing entries into the existing list and retain existing denies; this example illustrates
@@ -178,7 +180,7 @@ allowlist = ["git status", "git diff", "git show"]
 ```
 
 These prefixes also allow trailing arguments; they are not exact-command grants or glob patterns.
-Use direct Git commands in the assigned working directory: Polybridge already sets it. Allowing
+Use direct Git commands in the assigned working directory: HarflowMCP already sets it. Allowing
 `git diff` does **not** allow `git -C /path/to/repo diff`. In the inspected 2.25.8 resolver, Git
 option and repository checks recognize direct subcommands but miss the `-C` form. Adding a `git -C`
 prefix can therefore approve options that direct Git would ask about, including `diff --output`
@@ -223,7 +225,7 @@ For instance, verify the project's test command is allowed before choosing agy f
 
 See [command and tool permissions](https://antigravity.google/docs/permissions/),
 [headless operation](https://antigravity.google/docs/cli/headless/), and the
-[Antigravity adapter](../src/polybridge/backends/antigravity.py) for measured permission caveats.
+[Antigravity adapter](../src/harflow/backends/antigravity.py) for measured permission caveats.
 The bridge deliberately does not use agy's command sandbox, which did not establish usable,
 consistent repository confinement in its recorded measurements.
 
@@ -232,13 +234,13 @@ consistent repository confinement in its recorded measurements.
 Inspect a harness's global MCP approval entries without editing:
 
 ```bash
-polybridge-ctl mcp-allowlist --backend vibe --json
+harflow-ctl mcp-allowlist --backend vibe --json
 ```
 
 After registering the server and confirming its credentials, explicitly approve a needed tool:
 
 ```bash
-polybridge-ctl mcp-allowlist --backend vibe --allow jira/get_issue --json
+harflow-ctl mcp-allowlist --backend vibe --allow jira/get_issue --json
 ```
 
 Use your actual server/tool names. This command changes **global** harness configuration, backs up
@@ -246,7 +248,7 @@ existing content, and applies to future sessions; `--remove jira/get_issue` remo
 It does not change Bash permissions, register the server, authenticate it, or enable network.
 Project overrides and deny policies can still win. Claude/agy/Codex support `server/*`; Vibe requires
 individual tools. Codex, Vibe, and OpenCode require an existing global server entry; OpenCode editing
-also depends on its supported schema. See [approval adapters](../src/polybridge/backends/mcp_approval.py).
+also depends on its supported schema. See [approval adapters](../src/harflow/backends/mcp_approval.py).
 
 ## Candidate compatibility and verification
 
@@ -280,7 +282,7 @@ have different settings and credentials. Avoid copying credential values into lo
 | A rule works in one checkout but not a workflow | Compare node working directory and loaded global/project/local/profile sources. A multi-repository parent may start outside each repository. | Put the minimum rule in the effective authorized scope, or start the assignment in its intended checkout. A file-access grant does not load another directory's project settings. | Fresh task in the same directory and execution mode; confirm the loaded setting sources. |
 | Bash needs approval despite edit access | Compare the exact command, wrapper, arguments, deny/ask rules and compound operations. Accept-edits does not approve every shell tool. | Add an exact required build/test rule, preserving deny/ask entries. Do not approve every Bash operation or raise access simply to hide a refusal. | Verify both the intended command and an adjacent disallowed command in an isolated fixture. |
 | Direct Git works but `git -C ...` fails | The command prefix or path differs. Vibe has additional version-specific checks described above. | Use direct Git in the assigned checkout; inspect a specific directory grant only if another checkout is authorized. | Run the actual read command in that directory and inspect denial evidence. |
-| Plan, screenshot or scratch output cannot be written | Check target path, writable roots and protected configuration paths. A command allow rule does not grant filesystem access. | Use `PB_TASK_SCRATCH` for temporary assignment output, or an explicitly authorized output directory. Keep plans out of protected settings directories. | One reversible file creation in the intended directory under the same access, followed by cleanup. |
+| Plan, screenshot or scratch output cannot be written | Check target path, writable roots and protected configuration paths. A command allow rule does not grant filesystem access. | Use `HARFLOW_TASK_SCRATCH` for temporary assignment output, or an explicitly authorized output directory. Keep plans out of protected settings directories. | One reversible file creation in the intended directory under the same access, followed by cleanup. |
 | Tool missing or wrong SDK/JDK selected | Compare service PATH, absolute binary, version and login-shell resolution. Startup files can replace environment values. | Select the required installed tool or provide the required environment through supported harness configuration. Avoid a blanket `env *` allowance. | Repeat the same command through the worker's shell and record its resolved path and version. |
 | Dependency or network operation fails | Separate sandbox denial, DNS/connection failure, HTTP authorization and provider/API failure. | Prepare dependencies locally or enable the saved node's network setting when authorized and supported; repair destination credentials separately. | Check the intended endpoint without exposing secrets; then run the required dependency operation. |
 | Login, provider or publishing authentication fails | Identify which process/service owns credentials and whether its provider/model is supported. | Complete that harness's login or service credential setup; retain repository scope and tool approvals. | Read-only authenticated status check in the same environment, then the authorized operation. |
@@ -339,9 +341,9 @@ Changing harness settings does not raise a saved node's access or automatically 
 execution retryable. Follow [workflow control and recovery](workflows.md#control-and-recovery) for
 the current run state; a fresh task or workflow can verify the corrected setup.
 
-Bridge mapping sources: [Claude](../src/polybridge/backends/claude.py), [Codex](../src/polybridge/backends/codex.py),
-[OpenCode](../src/polybridge/backends/opencode.py),
-[Vibe](../src/polybridge/backends/vibe.py), [Antigravity](../src/polybridge/backends/antigravity.py).
+Bridge mapping sources: [Claude](../src/harflow/backends/claude.py), [Codex](../src/harflow/backends/codex.py),
+[OpenCode](../src/harflow/backends/opencode.py),
+[Vibe](../src/harflow/backends/vibe.py), [Antigravity](../src/harflow/backends/antigravity.py).
 
 ## Exact-action caller approvals
 
@@ -380,10 +382,10 @@ execution. Duplicate, stale, mismatched and expired answers fail rather than bei
 The equivalent CLI commands are:
 
 ```bash
-polybridge-ctl run --backend claude --repo /path/to/repo --prompt 'Run the check' --caller-approvals --json
-polybridge-ctl approval-list --task-id TASK_ID --json
-polybridge-ctl approval-get TASK_ID REQUEST_ID --json
-polybridge-ctl approval-respond TASK_ID REQUEST_ID --action-digest DIGEST --owner-revision REVISION --decision reject --json
+harflow-ctl run --backend claude --repo /path/to/repo --prompt 'Run the check' --caller-approvals --json
+harflow-ctl approval-list --task-id TASK_ID --json
+harflow-ctl approval-get TASK_ID REQUEST_ID --json
+harflow-ctl approval-respond TASK_ID REQUEST_ID --action-digest DIGEST --owner-revision REVISION --decision reject --json
 ```
 
 Only direct callers may inspect full actions or answer. Workers, orchestrators and their children
@@ -411,3 +413,7 @@ arguments and appear only in authorized full reads and the protected local ledge
 
 Root-tree reads have shared source byte/count budgets and return unavailable/retry guidance rather than
 silently omitting unverified pending work.
+
+Harflow native app integration and automatic opening are currently unavailable.
+Setting `HARFLOW_OPEN_MONITOR=1` does not enable opening until the companion
+runtime is integrated; the setting remains reserved for that integration.

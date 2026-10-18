@@ -1,11 +1,16 @@
 """Nested native transports retain the root tree's checkout exclusion."""
 import pytest
 
-from polybridge import workflows as w
-from polybridge.workflow_invocation import tree_write_strength
+from harflow_mcp import workflows as w
+from harflow_mcp.workflow_invocation import tree_write_strength
 from test_workflow_native import MODEL, native_graph
 from test_workflow_native_batch import BatchRegistry, graph as batch_graph
 from test_workflow_run_node_execution import parent_graph, run_tree, child_runs, workflow_policy
+
+
+@pytest.fixture(autouse=True)
+def qualified_native_adapter(monkeypatch):
+    monkeypatch.setattr("harflow_mcp.backends.claude.RENAMED_NATIVE_QUALIFIED", True)
 
 
 @pytest.mark.parametrize("batch", [False, True])

@@ -4,7 +4,7 @@ import copy
 
 import pytest
 
-from polybridge import workflow_delegation as d, workflows as w
+from harflow_mcp import workflow_delegation as d, workflows as w
 from test_workflow_delegation import Registry, default_decision, graph, run_flow, storage
 
 ANSWER = '  POST APPROVED\nKeep the exact body.\r\n  '

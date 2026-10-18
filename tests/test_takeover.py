@@ -13,8 +13,8 @@ from pathlib import Path
 
 import pytest
 
-from polybridge import backends, control, identity, lineage, store, takeover
-from polybridge.tasks import SessionBusyError, TaskRegistry
+from harflow_mcp import backends, control, identity, lineage, store, takeover
+from harflow_mcp.tasks import SessionBusyError, TaskRegistry
 
 CONTROLLER = {"pid": 111_111, "start_time": "Wed Jan  1 00:00:00 2026", "markers": []}
 DEAD_OWNER = {"pid": 222_222, "start_time": "Wed Jan  1 00:00:00 2026", "markers": []}
@@ -59,7 +59,7 @@ def repo(tmp_path: Path) -> Path:
 @pytest.fixture(autouse=True)
 def controller_identity(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(identity, "own_identity", lambda: CONTROLLER)
-    monkeypatch.delenv("PB_TASK_ID", raising=False)
+    monkeypatch.delenv("HARFLOW_TASK_ID", raising=False)
 
 
 @pytest.fixture(autouse=True)
@@ -321,7 +321,7 @@ def test_taken_over_appears_only_with_ready_and_no_failed(log_dir: Path, repo: P
 
 
 def test_a_live_tasks_brief_carries_taken_over_too(log_dir: Path, repo: Path) -> None:
-    from polybridge.tasks import Task
+    from harflow_mcp.tasks import Task
 
     task = Task(
         task_id="task-1",
@@ -358,7 +358,7 @@ async def test_an_agent_caller_is_refused_before_anything_is_written(
     store.write(log_dir, finished_record(repo))
 
     with pytest.raises(control.TakeoverRefused) as refused:
-        await _take_over(log_dir, environ={"PB_TASK_ID": "no-such-task"})
+        await _take_over(log_dir, environ={"HARFLOW_TASK_ID": "no-such-task"})
     assert refused.value.code == "agent_caller"
 
     caller = lineage.Caller(finished_record(repo, task_id="parent"), "ancestry")
@@ -771,7 +771,7 @@ async def test_the_returned_binary_is_absolute_even_from_a_relative_path_entry(
 
 # --- the humans-only gate fails closed ------------------------------------------------------
 
-from polybridge.lineage import detect_caller_detail as _real_detect_caller_detail  # noqa: E402
+from harflow_mcp.lineage import detect_caller_detail as _real_detect_caller_detail  # noqa: E402
 
 
 def _deny_ps(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1,4 +1,4 @@
-from polybridge import scratch, retention
+from harflow_mcp import scratch, retention
 
 def test_task_retention_removes_scratch_without_following_symlinks(tmp_path):
     log=tmp_path/'tasks';log.mkdir();(log/'worker.meta.json').write_text('{}')
@@ -13,8 +13,8 @@ def test_task_retention_removes_scratch_without_following_symlinks(tmp_path):
 
 import asyncio
 import pytest
-from polybridge import tasks
-from polybridge.backends.base import Invocation
+from harflow_mcp import tasks
+from harflow_mcp.backends.base import Invocation
 from test_registry import _TrivialBackend
 
 

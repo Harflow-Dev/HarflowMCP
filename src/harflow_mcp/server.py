@@ -1,0 +1,2514 @@
+"""MCP server dispatching coding tasks to whichever agent backend the caller picks."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import shutil
+import subprocess
+import sys
+import unicodedata
+import uuid
+from pathlib import Path
+from typing import Any, Literal
+
+from mcp import MCPError
+from pydantic import StrictBool, StrictInt, StrictStr
+from mcp.server import MCPServer
+from mcp.server.mcpserver import Context
+from mcp.types import INTERNAL_ERROR, INVALID_PARAMS
+
+from . import backends, control, followups, identity, inbox, store, wait_policy
+from .backends import DEFAULT_BACKEND, DEFAULT_FREEDOM, FREEDOMS
+from .catalog import bounded_request
+from .events import EVENT_KINDS, events_path, read_page, read_recent
+from .tasks import (
+    GIT_SAFE_CONFIG,
+    GIT_SAFE_ENV,
+    TERMINAL_STATUSES,
+    RepoUnavailableError,
+    SessionBusyError,
+    SessionUnknownError,
+    Task,
+    TaskRegistry,
+)
+
+log = logging.getLogger("harflow_mcp")
+
+VALID_STATUSES = frozenset({"running"}) | TERMINAL_STATUSES
+
+# MCP clients may impose their own per-request deadline; exceeding it surfaces to the caller as a
+# transport error (-32001) even though the dispatched run is unaffected. A client's deadline is not
+# discoverable from here, so the default stays short enough for clients that apply the common 60s;
+# longer holds are an explicit, honoured request (see wait_policy).
+DEFAULT_WAIT_SECONDS = 55
+
+# How often wait_for_workflow re-checks the run while it is active.
+WORKFLOW_POLL_SECONDS = 1.0
+
+# An `until="terminal"` workflow wait stops once a terminal-but-settling run's file has not changed
+# for this long: settling that never makes progress would otherwise hold to the 6 hour ceiling.
+WORKFLOW_SETTLING_STALL_SECONDS = 300.0
+
+# Matches the Monitor's `TaskTitle.maxLength`.
+MAX_TITLE_LENGTH = 90
+
+# What an MCP status response carries in place of the full raw tail (see `_status_payload`).
+RECENT_ACTIVITY_LIMIT = 5
+SHORT_TAIL_LINES = 5
+SHORT_TAIL_LINE_CHARS = 500
+
+
+def _status_payload(
+    snapshot: dict[str, Any], *, include_tail: bool, log_dir: Path, task_id: str
+) -> dict[str, Any]:
+    """The MCP shape of a status snapshot: `recent_activity` always, the raw tail only on request.
+
+    The full `last_output_tail` is up to 20 raw stream lines of 2000 chars — about 10k tokens on
+    every poll, which an orchestrator rarely needs. `recent_activity` answers "what is it doing" in
+    a few one-liners instead; a failed run keeps a short raw tail, since that is when the raw lines
+    help. The snapshot itself is untouched, so `harflow-ctl` (the Monitor's contract) still
+    carries the full tail. Blocking file I/O: callers run this off the event loop.
+    """
+    from .workflow_inspection import decorate_tasks
+    payload = decorate_tasks([dict(snapshot)], log_dir)[0]
+    if "queued_followups" not in payload:
+        # Read here, in the caller's worker thread, rather than in a live snapshot built on the loop.
+        payload["queued_followups"] = followups.view(log_dir, task_id)
+    payload["recent_activity"] = read_recent(events_path(log_dir, task_id), limit=RECENT_ACTIVITY_LIMIT)
+    if include_tail:
+        return payload
+    tail = payload.pop("last_output_tail", None)
+    if snapshot.get("status") == "failed" and isinstance(tail, list):
+        payload["last_output_tail"] = [
+            line[:SHORT_TAIL_LINE_CHARS] if isinstance(line, str) else line
+            for line in tail[-SHORT_TAIL_LINES:]
+        ]
+    return payload
+
+
+mcp = MCPServer(
+    "harflow",
+    instructions=(
+        "Dispatch coding tasks to headless coding agents on this machine — currently Claude Code, "
+        "Codex, opencode, vibe and Antigravity (binary `agy`). start_task returns immediately with "
+        "a task_id; poll it with get_task_status or await it with wait_for_task, then continue the "
+        "same session with resume_task.\n\n"
+        "Call list_backends first if you are unsure which to use: it reports what is installed and "
+        "what each one can actually do. Backends differ in ways that matter — Claude and vibe "
+        "support a turn cap (though a breach on vibe reads as a plain failure, not a distinct "
+        "status), only Claude and opencode report a dollar cost, only Codex enforces restrictions "
+        "with a real OS sandbox, only vibe has no model-selection flag at all, and Antigravity "
+        "accepts reasoning_effort only at low/medium/high (its CLI refuses xhigh before the run "
+        "starts). Every task reports an `enforcement` block describing what was actually "
+        "enforced, which is the honest answer rather than what `freedom` implies.\n\n"
+        "A `publish` freedom level sits between `write_in_repo` and `unrestricted`: it authorizes "
+        "remote publishing attempts, including commits, pushes, PRs and reviews; command approvals stay in harness settings. It is NOT a promise that publishing "
+        "succeeds — credentials, remote permissions, branch protection, repo hooks, or an "
+        "unauthenticated `gh` can all still stop it, and the agent may not even try — and it is "
+        "authorization only: with network=True a lower freedom can mechanically reach a remote "
+        "without having been authorized to publish. Check "
+        "`enforcement.publish_attempts_allowed_by_polybridge` and `enforcement.network_access` on "
+        "the returned task rather than assuming from the freedom name alone. An optional `network` "
+        "parameter on start_task and resume_task asks for network independently of the freedom: "
+        "True asks harflow_mcp to impose no network barrier of its own, False asks it to impose "
+        "one, and None keeps each freedom's historical behaviour. It governs harflow_mcp's own "
+        "network barrier only, never reachability.\n\n"
+        "A wait_for_task that comes back still 'running' has not failed — the run is untouched, so "
+        "call again or poll. wait_for_task, wait_for_tasks and wait_for_workflow share one contract: "
+        "timeout_seconds 0..3600 is honoured as asked (never clamped), until='terminal' holds to a "
+        "6 hour server ceiling (omit timeout_seconds), and each reports stop_reason, timed_out, "
+        "elapsed_seconds and polling_guidance. Your MCP client's own request deadline still applies; "
+        "see docs/multi-task-waiting.md. Tasks outlive this server process: ones started by an earlier "
+        "harflow_mcp server are still reported, marked 'recovered: true'.\n\n"
+        "A claude task started without max_turns, and every antigravity task, has live input "
+        "(`live_input: true`): send_message adds a message while it runs — folded into the "
+        "running turn on claude, or starting a new one if the agent is idle; on antigravity each "
+        "written message is its own turn, even mid-turn. It returns 'queued', never 'delivered'. "
+        "Once every turn the run owes has been answered and nothing is queued the task closes its "
+        "own input and settles as usual; a send after that is refused with 'finished; continue "
+        "with resume_task'.\n\n"
+        "Any other standalone task (a backend without live input, or claude with max_turns) takes "
+        "send_message too, but nothing is delivered while it runs: the message is queued "
+        "(`delivery: 'next_continuation'`) and consumed, verbatim and exactly once, by the next "
+        "continuation you start explicitly from that task — resume_task (whose followup_prompt may "
+        "then be omitted) or continue_task. Queuing starts nothing. cancel_queued_message withdraws "
+        "a message that is still queued; queued_followups on the task status lists every one.\n\n"
+        "Workflows are durable graphs owned by HarflowMCP. start_workflow gives the caller's "
+        "original prompt and workflow context to an orchestrator harness. The orchestrator "
+        "chooses valid next nodes and writes focused assignments; HarflowMCP validates those "
+        "decisions, runs node harnesses, coordinates parallel branches, and persists results. "
+        "Nodes receive their instructions, assignment, and relevant prior results, not the full "
+        "request or global checklist. They return structured results and can ask the orchestrator "
+        "for missing context. Only the orchestrator updates the checklist. Decisions and results "
+        "come from harness final messages; harnesses may still use their own tools. Poll or wait "
+        "using the workflow_run_id. For needs_input, the MCP caller answers through resume_workflow "
+        "with instructions and the current input_decision_id; recover_workflow explicitly retries "
+        "a settled failed run with a reason while preserving completed work."
+    ),
+)
+
+_registry: TaskRegistry | None = None
+
+
+
+async def _guard_mutation() -> None:
+    """Check worker authority without activating registry background services."""
+    from .caller_policy import require_mutation, signals
+    environ = dict(os.environ)
+    present, _ = signals(environ)
+    if not present:
+        return
+    from .tasks import default_log_dir
+    directory = _registry.log_dir if _registry is not None else default_log_dir()
+    await asyncio.to_thread(require_mutation, directory, environ=environ)
+
+def _reg() -> TaskRegistry:
+    # Built lazily so its asyncio primitives belong to the loop `mcp.run()` creates.
+    global _registry
+    if _registry is None:
+        _registry = TaskRegistry()
+        _registry.start_maintenance()
+        _start_notification_worker(_registry)
+    return _registry
+
+
+def _start_notification_worker(registry: TaskRegistry) -> None:
+    configured = bool(os.environ.get('HARFLOW_NOTIFY_DESTINATIONS'))
+    persisted = (registry.log_dir.parent / 'notifications.sqlite3').is_file()
+    if (configured or persisted) and getattr(registry, '_notification_worker', None) is None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        from .notifications import worker
+        registry._notification_worker = loop.create_task(worker(registry.log_dir), name='harflow-notifications')
+
+
+def install_cli_registry(log_dir: Path | None = None) -> TaskRegistry:
+    """Give `harflow-ctl` the registry-backed server helpers, without their side effects.
+
+    ctl has no MCP session, so unlike `_reg()` this never starts the maintenance sweep (retention
+    is a live-server job — see `retention.py`'s own contract) and never starts the notification
+    worker (ctl's `asyncio.run` loop would cancel it mid-delivery anyway). Only installs when no
+    registry is installed yet: an already-injected registry (a test, an embedding) is left
+    untouched.
+    """
+    global _registry
+    if _registry is None:
+        _registry = TaskRegistry(log_dir=log_dir, open_monitor=False)
+    return _registry
+
+
+async def _notification_authority() -> None:
+    if await _verified_workflow_caller() is not None:
+        raise MCPError(INVALID_PARAMS, 'Completion subscriptions require a direct caller; delegated tasks cannot authorize server network egress')
+
+
+def _backend(name: str):
+    try:
+        backend = backends.get(name)
+    except backends.UnknownBackend as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+    if not backends.is_installed(backend):
+        # A client-launched server usually runs on the PATH it was registered with, frozen at install
+        # time — so a CLI installed afterwards, or moved (an nvm Node upgrade), is missing here even
+        # though a terminal finds it. Saying which PATH, and how to refresh it, makes that fixable.
+        raise MCPError(
+            INVALID_PARAMS,
+            f"the `{backend.binary}` CLI for backend {name!r} was not found on this server's PATH "
+            f"({os.pathsep.join(os.get_exec_path())}); install it, or call list_backends to see what "
+            f"is available. If `{backend.binary}` is installed, harflow_mcp's registration may be out "
+            "of date: update it in Harflow (Settings → Harnesses → Update), or run "
+            f"`harflow-setup` from a terminal where `{backend.binary}` works, then restart "
+            "the client",
+        )
+    return backend
+
+
+def _check_freedom(freedom: str) -> str:
+    if freedom not in FREEDOMS:
+        raise MCPError(
+            INVALID_PARAMS, f"unknown freedom {freedom!r}; expected one of {list(FREEDOMS)}"
+        )
+    return freedom
+
+
+def _check_turn_cap(backend, max_turns: int | None) -> None:
+    if max_turns is None:
+        return
+    if max_turns < 1:
+        raise MCPError(INVALID_PARAMS, f"max_turns must be >= 1, got {max_turns}")
+    try:
+        backends.reject_turn_cap(backend, max_turns)
+    except backends.UnsupportedCapability as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+
+def _check_reasoning_effort(backend, reasoning_effort: str | None) -> None:
+    try:
+        backends.check_reasoning_effort(backend, reasoning_effort)
+    except backends.UnsupportedCapability as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+
+def _check_model(backend, model: str | None) -> None:
+    try:
+        backends.reject_model(backend, model)
+    except backends.UnsupportedCapability as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+
+def _check_group(group: str | None) -> None:
+    if group is None:
+        return
+    if not group.strip():
+        raise MCPError(INVALID_PARAMS, "group must be non-empty if provided")
+    if len(group) > 128:
+        raise MCPError(
+            INVALID_PARAMS, f"group must be at most 128 characters, got {len(group)}"
+        )
+
+
+def _normalize_title(title: str | None) -> str | None:
+    if title is None:
+        return None
+    stripped = title.strip()
+    if not stripped:
+        return None
+    if len(stripped) > MAX_TITLE_LENGTH:
+        raise MCPError(
+            INVALID_PARAMS,
+            f"title must be at most {MAX_TITLE_LENGTH} characters, got {len(stripped)}; "
+            "shorten it or omit it",
+        )
+    if any(
+        # Zl/Zp: U+2028/U+2029 break a line as surely as "\n" does.
+        unicodedata.category(ch).startswith("C") or unicodedata.category(ch) in ("Zl", "Zp")
+        for ch in stripped
+    ):
+        raise MCPError(
+            INVALID_PARAMS,
+            "title must not contain control characters (including newlines); "
+            "use a single plain line of text",
+        )
+    return stripped
+
+
+def _check_network(backend, freedom: str, network: bool | None) -> None:
+    # Strict on purpose: anything other than a real boolean or None is refused rather than
+    # truthy-coerced — "yes"/1/0 must not silently become a network decision, and a coerced
+    # request would be indistinguishable from a considered one on the returned task.
+    #
+    # This check alone is NOT what delivers that on the tool surface, and believing otherwise is
+    # the trap: pydantic's lax mode coerces "yes"/"true"/"on"/1/0 to real booleans while binding
+    # the call, so by the time this runs the string is already gone (measured). `StrictBool` on
+    # the two tool signatures is what actually refuses them; this remains as the backstop for a
+    # direct Python caller, which bypasses that binding entirely.
+    if network is not None and not isinstance(network, bool):
+        raise MCPError(
+            INVALID_PARAMS,
+            f"network must be a boolean (true/false) or omitted, got {network!r}",
+        )
+    try:
+        backends.check_network(backend, freedom, network)
+    except backends.UnsupportedCapability as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+
+def _resolve_repo_path(repo_path: str) -> Path:
+    if not repo_path or not repo_path.strip():
+        raise MCPError(INVALID_PARAMS, "repo_path must be a non-empty path")
+
+    path = Path(repo_path).expanduser()
+    try:
+        path = path.resolve(strict=True)
+    except OSError:
+        raise MCPError(INVALID_PARAMS, f"repo_path does not exist: {repo_path}") from None
+    if not path.is_dir():
+        raise MCPError(INVALID_PARAMS, f"repo_path is not a directory: {path}")
+
+    probe = subprocess.run(
+        ["git", "-C", str(path), *GIT_SAFE_CONFIG, "rev-parse", "--is-inside-work-tree"],
+        env={**os.environ, **GIT_SAFE_ENV},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if probe.returncode != 0 or probe.stdout.strip() != "true":
+        raise MCPError(INVALID_PARAMS, f"repo_path is not inside a git repository: {path}")
+    return path
+
+
+async def _validate_repo_path(repo_path: str) -> Path:
+    return await asyncio.to_thread(_resolve_repo_path, repo_path)
+
+
+
+@mcp.tool()
+async def list_backends() -> list[dict[str, Any]]:
+    """Report the available agent backends, what is installed, and what each can actually do.
+
+    Worth calling before start_task if the choice is not already obvious. Each entry carries its
+    `capabilities` (turn cap, cost reporting, OS sandbox, per-command deny, whether we can choose
+    the session id) and, for every `freedom` level, the enforcement it really delivers.
+    Ordinary script entrypoints retain version discovery and native eligibility checks.
+    Extra-path qualification separately rejects selected scripts before version execution.
+    """
+    return await asyncio.to_thread(backends.describe_all)
+
+
+async def _notification_io(function, *args, **kwargs):
+    """Finish an off-loop notification mutation before propagating cancellation."""
+    operation = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+    try:
+        return await asyncio.shield(operation)
+    except asyncio.CancelledError:
+        # Cancelling to_thread does not stop its thread. Retain the operation until its
+        # commit is known, including when the caller cancels us again during cleanup.
+        while not operation.done():
+            try:
+                await asyncio.shield(operation)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        if not operation.cancelled():
+            operation.exception()  # Retrieve a failed mutation without masking cancellation.
+        raise
+
+
+@mcp.tool()
+async def start_task(
+    prompt: str,
+    repo_path: str,
+    backend: str | None = None,
+    freedom: str | None = None,
+    model: str | None = None,
+    max_turns: int | None = None,
+    reasoning_effort: str | None = None,
+    network: StrictBool | None = None,
+    caller_approvals: StrictBool = False,
+    interaction_owner: str = "caller",
+    group: str | None = None,
+    title: str | None = None,
+    workflow: str | None = None,
+    auto_continue: StrictInt = 0,
+    notify: str | None = None,
+    extra_writable_paths: list[StrictStr] | None = None,
+) -> dict[str, Any]:
+    """Dispatch a coding task to a headless agent and return immediately.
+
+    Args:
+        prompt: Instructions for the agent. Be specific about the desired end state. Write it in
+            plain prose: preserve spaces and word boundaries, and never concatenate words or strip
+            whitespace to shrink the payload — harflow_mcp stores and delivers the text exactly as
+            submitted, so compressed text reaches the agent exactly as garbled. Blank or
+            all-whitespace prompts are rejected rather than trimmed into shape.
+        repo_path: Absolute path to a git repository; the agent's working directory.
+        backend: Which agent to use — "claude", "codex", "opencode", "vibe" or "antigravity". See
+            list_backends.
+        freedom: "read_only", "write_in_repo" (default), "publish", or "unrestricted". "publish"
+            sits between "write_in_repo" and "unrestricted": it authorizes an attempt to
+            remote publishing, including commit/push/PR creation/reviews, but that is not a promise the attempt succeeds — credentials,
+            remote permissions, branch protection and hooks are all
+            outside harflow_mcp's control. How each level is enforced depends on the backend; the
+            returned `enforcement` says what actually applies, via
+            `publish_attempts_allowed_by_polybridge` and `network_access` among other fields.
+        model: Model for this run, in the backend's own naming. Rejected outright, rather than
+            silently ignored, on a backend with no model-selection flag at all — vibe is the one
+            such case; see list_backends' capabilities.supports_model_selection.
+        max_turns: Cap on agent turns. Only some backends support this; asking for it on one that
+            does not is an error rather than being silently ignored.
+        reasoning_effort: "low", "medium", "high" or "xhigh", passed to the backend verbatim.
+            Rejected up front when the chosen *backend* has no effort control at all (vibe is
+            config-only and has none), or is asked for a level outside the ones it declares (see
+            list_backends — antigravity accepts only low/medium/high, and its CLI would refuse
+            xhigh before the run starts, exit 1); harflow_mcp cannot tell whether the chosen
+            *model* honours it — on opencode in particular, a model with no declared variants
+            silently ignores an unsupported level rather than erroring, and on antigravity a model
+            id that encodes its own level makes the CLI refuse --effort at startup. See
+            list_backends' per-backend reasoning_effort caveats for what is and is not known there.
+        caller_approvals: Opt in to version-qualified exact-action Bash caller decisions. Only
+            uncapped non-native Claude Code 2.1.302 write_in_repo/publish is supported. Defaults off;
+            worker self-approval is prohibited. Decisions do not override saved policy or grant
+            reusable access. Inspect list_approval_requests and get_approval_request before responding.
+        interaction_owner: caller by default; monitor requires the verified human Monitor path.
+        network: Optional boolean asking for network access independently of `freedom`: True
+            asks harflow_mcp to impose no network barrier of its own, False asks it to impose one,
+            and None (the default) keeps each freedom's historical behaviour exactly. The
+            parameter governs harflow_mcp's own network barrier only — never reachability: a
+            corporate firewall or proxy defeats it too. Only codex has a barrier harflow_mcp can
+            actually raise or lower, and its support is non-rectangular (see
+            capabilities.network_control): enabling is refused at read_only and blocking at
+            unrestricted. On claude, opencode, vibe and antigravity, True is accepted — there is
+            nothing to impose — and False is an error rather than silently dropped;
+            enforcement.network_access stays "not_controlled" there. What actually applied is
+            stated on the returned task's enforcement.network_access.
+        group: Optional label (1-128 chars), inherited by any nested dispatch this task's own
+            agent makes through harflow_mcp (unless that dispatch gives its own). Purely
+            informational — harflow_mcp does not act on it — useful for tagging a family of
+            dispatches you want to find together later via list_tasks.
+        title: Optional short human-readable label (at most 90 characters after trimming, no
+            control characters) shown for this task in the Monitor. Purely informational. It is
+            never inherited from a calling task: a dispatch without a title has none. A
+            resume_task continuation carries the resumed task's title.
+        auto_continue: Integer 0–10 (default 0). Opt in to that many fresh successors after
+            backend-confirmed recoverable cutoffs and observed process/output settlement.
+            Supported cutoff profiles are backend-owned; missing answers alone never qualify.
+            Cancellation, permission denial, usage limits and workflow-owned tasks are excluded.
+            Automatic continuation across server death is not promised.
+
+        notify: Configured destination alias, direct callers only. Intent is durable before spawn.
+            Receivers must deduplicate stable IDs; retries resume only while a server is active.
+
+        extra_writable_paths: Optional bounded list of existing absolute local file or directory
+            paths. At most 16 paths, 4096 UTF-8 bytes each and 16384 bytes total. Relative paths,
+            missing/special paths, filesystem roots and canonical duplicates are errors. Only
+            version-qualified configurations in capabilities.extra_writable_paths are supported;
+            other harnesses/configurations reject the request. The certified bounded mode clears
+            ambient writable roots and excludes implicit temporary roots. Known external execution
+            configuration namespaces of all registered backends remain protected; existing unsupported
+            inputs reject requests. Inherited repository configuration authority gains no new exclusions. Grants permit reads
+            as well as writes, never publication. Omission inherits a detected owner's grants;
+            nested requests cannot widen them. Saved grants and path identities carry through
+            resume/continuation; replacement requires a new authorized task. Workflows and
+            native adapters do not accept these grants. Use preview_task_permissions before launch.
+            Keep qualified startup inputs stable: checks refuse observed changes but do not atomically
+            pin configuration or executables against independently authorized concurrent writers.
+
+    Returns the new task_id and its starting state. The run continues in the background; poll
+    get_task_status or call wait_for_task to follow it.
+
+    If this task is itself dispatched from inside another harflow_mcp task's agent (a nested MCP
+    call), that ancestry is recorded — `spawned_by`, `root_task_id`, `depth` — on a best-effort
+    basis (see `lineage_detected` on the returned task: which detection method found the caller,
+    or null if none was found and this is treated as a root task). When a caller *is* detected,
+    this dispatch is also checked against it: a nested dispatch weaker than its caller on depth or
+    on any enforcement field is refused outright (`NestedDispatchRefused`). This cap is
+    best-effort, not a sandbox boundary — nothing stops an agent from dispatching outside
+    harflow_mcp entirely.
+    """
+    from .caller_policy import require_mutation
+    await _guard_mutation()
+    if not prompt or not prompt.strip():
+        raise MCPError(INVALID_PARAMS, "prompt must be a non-empty string")
+
+    if notify is not None:
+        await _notification_authority()
+        from .notifications import preflight
+        try:
+            preflight(notify)
+        except ValueError as exc:
+            raise MCPError(INVALID_PARAMS, str(exc)) from None
+        if workflow is not None:
+            raise MCPError(INVALID_PARAMS, 'notify is for standalone task dispatch; workflow notifications are unavailable')
+
+    from .task_continuation import validate_budget
+    try:
+        validate_budget(auto_continue)
+    except ValueError as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+    if workflow is not None:
+        if caller_approvals or interaction_owner != "caller":
+            raise MCPError(INVALID_PARAMS, "Workflow approval policy and ownership belong to saved candidates and root workflow launch")
+        if extra_writable_paths is not None:
+            raise MCPError(INVALID_PARAMS, "extra_writable_paths is unavailable for workflow launches")
+        if auto_continue:
+            raise MCPError(INVALID_PARAMS, "Workflow retries belong to their supervisor; auto_continue is unavailable")
+        if group is not None or title is not None:
+            raise MCPError(INVALID_PARAMS, "workflow runs do not accept task group or title")
+        return await start_workflow(
+            name=workflow, prompt=prompt, repo_path=repo_path,
+            overrides={k: v for k, v in {"backend": backend, "model": model, "max_turns": max_turns,
+                       "reasoning_effort": reasoning_effort}.items() if v is not None},
+            freedom=freedom, network=network,
+        )
+
+    freedom = freedom if freedom is not None else DEFAULT_FREEDOM
+    chosen = _backend(backend or DEFAULT_BACKEND)
+    if auto_continue and not chosen.capabilities.supports_auto_continue:
+        raise MCPError(INVALID_PARAMS, f"{chosen.name} has no certified automatic continuation cutoff; use continue_task")
+    _check_freedom(freedom)
+    _check_turn_cap(chosen, max_turns)
+    _check_reasoning_effort(chosen, reasoning_effort)
+    _check_model(chosen, model)
+    _check_network(chosen, freedom, network)
+    _check_group(group)
+    normalized_title = _normalize_title(title)
+    path = await _validate_repo_path(repo_path)
+
+    notification = None
+    reserved_id = None
+    if notify is not None:
+        from .notifications import subscribe as register
+        reserved_id = str(uuid.uuid4())
+        # Commit intent before spawning so a crash cannot strand a started task without opt-in.
+        try:
+            notification = await _notification_io(register, _reg().log_dir, reserved_id, notify, reservation=True)
+        except asyncio.CancelledError:
+            from .notifications import discard_unstarted
+            # No dispatch has begun, and the reservation thread has finished committing.
+            try:
+                await _notification_io(discard_unstarted, _reg().log_dir, reserved_id)
+            except Exception:
+                log.warning('Notification reservation cleanup unavailable for task %s', reserved_id)
+            raise
+        except Exception:
+            raise MCPError(INTERNAL_ERROR, 'Notification reservation failed; no task was started') from None
+    try:
+        task = await _reg().start(
+            prompt,
+            path,
+            backend=chosen,
+            freedom=freedom,
+            model=model,
+            max_turns=max_turns,
+            reasoning_effort=reasoning_effort,
+            network=network,
+            caller_approvals=caller_approvals,
+            interaction_owner=interaction_owner,
+            group=group,
+            title=normalized_title,
+            auto_continue=auto_continue,
+            **({'extra_writable_paths': extra_writable_paths} if extra_writable_paths is not None else {}),
+            **({'task_id': reserved_id} if reserved_id is not None else {}),
+        )
+    except (Exception, asyncio.CancelledError) as exc:
+        not_started = getattr(exc, 'harflow_not_started', False) is True
+        request_error = isinstance(exc, backends.UnsupportedCapability) or (isinstance(exc, ValueError) and not_started)
+        if reserved_id is not None:
+            from .notifications import discard_unstarted
+            cleaned = False
+            if not_started and _reg().get(reserved_id) is None:
+                try:
+                    cleaned = await _notification_io(discard_unstarted, _reg().log_dir, reserved_id)
+                except Exception:
+                    log.warning('Notification reservation cleanup unavailable for task %s', reserved_id)
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            if cleaned is True and _reg().get(reserved_id) is None and request_error:
+                raise MCPError(INVALID_PARAMS, str(exc)) from None
+            raise MCPError(INVALID_PARAMS, f'Dispatch did not return normally; inspect task_id {reserved_id} and its notification state before retrying') from None
+        if not request_error:
+            raise
+        # Covers `NestedDispatchRefused` too — it subclasses `UnsupportedCapability`, and this cap
+        # is only ever checked once a caller was actually detected inside `_reg().start`.
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+    result = task.brief() | {"enforcement": task.enforcement}
+    if notification is not None:
+        result['notification'] = notification
+        _start_notification_worker(_reg())
+    return result
+
+
+@mcp.tool()
+@bounded_request
+async def list_approval_requests(task_id: str | None = None, workflow_run_id: str | None = None, cursor: str | None = None, limit: StrictInt = 16) -> dict[str, Any]:
+    """List bounded permission request metadata for exactly one task or root workflow tree.
+
+    Default page size 16, maximum 32. Raw actions appear only in get_approval_request.
+    Workers and orchestrators cannot inspect caller approval records. A pending request is
+    an interaction substate; underlying execution remains running. No approval is inferred
+    from agent prose, errors or already denied actions.
+    """
+    from .approval_runtime import list_requests
+    try:
+        return await list_requests(_reg(), task_id, workflow_run_id, cursor, limit)
+    except (OSError, ValueError) as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+
+@mcp.tool()
+@bounded_request
+async def get_approval_request(task_id: str, request_id: str) -> dict[str, Any]:
+    """Read the complete exact action for an authorized direct caller.
+
+    Inspect this payload before approving; request IDs, digest and revision are comparison
+    fields, never authorization tokens. Payloads may contain sensitive command arguments.
+    """
+    from .approval_runtime import get_request
+    try:
+        return await get_request(_reg(), task_id, request_id)
+    except (OSError, ValueError) as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+
+@mcp.tool()
+@bounded_request
+async def respond_approval_request(task_id: str, request_id: str, action_digest: str, owner_revision: StrictInt, decision: str, interaction_owner: str = "caller") -> dict[str, Any]:
+    """Reserve approve/reject for one exact action, with stale/duplicate answer protection.
+
+    Only the authoritative root interaction owner can answer; workers/orchestrators cannot
+    self-approve or claim Monitor ownership. Approval preserves exact original input and never
+    installs permission suggestions or reusable grants. Reservation, local pipe delivery and
+    observed tool outcome are separate states. No ambiguous decision is automatically resent.
+    Use explicit recovery after settled refusal; ordinary messages/resume are not decisions.
+    """
+    from .caller_policy import require_mutation
+    await _guard_mutation()
+    from .approval_runtime import respond_request
+    try:
+        return await respond_request(_reg(), task_id, request_id, action_digest, owner_revision, decision, interaction_owner)
+    except (OSError, ValueError) as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+
+@mcp.tool()
+async def preview_task_permissions(
+    repo_path: str,
+    backend: str | None = None,
+    freedom: str | None = None,
+    network: StrictBool | None = None,
+    caller_approvals: StrictBool = False,
+    extra_writable_paths: list[StrictStr] | None = None,
+) -> dict[str, Any]:
+    """Preview standalone task permissions without launching an agent or allocating scratch.
+
+    Uses the same bounded extra_writable_paths validation, installed-version checks and detected
+    owner caps as start_task. Returns requested/effective typed paths, certification and truthful
+    enforcement. Writable scratch-aware launches disclose future task scratch symbolically in
+    writable_roots without allocating it; read-only previews have no scratch root.
+    The preview is an observation, not a reservation: launch revalidates paths and
+    configuration. Extra grants never authorize publication. Workflow/native-adapter grants and
+    unverified harness configurations are unavailable. Known external backend execution configuration
+    is protected; unsupported existing inputs reject requests. Existing repository configuration
+    authority retains its baseline limits. Grants authorize output writes, not trust in that output
+    as a future repository, hook or executable. Startup inputs are checked, not atomically
+    pinned against independently authorized concurrent writers; see docs/extra-writable-paths.md.
+    """
+    chosen = _backend(backend or DEFAULT_BACKEND)
+    access = freedom if freedom is not None else DEFAULT_FREEDOM
+    _check_freedom(access)
+    _check_network(chosen, access, network)
+    path = await _validate_repo_path(repo_path)
+    try:
+        return await _reg().preview_permissions(
+            path, backend=chosen, freedom=access, network=network,
+            extra_writable_paths=extra_writable_paths,
+            caller_approvals=caller_approvals,
+        )
+    except (ValueError, backends.UnsupportedCapability) as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+
+@mcp.tool()
+async def subscribe(task_id: str, notify: str) -> dict[str, Any]:
+    """Durably subscribe to one task's observed terminal settlement using a configured alias.
+
+    Direct callers only. The server administrator configures HARFLOW_NOTIFY_DESTINATIONS; caller URLs
+    and secrets are refused. Repeated task/alias subscriptions share a stable event ID. Delivery
+    retries at most six times and can duplicate after a crash: receivers must deduplicate IDs.
+    Pending delivery resumes while a configured server is active, not while every server is down.
+    Delivery failure never changes task execution. See docs/task-notifications.md.
+    """
+    from .caller_policy import require_mutation
+    await _guard_mutation()
+    await _notification_authority()
+    await _guard_task_read(task_id)
+    from . import notifications
+    try:
+        record = await asyncio.to_thread(store.read, _reg().log_dir, task_id, include_prompt=False, metadata_byte_limit=262144)
+        if record is None:
+            raise ValueError('Unknown or unavailable task record')
+        result = await asyncio.to_thread(notifications.subscribe, _reg().log_dir, task_id, notify)
+        _start_notification_worker(_reg())
+        return result
+    except ValueError as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+
+@mcp.tool()
+async def get_task_notifications(task_id: str) -> list[dict[str, Any]]:
+    """Read bounded subscription delivery states; this never establishes task success."""
+    await _notification_authority()
+    from .notifications import status
+    try:
+        return await asyncio.to_thread(status, _reg().log_dir, task_id)
+    except ValueError as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+
+@mcp.tool()
+async def unsubscribe(task_id: str, notify: str | None = None) -> list[dict[str, Any]]:
+    """Stop future attempts for a task/alias (or all aliases); in-flight requests may finish."""
+    from .caller_policy import require_mutation
+    await _guard_mutation()
+    await _notification_authority()
+    from .notifications import unsubscribe as remove
+    try:
+        return await asyncio.to_thread(remove, _reg().log_dir, task_id, notify)
+    except ValueError as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+
+@mcp.tool()
+async def get_task_status(
+    task_id: str,
+    include_tail: bool = False,
+    brief: StrictBool = False,
+) -> dict[str, Any]:
+    """Report a dispatched task's current state without blocking.
+
+    Args:
+        task_id: Identifier returned by start_task or resume_task.
+        include_tail: If True, include the full last_output_tail (20 lines × 2000 chars each);
+            if False (default), the tail is omitted for running/completed tasks and shortened
+            to 5 lines × 500 chars for failed tasks. The caller can request the full raw stream
+            log path from `raw_stream_log` for complete output, or use get_task_events for
+            normalized events.
+        brief: Return an 8 KiB display projection with bounded summary/outcome, the last three
+            activities and detail references. Overrides include_tail. Full reads remain available.
+
+    Returns the task's status, summary, enforcement, and `recent_activity` — a list of ≤ 5 one-line
+    strings describing the most recent meaningful events (tool calls, failed tool results, assistant
+    messages, notices). For running tasks this gives a live summary without the bulk of the
+    raw stream. These lines deliberately collapse whitespace and truncate to stay short — they are
+    a summary only; the stored event log (see get_task_events) and every stored or delivered
+    message keep their original text intact. `total_cost_usd` is null for backends that do not
+    report cost — Codex, vibe and Antigravity report tokens only or nothing (vibe reports neither
+    cost nor tokens nor a turn count).
+
+    `enforcement` states what the run's restrictions actually amounted to, and `mcp_servers` (where
+    the backend reports them) shows what the agent loaded. Tasks started by an earlier harflow_mcp
+    server process are still reported, marked `recovered: true` with a `note` explaining what is and
+    is not known about them.
+
+    Live, recovered and brief snapshots include `artifact_summary` with a bounded `count` and
+    `state` (available or unavailable). Supported standalone owners may include `detail_ref`:
+    {"tool": "get_task_artifacts", "task_id": "..."}, for explicit paged metadata reads.
+    Unsupported or unverifiable ownership returns unavailable without a detail reference;
+    a supported owner with an unreadable manifest may retain the reference for diagnostics.
+    Artifact registration is a reference, not proof of valid contents, successful execution,
+    or permission to copy or publish. Availability does not verify content integrity.
+
+    Confirmed usage limits add `failure_diagnostic` (category, reason, source, and optional
+    provider-supplied reset_at). It is retained during process settlement and after failure;
+    a running status during settlement does not authorize a replacement dispatch.
+
+    Terminal `outcome` records starting and ending Git observations, commits and diff statistics,
+    local upstream comparison, and best-effort structured tool evidence for external file writes
+    and the last build/test command. Missing evidence is null, including pushed state without
+    observed publication evidence. These shared-repository observations do not establish task
+    authorship or goal completion. Old records without captured outcomes return null.
+    """
+    if brief:
+        from .task_reads import brief_status
+        return brief_status(await get_task_status(task_id, include_tail=False))
+    await _guard_task_read(task_id)
+    task = _reg().get(task_id)
+    if task is not None:
+        snapshot = task.snapshot()
+        return await asyncio.to_thread(
+            _status_payload, snapshot, include_tail=include_tail, log_dir=_reg().log_dir, task_id=task_id
+        )
+
+    record = _reg().recover(task_id)
+    if record is None:
+        raise MCPError(
+            INVALID_PARAMS,
+            f"unknown task_id: {task_id}. No task with that id is running, and no record of one "
+            f"exists under {_reg().log_dir}. Use list_tasks to see what is known.",
+        )
+    snapshot = await asyncio.to_thread(store.snapshot, _reg().log_dir, record)
+    return await asyncio.to_thread(
+        _status_payload, snapshot, include_tail=include_tail, log_dir=_reg().log_dir, task_id=task_id
+    )
+
+
+def _wait_plan(timeout_seconds: Any, until: Any, default: int) -> wait_policy.WaitPlan:
+    """Validate a wait request for any of the three waits; a bad one is INVALID_PARAMS."""
+    try:
+        return wait_policy.WaitPlan.validate(timeout_seconds, until, default)
+    except ValueError as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+
+async def _await_with_progress(task: Task, plan: wait_policy.WaitPlan, ctx: Context | None) -> str:
+    """Wait for `task`, emitting progress every few seconds; returns why the wait stopped."""
+    clock = plan.begin()
+    step = 0
+    while True:
+        if task.caller_approvals:
+            from . import approvals
+            attention = await asyncio.to_thread(approvals.summary, _reg().log_dir, task.task_id)
+            task.approval_view = attention
+            if attention.get("interaction_state"):
+                return wait_policy.STOP_ATTENTION
+        if task.done.is_set():
+            return wait_policy.STOP_TERMINAL
+        remaining = clock.remaining()
+        if remaining <= 0:
+            return plan.expiry_reason
+        try:
+            await asyncio.wait_for(task.done.wait(), timeout=min(1.0 if task.caller_approvals else wait_policy.PROGRESS_INTERVAL_SECONDS, remaining))
+            # Re-evaluate terminal versus unresolved approval attention after the
+            # event wakes us; settlement can occur during this await.
+            continue
+        except asyncio.TimeoutError:
+            pass
+
+        step += 1
+        await wait_policy.report_progress(
+            ctx.report_progress if ctx is not None else None,
+            step,
+            plan.progress_total,
+            f"{task.backend} task {task.task_id} still running ({task.duration_seconds:.0f}s elapsed)",
+        )
+
+
+def _dead_without_observed_exit(record: store.TaskRecord, status: str) -> bool:
+    """A recovered row whose process is confirmed gone and whose exit nobody observed.
+
+    Its reported status is inferred, not observed, so a wait must not present it as a settled
+    outcome. `cancelled` is exempt: that records something the bridge itself did.
+    """
+    return status != "cancelled" and store.outcome_unobserved(record) and not store.record_process_alive(record)
+
+
+def _owner_alive(record: store.TaskRecord) -> bool:
+    """Whether the harflow_mcp server that owns this record is still running."""
+    try:
+        return identity.identity_check(record.owner) == "alive"
+    except Exception:
+        return False
+
+
+def _recovered_settlement(log_dir: Path, record: store.TaskRecord) -> tuple[str, bool]:
+    """The resolved status of a recovered record and whether it is a dead, unobserved outcome.
+
+    Blocking identity checks (`ps`), so callers on the event loop run it in a thread.
+    """
+    status = store.resolve_status(log_dir, record, detail=False)[0]
+    return status, status in TERMINAL_STATUSES and _dead_without_observed_exit(record, status)
+
+
+async def _poll_recovered(
+    record: store.TaskRecord, plan: wait_policy.WaitPlan, ctx: Context | None
+) -> tuple[store.TaskRecord, str, bool]:
+    """Wait on a task from another server process by polling its liveness.
+
+    There is no completion event to await here, so this checks the recorded process on the same
+    cadence it reports progress, and re-reads the record in case that process's own server finishes
+    it first. Returns the freshest record, why the wait stopped, and whether the outcome was
+    actually observed.
+
+    Whether it has settled is decided by `store.resolve_status`, never by the record's own `status`
+    field: a record can claim `failed` about a process that is still running (see
+    `store.outcome_unobserved`), and believing it would end the wait after a single interval while
+    the caller is told the whole timeout elapsed. A process whose identity is merely uncertain is
+    not settled either; resolve_status keeps it running. A process confirmed gone without an
+    observed exit stops the wait as `observation_unavailable` (in both modes) with the status left
+    exactly as resolve_status reports it — unless its owning server is still alive, in which case
+    that server is persisting the outcome and the wait keeps observing for a bounded grace first.
+
+    A record that cannot be read or re-read for `UNAVAILABLE_ROUNDS` consecutive rounds stops an
+    `until="terminal"` wait with `observation_unavailable`, so it cannot run to the ceiling on a
+    record that can no longer change. Bounded waits keep their timeout as the only such stop.
+    """
+    clock = plan.begin()
+    step = 0
+    failed_rounds = 0
+    draining_since: float | None = None
+    while True:
+        if record.caller_approvals:
+            from . import approvals
+            attention = await asyncio.to_thread(approvals.summary, _reg().log_dir, record.task_id)
+            if attention.get("interaction_state"):
+                return record, wait_policy.STOP_ATTENTION, False
+        round_failed = False
+        try:
+            status, gone = await asyncio.to_thread(_recovered_settlement, _reg().log_dir, record)
+        except Exception:
+            status, gone = None, False
+            round_failed = True
+        if gone:
+            # Another live harflow_mcp server owning the run is still draining and persisting it:
+            # keep observing for a bounded grace before calling the outcome unobservable.
+            if draining_since is None:
+                draining_since = wait_policy.monotonic()
+            if (not await asyncio.to_thread(_owner_alive, record)
+                    or wait_policy.monotonic() - draining_since >= wait_policy.OWNER_DRAIN_GRACE_SECONDS):
+                return record, wait_policy.STOP_UNAVAILABLE, False
+        elif status in TERMINAL_STATUSES:
+            return record, wait_policy.STOP_TERMINAL, True
+        if plan.terminal_mode and round_failed and failed_rounds + 1 >= wait_policy.UNAVAILABLE_ROUNDS:
+            return record, wait_policy.STOP_UNAVAILABLE, True
+        remaining = clock.remaining()
+        if remaining <= 0:
+            return record, plan.expiry_reason, True
+        await asyncio.sleep(min(1.0 if record.caller_approvals else wait_policy.PROGRESS_INTERVAL_SECONDS, remaining))
+
+        try:
+            fresh = _reg().recover(record.task_id)
+        except Exception:
+            fresh = None
+        if fresh is not None:
+            record = fresh
+        else:
+            round_failed = True
+        failed_rounds = failed_rounds + 1 if round_failed else 0
+        if plan.terminal_mode and failed_rounds >= wait_policy.UNAVAILABLE_ROUNDS:
+            return record, wait_policy.STOP_UNAVAILABLE, True
+
+        step += 1
+        await wait_policy.report_progress(
+            ctx.report_progress if ctx is not None else None,
+            step, plan.progress_total, f"{record.task_id} still running (recovered task)",
+        )
+
+
+@mcp.tool()
+async def wait_for_task(
+    task_id: str,
+    timeout_seconds: StrictInt | None = None,
+    include_tail: bool = False,
+    until: Literal["timeout", "terminal"] = "timeout",
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """Wait for a task to finish, giving up after a timeout without disturbing the run.
+
+    Args:
+        task_id: Identifier of the task to await.
+        timeout_seconds: How long to hold, 0..3600 (default 55; 0 observes once without
+            sleeping). Honoured as asked, never silently clamped; out of range is INVALID_PARAMS.
+            Breaking change: values above 3600 are now rejected (0 is newly accepted). Your MCP
+            client applies its own request deadline, and exceeding it fails the *call* even though
+            the task keeps running — see docs/multi-task-waiting.md before asking for long holds.
+        include_tail: If True, include the full last_output_tail (20 lines × 2000 chars each);
+            if False (default), the tail is omitted for running/completed tasks and shortened
+            to 5 lines × 500 chars for failed tasks.
+        until: "timeout" (default) returns when the task settles or timeout_seconds elapses.
+            "terminal" holds until the task settles, bounded only by a 6 hour server ceiling;
+            timeout_seconds must then be omitted (passing both is INVALID_PARAMS).
+        ctx: Injected by the server; not a caller argument.
+
+    The result is the task status plus `requested_timeout_seconds`, `effective_timeout_seconds`,
+    `until`, `timed_out`, `stop_reason` (terminal, timeout, ceiling or observation_unavailable),
+    `elapsed_seconds` and `polling_guidance`. If the task is still going when the wait ends, the
+    status is "running" with a `next_step` hint: call this again, or poll get_task_status. The
+    dispatched process is never signalled, written or resumed by a wait, so waiting is always safe
+    and repeating it costs nothing. For a task recovered from an earlier server process the result
+    carries `outcome_observed` once it is finished or the wait stopped as observation_unavailable:
+    false (normally with stop_reason observation_unavailable) means its process is gone but its
+    exit was never observed, so the status is an inference — inspect it with get_task_status;
+    true otherwise. It is never present on a task that is still running. Live tasks carry it
+    (true) once finished.
+    Progress is sent every 5 seconds, best effort. Returns
+    `recent_activity` — a list of ≤ 5 one-line strings describing the most recent meaningful events
+    — for a live summary without the bulk of the raw stream.
+
+    A coding task can easily run for many minutes. Expect several calls rather than one long one.
+    Confirmed usage limits retain `failure_diagnostic` and partial output while the task owner
+    settles the process. Waiting does not retry the task or authorize a paid fallback.
+    """
+    plan = _wait_plan(timeout_seconds, until, DEFAULT_WAIT_SECONDS)
+    await _guard_task_read(task_id)
+
+    clock = plan.begin()
+    outcome_observed = True
+    task = _reg().get(task_id)
+    if task is not None:
+        stop_reason = await _await_with_progress(task, plan, ctx)
+        snapshot = task.snapshot()
+        finished = task.finished
+    else:
+        record = _reg().recover(task_id)
+        if record is None:
+            raise MCPError(
+                INVALID_PARAMS,
+                f"unknown task_id: {task_id}. Use list_tasks to see what is known.",
+            )
+        record, stop_reason, outcome_observed = await _poll_recovered(record, plan, ctx)
+        try:
+            snapshot = await asyncio.to_thread(store.snapshot, _reg().log_dir, record)
+        except Exception:
+            if stop_reason != wait_policy.STOP_UNAVAILABLE:
+                raise
+            # The record could not be observed, and the snapshot cannot be built either: report
+            # that, with nothing invented beyond what the record itself says.
+            log.warning("task %s: snapshot unavailable after the wait", task_id, exc_info=True)
+            snapshot = {
+                "task_id": record.task_id, "backend": record.backend, "session_id": record.session_id,
+                "recovered": True, "status": "unknown",
+                "note": "The task's status could not be read; inspect it with get_task_status.",
+            }
+        finished = snapshot["status"] in TERMINAL_STATUSES
+
+    elapsed = clock.elapsed()
+    if task is None and finished and stop_reason in (wait_policy.STOP_TIMEOUT, wait_policy.STOP_CEILING):
+        # The hold ran out as the record settled; apply the same unobserved-outcome rule the
+        # polling loop uses before calling that a settled outcome.
+        if await asyncio.to_thread(_dead_without_observed_exit, record, snapshot["status"]):
+            outcome_observed = False
+            # A bounded hold that ran out while the owning server is still persisting the outcome
+            # keeps `timeout` as its reason; the status is still only inferred.
+            owner_draining = (
+                stop_reason == wait_policy.STOP_TIMEOUT and await asyncio.to_thread(_owner_alive, record)
+            )
+            if not owner_draining:
+                stop_reason = wait_policy.STOP_UNAVAILABLE
+        else:
+            stop_reason = wait_policy.STOP_TERMINAL
+    elif finished and stop_reason in (wait_policy.STOP_TIMEOUT, wait_policy.STOP_CEILING):
+        # The task settled while the hold was running out: report what the snapshot says.
+        stop_reason = wait_policy.STOP_TERMINAL
+    if not finished:
+        log.info("task %s still running after %.0fs wait", task_id, elapsed)
+        if stop_reason == wait_policy.STOP_UNAVAILABLE:
+            snapshot["next_step"] = (
+                f"could not keep observing after {elapsed:.0f}s; the task is unaffected — "
+                "poll get_task_status, then call wait_for_task again"
+            )
+        else:
+            snapshot["next_step"] = (
+                f"still running after {elapsed:.0f}s and unaffected by this wait — "
+                "call wait_for_task again, or poll get_task_status"
+            )
+
+    try:
+        payload = await asyncio.to_thread(
+            _status_payload, snapshot, include_tail=include_tail, log_dir=_reg().log_dir, task_id=task_id
+        )
+    except Exception:
+        if stop_reason != wait_policy.STOP_UNAVAILABLE:
+            raise
+        log.warning("task %s: status payload unavailable after the wait", task_id, exc_info=True)
+        payload = dict(snapshot)
+    guidance = None
+    if finished or stop_reason == wait_policy.STOP_UNAVAILABLE:
+        payload["outcome_observed"] = outcome_observed
+    if not outcome_observed:
+        guidance = (
+            "The task's process is gone but its exit was never observed, so the reported status is "
+            "inferred rather than observed. Inspect it with get_task_status."
+        )
+    payload.update(wait_policy.result_fields(
+        plan, stop_reason, elapsed, "wait_for_task", "get_task_status", guidance))
+    return payload
+
+
+@mcp.tool()
+async def wait_for_tasks(
+    task_ids: list[str], mode: str = "any", timeout_seconds: StrictInt | None = None,
+    until: Literal["timeout", "terminal"] = "timeout",
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """Observe 1..32 unique task IDs, returning compact statuses in requested order.
+
+    mode any returns when at least one requested task is settled; all waits for every task.
+    timeout_seconds accepts 0..3600 (default 30) and is honoured as asked, never silently clamped;
+    out of range is INVALID_PARAMS. Zero polls immediately. until="terminal" holds until the mode
+    is satisfied, bounded by a 6 hour server ceiling, and requires timeout_seconds to be omitted.
+    Your MCP client's own request deadline still applies; see docs/multi-task-waiting.md.
+    All IDs must exist and pass caller read authorization before waiting.
+    Existence checks and initial metadata share a two-second I/O budget; undecidable existence
+    rejects the request. A final metadata observation can add up to two more seconds.
+    Returns terminal_task_ids, bounded summaries and get_task_status diagnostic references;
+    no output tails. A recovered task whose process is confirmed gone without an observed exit is
+    listed in undecidable_task_ids (status unknown) and counts as settled in both modes, as in
+    wait_for_task, after a short grace if its owning harflow_mcp server is still alive; an uncertain
+    identity keeps waiting. Under until="terminal", targets that stay unobservable for
+    3 rounds stop the wait with stop_reason observation_unavailable. Rows carry a bounded
+    failure_diagnostic (category, reason) when one exists. Also returns requested/effective
+    timeout, until, timed_out, stop_reason, elapsed_seconds and polling_guidance. Progress is sent
+    every 5 seconds. Timeout and caller cancellation never cancel or signal the observed tasks.
+    """
+    from . import task_waiting
+    try:
+        task_waiting.validate(task_ids, mode, timeout_seconds, until)
+        for task_id in task_ids:
+            await _guard_task_read(task_id)
+        return await task_waiting.wait_for_tasks(
+            _reg(), task_ids, mode, timeout_seconds,
+            ctx.report_progress if ctx is not None else None,
+            until,
+        )
+    except ValueError as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+
+@mcp.tool()
+async def continue_task(task_id: str, extra_prompt: str | None = None, notes_path: str | None = None) -> dict[str, Any]:
+    """Start a fresh session from a conclusively settled standalone task.
+
+    This differs from resume_task: it reconstructs the original assignment, latest summary and
+    captured outcome, with optional UTF-8 notes and caller follow-up preserved verbatim. Oversized
+    evidence is referenced by path. Backend, model and access settings are retained. Process exit,
+    complete output drainage and a durable terminal record must be observed; old or inferred
+    records without settlement evidence are refused. Workflow-owned tasks use workflow recovery.
+    Concurrent identical retries share one successor; mismatched or unsettled reservations fail.
+    The returned continuation_of_task_id is separate from session resume/delegation ancestry.
+
+    Follow-ups queued on the source with send_message are consumed by this call: they appear
+    verbatim, in queue order, ahead of extra_prompt (or ahead of a fixed closing line when there is
+    none), and the new task's task_started event lists their message_ids. With nothing queued the
+    call behaves exactly as without the feature. Two manual calls with the same extra_prompt and
+    notes are the same request whatever is queued: the queue is read once, when the successor is
+    reserved, and a retry returns that successor. An automatic continuation never consumes.
+    """
+    from .caller_policy import require_mutation
+    await _guard_mutation()
+    await _guard_task_read(task_id)
+    try:
+        task = await _reg().continue_task(task_id, extra_prompt, notes_path, consume_followups=True)
+    except (ValueError, OSError, backends.UnsupportedCapability) as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+    return task.brief() | {"enforcement": task.enforcement}
+
+
+@mcp.tool()
+async def resume_task(
+    task_id: str,
+    followup_prompt: str | None = None,
+    max_turns: int | None = None,
+    network: StrictBool | None = None,
+) -> dict[str, Any]:
+    """Continue a finished task's session with follow-up instructions.
+
+    Args:
+        task_id: A task that has finished; its session is the one resumed.
+        followup_prompt: What the agent should do next, with the prior context intact. Write it
+            in plain prose, as with start_task's prompt: preserve spaces and word boundaries and
+            never concatenate words to shrink the payload — the text is stored and delivered
+            exactly as submitted. Blank or all-whitespace follow-ups are rejected rather than
+            trimmed into shape. May be omitted only when the task has follow-ups queued with
+            send_message (see below); otherwise it is required.
+        max_turns: Cap on agent turns, where the backend supports one.
+        network: Optional boolean overriding the parent run's network setting for this run only:
+            None (the default) inherits what the parent was dispatched with — which is also the
+            historical default for a record written before the field existed — True asks for no
+            network barrier of harflow_mcp's own, False asks for one, honoured or refused exactly
+            as on start_task for the parent's freedom.
+
+    Follow-ups queued on the task with send_message are consumed by this call, exactly once: the
+    prompt is each queued message as a block "Queued caller follow-up N of M (message <id>, queued
+    <time>):" followed by its text exactly as sent, in queue order, a blank line, then
+    followup_prompt verbatim — or the line "End of queued caller follow-ups." when it is omitted.
+    The new task's task_started event lists the message_ids. A message cannot be consumed twice;
+    one that cannot be proven undelivered after a failed launch is kept as delivery_unknown rather
+    than re-queued.
+
+    Returns a new task_id sharing the original session, and returns immediately as with start_task.
+    Runs on the same backend, model, reasoning_effort and freedom as the original — none of these
+    can be changed on resume, since a mid-conversation switch would not honestly describe what
+    produced the reply. `network` is the one per-run override, because it is a per-run sandbox
+    setting rather than a description of the session.
+
+    Some backends mint their own session id and only disclose it mid-run; if a task died before
+    doing so, its conversation cannot be continued and this says so rather than starting a
+    disconnected one.
+    """
+    from .caller_policy import require_mutation
+    await _guard_mutation()
+    if followup_prompt is not None and (not isinstance(followup_prompt, str) or not followup_prompt.strip()):
+        raise MCPError(INVALID_PARAMS, "followup_prompt must be a non-empty string when provided")
+    # Same strict boolean rule as start_task, checked before anything is resumed.
+    if network is not None and not isinstance(network, bool):
+        raise MCPError(
+            INVALID_PARAMS,
+            f"network must be a boolean (true/false) or omitted, got {network!r}",
+        )
+
+    parent = _reg().get(task_id)
+    try:
+        if parent is not None:
+            # `finished`, not the status field: a cancellation in progress is not resumable yet.
+            if not parent.finished:
+                raise MCPError(
+                    INVALID_PARAMS,
+                    f"task {task_id} is still {parent.status}; wait for it or cancel it "
+                    "before resuming",
+                )
+            _check_turn_cap(backends.get(parent.backend), max_turns)
+            _check_network(backends.get(parent.backend), parent.freedom, network)
+            task = await _reg().resume(
+                parent, followup_prompt, max_turns=max_turns, network=network,
+                consume_followups=True,
+            )
+        else:
+            record = _reg().recover(task_id)
+            if record is None:
+                raise MCPError(INVALID_PARAMS, f"unknown task_id: {task_id}")
+            if store.record_process_alive(record):
+                raise MCPError(
+                    INVALID_PARAMS,
+                    f"task {task_id} is still running (started by an earlier harflow_mcp server "
+                    "process); wait for it or cancel it before resuming",
+                )
+            _check_turn_cap(backends.get(record.backend), max_turns)
+            _check_network(backends.get(record.backend), record.freedom, network)
+            task = await _reg().resume_record(
+                record, followup_prompt, max_turns=max_turns, network=network,
+                consume_followups=True,
+            )
+    except (SessionBusyError, SessionUnknownError, RepoUnavailableError) as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+    except (backends.UnknownBackend, backends.UnsupportedCapability) as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+    except ValueError as exc:
+        if getattr(exc, 'harflow_not_started', False) is not True:
+            raise
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+    return task.brief() | {"enforcement": task.enforcement}
+
+
+@mcp.tool()
+async def list_tasks(
+    status: str | None = None, backend: str | None = None,
+    group: str | None = None, title_contains: str | None = None, repo: str | None = None,
+    since: str | None = None, limit: StrictInt | None = None,
+    fields: list[str] | None = None, cursor: str | None = None,
+) -> list[dict[str, Any]] | dict[str, Any]:
+    """List dispatched tasks, oldest first.
+
+    Args:
+        status: Optional filter — running, completed, failed, timed_out or cancelled.
+        backend: Optional filter by agent, e.g. "codex".
+
+    Includes tasks from earlier harflow_mcp server processes, marked `recovered: true`.
+    Supplying group/title_contains/repo/since/limit/fields/cursor selects a bounded newest-first
+    indexed page (default limit 50, maximum 100), rather than the legacy oldest-first list.
+    since is an inclusive ISO8601 timestamp with timezone. Filters run before pagination;
+    cursor binds filters. Status is the indexed observation: inspect needs_reconciliation and
+    observed_exit before interpreting it. See docs/compact-task-reads.md for supported fields,
+    bounded-header matching and direct detail lookup. Listing never replays task logs.
+    When status_reconciliation_pending is true, results are incomplete: retry the same filters
+    without a cursor as directed by polling_guidance, even if has_more is false.
+    """
+    if any(value is not None for value in (group, title_contains, repo, since, limit, fields, cursor)):
+        from .task_reads import list_tasks as compact_list
+        # The bounded reader enforces managed-workflow visibility before projections.
+        managed = await _bounded_managed_workflow_reader()
+        if managed is not None:
+            raise MCPError(INVALID_PARAMS, "Managed workflow callers use list_task_page for scoped task headers")
+        try:
+            return await asyncio.to_thread(
+                compact_list, _reg().log_dir, limit=50 if limit is None else limit,
+                cursor=cursor, fields=fields, group=group, title_contains=title_contains,
+                repo=repo, status=status, backend=backend, since=since,
+            )
+        except ValueError as exc:
+            raise MCPError(INVALID_PARAMS, str(exc)) from None
+    if status is not None and status not in VALID_STATUSES:
+        raise MCPError(
+            INVALID_PARAMS, f"unknown status {status!r}; expected one of {sorted(VALID_STATUSES)}"
+        )
+    if backend is not None and backend not in backends.BACKENDS:
+        raise MCPError(
+            INVALID_PARAMS,
+            f"unknown backend {backend!r}; expected one of {sorted(backends.BACKENDS)}",
+        )
+
+    live = _reg().list()
+    entries = [task.brief() for task in live]
+    entries.extend(_reg().recovered_briefs(exclude={task.task_id for task in live}))
+    entries = await _filter_task_reads(entries)
+    entries.sort(key=lambda entry: entry["started_at"])
+
+    if status is not None:
+        entries = [entry for entry in entries if entry["status"] == status]
+    if backend is not None:
+        entries = [entry for entry in entries if entry.get("backend") == backend]
+    from .workflow_inspection import decorate_tasks
+    return await asyncio.to_thread(decorate_tasks, entries, _reg().log_dir)
+
+
+@mcp.tool()
+@bounded_request
+async def list_task_page(limit: int = 100, cursor: str | None = None, active_only: bool = False, session_id: str | None = None, task_ids: list[str] | None = None) -> dict[str, Any]:
+    """Stable newest-first persisted task headers; inspect a task for reconciled status/output.
+
+    bootstrap_pending indicates bounded indexing or requested-header refresh is preparing.
+    Preserve loaded headers and cursors while catalog_state reports preparing.
+    Active-only pages are a separate inventory and do not reorder history cursors.
+    """
+    try:
+        from .workflow_inspection import managed_page_reader, page_indexing_response
+        ready, managed = await asyncio.to_thread(managed_page_reader, _reg().log_dir)
+        if not ready:
+            return page_indexing_response(_reg().log_dir)
+        page = await asyncio.to_thread(store.list_page, _reg().log_dir, limit=limit, cursor=cursor, active_only=active_only, session_id=session_id, task_ids=task_ids)
+        from .workflow_inspection import filter_task_reads
+        visible = filter_task_reads(page['items'], managed)
+        if managed is not None:
+            page['total_active_count'] = None if page.get('bootstrap_pending') or page.get('counts_complete') is False else sum(item.get('status') not in store.TERMINAL_RECORD_STATUSES for item in visible)
+            page.pop('total_active_root_count', None)
+            page.pop('total_attention_root_count', None)
+            page.update(next_cursor=None, has_more=False)
+        page['items'] = visible
+        page['related_headers'] = filter_task_reads(page.get('related_headers', []), managed)
+        return page
+    except ValueError as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+
+@mcp.tool()
+async def cancel_task(task_id: str) -> dict[str, Any]:
+    """Stop a running task, terminating the agent and any processes it spawned, and cascade the
+    same stop to any live descendants this bridge can find.
+
+    Args:
+        task_id: Identifier of the task to stop.
+
+    Already-finished tasks are returned unchanged. Work the agent had already written to disk is
+    left in place. Tasks started by an earlier harflow_mcp server process can be stopped too, via
+    their recorded process group.
+
+    The cascade reaches nested dispatches that task's own agent made through harflow_mcp —
+    `spawned_by`/`root_task_id` lineage, best-effort, not a sandboxed guarantee — and the response
+    carries the result as `cascade`: `cancelled_descendants` (ids now cancelled),
+    `sigkill_survivors` (ids that resisted even SIGKILL), `owner_still_settling` (ids belonging to
+    a still-alive bridge server that has not settled them yet), `not_signalled` (ids that
+    could not be signalled at all, with why), and `not_recorded` (ids that were signalled but
+    whose `cancelled` status could not be written, with why — their records are left untouched).
+    """
+    from .caller_policy import require_mutation
+    await _guard_mutation()
+    if _reg().get(task_id) is None and _reg().recover(task_id) is None:
+        raise MCPError(INVALID_PARAMS, f"unknown task_id: {task_id}")
+
+    try:
+        cascade = await _reg().cancel_cascade(task_id)
+    except backends.UnsupportedCapability as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+    except control.PhaseWriteError as exc:
+        raise MCPError(
+            INTERNAL_ERROR,
+            f"the cancel for task {task_id} was not attempted because its phase file could not "
+            f"be written, so nothing was signalled: {exc}",
+        ) from None
+
+    # Snapshot the state the cascade produced, not what we started from, or the response would
+    # report a status that later calls contradict.
+    task = _reg().get(task_id)
+    if task is not None:
+        snapshot = task.snapshot()
+    else:
+        record = _reg().recover(task_id)
+        snapshot = await asyncio.to_thread(store.snapshot, _reg().log_dir, record) if record is not None else {}
+
+    response = await asyncio.to_thread(
+        _status_payload, snapshot, include_tail=False, log_dir=_reg().log_dir, task_id=task_id
+    )
+    response["cascade"] = cascade
+    return response
+
+
+@mcp.tool()
+async def get_task_events(
+    task_id: str,
+    limit: int = 50,
+    before_seq: int | None = None,
+    after_seq: int | None = None,
+    kinds: list[str] | None = None,
+) -> dict[str, Any]:
+    """Fetch normalized events from a task's event log.
+
+    Args:
+        task_id: Identifier of the task whose events to read.
+        limit: Maximum number of events to return, capped at 200. Default is 50.
+        before_seq: Exclusive upper bound — return events with seq < before_seq (older events).
+            Cannot be used with after_seq.
+        after_seq: Exclusive lower bound — return events with seq > after_seq (newer events).
+            Cannot be used with before_seq.
+        kinds: Optional filter by event kind. Must be a non-empty list of known kinds from
+            `task_started`, `assistant_text`, `assistant_delta`, `tool_call`, `tool_result`,
+            `user_message`, `usage`, `notice`, `task_finished`, `undelivered`.
+            `assistant_delta` is excluded by default unless explicitly listed. Pass `null`
+            to get all kinds except assistant_delta.
+
+    Returns events in oldest→newest order within the page, with:
+    - `events`: list of event objects with their `seq`, `kind`, and data fields
+    - `has_more`: true if there are more matching events in the requested direction
+    - `next_before_seq`: the `seq` of the oldest event in this page (for paging older)
+    - `next_after_seq`: the `seq` of the newest event in this page (for paging newer)
+    - `skipped_oversized`: count of lines > 1 MiB that were skipped (not parsed, not counted as events)
+
+    Each returned event has its long string fields truncated to 2000 chars, lists to 50 items,
+    and dict nesting to depth 4, with `"truncated": true` added if anything was cut. An event still
+    over 16 KiB after that (a very wide dict) is replaced by a stub carrying only `seq`, `kind`,
+    `observed_at`, `truncated: true`, `oversized: true` and its size in `bytes`. A page
+    stops early once its serialized size would pass 256 KiB (has_more remains true, cursors still
+    valid). A page is never empty while has_more is true.
+
+    Default (no before_seq/after_seq): newest page — the most recent events.
+    Both cursors cannot be used at once. kinds=[] or an unknown kind raises INVALID_PARAMS.
+    """
+    await _guard_task_read(task_id)
+    try:
+        store.validate_task_id(task_id)
+    except store.InvalidTaskId as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+    if limit < 1 or limit > 200:
+        raise MCPError(INVALID_PARAMS, f"limit must be between 1 and 200, got {limit}")
+
+    if before_seq is not None and after_seq is not None:
+        raise MCPError(
+            INVALID_PARAMS, "cannot specify both before_seq and after_seq; use one or the other"
+        )
+
+    if kinds is not None:
+        if not kinds:
+            raise MCPError(INVALID_PARAMS, "kinds must be a non-empty list")
+        for kind in kinds:
+            if kind not in EVENT_KINDS:
+                raise MCPError(
+                    INVALID_PARAMS,
+                    f"unknown kind {kind!r}; must be one of {sorted(EVENT_KINDS)}",
+                )
+
+    task = _reg().get(task_id)
+    record = _reg().recover(task_id) if task is None else None
+
+    if task is None and record is None:
+        raise MCPError(INVALID_PARAMS, f"unknown task_id: {task_id}")
+
+    page_result = await asyncio.to_thread(
+        read_page,
+        events_path(_reg().log_dir, task_id),
+        limit=limit,
+        before_seq=before_seq,
+        after_seq=after_seq,
+        kinds=kinds,
+    )
+
+    return {
+        "task_id": task_id,
+        "events": page_result.events,
+        "has_more": page_result.has_more,
+        "next_before_seq": page_result.next_before_seq,
+        "next_after_seq": page_result.next_after_seq,
+        "skipped_oversized": page_result.skipped_oversized,
+    }
+
+
+@mcp.tool()
+@bounded_request
+async def get_task_event_page(
+    task_id: str, limit: int = 100, cursor: str | None = None,
+    kinds: list[str] | None = None,
+) -> dict[str, Any]:
+    """Read one bounded recent or older activity page using an opaque stable cursor.
+
+    Defaults to 100 records; each call reads at most 1 MiB plus integrity anchors
+    and returns at most 256 KiB. Pass next_cursor for exactly one older page.
+    Append-only live growth preserves the historical snapshot. Replacement or
+    truncation requires reloading without a cursor. Filtering can return an empty
+    page with has_more true. An indexing response exposes no task events; retry
+    after the bounded legacy catalog bootstrap advances.
+    """
+    from .event_history import read_cursor_page
+    from . import workflow_inspection
+
+    try:
+        store.validate_task_id(task_id)
+        if type(limit) is not int or not 1 <= limit <= 200:
+            raise ValueError("limit must be between 1 and 200")
+        if kinds is not None and (not isinstance(kinds, list) or not kinds or
+                any(not isinstance(kind, str) or kind not in EVENT_KINDS for kind in kinds)):
+            raise ValueError("kinds must be a non-empty list of known event kinds")
+        ready, managed = await asyncio.to_thread(
+            workflow_inspection.managed_page_reader, _reg().log_dir)
+        if not ready:
+            pending = await asyncio.to_thread(workflow_inspection.page_indexing_response, _reg().log_dir)
+            return {"task_id": task_id, "events": [], "has_more": False,
+                    "next_cursor": None, "indexing": pending["bootstrap_pending"],
+                    **{key: pending[key] for key in ("bootstrap_pending", "history_incomplete", "authority_incomplete", "counts_complete", "note", "catalog_state") if key in pending}}
+        workflow_inspection.guard_task_read(task_id, managed)
+        from .catalog import METADATA_BYTES, Catalog
+        budget = Catalog(_reg().log_dir, store.RECORD_SUFFIX)
+        record = await asyncio.to_thread(store.read, _reg().log_dir, task_id,
+                                         include_prompt=False, metadata_byte_limit=METADATA_BYTES, metadata_budget=budget)
+        if _reg().get(task_id) is None and record is None:
+            raise ValueError(f"unknown task_id: {task_id}")
+        page = await asyncio.to_thread(read_cursor_page, events_path(_reg().log_dir, task_id),
+                                       limit=limit, cursor=cursor, kinds=kinds)
+    except ValueError as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+    return {"task_id": task_id, "events": page.events, "has_more": page.has_more,
+            "next_cursor": page.next_cursor, "snapshot_end": page.snapshot_end,
+            "live_offset": page.live_offset, "bytes_read": page.bytes_read,
+            "decoded_records": page.decoded_records, "indexing": False}
+
+
+@mcp.tool()
+async def send_message(task_id: str, text: str) -> dict[str, Any]:
+    """Add a message to a running live-input task, as if the user had typed it mid-run — or queue
+    it for the next continuation of a task that has no live input.
+
+    Args:
+        task_id: A running task whose `live_input` is true (claude started without `max_turns`,
+            or any antigravity task); or any other standalone task, running or settled, whose
+            message waits for its next continuation (see below).
+        text: The message, stored and delivered exactly as submitted — keep plain prose intact,
+            as with start_task's prompt: spaces and word boundaries preserved, never words
+            concatenated to save tokens. Blank or all-whitespace messages are rejected.
+
+    Returns `status: "queued"` — never "delivered". The task's input pump writes the message to the
+    agent: on claude, a message arriving while a turn is running is folded into that turn, and one
+    arriving while the agent is idle starts a new turn; on antigravity every written message is its
+    own turn, even mid-turn. The task's event log then records a `user_message` event
+    (`source: "injected"`) when it is written, or an `undelivered` event plus a notice if it never
+    is (the run errored or exited first).
+
+    A live task closes its own input once it is idle with nothing queued, so it still settles
+    unattended. A send after that is refused with "finished; continue with resume_task" — which is
+    exactly what to do. Also refused: a live-input task that has settled, and one whose owning
+    harflow_mcp server is not confirmed alive. The response carries `delivery: "live_input"`.
+
+    A task without live input (a backend that has none, or claude started with max_turns) is not
+    refused: the message goes to a durable per-task queue and the response is `status: "queued"`
+    with `delivery: "next_continuation"`, `message_id` and `seq`. Nothing is started and nothing is
+    delivered. The next continuation you start explicitly from that task — resume_task (its
+    followup_prompt may then be omitted) or continue_task, or `harflow-ctl resume|continue`
+    and Resume in the Monitor — consumes every queued message, verbatim and in order, exactly once
+    (see those tools for the prompt shape); an automatic continuation does not. Withdraw a message
+    that is still queued with cancel_queued_message; task status lists them all as
+    `queued_followups`. Refused with a stable code: `superseded` (a successor already exists or
+    probably exists — the error names it; send there), `message_too_large` (over 32 KiB of UTF-8),
+    `queue_full` (16 outstanding, or the queue's byte budget), `unavailable` (the queue cannot be
+    read), `invalid_text` (not valid UTF-8), `live_input` (the task has live input), `workflow_owned`
+    and the workflow-active codes (a task owned by a workflow), `unknown_task`, `lock_timeout` (try
+    again) and `write_failed`.
+    """
+    from .caller_policy import require_mutation
+    await _guard_mutation()
+    try:
+        store.validate_task_id(task_id)
+    except store.InvalidTaskId as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+    if not isinstance(text, str) or not text.strip():
+        raise MCPError(INVALID_PARAMS, "text must be a non-empty string")
+
+    try:
+        caller = await _verified_workflow_caller()
+        if caller is not None:
+            from .workflow_hooks import refuse_message_caller
+            refuse_message_caller(_reg().log_dir, caller.record.task_id)
+        task = _reg().get(task_id)
+        if task is not None:
+            return await _reg().send_message(task, text)
+        if _reg().recover(task_id) is None:
+            raise MCPError(INVALID_PARAMS, f"unknown task_id: {task_id}")
+        return await _reg().send_to_record(task_id, text)
+    except inbox.SendRefused as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+
+@mcp.tool()
+async def cancel_queued_message(task_id: str, message_id: str) -> dict[str, Any]:
+    """Withdraw a follow-up that send_message queued for a task's next continuation.
+
+    Args:
+        task_id: The task the message was queued on.
+        message_id: The `message_id` send_message returned (also listed in the task's
+            `queued_followups`).
+
+    Only a message that is still `queued` can be cancelled: one already reserved for, or consumed
+    by, a continuation is refused (`not_cancellable`), and so is an unknown id (`unknown_message`).
+    The checks are the ones send_message takes: workflow-owned tasks and workflow-managed callers
+    are refused. Returns `status: "cancelled"`; the message is kept as metadata only.
+    """
+    from .caller_policy import require_mutation
+    await _guard_mutation()
+    try:
+        store.validate_task_id(task_id)
+    except store.InvalidTaskId as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+    if not isinstance(message_id, str) or not message_id.strip():
+        raise MCPError(INVALID_PARAMS, "message_id must be a non-empty string")
+    await _guard_task_read(task_id)
+    try:
+        caller = await _verified_workflow_caller()
+        if caller is not None:
+            from .workflow_hooks import refuse_message_caller
+            refuse_message_caller(_reg().log_dir, caller.record.task_id)
+        return await _reg().cancel_queued_followup(task_id, message_id)
+    except inbox.SendRefused as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+
+async def _filter_task_reads(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    from .workflow_inspection import filter_task_reads
+    return filter_task_reads(entries, await _managed_workflow_reader())
+
+
+async def _verified_workflow_caller():
+    """Read/mutation authority must distinguish a human from failed detection."""
+    from . import lineage
+    # One metadata scan feeds both detection phases (previously three per read).
+    candidates = await asyncio.to_thread(lineage.read_candidates, _reg().log_dir)
+    caller = await _reg()._detect_caller(candidates=candidates)
+    if caller is not None:
+        return caller
+    detection = await asyncio.to_thread(
+        lineage.detect_caller_detail, _reg().log_dir, candidates=candidates
+    )
+    if detection.undecidable is not None:
+        raise MCPError(INVALID_PARAMS, "Workflow caller authority is undecidable: " + str(detection.undecidable))
+    if detection.caller is not None:
+        return detection.caller
+    if os.environ.get(lineage.ENV_TASK_ID):
+        raise MCPError(INVALID_PARAMS, "Workflow caller task identity cannot be verified")
+    return None
+
+
+async def _bounded_managed_workflow_reader() -> tuple[dict[str, Any], dict[str, Any]] | None:
+    from .workflow_inspection import managed_page_reader
+    try:
+        ready, managed = await asyncio.to_thread(managed_page_reader, _reg().log_dir)
+        if not ready:
+            raise ValueError("Workflow caller authority indexing is incomplete; retry after bounded indexing progresses")
+        return managed
+    except ValueError as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+
+async def _managed_workflow_reader() -> tuple[dict[str, Any], dict[str, Any]] | None:
+    from . import workflow_hooks, workflows
+    caller = await _verified_workflow_caller()
+    if caller is None:
+        return None
+    association = workflow_hooks.owner(_reg().log_dir, caller.record.task_id, strict=True)
+    if association is None:
+        return None
+    run = workflows.WorkflowStore(root=_reg().log_dir.parent).get_run(association["workflow_run_id"])
+    if association.get("role") != "builder" and run.get("execution_contract") != "delegation":
+        return None
+    return association, run
+
+
+async def _bounded_workflow_caller():
+    """Verify Monitor transport callers without replaying retained task metadata."""
+    from .workflow_reads import bounded_caller
+    try:
+        return await bounded_caller(_reg().log_dir)
+    except ValueError as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+
+def _managed_run_summary(run: dict[str, Any]) -> dict[str, Any]:
+    from .workflow_reads import managed_run_summary
+    return managed_run_summary(run)
+
+
+async def _guard_task_read(task_id: str) -> None:
+    from .workflow_inspection import guard_task_read
+    try:
+        guard_task_read(task_id, await _managed_workflow_reader())
+    except ValueError as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+
+def _guard_saved_workflow_authority(caller: Any, definition: dict[str, Any]) -> None:
+    from .workflow_inspection import guard_saved_workflow_authority
+    guard_saved_workflow_authority(caller, definition)
+
+
+@bounded_request
+async def _workflow_call(action: str, **kwargs: Any) -> Any:
+    from .caller_policy import require_mutation
+    from .workflow_reads import READ_ACTIONS
+    if action not in READ_ACTIONS:
+        await _guard_mutation()
+    from . import workflows
+    bounded_read = kwargs.pop("_bounded_read", False)
+    try:
+        if kwargs.get("interaction_owner") == "monitor":
+            from .takeover import caller_refusal
+            refusal = await asyncio.to_thread(caller_refusal, _reg().log_dir)
+            if refusal is not None:
+                raise ValueError("Only a verified human Monitor caller can claim monitor interaction ownership: " + refusal[1])
+        from .workflow_reads import BOUNDED_READ_ACTIONS, call
+        if action in BOUNDED_READ_ACTIONS:
+            result = await call(action, directory=_reg().log_dir, reader=_managed_workflow_reader, _bounded_read=bounded_read, **kwargs)
+            return result
+        if action == "preview":
+            caller = await _verified_workflow_caller()
+            if caller is not None:
+                from .workflow_hooks import refuse_managed
+                refuse_managed(_reg().log_dir, caller.record.task_id)
+            kwargs["repo_path"] = await _validate_repo_path(kwargs["repo_path"])
+            return await asyncio.to_thread(workflows.preview_workflow_run, **kwargs)
+        if action in {"pause", "resume", "recover", "revise_goal"}:
+            kwargs.setdefault("interaction_owner", "caller")
+        if action not in {"list", "list_runs", "list_run_page", "get_run_header", "get", "status", "inspect", "assigned_input", "detail"}:
+            from .workflow_hooks import refuse_managed
+            caller = await _verified_workflow_caller()
+            if caller is not None:
+                refuse_managed(_reg().log_dir, caller.record.task_id)
+        if action == "save" and caller is not None:
+            def guard_tree(resolved: dict[str, Any], _caller: Any = caller) -> None:
+                _guard_saved_workflow_authority(_caller, resolved)
+        else:
+            guard_tree = None
+        if action == "start":
+            if kwargs.get("freedom") is not None:
+                raise ValueError("Workflow access is defined by saved nodes; caller freedom overrides are not supported")
+            store_ = workflows.WorkflowStore()
+            kwargs["definition_snapshot"] = await asyncio.to_thread(store_.get, kwargs["name"])
+            kwargs["definition_snapshot"] = workflows.launch_definition(kwargs["definition_snapshot"], kwargs.get("overrides"))
+            # Resolve once: the pinned tree feeds both authority and the run.
+            from .workflow_references import resolve_dependencies
+            kwargs["dependency_tree"] = await asyncio.to_thread(resolve_dependencies, store_, definition=kwargs["definition_snapshot"], substitute_name=kwargs["name"])
+        if action in {"start", "build"}:
+            if not kwargs["prompt"] or not kwargs["prompt"].strip():
+                raise ValueError("prompt must be a non-empty string")
+            if action == "build":
+                workflows._candidate({**kwargs["agent"], "fallbacks": kwargs.get("fallbacks") or kwargs["agent"].get("fallbacks", [])})
+            caller = await _verified_workflow_caller()
+            if caller is not None:
+                path = await _validate_repo_path(kwargs["repo_path"]) if kwargs.get("repo_path") is not None else workflows.builder_workspace(workflows.WorkflowStore())
+                if action == "start":
+                    # Authority walks the resolved tree: every pinned node candidate at
+                    # its saved freedom with the run's network, and an orchestrator only
+                    # for the root and definitions reached through Child-mode edges.
+                    tree = kwargs["dependency_tree"]
+                    from .workflow_native_policy import plan_owner_contracts
+                    owner_plan = await asyncio.to_thread(plan_owner_contracts, kwargs["definition_snapshot"], tree, network=kwargs.get("network"))
+                    network = kwargs.get("network")
+                    for ident, entry in tree.get("workflows", {}).items():
+                        definition = entry["definition"]
+                        configs = []
+                        owner = owner_plan["owners"].get(ident)
+                        if owner is not None:
+                            configs.extend(({key: value for key, value in contract["candidate"].items() if key != "fallbacks"}, contract["freedom"], contract["network"]) for contract in owner["candidates"].values())
+                        configs.extend((n["agent"], workflows.effective_freedom(n, "unrestricted", permission_policy="saved_node"), False if network is False else n.get("network", network)) for n in definition["nodes"] if n["type"] == "agent")
+                        for config, freedom, node_network in configs:
+                            for candidate in [config, *config.get("fallbacks", [])]:
+                                backend_ = backends.get(candidate["backend"])
+                                try:
+                                    enforcement = backend_.enforcement(freedom, node_network)
+                                except backends.NestedDispatchRefused:
+                                    raise
+                                except backends.UnsupportedCapability:
+                                    # The supervisor journals this candidate refusal and tries its fallback.
+                                    continue
+                                _reg()._resolve_lineage(caller, child_enforcement=enforcement, child_backend=backend_.name, child_repo=path)
+                else:
+                    configs = [({**kwargs["agent"], "fallbacks": kwargs.get("fallbacks") or []}, "read_only", None)]
+                    for config, freedom, network in configs:
+                        for candidate in [config, *config.get("fallbacks", [])]:
+                            backend_ = backends.get(candidate["backend"])
+                            try:
+                                enforcement = backend_.enforcement(freedom, network)
+                            except backends.NestedDispatchRefused:
+                                raise
+                            except backends.UnsupportedCapability:
+                                continue
+                            _reg()._resolve_lineage(caller, child_enforcement=enforcement, child_backend=backend_.name, child_repo=path)
+        if action == "start":
+            kwargs["repo_path"] = await _validate_repo_path(kwargs["repo_path"])
+            return await workflows.start_workflow(**kwargs, _verified_caller=caller)
+        if action == "build":
+            if kwargs.get("repo_path") is not None:
+                kwargs["repo_path"] = await _validate_repo_path(kwargs["repo_path"])
+            return await workflows.build_workflow(**kwargs, _verified_caller=caller)
+        if action == "builder_followup":
+            return await workflows.followup_workflow_builder(**kwargs)
+        managed = await _managed_workflow_reader()
+        if action == "assigned_input":
+            from .workflow_node_reads import assigned_input_node
+            return await asyncio.to_thread(assigned_input_node, managed, kwargs["run_id"], kwargs["execution_id"], source_run_id=kwargs.get("source_run_id"), task_id=kwargs.get("task_id"), cursor=kwargs.get("cursor"), limit=kwargs.get("limit", 16000))
+        if managed is not None:
+            association, owned_run = managed
+            if association["role"] == "builder":
+                if action == "inspect" and kwargs["run_id"] != owned_run["workflow_run_id"]:
+                    raise ValueError("Builders may only inspect their own workflow run")
+                raise ValueError("Builders may only inspect their own draft and builder run")
+            if association["role"] != "orchestrator":
+                raise ValueError("Worker nodes cannot inspect workflow context")
+            if action == "inspect" and kwargs["run_id"] != owned_run["workflow_run_id"]:
+                raise ValueError("Orchestrators may only inspect their own workflow run")
+        store_ = workflows.WorkflowStore()
+        if action == "revise_goal":
+            from .workflow_goals import revise
+            return await asyncio.to_thread(revise, store_, **kwargs)
+        if action == "save":
+            return await asyncio.to_thread(store_.save, kwargs["name"], kwargs["definition"], kwargs.get("expected_revision"), authority_guard=guard_tree, expected_workflow_id=kwargs.get("expected_workflow_id"))
+        if action == "delete":
+            return await asyncio.to_thread(store_.delete, kwargs["name"])
+        if action == "inspect":
+            from .workflow_node_reads import inspect_node
+            return await asyncio.to_thread(inspect_node, managed, kwargs["run_id"], execution_id=kwargs["execution_id"], task_id=kwargs.get("task_id"), view=kwargs.get("view", "result"), cursor=kwargs.get("cursor"), limit=kwargs.get("limit"), before_seq=kwargs.get("before_seq"), after_seq=kwargs.get("after_seq"))
+        return await asyncio.to_thread(store_.control, action=action, **kwargs)
+    except (ValueError, KeyError, OSError, backends.UnsupportedCapability) as exc:
+        data = None
+        if hasattr(exc, "missing_references"):
+            data = {"missing_references": exc.missing_references,
+                    "missing_references_truncated": exc.missing_references_truncated}
+        raise MCPError(INVALID_PARAMS, str(exc), data=data) from None
+
+
+@mcp.tool()
+async def list_workflows() -> list[dict[str, Any]]:
+    """List saved workflow definitions."""
+    return await _workflow_call("list")
+
+
+@mcp.tool()
+async def get_workflow(name: str) -> dict[str, Any]:
+    """Read a saved workflow definition and revision."""
+    return await _workflow_call("get", name=name)
+
+
+@mcp.tool()
+async def save_workflow(name: str, definition: dict[str, Any], expected_revision: int | None = None, expected_workflow_id: str | None = None) -> dict[str, Any]:
+    """Validate and save an explicit workflow; expected_revision protects concurrent edits.
+
+    expected_workflow_id optionally checks the loaded stable identity, rejecting a
+    deleted or replaced same-name definition even if its revision matches.
+    Every save normalizes context_delivery to optimized_v1, including omitted or legacy
+    values. Historical runs retain their pinned delivery policy. Bounded delivery uses
+    session-bound acknowledgements and assigned evidence retrieval,
+    with a 64 KiB target that never silently cuts required constraints.
+    orchestrator.instructions holds the workflow purpose; Start and End have no settings.
+    on_demand_nodes is separate from connected nodes, with id/title, required instructions,
+    optional call_condition (When to call guidance), agent/fallbacks, freedom/network,
+    session_mode agent_decides|fresh|resume and execution_mode headless|prefer_subagent.
+    Standalone IDs are unique across both lists; connections cannot reference them.
+    max_on_demand_calls defaults to 5, range 1–50, per routing/question checkpoint;
+    no per-node or per-run call cap exists. Legacy Start prompt migrates on saved reads.
+    Set routing_mode="explicit". Ordinary nodes choose exactly one outgoing path.
+    Parallel execution uses paired parallel_start/parallel_end nodes with shared
+    parallel_group_id. Every branch reaches its matching end; nesting is supported.
+    A Run workflow node (type "workflow") references a saved workflow by
+    workflow_ref.workflow_id with orchestrator_mode child or current.
+    Child mode supports child_session_policy agent_decides (default), fresh, or
+    resume. Resume inherits only the latest completed compatible child
+    conversation in this immediate parent run, with fresh workflow state; an
+    unavailable explicit Resume fails closed. Current mode retains its owner. The whole
+    dependency tree is resolved and pinned at save, so missing references, cycles
+    (reported as A > B > C > A) and nesting beyond four levels are refused before
+    anything is written. Agent callers may save only access and network settings
+    within their recorded capability envelope, checked over the resolved tree;
+    verified human callers can author workflow permissions.
+    """
+    from .caller_policy import require_mutation
+    await _guard_mutation()
+    return await _workflow_call("save", name=name, definition=definition, expected_revision=expected_revision, expected_workflow_id=expected_workflow_id)
+
+
+@mcp.tool()
+async def delete_workflow(name: str) -> dict[str, Any]:
+    """Delete a definition; historical run snapshots remain available."""
+    from .caller_policy import require_mutation
+    await _guard_mutation()
+    return await _workflow_call("delete", name=name)
+
+
+@mcp.tool()
+async def workflow_builder(name: str, prompt: str, repo_path: str | None = None, agent: dict[str, Any] | None = None, fallbacks: list[dict[str, Any]] | None = None, definition: dict[str, Any] | None = None, source: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Generate a workflow, or refine the current canvas into an unsaved validated proposal.
+
+    Orchestrator instructions belong in orchestrator.instructions; Start/End are structural.
+    Optional on_demand_nodes are a separate ordered list with globally unique local id, title,
+    required nonempty instructions, optional call_condition (When to call guidance), agent,
+    freedom, network, session_mode agent_decides|fresh|resume and execution_mode.
+    They have no position, role or connections. max_on_demand_calls defaults to 5 (1–50)
+    per routing/question checkpoint; no per-node or per-run call cap exists.
+
+    Write prompt in plain prose: preserve spaces and word boundaries rather than
+    concatenating words to save tokens. The caller's prompt is retained unchanged
+    before builder input assembly.
+
+    Keep node and connection instructions concise and task-specific. HarflowMCP owns
+    runtime retries, budget enforcement, configured fallback dispatch and user interaction;
+    use existing configuration fields for limits and fallback candidates, and orchestrator
+    needs_input for clarification or approval. End means intentional workflow termination,
+    not waiting for user input. Preserve legitimate task branches and revision loops.
+
+    Layout uses top-left logical point coordinates with x/y >= 0 and a 10-point dot grid.
+    Agent nodes are 200 x 92 points (reserve 20 x 10 grid cells); Start/End are 72 x 72
+    (reserve 8 x 8 cells). Leave at least 40 points (4 cells) between node edges and avoid
+    overlaps. Arrange forward steps left to right and parallel branches on separate rows.
+    Use routing_mode="explicit". Ordinary outgoing paths are exclusive alternatives.
+    Parallel execution requires paired parallel_start/parallel_end structural nodes with
+    a shared parallel_group_id; every branch must reach its matching end. Parallel start
+    defaults to `branch_selection: "all"`. With `branch_selection: "orchestrator"`, the
+    orchestrator selects applicable issued branch continuations, assigns each selected entry
+    through `branch_assignments`, and records a non-empty `selection_reason` explaining
+    selections and exclusions before dispatch. Optional `selection_guidance` advises that
+    choice. Selected branches may contain multiple steps and properly nested groups;
+    convergence uses the frozen selected membership, including singleton selections.
+    Preserve existing node positions exactly unless the user explicitly asks to move or rearrange them.
+    Preserve any supplied Run workflow nodes exactly (workflow_ref, orchestrator_mode,
+    child_session_policy, attempts, timeout, optional); never author new Run workflow references.
+    Child session policy is agent_decides (default), fresh, or resume, and is inactive in
+    Current mode. Resume reuses only the latest completed compatible invocation in the
+    immediate parent run, with fresh workflow state; explicit Resume never falls back Fresh.
+    The canvas expands automatically; there is no fixed right or bottom boundary.
+    """
+    from .caller_policy import require_mutation
+    await _guard_mutation()
+    if agent is None:
+        raise MCPError(INVALID_PARAMS, "Builder agent is required")
+    return await _workflow_call("build", name=name, prompt=prompt, repo_path=repo_path, agent=agent, fallbacks=fallbacks, definition=definition, source=source)
+
+
+@mcp.tool()
+async def followup_workflow_builder(run_id: str, prompt: str) -> dict[str, Any]:
+    """Queue a message in the same workflow-builder conversation without saving its draft.
+
+    Keep node and connection instructions concise and task-specific. HarflowMCP owns
+    runtime retries, budget enforcement, configured fallback dispatch and user interaction;
+    use existing configuration fields for limits and fallback candidates, and orchestrator
+    needs_input for clarification or approval. End means intentional workflow termination,
+    not waiting for user input. Preserve legitimate task branches and revision loops.
+
+    Preserve spaces and word boundaries in prompt rather than compressing natural
+    prose; the caller's source text is retained unchanged before builder input assembly.
+    """
+    from .caller_policy import require_mutation
+    await _guard_mutation()
+    return await _workflow_call("builder_followup", run_id=run_id, prompt=prompt)
+
+
+@mcp.tool()
+async def apply_workflow_draft(definition: dict[str, Any], expected_draft_revision: int) -> dict[str, Any]:
+    """Publish a preview from the verified active builder task; never write a saved workflow.
+
+    Positions are top-left logical points, with finite x/y >= 0, on a 10-point dot grid.
+    Agent nodes are 200 x 92 points (reserve 20 x 10 grid cells); Start/End are 72 x 72
+    (reserve 8 x 8 cells). Leave at least 40 points (4 cells) between node edges; no overlaps.
+    Use routing_mode="explicit". Ordinary outgoing paths are exclusive alternatives.
+    Parallel execution requires paired parallel_start/parallel_end structural nodes with
+    a shared parallel_group_id; every branch must reach its matching end. Parallel start
+    defaults to `branch_selection: "all"`. With `branch_selection: "orchestrator"`, the
+    orchestrator selects applicable issued branch continuations, assigns each selected entry
+    through `branch_assignments`, and records a non-empty `selection_reason` explaining
+    selections and exclusions before dispatch. Optional `selection_guidance` advises that
+    choice. Selected branches may contain multiple steps and properly nested groups;
+    convergence uses the frozen selected membership, including singleton selections.
+    Preserve existing node positions exactly unless the user explicitly asks to move or rearrange them.
+    The canvas expands automatically; do not constrain nodes to a fixed viewport.
+    """
+    from .caller_policy import require_mutation
+    await _guard_mutation()
+    from . import workflows
+    try:
+        caller = await _reg()._detect_caller()
+        return await workflows.apply_workflow_draft(definition, expected_draft_revision, caller=caller)
+    except (ValueError, KeyError, OSError) as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+
+@mcp.tool()
+async def preview_workflow_run(name: str, repo_path: str, overrides: dict[str, Any] | None = None, network: StrictBool | None = None) -> dict[str, Any]:
+    """Preview native ownership, inherited permissions and fallback reasons without launching.
+
+    The orchestrator receives the permissions required by compatible native
+    children. Supply preview_hash as expected_preview_hash when starting to
+    refuse changed workflow, launch settings or compatibility evidence.
+    """
+    return await _workflow_call("preview", name=name, repo_path=repo_path, overrides=overrides, network=network)
+
+
+@mcp.tool()
+async def start_workflow(name: str, prompt: str, repo_path: str, overrides: dict[str, Any] | None = None, freedom: str | None = None, network: StrictBool | None = None, expected_preview_hash: str | None = None, goal: str | None = None, notify: str | None = None, notify_events: list[str] | None = None) -> dict[str, Any]:
+    """Start a durable workflow run; returns workflow_run_id rather than task_id.
+
+    Preserve spaces and word boundaries in prompt rather than compressing natural prose;
+    the caller's source text is stored unchanged before workflow input assembly.
+
+    The complete dependency tree of any Run workflow node is resolved and pinned
+    before the run is created, so later edits or deletes never reinterpret the
+    run. Children are linked runs that share the root's harness-turn budget;
+    public controls apply to the root run id only.
+
+    goal is optional nonblank text up to 64 KiB UTF-8, preserved verbatim. It complements the
+    saved purpose and request without expanding permissions. notify reserves configured root-run
+    settlement/attention webhooks before creation; notify_events selects terminal, attention,
+    or both (default). Direct callers only; see docs/task-notifications.md.
+    Completion requires an assessment
+    with evidence for the current goal revision; conflicts or unverifiable criteria need input.
+    """
+    from .caller_policy import require_mutation
+    await _guard_mutation()
+    from .workflow_responses import compact
+    from . import workflow_notifications as notifications
+    if notify is None and notify_events is not None:
+        raise MCPError(INVALID_PARAMS, 'notify_events requires notify')
+    reserved_id = None
+    notification = None
+    if notify is not None:
+        await _notification_authority()
+        try:
+            from .notifications import preflight
+            preflight(notify)
+            notifications._events(notify_events)
+        except ValueError as exc:
+            raise MCPError(INVALID_PARAMS, str(exc)) from None
+        reserved_id = uuid.uuid4().hex
+        try:
+            notification = await _notification_io(notifications.subscribe, _reg().log_dir, reserved_id, notify, notify_events, reservation=True)
+        except asyncio.CancelledError:
+            await _notification_io(notifications.discard_unstarted, _reg().log_dir, reserved_id)
+            raise
+        except Exception:
+            raise MCPError(INVALID_PARAMS, 'Notification reservation failed; no workflow was started') from None
+    launch_notice = None
+    try:
+        run = await _workflow_call("start", name=name, prompt=prompt, repo_path=repo_path, overrides=overrides, freedom=freedom, network=network, expected_preview_hash=expected_preview_hash, goal=goal, **({'run_id': reserved_id} if reserved_id else {}))
+    except (Exception, asyncio.CancelledError) as exc:
+        if reserved_id is None:
+            raise
+        # Launch can persist needs_attention before raising. A launch exception is not proof
+        # that creation failed; retain the durable subscription whenever its run exists.
+        try:
+            from .workflows import WorkflowStore
+            from .catalog import METADATA_BYTES, metadata_request
+            def read_created_run():
+                with metadata_request() as budget:
+                    return WorkflowStore().get_run(reserved_id, metadata_byte_limit=METADATA_BYTES, metadata_budget=budget)
+            run = await asyncio.to_thread(read_created_run)
+        except FileNotFoundError:
+            await _notification_io(notifications.discard_unstarted, _reg().log_dir, reserved_id)
+            raise exc
+        except Exception:
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            raise MCPError(INVALID_PARAMS, f'Start did not return normally; inspect workflow_run_id {reserved_id} before retrying') from None
+        if isinstance(exc, asyncio.CancelledError):
+            _start_notification_worker(_reg())
+            raise
+        launch_notice = 'Workflow run was created but launch did not return normally; inspect its current status before retrying'
+    result = compact(run)
+    if launch_notice is not None:
+        result.setdefault('notices', []).append(launch_notice)
+    if notification is not None:
+        try:
+            await _notification_io(notifications.activate, _reg().log_dir, reserved_id)
+            notification['state'] = 'active'
+        except Exception:
+            result.setdefault('notices', []).append('Workflow started; notification activation is pending recovery by the server worker')
+        result['notification'] = notification
+        _start_notification_worker(_reg())
+    return result
+
+
+@mcp.tool()
+async def subscribe_workflow(workflow_run_id: str, notify: str, events: list[str] | None = None) -> dict[str, Any]:
+    """Subscribe a root workflow to configured webhooks (terminal, attention, or both).
+
+    Direct callers only. Current and future points are delivered; historical points are not
+    replayed. Repeat calls update event selection. Delivery never changes workflow execution.
+    """
+    from .caller_policy import require_mutation
+    await _guard_mutation()
+    await _notification_authority()
+    from . import workflow_notifications
+    try:
+        result = await _notification_io(workflow_notifications.subscribe, _reg().log_dir, workflow_run_id, notify, events)
+    except (ValueError, OSError) as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+    _start_notification_worker(_reg())
+    return result
+
+
+@mcp.tool()
+async def unsubscribe_workflow(workflow_run_id: str, notify: str | None = None) -> dict[str, Any]:
+    """Stop future workflow delivery attempts for one configured alias, or every alias."""
+    from .caller_policy import require_mutation
+    await _guard_mutation()
+    await _notification_authority()
+    from .workflow_notifications import unsubscribe
+    try:
+        return await _notification_io(unsubscribe, _reg().log_dir, workflow_run_id, notify)
+    except ValueError as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+
+@mcp.tool()
+async def get_workflow_notifications(workflow_run_id: str) -> dict[str, Any]:
+    """Read root workflow subscriptions and at most 50 recent delivery states; direct callers only."""
+    await _notification_authority()
+    from .workflow_notifications import status
+    try:
+        return await asyncio.to_thread(status, _reg().log_dir, workflow_run_id)
+    except ValueError as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+
+@mcp.tool()
+async def revise_workflow_goal(run_id: str, goal: str, expected_revision: StrictInt) -> dict[str, Any]:
+    """Revise a root run goal at a quiescent paused or awaiting-input checkpoint.
+
+    Only the run's interaction owner can revise it. Supply the current goal_revision (0 if no
+    goal exists). Stale revisions, terminal runs and active nested/parallel work are rejected.
+    The nonblank goal is preserved verbatim up to 64 KiB UTF-8. History and completed work remain;
+    previous assessments are invalidated and replanning is required before further dispatch.
+    Each run retains at most 64 goal revisions (including the initial goal) and 1 MiB UTF-8
+    of cumulative goal text. Edits exceeding either bound are rejected; start a new run.
+    """
+    from .workflow_responses import compact
+    return compact(await _workflow_call("revise_goal", run_id=run_id, goal=goal, expected_revision=expected_revision))
+
+
+@mcp.tool()
+async def list_workflow_runs(offset: int = 0, limit: int = 10) -> dict[str, Any]:
+    """List recorded workflow runs."""
+    from .workflow_responses import compact
+    if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 20:
+        raise MCPError(INVALID_PARAMS, "offset must be nonnegative; limit must be 1–20")
+    runs = await _workflow_call("list_runs")
+    entries = []
+    for run in runs[offset:offset + limit]:
+        candidate = compact(run)
+        import json
+        if len(json.dumps({"runs": entries + [candidate]}, ensure_ascii=True).encode()) > 22 * 1024:
+            break
+        entries.append(candidate)
+    next_offset = offset + len(entries)
+    return {"response_version": 1, "runs": entries, "next_offset": next_offset if next_offset < len(runs) else None}
+
+
+@mcp.tool()
+async def list_workflow_run_page(limit: int = 100, cursor: str | None = None, active_only: bool = False, related_run_id: str | None = None, run_ids: list[str] | None = None) -> dict[str, Any]:
+    """Stable newest-first run headers, with bounded ancestor/session-owner lookups.
+
+    Deferred explicit run_ids and ancestor reads report preparation; preserve loaded headers
+    and retry the read. Oversized or unsupported metadata reports blocked diagnostics with
+    incomplete counts, without publishing unknown placeholder outcomes.
+    """
+    return await _workflow_call('list_run_page', limit=limit, cursor=cursor, active_only=active_only, related_run_id=related_run_id, run_ids=run_ids)
+
+
+@mcp.tool()
+async def get_workflow_status(workflow_run_id: str) -> dict[str, Any]:
+    """Read a workflow run's execution state and task associations.
+
+    Child runs of Run workflow nodes report their parent and root links,
+    orchestrator mode and session owner, input source, tree settling state and
+    per-execution child invocation status. Public controls on a child id are
+    refused with the root run id.
+    """
+    from .workflow_responses import compact
+    return compact(await _workflow_call("status", run_id=workflow_run_id))
+
+
+async def _wait_workflow_full(
+    workflow_run_id: str,
+    timeout_seconds: int | None = None,
+    until: str = "timeout",
+    progress: Any = None,
+) -> dict[str, Any]:
+    plan = _wait_plan(timeout_seconds, until, 30)
+    clock = plan.begin()
+    result = await _workflow_call("status", run_id=workflow_run_id)
+    # The same root retention uses for run files, not the home directory.
+    path = _reg().log_dir.parent / "workflow-runs" / (workflow_run_id + ".json")
+    def revision():
+        try:
+            stat = path.stat()
+            return stat.st_mtime_ns, stat.st_size
+        except OSError:
+            return None
+    def finish(stop_reason: str) -> dict[str, Any]:
+        return {**result, **wait_policy.result_fields(
+            plan, stop_reason, clock.elapsed(), "wait_for_workflow", "get_workflow_status")}
+    # First poll refreshes after the initial read, avoiding a read/stat race.
+    previous_revision = None
+    last_seen_revision = revision()
+    revision_changed_at = clock.started
+    failed_rounds = 0
+    step = 0
+    next_progress = clock.started + wait_policy.PROGRESS_INTERVAL_SECONDS
+    while True:
+        from .approval_runtime import workflow_summary
+        if "approval_summary" in result:
+            result["approval_summary"] = await asyncio.to_thread(workflow_summary, _reg().log_dir, workflow_run_id)
+        if result.get("approval_summary", {}).get("interaction_state"):
+            return finish(wait_policy.STOP_ATTENTION)
+        phase = wait_policy.workflow_phase(result.get("status"), bool(result.get("settling")))
+        if phase == "terminal":
+            return finish(wait_policy.STOP_TERMINAL)
+        if phase == "settling":
+            # A terminal run whose tasks are still settling is not done yet.
+            if (plan.terminal_mode
+                    and wait_policy.monotonic() - revision_changed_at >= WORKFLOW_SETTLING_STALL_SECONDS):
+                # Settling that has made no visible progress for this long is not going to.
+                return finish(wait_policy.STOP_UNAVAILABLE)
+        elif phase == "attention":
+            return finish(wait_policy.STOP_ATTENTION)
+        remaining = clock.remaining()
+        if remaining <= 0:
+            return finish(plan.expiry_reason)
+        await asyncio.sleep(min(WORKFLOW_POLL_SECONDS, max(0, remaining)))
+        current_revision = revision()
+        if current_revision is not None and current_revision != last_seen_revision:
+            last_seen_revision = current_revision
+            revision_changed_at = wait_policy.monotonic()
+        read_ok = current_revision is not None  # an unreadable run file is an unavailable read
+        if current_revision is None or current_revision != previous_revision:
+            try:
+                result = await _workflow_call("status", run_id=workflow_run_id)
+            except Exception:
+                # Keep the last good snapshot; only a failure that persists ends the wait.
+                read_ok = False
+            else:
+                if read_ok:
+                    previous_revision = current_revision
+        if read_ok:
+            failed_rounds = 0
+        else:
+            failed_rounds += 1
+            if failed_rounds >= wait_policy.UNAVAILABLE_ROUNDS:
+                return finish(wait_policy.STOP_UNAVAILABLE)
+        if wait_policy.monotonic() >= next_progress:
+            step += 1
+            next_progress = wait_policy.monotonic() + wait_policy.PROGRESS_INTERVAL_SECONDS
+            await wait_policy.report_progress(
+                progress, step, plan.progress_total,
+                f"workflow {workflow_run_id} {result.get('status')} ({clock.elapsed():.0f}s elapsed)",
+            )
+
+
+@mcp.tool()
+async def wait_for_workflow(
+    workflow_run_id: str,
+    timeout_seconds: StrictInt | None = None,
+    until: Literal["timeout", "terminal"] = "timeout",
+    ctx: Context | None = None,
+) -> dict[str, Any]:
+    """Wait for a workflow run to need attention or finish; read-only and resumable.
+
+    timeout_seconds accepts 0..3600 (default 30; 0 reads once). It is honoured as asked, never
+    silently clamped; out of range is INVALID_PARAMS. Breaking change: values above 300 used to
+    be rejected, and 46..300 were silently held for only 45 seconds. until="terminal" holds until the run stops
+    needing the wait, bounded by a 6 hour server ceiling, and requires timeout_seconds to be
+    omitted. Your MCP client's own request deadline still applies; see docs/multi-task-waiting.md.
+
+    Returns when the run is completed, failed or cancelled and has finished settling
+    (stop_reason terminal), or reaches needs_input, needs_attention or paused (stop_reason
+    attention), or the hold ends (timeout, ceiling). If reading the run keeps failing for 3
+    rounds the last good snapshot comes back with stop_reason observation_unavailable, as does an
+    until="terminal" wait on a terminal run that stays settling with its run file unchanged for
+    300 seconds. Also
+    returns requested/effective timeout, until, timed_out, elapsed_seconds and polling_guidance.
+    Progress is sent every 5 seconds, best effort. A wait never changes, resumes or cancels a run.
+    """
+    from .workflow_responses import compact
+    run = await _wait_workflow_full(
+        workflow_run_id, timeout_seconds, until, ctx.report_progress if ctx is not None else None)
+    return compact(run) | {key: run[key] for key in wait_policy.WAIT_FIELD_NAMES}
+
+
+@mcp.tool()
+async def get_workflow_run_detail(workflow_run_id: str, view: str, cursor: str | None = None, limit: int = 8000) -> dict[str, Any]:
+    """Losslessly read executions, decisions, checklist, technical_plan, definition, owner_contracts, builder_draft, generated_definition, question, reason or wait_reason.
+
+    owner_contracts contains the pinned per-owner permission plan. Concatenate chunk fields
+    then decode JSON. Cursors bind content, run and view; changed content requires restarting.
+    On-demand detail views: on_demand_nodes (configured owner-scope catalog),
+    on_demand_calls (chronological reservation/call records), on_demand_state.
+    Calls include source scope, checkpoint/origin, timing, result_ref and nullable task_id.
+    Managed orchestrators use settled node inspection for executions.
+    """
+    return await _workflow_call("detail", run_id=workflow_run_id, view=view, cursor=cursor, limit=limit)
+
+
+@mcp.tool()
+async def pause_workflow(workflow_run_id: str) -> dict[str, Any]:
+    """Stop scheduling while active steps settle."""
+    from .workflow_responses import compact
+    return compact(await _workflow_call("pause", run_id=workflow_run_id))
+
+
+@mcp.tool()
+async def resume_workflow(workflow_run_id: str, instructions: str | None = None, additional_attempts: int = 0, decision_id: str | None = None, allow_optional_review_skip: StrictBool = False) -> dict[str, Any]:
+    """Resume a caller-owned run with instructions and optional explicit attempt grants.
+
+    Preserve spaces and word boundaries in instructions rather than compressing natural
+    prose; the caller's source text is retained unchanged before workflow input assembly.
+
+    For needs_input, supply its current input_decision_id as decision_id and a nonempty answer
+    in instructions. Stale answers and live/uncertain dispatches are refused. When the root
+    run carries a forwarded question from a Run workflow descendant, the answer is applied to
+    the attention source run; additional_attempts go to that source and grant no fresh child.
+    For an orchestrator usage-limit checkpoint, instructions must exactly match an offered
+    recovery answer (fallback, fallback:2, and so on, or retry_current); this approves a Fresh
+    configured recovery candidate for the preserved decision. Other prose does not approve replacement dispatch.
+    Use pause_workflow to wait or cancel_workflow to stop. A paused quota checkpoint retains
+    its decision_id and still requires the exact offered recovery answer (fallback or retry_current) on resume.
+    Worker usage-limit recovery is selected explicitly by the
+    orchestrator using an issued retry continuation and candidate_id, within attempt limits.
+    The orchestrator may instead ask the caller to pause, cancel, or choose a configured
+    worker fallback; after the answer it must explicitly select the candidate_id.
+    Answers alone never authorize skipping. Set allow_optional_review_skip=True only to
+    permit the orchestrator to skip a current settled optional review with recorded harness
+    permission denial, when optional_review_skip_available is true. The core revalidates
+    eligibility and decision_id; this grants no retry, required-review bypass, or permissions.
+    For a forwarded question, consent applies only to its originating child checkpoint.
+    Each accepted answer replaces previous skip consent at that checkpoint: the default
+    False revokes it, while True renews it with the latest answer as its reason.
+    """
+    from .workflow_responses import compact
+    return compact(await _workflow_call("resume", run_id=workflow_run_id, instructions=instructions, additional_attempts=additional_attempts, decision_id=decision_id, allow_optional_review_skip=allow_optional_review_skip))
+
+
+@mcp.tool()
+async def read_workflow_assigned_input(workflow_run_id: str, execution_id: str, source_run_id: str | None = None, task_id: str | None = None, cursor: str | None = None, limit: int = 16000) -> dict[str, Any]:
+    """Read an immutable input explicitly assigned to your active worker activation.
+
+    Only verified managed workers may use this tool. Inputs are authorized by the persisted
+    activation allowlist and content digest, including linked child inputs with a verified
+    parent chain. Live, uncertain, unrelated, revoked, or changed inputs are refused.
+    Concatenate lossless JSON chunk fields until next_cursor is null, then decode JSON.
+    Return next_cursor as cursor; limit counts characters (default 16000, maximum 32000).
+    workflow_run_id is your own run; source_run_id optionally names a linked child run.
+    This does not grant general workflow inspection authority.
+    """
+    return await _workflow_call("assigned_input", run_id=workflow_run_id, execution_id=execution_id, source_run_id=source_run_id, task_id=task_id, cursor=cursor, limit=limit)
+
+
+@mcp.tool()
+async def inspect_workflow_node(workflow_run_id: str, execution_id: str, task_id: str | None = None, view: str = "result", cursor: str | None = None, limit: int | None = None, before_seq: int | None = None, after_seq: int | None = None) -> dict[str, Any]:
+    """Inspect any fully settled node execution in your workflow, including older executions.
+
+    Result view returns lossless JSON text chunks: concatenate chunk fields until next_cursor
+    is null, then decode JSON. Pass next_cursor back as cursor. Default payload contains the
+    normalized node_result, full raw_output, permission_denials, and optional_skip consent
+    metadata when present. Selecting task_id reads a specific fallback
+    attempt. Activity uses normalized events with before_seq/after_seq. Result limit is
+    characters (default 16000, max 32000); activity limit is events (default 50, max 200).
+    No live or uncertain execution can be inspected. Orchestrator inspect decisions may name
+    a linked child run through workflow_run_id, authorized only by a verified parent chain.
+    """
+    if view == "result" and (before_seq is not None or after_seq is not None):
+        raise MCPError(INVALID_PARAMS, "Result view uses cursor, not event sequence cursors")
+    return await _workflow_call("inspect", run_id=workflow_run_id, execution_id=execution_id, task_id=task_id, view=view, cursor=cursor, limit=limit if limit is not None else (50 if view == "activity" else 16000), before_seq=before_seq, after_seq=after_seq)
+
+
+@mcp.tool()
+async def recover_workflow(workflow_run_id: str, reason: str, additional_attempts: int = 0) -> dict[str, Any]:
+    """Explicitly recover a failed settled run; retain completed work and supply a reason.
+
+    Preserve spaces and word boundaries in reason rather than compressing natural
+    prose; the caller's source text is retained unchanged before workflow input assembly.
+    """
+    from .caller_policy import require_mutation
+    await _guard_mutation()
+    if not reason or not reason.strip():
+        raise MCPError(INVALID_PARAMS, "Recovery reason must be nonempty")
+    from .workflow_responses import compact
+    return compact(await _workflow_call("recover", run_id=workflow_run_id, instructions=reason, additional_attempts=additional_attempts))
+
+
+@mcp.tool()
+async def cancel_workflow(workflow_run_id: str) -> dict[str, Any]:
+    """Stop root scheduling and cascade cancellation to associated tasks and children.
+
+    A cancellation request returns ``cancelling`` until settlement is observed;
+    unresolved dispatches or cancellation transport errors return ``needs_attention``.
+    Child runs must be controlled through their root workflow run.
+    Human Monitor cancellation uses the local CLI verified-human boundary; it does
+    not transfer the original caller's answer, retry, or continuation ownership.
+    """
+    from .caller_policy import require_mutation
+    await _guard_mutation()
+    from .workflow_responses import compact
+    return compact(await _workflow_call("cancel", run_id=workflow_run_id))
+
+
+def main() -> None:
+    """Entry point for the `harflow-server` console script."""
+    logging.basicConfig(
+        level=os.environ.get("HARFLOW_LOG_LEVEL", "INFO").upper(),
+        # stderr, never stdout: stdout is the MCP wire.
+        stream=sys.stderr,
+        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+    )
+    available = [
+        name for name, backend in backends.BACKENDS.items() if shutil.which(backend.binary)
+    ]
+    missing = sorted(set(backends.BACKENDS) - set(available))
+    log.info("harflow_mcp starting (backends available: %s)", ", ".join(available) or "none")
+    if missing:
+        log.warning("backends unavailable, their CLI is not on PATH: %s", ", ".join(missing))
+    # Warmed here rather than left to the first dispatch, so every task's `owner` is computed
+    # once at startup instead of paying a `ps` call on the first `start_task`.
+    identity.own_identity()
+    mcp.run()
+
+
+@mcp.tool()
+async def register_artifact(path: str, kind: str, note: str = '') -> dict[str, Any]:
+    """Register an existing regular-file metadata reference for the verified calling task.
+
+    No owner parameter is accepted. Relative paths use the recorded repository; only repository,
+    allocated own scratch, and revalidated saved grants are accepted. A standalone task, or a
+    running workflow node, orchestrator turn or native-subagent controller, may register; its
+    reference is bound to that workflow execution. Builders and inherited descendants are refused.
+    A native subagent has no channel of its own: what it registers lands on its controller.
+    Notes are preserved verbatim. Kinds: screenshot, log, report, other. Paths and notes are
+    at most 4096 UTF-8 bytes; at most 100 references per task and a 1 MiB manifest.
+    A reference establishes no content validity, task success, access, copy, or publication
+    authority. No content is read, copied, hashed, previewed, or published.
+    Caller indexing is bounded; retry a catalog-preparation error to advance cold history.
+    """
+    from .caller_policy import require_mutation
+    await _guard_mutation()
+    from . import artifacts
+    from .tasks import default_log_dir
+    directory = _registry.log_dir if _registry is not None else default_log_dir()
+    try:
+        return await asyncio.to_thread(artifacts.register, directory, path, kind, note)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from exc
+
+
+@mcp.tool()
+async def get_task_artifacts(task_id: str, cursor: str | None = None, limit: int = 20) -> dict[str, Any]:
+    """Page at most 50 artifact references with current stat observations, not content verification.
+
+    Verified human callers can inspect a known standalone or workflow-bound task; task callers can
+    inspect only self. Workflow-bound items carry a `workflow` binding. Builders and inherited
+    descendants are refused (use get_workflow_artifacts for run-level reads). Cursors are task-bound and reject manifest
+    changes. Availability is available/deleted/changed/unavailable at observed_at; available does
+    not establish unchanged contents. Missing legacy manifests are empty; corrupt ones unavailable.
+    Caller indexing is bounded; retry a catalog-preparation error to advance cold history.
+    """
+    from . import artifacts
+    from .tasks import default_log_dir
+    directory = _registry.log_dir if _registry is not None else default_log_dir()
+    try:
+        return await asyncio.to_thread(artifacts.get, directory, task_id, cursor, limit)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from exc
+
+
+@mcp.tool()
+async def get_workflow_artifacts(workflow_run_id: str, cursor: str | None = None, limit: int = 20,
+                                 execution_id: str | None = None, task_id: str | None = None) -> dict[str, Any]:
+    """Page artifact references registered by the attempts of a workflow run and its linked child runs.
+
+    References are metadata only (path, kind, note, a stat observation); nothing is read, copied or
+    validated. Each item carries `workflow` (run, node, execution, role, attribution) and current
+    `availability`. `execution_id` selects one node execution; a native subagent has no channel of
+    its own, so references its controller registered appear under that execution with
+    `attribution: native_transport`. `owners` lists only owners whose references could not be read
+    (`unavailable`, `record_removed`, `run_unavailable`). `state: unavailable` with `reason`
+    `catalog_preparing` or `catalog_stale` means retry; `tree_bound_exceeded` (over 64 runs) is final.
+    Page with `next_cursor` (positional, so owners appended behind it appear only on a new pass).
+    Authority: a verified human reads any run; a delegation orchestrator reads its own run and
+    linked descendants; workers, native transports, builders and standalone task callers are refused
+    (a worker reads its own task with get_task_artifacts).
+    """
+    from . import workflow_node_reads
+    caller = await _verified_workflow_caller()
+    managed = None if caller is None else await _managed_workflow_reader()
+    try:
+        return await asyncio.to_thread(
+            workflow_node_reads.workflow_artifacts_page, managed, caller is None, _reg().log_dir, workflow_run_id,
+            cursor=cursor, limit=limit, execution_id=execution_id, task_id=task_id)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from exc
+
+
+if __name__ == "__main__":
+    main()

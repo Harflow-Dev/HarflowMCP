@@ -4,7 +4,7 @@ import uuid
 
 import pytest
 
-from polybridge import workflow_invocation as inv
+from harflow_mcp import workflow_invocation as inv
 from test_workflow_run_node_recovery import finished_child, seed_parent, store, write_run
 
 

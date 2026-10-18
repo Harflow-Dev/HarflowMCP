@@ -1,7 +1,7 @@
 """Goal launch/revision controls preserve caller text across CLI and MCP boundaries."""
 import pytest
 
-from polybridge import ctl, server
+from harflow_mcp import ctl, server
 
 
 @pytest.mark.parametrize("monitor", [False, True])

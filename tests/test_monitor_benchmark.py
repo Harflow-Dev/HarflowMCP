@@ -13,7 +13,7 @@ def test_fixture_is_deterministic_and_refuses_existing_history(tmp_path):
     first, second = tmp_path / 'a', tmp_path / 'b'
     benchmark.fixture(first, 'small')
     benchmark.fixture(second, 'small')
-    paths = sorted((first / '.polybridge').rglob('*.json'))
+    paths = sorted((first / '.harflow').rglob('*.json'))
     assert paths
     for path in paths:
         assert path.read_bytes() == (second / path.relative_to(first)).read_bytes()
@@ -22,16 +22,16 @@ def test_fixture_is_deterministic_and_refuses_existing_history(tmp_path):
 
 
 def test_large_fixture_preparation_blocked_nested_and_pagination(tmp_path):
-    from polybridge import store, workflows, workflow_responses
+    from harflow_mcp import store, workflows, workflow_responses
     benchmark.fixture(tmp_path, 'large')
-    root = tmp_path / '.polybridge'
+    root = tmp_path / '.harflow'
     first = store.list_page(root / 'tasks')
     assert first['bootstrap_pending']
     for _ in range(30):
         page = store.list_page(root / 'tasks')
         if not page['bootstrap_pending']:
             break
-    blocked = store.list_page(tmp_path / 'blocked-fixture' / '.polybridge' / 'tasks')
+    blocked = store.list_page(tmp_path / 'blocked-fixture' / '.harflow' / 'tasks')
     assert blocked['catalog_state']['status'] == 'blocked'
     assert blocked['history_incomplete'] and page['has_more']
     second = store.list_page(root / 'tasks', cursor=page['next_cursor'])

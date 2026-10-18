@@ -1,9 +1,11 @@
 # Workflows
 
+> HarflowMCP extraction status: native workflow adapters and extra writable path grants are unavailable pending no-paid requalification. Historical certification details below describe the source implementation, not qualification of the renamed product. Ordinary headless dispatch is supported. Harflow macOS integration is unavailable pending companion runtime integration.
+
 A workflow is a saved graph of independent agent steps. The orchestrator owns the original request,
 workflow context, and checklist. At each stage it selects a valid continuation and writes a focused
-assignment for the next agent. Polybridge validates, dispatches, and durably records the decision.
-Conditions are instructions to the orchestrator, not code executed by Polybridge.
+assignment for the next agent. HarflowMCP validates, dispatches, and durably records the decision.
+Conditions are instructions to the orchestrator, not code executed by HarflowMCP.
 
 ## Context delivery
 
@@ -23,7 +25,7 @@ Headless workers receive bounded evidence previews and immutable assigned-input 
 The assigned-input CLI/MCP reader returns lossless pages only for references persisted on that
 worker's execution; it does not grant access to unrelated executions or workflow controls.
 Use MCP `read_workflow_assigned_input(workflow_run_id, execution_id, ...)` or
-`polybridge-ctl workflow-assigned-input <own-run-id> <input-execution-id>`;
+`harflow-ctl workflow-assigned-input <own-run-id> <input-execution-id>`;
 for linked child evidence, supply `source_run_id` or `--source-run` respectively.
 Pass each `next_cursor` back as `cursor` or `--cursor` until it is null, concatenate the
 `chunk` strings, then decode the complete JSON. Pages default to 16,000 characters and
@@ -58,7 +60,7 @@ Reproduce the deterministic fixtures and complete fake-harness workflow comparis
 ## Native subagent execution
 
 New agent nodes default to **Prefer orchestrator subagent**. Previously saved nodes without an
-execution preference retain **Headless** execution. **Prefer orchestrator subagent** asks Polybridge to
+execution preference retain **Headless** execution. **Prefer orchestrator subagent** asks HarflowMCP to
 use a native child of the workflow's owning orchestrator when the harness and all requested node
 settings are compatible. It does not adopt the interactive chat that started the workflow.
 Unsupported combinations use headless execution before launch; the execution inspector records why.
@@ -87,7 +89,7 @@ Native support is certified per harness version and settings. Availability does 
 role, permission level, session mode, model, or parallel configuration is supported. The runner
 reports the actual execution mode rather than assuming that a preference was honored.
 
-Before a new run, Polybridge pins permissions for each owning orchestrator candidate. Only
+Before a new run, HarflowMCP pins permissions for each owning orchestrator candidate. Only
 compatible native node candidates with the same harness contribute, including matching fallback
 candidates. Current-mode child workflows contribute recursively to that same owner; Child-mode
 workflows receive separate owner contracts. A mismatched Headless worker never expands its owner's
@@ -104,7 +106,7 @@ v9 added task failure diagnostics and v8 introduced permission previews
 and pinned owner contracts. The Monitor continues decoding supported historical versions.
 The inspector retains the pinned contracts. Historical runs never acquire expanded permissions.
 
-CLI callers can inspect the same plan with `polybridge-ctl workflow-preview NAME --repo PATH --json`. Pass its `preview_hash` to `workflow-start --expected-preview-hash HASH` to reject
+CLI callers can inspect the same plan with `harflow-ctl workflow-preview NAME --repo PATH --json`. Pass its `preview_hash` to `workflow-start --expected-preview-hash HASH` to reject
 a changed definition or permission plan before launch. MCP callers use `preview_workflow_run`
 and `start_workflow(expected_preview_hash=...)`.
 
@@ -139,7 +141,7 @@ child ownership cannot advance siblings or retry as Headless.
 Certification uses real executables against isolated localhost fake APIs, without paid model calls:
 
 ```bash
-PB_CLI_INTEGRATION=1 uv run pytest tests/test_claude_native_subagent_cli.py tests/test_codex_native_subagent_cli.py
+HARFLOW_CLI_INTEGRATION=1 uv run pytest tests/test_claude_native_subagent_cli.py tests/test_codex_native_subagent_cli.py
 ```
 
 The fixtures cover successful results, parent-session resume, child permissions and failures,
@@ -147,20 +149,20 @@ Codex inherited effort, and overlapping native batches. They prove the tested tr
 permission behavior, not model quality or success on an arbitrary assignment.
 
 Vibe, OpenCode and Antigravity remain Headless with visible reasons. Native adapter follow-ups are
-tracked in [Vibe #32](https://github.com/hainayanda/Polybridge/issues/32),
-[OpenCode #33](https://github.com/hainayanda/Polybridge/issues/33) and
-[Antigravity #34](https://github.com/hainayanda/Polybridge/issues/34).
+tracked in [Vibe #32](https://github.com/Harflow-Dev/HarflowMCP/issues/32),
+[OpenCode #33](https://github.com/Harflow-Dev/HarflowMCP/issues/33) and
+[Antigravity #34](https://github.com/Harflow-Dev/HarflowMCP/issues/34).
 
 ## How the runner works
 
-Polybridge runs the control loop. The orchestrator decides what to do; worker harnesses execute
+HarflowMCP runs the control loop. The orchestrator decides what to do; worker harnesses execute
 focused assignments and return structured results. The arrows below represent harness prompts
 and final JSON messages—not MCP calls between agents.
 
 ```mermaid
 sequenceDiagram
     participant Caller as Caller (MCP tool or Monitor)
-    participant Runner as Polybridge runner
+    participant Runner as HarflowMCP runner
     participant Orchestrator as Orchestrator harness
     participant Worker as Worker harnesses
 
@@ -206,7 +208,7 @@ sequenceDiagram
 
 Only the orchestrator owns the original request and global checklist. Planning can return two
 separate outputs: task descriptors and a technical plan. Each planning node independently controls
-whether either output is required. Polybridge stores supplied outputs, shows them in the Monitor,
+whether either output is required. HarflowMCP stores supplied outputs, shows them in the Monitor,
 and includes them in later orchestrator context. A worker receives only its assignment,
 local guidance, and selected inputs. Harnesses can still use their own tools during execution.
 
@@ -226,7 +228,7 @@ shows the canvas above the same agent activity columns used by Parallel. Paralle
 those columns. Highlighting comes from recorded task state. Agent names and colored dots identify
 backends; vendor logos are unnecessary.
 
-Use **File → Create Workflow…** (⇧⌘N) to open a new editor, or **File → Run Workflow…** (⇧⌘R) to choose a saved workflow and review its existing launch settings. Opening the chooser does not start execution. **Polybridge Monitor → Settings…** (⌘,) opens settings.
+Use **File → Create Workflow…** (⇧⌘N) to open a new editor, or **File → Run Workflow…** (⇧⌘R) to choose a saved workflow and review its existing launch settings. Opening the chooser does not start execution. **Harflow → Settings…** (⌘,) opens settings.
 
 New Session and Run Workflow share one sheet: invoking either command replaces the other open sheet.
 
@@ -291,8 +293,8 @@ Fallback candidates use that node's effective access. Historical runs retain the
 ceilings. Network is a separate optional setting, subject to backend capabilities.
 Publish authorizes remote publishing when the assignment requests it, including PR creation,
 reviews and comments. It does not itself grant credentials or bypass harness approval rules.
-Polybridge owns runtime execution, not GitHub operations. Agents use their own tools under the
-user's harness settings. Polybridge injects no GitHub command approvals or publishing guidance.
+HarflowMCP owns runtime execution, not GitHub operations. Agents use their own tools under the
+user's harness settings. HarflowMCP injects no GitHub command approvals or publishing guidance.
 
 | Freedom | Claude | Codex | Vibe |
 | --- | --- | --- | --- |
@@ -301,7 +303,7 @@ user's harness settings. Polybridge injects no GitHub command approvals or publi
 | Publish | Accept-edits mode plus git commit/push allow rules only | Workspace-write sandbox; network on by default; no per-command allowlist | Auto-approve profile, equivalent to Unrestricted |
 | Unrestricted | Bypass-permissions mode; no command allowlist or denies added | Full-access mode; no command allowlist; network cannot be blocked by this sandbox | Auto-approve profile |
 
-These are Polybridge's mechanisms, not an exhaustive list of commands that can run. Inherited
+These are HarflowMCP's mechanisms, not an exhaustive list of commands that can run. Inherited
 harness/user settings, credentials, sandbox policy and network determine actual tool access.
 Claude's explicit denies win over inherited allow rules; at Publish, other commands still follow
 user permission settings. Codex does not mechanically forbid commits at Write in repo, and Vibe's
@@ -315,9 +317,9 @@ relative paths stay as configured and a subsequent config change can affect laun
 Codex Publish enables its workspace sandbox's network access; Write in repo keeps network off
 by default unless explicitly requested. Vibe and Antigravity provide no narrower publishing mode:
 Publish currently uses their unrestricted approval mechanism, as reported in access caveats.
-Polybridge does not claim identical confinement across harnesses.
+HarflowMCP does not claim identical confinement across harnesses.
 
-Write-capable tasks receive a private scratch directory through `PB_TASK_SCRATCH`, outside the
+Write-capable tasks receive a private scratch directory through `HARFLOW_TASK_SCRATCH`, outside the
 repository. Claude and Codex receive that exact directory as an additional writable root;
 read-only tasks receive no scratch grant. Each worker's internal preamble also names its exact
 absolute scratch path so it need not discover the environment variable. This context is hidden
@@ -332,7 +334,7 @@ are stored once in private full-prompt files; task metadata contains a bounded p
 explicit source reference. Detail reads verify and retrieve the complete assignment.
 Large Codex, Vibe, OpenCode, and capped Claude prompts use stdin with immediate EOF rather than argv, so complete input
 results do not exceed operating-system argument limits. Vibe trims outer whitespace on stdin;
-Polybridge explicitly refuses large Vibe assignments with outer whitespace rather than altering them.
+HarflowMCP explicitly refuses large Vibe assignments with outer whitespace rather than altering them.
 
 For example, a Task step that updates a Jira issue can request `"freedom": "publish"`.
 The saved node access is authoritative for new runs. Callers cannot override it with
@@ -345,8 +347,8 @@ session mode, and attempt budget. The orchestrator has its own candidate list, s
 workflow and overrideable when launching. Workflow generation has a separate candidate list.
 
 MCP tools expose definition list/get/save/delete, `workflow_builder`, run list/start/status/wait,
-inspection, recovery, and pause/resume/cancel. The Monitor acts through matching `polybridge-ctl workflow-*` commands;
-it never writes Polybridge state directly. Definition saves use an expected revision to reject
+inspection, recovery, and pause/resume/cancel. The Monitor acts through matching `harflow-ctl workflow-*` commands;
+it never writes HarflowMCP state directly. Definition saves use an expected revision to reject
 concurrent edits. Editing or deleting a definition does not change existing run snapshots.
 
 MCP run start/status/wait/control responses use `response_version: 1` compact projections,
@@ -382,20 +384,20 @@ Repeat the wait while the run is active, and see
 For example, load the supplied [implementation/review workflow](../examples/workflows/implement-review.json):
 
 ```bash
-polybridge-ctl workflow-save implement-review \
+harflow-ctl workflow-save implement-review \
   --definition examples/workflows/implement-review.json --expected-revision 0 --json
-polybridge-ctl workflow-start implement-review --repo /absolute/path/to/repo \
+harflow-ctl workflow-start implement-review --repo /absolute/path/to/repo \
   --prompt "Implement the requested change" --json
-polybridge-ctl workflow-status <workflow_run_id> --json
-polybridge-ctl workflow-pause <workflow_run_id> --json
-polybridge-ctl workflow-resume <workflow_run_id> \
+harflow-ctl workflow-status <workflow_run_id> --json
+harflow-ctl workflow-pause <workflow_run_id> --json
+harflow-ctl workflow-resume <workflow_run_id> \
   --instructions "Address the reported failure" --additional-attempts 1 --json
-polybridge-ctl workflow-resume <workflow_run_id> \
+harflow-ctl workflow-resume <workflow_run_id> \
   --instructions-file /absolute/path/to/answer.txt --decision-id EXACT_DECISION_ID --json
 ```
 
 Validate an editable graph before saving with
-`polybridge-ctl workflow-validate --definition workflow.json --json`.
+`harflow-ctl workflow-validate --definition workflow.json --json`.
 It returns `result.valid` and an optional `result.error` without saving definitions or run state.
 Missing dependencies also return bounded `missing_references` diagnostics with the owning
 workflow, node and dependency path, plus `missing_references_truncated` when the diagnostic
@@ -412,7 +414,7 @@ Every node must be reachable from Start and have a forward path to End, includin
 `workflow-delete` removes one. To generate a draft:
 
 ```bash
-polybridge-ctl workflow-build my-workflow --repo /absolute/path/to/repo \
+harflow-ctl workflow-build my-workflow --repo /absolute/path/to/repo \
   --prompt "Plan, implement, review, then run tests" --backend codex \
   --fallbacks '[{"backend":"claude","model":"opus","reasoning_effort":"high"}]' --json
 ```
@@ -421,7 +423,7 @@ Definition JSON uses `nodes` and `connections`. An agent node's `role` is `plann
 `implementation`, `review`, or `task`; its `agent.fallbacks` is an ordered array. `session_mode`
 is `agent_decides`, `resume`, `fresh`, or `continue_previous` (default `agent_decides`). Connections specify `source`, `target`, `condition`, and an optional
 `default` fallback. Definitions use `routing_mode: explicit`. A `parallel_start` and its
-`parallel_end` share a stable `parallel_group_id`. Polybridge derives retry direction from
+`parallel_end` share a stable `parallel_group_id`. HarflowMCP derives retry direction from
 topology; callers do not configure a backward flag. Historical snapshots retain their original
 routing interpreter. Legacy `join` nodes remain readable in historical records. Nodes store top-left canvas coordinates in `position: {x, y}`. Coordinates must be finite and nonnegative; the canvas expands automatically. Snapping uses a 10-point grid. Background dots are visual guides: their spacing adapts to zoom in multiples of that grid, keeping at least 20 points between dots on screen. Only visible dots are rendered, and their screen size stays constant. Agent nodes are 200 × 92 points (reserve 20 × 10 cells); Start and End are 72 × 72 points (reserve 8 × 8 cells). Builder agents are guided to leave at least 40 points between node edges and preserve existing positions exactly unless the user explicitly asks to move or rearrange nodes.
 
@@ -559,7 +561,7 @@ Tests pin exact answer routing and recovery independently of model behavior.
 
 Outgoing connections on Start, agent nodes, and Parallel end are **exclusive alternatives**. The
 orchestrator chooses exactly one valid connection, or asks for input/stops when no justified path
-is available. Choosing multiple alternatives is a protocol error: Polybridge dispatches nothing
+is available. Choosing multiple alternatives is a protocol error: HarflowMCP dispatches nothing
 and requests a correction within the decision-attempt allowance.
 
 Parallel start opens a group with **Branch selection** set to **All branches** by default. This
@@ -575,7 +577,7 @@ invocation and can select differently. To skip the whole group, use an alternati
 Applicability selection does not make selected required work optional or relax failure-bypass
 rules: selecting a branch with optional work requires an actually selected required sibling, and an optional-only selection is rejected before dispatch.
 
-Outgoing arrow instructions describe branch purpose. Polybridge obtains focused assignments for
+Outgoing arrow instructions describe branch purpose. HarflowMCP obtains focused assignments for
 ready workers; structural traversal needs no assignment. `max_parallel` limits concurrent harness
 turns across the workflow tree, so a group remains valid when branches execute one at a time.
 
@@ -631,7 +633,7 @@ Retry loops may remain inside a branch, but cannot cross an open parallel bounda
 whole closed group creates a new generation within the existing execution and transition budgets.
 A retry arrow may share a step with forward alternatives, but selecting it remains exclusive.
 
-Polybridge infers a retry when an arrow returns to a step that every path to its source passes
+HarflowMCP infers a retry when an arrow returns to a step that every path to its source passes
 through. Canvas placement does not determine direction; ambiguous cycles are rejected.
 Retry connections repeat a step. Workflow candidates default to a 100-turn cap where supported (Claude and Vibe).
 Explicit limits are preserved; backends without turn-cap support, including Codex, do not
@@ -645,20 +647,20 @@ activations per visit, 100 transitions per run, and four concurrently active nod
 writing workflow steps require exclusive access. These leases coordinate workflow runs, not
 manual edits or unrelated tools.
 
-**Agent decides** lets the orchestrator choose Fresh, Resume, or Continue previous node for each assignment. Polybridge
+**Agent decides** lets the orchestrator choose Fresh, Resume, or Continue previous node for each assignment. HarflowMCP
 issues compatible available session references in decision context. A Resume assignment names the
 issued `resume_task_id`; arbitrary, busy, or incompatible sessions are rejected. **Fresh** starts
 an independent conversation with only the assignment and selected input results. **Resume** keeps
 an eligible candidate's prior conversation. Explicit node policies remain available. A different
 fallback candidate starts fresh for a Fresh execution. When a selected Resume attempt encounters a
-confirmed availability failure, Polybridge asks the orchestrator for an explicit Fresh decision
+confirmed availability failure, HarflowMCP asks the orchestrator for an explicit Fresh decision
 within the same node execution or clarification question. This happens automatically without asking
-the caller for routine provider outages; Polybridge never silently replaces Resume with Fresh.
+the caller for routine provider outages; HarflowMCP never silently replaces Resume with Fresh.
 Unknown execution outcomes require reconciliation, and the orchestrator can still choose
 `needs_input` when caller guidance is necessary.
 
 For example, after a confirmed outage while resuming an asking worker, the orchestrator may answer
-the same question with `session_mode: fresh`. Polybridge reconstructs the original assignment,
+the same question with `session_mode: fresh`. HarflowMCP reconstructs the original assignment,
 observed progress, and clarification history in the new session. For an ordinary node continuation,
 the orchestrator selects the issued Fresh execution continuation with a new focused prompt. These
 choices retain the activation identity and attempt history; they do not replay completed graph
@@ -679,7 +681,7 @@ Changing units preserves the limit; typed fractional durations round to the near
 
 Agent nodes may set `timeout_seconds` to a positive integer; omitted, null, or zero disables it.
 The deadline applies to each candidate execution. Expiry counts against the current visit's
-attempt allowance. Polybridge cancels the task and its descendants, confirms settlement, and
+attempt allowance. HarflowMCP cancels the task and its descendants, confirms settlement, and
 records a timeout notice before using an ordered fallback. Unconfirmed cancellation pauses for
 attention instead of starting overlapping work. The cancellation allowance includes SIGTERM
 escalation and drain time. A recovered positively settled timeout still permits an unused fallback
@@ -698,7 +700,7 @@ to perform the review uses worker `status: blocked` and does not require a revie
 ## Fallbacks
 
 Fallback candidates are ordered and may include different backends or different models on the
-same backend. Polybridge advances only after a confirmed availability failure: missing binary,
+same backend. HarflowMCP advances only after a confirmed availability failure: missing binary,
 unavailable model, or a recognized provider outage. Usage limits use the explicit recovery path
 below. Unsupported configuration is a
 validation error. Failed tests, generic crashes, or an agent saying it is unavailable do
@@ -715,7 +717,7 @@ the switch reason are recorded.
 Claude, Codex, opencode, Vibe, and Antigravity interpret their own authoritative usage-limit
 signals. A confirmed rejection remains a failure even after useful progress or an earlier
 successful turn. Warnings, assistant/tool prose, and silence do not establish a usage limit.
-Unsupported signal shapes remain unverified; Polybridge does not guess a reset time.
+Unsupported signal shapes remain unverified; HarflowMCP does not guess a reset time.
 
 Usage limits never authorize automatic availability fallback, including older stderr and stream
 quota forms. Verified provider envelopes and error-prefixed stderr produce structured recovery
@@ -733,7 +735,7 @@ The diagnostic is retained with partial output and
 session identity. Monitor keeps it in task notices and workflow recovery state after a notification
 is dismissed.
 
-Polybridge stops forwarding input and reports queued messages as undelivered. It allows five
+HarflowMCP stops forwarding input and reports queued messages as undelivered. It allows five
 seconds for the affected process to exit before termination. The owning server uses its retained
 child-process handle, as it does for local cancellation; a CLI changing its process title does not
 prevent settlement. Recovered cross-process control still requires verified process identity. A
@@ -744,7 +746,7 @@ failed outcome even if the owner never persisted its exit receipt. Worker recove
 the orchestrator; control recovery restores the caller question before another control turn.
 
 For a settled worker limit, the orchestrator receives the failure and eligible configured
-candidates. Polybridge does not automatically launch the next candidate. The orchestrator must
+candidates. HarflowMCP does not automatically launch the next candidate. The orchestrator must
 explicitly choose an issued `retry_execution` continuation and its `candidate_id` from
 `available_candidates`, using a Fresh session within the existing attempt budget. It may instead
 ask the caller to pause, cancel, or continue with a fallback for the affected node. The caller's
@@ -786,7 +788,7 @@ can die between the initial scan and lock acquisition. Active and Needs attentio
 protect their referenced task records from ordinary retention. Finished run history retains compact
 outcomes; expired activity logs are shown as unavailable.
 
-Native child activity logs follow `PB_RETENTION_DAYS` too, despite having no process task record.
+Native child activity logs follow `HARFLOW_RETENTION_DAYS` too, despite having no process task record.
 Cleanup requires a fully settled workflow tree and both the execution's completion time and
 the log's last write to be older than the retention period. Active, uncertain, or incompletely
 recorded trees retain their evidence. Compact execution outcomes remain in workflow history.
@@ -794,7 +796,7 @@ recorded trees retain their evidence. Compact execution outcomes remain in workf
 ## Delegation contracts and inspection
 
 The orchestrator receives a durable decision ID, current stage, node responsibilities and access,
-settled input results, checklist, recent decisions, and Polybridge-issued valid continuations.
+settled input results, checklist, recent decisions, and HarflowMCP-issued valid continuations.
 Its JSON decision contains `decision_id`, `action`, and `reason`. Actions are `continue`,
 `complete`, `failed`, `needs_input`, `inspect`, or `answer`. Continuing selects `continuation_id` entries and supplies
 an assignment `prompt` for each agent execution, optional additional result references, and
@@ -813,7 +815,7 @@ returns `branch_assignments`: every issued entry under All branches, or one or m
 entries under Orchestrator selects. Selectable groups also require `selection_reason` explaining
 selection and exclusions. Executable entries receive separately written assignments; structural
 entries carry their own validated nested branch bundle. Branches can perform different jobs and
-do not share a prompt. Polybridge validates the complete bundle before advancing or dispatching
+do not share a prompt. HarflowMCP validates the complete bundle before advancing or dispatching
 anything, including nested groups. A single unconditional structural exit advances through normal
 transition accounting. A successful worker with one unconditional path to End goes straight to
 the completion decision, where the orchestrator still checks results and owns checklist updates.
@@ -825,7 +827,7 @@ warnings alongside the accepted decision; empty assignment-reference fields on s
 are harmless. Invalid identities, continuation selections, required fields, nonempty misplaced
 assignment context, and permission or harness overrides remain errors.
 
-An agent continuation decision looks like this (IDs are issued by Polybridge):
+An agent continuation decision looks like this (IDs are issued by HarflowMCP):
 
 ```json
 {
@@ -876,7 +878,7 @@ nonempty `checklist_reason` instead of inventing tasks. This is explicit evidenc
 orchestrator to assess when deciding whether to continue, retry, fail, or ask for input; it never
 marks existing checklist items completed. Even with one unconditional exit, this proposal gets
 an orchestrator decision: it may accept the brief or select an issued replan retry within the
-node attempt budget. Polybridge never retries the planning worker automatically.
+node attempt budget. HarflowMCP never retries the planning worker automatically.
 Omitted optional outputs preserve the previously stored
 checklist and technical plan. A normal planning result looks like:
 
@@ -891,12 +893,12 @@ checklist and technical plan. A normal planning result looks like:
 }
 ```
 
-Polybridge preserves the complete technical plan and its source execution. The immediate successor
+HarflowMCP preserves the complete technical plan and its source execution. The immediate successor
 receives both the plan and checklist descriptors in the planning result; the orchestrator owns
 checklist completion. The right sidebar shows the plan and live checklist for each workflow run.
 
 A reviewer finding issues or a test step reporting failing tests can still execute successfully.
-Polybridge accepts one unambiguous JSON contract surrounded by prose or a code fence. Conflicting
+HarflowMCP accepts one unambiguous JSON contract surrounded by prose or a code fence. Conflicting
 objects remain protocol failures, with the complete raw output retained. New runs accept a complete
 result envelope followed by unrelated text or surplus formatting; a missing or malformed envelope
 still fails the protocol. Historical run snapshots retain their recorded runner policy.
@@ -912,7 +914,7 @@ without granting additional tool access. An `asking`
 result contains `result.question` and optional `result.context`. The worker yields; the runner
 persists the question and marks its execution `waiting_for_answer`, without treating it as a final
 result. The orchestrator returns `answer` with the issued question ID and a focused answer prompt.
-Polybridge resumes that same execution's conversation; repeated questions remain recorded until a
+HarflowMCP resumes that same execution's conversation; repeated questions remain recorded until a
 final result. Each node defaults to ten clarification questions (`max_context_questions`),
 so repeated questioning cannot run indefinitely. Answering does not create an extra graph activation. Parallel workers may ask
 independently; questions are serialized through the orchestrator while already-running siblings
@@ -940,7 +942,7 @@ The clarification decision uses the issued decision and question IDs:
 }
 ```
 
-Invalid decisions dispatch nothing. Polybridge returns the error and valid choices, with three
+Invalid decisions dispatch nothing. HarflowMCP returns the error and valid choices, with three
 total decision attempts by default (Start setting, range 1–10). This allowance resets after a valid
 decision and is separate from node retries. In new runs, exhaustion pauses scheduling with
 `needs_attention` and preserves the last decision error in `attention_reason`. The caller can
@@ -950,11 +952,11 @@ a decision attempt. Each decision checkpoint has a bounded inspection allowance 
 configurable 1–1000); repeated inspection cannot indefinitely postpone a decision. `needs_input` includes a question and suspends scheduling; running siblings settle,
 and status reports whether settling remains. Resume rejects live or uncertain dispatches.
 
-The orchestrator controls the runner through its final JSON response, not by calling Polybridge
+The orchestrator controls the runner through its final JSON response, not by calling HarflowMCP
 control tools. For inspection it returns `action: inspect`, its `decision_id`, a `reason`, and a
 `requests` array of `{execution_id, task_id?, view?, cursor?, limit?, before_seq?, after_seq?}`.
 The runner validates and serves those requests, then gives their bounded results back to the same
-decision point. Harness tools remain available for other authorized work; no Polybridge MCP call
+decision point. Harness tools remain available for other authorized work; no HarflowMCP MCP call
 is required for workflow routing, answering questions, or inspection.
 
 The public `inspect_workflow_node(workflow_run_id, execution_id, ...)` tool remains available to
@@ -972,11 +974,11 @@ only tasks from their own execution; workflow context reads are refused. Ordinar
 existing read access. These are API boundaries, not filesystem isolation.
 
 ```bash
-polybridge-ctl workflow-inspect RUN_ID EXECUTION_ID --view result --json
-polybridge-ctl workflow-inspect RUN_ID EXECUTION_ID --task-id TASK_ID --view activity --json
-polybridge-ctl workflow-recover RUN_ID --reason "Inspected and resolved the outage" --json
-polybridge-ctl workflow-recover RUN_ID --reason-file /absolute/path/to/recovery.txt --json
-polybridge-ctl workflow-migrate --json
+harflow-ctl workflow-inspect RUN_ID EXECUTION_ID --view result --json
+harflow-ctl workflow-inspect RUN_ID EXECUTION_ID --task-id TASK_ID --view activity --json
+harflow-ctl workflow-recover RUN_ID --reason "Inspected and resolved the outage" --json
+harflow-ctl workflow-recover RUN_ID --reason-file /absolute/path/to/recovery.txt --json
+harflow-ctl workflow-migrate --json
 ```
 
 For large control text, `workflow-resume --instructions-file` and `workflow-recover --reason-file`
@@ -1020,7 +1022,7 @@ Resume of `needs_input` includes the exact published `input_decision_id` as `dec
 later question. Monitor CLI controls also include `--monitor`. The caller's original request
 remains the workflow prompt; answer prompts are stored separately for their individual task attempts.
 
-If a supervisor encounters an exception while cancelling, Polybridge makes a bounded attempt to
+If a supervisor encounters an exception while cancelling, HarflowMCP makes a bounded attempt to
 settle its active dispatches, then records `needs_attention` with the cancellation error. It does
 not repeatedly relaunch the failed cancellation supervisor. Existing task records remain
 available for reconciliation; uncertain dispatches cannot be resumed or repeated.
@@ -1039,10 +1041,10 @@ them with the latest reason. Grants for other checkpoints are preserved. Forward
 this replacement at the originating child checkpoint, and retrying the same delivered answer is
 idempotent. In a Monitor-owned run, the separate **Proceed without optional reviewer**
 button makes that choice; ordinary **Resume** does not. The availability indicator is only a hint:
-Polybridge rechecks eligibility and the current decision when accepting the request.
+HarflowMCP rechecks eligibility and the current decision when accepting the request.
 
 ```bash
-polybridge-ctl workflow-resume RUN_ID --decision-id CURRENT_DECISION_ID \
+harflow-ctl workflow-resume RUN_ID --decision-id CURRENT_DECISION_ID \
   --instructions 'Proceed without this reviewer; reconcile the available reviews.' \
   --allow-optional-review-skip --json
 ```
@@ -1087,9 +1089,9 @@ cancelled before cutover; migration does not cancel them automatically.
 
 ## Storage and permissions
 
-Definitions live under `~/.polybridge/workflows/`. Immutable run snapshots, task associations,
-decisions, and control history live under `~/.polybridge/workflow-runs/`. Ordinary agent streams
-remain under `~/.polybridge/tasks/` and use the existing event format.
+Definitions live under `~/.harflow/workflows/`. Immutable run snapshots, task associations,
+decisions, and control history live under `~/.harflow/workflow-runs/`. Ordinary agent streams
+remain under `~/.harflow/tasks/` and use the existing event format.
 
 The orchestrator recommends decisions; it cannot grant additional node permissions. Builder agents
 remain read-only. New workflow orchestrators use their pinned per-owner permission contracts,
@@ -1139,7 +1141,7 @@ saved baseline and revision, so Save still detects concurrent updates.
 CLI callers can pass a current canvas file (it may be incomplete) and optional saved metadata:
 
 ```sh
-polybridge-ctl workflow-build my-workflow --repo /absolute/path/to/repo \
+harflow-ctl workflow-build my-workflow --repo /absolute/path/to/repo \
   --prompt "Add a review step" --backend codex --definition canvas.json \
   --source '{"name":"my-workflow","revision":3,"saved_definition":{}}' --json
 ```
@@ -1162,7 +1164,7 @@ Chat uses the same task composer. Messages join the current turn when supported,
 the next builder turn in the same run and conversation. CLI callers use:
 
 ```sh
-polybridge-ctl workflow-builder-followup RUN_ID --prompt "Add tests after implementation" --json
+harflow-ctl workflow-builder-followup RUN_ID --prompt "Add tests after implementation" --json
 ```
 
 The builder can publish a preview through MCP `apply_workflow_draft(definition,
@@ -1175,8 +1177,8 @@ and Save in the editor.
 
 Creation, canvas edits and follow-up builder turns share concise authoring guidance. Describe each
 node's task responsibility and required evidence, and each connection's task-specific condition.
-Polybridge supplies shared role instructions and the result protocol; do not repeat them in nodes.
-Polybridge also manages runtime retries, budget enforcement, configured fallback dispatch and user
+HarflowMCP supplies shared role instructions and the result protocol; do not repeat them in nodes.
+HarflowMCP also manages runtime retries, budget enforcement, configured fallback dispatch and user
 interaction. Put requested limits and fallback candidates in existing configuration fields, such as
 `max_attempts`, `max_retries`, `max_transitions` and `fallbacks`, instead of adding runtime-recovery
 branches or repeated instructions.
@@ -1213,8 +1215,8 @@ instructions and does not change the saved workflow's limit. The workflow valida
 canonical definition so the inspector uses engine-inferred retry metadata rather than stale flags.
 
 Creating or editing a workflow does not require a repository. Omit `--repo` from
-`workflow-build` (or omit `repo_path` from `workflow_builder`) to use Polybridge's
-private `~/.polybridge/builder-workspace`. The builder remains read-only, and
+`workflow-build` (or omit `repo_path` from `workflow_builder`) to use HarflowMCP's
+private `~/.harflow/builder-workspace`. The builder remains read-only, and
 followups reuse that workspace. Supply a repository when the builder needs its
 instructions or skills; supplied paths still receive the normal repository
 validation. Running a workflow still requires a repository.
@@ -1230,23 +1232,23 @@ contain the complete execution payload.
 Settings → Harnesses → MCP approvals lists native global approval rules for each harness.
 Use `server/tool` for an individual MCP tool or `server/*` for a server-wide rule.
 Vibe requires individual tool entries. Adding or removing a rule requires explicit confirmation;
-Polybridge does not approve tools automatically after an agent error. The recovery action offers
-approval for Polybridge tools and does not restart or resume the agent automatically.
+HarflowMCP does not approve tools automatically after an agent error. The recovery action offers
+approval for HarflowMCP tools and does not restart or resume the agent automatically.
 
-The CLI equivalent is `polybridge-ctl mcp-allowlist --backend codex --json`, with
-`--allow polybridge/apply_workflow_draft` or `--remove polybridge/apply_workflow_draft`.
+The CLI equivalent is `harflow-ctl mcp-allowlist --backend codex --json`, with
+`--allow harflow/apply_workflow_draft` or `--remove harflow/apply_workflow_draft`.
 Rules are written to the harness's native global configuration, with a private backup of the
 previous file. Harness deny/ask rules, agent profiles and project configuration may still take
 precedence. New sessions load updated configuration. Removing an approval restores the harness's
 fallback policy rather than restoring a previous explicit per-tool policy.
 
 The standalone Orchestrator owns `orchestrator.instructions`, describing the workflow's purpose.
-Polybridge includes these instructions in decision context alongside the runtime request.
+HarflowMCP includes these instructions in decision context alongside the runtime request.
 Start and End are structural nodes with no settings. Workflow name and description are in the
 editor's ⋯ menu. Saved legacy Start `prompt` text moves verbatim to orchestrator instructions
 unless explicit instructions already exist. Historical run snapshots retain their original shape.
 
-A candidate can also fall back when Polybridge positively refuses a harness capability before
+A candidate can also fall back when HarflowMCP positively refuses a harness capability before
 starting its process, such as an unsupported turn cap or reasoning control. An unsupported primary
 configuration is accepted only when an ordered fallback exists. Each fallback keeps the same
 effective access and network limits. Security lineage refusals, repository/session problems,
@@ -1282,7 +1284,7 @@ Protocol failures, permission failures, cancellation and uncertain dispatches do
 silently retry. Structural continuations accept only their continuation ID; session
 fields belong to executable assignments.
 
-Polybridge records requested and effective harness settings separately from observed
+HarflowMCP records requested and effective harness settings separately from observed
 runtime identity. Workers do not need to certify a model or effort they cannot inspect.
 Only a returned review verdict counts as a review; a blocked result is evidence of a
 blocker, not an approval.
@@ -1300,7 +1302,7 @@ agent chats, including in fullscreen.
 
 ### Recordless dispatch reconciliation
 
-Reservations record whether Polybridge is still preparing or has requested a spawn. A restart
+Reservations record whether HarflowMCP is still preparing or has requested a spawn. A restart
 can settle a recordless preparing reservation as not started. Once spawning was requested,
 missing records remain uncertain: they never expire automatically or permit redispatch.
 Known exec failures before a process exists are recorded as not started.
@@ -1309,7 +1311,7 @@ After independently confirming that no process survived, a human can release a n
 recordless reservation with:
 
 ```sh
-polybridge-ctl workflow-abandon-dispatch RUN_ID EXECUTION_ID TASK_ID \
+harflow-ctl workflow-abandon-dispatch RUN_ID EXECUTION_ID TASK_ID \
   --reason "Confirmed the process is stopped" --confirm-no-process
 ```
 
@@ -1548,7 +1550,7 @@ approval; CLI registration requires bridge-state writes and `ps`, which OS sandb
 Native children have no independent channel; transport registrations identify the hosting
 transport and do not attribute child authorship.
 
-Use `get_workflow_artifacts` or `polybridge-ctl workflow-artifacts RUN --execution-id EXEC --json`
+Use `get_workflow_artifacts` or `harflow-ctl workflow-artifacts RUN --execution-id EXEC --json`
 for bounded paged reads (including linked child runs). The Monitor shows references for the
 selected execution with explicit loading and availability states. Delegation orchestrators can
 read their run and descendants; workers/native controls can read only their own task references.
@@ -1576,7 +1578,7 @@ Direct callers can use `start_workflow(..., notify="builds")` or
 Configured destinations receive root settlement and current attention events;
 node completion and caller pauses do not notify. Workflow recovery never retries
 webhooks as work, and webhook failure never changes a run. Read state with
-`get_workflow_notifications` or `polybridge-ctl workflow-notifications <run_id> --json`.
+`get_workflow_notifications` or `harflow-ctl workflow-notifications <run_id> --json`.
 Subscription management is MCP-only and is not exposed in the Monitor. See
 [notification delivery, history bounds and payloads](task-notifications.md#root-workflow-notifications).
 
@@ -1658,7 +1660,7 @@ follows owner reservations, including those interrupted before origin acknowledg
 Full run status and Monitor snapshots expose `on_demand_nodes`, chronological `on_demand_calls`,
 and `on_demand_state`. Each call records its per-specialist number, assignment, reason, source
 scope, routing/question origin, checkpoint, status, timing, execution/result reference and task ID
-(nullable for native execution). `polybridge-ctl workflow detail RUN --view on_demand_calls`
+(nullable for native execution). `harflow-ctl workflow detail RUN --view on_demand_calls`
 provides lossless paged calls; `on_demand_nodes` and `on_demand_state` are detail views too.
 The CTL JSON contract is version 14. Historical records without these fields remain readable.
 

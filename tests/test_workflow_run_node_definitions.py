@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from polybridge import workflows as w
-from polybridge import workflow_references as refs
+from harflow_mcp import workflows as w
+from harflow_mcp import workflow_references as refs
 
 
 def child_definition(name: str = "child") -> dict:
@@ -215,9 +215,9 @@ def test_delete_reports_referenced_by_notice(storage):
 
 
 def test_workflow_validate_reports_dependencies(tmp_path, monkeypatch, capsys):
-    from polybridge import ctl
+    from harflow_mcp import ctl
     monkeypatch.setenv("HOME", str(tmp_path))
-    root = tmp_path / ".polybridge"
+    root = tmp_path / ".harflow"
     child_store = w.WorkflowStore(root)
     child = child_store.save("child", child_definition())
     definition_file = tmp_path / "parent.json"
@@ -362,9 +362,9 @@ def test_missing_diagnostics_bound_strings_without_changing_ids(storage, monkeyp
 
 
 def test_save_error_preserves_missing_diagnostics_through_cli(tmp_path, monkeypatch, capsys):
-    from polybridge import ctl, server
+    from harflow_mcp import ctl, server
     monkeypatch.setenv("HOME", str(tmp_path))
-    store = w.WorkflowStore(tmp_path / ".polybridge")
+    store = w.WorkflowStore(tmp_path / ".harflow")
     async def save(name, definition, expected_revision=None, expected_workflow_id=None):
         try:
             return store.save(name, definition, expected_revision, expected_workflow_id=expected_workflow_id)

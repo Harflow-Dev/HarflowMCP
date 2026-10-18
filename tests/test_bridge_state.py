@@ -1,8 +1,8 @@
 from pathlib import Path
 import pytest
-from polybridge.bridge_state import assert_state_outside_writes
-from polybridge.extra_paths import normalize_paths
-from polybridge import tasks, scratch
+from harflow_mcp.bridge_state import assert_state_outside_writes
+from harflow_mcp.extra_paths import normalize_paths
+from harflow_mcp import tasks, scratch
 
 @pytest.fixture
 def layout(tmp_path,monkeypatch):
@@ -17,7 +17,7 @@ def layout(tmp_path,monkeypatch):
 @pytest.mark.parametrize('kind',['directory','file','repo'])
 def test_state_authority_refused(layout,monkeypatch,which,kind):
     home,repo,logs,grant=layout
-    root={'default':home/'.polybridge','custom':logs.parent}[which]
+    root={'default':home/'.harflow','custom':logs.parent}[which]
     root.mkdir(exist_ok=True)
     target=root/'tasks';target.mkdir(exist_ok=True)
     if kind=='file':target=target/'task.meta.json';target.write_text('{}')
@@ -38,7 +38,7 @@ def test_state_aliases_and_ancestors(layout):
 
 def test_default_task_alias_refused(layout):
     home,repo,logs,grant=layout
-    default=home/'.polybridge';default.mkdir()
+    default=home/'.harflow';default.mkdir()
     (default/'tasks').symlink_to(grant,target_is_directory=True)
     with pytest.raises(ValueError,match='state'):
         assert_state_outside_writes(logs,repo,normalize_paths([str(grant)]))

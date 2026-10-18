@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from polybridge import ctl, server
+from harflow_mcp import ctl, server
 
 
 @pytest.mark.parametrize('action,field', [('resume', 'instructions'), ('recover', 'reason')])

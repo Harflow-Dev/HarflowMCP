@@ -5,8 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from polybridge import ctl, server
-from polybridge.workflow_inspection import execution, result_page
+from harflow_mcp import ctl, server
+from harflow_mcp.workflow_inspection import execution, result_page
 
 
 @pytest.fixture
@@ -15,7 +15,7 @@ def run():
 
 
 def indexed_run(monkeypatch, tmp_path, value):
-    from polybridge import workflows
+    from harflow_mcp import workflows
     storage = workflows.WorkflowStore(root=tmp_path)
     for activation in value.get("activations", []):
         for task in activation.get("tasks", []):
@@ -92,7 +92,7 @@ async def test_human_reads_unchanged(monkeypatch):
 
 
 def test_cli_inspection_parity(monkeypatch, capsys):
-    from polybridge import workflow_inspection, workflow_node_reads
+    from harflow_mcp import workflow_inspection, workflow_node_reads
     observed = []
     managed = object()
     monkeypatch.setattr(workflow_inspection, "managed_reader", lambda log_dir: managed)
@@ -152,8 +152,8 @@ async def test_wait_returns_suspension_and_settling_without_waiting(monkeypatch)
 
 
 def test_task_listing_metadata_preserves_assignment_and_original_entry(run, monkeypatch, tmp_path):
-    from polybridge import workflows
-    from polybridge.workflow_inspection import decorate_tasks
+    from harflow_mcp import workflows
+    from harflow_mcp.workflow_inspection import decorate_tasks
     indexed_run(monkeypatch, tmp_path, run)
     entry = {"task_id": "second", "prompt": "Review this focused assignment"}
     decorated = decorate_tasks([entry], tmp_path / "tasks")[0]
@@ -182,10 +182,10 @@ def test_result_cursor_rejects_non_object_json(run, cursor):
 
 @pytest.mark.parametrize("role,expected", [("orchestrator", ["first", "second"]), ("node", ["third"])])
 def test_cli_task_list_uses_managed_scope(run, monkeypatch, tmp_path, capsys, role, expected):
-    from polybridge import store
+    from harflow_mcp import store
     def reader(log_dir):
         return {"role": role, "activation_id": "live"}, run
-    from polybridge import workflow_inspection
+    from harflow_mcp import workflow_inspection
     monkeypatch.setattr(workflow_inspection, "managed_reader", reader)
     monkeypatch.setattr(ctl, "default_log_dir", lambda: tmp_path / "tasks")
     monkeypatch.setattr(store, "read_all", lambda path: ["first", "second", "third", "foreign"])
@@ -198,7 +198,7 @@ def test_cli_task_list_uses_managed_scope(run, monkeypatch, tmp_path, capsys, ro
 def test_cli_status_refuses_live_or_foreign_task_for_orchestrator(run, monkeypatch, tmp_path, capsys, task_id):
     def reader(log_dir):
         return {"role": "orchestrator"}, run
-    from polybridge import workflow_inspection
+    from harflow_mcp import workflow_inspection
     monkeypatch.setattr(workflow_inspection, "managed_reader", reader)
     monkeypatch.setattr(ctl, "default_log_dir", lambda: tmp_path / "tasks")
     assert ctl.main(["status", task_id, "--json"]) == 1
@@ -206,8 +206,8 @@ def test_cli_status_refuses_live_or_foreign_task_for_orchestrator(run, monkeypat
 
 
 def test_worker_display_prompt_uses_full_assignment_for_each_execution(run, monkeypatch, tmp_path):
-    from polybridge import workflows
-    from polybridge.workflow_inspection import decorate_tasks
+    from harflow_mcp import workflows
+    from harflow_mcp.workflow_inspection import decorate_tasks
     assignment = "Focused assignment " + "A" * 6000
     run["activations"][0]["assignment_prompt"] = assignment
     run["prompt"] = "Caller original request"
@@ -221,8 +221,8 @@ def test_worker_display_prompt_uses_full_assignment_for_each_execution(run, monk
 
 
 def test_runner_inspection_needs_no_registry_and_rejects_unsettled_questions(run, tmp_path, monkeypatch):
-    from polybridge import tasks
-    from polybridge.workflow_inspection import inspect_request
+    from harflow_mcp import tasks
+    from harflow_mcp.workflow_inspection import inspect_request
     monkeypatch.setattr(tasks, "TaskRegistry", lambda *a, **k: pytest.fail("Runner inspection must not construct a registry"))
     assert inspect_request(run, tmp_path, {"execution_id": "old", "view": "result"})["execution_id"] == "old"
     assert inspect_request(run, tmp_path, {"execution_id": "old", "view": "activity"})["events"] == []
@@ -233,14 +233,14 @@ def test_runner_inspection_needs_no_registry_and_rejects_unsettled_questions(run
 
 @pytest.mark.parametrize("payload", [{"execution_id": "old", "limit": 10.5}, {"execution_id": "old", "limit": "10"}, {"execution_id": "old", "view": "activity", "limit": True}, {"execution_id": "old", "view": "activity", "before_seq": 1, "after_seq": 2}, {"execution_id": "old", "workflow_run_id": "foreign"}])
 def test_runner_inspection_validates_request(run, tmp_path, payload):
-    from polybridge.workflow_inspection import inspect_request
+    from harflow_mcp.workflow_inspection import inspect_request
     with pytest.raises(ValueError):
         inspect_request(run, tmp_path, payload)
 
 
 def test_task_prompt_history_prefers_each_answer_attempt(run, monkeypatch, tmp_path):
-    from polybridge import workflows
-    from polybridge.workflow_inspection import decorate_tasks
+    from harflow_mcp import workflows
+    from harflow_mcp.workflow_inspection import decorate_tasks
     run["status"] = "running"
     run["interaction_owner"] = "monitor"
     run["activations"][0]["assignment_prompt"] = "Original assignment"
@@ -268,13 +268,13 @@ def test_cli_monitor_start_and_resume_forward_internal_owner(monkeypatch, capsys
 
 
 async def test_managed_agent_cannot_claim_monitor_ownership(monkeypatch, tmp_path):
-    from polybridge.tasks import TaskRegistry
+    from harflow_mcp.tasks import TaskRegistry
     registry = TaskRegistry(log_dir=tmp_path / "tasks", owner={})
     async def caller():
         return SimpleNamespace(record=SimpleNamespace(task_id="managed"))
     monkeypatch.setattr(registry, "_detect_caller", caller)
     monkeypatch.setattr(server, "_registry", registry)
-    from polybridge import takeover
+    from harflow_mcp import takeover
     monkeypatch.setattr(takeover, "caller_refusal", lambda *args: ("agent_caller", "managed agent"))
     with pytest.raises(Exception, match="human Monitor"):
         await server._workflow_call("start", interaction_owner="monitor")
@@ -294,7 +294,7 @@ async def test_managed_status_bounds_plan_but_preserves_source(run, monkeypatch)
 
 
 async def test_recovered_completed_asking_turn_is_not_a_settled_node(run, monkeypatch, tmp_path):
-    from polybridge.workflow_inspection import inspect_request
+    from harflow_mcp.workflow_inspection import inspect_request
     activation = run["activations"][0]
     activation.pop("node_result")
     activation["tasks"][-1]["result"] = {"summary": '{"status":"asking","result":{"question":"Need context"},"evidence":[]}'}
@@ -315,15 +315,15 @@ def test_delegation_asking_result_cannot_pass_settlement_gate(run):
 
 
 def test_cancelled_execution_activity_remains_inspectable_without_result(run, tmp_path):
-    from polybridge.workflow_inspection import inspect_request
+    from harflow_mcp.workflow_inspection import inspect_request
     run["activations"][0].pop("node_result")
     run["activations"][0]["status"] = "cancelled"
     assert inspect_request(run, tmp_path, {"execution_id": "old", "view": "activity"})["events"] == []
 
 
 def test_descendant_projection_inherits_owner_but_not_assignment(monkeypatch, tmp_path):
-    from polybridge import workflows
-    from polybridge.workflow_inspection import decorate_tasks
+    from harflow_mcp import workflows
+    from harflow_mcp.workflow_inspection import decorate_tasks
     owner = {'workflow_run_id': 'run', 'status': 'running', 'settling': True, 'name': 'Review', 'execution_contract': 'delegation', 'activations': [{'id': 'execution', 'node_id': 'work', 'role': 'node', 'assignment_prompt': 'private ancestor assignment', 'tasks': [{'task_id': 'root'}]}]}
     indexed_run(monkeypatch, tmp_path, owner)
     entries = [{'task_id': 'grandchild', 'parent_task_id': 'child', 'prompt': 'own prompt'}, {'task_id': 'child', 'spawned_by': 'root', 'prompt': 'own child prompt'}]
@@ -334,9 +334,9 @@ def test_descendant_projection_inherits_owner_but_not_assignment(monkeypatch, tm
 
 
 def test_single_descendant_detail_retains_workflow_takeover_gate(monkeypatch, tmp_path):
-    from polybridge import workflows, store
-    from polybridge.workflow_inspection import decorate_tasks
-    from polybridge.store import TaskRecord
+    from harflow_mcp import workflows, store
+    from harflow_mcp.workflow_inspection import decorate_tasks
+    from harflow_mcp.store import TaskRecord
     def make_record(**kwargs):
         return TaskRecord(backend="claude", session_id=None, repo_path=str(tmp_path), started_at="2026-10-04T00:00:00Z", prompt="test", **kwargs)
     monkeypatch.setattr(workflows.WorkflowStore, 'list_runs', lambda self: [])
@@ -350,9 +350,9 @@ def test_single_descendant_detail_retains_workflow_takeover_gate(monkeypatch, tm
 
 
 def test_ordinary_descendants_do_not_scan_run_history(monkeypatch, tmp_path):
-    from polybridge import workflows, store
-    from polybridge.workflow_inspection import decorate_tasks
-    from polybridge.store import TaskRecord
+    from harflow_mcp import workflows, store
+    from harflow_mcp.workflow_inspection import decorate_tasks
+    from harflow_mcp.store import TaskRecord
     def make_record(**kwargs):
         return TaskRecord(backend="claude", session_id=None, repo_path=str(tmp_path), started_at="2026-10-04T00:00:00Z", prompt="test", **kwargs)
     calls = []
@@ -370,9 +370,9 @@ def test_ordinary_descendants_do_not_scan_run_history(monkeypatch, tmp_path):
 
 
 def test_decorating_hidden_cyclic_lineage_terminates(monkeypatch, tmp_path):
-    from polybridge import workflows, store
-    from polybridge.workflow_inspection import decorate_tasks
-    from polybridge.store import TaskRecord
+    from harflow_mcp import workflows, store
+    from harflow_mcp.workflow_inspection import decorate_tasks
+    from harflow_mcp.store import TaskRecord
     def make_record(**kwargs):
         return TaskRecord(backend="claude", session_id=None, repo_path=str(tmp_path), started_at="2026-10-04T00:00:00Z", prompt="test", **kwargs)
     monkeypatch.setattr(workflows.WorkflowStore, 'list_runs', lambda self: [])
@@ -383,8 +383,8 @@ def test_decorating_hidden_cyclic_lineage_terminates(monkeypatch, tmp_path):
 
 
 def test_decoration_loads_only_receipt_runs_once_and_ignores_unrelated_history(monkeypatch, tmp_path):
-    from polybridge import workflows
-    from polybridge.workflow_inspection import decorate_tasks
+    from harflow_mcp import workflows
+    from harflow_mcp.workflow_inspection import decorate_tasks
     storage = workflows.WorkflowStore(root=tmp_path)
     for number in range(200):
         (storage.runs / f'unrelated-{number}.json').write_text('invalid unrelated history')
@@ -404,8 +404,8 @@ def test_decoration_loads_only_receipt_runs_once_and_ignores_unrelated_history(m
 
 
 def test_bad_receipt_does_not_break_unrelated_task_decoration(monkeypatch, tmp_path):
-    from polybridge import workflows
-    from polybridge.workflow_inspection import decorate_tasks
+    from harflow_mcp import workflows
+    from harflow_mcp.workflow_inspection import decorate_tasks
     storage = workflows.WorkflowStore(root=tmp_path)
     (storage.owners / 'broken.json').write_text('invalid')
     entries = [{'task_id': 'broken'}, {'task_id': 'ordinary'}]
@@ -414,7 +414,7 @@ def test_bad_receipt_does_not_break_unrelated_task_decoration(monkeypatch, tmp_p
 
 
 def test_compact_checklist_disposition_exposes_authority_with_bounded_reason():
-    from polybridge.workflow_responses import compact, detail
+    from harflow_mcp.workflow_responses import compact, detail
     disposition = {'status': 'not_needed', 'reason': 'No implementation checklist is needed. ' * 200, 'execution_id': 'execution', 'decision_id': 'decision'}
     run = {'workflow_run_id': 'run', 'status': 'completed', 'checklist_disposition': disposition}
     result = compact(run)

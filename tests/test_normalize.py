@@ -15,11 +15,11 @@ from pathlib import Path
 
 import pytest
 
-from polybridge import backends
-from polybridge.backends import Accumulator
-from polybridge.backends.claude import ClaudeBackend
-from polybridge.backends.codex import CodexBackend
-from polybridge.backends.normalize import (
+from harflow_mcp import backends
+from harflow_mcp.backends import Accumulator
+from harflow_mcp.backends.claude import ClaudeBackend
+from harflow_mcp.backends.codex import CodexBackend
+from harflow_mcp.backends.normalize import (
     CATEGORIES,
     EDIT_TEXT_BYTES,
     INPUT_PREVIEW_BYTES,
@@ -32,8 +32,8 @@ from polybridge.backends.normalize import (
     truncate_head,
     truncate_tail,
 )
-from polybridge.backends.opencode import OpencodeBackend
-from polybridge.backends.vibe import VibeBackend
+from harflow_mcp.backends.opencode import OpencodeBackend
+from harflow_mcp.backends.vibe import VibeBackend
 
 SESSION = "11111111-1111-1111-1111-111111111111"
 

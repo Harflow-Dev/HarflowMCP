@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from polybridge.clients import jsonc
+from harflow_mcp.clients import jsonc
 
 
 def test_plain_json_passes_through_unchanged() -> None:

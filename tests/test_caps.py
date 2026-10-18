@@ -16,15 +16,15 @@ from pathlib import Path
 
 import pytest
 
-from polybridge import backends
-from polybridge.backends import (
+from harflow_mcp import backends
+from harflow_mcp.backends import (
     BACKENDS,
     FREEDOMS,
     NestedDispatchRefused,
     UnsupportedCapability,
     check_network,
 )
-from polybridge.backends.base import Enforcement, check_nested_depth, check_nested_enforcement
+from harflow_mcp.backends.base import Enforcement, check_nested_depth, check_nested_enforcement
 
 NETWORKS: list[bool | None] = [None, True, False]
 
@@ -98,7 +98,7 @@ def oracle_violation(
     return None
 
 
-SAME_REPO = "/tmp/polybridge-caps-test-repo"
+SAME_REPO = "/tmp/harflow_mcp-caps-test-repo"
 
 
 @pytest.mark.parametrize("parent_key,child_key", PAIRS, ids=[f"{_id(p)}->{_id(c)}" for p, c in PAIRS])

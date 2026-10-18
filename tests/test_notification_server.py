@@ -8,12 +8,12 @@ from types import SimpleNamespace
 import pytest
 from mcp import MCPError
 
-from polybridge import backends, notifications, server, store, workflow_notifications
+from harflow_mcp import backends, notifications, server, store, workflow_notifications
 
 
 @pytest.fixture
 def configured(monkeypatch):
-    monkeypatch.setenv('PB_NOTIFY_DESTINATIONS', json.dumps({'hook': {'url': 'https://example.com/hook'}}))
+    monkeypatch.setenv('HARFLOW_NOTIFY_DESTINATIONS', json.dumps({'hook': {'url': 'https://example.com/hook'}}))
     monkeypatch.setattr(server, '_start_notification_worker', lambda _: None)
 
 
@@ -62,7 +62,7 @@ async def test_start_workflow_created_run_launch_failure_keeps_subscription_and_
         def get_run(self, run_id, **kwargs):
             run["workflow_run_id"] = run_id
             return run
-    import polybridge.workflows as workflow_module
+    import harflow_mcp.workflows as workflow_module
     monkeypatch.setattr(workflow_module, "WorkflowStore", ExistingRun)
     monkeypatch.setattr(workflow_notifications, "WorkflowStore", ExistingRun)
     response = await server.start_workflow("workflow", "prompt", "/tmp/repo", notify="hook")
@@ -78,7 +78,7 @@ async def test_start_workflow_activation_failure_returns_notice(configured, monk
         run["workflow_run_id"] = kwargs["run_id"]
         return run
     monkeypatch.setattr(server, "_workflow_call", started)
-    import polybridge.workflow_notifications as workflow_module
+    import harflow_mcp.workflow_notifications as workflow_module
     monkeypatch.setattr(workflow_module, "activate", lambda *args: (_ for _ in ()).throw(OSError("activation down")))
     response = await server.start_workflow("workflow", "prompt", "/tmp/repo", notify="hook")
     assert response["workflow_run_id"] == run["workflow_run_id"]
@@ -107,7 +107,7 @@ async def test_failed_reservation_never_spawns(configured, monkeypatch, git_repo
 
 @pytest.mark.parametrize('url', [123, 1.5, True, None, [], {}], ids=['int', 'float', 'bool', 'null', 'list', 'dict'])
 async def test_start_rejects_non_string_notification_url_before_spawn(configured, monkeypatch, git_repo, fake_backend_clis, url):
-    monkeypatch.setenv('PB_NOTIFY_DESTINATIONS', json.dumps({'hook': {'url': url}}))
+    monkeypatch.setenv('HARFLOW_NOTIFY_DESTINATIONS', json.dumps({'hook': {'url': url}}))
     monkeypatch.setattr(server._reg(), 'start', lambda *a, **k: pytest.fail('spawned'))
     monkeypatch.setattr(notifications, 'subscribe', lambda *a, **k: pytest.fail('reserved'))
     with pytest.raises(MCPError, match='notification destination unavailable or invalid') as error:
@@ -117,7 +117,7 @@ async def test_start_rejects_non_string_notification_url_before_spawn(configured
 
 @pytest.mark.parametrize('scheme,allow_private', [('https', False), ('http', True)])
 async def test_start_rejects_port_zero_before_reservation_or_spawn(configured, monkeypatch, git_repo, fake_backend_clis, scheme, allow_private):
-    monkeypatch.setenv('PB_NOTIFY_DESTINATIONS', json.dumps({
+    monkeypatch.setenv('HARFLOW_NOTIFY_DESTINATIONS', json.dumps({
         'hook': {'url': f'{scheme}://receiver.example:0/hook', 'allow_private': allow_private}
     }))
     monkeypatch.setattr(server._reg(), 'start', lambda *a, **k: pytest.fail('spawned'))
@@ -133,7 +133,7 @@ async def test_subscribe_rejects_port_zero_before_persistence(configured, monkey
     task_id = 'port-zero-task'
     store.write(logs, store.TaskRecord(task_id=task_id, backend='codex', session_id=None,
         repo_path='/tmp/repo', started_at='2026-10-14T00:00:00Z'))
-    monkeypatch.setenv('PB_NOTIFY_DESTINATIONS', json.dumps({
+    monkeypatch.setenv('HARFLOW_NOTIFY_DESTINATIONS', json.dumps({
         'hook': {'url': f'{scheme}://receiver.example:0/hook', 'allow_private': allow_private}
     }))
     with pytest.raises(MCPError, match='notification destination unavailable or invalid') as error:
@@ -148,7 +148,7 @@ async def test_subscribe_rejects_non_string_notification_url_before_persistence(
     task_id = 'malformed-url-task'
     store.write(logs, store.TaskRecord(task_id=task_id, backend='codex', session_id=None,
         repo_path='/tmp/repo', started_at='2026-10-14T00:00:00Z'))
-    monkeypatch.setenv('PB_NOTIFY_DESTINATIONS', json.dumps({'hook': {'url': url}}))
+    monkeypatch.setenv('HARFLOW_NOTIFY_DESTINATIONS', json.dumps({'hook': {'url': url}}))
     with pytest.raises(MCPError, match='notification destination unavailable or invalid') as error:
         await server.subscribe(task_id, 'hook')
     assert error.value.code == -32602
@@ -179,7 +179,7 @@ async def test_rejected_start_releases_reservation(configured, monkeypatch, git_
     async def reject(*args, **kwargs):
         seen.append(kwargs['task_id'])
         exc = OSError('cannot spawn')
-        exc.polybridge_not_started = True
+        exc.harflow_not_started = True
         raise exc
     monkeypatch.setattr(server._reg(), 'start', reject)
     with pytest.raises(MCPError, match='inspect task_id'):
@@ -191,7 +191,7 @@ async def test_cleanup_failure_keeps_recovery_identity(configured, monkeypatch, 
     async def reject(*args, **kwargs):
         seen.append(kwargs['task_id'])
         exc = OSError('cannot spawn')
-        exc.polybridge_not_started = True
+        exc.harflow_not_started = True
         raise exc
     monkeypatch.setattr(server._reg(), 'start', reject)
     monkeypatch.setattr(notifications, 'discard_unstarted', lambda *a: (_ for _ in ()).throw(OSError('disk error')))
@@ -237,7 +237,7 @@ async def test_capability_refusal_keeps_uncertain_identity(configured, monkeypat
         elif uncertainty == 'live':
             server._reg()._tasks[task_id] = object()
         exc = backends.UnsupportedCapability('specific refusal')
-        exc.polybridge_not_started = True
+        exc.harflow_not_started = True
         raise exc
     monkeypatch.setattr(server._reg(), 'start', reject)
     if uncertainty == 'cleanup_failure':
@@ -252,7 +252,7 @@ async def test_capability_refusal_keeps_uncertain_identity(configured, monkeypat
 
 async def test_pristine_configless_registry_starts_no_notification_worker(monkeypatch):
     registry = server._reg()
-    monkeypatch.delenv('PB_NOTIFY_DESTINATIONS', raising=False)
+    monkeypatch.delenv('HARFLOW_NOTIFY_DESTINATIONS', raising=False)
     monkeypatch.setattr(server, '_registry', None)
     monkeypatch.setattr(server, 'TaskRegistry', lambda: registry)
     monkeypatch.setattr(registry, 'start_maintenance', lambda: None)
@@ -263,7 +263,7 @@ async def test_pristine_configless_registry_starts_no_notification_worker(monkey
 
 async def test_configured_registry_starts_notification_worker_once(monkeypatch):
     registry = server._reg()
-    monkeypatch.setenv('PB_NOTIFY_DESTINATIONS', json.dumps({'hook': {'url': 'https://example.com/hook'}}))
+    monkeypatch.setenv('HARFLOW_NOTIFY_DESTINATIONS', json.dumps({'hook': {'url': 'https://example.com/hook'}}))
     started = []
     async def worker(logs):
         started.append(logs)
@@ -288,7 +288,7 @@ async def test_configured_registry_starts_notification_worker_once(monkeypatch):
 async def test_existing_database_cleanup_resumes_without_configuration(monkeypatch):
     registry = server._reg()
     logs = registry.log_dir
-    monkeypatch.setenv('PB_NOTIFY_DESTINATIONS', json.dumps({'hook': {'url': 'https://example.com/hook'}}))
+    monkeypatch.setenv('HARFLOW_NOTIFY_DESTINATIONS', json.dumps({'hook': {'url': 'https://example.com/hook'}}))
     for task_id in ('expired', 'final', 'unexpired'):
         store.write(logs, store.TaskRecord(task_id=task_id, backend='codex', session_id=None,
             repo_path='/tmp/repo', started_at='2026-10-14T00:00:00Z',
@@ -299,7 +299,7 @@ async def test_existing_database_cleanup_resumes_without_configuration(monkeypat
         db.execute("UPDATE subscriptions SET created=? WHERE task_id='expired'", (old,))
         db.execute("UPDATE subscriptions SET state='delivered',updated=? WHERE task_id='final'", (old,))
     assert 'expired' in notifications.pinned_tasks(logs)
-    monkeypatch.delenv('PB_NOTIFY_DESTINATIONS')
+    monkeypatch.delenv('HARFLOW_NOTIFY_DESTINATIONS')
     monkeypatch.setattr(notifications, '_deliver', lambda *a: pytest.fail('delivery without current configuration'))
     monkeypatch.setattr(notifications, '_resolve', lambda *a: pytest.fail('network without current configuration'))
     ticked = asyncio.Event()
@@ -374,7 +374,7 @@ async def test_spawned_process_persist_failure_keeps_reservation(configured, mon
 
 async def test_notification_status_absent_does_not_create_storage_or_worker(monkeypatch):
     registry = server._reg()
-    monkeypatch.delenv('PB_NOTIFY_DESTINATIONS', raising=False)
+    monkeypatch.delenv('HARFLOW_NOTIFY_DESTINATIONS', raising=False)
     assert await server.get_task_notifications('absent') == []
     assert not (registry.log_dir.parent / 'notifications.sqlite3').exists()
     assert getattr(registry, '_notification_worker', None) is None
@@ -382,7 +382,7 @@ async def test_notification_status_absent_does_not_create_storage_or_worker(monk
 
 async def test_unsubscribe_absent_does_not_create_storage_or_future_worker(monkeypatch):
     registry = server._reg()
-    monkeypatch.delenv('PB_NOTIFY_DESTINATIONS', raising=False)
+    monkeypatch.delenv('HARFLOW_NOTIFY_DESTINATIONS', raising=False)
     assert await server.unsubscribe('absent') == []
     assert not (registry.log_dir.parent / 'notifications.sqlite3').exists()
     monkeypatch.setattr(server, '_registry', None)
@@ -435,7 +435,7 @@ async def test_cancel_during_start_cleans_only_proven_unstarted(configured, monk
             await asyncio.Future()
         except asyncio.CancelledError as error:
             if marked:
-                error.polybridge_not_started = True
+                error.harflow_not_started = True
             raise
     monkeypatch.setattr(registry, 'start', interrupted_start)
     if not marked:
@@ -466,7 +466,7 @@ async def test_repeated_cancellation_waits_for_reservation_cleanup(configured, m
     async def reject(*args, **kwargs):
         seen.append(kwargs['task_id'])
         error = asyncio.CancelledError()
-        error.polybridge_not_started = True
+        error.harflow_not_started = True
         raise error
     monkeypatch.setattr(registry, 'start', reject)
     monkeypatch.setattr(notifications, 'discard_unstarted', blocked_discard)

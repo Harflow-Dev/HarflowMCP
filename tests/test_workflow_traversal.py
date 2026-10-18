@@ -1,6 +1,6 @@
 """Guided structural traversal keeps individual assignments authoritative."""
-from polybridge import workflows as w
-from polybridge.workflow_traversal import automatic_edges
+from harflow_mcp import workflows as w
+from harflow_mcp.workflow_traversal import automatic_edges
 from test_workflow_delegation import Registry, default_decision, run_flow, storage  # noqa: F401
 
 

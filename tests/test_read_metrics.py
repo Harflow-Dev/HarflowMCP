@@ -2,18 +2,18 @@ import json
 
 import pytest
 
-from polybridge import read_metrics
+from harflow_mcp import read_metrics
 
 
 def test_disabled_by_default(monkeypatch, capsys):
-    monkeypatch.delenv("PB_WORKFLOW_READ_METRICS", raising=False)
+    monkeypatch.delenv("HARFLOW_WORKFLOW_READ_METRICS", raising=False)
     with read_metrics.span("authority"):
         pass
     assert capsys.readouterr().err == ""
 
 
 def test_enabled_fixed_content_free_schema(monkeypatch, capsys):
-    monkeypatch.setenv("PB_WORKFLOW_READ_METRICS", "1")
+    monkeypatch.setenv("HARFLOW_WORKFLOW_READ_METRICS", "1")
     with read_metrics.span("catalog"):
         pass
     payload = json.loads(capsys.readouterr().err)
@@ -23,7 +23,7 @@ def test_enabled_fixed_content_free_schema(monkeypatch, capsys):
 
 
 def test_exception_is_preserved(monkeypatch, capsys):
-    monkeypatch.setenv("PB_WORKFLOW_READ_METRICS", "1")
+    monkeypatch.setenv("HARFLOW_WORKFLOW_READ_METRICS", "1")
     with pytest.raises(RuntimeError, match="original"):
         with read_metrics.span("projection"):
             raise RuntimeError("original")
@@ -38,7 +38,7 @@ def test_arbitrary_content_is_rejected(capsys):
 
 
 def test_unavailable_diagnostic_stream_preserves_read(monkeypatch):
-    monkeypatch.setenv("PB_WORKFLOW_READ_METRICS", "1")
+    monkeypatch.setenv("HARFLOW_WORKFLOW_READ_METRICS", "1")
 
     class ClosedStream:
         def write(self, value):

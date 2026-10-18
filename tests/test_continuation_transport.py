@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 from mcp import MCPError
 
-from polybridge import ctl, server
+from harflow_mcp import ctl, server
 
 
 @pytest.mark.parametrize("budget", [True, -1, 11, 1.5, "1"])

@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from polybridge import backends, workflow_inspection as inspection
+from harflow_mcp import backends, workflow_inspection as inspection
 
 
 def caller():

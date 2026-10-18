@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from polybridge import workflows as w
-from polybridge import workflow_delegation as d
+from harflow_mcp import workflows as w
+from harflow_mcp import workflow_delegation as d
 
 
 def graph(role="task"):
@@ -79,7 +79,7 @@ class Registry:
         task = Task(kwargs["task_id"], snapshot)
         task.kwargs = copy.deepcopy(kwargs)
         task.repo = repo
-        from polybridge import store
+        from harflow_mcp import store
         store.write(self._log_dir, store.TaskRecord(task_id=task.task_id, backend=task.result["backend"], session_id=task.result["session_id"], repo_path=str(repo), started_at="2026-10-04T00:00:00Z", freedom=kwargs.get("freedom", "write_in_repo"), network=kwargs.get("network"), status=task.result["status"]))
         self.tasks[task.task_id] = task
         return task
@@ -526,7 +526,7 @@ async def test_parallel_input_suspension_settles_sibling_and_resume_does_not_rep
     await asyncio.wait_for(input_accepted.wait(), 3)
     pending = storage.get_run(run["workflow_run_id"])
     assert pending["status"] == "needs_input" and pending["settling"]
-    from polybridge import identity
+    from harflow_mcp import identity
     monkeypatch.setattr(identity, "identity_check", lambda *args: "alive")
     with pytest.raises(w.WorkflowError, match="Unresolved"):
         storage.control(run["workflow_run_id"], "resume", instructions="Continue")
@@ -741,7 +741,7 @@ async def test_inflight_on_demand_call_cancels_once_with_root_workflow(storage, 
             if "Execute the specialist assignment." in prompt:
                 task.done = release
                 task.result["status"] = "running"
-                from polybridge import store as task_store
+                from harflow_mcp import store as task_store
                 record = task_store.read(self._log_dir, task.task_id)
                 task_store.write(self._log_dir, replace(record, status="running", exit_code=None))
                 started.set()
@@ -754,7 +754,7 @@ async def test_inflight_on_demand_call_cancels_once_with_root_workflow(storage, 
                 if requested and task_id != requested:
                     continue
                 task.result["status"] = "cancelled"
-                from polybridge import store as task_store
+                from harflow_mcp import store as task_store
                 record = task_store.read(self._log_dir, task_id)
                 task_store.write(self._log_dir, replace(record, status="cancelled", exit_code=-15))
             release.set()
@@ -764,7 +764,7 @@ async def test_inflight_on_demand_call_cancels_once_with_root_workflow(storage, 
     run = storage.create_run(w.validate_definition(definition), "Request", tmp_path)
     execution = asyncio.create_task(w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]))
     await asyncio.wait_for(started.wait(), 3)
-    from polybridge import identity
+    from harflow_mcp import identity
     monkeypatch.setattr(identity, "identity_check", lambda _identity: "dead")
     storage.control(run["workflow_run_id"], "cancel")
     await asyncio.wait_for(execution, 5)

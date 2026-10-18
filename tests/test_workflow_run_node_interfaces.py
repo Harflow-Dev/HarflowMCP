@@ -7,13 +7,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from polybridge import backends, control, store as task_store
-from polybridge import workflow_delegation as d
-from polybridge import workflow_hooks
-from polybridge import workflow_inspection
-from polybridge import workflow_invocation as inv
-from polybridge import workflow_references as refs
-from polybridge import workflows as w
+from harflow_mcp import backends, control, store as task_store
+from harflow_mcp import workflow_delegation as d
+from harflow_mcp import workflow_hooks
+from harflow_mcp import workflow_inspection
+from harflow_mcp import workflow_invocation as inv
+from harflow_mcp import workflow_references as refs
+from harflow_mcp import workflows as w
 
 from test_workflow_run_node_execution import TreeRegistry, _start_tree, _wait_until, child_graph, child_runs, parent_graph, run_tree
 from test_workflow_run_node_recovery import finished_child, seed_parent, write_run
@@ -100,7 +100,7 @@ async def test_takeover_pause_and_direct_message_use_the_tree_gate(store, tmp_pa
     # The root is still active: takeover and direct messages are refused.
     with pytest.raises(control.TakeoverRefused):
         workflow_hooks.refuse_takeover(store.root / "tasks", "kid")
-    from polybridge.inbox import SendRefused
+    from harflow_mcp.inbox import SendRefused
     with pytest.raises(SendRefused):
         workflow_hooks.refuse_direct_message(store.root / "tasks", "kid")
     # Pausing a child task pauses the root, not the child.
@@ -134,7 +134,7 @@ async def test_decorate_tasks_reports_tree_fields_and_session_owner(store, tmp_p
 
 
 async def test_compact_projection_carries_tree_fields(store, tmp_path):
-    from polybridge.workflow_responses import compact
+    from harflow_mcp.workflow_responses import compact
     parent_run, activation, child = seeded_two_level(store, tmp_path)
     child_run_record = store.get_run(child["workflow_run_id"])
     projection = compact(child_run_record)

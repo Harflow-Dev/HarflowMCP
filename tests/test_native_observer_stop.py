@@ -7,10 +7,15 @@ from dataclasses import replace
 
 import pytest
 
-from polybridge import tasks, store, workflows as w
+from harflow_mcp import tasks, store, workflows as w
 from test_cancel import make_task, OWNER
 from test_workflow_delegation import Task
 from test_workflow_native import NativeRegistry, native_graph
+
+
+@pytest.fixture(autouse=True)
+def qualified_native_adapter(monkeypatch):
+    monkeypatch.setattr("harflow_mcp.backends.claude.RENAMED_NATIVE_QUALIFIED", True)
 
 
 async def failing_transport(tmp_path, task_id, backend, event, observer, monkeypatch, *, storage_failure=False):

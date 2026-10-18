@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from polybridge import lineage, server
-from polybridge.tasks import TaskRegistry
+from harflow_mcp import lineage, server
+from harflow_mcp.tasks import TaskRegistry
 
 
 @pytest.fixture(autouse=True)
@@ -20,9 +20,9 @@ def isolated_registry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 @pytest.fixture(autouse=True)
 def no_monitor_app(monkeypatch: pytest.MonkeyPatch):
-    """`PB_OPEN_MONITOR=0`: a root task must never open the real Monitor app from a test (A4.3).
+    """`HARFLOW_OPEN_MONITOR=0`: a root task must never open the real Monitor app from a test (A4.3).
     Tests of that behaviour inject a launcher and lift this themselves."""
-    monkeypatch.setenv("PB_OPEN_MONITOR", "0")
+    monkeypatch.setenv("HARFLOW_OPEN_MONITOR", "0")
 
 
 @pytest.fixture(autouse=True)
@@ -43,10 +43,14 @@ def no_caller_detected(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(
         lineage, "detect_caller_detail", lambda *args, **kwargs: lineage.Detection(None)
     )
-    # A suite run from inside a polybridge-managed worker inherits `PB_TASK_ID`; the
-    # registry would then (correctly) refuse mutations as an unverifiable managed
-    # caller. CI runs without it, so clear it to keep the same isolation everywhere.
-    monkeypatch.delenv("PB_TASK_ID", raising=False)
+    # A suite run from inside a managed worker may inherit either product's identity and depth
+    # variables; clear all of them to keep test isolation. Tests of the boundary set them after
+    # this fixture has run.
+    for name in (
+        "HARFLOW_TASK_ID", "HARFLOW_ROOT_TASK_ID", "HARFLOW_DEPTH",
+        "HARFLOW_MAX_DEPTH", "PB_TASK_ID", "PB_ROOT_TASK_ID", "PB_DEPTH", "PB_MAX_DEPTH",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture
@@ -71,7 +75,7 @@ exit 97
 
 @pytest.fixture
 def fake_backend_clis(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    from polybridge.backends import BACKENDS
+    from harflow_mcp.backends import BACKENDS
 
     bin_dir = tmp_path / "fake-bin"
     bin_dir.mkdir()
@@ -112,7 +116,7 @@ class IdentityStub:
 def identities(monkeypatch: pytest.MonkeyPatch) -> IdentityStub:
     """Replace `identity.identity_check` (looked up at call time by `inbox`, `store`, `control`)
     with an `IdentityStub`, so live-input send checks do not depend on `ps`."""
-    from polybridge import identity
+    from harflow_mcp import identity
 
     stub = IdentityStub()
     monkeypatch.setattr(identity, "identity_check", stub)
@@ -127,7 +131,7 @@ def only_v1_event_kinds(request: pytest.FixtureRequest, monkeypatch: pytest.Monk
     broken event log must never change an outcome), so that raise alone would be swallowed. This
     records each attempted kind and fails the test that produced an unlisted one.
     """
-    from polybridge import events
+    from harflow_mcp import events
 
     attempted: set[str] = set()
     real_write = events.EventLog.write

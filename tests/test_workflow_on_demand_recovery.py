@@ -1,8 +1,8 @@
 """Crash recovery and idempotent receipts for on-demand calls."""
 import copy
 
-from polybridge.workflow_child_questions import recover_answers
-from polybridge.workflow_on_demand import reconcile
+from harflow_mcp.workflow_child_questions import recover_answers
+from harflow_mcp.workflow_on_demand import reconcile
 from test_workflow_on_demand_contract import MemoryStorage, run_fixture
 
 

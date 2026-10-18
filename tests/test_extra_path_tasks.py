@@ -3,10 +3,15 @@ from pathlib import Path
 from types import SimpleNamespace
 import asyncio
 import pytest
-from polybridge import tasks, store, scratch, takeover, control
-from polybridge.extra_paths import normalize_paths, serialize_paths, revalidate_paths
-from polybridge.backends.base import Invocation
+from harflow_mcp import tasks, store, scratch, takeover, control
+from harflow_mcp.extra_paths import normalize_paths, serialize_paths, revalidate_paths
+from harflow_mcp.backends.base import Invocation
 from test_registry import _TrivialBackend
+
+
+@pytest.fixture(autouse=True)
+def qualified_extra_paths(monkeypatch):
+    monkeypatch.setattr('harflow_mcp.backends.codex.RENAMED_EXTRA_PATHS_QUALIFIED', True)
 
 
 async def test_live_send_malformed_enforcement_refuses_before_inbox_mutation(tmp_path, monkeypatch, backend):
@@ -27,7 +32,7 @@ async def test_non_live_task_send_revalidates_authority_before_queueing(tmp_path
     # The saturated pool fails the revalidation; the follow-up ledger must not be touched.
     import threading
     from unittest.mock import AsyncMock
-    from polybridge import followups
+    from harflow_mcp import followups
     registry = tasks.TaskRegistry(log_dir=_state_logs(tmp_path))
     task = SimpleNamespace(task_id='ordinary-worker', backend='codex', live_input=False,
         extra_writable_paths=serialize_paths(normalize_paths([str(tmp_path)])),
@@ -45,7 +50,7 @@ async def test_non_live_task_send_revalidates_authority_before_queueing(tmp_path
 async def test_non_live_record_send_revalidates_authority_before_queueing(tmp_path, monkeypatch, backend):
     import threading
     from unittest.mock import AsyncMock
-    from polybridge import followups
+    from harflow_mcp import followups
     registry = tasks.TaskRegistry(log_dir=_state_logs(tmp_path))
     record = replace(owner(tmp_path, normalize_paths([str(tmp_path)])), backend=backend.name)
     store.write_landed(registry.log_dir, record)
@@ -155,7 +160,7 @@ async def test_identity_replaced_during_bookkeeping_refuses_and_cleans_scratch(t
     invocation=backend.with_extra_writable_paths(Invocation(['/bin/echo','{}']),grants,'write_in_repo')
     with pytest.raises(ValueError,match='identity') as error:
         await registry._spawn(invocation,extra_path_grants=grants,backend=backend,prompt='Task',repo_path=tmp_path,session_id=None,freedom='write_in_repo',max_turns=None,model=None,reasoning_effort=None,task_id='worker')
-    assert error.value.polybridge_not_started
+    assert error.value.harflow_not_started
     assert not scratch.directory(registry.log_dir,'worker').exists()
 
 
@@ -246,7 +251,7 @@ async def test_granted_cancellation_during_probe_is_not_started_and_leaves_no_sc
     await asyncio.wait_for(entered.wait(),1)
     pending.cancel()
     with pytest.raises(asyncio.CancelledError) as error:await pending
-    assert error.value.polybridge_not_started
+    assert error.value.harflow_not_started
     assert not scratch.directory(registry.log_dir,'worker').exists()
 
 
@@ -259,8 +264,8 @@ def test_saved_certificate_change_refuses_resume_authority(tmp_path,backend,monk
 
 async def test_slow_qualification_keeps_loop_responsive_and_cancels_before_scratch(tmp_path, monkeypatch):
     import threading
-    from polybridge import backends
-    from polybridge.backends.codex import CodexBackend, EXTRA_PATHS_VERSION
+    from harflow_mcp import backends
+    from harflow_mcp.backends.codex import CodexBackend, EXTRA_PATHS_VERSION
     backend = CodexBackend()
     entered = threading.Event()
     release = threading.Event()
@@ -273,7 +278,7 @@ async def test_slow_qualification_keeps_loop_responsive_and_cancels_before_scrat
     monkeypatch.setattr(backend, '_extra_path_configuration', lambda *args: ('fixture',))
     monkeypatch.setattr(backend, '_assert_execution_configuration', lambda *args: None)
     monkeypatch.setattr(backend, '_extra_path_runtime', lambda: ('/fixture',))
-    monkeypatch.setattr('polybridge.backends.codex.sys.platform', 'darwin')
+    monkeypatch.setattr('harflow_mcp.backends.codex.sys.platform', 'darwin')
     registry = tasks.TaskRegistry(log_dir=_state_logs(tmp_path), open_monitor=False)
     invocation = backend.build_start_argv('Task', repo=tmp_path, freedom='write_in_repo', session_id=None, model=None, max_turns=None, reasoning_effort=None)
     async def spawn(*args, **kwargs):
@@ -290,15 +295,15 @@ async def test_slow_qualification_keeps_loop_responsive_and_cancels_before_scrat
         pending.cancel()
         with pytest.raises(asyncio.CancelledError) as error:
             await pending
-        assert error.value.polybridge_not_started
+        assert error.value.harflow_not_started
         assert not scratch.directory(registry.log_dir, 'worker').exists()
     finally:
         release.set()
 
 
 async def test_runtime_replaced_during_bookkeeping_refuses_and_cleans_scratch(tmp_path, monkeypatch):
-    from polybridge import backends
-    from polybridge.backends.codex import CodexBackend, EXTRA_PATHS_VERSION
+    from harflow_mcp import backends
+    from harflow_mcp.backends.codex import CodexBackend, EXTRA_PATHS_VERSION
     backend = CodexBackend()
     runtime = ['/original']
     monkeypatch.setattr(backends, 'version', lambda _, **kwargs: EXTRA_PATHS_VERSION)
@@ -306,7 +311,7 @@ async def test_runtime_replaced_during_bookkeeping_refuses_and_cleans_scratch(tm
     monkeypatch.setattr(backend, '_extra_path_configuration', lambda *args: ('fixture',))
     monkeypatch.setattr(backend, '_assert_execution_configuration', lambda *args: None)
     monkeypatch.setattr(backend, '_extra_path_runtime', lambda: tuple(runtime))
-    monkeypatch.setattr('polybridge.backends.codex.sys.platform', 'darwin')
+    monkeypatch.setattr('harflow_mcp.backends.codex.sys.platform', 'darwin')
     registry = tasks.TaskRegistry(log_dir=_state_logs(tmp_path), open_monitor=False)
     async def thread(function, *args):
         if function.__name__ == 'baseline':
@@ -319,10 +324,10 @@ async def test_runtime_replaced_during_bookkeeping_refuses_and_cleans_scratch(tm
         raise AssertionError('must not launch')
     monkeypatch.setattr(tasks.asyncio, 'create_subprocess_exec', spawn)
     invocation = backend.build_start_argv('Task', repo=tmp_path, freedom='write_in_repo', session_id=None, model=None, max_turns=None, reasoning_effort=None)
-    from polybridge.backends.codex import UnsafeInvocationError
+    from harflow_mcp.backends.codex import UnsafeInvocationError
     with pytest.raises(UnsafeInvocationError, match='runtime identity') as error:
         await registry._spawn(invocation, extra_path_grants=normalize_paths([str(tmp_path)]), backend=backend, prompt='Task', repo_path=tmp_path, session_id=None, freedom='write_in_repo', max_turns=None, model=None, reasoning_effort=None, task_id='worker')
-    assert error.value.polybridge_not_started
+    assert error.value.harflow_not_started
     assert not scratch.directory(registry.log_dir, 'worker').exists()
 
 
@@ -435,7 +440,7 @@ async def test_slow_path_resolution_times_out_without_dispatch(tmp_path, monkeyp
         assert not release.is_set()
         with pytest.raises(ValueError, match='filesystem availability') as error:
             await pending
-        if operation == 'start': assert error.value.polybridge_not_started
+        if operation == 'start': assert error.value.harflow_not_started
         spawn.assert_not_awaited()
         assert not registry.log_dir.exists()
     finally:
@@ -479,7 +484,7 @@ async def test_final_path_validation_block_removes_scratch(tmp_path, monkeypatch
         if exit_mode == 'cancel': pending.cancel()
         with pytest.raises(asyncio.CancelledError if exit_mode == 'cancel' else ValueError) as error:
             await pending
-        assert error.value.polybridge_not_started
+        assert error.value.harflow_not_started
         assert not scratch.directory(registry.log_dir, 'worker').exists()
         assert registry.get('worker') is None
         assert store.read(registry.log_dir, 'worker') is None
@@ -528,7 +533,7 @@ async def test_saved_authority_resolution_timeout_prevents_effects(tmp_path, mon
         with pytest.raises(ValueError, match='filesystem availability') as error:
             await pending
         if operation in ('resume', 'resume_record', 'continuation'):
-            assert error.value.polybridge_not_started
+            assert error.value.harflow_not_started
         spawn.assert_not_awaited()
         inbox_lock.assert_not_awaited()
         assert store.read(registry.log_dir, 'child') is None
@@ -611,7 +616,7 @@ def test_shared_authority_budget_leaves_headroom_inside_detached_handshake():
     # The shared authority deadline plus the bounded publish-branch and git-baseline
     # probes must fit inside detached's handshake window with at least 5 seconds to
     # spare, so a fully-spent authority budget cannot expire the handshake on its own.
-    from polybridge import detached
+    from harflow_mcp import detached
     assert tasks.EXTRA_PATH_CHECK_BUDGET_SECONDS == 20.0
     spent = (
         tasks.AUTHORITY_CHECK_REQUEST_BUDGET_SECONDS
@@ -754,7 +759,7 @@ async def test_nested_entry_reuses_the_caller_deadline_and_fails_closed_before_s
     with tasks.authority_check_budget(seconds=0.0):
         with pytest.raises(ValueError, match='request budget expired') as error:
             await registry.start('Task', tmp_path, backend=backend, extra_writable_paths=[str(tmp_path)])
-    assert error.value.polybridge_not_started
+    assert error.value.harflow_not_started
     assert not (registry.log_dir.exists() and any(registry.log_dir.rglob('*')))
 
 

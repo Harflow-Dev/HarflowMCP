@@ -1,13 +1,13 @@
 from pathlib import Path
 import pytest
-from polybridge.backends.codex_config import qualify_configuration, MAX_BYTES
+from harflow_mcp.backends.codex_config import qualify_configuration, MAX_BYTES
 
 @pytest.fixture
 def context(tmp_path, monkeypatch):
     home = tmp_path / 'home'; home.mkdir()
     repo = tmp_path / 'repo'; repo.mkdir()
     grant = tmp_path / 'grant'; grant.mkdir()
-    monkeypatch.setattr('polybridge.backends.codex_config._mdm_absence', lambda: ('managed_preferences_absent',))
+    monkeypatch.setattr('harflow_mcp.backends.codex_config._mdm_absence', lambda: ('managed_preferences_absent',))
     monkeypatch.setenv('CODEX_HOME', str(home))
     return home, repo, grant
 
@@ -147,7 +147,7 @@ def test_plugin_namespace_protected_when_missing(context):
 @pytest.mark.parametrize('present,forced', [(False,False),(True,False),(False,True)])
 def test_effective_managed_preferences_presence_and_owned_release(monkeypatch,present,forced):
     import ctypes
-    from polybridge.backends.codex_config import _mdm_absence
+    from harflow_mcp.backends.codex_config import _mdm_absence
     class Function:
         def __init__(self,call): self.call=call
         def __call__(self,*args): return self.call(*args)
@@ -170,7 +170,7 @@ def test_effective_managed_preferences_presence_and_owned_release(monkeypatch,pr
 
 def test_managed_preferences_unreadable_fails_closed(monkeypatch):
     import ctypes
-    from polybridge.backends.codex_config import _mdm_absence
+    from harflow_mcp.backends.codex_config import _mdm_absence
     def unavailable(path): raise OSError('sensitive implementation detail')
     monkeypatch.setattr(ctypes,'CDLL',unavailable)
     with pytest.raises(ValueError,match='cannot be qualified') as exc: _mdm_absence()

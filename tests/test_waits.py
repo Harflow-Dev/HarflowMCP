@@ -7,8 +7,8 @@ from types import SimpleNamespace
 import pytest
 from mcp import MCPError
 
-from polybridge import ctl, identity, server, store, task_waiting, wait_policy
-from polybridge.tasks import Task
+from harflow_mcp import ctl, identity, server, store, task_waiting, wait_policy
+from harflow_mcp.tasks import Task
 
 SCALE = 1000.0
 
@@ -746,7 +746,7 @@ async def test_live_task_reports_outcome_observed_once_finished(tmp_path):
     ({"status": "some_new_status"}, "attention"),
 ])
 async def test_workflow_wait_follows_shared_phase(monkeypatch, fast_clock, item, reason):
-    from polybridge import wait_policy
+    from harflow_mcp import wait_policy
     workflow_status(monkeypatch, [{"status": "running"}, item])
     result = await server.wait_for_workflow("r", until="terminal")
     assert result["stop_reason"] == reason
@@ -754,7 +754,7 @@ async def test_workflow_wait_follows_shared_phase(monkeypatch, fast_clock, item,
 
 
 async def test_workflow_wait_settling_phase_holds(monkeypatch, fast_clock):
-    from polybridge import wait_policy
+    from harflow_mcp import wait_policy
     assert wait_policy.workflow_phase("cancelled", True) == "settling"
     workflow_status(monkeypatch, [{"status": "cancelled", "settling": True}])
     result = await server.wait_for_workflow("r", 10)

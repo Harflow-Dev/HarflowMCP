@@ -14,14 +14,14 @@ from pathlib import Path
 
 import pytest
 
-from polybridge import approval_runtime, approvals
-from polybridge.backends import get
-from polybridge.tasks import TaskRegistry
+from harflow_mcp import approval_runtime, approvals
+from harflow_mcp.backends import get
+from harflow_mcp.tasks import TaskRegistry
 
 
 pytestmark = [
     pytest.mark.cli_integration,
-    pytest.mark.skipif(not os.environ.get("PB_CLI_INTEGRATION"), reason="opt in with PB_CLI_INTEGRATION=1"),
+    pytest.mark.skipif(not os.environ.get("HARFLOW_CLI_INTEGRATION"), reason="opt in with HARFLOW_CLI_INTEGRATION=1"),
 ]
 
 

@@ -11,11 +11,11 @@ from pathlib import Path
 
 import pytest
 
-from polybridge import backends, store
-from polybridge.backends import STDIN_PIPE, Invocation
-from polybridge.backends.base import Enforcement
-from polybridge.events import events_path
-from polybridge.tasks import TaskRegistry
+from harflow_mcp import backends, store
+from harflow_mcp.backends import STDIN_PIPE, Invocation
+from harflow_mcp.backends.base import Enforcement
+from harflow_mcp.events import events_path
+from harflow_mcp.tasks import TaskRegistry
 
 OWNER = {"pid": 1, "start_time": "t", "markers": []}
 
@@ -210,7 +210,7 @@ TOOL_RESULT = {"type": "user", "message": {"content": [{"type": "tool_result", "
 
 
 def _feed(*events: dict):
-    from polybridge.backends import Accumulator
+    from harflow_mcp.backends import Accumulator
 
     acc = Accumulator()
     claude = backends.ClaudeBackend()
@@ -341,14 +341,14 @@ def test_classify_reports_an_abandoned_background_wait_as_failed() -> None:
     ],
 )
 def test_live_idle_seconds_parsing(raw, expected: float) -> None:
-    from polybridge.tasks import live_idle_seconds
+    from harflow_mcp.tasks import live_idle_seconds
 
-    environ = {} if raw is None else {"PB_LIVE_IDLE_SECONDS": raw}
+    environ = {} if raw is None else {"HARFLOW_LIVE_IDLE_SECONDS": raw}
     assert live_idle_seconds(environ) == expected
 
 
 def test_the_idle_bound_applies_only_to_a_wait_on_background_tasks_alone() -> None:
-    from polybridge.tasks import background_idle_bound_reached as reached
+    from harflow_mcp.tasks import background_idle_bound_reached as reached
 
     waiting = _feed(_started("bg", True), _result())
     assert reached(waiting, silent_for=600, bound=600)
@@ -474,9 +474,9 @@ from collections import deque  # noqa: E402
 from datetime import datetime, timezone  # noqa: E402
 from types import SimpleNamespace  # noqa: E402
 
-from polybridge import control, identity, inbox  # noqa: E402
-from polybridge import tasks as tasks_module  # noqa: E402
-from polybridge.tasks import Task  # noqa: E402
+from harflow_mcp import control, identity, inbox  # noqa: E402
+from harflow_mcp import tasks as tasks_module  # noqa: E402
+from harflow_mcp.tasks import Task  # noqa: E402
 
 from conftest import ALIVE_OWNER  # noqa: E402
 
@@ -647,7 +647,7 @@ async def test_an_open_background_task_holds_input_open_until_it_finishes(fake) 
 async def test_the_idle_bound_closes_a_background_wait_and_fails_the_run(
     fake, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("PB_LIVE_IDLE_SECONDS", "0.5")
+    monkeypatch.setenv("HARFLOW_LIVE_IDLE_SECONDS", "0.5")
     task = await fake.registry.start("silentbg forever", fake.repo, backend=fake.backend)
     await _settle(task)
 
@@ -776,7 +776,7 @@ class _Stdin:
 
 
 def _stub_task(log_dir: Path, stdin: _Stdin, task_id: str = "live1") -> Task:
-    from polybridge.events import EventLog
+    from harflow_mcp.events import EventLog
 
     log_dir.mkdir(parents=True, exist_ok=True)
     task = Task(
@@ -1052,7 +1052,7 @@ def test_a_held_inbox_lock_times_out_the_sender(tmp_path: Path) -> None:
 def test_background_subagent_events_after_a_result_do_not_reopen_the_turn() -> None:
     """A background subagent's own events carry `parent_tool_use_id`. Treating them as main-turn
     activity kept a stalled one from ever reaching the idle bound."""
-    from polybridge.tasks import background_idle_bound_reached as reached
+    from harflow_mcp.tasks import background_idle_bound_reached as reached
 
     subagent = {
         "type": "assistant",
@@ -1224,7 +1224,7 @@ async def test_the_idle_bound_is_only_marked_abandoned_when_the_close_happens(
     for event in (_started("bg", True), _result("STARTED")):
         claude.ingest(event, task.acc)
     task.last_output_at -= 10_000
-    monkeypatch.setenv("PB_LIVE_IDLE_SECONDS", "1")
+    monkeypatch.setenv("HARFLOW_LIVE_IDLE_SECONDS", "1")
     monkeypatch.setattr(tasks_module, "PUMP_POLL_SECONDS", 0.05)
     real_seal = inbox.seal
     failures = {"left": 2}
@@ -1399,7 +1399,7 @@ async def test_a_forced_close_with_background_work_open_is_abandonment(
     for event in (_started("bg", True), _result("STARTED")):
         claude.ingest(event, task.acc)
     task.last_output_at -= 10_000
-    monkeypatch.setenv("PB_LIVE_IDLE_SECONDS", "1")
+    monkeypatch.setenv("HARFLOW_LIVE_IDLE_SECONDS", "1")
     monkeypatch.setattr(tasks_module, "PUMP_POLL_SECONDS", 0.01)
 
     def never(log_dir, task_id):
@@ -1855,7 +1855,7 @@ async def test_usage_limit_process_ignoring_eof_is_locally_settled(tmp_path, mon
 @pytest.mark.parametrize('identity_result', [('undecidable', 'markers_missing'), ('undecidable', 'ps_failed')])
 async def test_usage_limit_owned_child_settles_despite_retitling_or_unavailable_ps(tmp_path, monkeypatch, identity_result):
     import asyncio
-    from polybridge import identity
+    from harflow_mcp import identity
     rejection = json.dumps({'type':'rate_limit_event','rate_limit_info':{'status':'rejected'}})
     class Limited(_CatDouble):
         name = 'retitled-usage-limit-double'
@@ -1884,7 +1884,7 @@ async def test_usage_limit_owned_child_settles_despite_retitling_or_unavailable_
 async def test_usage_limit_settlement_does_not_break_a_concurrent_sender_flock(tmp_path, monkeypatch):
     """Termination stays bounded while the single pump waits for the sender's lock."""
     import asyncio
-    from polybridge import identity
+    from harflow_mcp import identity
     rejection = json.dumps({'type': 'rate_limit_event', 'rate_limit_info': {'status': 'rejected'}})
     class Limited(_CatDouble):
         name = 'locked-usage-limit-double'

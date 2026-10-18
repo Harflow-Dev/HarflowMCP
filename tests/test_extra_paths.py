@@ -1,6 +1,6 @@
 import os
 import pytest
-from polybridge.extra_paths import normalize_paths, serialize_paths, restore_paths, revalidate_paths, check_child_paths
+from harflow_mcp.extra_paths import normalize_paths, serialize_paths, restore_paths, revalidate_paths, check_child_paths
 
 
 def test_identity_roundtrip_and_replacement(tmp_path):
@@ -33,7 +33,7 @@ def test_symlink_resolution_duplicates_and_retarget(tmp_path):
         revalidate_paths(grant)
 
 
-@pytest.mark.parametrize('value', [['relative'], ['~/foo'], ['/'], ['/missing-polybridge-path'], ['a\0'], [123], (), ['x'] * 17])
+@pytest.mark.parametrize('value', [['relative'], ['~/foo'], ['/'], ['/missing-harflow_mcp-path'], ['a\0'], [123], (), ['x'] * 17])
 def test_invalid_inputs(value):
     with pytest.raises(ValueError):
         normalize_paths(value)
@@ -102,7 +102,7 @@ def test_utf8_and_aggregate_bounds(tmp_path):
 ])
 def test_saved_authority_detection_accepts_mappings(markers, expected):
     from types import MappingProxyType, SimpleNamespace
-    from polybridge.extra_paths import has_extra_path_authority
+    from harflow_mcp.extra_paths import has_extra_path_authority
     if isinstance(markers.get("enforcement"), dict):
         markers = {**markers, "enforcement": MappingProxyType(markers["enforcement"])}
     assert has_extra_path_authority(MappingProxyType(markers)) is expected

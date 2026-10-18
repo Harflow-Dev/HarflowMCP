@@ -3,11 +3,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from polybridge import backends
-from polybridge.backends.claude import ClaudeBackend, UnsafeInvocationError as ClaudeUnsafe
-from polybridge.backends.claude_native import ClaudeNativeAdapter
-from polybridge.backends.codex import CodexBackend, UnsafeInvocationError as CodexUnsafe
-from polybridge.backends.codex_native import CodexNativeAdapter
+from harflow_mcp import backends
+from harflow_mcp.backends.claude import ClaudeBackend, UnsafeInvocationError as ClaudeUnsafe
+from harflow_mcp.backends.claude_native import ClaudeNativeAdapter
+from harflow_mcp.backends.codex import CodexBackend, UnsafeInvocationError as CodexUnsafe
+from harflow_mcp.backends.codex_native import CodexNativeAdapter
 
 
 @pytest.mark.parametrize("backend,adapter,error", [(ClaudeBackend(), ClaudeNativeAdapter(), ClaudeUnsafe), (CodexBackend(), CodexNativeAdapter(), CodexUnsafe)])

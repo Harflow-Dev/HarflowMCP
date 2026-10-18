@@ -2,9 +2,9 @@
 
 import pytest
 
-from polybridge import workflow_delegation as d
-from polybridge import workflow_child_sessions as sessions
-from polybridge import workflows as w
+from harflow_mcp import workflow_delegation as d
+from harflow_mcp import workflow_child_sessions as sessions
+from harflow_mcp import workflows as w
 from test_workflow_delegation import storage
 from test_workflow_run_node_execution import child_graph, parent_graph
 
@@ -14,7 +14,7 @@ def setup_run(storage, tmp_path, policy="agent_decides", mode="child"):
     definition = parent_graph(child["workflow_id"], mode=mode)
     if policy is not None:
         definition["nodes"][1]["child_session_policy"] = policy
-    from polybridge.workflow_references import resolve_dependencies
+    from harflow_mcp.workflow_references import resolve_dependencies
     definition = w.validate_definition(definition)
     tree = resolve_dependencies(storage, definition=definition)
     run = storage.create_run(definition, "Request", tmp_path, dependency_tree=tree)
@@ -76,7 +76,7 @@ def test_child_choice_cannot_override_permissions(storage, tmp_path):
 
 
 def test_optimized_child_guidance_preserves_contract_and_decision_reason():
-    from polybridge.workflow_context import compact_recent_decisions, render_decision_context
+    from harflow_mcp.workflow_context import compact_recent_decisions, render_decision_context
     context = {"decision_id": "decision", "valid_continuations": [{"continuation_id": "child", "workflow": {}, "requires_prompt": True, "child_session_policy": "agent_decides"}]}
     import json
     prompt = json.loads(render_decision_context(context, session_owner="session", scope="new-child").prompt)

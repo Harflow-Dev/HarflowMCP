@@ -3,8 +3,8 @@ import copy
 
 import pytest
 
-from polybridge import workflows as w
-from polybridge.workflow_cancellation import eligibility
+from harflow_mcp import workflows as w
+from harflow_mcp.workflow_cancellation import eligibility
 
 
 @pytest.fixture
@@ -93,7 +93,7 @@ def test_child_reservation_cannot_race_root_cancel(run_store):
 def test_descendant_reservation_serializes_with_cancel(run_store, monkeypatch, reservation_event):
     from concurrent.futures import ThreadPoolExecutor
     from threading import Event
-    from polybridge import workflow_cancellation
+    from harflow_mcp import workflow_cancellation
     storage, rid = run_store
     child = copy.deepcopy(storage.get_run(rid))
     child.update(workflow_run_id="child", status="running", parent_link={"workflow_run_id": rid, "root_workflow_run_id": rid, "execution_id": "invocation"})
@@ -121,7 +121,7 @@ def test_descendant_reservation_serializes_with_cancel(run_store, monkeypatch, r
 
 
 async def test_missing_descendant_cancellation_does_not_report_success(run_store):
-    from polybridge.workflow_invocation import WorkflowTree
+    from harflow_mcp.workflow_invocation import WorkflowTree
     storage, rid = run_store
     storage.update_run(rid, lambda r: r.update(status="cancelling", activations=[{"id": "invocation", "node_id": "work", "status": "failed", "role": "node", "tasks": [], "invocation": {"stage": "settled", "child_workflow_run_id": "missing"}}]), "fixture")
     class Registry:
@@ -135,7 +135,7 @@ async def test_missing_descendant_cancellation_does_not_report_success(run_store
 
 
 async def test_descendant_cascade_failures_are_reported(run_store):
-    from polybridge.workflow_invocation import WorkflowTree
+    from harflow_mcp.workflow_invocation import WorkflowTree
     storage, rid = run_store
     child = copy.deepcopy(storage.get_run(rid))
     child.update(workflow_run_id="child", status="failed", parent_link={"workflow_run_id": rid, "root_workflow_run_id": rid, "execution_id": "invocation"}, activations=[{"id": "native", "status": "running", "tasks": [{"task_id": "execution", "transport_task_id": "transport", "status": "running"}]}])
@@ -154,7 +154,7 @@ async def test_descendant_cascade_failures_are_reported(run_store):
 
 
 def test_monitor_cli_cancel_retains_verified_human_flag(monkeypatch, capsys):
-    from polybridge import ctl, server
+    from harflow_mcp import ctl, server
     import json
     observed = {}
     async def call(action, **kwargs):
@@ -167,7 +167,7 @@ def test_monitor_cli_cancel_retains_verified_human_flag(monkeypatch, capsys):
 
 
 async def test_agent_cannot_claim_monitor_cancellation(monkeypatch):
-    from polybridge import server, takeover
+    from harflow_mcp import server, takeover
     monkeypatch.setattr(takeover, "caller_refusal", lambda _: ("caller_detected", "Agent caller cannot claim human controls"))
     with pytest.raises(Exception, match="verified human Monitor"):
         await server._workflow_call("cancel", run_id="root", interaction_owner="monitor")
@@ -185,7 +185,7 @@ def test_empty_child_waiting_under_paused_root_is_idle(run_store):
 
 @pytest.mark.parametrize("outcome", [None, [], "cancelled", True, 0])
 def test_missing_or_invalid_cascade_outcome_fails_closed(outcome):
-    from polybridge.workflow_cancellation import cascade_error
+    from harflow_mcp.workflow_cancellation import cascade_error
     assert cascade_error(outcome) == "Cancellation transport returned no verifiable outcome"
 
 
@@ -232,7 +232,7 @@ async def test_tracked_task_settlement_requires_cascade_descendant_owner_settlem
 
 
 def test_cascade_owner_still_settling_is_unresolved():
-    from polybridge.workflow_cancellation import cascade_error
+    from harflow_mcp.workflow_cancellation import cascade_error
     assert "lineage-only-child" in cascade_error({"owner_still_settling": ["lineage-only-child"]})
     assert cascade_error({"owner_still_settling": []}) == ""
 
@@ -240,8 +240,8 @@ def test_cascade_owner_still_settling_is_unresolved():
 @pytest.mark.parametrize("owner", ["monitor", "caller"])
 @pytest.mark.parametrize("supervisor_state", ["alive", "dead", "undecidable"])
 def test_monitor_projection_matches_supervisor_identity_control_gate(run_store, monkeypatch, owner, supervisor_state):
-    from polybridge import identity
-    from polybridge.workflow_cancellation import monitor_projection
+    from harflow_mcp import identity
+    from harflow_mcp.workflow_cancellation import monitor_projection
     storage, rid = run_store
     storage.update_run(rid, lambda r: r.update(interaction_owner=owner, supervisor_identity={"pid": 123}), "fixture")
     monkeypatch.setattr(identity, "identity_check", lambda _: supervisor_state)

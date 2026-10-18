@@ -1,6 +1,6 @@
 # Compact task reads
 
-Full task status, events, and the existing `polybridge-ctl list` / `status` remain
+Full task status, events, and the existing `harflow-ctl list` / `status` remain
 available. Compact reads are explicit display projections; they never rewrite
 prompts, follow-ups, messages, summaries, or any other stored caller prose.
 
@@ -9,14 +9,14 @@ identity, status and reconciliation evidence, title, bounded summary and outcome
 up to three recent activity lines, and references to full status and event reads.
 Oversized fields appear in `truncated_fields`. Outcome publication values remain
 nullable: absence of publication evidence does not mean a push failed or succeeded.
-The same projection is available with `polybridge-ctl status TASK --brief --json`.
+The same projection is available with `harflow-ctl status TASK --brief --json`.
 Standalone artifact registrations add a bounded `artifact_summary` with a count,
 availability of registration metadata, and a detail reference. Full notes and current
 file observations are paged separately through [task artifact reads](task-artifacts.md).
 The projection bounds response size; obtaining a full recovered status can still
 require the existing recovery/replay work before projection.
 
-For indexed history use `polybridge-ctl task-list-compact --json --limit 50`, or
+For indexed history use `harflow-ctl task-list-compact --json --limit 50`, or
 explicit bounded listing options on the MCP `list_tasks` tool. These compact
 history listings are available only to direct callers. Once caller readiness is
 established, managed workflow callers receive an invalid-parameters error before
@@ -25,7 +25,7 @@ retains its catalog preparation response; the MCP tool reports incomplete caller
 authority as an invalid-parameters error.
 
 Managed callers can inspect explicit known IDs with
-`polybridge-ctl task-list-page --json --task-ids TASK1,TASK2` (MCP
+`harflow-ctl task-list-page --json --task-ids TASK1,TASK2` (MCP
 `list_task_page(task_ids=["TASK1", "TASK2"])`), subject to their existing task
 visibility, or use status reads for known tasks. Compact filters are ANDed:
 
@@ -70,7 +70,7 @@ A reproducible test creates 200 settled tasks and 20 MB of raw logs, then forbid
 metadata materialization while requesting five filtered rows:
 
 ```sh
-UV_CACHE_DIR=/tmp/polybridge-uv-cache uv run pytest -q -s tests/test_task_reads.py::test_reproducible_large_history
+UV_CACHE_DIR=/tmp/harflow_mcp-uv-cache uv run pytest -q -s tests/test_task_reads.py::test_reproducible_large_history
 ```
 
 The warm-catalog run measured a 2,586-byte response in 0.008182 seconds on the
@@ -83,7 +83,7 @@ through the usual bounded bootstrap; retry while `bootstrap_pending` is true.
 
 ## Batched full status reads
 
-`polybridge-ctl status-batch --task-ids TASK1,TASK2 --json` returns several full
+`harflow-ctl status-batch --task-ids TASK1,TASK2 --json` returns several full
 snapshots in one document and one process:
 `{"v": 11, "tasks": [<snapshot>...], "errors": {"<id>": {"code", "message"}}}`.
 It is an additive command under `CTL_JSON_VERSION` 11 — no existing document

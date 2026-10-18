@@ -2,8 +2,8 @@ import subprocess
 import pytest
 from pathlib import Path
 
-from polybridge.task_outcomes import baseline, capture, observe, GIT_LOCAL_ENV
-from polybridge import store
+from harflow_mcp.task_outcomes import baseline, capture, observe, GIT_LOCAL_ENV
+from harflow_mcp import store
 
 
 @pytest.mark.parametrize('command', ['rg pytest tests', 'echo pytest', 'echo "hi; pytest"',

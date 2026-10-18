@@ -1,7 +1,7 @@
 """Authoritative quota envelopes, without model calls."""
 import pytest
-from polybridge.backends import get as get_backend
-from polybridge.backends.base import Accumulator
+from harflow_mcp.backends import get as get_backend
+from harflow_mcp.backends.base import Accumulator
 
 @pytest.mark.parametrize('name,envelope', [('claude','error'),('codex','turn.failed'),('opencode','error'),('vibe','error'),('antigravity','result')])
 def test_limit_is_sticky_after_progress_and_success(name, envelope):
@@ -51,7 +51,7 @@ def test_codex_typed_error_is_authoritative(envelope, info):
 
 @pytest.mark.parametrize('status', ['running', 'failed', 'cancelled'])
 def test_recovered_live_limit_with_lost_owner_requires_attention(tmp_path, monkeypatch, status):
-    from polybridge import store
+    from harflow_mcp import store
     from test_store import make_record
     diagnostic = {'category': 'usage_limit', 'reason': 'Quota reached', 'source': 'stderr'}
     record = make_record(status=status, failure_diagnostic=diagnostic)
@@ -67,8 +67,8 @@ def test_recovered_live_limit_with_lost_owner_requires_attention(tmp_path, monke
 
 def test_live_and_recovered_briefs_retain_durable_usage_evidence(tmp_path):
     from datetime import datetime, timezone
-    from polybridge import store
-    from polybridge.tasks import Task
+    from harflow_mcp import store
+    from harflow_mcp.tasks import Task
     from test_store import make_record
     diagnostic = {'category': 'usage_limit', 'reason': 'Quota reached', 'source': 'stderr', 'reset_at': 1234}
     record = make_record(status='failed', exit_code=1, failure_diagnostic=diagnostic)
@@ -157,7 +157,7 @@ def test_quota_warning_or_quoted_prose_does_not_hide_real_outage(name, quoted):
 @pytest.mark.parametrize('quota_first', [True, False])
 def test_legacy_stream_quota_cannot_be_hidden_by_another_availability_event(tmp_path, name, envelope, quota_first):
     import json
-    from polybridge import workflows as w
+    from harflow_mcp import workflows as w
     if name == 'antigravity':
         quota = {'event': 'result', 'result': {'status': 'ERROR', 'error': {'code': 'rate_limit_exceeded'}}}
         outage = {'event': 'result', 'result': {'status': 'ERROR', 'error': {'status': 503}}}
@@ -177,7 +177,7 @@ def test_legacy_stream_quota_cannot_be_hidden_by_another_availability_event(tmp_
 @pytest.mark.parametrize('code', ['outage', 'model'])
 def test_quota_stderr_veto_applies_to_availability_in_stream(tmp_path, name, envelope, quota, code):
     import json
-    from polybridge import workflows as w
+    from harflow_mcp import workflows as w
     error = {'status': 503} if code == 'outage' else {'code': 'model_not_found'}
     event = {'event': 'result', 'result': {'status': 'ERROR', 'error': error}} if name == 'antigravity' else {'type': envelope, 'error': error}
     path = tmp_path / 'availability.jsonl'
@@ -189,7 +189,7 @@ def test_quota_stderr_veto_applies_to_availability_in_stream(tmp_path, name, env
 @pytest.mark.parametrize('quoted', ['Warning: rate_limit_exceeded', 'Tool quoted rate_limit_exceeded', '"You\'ve hit your limit"'])
 def test_warning_prose_stderr_does_not_veto_authoritative_stream_outage(tmp_path, name, envelope, quoted):
     import json
-    from polybridge import workflows as w
+    from harflow_mcp import workflows as w
     error = {'status': 503}
     event = {'event': 'result', 'result': {'status': 'ERROR', 'error': error}} if name == 'antigravity' else {'type': envelope, 'error': error}
     path = tmp_path / 'outage.jsonl'
@@ -199,14 +199,14 @@ def test_warning_prose_stderr_does_not_veto_authoritative_stream_outage(tmp_path
 
 @pytest.mark.parametrize('name', ['claude', 'codex', 'opencode', 'vibe', 'antigravity'])
 def test_stderr_usage_reason_never_copies_sensitive_provider_line(name):
-    from polybridge.backends.workflow_diagnostics import USAGE_LIMIT_REASON
+    from harflow_mcp.backends.workflow_diagnostics import USAGE_LIMIT_REASON
     line = 'API Error: rate_limit_exceeded Authorization: Bearer synthetic-private-token Cookie: synthetic-session api_key=synthetic-key'
     diagnostic = get_backend(name).stderr_usage_limit_diagnostic(line)
     assert diagnostic == {'category': 'usage_limit', 'reason': USAGE_LIMIT_REASON, 'source': 'stderr'}
 
 
 def test_antigravity_string_usage_reason_is_generic():
-    from polybridge.backends.workflow_diagnostics import USAGE_LIMIT_REASON
+    from harflow_mcp.backends.workflow_diagnostics import USAGE_LIMIT_REASON
     error = 'insufficient_quota Authorization: Bearer synthetic-private-token Cookie: synthetic-session'
     diagnostic = get_backend('antigravity').usage_limit_diagnostic({'event': 'result', 'result': {'status': 'ERROR', 'error': error}})
     assert diagnostic == {'category': 'usage_limit', 'reason': USAGE_LIMIT_REASON, 'source': 'stream:result'}
@@ -217,9 +217,9 @@ def test_antigravity_string_usage_reason_is_generic():
 async def test_sensitive_stderr_does_not_enter_durable_public_usage_metadata(tmp_path, name, source):
     import json
     from datetime import datetime, timezone
-    from polybridge import store, workflows as w
-    from polybridge.tasks import Task, TaskRegistry
-    from polybridge.workflow_responses import compact
+    from harflow_mcp import store, workflows as w
+    from harflow_mcp.tasks import Task, TaskRegistry
+    from harflow_mcp.workflow_responses import compact
     from test_workflow_delegation import graph
     line = 'API Error: rate_limit_exceeded Authorization: Bearer synthetic-private-token Cookie: synthetic-session api_key=synthetic-key'
     diagnostic = get_backend(name).stderr_usage_limit_diagnostic(line)

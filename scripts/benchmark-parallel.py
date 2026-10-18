@@ -29,7 +29,7 @@ def event(task_id, seq, kind, **fields):
 
 
 def fixture(home: Path, conversations=8, chain=1, activity='sparse', workflow=False):
-    from polybridge import store
+    from harflow_mcp import store
     if conversations not in (8, 64, 256) or chain not in (1, 16) or activity not in ('sparse', 'long'):
         raise ValueError('Unsupported fixture shape')
     if home.is_symlink() or (home.exists() and any(home.iterdir())):
@@ -38,8 +38,8 @@ def fixture(home: Path, conversations=8, chain=1, activity='sparse', workflow=Fa
     home.mkdir(parents=True, exist_ok=True)
     monitor_module().fixture(home, 'small')
     import shutil
-    shutil.rmtree(home / '.polybridge')
-    directory = home / '.polybridge' / 'tasks'
+    shutil.rmtree(home / '.harflow')
+    directory = home / '.harflow' / 'tasks'
     directory.mkdir(parents=True)
     for conversation in range(conversations):
         for turn in range(chain):
@@ -61,8 +61,8 @@ def fixture(home: Path, conversations=8, chain=1, activity='sparse', workflow=Fa
             raw = [{'type':'thread.started','thread_id':record.session_id}, {'type':'item.completed','item':{'id':'answer','type':'agent_message','text':'Synthetic benchmark answer'}}, {'type':'turn.completed','usage':{'input_tokens':0,'output_tokens':0,'cached_input_tokens':0}}]
             (directory / f'{task_id}.jsonl').write_text(''.join(json.dumps(row)+'\n' for row in raw))
     if workflow:
-        from polybridge import workflows
-        storage = workflows.WorkflowStore(home / '.polybridge')
+        from harflow_mcp import workflows
+        storage = workflows.WorkflowStore(home / '.harflow')
         definition = workflows.validate_definition({'name': 'Synthetic parallel workflow', 'nodes': [
             {'id': 'start', 'type': 'start'}, {'id': 'work', 'type': 'agent', 'name': 'Synthetic parallel tasks', 'agent': {'backend': 'codex'}},
             {'id': 'end', 'type': 'end'}], 'connections': [
@@ -95,8 +95,8 @@ def append_burst(home: Path, count=32):
     targets = []
     for conversation in range(manifest['conversations']):
         task_id = f"parallel-{conversation:04}-{manifest['chain']-1:02}"
-        path = home / '.polybridge' / 'tasks' / f'{task_id}.events.jsonl'
-        if path.is_symlink() or path.resolve().parent != (home / '.polybridge' / 'tasks').resolve() or (home / '.polybridge').is_symlink() or (home / '.polybridge' / 'tasks').is_symlink():
+        path = home / '.harflow' / 'tasks' / f'{task_id}.events.jsonl'
+        if path.is_symlink() or path.resolve().parent != (home / '.harflow' / 'tasks').resolve() or (home / '.harflow').is_symlink() or (home / '.harflow' / 'tasks').is_symlink():
             raise ValueError('Fixture event path must be local')
         rows = [json.loads(line) for line in path.read_text().splitlines()]
         if not rows or any(not isinstance(row, dict) or row.get('task_id') != task_id or row.get('v') != 1 or row.get('seq') != index for index, row in enumerate(rows)):
@@ -113,7 +113,7 @@ def protocol():
     return {'version':1, 'shapes': [{'conversations':n,'chain':c,'activity':a} for n in (8,64,256) for c in (1,16) for a in ('sparse','long')],
         'repeats':10, 'scenarios':['horizontal scrolling','rapid reversals','column actions','Show all','return to visited columns','unchanged polling','burst on all current checkpoints'],
         'record':['first useful content ms','complete preparation ms','snapshot/build/apply p50 and p95 ms','main-thread stalls','peak RSS bytes','CLI process count','leased task count'],
-        'notes':['Use isolated copied app via profile-monitor.py; never install.', 'Collect baseline and optimized runs under comparable host load.', 'Record UI observation overhead separately; readiness timestamps are applied state, not pixels.', 'Burst events are synthetic post-completion activity for tailing stress, not a real agent lifecycle.']}
+        'notes':['Use the isolated app profiling helper in Harflow-Dev/HarflowMac (scripts/profile-monitor.py); never install.', 'Collect baseline and optimized runs under comparable host load.', 'Record UI observation overhead separately; readiness timestamps are applied state, not pixels.', 'Burst events are synthetic post-completion activity for tailing stress, not a real agent lifecycle.']}
 
 
 def main():

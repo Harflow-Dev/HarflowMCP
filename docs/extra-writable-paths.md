@@ -1,5 +1,7 @@
 # Extra writable paths
 
+> HarflowMCP extraction status: native workflow adapters and extra writable path grants are unavailable pending no-paid requalification. Historical certification details below describe the source implementation, not qualification of the renamed product. Ordinary headless dispatch is supported. Harflow macOS integration is unavailable pending companion runtime integration.
+
 `start_task(..., extra_writable_paths=["/absolute/build-output"])` authorizes
 additional local writes without selecting unrestricted access. Inspect
 `preview_task_permissions(repo_path=..., backend=..., extra_writable_paths=...)`
@@ -8,7 +10,7 @@ without launching an agent or allocating task scratch. Launch revalidates this
 observation; preview does not reserve authority. For writable launches on scratch-aware
 backends, enforcement includes `the task scratch directory (allocated per task at launch)`
 as a symbolic future writable root. Read-only previews include no scratch root.
-`polybridge-ctl backends --json` exposes declared support under
+`harflow-ctl backends --json` exposes declared support under
 `capabilities.extra_writable_paths` without a version or model probe. Use the
 permission preview to qualify the actual installed environment before launch.
 
@@ -65,12 +67,12 @@ over its own source/import root; use an installed server for bounded tasks there
 On macOS, existing paths use kernel-derived spelling so case, Unicode and Data
 firmlink aliases cannot hide protected namespaces. Symlink hops remain protected,
 and missing names are anchored to their verified existing ancestors. Lookup
-failures reject authority. The installed `/Applications/Polybridge Monitor.app`
+failures reject authority. The installed `/Applications/Harflow.app`
 bundle is protected as a whole, even when auto-open is off or the bundle is absent.
 Auto-open names that bundle explicitly rather than using the URL-handler mapping.
-Extra-path requests require `PB_OPEN_MONITOR` to be unset or different from `1`;
-automatic app launch is outside this qualified runtime profile. Open Monitor
-manually to follow these tasks. Ordinary requests retain optional auto-open.
+Extra-path requests require `HARFLOW_OPEN_MONITOR` to be unset or different from `1`;
+automatic app launch is outside this qualified runtime profile. Native app
+integration and automatic opening are currently unavailable for all requests.
 Path resolution,
 saved-authority reads, runtime qualification and final identity checks run in worker
 threads with a 20-second budget per check, including executor queueing. There is
@@ -91,9 +93,9 @@ The CLI reports marked pre-launch path validation failures as `invalid_params`;
 unmarked failures retain their existing launch-failure classification.
 
 ```sh
-polybridge-ctl permission-preview --repo /absolute/repo --backend codex \
+harflow-ctl permission-preview --repo /absolute/repo --backend codex \
   --extra-writable-path /absolute/build-output --json
-polybridge-ctl run --repo /absolute/repo --backend codex --prompt 'Build the project' \
+harflow-ctl run --repo /absolute/repo --backend codex --prompt 'Build the project' \
   --extra-writable-path /absolute/build-output --json
 ```
 
@@ -126,7 +128,7 @@ Reads remain broader than these write scopes; no read privacy is promised.
 Ordinary CLI children inherited the bounded paths, temp exclusions and blocked
 network on fresh/resume probes, both fork modes, and hostile role configuration.
 Guessed child-disable flags did not prevent spawning and are not used as a safety
-claim. Polybridge's separately certified native adapter and workflow launches do
+claim. HarflowMCP's separately certified native adapter and workflow launches do
 not accept grants. Native version pins remain unchanged. Other versions/platforms,
 read-only and unrestricted configurations reject nonempty requests.
 
@@ -162,7 +164,7 @@ they do not sandbox independent services or add restart-safe supervision.
 ## Reproduce
 
 ```sh
-PB_CLI_INTEGRATION=1 uv run pytest -q tests/test_extra_path_cli.py
+HARFLOW_CLI_INTEGRATION=1 uv run pytest -q tests/test_extra_path_cli.py
 uv run pytest -q tests/test_extra_paths.py tests/test_extra_path_backends.py tests/test_extra_path_tasks.py
 ```
 
@@ -170,7 +172,7 @@ The opt-in CLI test uses an isolated localhost fake Responses API, makes no paid
 calls and skips other versions/platforms. Support expansion requires new actual
 allowed-write/denied-write evidence for each version and configuration.
 
-Bounded workers cannot write bridge task/control state: the default `~/.polybridge` state, and the active registry state (including custom task-directory aliases) are protected against repository or explicit grant overlap. This preserves saved authorization and lineage records. Only separately allocated per-task scratch remains writable; caller-supplied grants or repositories inside state/scratch are rejected. The shared registry check runs before qualification and again before execution, including permission previews. Ordinary requests without extra grants retain their existing behavior.
+Bounded workers cannot write bridge task/control state: the default `~/.harflow` state, and the active registry state (including custom task-directory aliases) are protected against repository or explicit grant overlap. This preserves saved authorization and lineage records. Only separately allocated per-task scratch remains writable; caller-supplied grants or repositories inside state/scratch are rejected. The shared registry check runs before qualification and again before execution, including permission previews. Ordinary requests without extra grants retain their existing behavior.
 
 Extra-path qualification also protects known execution configuration namespaces of every registered backend, including backends absent from PATH. The backend declarations cover Claude's default/`CLAUDE_CONFIG_DIR` settings, MCP and plugin state; opencode's default and XDG config/data/cache/state paths plus `OPENCODE_CONFIG`, `OPENCODE_CONFIG_DIR`, `OPENCODE_TEST_HOME`, `OPENCODE_TUI_CONFIG`, `OPENCODE_TEST_MANAGED_CONFIG_DIR`, known system/managed preference inputs and inline configuration; Vibe's default/`VIBE_HOME` tools, plugins, agents and shared skills; and Antigravity's known `.gemini` and system settings namespaces. Existing other-backend configuration inputs are outside the qualified profile and reject requests, rather than claiming to parse arbitrary execution graphs. Relative or empty configuration-path overrides and nonempty inline configuration also reject requests. Missing namespaces, ancestors and symlink targets stay protected against repository, scratch and added-grant overlap. Use an isolated configuration environment; the feature does not modify user configuration.
 
@@ -194,3 +196,7 @@ those inputs between the last check and the CLI reading them. Protection against
 non-cooperating concurrent writers requires a separately isolated or immutable
 runtime and is outside this feature's certification. Keep the qualified startup
 environment stable while launching bounded tasks.
+
+Harflow native app integration and automatic opening are currently unavailable.
+Setting `HARFLOW_OPEN_MONITOR=1` does not enable opening until the companion
+runtime is integrated; the setting remains reserved for that integration.

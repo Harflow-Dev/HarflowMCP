@@ -28,12 +28,12 @@ def worker(source: Path, commands: list[str]) -> int:
         return 2
     sys.path.insert(0, str(source / 'src'))
     entry = time.perf_counter()
-    launch_marker = os.environ.get('PB_BENCH_LAUNCH_CLOCK')
+    launch_marker = os.environ.get('HARFLOW_BENCH_LAUNCH_CLOCK')
     launch = float(launch_marker) if launch_marker is not None else None
     started = time.perf_counter()
-    from polybridge import ctl
+    from harflow_mcp import ctl
     imported = (time.perf_counter() - started) * 1000
-    from polybridge import catalog, lineage
+    from harflow_mcp import catalog, lineage
     lineage._default_process_table = lambda: {os.getpid(): 1, 1: 0}
     original = catalog.Catalog.bootstrap
     durations = []
@@ -87,10 +87,10 @@ def main():
     baseline = load_baseline(source)
 
     def invoke(home, commands):
-        env = {k: v for k, v in os.environ.items() if not k.startswith('PB_')}
-        env.update(HOME=str(home), PB_WORKFLOW_READ_METRICS='1' if args.read_timings == 'on' else '0')
+        env = {k: v for k, v in os.environ.items() if not k.startswith(('HARFLOW_', 'PB_'))}
+        env.update(HOME=str(home), HARFLOW_WORKFLOW_READ_METRICS='1' if args.read_timings == 'on' else '0')
         started = time.perf_counter()
-        env['PB_BENCH_LAUNCH_CLOCK'] = str(started)
+        env['HARFLOW_BENCH_LAUNCH_CLOCK'] = str(started)
         completed = subprocess.run([sys.executable, str(SCRIPT), '--source', str(source), '--worker', *commands],
                                    env=env, capture_output=True, check=True)
         elapsed = (time.perf_counter() - started) * 1000

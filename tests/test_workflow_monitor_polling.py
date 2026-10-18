@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from polybridge.workflow_responses import BUDGET, detail, monitor
+from harflow_mcp.workflow_responses import BUDGET, detail, monitor
 
 
 def test_selected_monitor_projection_bounds_large_results_and_history():
@@ -58,7 +58,7 @@ def test_monitor_unicode_metadata_cannot_defeat_transport_budget():
 
 
 def test_monitor_cli_surface_is_additive_and_ordinary_status_unchanged():
-    from polybridge.ctl import _build_parser
+    from harflow_mcp.ctl import _build_parser
     parser = _build_parser()[0]
     ordinary = parser.parse_args(["workflow-status", "run"])
     selected = parser.parse_args(["workflow-status", "run", "--monitor-view"])
@@ -70,7 +70,7 @@ def test_monitor_cli_surface_is_additive_and_ordinary_status_unchanged():
 
 
 def test_monitor_and_compact_preserve_frozen_native_scheduling_policy():
-    from polybridge.workflow_responses import compact
+    from harflow_mcp.workflow_responses import compact
     run = {"workflow_run_id": "run", "status": "running", "scheduling_policy": "native_workers_plus_control_v1", "activations": []}
     assert compact(run)["scheduling_policy"] == "native_workers_plus_control_v1"
     assert monitor(run)["scheduling_policy"] == "native_workers_plus_control_v1"

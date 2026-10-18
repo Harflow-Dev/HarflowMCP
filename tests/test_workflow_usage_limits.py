@@ -3,8 +3,8 @@ import copy
 
 import pytest
 
-from polybridge import workflows as w
-from polybridge import workflow_delegation as d
+from harflow_mcp import workflows as w
+from harflow_mcp import workflow_delegation as d
 from test_workflow_delegation import Registry, graph, run_flow, storage, default_decision
 
 
@@ -150,7 +150,7 @@ async def test_live_unsettled_limit_returns_attention_without_waiting_forever(st
 
 
 def test_recovery_choices_are_exposed_in_bounded_response():
-    from polybridge.workflow_responses import compact
+    from harflow_mcp.workflow_responses import compact
     run = {"workflow_run_id": "r", "status": "needs_input", "input_decision_id": "d", "orchestrator_usage_recovery": {"decision_id": "d", "failure_diagnostic": LIMIT["failure_diagnostic"], "choices": [{"answer": "fallback", "candidate": {"backend": "codex", "model": "fallback-fixture"}}]}}
     response = compact(run)
     assert response["usage_limit_recovery"]["choices"][0]["answer"] == "fallback"
@@ -250,13 +250,13 @@ async def test_failed_approved_control_fallback_requires_new_consent(storage, tm
         async def fail_selected(prompt, repo, **kwargs):
             if kwargs.get("model") == "fallback-fixture":
                 if failure == "repo_unavailable":
-                    from polybridge.tasks import RepoUnavailableError
+                    from harflow_mcp.tasks import RepoUnavailableError
                     raise RepoUnavailableError("fixture repo unavailable")
                 if failure == "capability":
                     raise w.backends.UnsupportedCapability("fixture capability unavailable")
                 if failure == "not_started":
                     exc = RuntimeError("fixture definitely did not spawn")
-                    exc.polybridge_not_started = True
+                    exc.harflow_not_started = True
                     raise exc
                 if failure == "uncertain":
                     raise RuntimeError("fixture spawn uncertain")
@@ -324,8 +324,8 @@ async def test_builder_success_consumes_fallback_and_feedback_resumes_session(st
 @pytest.mark.parametrize('diagnostic', [LIMIT['failure_diagnostic'], None, {'category': 'other', 'reason': 'generic error'}])
 def test_restart_quota_authority_requires_confirmed_dead_process(tmp_path, monkeypatch, verdict, known, diagnostic):
     from types import SimpleNamespace
-    from polybridge import identity
-    from polybridge.backends.base import Accumulator
+    from harflow_mcp import identity
+    from harflow_mcp.backends.base import Accumulator
     record = SimpleNamespace(status='running', exit_code=None, pid=123, start_time='old', markers=[])
     monkeypatch.setattr(identity, 'check_detail', lambda *_: (verdict, 'fixture'))
     monkeypatch.setattr(w.task_store, 'resolve_status', lambda *a, **k: ('failed', 'Recovered', Accumulator(failure_diagnostic=diagnostic), []))
@@ -335,7 +335,7 @@ def test_restart_quota_authority_requires_confirmed_dead_process(tmp_path, monke
 
 
 async def test_orchestrator_restart_with_dead_quota_reissues_explicit_caller_recovery(storage, tmp_path, monkeypatch):
-    from polybridge import identity, store
+    from harflow_mcp import identity, store
     registry = LimitedRegistry(storage.root, limited_role='orchestrator')
     run, _ = await run_flow(storage, tmp_path, definition(), registry, guided=True)
     pending = copy.deepcopy(run['pending'])
@@ -381,7 +381,7 @@ async def test_orchestrator_restart_with_dead_quota_reissues_explicit_caller_rec
 async def test_worker_restart_with_dead_quota_returns_choice_to_orchestrator(storage, tmp_path, monkeypatch):
     import json
     from dataclasses import replace
-    from polybridge import identity, store
+    from harflow_mcp import identity, store
     def policy(context, registry):
         retry = next((c for c in context['valid_continuations'] if c.get('usage_limit_recovery')), None)
         if retry and 'choose fallback' in context.get('recovery_instructions', ''):
@@ -526,7 +526,7 @@ async def test_builder_without_fallback_can_explicitly_retry_current(storage, tm
 
 @pytest.mark.parametrize('reset', [0, 1791594123, 1791594123.5, '2026-10-10T01:02:03Z'])
 async def test_reset_type_survives_workflow_public_projections(storage, tmp_path, reset):
-    from polybridge.workflow_responses import compact, monitor, history_page
+    from harflow_mcp.workflow_responses import compact, monitor, history_page
     class ResetRegistry(LimitedRegistry):
         async def start(self, prompt, repo, **kwargs):
             task = await super().start(prompt, repo, **kwargs)
@@ -546,7 +546,7 @@ async def test_reset_type_survives_workflow_public_projections(storage, tmp_path
 
 @pytest.mark.parametrize('reset', [True, float('nan'), float('inf'), 10 ** 1000, 'tomorrow', 'Authorization: Bearer synthetic-private-token'])
 def test_compact_omits_invalid_reset_metadata(reset):
-    from polybridge.workflow_responses import compact, monitor, history_page
+    from harflow_mcp.workflow_responses import compact, monitor, history_page
     run = {'workflow_run_id': 'r', 'status': 'needs_input', 'orchestrator_usage_recovery': {'failure_diagnostic': {**LIMIT['failure_diagnostic'], 'reset_at': reset}}}
     for response in (compact(run), monitor(run), history_page([run])['runs'][0]):
         assert 'reset_at' not in response['usage_limit_recovery']['failure_diagnostic']
@@ -554,8 +554,8 @@ def test_compact_omits_invalid_reset_metadata(reset):
 
 def test_oversized_iso_reset_is_omitted_from_bounded_projection():
     import json
-    from polybridge.backends.workflow_diagnostics import valid_reset_value
-    from polybridge.workflow_responses import BUDGET, compact
+    from harflow_mcp.backends.workflow_diagnostics import valid_reset_value
+    from harflow_mcp.workflow_responses import BUDGET, compact
     reset = '2026-10-10T01:02:03.' + '1' * 30000 + 'Z'
     assert not valid_reset_value(reset)
     run = {'workflow_run_id': 'r', 'status': 'needs_input', 'orchestrator_usage_recovery': {'failure_diagnostic': {**LIMIT['failure_diagnostic'], 'reset_at': reset}}}

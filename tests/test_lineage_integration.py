@@ -23,14 +23,14 @@ from types import SimpleNamespace
 import pytest
 from mcp import Client, MCPError
 
-from polybridge import backends, control, lineage, server, store
-from polybridge import tasks as tasks_module
-from polybridge.backends import BACKENDS, NestedDispatchRefused
-from polybridge.backends import Invocation
-from polybridge.backends.base import Enforcement
-from polybridge.backends.codex import CodexBackend
-from polybridge.lineage import Caller
-from polybridge.tasks import SessionBusyError, TaskRegistry
+from harflow_mcp import backends, control, lineage, server, store
+from harflow_mcp import tasks as tasks_module
+from harflow_mcp.backends import BACKENDS, NestedDispatchRefused
+from harflow_mcp.backends import Invocation
+from harflow_mcp.backends.base import Enforcement
+from harflow_mcp.backends.codex import CodexBackend
+from harflow_mcp.lineage import Caller
+from harflow_mcp.tasks import SessionBusyError, TaskRegistry
 
 
 async def call(tool: str, **arguments):
@@ -138,10 +138,10 @@ async def test_root_task_gets_default_lineage_everywhere_it_is_reported(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """No caller detected (the autouse fixture's default) means a root task: no `spawned_by`, its
-    own id as `root_task_id`, depth 0, `max_depth` from `PB_MAX_DEPTH`, no detection method. Must
+    own id as `root_task_id`, depth 0, `max_depth` from `HARFLOW_MAX_DEPTH`, no detection method. Must
     show up identically on the live `Task`, its persisted `TaskRecord`, and its `task_started`
     event."""
-    monkeypatch.setenv("PB_MAX_DEPTH", "7")
+    monkeypatch.setenv("HARFLOW_MAX_DEPTH", "7")
     registry = TaskRegistry(log_dir=tmp_path / "streams")
     fake = _FakeBackend()
     monkeypatch.setitem(backends.BACKENDS, fake.name, fake)
@@ -202,7 +202,7 @@ async def test_root_task_gets_default_lineage_everywhere_it_is_reported(
 async def test_max_depth_default_falls_back_when_env_is_unset(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.delenv("PB_MAX_DEPTH", raising=False)
+    monkeypatch.delenv("HARFLOW_MAX_DEPTH", raising=False)
     registry = TaskRegistry(log_dir=tmp_path / "streams")
     fake = _FakeBackend()
     monkeypatch.setitem(backends.BACKENDS, fake.name, fake)
@@ -316,9 +316,9 @@ async def test_lineage_env_vars_reach_the_spawned_process(
         "import os, sys\n"
         "with open(sys.argv[1], 'w') as f:\n"
         "    f.write('\\n'.join([\n"
-        "        os.environ.get('PB_TASK_ID', ''),\n"
-        "        os.environ.get('PB_ROOT_TASK_ID', ''),\n"
-        "        os.environ.get('PB_DEPTH', ''),\n"
+        "        os.environ.get('HARFLOW_TASK_ID', ''),\n"
+        "        os.environ.get('HARFLOW_ROOT_TASK_ID', ''),\n"
+        "        os.environ.get('HARFLOW_DEPTH', ''),\n"
         "    ]))\n"
     )
     fake = _FakeBackend(

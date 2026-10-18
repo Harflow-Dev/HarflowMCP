@@ -3,10 +3,12 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "polybridge"
-version = "0.1.0"
+name = "harflow-mcp"
+version = "1.0.0"
 description = "Local MCP server that dispatches coding tasks to headless agents (Claude Code, Codex, opencode, vibe, Antigravity)"
 readme = "README.md"
+license = "Apache-2.0"
+authors = [{name = "Nayanda Haberty"}]
 requires-python = ">=3.11"
 dependencies = [
     "mcp>=2.0,<3",
@@ -14,21 +16,21 @@ dependencies = [
 ]
 
 [project.scripts]
-polybridge-server = "polybridge.server:main"
-polybridge-setup = "polybridge.setup_client:main"
-polybridge-ctl = "polybridge.ctl:main"
+harflow-server = "harflow_mcp.server:main"
+harflow-setup = "harflow_mcp.setup_client:main"
+harflow-ctl = "harflow_mcp.ctl:main"
 
 [dependency-groups]
 dev = ["pytest>=8", "pytest-asyncio>=0.24"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/polybridge"]
+packages = ["src/harflow_mcp"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
-    "integration: spawns a real agent CLI; spends real tokens. Opt in with PB_INTEGRATION=1",
-    "cli_integration: drives a real MCP client CLI, or a real agent CLI's own parser, against a sandboxed config or throwaway repo. No model calls in the measured cases, but depends on those binaries. Opt in with PB_CLI_INTEGRATION=1",
+    "integration: spawns a real agent CLI; spends real tokens. Opt in with HARFLOW_INTEGRATION=1",
+    "cli_integration: drives a real MCP client CLI, or a real agent CLI's own parser, against a sandboxed config or throwaway repo. No model calls in the measured cases, but depends on those binaries. Opt in with HARFLOW_CLI_INTEGRATION=1",
     "allow_unknown_event_kinds: the test deliberately writes an event kind outside events.EVENT_KINDS (exempt from the conftest check)",
 ]

@@ -4,7 +4,7 @@ import json
 import os
 from pathlib import Path
 import pytest
-from polybridge import artifacts, identity, lineage, store, workflow_hooks
+from harflow_mcp import artifacts, identity, lineage, store, workflow_hooks
 
 
 @pytest.fixture
@@ -17,8 +17,8 @@ def setup(tmp_path, monkeypatch):
     store.write(logs, record)
     monkeypatch.setattr(lineage, '_default_process_table', lambda: {os.getpid(): 123, 123: 1, 1: 0})
     monkeypatch.setattr(identity, 'identity_check', lambda _: 'alive')
-    monkeypatch.delenv('PB_TASK_ID', raising=False)
-    monkeypatch.delenv('PB_ROOT_TASK_ID', raising=False)
+    monkeypatch.delenv('HARFLOW_TASK_ID', raising=False)
+    monkeypatch.delenv('HARFLOW_ROOT_TASK_ID', raising=False)
     return logs, repo, record
 
 
@@ -106,10 +106,10 @@ def test_terminal_workflow_spoof_and_human(setup, monkeypatch):
     logs, repo, record = setup
     target = repo / 'report'
     target.write_text('hello')
-    monkeypatch.setenv('PB_TASK_ID', 'another')
+    monkeypatch.setenv('HARFLOW_TASK_ID', 'another')
     with pytest.raises(ValueError, match='unverifiable'):
         artifacts.register(logs, str(target), 'report')
-    monkeypatch.delenv('PB_TASK_ID')
+    monkeypatch.delenv('HARFLOW_TASK_ID')
     monkeypatch.setattr(artifacts, '_workflow_owner', lambda *a, **k: {'role': 'worker'})
     with pytest.raises(ValueError, match='Managed'):
         artifacts.get(logs, record.task_id)
@@ -126,9 +126,9 @@ def test_snapshot_brief_and_retention(setup):
     target.write_text('hello')
     artifacts.register(logs, str(target), 'report')
     assert store.snapshot(logs, record)['artifact_summary']['count'] == 1
-    from polybridge.task_reads import brief_status
+    from harflow_mcp.task_reads import brief_status
     assert brief_status(store.snapshot(logs, record))['artifact_summary']['count'] == 1
-    from polybridge.retention import _delete_task_files_locked
+    from harflow_mcp.retention import _delete_task_files_locked
     assert _delete_task_files_locked(logs, record.task_id)
     assert target.read_text() == 'hello'
     assert not artifacts._path(logs, record.task_id).exists()
@@ -149,7 +149,7 @@ def test_nested_nearest_and_ambiguous_session(setup, monkeypatch):
 
 def test_extra_path_revocation_and_changed_symlink(setup):
     logs, repo, record = setup
-    from polybridge.extra_paths import normalize_paths, serialize_paths
+    from harflow_mcp.extra_paths import normalize_paths, serialize_paths
     outside = repo.parent / 'grant'
     outside.mkdir()
     target = outside / 'report'
@@ -171,7 +171,7 @@ def test_extra_path_revocation_and_changed_symlink(setup):
 
 async def test_mcp_cli_parity_and_no_registry_launch(setup, monkeypatch, capsys):
     logs, repo, record = setup
-    from polybridge import ctl, server, tasks
+    from harflow_mcp import ctl, server, tasks
     monkeypatch.setattr(tasks, 'default_log_dir', lambda: logs)
     monkeypatch.setattr(ctl, 'default_log_dir', lambda: logs)
     monkeypatch.setattr(server, '_registry', None)
@@ -214,7 +214,7 @@ def test_manifest_provenance_and_duplicate_id_rejected(setup):
 
 def test_own_scratch_and_sibling_refusal(setup):
     logs, repo, record = setup
-    from polybridge import scratch
+    from harflow_mcp import scratch
     own = scratch.create(logs, record.task_id)
     sibling = scratch.create(logs, 'sibling')
     (own / 'capture').write_text('own')
@@ -296,7 +296,7 @@ def test_cross_process_registration_and_retention_flock(setup):
     script = '''
 import sys
 from pathlib import Path
-from polybridge import artifacts, identity, store, workflow_hooks
+from harflow_mcp import artifacts, identity, store, workflow_hooks
 logs = Path(sys.argv[1])
 artifacts._caller = lambda directory: store.read(directory, 'owner', include_prompt=False)
 identity.identity_check = lambda value: 'alive'
@@ -322,7 +322,7 @@ with open(sys.argv[1], 'a') as stream:
         assert process.stdout.readline().strip() == 'locked'
         terminal = replace(record, status='completed', exit_code=0)
         store.write(logs, terminal)
-        from polybridge.retention import _delete_task
+        from harflow_mcp.retention import _delete_task
         stats = defaultdict(int)
         _delete_task(logs, terminal, stats, datetime.now(timezone.utc), frozenset({'owner'}), {'owner': terminal})
         assert stats['kept_locked'] == 1
@@ -354,7 +354,7 @@ def test_summary_brief_cap_and_lists_do_not_load_manifest(setup, monkeypatch):
     target = repo / 'report'
     target.write_text('hello')
     artifacts.register(logs, str(target), 'report', '界' * 1000)
-    from polybridge import task_reads
+    from harflow_mcp import task_reads
     full = store.snapshot(logs, record)
     brief = task_reads.brief_status(full | {'summary': '界' * 10000, 'note': '界' * 10000})
     assert len(json.dumps(brief).encode()) <= task_reads.BRIEF_BYTES
@@ -364,7 +364,7 @@ def test_summary_brief_cap_and_lists_do_not_load_manifest(setup, monkeypatch):
 
 
 def test_artifact_cli_usage_error_has_json_envelope(capsys):
-    from polybridge import ctl
+    from harflow_mcp import ctl
     with pytest.raises(SystemExit) as exited:
         ctl.main(['register-artifact', 'path', '--kind', 'invalid', '--json'])
     assert exited.value.code == 2
@@ -373,8 +373,8 @@ def test_artifact_cli_usage_error_has_json_envelope(capsys):
 
 def test_missing_repository_preserves_independent_scratch_and_grant_authority(setup):
     logs, repo, record = setup
-    from polybridge import scratch
-    from polybridge.extra_paths import normalize_paths, serialize_paths
+    from harflow_mcp import scratch
+    from harflow_mcp.extra_paths import normalize_paths, serialize_paths
     own = scratch.create(logs, record.task_id)
     scratch_target = own / 'capture'
     scratch_target.write_text('scratch')
@@ -420,7 +420,7 @@ def test_inline_other_backend_configuration_does_not_block_references(setup, mon
     monkeypatch.setenv('OPENCODE_CONFIG', str(protected))
     with pytest.raises(ValueError, match='protected backend configuration'):
         artifacts.register(logs, str(protected), 'other')
-    from polybridge.backends import get
+    from harflow_mcp.backends import get
     with pytest.raises(ValueError, match='inline backend execution'):
         get('opencode').execution_configuration_namespaces(repo)
 
@@ -461,7 +461,7 @@ def test_replaced_lock_inode_is_refused(setup, monkeypatch):
 @pytest.mark.parametrize('grant_kind', ['file', 'directory'])
 def test_only_covering_grants_need_revalidation(setup, grant_kind):
     logs, repo, record = setup
-    from polybridge.extra_paths import normalize_paths, serialize_paths
+    from harflow_mcp.extra_paths import normalize_paths, serialize_paths
     authority = repo.parent / 'authority-a'
     authority.mkdir()
     target = authority / 'report'
@@ -491,7 +491,7 @@ def test_only_covering_grants_need_revalidation(setup, grant_kind):
 
 def test_overlapping_covering_grants_are_independent_but_structure_is_strict(setup):
     logs, repo, record = setup
-    from polybridge.extra_paths import normalize_paths, serialize_paths
+    from harflow_mcp.extra_paths import normalize_paths, serialize_paths
     authority = repo.parent / 'authority'
     authority.mkdir()
     target = authority / 'report'
@@ -516,8 +516,8 @@ def test_overlapping_covering_grants_are_independent_but_structure_is_strict(set
 def test_unsupported_summary_is_shared_by_live_recovered_and_brief(setup, monkeypatch, case):
     logs, repo, record = setup
     from datetime import datetime, timezone
-    from polybridge import task_reads
-    from polybridge.tasks import Task
+    from harflow_mcp import task_reads
+    from harflow_mcp.tasks import Task
     if case == 'builder':
         record = replace(record, workflow_builder=True)
     elif case in ('ancestor', 'missing_parent', 'cycle'):
@@ -548,7 +548,7 @@ def test_unsupported_summary_is_shared_by_live_recovered_and_brief(setup, monkey
 
 def test_supported_empty_corrupt_and_unknown_summary_references(setup, monkeypatch):
     logs, _, record = setup
-    from polybridge import task_reads
+    from harflow_mcp import task_reads
     monkeypatch.setattr(artifacts, '_caller', lambda *args: pytest.fail('summary must not detect callers'))
     reference = {'tool': 'get_task_artifacts', 'task_id': record.task_id}
     assert artifacts.summary(logs, record.task_id) == {'count': 0, 'state': 'available', 'detail_ref': reference}
@@ -661,7 +661,7 @@ def test_caller_observes_late_uncooperative_metadata_replacement(setup):
 @pytest.mark.parametrize('hint', ['forged', 'owner'])
 def test_caller_unknown_identity_and_forged_hints_fail_closed(setup, monkeypatch, hint):
     logs, _, _ = setup
-    monkeypatch.setenv('PB_TASK_ID', hint)
+    monkeypatch.setenv('HARFLOW_TASK_ID', hint)
     if hint == 'owner':
         monkeypatch.setattr(identity, 'identity_check', lambda _: 'undecidable')
     with pytest.raises(ValueError, match='identity|ambiguous'):
@@ -688,7 +688,7 @@ def test_caller_rechecks_selected_full_record_identity(setup, monkeypatch):
 
 
 def test_registration_identity_checks_share_preparation_budget(setup, monkeypatch):
-    from polybridge import catalog
+    from harflow_mcp import catalog
     logs, repo, _ = setup
     (repo / 'report').write_text('observed')
     original = lineage.related_catalog_candidates
@@ -705,7 +705,7 @@ def test_registration_identity_checks_share_preparation_budget(setup, monkeypatc
 
 
 def test_artifact_boundaries_never_scan_workflow_history(setup, monkeypatch):
-    from polybridge.workflows import WorkflowStore
+    from harflow_mcp.workflows import WorkflowStore
     logs, repo, record = setup
     monkeypatch.setattr(WorkflowStore, 'list_runs', lambda *a, **k: pytest.fail('unbounded workflow history'))
     (repo / 'report').write_text('report')
@@ -715,7 +715,7 @@ def test_artifact_boundaries_never_scan_workflow_history(setup, monkeypatch):
 
 
 def test_artifact_workflow_preparation_is_bounded_and_summary_unavailable(setup, monkeypatch):
-    from polybridge.workflows import WorkflowStore
+    from harflow_mcp.workflows import WorkflowStore
     logs, _, record = setup
     storage = WorkflowStore(logs.parent)
     for n in range(205):
@@ -739,7 +739,7 @@ def test_artifact_workflow_preparation_is_bounded_and_summary_unavailable(setup,
 
 @pytest.mark.parametrize('ownership', ['association', 'receipt', 'malformed', 'dangling'])
 def test_real_inherited_workflow_ownership_denies_artifacts(setup, ownership):
-    from polybridge.workflows import WorkflowStore
+    from harflow_mcp.workflows import WorkflowStore
     logs, repo, record = setup
     storage = WorkflowStore(logs.parent)
     parent = replace(record, task_id='managed-parent', pid=777, pgid=888)
@@ -781,7 +781,7 @@ def test_artifact_authority_rejects_oversized_owner_or_ancestor(setup, monkeypat
 
 
 def test_manifest_and_repeated_owner_reads_share_nested_budget(setup, monkeypatch):
-    from polybridge.catalog import current_metadata_budget, metadata_request
+    from harflow_mcp.catalog import current_metadata_budget, metadata_request
     logs, _, record = setup
     monkeypatch.setattr(artifacts, '_workflow_owner', lambda *args, **kwargs: None)
     manifest = artifacts._path(logs, record.task_id)
@@ -799,7 +799,7 @@ def test_manifest_and_repeated_owner_reads_share_nested_budget(setup, monkeypatc
 
 
 def test_registration_budget_exhaustion_preserves_manifest(setup):
-    from polybridge.catalog import current_metadata_budget, metadata_request
+    from harflow_mcp.catalog import current_metadata_budget, metadata_request
     logs, repo, record = setup
     (repo / 'report').write_text('report')
     artifacts.register(logs, 'report', 'report')
@@ -813,7 +813,7 @@ def test_registration_budget_exhaustion_preserves_manifest(setup):
 
 
 def test_valid_near_file_limit_and_shared_ancestor_byte_exhaustion(setup, monkeypatch):
-    from polybridge.catalog import METADATA_BYTES
+    from harflow_mcp.catalog import METADATA_BYTES
     logs, _, record = setup
     monkeypatch.setattr(artifacts, '_workflow_owner', lambda *args, **kwargs: None)
     monkeypatch.setattr(artifacts, '_caller', lambda _: None)
@@ -833,7 +833,7 @@ def test_valid_near_file_limit_and_shared_ancestor_byte_exhaustion(setup, monkey
 
 
 def test_registration_exhaustion_after_locked_rechecks_preserves_manifest(setup):
-    from polybridge.catalog import current_metadata_budget, metadata_request
+    from harflow_mcp.catalog import current_metadata_budget, metadata_request
     logs, repo, record = setup
     (repo / 'report').write_text('report')
     artifacts.register(logs, 'report', 'report')
@@ -852,7 +852,7 @@ def test_registration_exhaustion_after_locked_rechecks_preserves_manifest(setup)
 
 def test_artifact_directory_mutations_share_catalog_lock_without_flock_inversion(setup, monkeypatch):
     from contextlib import contextmanager
-    from polybridge.catalog import catalog_lock
+    from harflow_mcp.catalog import catalog_lock
     logs, repo, record = setup
     (repo / 'report').write_text('report')
     depth = 0
@@ -900,7 +900,7 @@ def test_initial_task_lock_creation_waits_for_catalog_discovery(setup, monkeypat
     from concurrent.futures import ThreadPoolExecutor
     from contextlib import contextmanager
     from threading import Event
-    from polybridge.catalog import catalog_lock
+    from harflow_mcp.catalog import catalog_lock
     logs, _, record = setup
     attempted = Event()
     @contextmanager

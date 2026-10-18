@@ -7,10 +7,10 @@ from pathlib import Path
 
 import pytest
 
-from polybridge import store as tasks
-from polybridge import workflow_child_sessions as reuse
-from polybridge import workflow_invocation as inv
-from polybridge import workflows as w
+from harflow_mcp import store as tasks
+from harflow_mcp import workflow_child_sessions as reuse
+from harflow_mcp import workflow_invocation as inv
+from harflow_mcp import workflows as w
 from test_workflow_delegation import Task
 from test_workflow_run_node_recovery import seed_parent, store, write_run
 from test_workflow_run_node_execution import TreeRegistry
@@ -176,14 +176,14 @@ async def test_first_resume_bootstraps_new_scope_then_acknowledged_delta(store, 
     parent, _, _, _, _, record = source
     workflow_id = parent["definition"]["nodes"][1]["workflow_ref"]["workflow_id"]
     # Keep the pinned source and new scope on the same delivery policy.
-    from polybridge.workflow_references import definition_sha256
+    from harflow_mcp.workflow_references import definition_sha256
     definition = parent["dependency_tree"]["workflows"][workflow_id]["definition"]
     definition["context_delivery"] = policy
     parent["dependency_tree"]["workflows"][workflow_id]["definition_sha256"] = definition_sha256(definition)
     previous = source[3]
     previous["definition"] = copy.deepcopy(definition)
     previous["definition_hash"] = definition_sha256(definition)
-    from polybridge.workflow_references import subtree
+    from harflow_mcp.workflow_references import subtree
     previous["dependency_tree"] = subtree(parent["dependency_tree"], workflow_id)
     write_run(store, previous)
     registry = ReuseRegistry(store.root, record)
@@ -216,14 +216,14 @@ def test_actual_source_fallback_is_pinned(store, source):
     definition = parent["dependency_tree"]["workflows"][workflow_id]["definition"]
     fallback = {"backend": "codex", "model": "gpt-6-sol", "reasoning_effort": "medium"}
     definition["orchestrator"]["fallbacks"] = [fallback]
-    from polybridge.workflow_references import definition_sha256, subtree
+    from harflow_mcp.workflow_references import definition_sha256, subtree
     parent["dependency_tree"]["workflows"][workflow_id]["definition_sha256"] = definition_sha256(definition)
     child["definition"] = copy.deepcopy(definition)
     child["definition_hash"] = definition_sha256(definition)
     child["dependency_tree"] = subtree(parent["dependency_tree"], workflow_id)
     child["sessions"]["orchestrator"]["candidate"] = "orchestrator:" + w._candidate_key(fallback)
     child["activations"][0]["tasks"][0]["candidate"] = fallback
-    from polybridge.workflow_native_policy import plan_owner_contracts, child_contracts
+    from harflow_mcp.workflow_native_policy import plan_owner_contracts, child_contracts
     parent["owner_contracts"] = plan_owner_contracts(parent["definition"], parent["dependency_tree"], network=parent.get("network"))
     child["owner_contracts"] = child_contracts(parent, workflow_id)
     tasks.write(store.root / "tasks", replace(record, model=fallback["model"], reasoning_effort=fallback["reasoning_effort"]))
@@ -284,7 +284,7 @@ def test_fixed_resume_revalidates_checkpoint_issued_reference(store, source):
 
 @pytest.mark.parametrize("error", ["unknown", "busy"])
 async def test_missing_or_busy_session_never_launches_fresh(store, source, error):
-    from polybridge.tasks import SessionBusyError, SessionUnknownError
+    from harflow_mcp.tasks import SessionBusyError, SessionUnknownError
     exc = SessionUnknownError("expired") if error == "unknown" else SessionBusyError("takeover held")
     registry = ReuseRegistry(store.root, source[-1], failure=exc)
     final = await execute_new_child(store, source, registry)
@@ -307,14 +307,14 @@ def test_unknown_ambient_configuration_is_not_compatible(store, source, field):
     workflow_id = node["workflow_ref"]["workflow_id"]
     definition = parent["dependency_tree"]["workflows"][workflow_id]["definition"]
     definition["orchestrator"].pop(field)
-    from polybridge.workflow_references import definition_sha256, subtree
+    from harflow_mcp.workflow_references import definition_sha256, subtree
     parent["dependency_tree"]["workflows"][workflow_id]["definition_sha256"] = definition_sha256(definition)
     child["definition"] = copy.deepcopy(definition)
     child["definition_hash"] = definition_sha256(definition)
     child["dependency_tree"] = subtree(parent["dependency_tree"], workflow_id)
     child["sessions"]["orchestrator"]["candidate"] = "orchestrator:" + w._candidate_key(definition["orchestrator"])
     child["activations"][0]["tasks"][0]["candidate"] = copy.deepcopy(definition["orchestrator"])
-    from polybridge.workflow_native_policy import plan_owner_contracts, child_contracts
+    from harflow_mcp.workflow_native_policy import plan_owner_contracts, child_contracts
     parent["owner_contracts"] = plan_owner_contracts(parent["definition"], parent["dependency_tree"], network=parent.get("network"))
     child["owner_contracts"] = child_contracts(parent, workflow_id)
     tasks.write(store.root / "tasks", replace(record, **{field: None}))
@@ -371,8 +371,8 @@ def test_completed_external_resume_invalidates_offered_and_saved_source(store, s
 
 async def test_successor_between_workflow_validation_and_lock_never_spawns(store, source, monkeypatch):
     from contextlib import asynccontextmanager
-    from polybridge import control
-    from polybridge.tasks import TaskRegistry
+    from harflow_mcp import control
+    from harflow_mcp.tasks import TaskRegistry
     record = source[-1]
     actual = TaskRegistry(log_dir=store.root / "tasks")
     async def no_caller():
@@ -443,7 +443,7 @@ async def test_completed_first_resume_crash_reconciles_owned_binding(store, sour
     elif mutation == "foreign":
         tasks.write(store.root / "tasks", replace(own, task_id=uuid.uuid4().hex, parent_task_id=own.task_id))
     if mutation == "race":
-        from polybridge.tasks import TaskRegistry
+        from harflow_mcp.tasks import TaskRegistry
         actual = TaskRegistry(log_dir=store.root / "tasks")
         async def no_caller():
             return None

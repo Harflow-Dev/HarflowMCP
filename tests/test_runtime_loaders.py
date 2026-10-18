@@ -4,7 +4,7 @@ import struct
 
 import pytest
 
-from polybridge import runtime_loaders, runtime_paths
+from harflow_mcp import runtime_loaders, runtime_paths
 
 
 @pytest.fixture(autouse=True)
@@ -14,8 +14,9 @@ def isolated_configuration(monkeypatch, tmp_path_factory):
     from test_execution_config import isolate_configuration_environment
     isolate_configuration_environment(monkeypatch, tmp_path_factory.mktemp('backend-home'))
     monkeypatch.setenv('CODEX_HOME', str(tmp_path_factory.mktemp('loader-config')))
-    monkeypatch.setattr('polybridge.backends.codex_config._mdm_absence',
+    monkeypatch.setattr('harflow_mcp.backends.codex_config._mdm_absence',
                         lambda: ('managed_preferences_absent',))
+    monkeypatch.setattr('harflow_mcp.backends.codex.RENAMED_EXTRA_PATHS_QUALIFIED', True)
 
 
 def image(path, dependencies=(), rpaths=()):
@@ -102,9 +103,9 @@ def test_truncated_thin_header_is_value_error(tmp_path):
 
 @pytest.mark.parametrize('env_shebang', [False, True])
 def test_script_interpreter_layout_refused_before_version(tmp_path, monkeypatch, env_shebang):
-    from polybridge import backends
-    from polybridge.backends.codex import UnsafeInvocationError
-    from polybridge.extra_paths import normalize_paths
+    from harflow_mcp import backends
+    from harflow_mcp.backends.codex import UnsafeInvocationError
+    from harflow_mcp.extra_paths import normalize_paths
 
     binaries = tmp_path / 'bin'
     binaries.mkdir()
@@ -128,7 +129,7 @@ def test_script_interpreter_layout_refused_before_version(tmp_path, monkeypatch,
     choices = {'codex': codex, 'vibe': script, 'node': node}
     monkeypatch.setattr(runtime_paths.shutil, 'which', lambda name: str(choices[name]) if name in choices else None)
     monkeypatch.setattr(runtime_paths.sys, 'executable', str(codex))
-    monkeypatch.setattr('polybridge.backends.codex.sys.platform', 'darwin')
+    monkeypatch.setattr('harflow_mcp.backends.codex.sys.platform', 'darwin')
     calls = []
     monkeypatch.setattr(backends, 'version', lambda *a, **kw: calls.append(1))
     repo = tmp_path / 'repo'
@@ -142,9 +143,9 @@ def test_script_interpreter_layout_refused_before_version(tmp_path, monkeypatch,
 
 
 def test_later_rpath_candidate_dependency_refused_before_version(tmp_path, monkeypatch):
-    from polybridge import backends
-    from polybridge.backends.codex import UnsafeInvocationError
-    from polybridge.extra_paths import normalize_paths
+    from harflow_mcp import backends
+    from harflow_mcp.backends.codex import UnsafeInvocationError
+    from harflow_mcp.extra_paths import normalize_paths
 
     binaries = tmp_path / 'bin'
     first = tmp_path / 'first'
@@ -160,7 +161,7 @@ def test_later_rpath_candidate_dependency_refused_before_version(tmp_path, monke
     executable = image(binaries / 'codex', ['@rpath/candidate.dylib'], [str(first), str(later)])
     monkeypatch.setattr(runtime_paths.shutil, 'which', lambda name: str(executable) if name == 'codex' else None)
     monkeypatch.setattr(runtime_paths.sys, 'executable', str(executable))
-    monkeypatch.setattr('polybridge.backends.codex.sys.platform', 'darwin')
+    monkeypatch.setattr('harflow_mcp.backends.codex.sys.platform', 'darwin')
     calls = []
     monkeypatch.setattr(backends, 'version', lambda *a, **kw: calls.append(1))
     repo = tmp_path / 'repo'

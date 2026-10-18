@@ -4,8 +4,8 @@ import copy
 
 import pytest
 
-from polybridge import workflow_delegation as d
-from polybridge import workflows as w
+from harflow_mcp import workflow_delegation as d
+from harflow_mcp import workflows as w
 from test_workflow_delegation import Registry, run_flow, storage
 from test_workflow_explicit_parallel import explicit
 from test_workflow_run_node_execution import TreeRegistry, assignment_for, child_graph, parent_graph, run_tree, _start_tree, _wait_until

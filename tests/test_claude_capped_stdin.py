@@ -1,7 +1,7 @@
 from dataclasses import replace
 from pathlib import Path
 import pytest
-from polybridge.backends.claude import ClaudeBackend, UnsafeInvocationError
+from harflow_mcp.backends.claude import ClaudeBackend, UnsafeInvocationError
 
 
 def invocation(prompt, resume=False):

@@ -21,8 +21,8 @@ sys.path.insert(0, str(REPO / 'src'))
 
 
 def fixture(home: Path, size: str) -> dict:
-    from polybridge import store, workflows
-    root = home / '.polybridge'
+    from harflow_mcp import store, workflows
+    root = home / '.harflow'
     if root.exists():
         raise ValueError('Fixture destination must be empty')
     definitions, runs, tasks = SIZES[size]
@@ -61,18 +61,18 @@ def fixture(home: Path, size: str) -> dict:
         events = [{'type': 'thread.started', 'thread_id': 'synthetic-session'}, {'type': 'item.completed', 'item': {'id': 'answer', 'type': 'agent_message', 'text': f'Synthetic task summary {i}'}}, {'type': 'turn.completed', 'usage': {'input_tokens': 0, 'cached_input_tokens': 0, 'output_tokens': 0}}]
         (directory / f'{value.task_id}.jsonl').write_text(''.join(json.dumps(event) + '\n' for event in events))
     # Persistent malformed history exercises the blocked projection without permission changes.
-    blocked = home / 'blocked-fixture' / '.polybridge' / 'tasks'
+    blocked = home / 'blocked-fixture' / '.harflow' / 'tasks'
     blocked.mkdir(parents=True)
     (blocked / 'blocked.meta.json').write_text('{')
-    manifest = {'version': 1, 'size': size, 'definitions': definitions, 'runs': runs, 'tasks': tasks,
+    manifest = {'format': 'harflow.monitor-fixture', 'version': 1, 'size': size, 'definitions': definitions, 'runs': runs, 'tasks': tasks,
             'blocked_records': 1, 'nested_runs': runs // 2, 'snapshot_summary_chars': 380000}
     (home / 'monitor-benchmark-fixture.json').write_text(json.dumps(manifest))
     binaries = home / '.local' / 'bin'
     binaries.mkdir(parents=True)
-    wrapper = binaries / 'polybridge-ctl'
+    wrapper = binaries / 'harflow-ctl'
     wrapper.write_text('#!/bin/sh\ncase "$1" in backends|workflow-validate|workflow-get|workflow-list-page|workflow-list|task-list-page|list|status|workflow-status|workflow-detail|workflow-list-runs) ;; *) exit 2 ;; esac\nexport HOME=' + shlex.quote(str(home.resolve())) + '\nexec ' + shlex.quote(str(REPO / '.venv/bin/python')) + ' ' + shlex.quote(str(Path(__file__).resolve())) + ' --worker "$@"\n')
     wrapper.chmod(0o755)
-    setup = binaries / 'polybridge-setup'
+    setup = binaries / 'harflow-setup'
     setup.write_text("#!/bin/sh\n[ \"$*\" = \"--status --json\" ] || exit 2\necho '{\"v\":1,\"server_path\":null,\"clients\":[]}'\n")
     setup.chmod(0o755)
     return manifest
@@ -87,7 +87,7 @@ def worker(args):
     if not args or args[0] not in allowed:
         print('Benchmark fixture permits read commands only', file=sys.stderr)
         return 2
-    from polybridge import catalog, ctl, lineage
+    from harflow_mcp import catalog, ctl, lineage
     # Explicit synthetic human ancestry avoids host process-table permission variability.
     lineage._default_process_table = lambda: {os.getpid(): 1, 1: 0}
     original = catalog.Catalog.bootstrap
@@ -109,7 +109,7 @@ def worker(args):
 
 
 def invoke(home, args):
-    env = {k: v for k, v in os.environ.items() if not k.startswith('PB_')}
+    env = {k: v for k, v in os.environ.items() if not k.startswith(('HARFLOW_', 'PB_'))}
     env['HOME'] = str(home)
     start = time.perf_counter()
     completed = subprocess.run([sys.executable, str(Path(__file__).resolve()), '--worker', *args],
@@ -152,7 +152,7 @@ def benchmark(size, repeats):
     results = []
     manifest = None
     for _ in range(repeats):
-        with tempfile.TemporaryDirectory(prefix='pb-monitor-benchmark-') as temporary:
+        with tempfile.TemporaryDirectory(prefix='harflow-monitor-benchmark-') as temporary:
             home = Path(temporary)
             manifest = fixture(home, size)
             for name, command, paginate, prepare in [

@@ -1,9 +1,9 @@
 from dataclasses import replace
 import pytest
-from polybridge import backends
-from polybridge.backends.codex import EXTRA_PATHS_VERSION, EXTRA_PATH_PAIRS, UnsafeInvocationError
-from polybridge.backends.base import Invocation, UnsupportedCapability
-from polybridge.extra_paths import normalize_paths
+from harflow_mcp import backends
+from harflow_mcp.backends.codex import EXTRA_PATHS_VERSION, EXTRA_PATH_PAIRS, UnsafeInvocationError
+from harflow_mcp.backends.base import Invocation, UnsupportedCapability
+from harflow_mcp.extra_paths import normalize_paths
 
 
 def build(backend, repo, freedom='write_in_repo', network=None, resume=False):
@@ -16,7 +16,7 @@ def build(backend, repo, freedom='write_in_repo', network=None, resume=False):
 def qualified(monkeypatch, tmp_path_factory):
     # Exercise the real executable fingerprint without requiring an installed CLI.
     # The version probe is stubbed below; invoking the stand-in would fail loudly.
-    monkeypatch.setattr('polybridge.backends.codex_config._mdm_absence', lambda: ('managed_preferences_absent',))
+    monkeypatch.setattr('harflow_mcp.backends.codex_config._mdm_absence', lambda: ('managed_preferences_absent',))
     from test_execution_config import isolate_configuration_environment
     isolate_configuration_environment(monkeypatch, tmp_path_factory.mktemp('backend-home'))
     monkeypatch.setenv('CODEX_HOME', str(tmp_path_factory.mktemp('qualified-config')))
@@ -25,15 +25,16 @@ def qualified(monkeypatch, tmp_path_factory):
     launcher.chmod(0o755)
     monkeypatch.setenv('PATH', str(launcher.parent))
     # Native-shaped stand-ins exercise namespace/identity guards, not native loaders.
-    monkeypatch.setattr('polybridge.runtime_loaders.qualify_loaders',
+    monkeypatch.setattr('harflow_mcp.runtime_loaders.qualify_loaders',
                         lambda paths: (set(paths), set()))
-    monkeypatch.setattr('polybridge.backends.codex.sys.platform', 'darwin')
+    monkeypatch.setattr('harflow_mcp.backends.codex.sys.platform', 'darwin')
     monkeypatch.setattr(backends, 'version', lambda backend, **kwargs: EXTRA_PATHS_VERSION)
+    monkeypatch.setattr('harflow_mcp.backends.codex.RENAMED_EXTRA_PATHS_QUALIFIED', True)
     return backends.get('codex')
 
 
 def test_monitor_auto_open_is_outside_the_qualified_profile(qualified, monkeypatch, tmp_path):
-    monkeypatch.setenv('PB_OPEN_MONITOR', '1')
+    monkeypatch.setenv('HARFLOW_OPEN_MONITOR', '1')
     calls = []
     monkeypatch.setattr(backends, 'version', lambda *args, **kwargs: calls.append(1))
     repo, grant = tmp_path / 'repo', tmp_path / 'grant'
@@ -86,7 +87,7 @@ def test_version_platform_native_and_freedom_rejected(qualified, monkeypatch, tm
     # Empty grants never query runtime qualification.
     assert qualified.with_extra_writable_paths(invocation, (), 'write_in_repo') is invocation
     monkeypatch.setattr(backends, 'version', lambda backend, **kwargs: EXTRA_PATHS_VERSION)
-    monkeypatch.setattr('polybridge.backends.codex.sys.platform', 'linux')
+    monkeypatch.setattr('harflow_mcp.backends.codex.sys.platform', 'linux')
     with pytest.raises(UnsupportedCapability):
         qualified.with_extra_writable_paths(invocation, grants, 'write_in_repo')
 
@@ -354,13 +355,13 @@ def test_server_helper_authority_refused_before_probe(qualified, monkeypatch, tm
 def test_monitor_bundle_namespace_protected_regardless_of_open_monitor(qualified, monkeypatch):
     """The fixed Monitor bundle is a launch target of this server's `open` helper, so its
     whole namespace — absent names included — stays outside writable authority whether or
-    not `PB_OPEN_MONITOR` asks for a launch; a later ordinary launch must stay safe."""
+    not `HARFLOW_OPEN_MONITOR` asks for a launch; a later ordinary launch must stay safe."""
     from pathlib import Path
-    from polybridge.runtime_paths import MONITOR_BUNDLE, assert_runtime_outside_writes
+    from harflow_mcp.runtime_paths import MONITOR_BUNDLE, assert_runtime_outside_writes
     for env in (None, "0", "1"):
-        monkeypatch.delenv("PB_OPEN_MONITOR", raising=False)
+        monkeypatch.delenv("HARFLOW_OPEN_MONITOR", raising=False)
         if env is not None:
-            monkeypatch.setenv("PB_OPEN_MONITOR", env)
+            monkeypatch.setenv("HARFLOW_OPEN_MONITOR", env)
         for scope in (MONITOR_BUNDLE, Path("/Applications")):
             with pytest.raises(ValueError, match="auto-open disabled" if env == "1" else "runtime"):
                 assert_runtime_outside_writes([(scope, "directory")])
@@ -409,7 +410,7 @@ def test_helper_hardlinks_require_readonly_filesystem(qualified, monkeypatch, tm
     helper.chmod(0o755)
     os.link(helper, tmp_path / 'hidden-helper-alias')
     monkeypatch.setenv('PATH', str(helpers) + os.pathsep + os.environ['PATH'])
-    monkeypatch.setattr('polybridge.runtime_paths.os.statvfs', lambda path: SimpleNamespace(f_flag=os.ST_RDONLY if readonly else 0))
+    monkeypatch.setattr('harflow_mcp.runtime_paths.os.statvfs', lambda path: SimpleNamespace(f_flag=os.ST_RDONLY if readonly else 0))
     repo = tmp_path / 'repo'
     repo.mkdir()
     grant = tmp_path / 'grant'
@@ -454,9 +455,9 @@ def test_python_execution_roots_refused_before_probe(qualified, monkeypatch, tmp
     root = tmp_path / 'python-runtime'
     root.mkdir()
     if root_kind == 'prefix':
-        monkeypatch.setattr('polybridge.runtime_paths.sys.prefix', str(root))
+        monkeypatch.setattr('harflow_mcp.runtime_paths.sys.prefix', str(root))
     else:
-        monkeypatch.setattr('polybridge.runtime_paths.sys.path', [*sys.path, str(root)])
+        monkeypatch.setattr('harflow_mcp.runtime_paths.sys.path', [*sys.path, str(root)])
     grant = root / 'poison.py'
     grant.touch()
     repo = tmp_path / 'repo'
@@ -477,7 +478,7 @@ def test_readonly_helper_alias_still_refuses_direct_grant(qualified, monkeypatch
     alias = tmp_path / 'alias'
     os.link(helper, alias)
     monkeypatch.setenv('PATH', str(helpers) + os.pathsep + os.environ['PATH'])
-    monkeypatch.setattr('polybridge.runtime_paths.os.statvfs', lambda path: SimpleNamespace(f_flag=os.ST_RDONLY))
+    monkeypatch.setattr('harflow_mcp.runtime_paths.os.statvfs', lambda path: SimpleNamespace(f_flag=os.ST_RDONLY))
     monkeypatch.setattr(backends, 'version', lambda *args, **kwargs: pytest.fail('unsafe version probe'))
     repo = tmp_path / 'repo'
     repo.mkdir()
@@ -628,7 +629,7 @@ def test_final_recheck_rejects_grant_replaced_during_final_scan(qualified, monke
     refused by the closing saved-identity recheck; an unchanged grant still passes
     and qualification keeps exactly two full scans — the recheck adds none."""
     import os
-    from polybridge import runtime_paths
+    from harflow_mcp import runtime_paths
     repo = tmp_path / 'repo'
     repo.mkdir()
     grant = tmp_path / 'grant-file'
@@ -662,7 +663,7 @@ def test_final_recheck_rejects_mid_scan_configuration_and_runtime_mutation(quali
     snapshots still pass and the closing checks add no full scans."""
     import shutil
     from pathlib import Path
-    from polybridge import runtime_paths
+    from harflow_mcp import runtime_paths
     repo = tmp_path / 'repo'
     repo.mkdir()
     grant = tmp_path / 'grant'
@@ -771,7 +772,7 @@ def test_qualify_runs_one_preflight_and_one_final_full_scan(qualified, monkeypat
     grant = tmp_path / 'grant'; grant.mkdir()
     grants = normalize_paths([str(grant)])
     validate_calls, assert_calls, scans = [], [], []
-    from polybridge import runtime_paths
+    from harflow_mcp import runtime_paths
     real_scan = runtime_paths.assert_single_link_writable_files
     monkeypatch.setattr(runtime_paths, 'assert_single_link_writable_files',
                         lambda scopes: scans.append(1) or real_scan(scopes))

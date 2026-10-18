@@ -13,8 +13,8 @@ from pathlib import Path
 import pytest
 from mcp import Client, MCPError
 
-from polybridge import identity, server, store, wait_policy
-from polybridge.tasks import Task, TAIL_LINES_RETURNED
+from harflow_mcp import identity, server, store, wait_policy
+from harflow_mcp.tasks import Task, TAIL_LINES_RETURNED
 
 
 async def call(tool: str, **arguments):
@@ -109,7 +109,7 @@ async def test_missing_backend_cli_names_the_path_and_how_to_re_register(
     assert "`codex`" in message
     assert "(/frozen/at/install:/usr/bin)" in message
     assert "Settings → Harnesses → Update" in message
-    assert "`polybridge-setup`" in message
+    assert "`harflow-setup`" in message
 
 
 @pytest.mark.usefixtures("fake_backend_clis")
@@ -366,7 +366,7 @@ async def test_a_started_task_reports_its_enforcement(fake_task: Task) -> None:
 
 
 def _plan(seconds: int):
-    from polybridge import wait_policy
+    from harflow_mcp import wait_policy
     return wait_policy.WaitPlan.validate(seconds, "timeout", 55)
 
 
@@ -729,7 +729,7 @@ async def test_send_message_queues_for_a_live_task_the_server_owns(fake_task: Ta
     fake_task.live_input = True
     result = (await call("send_message", task_id="task-1", text="also this")).structured_content
     assert result["status"] == "queued"
-    from polybridge import inbox
+    from harflow_mcp import inbox
     queued, _ = inbox.read_new(server._reg().log_dir, fake_task.task_id, 0)
     assert [(m["id"], m["text"]) for m in queued] == [(result["message_id"], "also this")]
     assert not fake_task.inbox_queue  # The durable inbox is the single source for the pump.
@@ -740,7 +740,7 @@ async def test_send_message_queues_for_the_next_continuation_without_live_input(
     server._reg().persist(fake_task)
     result = (await call("send_message", task_id="task-1", text="hi")).structured_content
     assert result["status"] == "queued" and result["delivery"] == "next_continuation"
-    from polybridge import inbox
+    from harflow_mcp import inbox
     assert inbox.read_new(server._reg().log_dir, fake_task.task_id, 0)[0] == []  # never the inbox
 
 
@@ -763,7 +763,7 @@ async def test_send_message_validates_its_arguments() -> None:
 async def test_send_message_reaches_a_recorded_task_via_its_inbox(identities) -> None:
     from conftest import ALIVE_OWNER
 
-    from polybridge import inbox
+    from harflow_mcp import inbox
 
     log_dir = server._reg().log_dir
     store.write(
@@ -845,7 +845,7 @@ async def test_cancel_task_response_has_recent_activity(fake_task: Task) -> None
 
 async def test_get_task_events_basic(fake_task: Task, tmp_path: Path) -> None:
     """Basic get_task_events returns events from the task's events log."""
-    from polybridge.events import EventLog, events_path
+    from harflow_mcp.events import EventLog, events_path
     import os
 
     log_dir = server._reg().log_dir
@@ -940,7 +940,7 @@ async def test_get_task_events_unknown_kind_raises(fake_task: Task) -> None:
 
 async def test_get_task_events_kinds_filter(fake_task: Task, tmp_path: Path) -> None:
     """kinds filter works correctly."""
-    from polybridge.events import events_path
+    from harflow_mcp.events import events_path
     import os
 
     log_dir = server._reg().log_dir
@@ -1004,7 +1004,7 @@ async def test_get_task_events_excludes_assistant_delta_by_default(
     fake_task: Task, tmp_path: Path
 ) -> None:
     """assistant_delta excluded by default."""
-    from polybridge.events import events_path
+    from harflow_mcp.events import events_path
     import os
 
     log_dir = server._reg().log_dir
@@ -1058,7 +1058,7 @@ async def test_get_task_events_includes_assistant_delta_when_requested(
     fake_task: Task, tmp_path: Path
 ) -> None:
     """assistant_delta included when explicitly requested."""
-    from polybridge.events import events_path
+    from harflow_mcp.events import events_path
     import os
 
     log_dir = server._reg().log_dir
@@ -1096,7 +1096,7 @@ async def test_get_task_events_includes_assistant_delta_when_requested(
 
 async def test_get_task_events_before_seq(fake_task: Task, tmp_path: Path) -> None:
     """before_seq returns events older than the cursor."""
-    from polybridge.events import events_path
+    from harflow_mcp.events import events_path
     import os
 
     log_dir = server._reg().log_dir
@@ -1133,7 +1133,7 @@ async def test_get_task_events_before_seq(fake_task: Task, tmp_path: Path) -> No
 
 async def test_get_task_events_after_seq(fake_task: Task, tmp_path: Path) -> None:
     """after_seq returns events newer than the cursor."""
-    from polybridge.events import events_path
+    from harflow_mcp.events import events_path
     import os
 
     log_dir = server._reg().log_dir
@@ -1170,7 +1170,7 @@ async def test_get_task_events_after_seq(fake_task: Task, tmp_path: Path) -> Non
 
 async def test_get_task_events_paging_newest_first(fake_task: Task, tmp_path: Path) -> None:
     """Default (no cursor) returns newest page."""
-    from polybridge.events import events_path
+    from harflow_mcp.events import events_path
     import os
 
     log_dir = server._reg().log_dir
@@ -1226,7 +1226,7 @@ async def test_get_task_status_on_recovered_task_shaped(
     fake_task: Task, tmp_path: Path
 ) -> None:
     """Recovered task path gets the same shaping."""
-    from polybridge import store
+    from harflow_mcp import store
 
     log_dir = server._reg().log_dir
     # Create a fake recovered record

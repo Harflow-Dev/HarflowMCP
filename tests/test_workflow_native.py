@@ -6,14 +6,20 @@ from dataclasses import replace
 
 import pytest
 
-from polybridge import store, workflows as w
-from polybridge.backends.claude import ClaudeBackend, UnsafeInvocationError
-from polybridge.backends.claude_native import ClaudeNativeAdapter, NATIVE_ARGS
-from polybridge.workflow_invocation import WorkflowTree
-from polybridge.workflow_native import POLICY, dispatch_native, scheduling_policy
+from harflow_mcp import store, workflows as w
+from harflow_mcp.backends.claude import ClaudeBackend, UnsafeInvocationError
+from harflow_mcp.backends.claude_native import ClaudeNativeAdapter, NATIVE_ARGS
+from harflow_mcp.workflow_invocation import WorkflowTree
+from harflow_mcp.workflow_native import POLICY, dispatch_native, scheduling_policy
 from test_workflow_delegation import Registry, Task, graph
 
 MODEL = "claude-sonnet-4-6"
+
+
+@pytest.fixture(autouse=True)
+def qualified_native_adapter(monkeypatch):
+    """Opt legacy adapter contract fixtures into the separately certified test seam."""
+    monkeypatch.setattr("harflow_mcp.backends.claude.RENAMED_NATIVE_QUALIFIED", True)
 
 
 def native_graph():
@@ -28,10 +34,10 @@ def native_events(nonce, assignment, session):
         return {"type": kind, "session_id": session, **fields}
     return [
         event("system", subtype="init", claude_code_version="2.1.295", permissionMode="plan"),
-        event("assistant", message={"content": [{"type": "tool_use", "id": "tool-child", "name": "Agent", "input": {"description": nonce, "prompt": assignment, "subagent_type": "pb-node", "run_in_background": False}}]}),
-        event("system", subtype="task_started", task_id="native-child", tool_use_id="tool-child", description=nonce, prompt=assignment, subagent_type="pb-node", is_backgrounded=False, task_type="local_agent"),
+        event("assistant", message={"content": [{"type": "tool_use", "id": "tool-child", "name": "Agent", "input": {"description": nonce, "prompt": assignment, "subagent_type": "harflow-node", "run_in_background": False}}]}),
+        event("system", subtype="task_started", task_id="native-child", tool_use_id="tool-child", description=nonce, prompt=assignment, subagent_type="harflow-node", is_backgrounded=False, task_type="local_agent"),
         event("assistant", parent_tool_use_id="tool-child", message={"content": [{"type": "text", "text": "Child progress"}]}),
-        event("user", message={"content": [{"type": "tool_result", "tool_use_id": "tool-child"}]}, tool_use_result={"status": "completed", "agentId": "native-child", "agentType": "pb-node", "prompt": assignment, "resolvedModel": MODEL, "content": [{"type": "text", "text": json.dumps({"status": "succeeded", "result": {"summary": "Native reviewed", "verdict": "approved"}, "evidence": ["observed"]})}]}),
+        event("user", message={"content": [{"type": "tool_result", "tool_use_id": "tool-child"}]}, tool_use_result={"status": "completed", "agentId": "native-child", "agentType": "harflow-node", "prompt": assignment, "resolvedModel": MODEL, "content": [{"type": "text", "text": json.dumps({"status": "succeeded", "result": {"summary": "Native reviewed", "verdict": "approved"}, "evidence": ["observed"]})}]}),
     ]
 
 
@@ -191,7 +197,7 @@ async def test_native_worker_and_control_accounting_at_one_and_held_release(nati
 
 @pytest.mark.parametrize("adds_task", [True, False])
 async def test_native_dispatch_accounting_preserves_previous_attempt(native_setup, tmp_path, monkeypatch, adds_task):
-    from polybridge import workflow_native
+    from harflow_mcp import workflow_native
     storage, registry = native_setup
     definition = w.validate_definition(native_graph())
     run = storage.create_run(definition, "Review", tmp_path)
@@ -286,8 +292,8 @@ def test_uncertain_child_holds_checkout_after_owner_dies(native_setup, tmp_path,
 
 
 def test_native_independent_takeover_is_refused_even_after_run_completed(native_setup, tmp_path):
-    from polybridge import control
-    from polybridge.workflow_hooks import refuse_takeover
+    from harflow_mcp import control
+    from harflow_mcp.workflow_hooks import refuse_takeover
     storage, registry = native_setup
     run = storage.create_run(w.validate_definition(native_graph()), "Review", tmp_path)
     storage.update_run(run["workflow_run_id"], lambda r: r.update(status="completed", activations=[{"id": "execution", "node_id": "work", "role": "node", "status": "completed", "tasks": [{"task_id": "child-execution", "execution_kind": "native_subagent", "status": "completed"}]}]), "settled_fixture")
@@ -296,8 +302,8 @@ def test_native_independent_takeover_is_refused_even_after_run_completed(native_
 
 
 async def test_live_native_activity_has_child_origin_without_process_record(native_setup, tmp_path):
-    from polybridge.workflow_inspection import inspect_request
-    from polybridge.events import EventLog, events_path
+    from harflow_mcp.workflow_inspection import inspect_request
+    from harflow_mcp.events import EventLog, events_path
     storage, registry = native_setup
     run = storage.create_run(w.validate_definition(native_graph()), "Review", tmp_path)
     observed = storage.update_run(run["workflow_run_id"], lambda r: r.update(status="running", activations=[{"id": "execution", "node_id": "work", "role": "node", "status": "running", "tasks": [{"task_id": "child-execution", "execution_kind": "native_subagent", "status": "running"}]}]), "live_fixture")
@@ -324,7 +330,7 @@ def test_native_cap_exhaustion_cannot_complete_even_with_tool_completed():
 async def test_authoritative_observer_failure_does_not_stop_parent_stdout_drain(tmp_path):
     from types import SimpleNamespace
     from test_cancel import make_task
-    from polybridge.tasks import _drain_stdout, TaskRegistry
+    from harflow_mcp.tasks import _drain_stdout, TaskRegistry
     task = make_task(tmp_path, "transport")
     reader = asyncio.StreamReader()
     reader.feed_data((json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "First"}]}}) + "\n" + json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "Second"}]}}) + "\n").encode())
@@ -347,7 +353,7 @@ async def test_authoritative_observer_failure_does_not_stop_parent_stdout_drain(
 
 
 async def test_parent_permission_evidence_preserved_on_native_child(native_setup, tmp_path, monkeypatch):
-    from polybridge.workflow_delegation import caller_decision_block
+    from harflow_mcp.workflow_delegation import caller_decision_block
     storage, _ = native_setup
     original_events = native_events
     denial = {"tool_name": "Bash", "tool_use_id": "refused", "reason": "Permission to use Bash denied"}
@@ -420,7 +426,7 @@ def test_native_tool_activity_uses_monitor_contract():
 
 
 def test_native_permission_evidence_union_preserves_child_and_parent():
-    from polybridge.workflow_native import merge_denials
+    from harflow_mcp.workflow_native import merge_denials
     child = {"tool_name": "Read", "reason": "Child denied"}
     parent = {"tool_name": "Bash", "reason": "Parent denied"}
     assert merge_denials([child], [parent, child]) == [child, parent]
@@ -447,13 +453,13 @@ async def test_duplicate_native_child_identity_across_same_owner_session_is_fenc
 @pytest.mark.parametrize("persisted", [False, True])
 @pytest.mark.parametrize("refusal", ["busy", "unknown", "repo", "positive", "ambiguous"])
 async def test_native_resume_refusal_releases_only_proven_no_spawn(native_setup, tmp_path, monkeypatch, persisted, refusal):
-    from polybridge.tasks import SessionBusyError, SessionUnknownError, RepoUnavailableError
+    from harflow_mcp.tasks import SessionBusyError, SessionUnknownError, RepoUnavailableError
     storage, _ = native_setup
     monkeypatch.setattr(w, "_launch", lambda *args: None)
     errors = {"busy": SessionBusyError, "unknown": SessionUnknownError, "repo": RepoUnavailableError, "positive": OSError, "ambiguous": RuntimeError}
     error = errors[refusal]("resume refused")
     if refusal == "positive":
-        error.polybridge_not_started = True
+        error.harflow_not_started = True
 
     class RefusingRegistry(NativeRegistry):
         refuse = True
@@ -501,9 +507,9 @@ async def test_native_resume_refusal_releases_only_proven_no_spawn(native_setup,
 
 
 async def test_native_transport_direct_cancel_and_takeover_are_refused(native_setup, tmp_path, monkeypatch):
-    from polybridge.tasks import TaskRegistry
-    from polybridge.workflow_hooks import refuse_takeover
-    from polybridge.control import TakeoverRefused
+    from harflow_mcp.tasks import TaskRegistry
+    from harflow_mcp.workflow_hooks import refuse_takeover
+    from harflow_mcp.control import TakeoverRefused
     storage, _ = native_setup
     run = storage.create_run(w.validate_definition(native_graph()), "Review", tmp_path)
     storage.update_run(run["workflow_run_id"], lambda r: r.update(status="running", activations=[{"id": "transport", "node_id": "orchestrator", "role": "native_control", "status": "running", "tasks": [{"task_id": "transport", "status": "running"}]}]), "transport_fixture")

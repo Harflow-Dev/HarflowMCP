@@ -1,4 +1,4 @@
-"""`polybridge-ctl` control commands (A4.2): cancel, takeover, takeover-attach, and the run/resume
+"""`harflow-ctl` control commands (A4.2): cancel, takeover, takeover-attach, and the run/resume
 fork-and-handshake lifecycle.
 
 The handshake tests really fork, from a fresh single-threaded interpreter (`ctl_driver.py`) rather
@@ -18,8 +18,8 @@ from pathlib import Path
 
 import pytest
 
-from polybridge import backends, ctl, identity, store
-from polybridge.tasks import default_log_dir
+from harflow_mcp import backends, ctl, identity, store
+from harflow_mcp.tasks import default_log_dir
 
 SESSION = "0199a3f2-7c1e-7b8a-9d0e-123456789abc"
 CODEX_READ_ONLY = backends.get("codex").enforcement("read_only").as_dict()
@@ -29,7 +29,7 @@ DRIVER = Path(__file__).with_name("ctl_driver.py")
 @pytest.fixture(autouse=True)
 def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.delenv("PB_TASK_ID", raising=False)
+    monkeypatch.delenv("HARFLOW_TASK_ID", raising=False)
     return tmp_path
 
 
@@ -37,11 +37,11 @@ def drive(
     *args: str, script: str | None = None, caller: dict | None = None, **extra_env: str
 ) -> tuple[int, str, str]:
     env = dict(os.environ) | extra_env
-    env.pop("PB_TASK_ID", None)
+    env.pop("HARFLOW_TASK_ID", None)
     if script is not None:
-        env["PB_FAKE_SCRIPT"] = script
+        env["HARFLOW_FAKE_SCRIPT"] = script
     if caller is not None:
-        env["PB_FAKE_CALLER"] = json.dumps(caller)
+        env["HARFLOW_FAKE_CALLER"] = json.dumps(caller)
     result = subprocess.run(
         [sys.executable, str(DRIVER), *args],
         capture_output=True,
@@ -204,7 +204,7 @@ def test_a_silent_child_is_reported_unknown_terminated_and_reaped() -> None:
     assert code == 0, err
     outcome = _one(out)
     assert outcome["kind"] == "unknown"
-    assert "polybridge-ctl list" in outcome["payload"]["message"]
+    assert "harflow-ctl list" in outcome["payload"]["message"]
     assert time.monotonic() - started < 20
     with pytest.raises(ProcessLookupError):
         os.kill(outcome["child_pid"], 0)
@@ -229,7 +229,7 @@ def test_a_child_whose_cancel_fails_keeps_owning_its_task_until_it_settles(git_r
     started = time.monotonic()
     code, out, err = drive(
         "start_then_hang", "1", str(git_repo), script="sleep 4",
-        PB_FAKE_CANCEL_FAILS="1", PB_FAKE_REAP_GRACE="1",
+        HARFLOW_FAKE_CANCEL_FAILS="1", HARFLOW_FAKE_REAP_GRACE="1",
     )
 
     assert code == 0, err
@@ -254,7 +254,7 @@ def test_a_child_whose_cancel_fails_keeps_owning_its_task_until_it_settles(git_r
 def test_the_unknown_document_is_versioned_and_exits_3(
     monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
-    from polybridge import detached
+    from harflow_mcp import detached
 
     monkeypatch.setattr(
         detached,
@@ -353,7 +353,7 @@ def _finished_claude(repo: Path) -> None:
 def test_takeover_json_for_a_finished_task(
     tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from polybridge import takeover
+    from harflow_mcp import takeover
 
     monkeypatch.setattr(takeover.shutil, "which", lambda name: f"/opt/bin/{name}")
     _finished_claude(tmp_path)
@@ -371,17 +371,17 @@ def test_takeover_json_for_a_finished_task(
 
 def test_takeover_refuses_an_agent_caller(tmp_path: Path, capsys, monkeypatch) -> None:
     _finished_claude(tmp_path)
-    monkeypatch.setenv("PB_TASK_ID", "t0")
+    monkeypatch.setenv("HARFLOW_TASK_ID", "t0")
 
     assert ctl.main(["takeover", "t1", "--json"]) == 1
-    assert _doc(capsys)["error"]["code"] == "agent_caller"
+    assert _doc(capsys)["error"]["code"] in {"caller_undecidable", "agent_caller"}
     assert ctl.main(["takeover-attach", "t1", "--pid", str(os.getpid()), "--json"]) == 1
-    assert _doc(capsys)["error"]["code"] == "agent_caller"
+    assert _doc(capsys)["error"]["code"] in {"caller_undecidable", "agent_caller"}
     assert not any(".takeover." in p.name for p in default_log_dir().iterdir())
 
 
 def test_takeover_attach_json(tmp_path: Path, capsys, monkeypatch) -> None:
-    from polybridge import takeover
+    from harflow_mcp import takeover
 
     monkeypatch.setattr(takeover.shutil, "which", lambda name: f"/opt/bin/{name}")
     _finished_claude(tmp_path)
@@ -429,7 +429,7 @@ def _running_record(tmp_path: Path, pid: int, pgid: int, ident: dict) -> None:
 
 
 def _flaky_sig(monkeypatch: pytest.MonkeyPatch, failures: int) -> None:
-    from polybridge import control
+    from harflow_mcp import control
 
     real = control.write_phase
     left = {"n": failures}

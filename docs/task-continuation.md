@@ -16,8 +16,8 @@ Automatic continuation currently recognizes Claude's structured `error_max_turns
 
 A cross-process chain lock and durable predecessor reservation prevent duplicate successors. A reservation with an existing successor is not executed again. An identical retry returns a locally held successor; a changed follow-up or notes is rejected rather than silently dropped. An interrupted or ambiguous spawn remains reserved and fails closed. A proven pre-exec failure can retry the same reserved identifier. Manual continuation can also recover a failed automatic pre-exec attempt with the identical reconstructed context, provided no successor exists; its automatic budget is disabled. Other changes of automatic mode are rejected. Automatic continuation does not survive MCP server death; explicit continuation remains available after eligible durable settlement.
 
-The CLI supports `polybridge-ctl continue TASK_ID --extra-prompt-file followup.txt --notes-path notes.txt`.
-For a standalone launch, `polybridge-ctl run ... --auto-continue N` keeps its detached owner alive
+The CLI supports `harflow-ctl continue TASK_ID --extra-prompt-file followup.txt --notes-path notes.txt`.
+For a standalone launch, `harflow-ctl run ... --auto-continue N` keeps its detached owner alive
 until all eligible successors settle. Identical continuation retries share the reserved successor;
 different follow-up text or notes are rejected instead of silently dropped. `list_backends` reports
 `capabilities.supports_auto_continue`; unsupported automatic settings are rejected before spawn.
@@ -35,11 +35,11 @@ standalone task, running or settled, appends the text to a durable per-task ledg
 "delivered": nothing is started and nothing is written to an agent. Live-input tasks keep their
 inbox path unchanged and answer `delivery: "live_input"`; a live task whose input has closed is
 still told to `resume_task`, not redirected here. The ledger is separate from the live-input inbox
-and never touches its lock or close protocol. `polybridge-ctl send` takes the same route.
+and never touches its lock or close protocol. `harflow-ctl send` takes the same route.
 
 **Consumption.** The next continuation a caller starts explicitly from the task consumes every
-queued message, in `seq` order, exactly once: `resume_task`, `continue_task`, `polybridge-ctl
-resume` and `polybridge-ctl continue` (the Monitor's Resume goes through ctl). Automatic
+queued message, in `seq` order, exactly once: `resume_task`, `continue_task`, `harflow-ctl
+resume` and `harflow-ctl continue` (the Monitor's Resume goes through ctl). Automatic
 continuations, workflow supervisor resumes and builder resumes never consume. A resume's prompt is
 
 ```
@@ -51,7 +51,7 @@ Queued caller follow-up 1 of N (message <id>, queued <iso time>):
 ```
 
 or, when `followup_prompt` is omitted, the fixed last line `End of queued caller follow-ups.`.
-`followup_prompt` (and the `polybridge-ctl resume` text) may be omitted only when something is
+`followup_prompt` (and the `harflow-ctl resume` text) may be omitted only when something is
 queued; blank strings are still rejected. `continue_task` places the same blocks ahead of its
 `Caller follow-up:` section (or the closing line when there is none). With nothing queued every
 call behaves exactly as before. The successor's `task_started` event carries `message_ids`.
@@ -60,7 +60,7 @@ call behaves exactly as before. The successor's `task_started` event carries `me
 `cancelled`, `undeliverable` (a successor already exists: resend to it) and `delivery_unknown` (a
 launch failed after the messages were handed over, so they may have reached an agent; inspect, do
 not blindly resend). Consumed and cancelled items keep metadata only (newest 20; `omitted_final`
-counts the rest). `get_task_status` and `polybridge-ctl status --json` list them as
+counts the rest). `get_task_status` and `harflow-ctl status --json` list them as
 `queued_followups` (`{state, items, omitted_final}`; `state: "unavailable"` if the ledger cannot be
 read), and briefs carry `queued_followup_count`.
 

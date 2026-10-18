@@ -2,14 +2,21 @@ from types import SimpleNamespace
 import sys
 import pytest
 
-from polybridge import backends
+from harflow_mcp import backends
+
+
+@pytest.fixture(autouse=True)
+def qualified_native_adapter(monkeypatch):
+    """Opt legacy native eligibility assertions into the certified test seam."""
+    monkeypatch.setattr("harflow_mcp.backends.claude.RENAMED_NATIVE_QUALIFIED", True)
+    monkeypatch.setattr("harflow_mcp.backends.codex.RENAMED_NATIVE_QUALIFIED", True)
 
 
 @pytest.mark.parametrize('platform', ['darwin', 'linux'])
 def test_ordinary_script_version_and_native_owner_eligibility(tmp_path, monkeypatch, platform):
-    from polybridge.backends.claude_native import CERTIFIED_VERSION
-    from polybridge.workflow_native_policy import plan_owner_contracts
-    from polybridge import workflows
+    from harflow_mcp.backends.claude_native import CERTIFIED_VERSION
+    from harflow_mcp.workflow_native_policy import plan_owner_contracts
+    from harflow_mcp import workflows
     from test_workflow_delegation import graph
     wrapper = tmp_path / 'claude'
     wrapper.write_text('#!/bin/sh\nif [ "$1" = "--version" ]; then printf "%s\\n" "' + CERTIFIED_VERSION + ' fixture"; else exit 99; fi\n')

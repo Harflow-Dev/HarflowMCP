@@ -24,27 +24,10 @@ constraints to exercise historical assignment compaction. Both run with the
 guided policy and Headless workers. Optimized decisions echo the issued context
 acknowledgement; legacy decisions use the legacy envelope.
 
-Observed baseline on 2026-10-07:
-
-| Measurement | Legacy | Optimized v1 |
-| --- | ---: | ---: |
-| Final status | completed | completed |
-| Total dispatched turns | 5 | 5 |
-| Worker executions | 2 | 2 |
-| Repair turns | 0 | 0 |
-| Inspection turns | 0 | 0 |
-| Fresh orchestrator bytes, 1 turn | 7,059 | 5,813 |
-| Resumed orchestrator bytes, 2 turns | 76,083 | 12,712 |
-| Fresh worker bytes, 2 turns | 42,051 | 41,998 |
-| Complete workflow injected bytes | 125,193 | 60,523 |
-| Reported tokens / cost | unknown | unknown |
-
-The observed reduction is **64,670 bytes (51.7%)** across the complete workflow.
-This fixture establishes matching fake workflow outcomes and dispatch counts;
-it does not establish live-agent quality. Temporary paths appear in scratch
-instructions, so absolute byte totals can vary with the test environment. The
-test asserts the behavioral outcomes and total-byte reduction, rather than
-hard-coding machine-specific byte counts.
+The fixture checks matching workflow outcomes and dispatch counts. Temporary paths
+appear in scratch instructions, so absolute byte totals vary with the environment.
+The test asserts behavioral outcomes and total-byte reduction rather than fixed
+machine-specific byte counts.
 
 ## Isolated prompt scenarios
 
@@ -59,16 +42,6 @@ workflow execution. It includes section accounting and explicit `model_calls: 0`
 and `token_counts: null`. Parallel evidence manifests are synthetic authorized
 retrieval fixtures; their IDs cannot be used against a live workflow.
 
-| Fixture | Legacy bytes | Optimized bytes |
-| --- | ---: | ---: |
-| Small | 4,328 | 2,680 |
-| Large history | 225,716 | 3,839 |
-| Parallel evidence | 673,884 | 4,770 |
-| Child scope | 225,859 | 3,973 |
-| Clarification | 225,955 | 4,066 |
-| Protocol repair | 225,716 | 3,839 |
-| Acknowledged resume | 225,716 | 3,508 |
-
 Large-history savings come mainly from removing historical assignment bodies.
 Parallel evidence savings include replacement with complete retrieval references.
 Repair keeps bootstrap; an acknowledged compatible resume omits it.
@@ -80,7 +53,7 @@ protocol repair bootstrap, positively refused candidate fallback, explicit legac
 upgrade, retained-session supervisor restart, authorized oversized worker input,
 linked-child evidence reconstruction, and exhausted orchestrator inspection
 budgets. These assertions cover recovery and evidence access independently of
-the five-turn baseline above.
+the complete workflow comparison.
 
 ```bash
 uv run pytest tests/test_workflow_context_integration.py tests/test_workflow_assigned_inputs.py -q

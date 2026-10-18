@@ -11,10 +11,10 @@ from pathlib import Path
 
 import pytest
 
-from polybridge import setup_client
-from polybridge.clients import Result, SetupError
+from harflow_mcp import setup_client
+from harflow_mcp.clients import Result, SetupError
 
-EVERYTHING = {"polybridge-server", "claude", "codex", "opencode", "vibe", "agy", "git"}
+EVERYTHING = {"harflow-server", "claude", "codex", "opencode", "vibe", "agy", "git"}
 
 
 class FakeCli:
@@ -47,7 +47,7 @@ def fake_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeCli:
     """Every client CLI faked, and every config location a client reads pointed into tmp_path."""
     fake = FakeCli()
     fake.reply(("codex", "mcp", "list", "--json"), 0, "[]")
-    monkeypatch.setattr("polybridge.clients.base.subprocess.run", fake)
+    monkeypatch.setattr("harflow_mcp.clients.base.subprocess.run", fake)
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
@@ -84,7 +84,7 @@ def run(tmp_path: Path, *argv: str) -> int:
 
 
 def test_path_env_leads_with_the_servers_own_directory() -> None:
-    path_env = setup_client.build_path_env("/opt/tools/polybridge-server", "/usr/local/bin/claude")
+    path_env = setup_client.build_path_env("/opt/tools/harflow-server", "/usr/local/bin/claude")
 
     assert path_env.split(":")[0] == "/opt/tools"
     assert "/usr/local/bin" in path_env.split(":")
@@ -99,14 +99,14 @@ def test_path_env_keeps_symlinks_unresolved(tmp_path: Path) -> None:
     link.parent.mkdir(exist_ok=True)
     link.symlink_to(real)
 
-    path_env = setup_client.build_path_env("/opt/bin/polybridge-server", str(link / "claude"))
+    path_env = setup_client.build_path_env("/opt/bin/harflow-server", str(link / "claude"))
 
     assert str(link) in path_env.split(":")
     assert str(real) not in path_env.split(":")
 
 
 def test_path_env_drops_absent_dependencies_and_repeats() -> None:
-    path_env = setup_client.build_path_env("/usr/bin/polybridge-server", None, "/usr/bin/git")
+    path_env = setup_client.build_path_env("/usr/bin/harflow-server", None, "/usr/bin/git")
 
     assert path_env.split(":").count("/usr/bin") == 1
 
@@ -122,8 +122,8 @@ def test_missing_server_binary_is_an_error_that_says_how_to_fix_it(which) -> Non
 
 
 def test_an_install_inside_a_virtualenv_is_recognised_as_ephemeral() -> None:
-    assert setup_client.is_ephemeral_install("/repo/.venv/bin/polybridge-server")
-    assert not setup_client.is_ephemeral_install("/Users/x/.local/bin/polybridge-server")
+    assert setup_client.is_ephemeral_install("/repo/.venv/bin/harflow-server")
+    assert not setup_client.is_ephemeral_install("/Users/x/.local/bin/harflow-server")
 
 
 # --- selection ----------------------------------------------------------------------------------
@@ -141,7 +141,7 @@ def test_a_dry_run_changes_nothing_and_previews_every_client(
     assert not (tmp_path / "claude_desktop_config.json").exists()
     assert "would write" in out
     for binary in ("claude", "codex", "opencode", "vibe"):
-        assert f"{binary} mcp add polybridge" in out
+        assert f"{binary} mcp add harflow" in out
     # agy takes its flags before the name (measured), so its preview is matched by its prefix.
     assert "agy mcp add --env" in out
 
@@ -149,7 +149,7 @@ def test_a_dry_run_changes_nothing_and_previews_every_client(
 def test_clients_that_are_not_installed_are_skipped_not_failed(
     tmp_path: Path, which, capsys
 ) -> None:
-    which("polybridge-server", "git")
+    which("harflow-server", "git")
 
     code = run(tmp_path)
 
@@ -162,7 +162,7 @@ def test_clients_that_are_not_installed_are_skipped_not_failed(
 def test_asking_for_a_client_that_is_not_installed_is_an_error(
     tmp_path: Path, which, capsys
 ) -> None:
-    which("polybridge-server")
+    which("harflow-server")
 
     code = setup_client.main(["--client", "codex"])
 
@@ -198,7 +198,7 @@ def test_post_apply_guidance_comes_from_the_clients_not_from_a_name_check(
     tmp_path: Path, which, capsys
 ) -> None:
     """Which clients need a restart is theirs to say; setup only prints what it is told."""
-    which("polybridge-server", "codex", "git")
+    which("harflow-server", "codex", "git")
 
     run(tmp_path)
 
@@ -251,12 +251,12 @@ def run_json(tmp_path: Path, capsys, *argv: str, desktop: bool = True) -> tuple[
 
 def nothing_registered(fake_cli: FakeCli) -> None:
     """Each CLI's measured "there was nothing to remove" reply."""
-    fake_cli.reply(("claude", "mcp", "remove"), 1, 'No MCP server named "polybridge" in user scope')
-    fake_cli.reply(("codex", "mcp", "remove"), 0, "No MCP server named 'polybridge' found.")
+    fake_cli.reply(("claude", "mcp", "remove"), 1, 'No MCP server named "harflow" in user scope')
+    fake_cli.reply(("codex", "mcp", "remove"), 0, "No MCP server named 'harflow' found.")
     fake_cli.reply(
-        ("vibe", "mcp", "remove"), 0, "MCP server `polybridge` is not configured in the user config."
+        ("vibe", "mcp", "remove"), 0, "MCP server `harflow` is not configured in the user config."
     )
-    fake_cli.reply(("agy", "mcp", "remove"), 1, 'Error: MCP server "polybridge" not found')
+    fake_cli.reply(("agy", "mcp", "remove"), 1, 'Error: MCP server "harflow" not found')
 
 
 def rows(document: dict) -> dict[str, dict]:
@@ -330,7 +330,7 @@ def test_status_json_is_version_one_with_exactly_the_documented_fields(
     assert code == 0
     assert set(document) == {"v", "server_path", "clients"}
     assert document["v"] == 1
-    assert document["server_path"] == "/fake/bin/polybridge-server"
+    assert document["server_path"] == "/fake/bin/harflow-server"
     assert [row["key"] for row in document["clients"]] == [
         "claude-desktop",
         "claude-code",
@@ -362,12 +362,12 @@ def test_status_reports_an_install_as_current_and_a_stale_one_as_not(
     row = rows(document)["claude-desktop"]
     assert (row["installed"], row["command"], row["current"]) == (
         True,
-        "/fake/bin/polybridge-server",
+        "/fake/bin/harflow-server",
         True,
     )
 
     config = json.loads((tmp_path / DESKTOP).read_text())
-    config["mcpServers"]["polybridge"]["env"]["PATH"] = "/somewhere/else"
+    config["mcpServers"]["harflow"]["env"]["PATH"] = "/somewhere/else"
     (tmp_path / DESKTOP).write_text(json.dumps(config))
 
     _, document = run_json(tmp_path, capsys, "--status", "--client", "claude-desktop")
@@ -406,13 +406,13 @@ def test_status_runs_nothing_but_codex_s_listing(tmp_path: Path, which, fake_cli
 
 
 def test_status_table_is_readable(tmp_path: Path, which, capsys) -> None:
-    which("polybridge-server", "codex", "git")
+    which("harflow-server", "codex", "git")
 
     code = run(tmp_path, "--status")
 
     out = capsys.readouterr().out
     assert code == 0
-    assert "server:  /fake/bin/polybridge-server" in out
+    assert "server:  /fake/bin/harflow-server" in out
     assert "not installed" in out
     assert "unavailable" in out
 
@@ -459,7 +459,7 @@ def test_uninstall_leaves_opencode_to_the_user_and_still_exits_zero(
     which("opencode")
     config = tmp_path / "home" / "config" / "opencode" / "opencode.jsonc"
     config.parent.mkdir(parents=True)
-    config.write_text(json.dumps({"mcp": {"polybridge": {"type": "local", "command": ["/x"]}}}))
+    config.write_text(json.dumps({"mcp": {"harflow": {"type": "local", "command": ["/x"]}}}))
 
     code, document = run_json(
         tmp_path, capsys, "--uninstall", "--client", "opencode", desktop=False
@@ -484,7 +484,7 @@ def test_uninstall_exits_one_on_a_remove_failure(tmp_path: Path, which, fake_cli
     assert code == 1
     assert row["action"] == "failed"
     assert row["error"] == "remove command failed (exit 1)"
-    assert "ran: codex mcp remove polybridge" in row["notes"]
+    assert "ran: codex mcp remove harflow" in row["notes"]
 
 
 def test_uninstall_exits_one_on_an_unknown_outcome(tmp_path: Path, which, fake_cli, capsys) -> None:
@@ -512,7 +512,7 @@ def test_install_json_is_the_only_thing_on_stdout(tmp_path: Path, which, capsys)
 
     by_key = rows(document)
     assert code == 0
-    assert document["server_path"] == "/fake/bin/polybridge-server"
+    assert document["server_path"] == "/fake/bin/harflow-server"
     assert by_key["claude-desktop"]["action"] == "applied"
     assert by_key["claude-desktop"]["installed"] is True
     assert by_key["claude-desktop"]["current"] is True
@@ -532,19 +532,19 @@ def test_install_dry_run_json_describes_the_unchanged_state(tmp_path: Path, whic
 
 
 def test_json_document_puts_a_failed_actions_detail_in_error() -> None:
-    from polybridge.clients import Inspection
+    from harflow_mcp.clients import Inspection
 
     document = setup_client.json_document(
         "/s",
         "/p",
         [Inspection("codex", None, error="list broke")],
-        [Result("codex", "unknown", "timed out", steps=("codex mcp remove polybridge",))],
+        [Result("codex", "unknown", "timed out", steps=("codex mcp remove harflow",))],
     )
 
     (row,) = document["clients"]
     assert row["error"] == "timed out"
     assert "inspect: list broke" in row["notes"]
-    assert "ran: codex mcp remove polybridge" in row["notes"]
+    assert "ran: codex mcp remove harflow" in row["notes"]
 
 
 def test_the_report_keeps_its_columns_aligned_for_long_statuses(capsys) -> None:

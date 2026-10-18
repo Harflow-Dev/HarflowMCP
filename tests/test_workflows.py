@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from polybridge import workflows as w
+from harflow_mcp import workflows as w
 
 
 def definition(role="task"):
@@ -467,7 +467,7 @@ async def test_role_defaults_complement_custom_context_and_preserve_freedom(stor
     supervisor.run_id = rid
     await supervisor._execute_node(run["definition"]["nodes"][1], token)
     prompt, settings = registry.calls[0]
-    for marker in ("Overall user task", "Custom instruction for this step", "Previous step evidence", "Human recovery note", "Role defaults:", default_marker, "Only the orchestrator may change checklist statuses", "Polybridge owns dispatch and routing", "configured permission limits"):
+    for marker in ("Overall user task", "Custom instruction for this step", "Previous step evidence", "Human recovery note", "Role defaults:", default_marker, "Only the orchestrator may change checklist statuses", "HarflowMCP owns dispatch and routing", "configured permission limits"):
         assert marker in prompt
     assert settings["freedom"] == "write_in_repo"
     assert storage.get_run(rid)["pending"][0]["execution_complete"] is True
@@ -1175,7 +1175,7 @@ async def test_edit_context_invalid_json_shapes_and_source_metadata_rejected(sto
 
 
 def active_builder(storage, tmp_path, *, role="builder"):
-    from polybridge import store, lineage
+    from harflow_mcp import store, lineage
     run = storage.create_run({"name": "example", "orchestrator": {"backend": "codex"}}, "Build", tmp_path, kind="builder", freedom="read_only")
     tid = "builder-task"
     record = store.TaskRecord(task_id=tid, backend="codex", session_id="session", repo_path=str(tmp_path), started_at=1, status="running")
@@ -1230,7 +1230,7 @@ def test_live_preview_rejects_render_unsafe_snapshots(canvas):
 
 
 async def test_live_builder_applied_draft_wins_over_stale_final_json(storage, tmp_path):
-    from polybridge import store, lineage
+    from harflow_mcp import store, lineage
     baseline = storage.save("example", definition())
     run = storage.create_run({"name": "example", "orchestrator": {"backend": "codex"}}, "Refine", tmp_path, kind="builder", freedom="read_only")
     storage.update_run(run["workflow_run_id"], lambda r: r.update(editing_definition=baseline, editing_source={"name": "example", "revision": 1, "saved_definition": baseline}, draft_revision=0), "editing")
@@ -1288,7 +1288,7 @@ async def test_builder_followup_refuses_unreconciled_dispatch(storage, tmp_path,
 
 @pytest.mark.parametrize("uncertain", [False, True])
 async def test_live_builder_feedback_close_refusal_defers_but_unknown_send_needs_attention(storage, tmp_path, monkeypatch, uncertain):
-    from polybridge import inbox
+    from harflow_mcp import inbox
     monkeypatch.setattr(w, "_supervisor_present", lambda r: bool(r.get("supervisor_pid")))
     baseline = storage.save("example", definition())
     run = storage.create_run({"name": "example", "orchestrator": {"backend": "codex"}}, "Edit", tmp_path, kind="builder", freedom="read_only")
@@ -1454,7 +1454,7 @@ async def test_builder_invalid_agent_does_not_create_default_workspace(storage):
 
 async def test_registry_display_projection_keeps_full_backend_prompt_and_normalized_timeline(tmp_path, monkeypatch):
     from datetime import datetime, timezone
-    from polybridge import tasks, store
+    from harflow_mcp import tasks, store
     registry = tasks.TaskRegistry(log_dir=tmp_path)
     captured = {}
     async def spawn(invocation, **kwargs):
@@ -1481,7 +1481,7 @@ async def test_registry_display_projection_keeps_full_backend_prompt_and_normali
 @pytest.mark.parametrize("recovered", [False, True])
 async def test_registry_workflow_followup_display_keeps_full_resume_input(tmp_path, monkeypatch, recovered):
     from datetime import datetime, timezone
-    from polybridge import tasks, store
+    from harflow_mcp import tasks, store
     registry = tasks.TaskRegistry(log_dir=tmp_path)
     parent = tasks.Task(task_id="parent", backend="claude", session_id="session", repo_path=tmp_path, prompt="Previous full prompt", display_prompt="Previous user request", max_turns=5, log_path=tmp_path / "parent.log", started_at=datetime.now(timezone.utc))
     parent.status = "completed"; parent.done.set()
@@ -1564,7 +1564,7 @@ async def test_builder_failed_startup_exposes_sanitized_stderr_reason(storage, t
     observed = storage.get_run(run["workflow_run_id"])
     assert observed["status"] == "needs_attention"
     assert error in observed["attention_reason"]
-    assert "Create a Polybridge workflow" not in observed["attention_reason"]
+    assert "Create a HarflowMCP workflow" not in observed["attention_reason"]
 
 
 def test_failure_diagnostic_removes_injected_prompt_echo_and_bounds_output():
@@ -1576,7 +1576,7 @@ def test_failure_diagnostic_removes_injected_prompt_echo_and_bounds_output():
 
 def test_failed_stderr_survives_registry_persistence_and_recovered_snapshot(tmp_path):
     from datetime import datetime, timezone
-    from polybridge import tasks, store
+    from harflow_mcp import tasks, store
     registry = tasks.TaskRegistry(log_dir=tmp_path)
     task = tasks.Task(task_id="failed", backend="codex", session_id=None, repo_path=tmp_path, prompt="Prompt", max_turns=5, log_path=tmp_path / "failed.jsonl", started_at=datetime.now(timezone.utc))
     task.status = "failed"; task.exit_code = 1; task.finished_at = datetime.now(timezone.utc)
@@ -2033,7 +2033,7 @@ async def test_recovered_optional_fallback_completed_snapshot_survives_second_in
     registry = FakeRegistry(storage.root, ["fallback done"])
     supervisor = w.WorkflowSupervisor(registry, storage)
     supervisor.run_id = run["workflow_run_id"]
-    from polybridge import identity
+    from harflow_mcp import identity
     import os
     storage.update_run(run["workflow_run_id"], lambda r: r.update(supervisor_pid=os.getpid(), supervisor_identity=identity.own_identity()), "supervisor_restored")
     original = supervisor._task_update
@@ -2071,7 +2071,7 @@ async def test_pause_before_start_preserves_initial_continuation(storage, tmp_pa
 
 
 def test_resume_uncertain_supervisor_does_not_mutate(storage, tmp_path, monkeypatch):
-    from polybridge import identity
+    from harflow_mcp import identity
     run = storage.create_run(w.validate_definition(definition()), "request", tmp_path)
     rid = run["workflow_run_id"]
     before = storage.update_run(rid, lambda r: r.update(status="paused", supervisor_identity={"pid": 123}), "fixture")
@@ -2196,7 +2196,7 @@ async def test_cancellation_supervisor_failure_does_not_respawn(storage, tmp_pat
     async def broken_cancel(self, task_id, **kwargs):
         cancelled.append(task_id)
         raise RuntimeError("cancel still unavailable")
-    from polybridge.tasks import TaskRegistry
+    from harflow_mcp.tasks import TaskRegistry
     monkeypatch.setattr(TaskRegistry, "cancel_cascade", broken_cancel)
     launched = []
     monkeypatch.setattr(w.WorkflowSupervisor, "execute", broken)

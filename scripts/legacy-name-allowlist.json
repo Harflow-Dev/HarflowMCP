@@ -1,0 +1,284 @@
+[
+  {
+    "file": "src/harflow_mcp/artifacts.py",
+    "literal": "polybridge",
+    "reason": "Exclude both current and legacy product state from artifacts.",
+    "count": 1
+  },
+  {
+    "file": "src/harflow_mcp/backends/antigravity.py",
+    "literal": "polybridge",
+    "reason": "Stable pre-extraction wire field; contract reset deferred.",
+    "count": 1
+  },
+  {
+    "file": "src/harflow_mcp/backends/base.py",
+    "literal": "polybridge",
+    "reason": "Stable pre-extraction wire field; contract reset deferred.",
+    "count": 9
+  },
+  {
+    "file": "src/harflow_mcp/backends/claude.py",
+    "literal": "polybridge",
+    "reason": "Stable pre-extraction wire field; contract reset deferred.",
+    "count": 1
+  },
+  {
+    "file": "src/harflow_mcp/backends/codex.py",
+    "literal": "polybridge",
+    "reason": "Stable pre-extraction wire field; contract reset deferred.",
+    "count": 2
+  },
+  {
+    "file": "src/harflow_mcp/backends/opencode.py",
+    "literal": "polybridge",
+    "reason": "Stable pre-extraction wire field; contract reset deferred.",
+    "count": 1
+  },
+  {
+    "file": "src/harflow_mcp/backends/vibe.py",
+    "literal": "polybridge",
+    "reason": "Stable pre-extraction wire field; contract reset deferred.",
+    "count": 1
+  },
+  {
+    "file": "src/harflow_mcp/caller_policy.py",
+    "literal": "PB_DEPTH",
+    "reason": "Reject foreign or conflicting legacy caller signals and diagnose stale variables.",
+    "count": 5
+  },
+  {
+    "file": "src/harflow_mcp/caller_policy.py",
+    "literal": "PB_TASK_ID",
+    "reason": "Reject foreign or conflicting legacy caller signals and diagnose stale variables.",
+    "count": 8
+  },
+  {
+    "file": "src/harflow_mcp/lineage.py",
+    "literal": "pb_task_id",
+    "reason": "Stable pre-extraction wire field; contract reset deferred.",
+    "count": 2
+  },
+  {
+    "file": "src/harflow_mcp/server.py",
+    "literal": "polybridge",
+    "reason": "Stable pre-extraction wire field; contract reset deferred.",
+    "count": 2
+  },
+  {
+    "file": "src/harflow_mcp/store.py",
+    "literal": "pb_task_id",
+    "reason": "Stable pre-extraction wire field; contract reset deferred.",
+    "count": 1
+  },
+  {
+    "file": "src/harflow_mcp/takeover.py",
+    "literal": "PB_TASK_ID",
+    "reason": "Stable pre-extraction wire field; contract reset deferred.",
+    "count": 3
+  },
+  {
+    "file": "src/harflow_mcp/tasks.py",
+    "literal": "polybridge",
+    "reason": "Stable pre-extraction wire field; contract reset deferred.",
+    "count": 3
+  },
+  {
+    "file": "src/harflow_mcp/tasks.py",
+    "literal": "pb_task_id",
+    "reason": "Stable pre-extraction wire field; contract reset deferred.",
+    "count": 1
+  },
+  {
+    "file": "src/harflow_mcp/tasks.py",
+    "literal": "PB_DEPTH",
+    "reason": "Cross-product caller compatibility and protected legacy state.",
+    "count": 1
+  },
+  {
+    "file": "src/harflow_mcp/tasks.py",
+    "literal": "PB_TASK_ID",
+    "reason": "Stable pre-extraction wire field; contract reset deferred.",
+    "count": 1
+  },
+  {
+    "file": "docs/getting-started.md",
+    "literal": "Polybridge",
+    "reason": "Document that legacy product state is not imported.",
+    "count": 1
+  },
+  {
+    "file": "tests/ctl_driver.py",
+    "literal": "pb_task_id",
+    "reason": "Stable pre-extraction wire field; contract reset deferred.",
+    "count": 1
+  },
+  {
+    "file": "tests/fixtures/antigravity_tools.jsonl",
+    "literal": "pb_outside_test",
+    "reason": "Cross-product caller compatibility and protected legacy state.",
+    "count": 8
+  },
+  {
+    "file": "tests/test_approval_lifecycle.py",
+    "literal": "pb_task_id_is_cleared",
+    "reason": "Cross-product caller compatibility and protected legacy state.",
+    "count": 1
+  },
+  {
+    "file": "tests/test_backends.py",
+    "literal": "pb_outside_test",
+    "reason": "Cross-product caller compatibility and protected legacy state.",
+    "count": 1
+  },
+  {
+    "file": "tests/test_backends.py",
+    "literal": "polybridge",
+    "reason": "Stable pre-extraction wire field; contract reset deferred.",
+    "count": 3
+  },
+  {
+    "file": "tests/test_caps.py",
+    "literal": "polybridge",
+    "reason": "Stable pre-extraction wire field; contract reset deferred.",
+    "count": 3
+  },
+  {
+    "file": "tests/test_codex_native_subagent_cli.py",
+    "literal": "pb_node_nonce_first",
+    "reason": "Cross-product caller compatibility and protected legacy state.",
+    "count": 8
+  },
+  {
+    "file": "tests/test_codex_native_subagent_cli.py",
+    "literal": "pb_node_nonce_second",
+    "reason": "Cross-product caller compatibility and protected legacy state.",
+    "count": 9
+  },
+  {
+    "file": "tests/test_extra_path_surface.py",
+    "literal": "polybridge",
+    "reason": "Stable pre-extraction wire field; contract reset deferred.",
+    "count": 1
+  },
+  {
+    "file": "tests/test_lineage.py",
+    "literal": "pb_task_id_unrelated_to_this_process_falls_through",
+    "reason": "Cross-product caller compatibility and protected legacy state.",
+    "count": 1
+  },
+  {
+    "file": "tests/test_lineage.py",
+    "literal": "pb_task_id_confirmed_by_ancestry",
+    "reason": "Cross-product caller compatibility and protected legacy state.",
+    "count": 1
+  },
+  {
+    "file": "tests/test_lineage.py",
+    "literal": "pb_task_id_confirmed_by_session_match",
+    "reason": "Cross-product caller compatibility and protected legacy state.",
+    "count": 1
+  },
+  {
+    "file": "tests/test_lineage.py",
+    "literal": "pb_task_id_naming_a_dead_record_falls_through",
+    "reason": "Cross-product caller compatibility and protected legacy state.",
+    "count": 1
+  },
+  {
+    "file": "tests/test_lineage.py",
+    "literal": "pb_task_id_beats_session_and_ancestry",
+    "reason": "Cross-product caller compatibility and protected legacy state.",
+    "count": 1
+  },
+  {
+    "file": "tests/test_lineage.py",
+    "literal": "pb_task_id_naming_an_undecidable_record_falls_through",
+    "reason": "Cross-product caller compatibility and protected legacy state.",
+    "count": 1
+  },
+  {
+    "file": "tests/test_lineage.py",
+    "literal": "pb_task_id_with_invalid_chars_is_ignored",
+    "reason": "Cross-product caller compatibility and protected legacy state.",
+    "count": 1
+  },
+  {
+    "file": "tests/test_lineage.py",
+    "literal": "pb_task_id",
+    "reason": "Stable pre-extraction wire field; contract reset deferred.",
+    "count": 3
+  },
+  {
+    "file": "tests/test_lineage_integration.py",
+    "literal": "pb_task_id",
+    "reason": "Stable pre-extraction wire field; contract reset deferred.",
+    "count": 5
+  },
+  {
+    "file": "src/harflow_mcp/bridge_state.py",
+    "literal": "polybridge",
+    "reason": "Protect legacy product state from writable path authority.",
+    "count": 1
+  },
+  {
+    "file": "tests/test_harflow_identity_policy.py",
+    "literal": "polybridge",
+    "reason": "Explicit cross-product caller and protected legacy state regression coverage.",
+    "count": 2
+  },
+  {
+    "file": "tests/test_harflow_identity_policy.py",
+    "literal": "PB_DEPTH",
+    "reason": "Explicit cross-product caller and protected legacy state regression coverage.",
+    "count": 2
+  },
+  {
+    "file": "tests/test_harflow_identity_policy.py",
+    "literal": "PB_TASK_ID",
+    "reason": "Explicit cross-product caller and protected legacy state regression coverage.",
+    "count": 5
+  },
+  {
+    "file": "src/harflow_mcp/takeover.py",
+    "literal": "PB_DEPTH",
+    "reason": "Refuse takeover for any inherited legacy worker signal.",
+    "count": 2
+  },
+  {
+    "file": "src/harflow_mcp/lineage.py",
+    "literal": "PB_MAX_DEPTH",
+    "reason": "Honor the lower valid legacy dispatch budget during extraction.",
+    "count": 1
+  },
+  {
+    "file": "tests/conftest.py",
+    "literal": "PB_TASK_ID",
+    "reason": "Isolate inherited legacy worker signals from unrelated unit tests.",
+    "count": 1
+  },
+  {
+    "file": "tests/conftest.py",
+    "literal": "PB_ROOT_TASK_ID",
+    "reason": "Isolate inherited legacy worker signals from unrelated unit tests.",
+    "count": 1
+  },
+  {
+    "file": "tests/conftest.py",
+    "literal": "PB_DEPTH",
+    "reason": "Isolate inherited legacy worker signals from unrelated unit tests.",
+    "count": 1
+  },
+  {
+    "file": "tests/conftest.py",
+    "literal": "PB_MAX_DEPTH",
+    "reason": "Isolate inherited legacy worker depth budgets from unrelated unit tests.",
+    "count": 1
+  },
+  {
+    "file": "tests/test_harflow_identity_policy.py",
+    "literal": "PB_MAX_DEPTH",
+    "reason": "Verify that the lower legacy dispatch budget remains effective.",
+    "count": 2
+  }
+]

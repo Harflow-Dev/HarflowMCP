@@ -20,12 +20,12 @@ import uuid
 
 import pytest
 
-from polybridge.backends.codex import CodexBackend
-from polybridge.extra_paths import normalize_paths, restore_paths, serialize_paths
+from harflow_mcp.backends.codex import CodexBackend
+from harflow_mcp.extra_paths import normalize_paths, restore_paths, serialize_paths
 
 VERSION = "codex-cli 0.162.0-alpha.17.2"
 pytestmark = [pytest.mark.cli_integration, pytest.mark.skipif(
-    not os.environ.get("PB_CLI_INTEGRATION"), reason="opt in with PB_CLI_INTEGRATION=1")]
+    not os.environ.get("HARFLOW_CLI_INTEGRATION"), reason="opt in with HARFLOW_CLI_INTEGRATION=1")]
 
 
 class LocalResponses:
@@ -163,7 +163,7 @@ def certified(tmp_path):
     paths["file"] = tmp_path / "exact-file"
     paths["file"].write_text("original")
     env = {key: value for key, value in os.environ.items()
-           if not key.startswith(("CODEX", "OPENAI", "ANTHROPIC", "CLAUDE", "OPENCODE", "VIBE", "XDG_", "PB_"))}
+           if not key.startswith(("CODEX", "OPENAI", "ANTHROPIC", "CLAUDE", "OPENCODE", "VIBE", "XDG_", "HARFLOW_"))}
     # Expose only the certified native launchers and native commands needed by
     # the OS-boundary probes; ambient registered script backends are unsupported.
     native_bin = tmp_path / 'native-bin'
@@ -292,8 +292,8 @@ def test_actual_ordinary_children_inherit_bounded_roots(certified, fork):
         assert str(certified.paths["unrelated"].resolve()) not in policy["writable_roots"]
         assert policy["network_access"] is False
         assert policy["exclude_slash_tmp"] is policy["exclude_tmpdir_env_var"] is True
-    # Plain CLI inheritance does not certify Polybridge's separately pinned adapter.
-    from polybridge.backends.codex_native import CodexNativeAdapter
+    # Plain CLI inheritance does not certify HarflowMCP's separately pinned adapter.
+    from harflow_mcp.backends.codex_native import CodexNativeAdapter
     parent = SimpleNamespace(backend="codex", freedom="write_in_repo", network=False,
                              model="gpt-6.1-sol", reasoning_effort=None, max_turns=None)
     assert CodexNativeAdapter().eligible(parent, {"model": parent.model},

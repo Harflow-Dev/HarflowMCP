@@ -4,7 +4,7 @@ from dataclasses import replace
 
 import pytest
 
-from polybridge import store, task_reads
+from harflow_mcp import store, task_reads
 
 
 def record(identifier, **kw):
@@ -68,7 +68,7 @@ def test_reproducible_large_history(tmp_path, monkeypatch, capsys):
 
 
 def test_maximum_unicode_filters_round_trip_cursor(tmp_path):
-    from polybridge.catalog import Catalog
+    from harflow_mcp.catalog import Catalog
     value = 'é' * 100  # Each of the three filters is exactly 200 UTF-8 bytes.
     catalog = Catalog(tmp_path, store.RECORD_SUFFIX)
     for i in range(3):
@@ -130,8 +130,8 @@ def test_status_filter_reports_unchecked_active_inventory(tmp_path, monkeypatch)
         assert not page['counts_complete']
 
 async def test_mcp_compact_projection_and_page(tmp_path):
-    from polybridge import server
-    from polybridge.tasks import Task
+    from harflow_mcp import server
+    from harflow_mcp.tasks import Task
     from datetime import datetime, timezone
     task = Task(task_id='compact', backend='codex', session_id=None, repo_path=tmp_path,
         prompt='exact caller prose', max_turns=None, log_path=tmp_path / 'compact.jsonl',
@@ -149,7 +149,7 @@ async def test_mcp_compact_projection_and_page(tmp_path):
 
 @pytest.mark.parametrize('group', ['😀' * 51, '😀' * 128])
 async def test_unicode_group_producer_and_compact_readers_agree(tmp_path, monkeypatch, capsys, group):
-    from polybridge import ctl, server, workflow_inspection
+    from harflow_mcp import ctl, server, workflow_inspection
 
     # Validate the unchanged producer contract, then persist its exact label.
     server._check_group(group)
@@ -166,8 +166,8 @@ async def test_unicode_group_producer_and_compact_readers_agree(tmp_path, monkey
 
 @pytest.mark.parametrize('group', ['x' * 129, '😀' * 129])
 async def test_oversized_group_rejected_by_mcp_and_cli(monkeypatch, capsys, group):
-    from polybridge import ctl, server, workflow_inspection
-    from polybridge.server import INVALID_PARAMS, MCPError
+    from harflow_mcp import ctl, server, workflow_inspection
+    from harflow_mcp.server import INVALID_PARAMS, MCPError
 
     with pytest.raises(MCPError) as error:
         await server.list_tasks(group=group, limit=1)

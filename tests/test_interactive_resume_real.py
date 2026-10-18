@@ -1,6 +1,6 @@
 """`interactive_resume_argv` checked against each installed CLI's own `--help`.
 
-Opt-in (`PB_CLI_INTEGRATION=1 uv run pytest -m cli_integration`). Only `--help` is ever run: the
+Opt-in (`HARFLOW_CLI_INTEGRATION=1 uv run pytest -m cli_integration`). Only `--help` is ever run: the
 command under test opens an interactive UI (and codex's writes a trust entry to ~/.codex/config.toml
 in an untrusted directory), so running it here is exactly what must never happen. What `--help` can
 show is that every option the argv uses still exists, and that the positional shape is still the one
@@ -21,18 +21,18 @@ from pathlib import Path
 
 import pytest
 
-from polybridge import backends
+from harflow_mcp import backends
 
 pytestmark = [
     pytest.mark.cli_integration,
     pytest.mark.skipif(
-        not os.environ.get("PB_CLI_INTEGRATION"),
-        reason="reads real agent CLIs' --help; opt in with PB_CLI_INTEGRATION=1",
+        not os.environ.get("HARFLOW_CLI_INTEGRATION"),
+        reason="reads real agent CLIs' --help; opt in with HARFLOW_CLI_INTEGRATION=1",
     ),
 ]
 
 SESSION_ID = "0199a3f2-7c1e-7b8a-9d0e-123456789abc"
-REPO = Path("/tmp/pb-interactive-help-check")
+REPO = Path("/tmp/harflow-interactive-help-check")
 
 # (help argv suffix, [patterns that must match that help text], option tokens those patterns claim)
 HELP_CHECKS: dict[str, list[tuple[list[str], list[str], set[str]]]] = {

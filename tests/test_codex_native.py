@@ -5,8 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from polybridge.backends.codex import CodexBackend, UnsafeInvocationError
-from polybridge.backends.codex_native import CodexNativeAdapter, NATIVE_ARGS, child_configuration
+from harflow_mcp.backends.codex import CodexBackend, UnsafeInvocationError
+from harflow_mcp.backends.codex_native import CodexNativeAdapter, NATIVE_ARGS, child_configuration
 
 PARENT = "00000000-0000-0000-0000-000000000001"
 CHILD = "00000000-0000-0000-0000-000000000002"
@@ -86,7 +86,7 @@ def test_foreign_parent_is_rejected():
 
 
 def test_eligibility_uses_real_cli_version_shape(monkeypatch):
-    from polybridge import backends
+    from harflow_mcp import backends
     monkeypatch.setattr(backends, "version", lambda _: "codex-cli 0.162.0")
     parent = SimpleNamespace(backend="codex", freedom="read_only", network=None, model="gpt-6.1-sol", reasoning_effort=None, max_turns=None)
     candidate = {"model": parent.model}
@@ -183,7 +183,7 @@ def test_native_lifecycle_rejects_uncorrelated_or_incomplete_evidence(tmp_path, 
 
 
 def test_partial_rollout_cannot_be_accepted_as_terminal(tmp_path, monkeypatch):
-    from polybridge.backends.codex_native import rollout_records
+    from harflow_mcp.backends.codex_native import rollout_records
     native_rollouts(tmp_path, monkeypatch)
     file = next((tmp_path / "sessions").glob(f"*/*/*/rollout-parent-{PARENT}.jsonl"))
     file.write_bytes(file.read_bytes().rstrip(b"\n"))
@@ -306,7 +306,7 @@ def test_native_quota_does_not_bypass_correlated_failure_requirements(tmp_path, 
 
 
 def test_native_usage_diagnostic_reason_does_not_copy_provider_credentials(tmp_path, monkeypatch):
-    from polybridge.backends.workflow_diagnostics import USAGE_LIMIT_REASON
+    from harflow_mcp.backends.workflow_diagnostics import USAGE_LIMIT_REASON
     failed_rollouts(tmp_path, monkeypatch)
     secret_message = 'fixture native child API failure Authorization: Bearer synthetic-private-token Cookie: synthetic-session'
     child_file = next((tmp_path / 'sessions').glob(f'*/*/*/*-{CHILD}.jsonl'))

@@ -2,9 +2,9 @@ import copy
 
 import pytest
 
-from polybridge import workflows
-from polybridge.workflow_migration import migrate_orchestrator_instructions
-from polybridge.workflow_on_demand import (
+from harflow_mcp import workflows
+from harflow_mcp.workflow_migration import migrate_orchestrator_instructions
+from harflow_mcp.workflow_on_demand import (
     cancel_reservations,
     catalog,
     context,

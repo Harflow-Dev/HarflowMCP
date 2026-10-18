@@ -14,15 +14,15 @@ from pathlib import Path
 
 import pytest
 
-from polybridge import backends
-from polybridge.events import events_path
-from polybridge.tasks import TaskRegistry
+from harflow_mcp import backends
+from harflow_mcp.events import events_path
+from harflow_mcp.tasks import TaskRegistry
 
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(
-        not os.environ.get("PB_INTEGRATION"),
-        reason="set PB_INTEGRATION=1 to spawn real agent runs (spends real tokens)",
+        not os.environ.get("HARFLOW_INTEGRATION"),
+        reason="set HARFLOW_INTEGRATION=1 to spawn real agent runs (spends real tokens)",
     ),
 ]
 

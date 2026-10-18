@@ -78,7 +78,7 @@ def main():
     here = Path(__file__).resolve()
     if not a.name or Path(a.name).name != a.name or a.name in (".", "..") or "\\" in a.name:
         ap.error("--name must be a single path component (no separators, '..' or absolute paths)")
-    root = a.work_dir or Path(tempfile.mkdtemp(prefix="pb-probe-"))
+    root = a.work_dir or Path(tempfile.mkdtemp(prefix="harflow-probe-"))
     work = root / a.name
     if work.exists():
         ap.error(f"{work} already exists; choose another --name or --work-dir")

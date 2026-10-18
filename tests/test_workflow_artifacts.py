@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from polybridge import artifacts, store, workflows
-from polybridge.bounded_io import ReadLimit
+from harflow_mcp import artifacts, store, workflows
+from harflow_mcp.bounded_io import ReadLimit
 
 
 def _item(task_id: str, *, artifact_id: str = "00000000-0000-4000-8000-000000000001", workflow=None, note="note"):
@@ -70,7 +70,7 @@ def test_tree_members_uses_catalog_without_loading_run_records(tmp_path, monkeyp
         def connect(self): return DB()
         def _discover(self, db): pass
         def state(self, db): return {"status": "ready"}
-    monkeypatch.setattr("polybridge.catalog.Catalog", Catalog)
+    monkeypatch.setattr("harflow_mcp.catalog.Catalog", Catalog)
     result = storage.tree_members("root")
     assert result["state"] == "ready"
     assert result["members"][0]["id"] == "root"
@@ -207,7 +207,7 @@ def test_workflow_page_budget_exhaustion_advances_owner_cursor(tmp_path, monkeyp
 
 
 def test_selected_artifact_refs_are_frozen_and_notes_render_verbatim(monkeypatch, tmp_path):
-    from polybridge import workflow_artifact_refs as refs
+    from harflow_mcp import workflow_artifact_refs as refs
 
     selected = _item("owner", note="  preserve\nexactly  ") | {
         "availability": {"state": "available"},
@@ -234,13 +234,13 @@ def test_selected_artifact_refs_are_frozen_and_notes_render_verbatim(monkeypatch
     [{"execution_id": "exec", "artifact_id": "missing", "extra": "field"}],
 ])
 def test_artifact_ref_selection_rejects_duplicates_and_extra_fields(tmp_path, bad):
-    from polybridge import workflow_artifact_refs as refs
+    from harflow_mcp import workflow_artifact_refs as refs
     with pytest.raises(workflows.WorkflowError, match="artifact_refs"):
         refs.resolve_refs({"workflow_run_id": "run"}, bad, tmp_path)
 
 
 def test_worker_prompt_keeps_selected_refs_with_optimized_delivery(tmp_path):
-    from polybridge.workflow_delegation import worker_prompt
+    from harflow_mcp.workflow_delegation import worker_prompt
 
     note = "literal note\nwith leading spaces"
     token = {
@@ -304,7 +304,7 @@ def test_authority_accepts_managed_ancestor_in_same_tree_and_refuses_other_tree(
 
 @pytest.mark.parametrize("managed", [None, ({"role": "node"}, {"workflow_run_id": "run"}), ({"role": "builder"}, {"workflow_run_id": "run"})])
 def test_run_level_artifact_read_authority_is_role_scoped(tmp_path, monkeypatch, managed):
-    from polybridge import workflow_node_reads
+    from harflow_mcp import workflow_node_reads
     observed = {}
     monkeypatch.setattr(artifacts, "workflow_page", lambda *a, **k: observed.update(kwargs=k) or {"state": "available"})
     if managed is None:
@@ -315,7 +315,7 @@ def test_run_level_artifact_read_authority_is_role_scoped(tmp_path, monkeypatch,
 
 
 def test_inherited_artifact_refs_are_selectable_only_when_explicitly_forwarded(tmp_path, monkeypatch):
-    from polybridge import workflow_artifact_refs as refs
+    from harflow_mcp import workflow_artifact_refs as refs
     inherited = {"execution_id": "parent-exec", "artifact_id": "artifact", "owner_task_id": "owner", "workflow_run_id": "parent", "node_id": "work", "kind": "report", "path": "/repo/r", "note": "keep", "registered_at": "now", "registered_observation": {}, "availability_at_assignment": "available", "attribution": "attempt"}
     run = {"workflow_run_id": "child", "invocation_artifact_refs": [inherited], "activations": []}
     monkeypatch.setattr(refs, "_find_execution", lambda *a, **k: None)
@@ -330,7 +330,7 @@ def test_workflow_retry_registration_keeps_distinct_artifact_ids(tmp_path, monke
     repo = tmp_path / "repo"; repo.mkdir()
     record = store.TaskRecord("owner", "codex", None, str(repo), "2026-01-01T00:00:00+00:00", pid=123, pgid=456, start_time="start")
     store.write(logs, record)
-    from polybridge import identity, lineage
+    from harflow_mcp import identity, lineage
     monkeypatch.setattr(lineage, "_default_process_table", lambda: {__import__('os').getpid(): 123, 123: 1, 1: 0})
     monkeypatch.setattr(identity, "identity_check", lambda _: "alive")
     target = repo / "report"

@@ -5,14 +5,14 @@ from pathlib import Path
 
 import pytest
 
-from polybridge import notifications as n, store
+from harflow_mcp import notifications as n, store
 
 
 @pytest.fixture
 def setup(tmp_path, monkeypatch):
     logs = tmp_path / 'tasks'
     logs.mkdir()
-    monkeypatch.setenv('PB_NOTIFY_DESTINATIONS', json.dumps({'test': {'url': 'https://example.com/hook', 'secret_env': 'TEST_SECRET'}}))
+    monkeypatch.setenv('HARFLOW_NOTIFY_DESTINATIONS', json.dumps({'test': {'url': 'https://example.com/hook', 'secret_env': 'TEST_SECRET'}}))
     monkeypatch.setenv('TEST_SECRET', 'never-persist-this')
     return logs
 
@@ -36,7 +36,7 @@ def test_discard_confirms_only_removed_reservation(setup):
 
 @pytest.mark.parametrize('scheme,allow_private', [('https', False), ('http', True)])
 def test_preflight_rejects_explicit_port_zero(setup, monkeypatch, scheme, allow_private):
-    monkeypatch.setenv('PB_NOTIFY_DESTINATIONS', json.dumps({
+    monkeypatch.setenv('HARFLOW_NOTIFY_DESTINATIONS', json.dumps({
         'test': {'url': f'{scheme}://receiver.example:0/hook', 'allow_private': allow_private}
     }))
     with pytest.raises(ValueError, match='notification destination unavailable or invalid'):
@@ -174,7 +174,7 @@ def test_expiry_after_lease_elapsed(setup, monkeypatch, state):
 
 @pytest.mark.parametrize('url', ['http://example.com', 'https://u:p@example.com', 'https://example.com/#x', 'file:///tmp/a'])
 def test_reject_urls(setup, monkeypatch, url):
-    monkeypatch.setenv('PB_NOTIFY_DESTINATIONS', json.dumps({'test': {'url': url}}))
+    monkeypatch.setenv('HARFLOW_NOTIFY_DESTINATIONS', json.dumps({'test': {'url': url}}))
     with pytest.raises(ValueError):
         n.preflight('test')
     with pytest.raises(ValueError):
@@ -183,7 +183,7 @@ def test_reject_urls(setup, monkeypatch, url):
 
 @pytest.mark.parametrize('url', [123, 1.5, True, None, [], {}], ids=['int', 'float', 'bool', 'null', 'list', 'dict'])
 def test_reject_non_string_configured_urls(setup, monkeypatch, url):
-    monkeypatch.setenv('PB_NOTIFY_DESTINATIONS', json.dumps({'test': {'url': url}}))
+    monkeypatch.setenv('HARFLOW_NOTIFY_DESTINATIONS', json.dumps({'test': {'url': url}}))
     with pytest.raises(ValueError, match='notification destination unavailable or invalid') as error:
         n.preflight('test')
     assert 'Traceback' not in str(error.value)
@@ -236,7 +236,7 @@ def test_local_transport_signature_and_response_bounds(setup, monkeypatch, respo
     thread = threading.Thread(target=serve, daemon=True)
     thread.start()
     port = listener.getsockname()[1]
-    monkeypatch.setenv('PB_NOTIFY_DESTINATIONS', json.dumps({'test': {'url': f'http://127.0.0.1:{port}/hook', 'allow_private': True, 'secret_env': 'TEST_SECRET'}}))
+    monkeypatch.setenv('HARFLOW_NOTIFY_DESTINATIONS', json.dumps({'test': {'url': f'http://127.0.0.1:{port}/hook', 'allow_private': True, 'secret_env': 'TEST_SECRET'}}))
     refused = socket.socket()
     refused.bind(('127.0.0.1', 0))  # Reserve a port without listening: connect is refused.
     addresses = [(2, 1, 6, '', ('127.0.0.1', port))]
@@ -253,8 +253,8 @@ def test_local_transport_signature_and_response_bounds(setup, monkeypatch, respo
         assert len(captured) == 1
         head = captured[0].split(b'\r\n\r\n')[0].decode()
         headers = dict(line.split(': ', 1) for line in head.split('\r\n')[1:])
-        signed = b'stable-id.' + headers['X-Polybridge-Timestamp'].encode() + b'.{}'
-        assert headers['X-Polybridge-Signature'] == 'sha256=' + hmac.new(b'never-persist-this', signed, hashlib.sha256).hexdigest()
+        signed = b'stable-id.' + headers['X-HarflowMCP-Timestamp'].encode() + b'.{}'
+        assert headers['X-HarflowMCP-Signature'] == 'sha256=' + hmac.new(b'never-persist-this', signed, hashlib.sha256).hexdigest()
         assert 'never-persist-this' not in head
     finally:
         refused.close()
@@ -302,7 +302,7 @@ def test_subscribe_requires_record_unless_reserving(setup):
 def test_retention_rechecks_new_subscription_after_pin_snapshot(setup, monkeypatch):
     from dataclasses import replace
     from datetime import datetime, timedelta, timezone
-    from polybridge import retention
+    from harflow_mcp import retention
     old = (datetime.now(timezone.utc) - timedelta(days=40)).isoformat()
     r = replace(record(setup), started_at=old, finished_at=old, output_drained=True)
     store.write(setup, r)
@@ -539,7 +539,7 @@ def test_transport_falls_back_when_address_family_unavailable(monkeypatch):
 
 @pytest.mark.parametrize('destination', [None, 'hook'])
 def test_unsubscribe_absent_does_not_create_storage(tmp_path, monkeypatch, destination):
-    monkeypatch.delenv('PB_NOTIFY_DESTINATIONS', raising=False)
+    monkeypatch.delenv('HARFLOW_NOTIFY_DESTINATIONS', raising=False)
     logs = tmp_path / 'missing' / 'tasks'
     assert n.unsubscribe(logs, 'absent', destination) == []
     assert not logs.parent.exists()

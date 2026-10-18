@@ -5,11 +5,16 @@ from dataclasses import replace
 
 import pytest
 
-from polybridge import store, workflows as w
+from harflow_mcp import store, workflows as w
 from test_workflow_native import NativeRegistry, MODEL, native_events
 from test_workflow_delegation import Task
 from test_workflow_explicit_parallel import explicit
 from test_workflow_traversal import policy
+
+
+@pytest.fixture(autouse=True)
+def qualified_native_adapter(monkeypatch):
+    monkeypatch.setattr("harflow_mcp.backends.claude.RENAMED_NATIVE_QUALIFIED", True)
 
 
 class BatchRegistry(NativeRegistry):
@@ -58,8 +63,8 @@ async def test_native_parallel_batch_observes_children_and_releases_slots(tmp_pa
     monkeypatch.setattr(w.backends, "version", lambda _: "2.1.295 (Claude Code)")
     storage, registry = w.WorkflowStore(tmp_path), BatchRegistry(tmp_path)
     run = storage.create_run(w.validate_definition(graph(limit)), "Review", tmp_path)
-    from polybridge.workflow_invocation import WorkflowTree
-    from polybridge.workflow_native import POLICY
+    from harflow_mcp.workflow_invocation import WorkflowTree
+    from harflow_mcp.workflow_native import POLICY
     supervisor = w.WorkflowSupervisor(registry, storage, tree=WorkflowTree(storage, run["workflow_run_id"], permits=tree_limit, scheduling_policy=POLICY))
     await asyncio.wait_for(supervisor.execute(run["workflow_run_id"]), 10)
     observed = storage.get_run(run["workflow_run_id"])
@@ -93,7 +98,7 @@ async def test_missing_batch_child_retains_ownership_without_headless_duplicate(
 
 async def test_batch_queue_splits_at_adapter_limit_before_reserving(monkeypatch):
     from types import SimpleNamespace
-    from polybridge import workflow_native_batch as batch
+    from harflow_mcp import workflow_native_batch as batch
     seen = []
     async def execute(requests):
         seen.append(len(requests))
@@ -109,7 +114,7 @@ async def test_batch_queue_splits_at_adapter_limit_before_reserving(monkeypatch)
 
 async def test_batch_queue_separates_timeout_policies(monkeypatch):
     from types import SimpleNamespace
-    from polybridge import workflow_native_batch as batch
+    from harflow_mcp import workflow_native_batch as batch
     seen = []
     async def execute(requests):
         seen.append([r["node"].get("timeout_seconds") for r in requests])
@@ -124,7 +129,7 @@ async def test_batch_queue_separates_timeout_policies(monkeypatch):
 
 
 def test_batch_parent_denials_are_attributed_only_to_child_tools():
-    from polybridge.backends.claude_native import ClaudeNativeAdapter
+    from harflow_mcp.backends.claude_native import ClaudeNativeAdapter
     adapter = ClaudeNativeAdapter()
     entries = [{"nonce": "one"}, {"nonce": "two"}]
     child_denial = {"tool_use_id": "child-edit", "tool_name": "Edit"}

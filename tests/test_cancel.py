@@ -13,9 +13,9 @@ from pathlib import Path
 
 import pytest
 
-from polybridge import control, identity, store
-from polybridge import tasks as tasks_module
-from polybridge.tasks import Task, TaskRegistry
+from harflow_mcp import control, identity, store
+from harflow_mcp import tasks as tasks_module
+from harflow_mcp.tasks import Task, TaskRegistry
 
 OWNER = {"pid": 1, "start_time": None, "markers": []}
 

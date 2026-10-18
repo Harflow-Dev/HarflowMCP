@@ -22,9 +22,9 @@ from pathlib import Path
 import pytest
 from mcp import MCPError
 
-from polybridge import backends, control, ctl, followups, inbox, retention, server, store
-from polybridge.events import events_path
-from polybridge.tasks import SessionBusyError, TaskRegistry
+from harflow_mcp import backends, control, ctl, followups, inbox, retention, server, store
+from harflow_mcp.events import events_path
+from harflow_mcp.tasks import SessionBusyError, TaskRegistry
 
 from test_registry import make_task
 
@@ -80,7 +80,7 @@ class Spawns:
         if self.during is not None:
             await self.during()
         if self.pre_exec is not None:
-            self.pre_exec.polybridge_not_started = True
+            self.pre_exec.harflow_not_started = True
             raise self.pre_exec
         if self.ambiguous is not None:
             raise self.ambiguous
@@ -175,7 +175,7 @@ def test_unknown_and_workflow_owned_tasks_are_refused(log_dir: Path, monkeypatch
         send(log_dir)
     assert caught.value.code == "workflow_owned"
     put_record(log_dir, "owned")
-    from polybridge import workflow_hooks
+    from harflow_mcp import workflow_hooks
 
     def owned(*args, **kwargs):
         raise inbox.SendRefused("This task belongs to an active workflow", code="workflow_active")
@@ -264,7 +264,7 @@ def test_concurrent_sends_from_threads_get_unique_ordered_seqs(log_dir: Path) ->
 def test_concurrent_sends_from_processes_get_unique_ordered_seqs(log_dir: Path) -> None:
     put_record(log_dir)
     code = (
-        "import sys\nfrom pathlib import Path\nfrom polybridge import followups\n"
+        "import sys\nfrom pathlib import Path\nfrom harflow_mcp import followups\n"
         "for n in range(5):\n"
         "    followups.send(Path(sys.argv[1]), 'src', f'{sys.argv[2]}-{n}', by=None)\n"
     )
@@ -490,7 +490,7 @@ async def test_failures_before_the_exec_release_the_messages(
     with pytest.raises(expected) as caught:
         await registry.resume_record(record, "go", consume_followups=True)
     if failure == "build":
-        assert caught.value.polybridge_not_started is True
+        assert caught.value.harflow_not_started is True
     assert spawns.calls == []
     assert statuses(log_dir) == ["queued"] and state_doc(log_dir)["sealed_by"] is None
     assert send(log_dir, "more")["seq"] == 2
@@ -775,7 +775,7 @@ async def test_status_carries_queued_followups_live_and_recovered(
 @pytest.fixture
 def ctl_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    from polybridge.tasks import default_log_dir
+    from harflow_mcp.tasks import default_log_dir
 
     return default_log_dir()
 
@@ -795,7 +795,7 @@ def test_ctl_send_and_the_mcp_tool_share_the_dispatcher(
     put_record(ctl_home, "done")
     followups.send(ctl_home, "done", "x", by=None)
     # The same workflow refusal as the MCP tool, on the ctl path.
-    from polybridge import workflow_hooks
+    from harflow_mcp import workflow_hooks
 
     def owned(*args, **kwargs):
         raise inbox.SendRefused("workflow", code="workflow_active")
@@ -838,7 +838,7 @@ async def test_continue_task_with_an_empty_queue_is_unchanged(
 ) -> None:
     put_record(log_dir)
     child = await registry.continue_task(SRC, None, None, consume_followups=True)
-    from polybridge.task_continuation import context
+    from harflow_mcp.task_continuation import context
 
     assert spawns.prompts[0] == context(registry, store.read(log_dir, SRC), None, None)
     assert not followups.state_path(log_dir, SRC).exists()  # nothing written
@@ -923,8 +923,8 @@ async def test_continue_task_failure_cases_resolve_like_resume(
 async def test_an_automatic_continuation_never_consumes_and_budget_exhaustion_leaves_the_queue(
     log_dir: Path, registry: TaskRegistry, spawns: Spawns
 ) -> None:
-    from polybridge.backends.base import Accumulator
-    from polybridge import task_continuation
+    from harflow_mcp.backends.base import Accumulator
+    from harflow_mcp import task_continuation
 
     put_record(log_dir, auto_continue=1)
     send(log_dir, "stays queued")

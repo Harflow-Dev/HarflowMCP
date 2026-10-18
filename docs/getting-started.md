@@ -1,0 +1,27 @@
+# Getting started
+
+HarflowMCP requires Python 3.11+ and the agent CLIs you intend to use. Version 1.0.0 is unreleased; install from this source checkout:
+
+```sh
+uv tool install . --force --no-cache
+harflow-setup --status
+harflow-setup
+```
+
+`harflow-setup --status` inspects client registrations. Run `harflow-setup` to register the server with supported MCP clients, or use `harflow-setup --dry-run` to preview registration commands.
+
+The commands are `harflow-server`, `harflow-ctl`, and `harflow-setup`. The MCP registration key is `harflow`. State is stored under `~/.harflow`; existing Polybridge state is not imported.
+
+Ordinary headless agent dispatch is supported. Native workflow adapters, extra writable path grants, and companion app integration are currently unavailable; see [current qualification limits](development.md#current-qualification-limits).
+
+## Guides
+
+- [Workflows](workflows.md)
+- [Task continuation](task-continuation.md)
+- [Task outcomes](task-outcomes.md)
+- [Task artifacts](task-artifacts.md)
+- [Task notifications](task-notifications.md)
+- [Waiting for multiple tasks](multi-task-waiting.md)
+- [Compact task reads](compact-task-reads.md)
+- [Harness permissions](harness-permissions.md)
+- [Extra writable paths](extra-writable-paths.md)

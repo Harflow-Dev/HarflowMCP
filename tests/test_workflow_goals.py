@@ -3,10 +3,10 @@ import copy
 
 import pytest
 
-from polybridge import workflows as w
-from polybridge import workflow_goals as g
-from polybridge import workflow_delegation as d
-from polybridge import workflow_responses as responses
+from harflow_mcp import workflows as w
+from harflow_mcp import workflow_goals as g
+from harflow_mcp import workflow_delegation as d
+from harflow_mcp import workflow_responses as responses
 from test_workflow_delegation import graph, Registry, default_decision
 
 

@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from polybridge import ctl, server
+from harflow_mcp import ctl, server
 
 
 def test_cli_build_reads_large_definition_and_source_files(monkeypatch, tmp_path, capsys):

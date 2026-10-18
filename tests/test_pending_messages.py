@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from polybridge import events, inbox, workflows
+from harflow_mcp import events, inbox, workflows
 
 
 def test_pending_survives_reload_and_delivery_removes_only_exact_id(tmp_path):
@@ -51,7 +51,7 @@ def test_builder_canonical_ids_mapping_and_claimed_delivery(tmp_path):
 
 
 async def test_owned_sender_is_durable_and_pump_takes_once(tmp_path):
-    from polybridge.tasks import Task, TaskRegistry
+    from harflow_mcp.tasks import Task, TaskRegistry
     from datetime import datetime, timezone
     task = Task(task_id="task", backend="claude", session_id="s", repo_path=tmp_path, prompt="initial", max_turns=5, log_path=tmp_path / "task.jsonl", started_at=datetime.now(timezone.utc), live_input=True)
     registry = TaskRegistry(log_dir=tmp_path, open_monitor=False)
@@ -71,7 +71,7 @@ def test_incomplete_delivery_evidence_omits_pending_instead_of_resurrecting(tmp_
 
 
 def test_builder_association_failure_does_not_suppress_user_event(tmp_path, monkeypatch):
-    from polybridge.tasks import Task, _write_event
+    from harflow_mcp.tasks import Task, _write_event
     from datetime import datetime, timezone
     task = Task(task_id="task", backend="claude", session_id="s", repo_path=tmp_path, prompt="initial", max_turns=5, log_path=tmp_path / "task.jsonl", started_at=datetime.now(timezone.utc), workflow_builder=True)
     task.events = events.EventLog(events.events_path(tmp_path, "task"), "task")
@@ -85,7 +85,7 @@ def test_builder_association_failure_does_not_suppress_user_event(tmp_path, monk
 
 @pytest.mark.parametrize("live_input,kind", [(False, "task_started"), (True, "user_message")])
 def test_builder_initial_delivery_ids_cover_positional_and_live_input(tmp_path, monkeypatch, live_input, kind):
-    from polybridge.tasks import Task, _write_event
+    from harflow_mcp.tasks import Task, _write_event
     from datetime import datetime, timezone
     task = Task(task_id="task", backend="codex", session_id="s", repo_path=tmp_path, prompt="injected", max_turns=None, log_path=tmp_path / "task.jsonl", started_at=datetime.now(timezone.utc), workflow_builder=True, live_input=live_input)
     task.events = events.EventLog(events.events_path(tmp_path, "task"), "task")

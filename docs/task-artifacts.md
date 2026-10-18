@@ -15,12 +15,12 @@ register_artifact(path="reports/check.txt", kind="report", note="Observed checks
 ```
 
 ```bash
-polybridge-ctl register-artifact reports/check.txt --kind report \
+harflow-ctl register-artifact reports/check.txt --kind report \
   --note 'Observed checks; needs review.' --json
 ```
 
 Kinds are `screenshot`, `log`, `report` and `other`. They are the registrar's
-declarations; Polybridge does not inspect the contents to certify the kind. Notes are
+declarations; HarflowMCP does not inspect the contents to certify the kind. Notes are
 stored verbatim, including whitespace. Oversized metadata is refused, not silently
 shortened in storage.
 
@@ -60,8 +60,8 @@ their hosting transport are labelled `native_transport`, with hosted attempt IDs
 batch ambiguity), and never claim child authorship. Workflow extra writable paths remain
 unsupported; workflow scope is the repository and the owning task's scratch directory.
 
-The MCP channel requires Polybridge registered in that harness and its MCP approval.
-The CLI channel requires a shell able to write `~/.polybridge/tasks` and run `ps`.
+The MCP channel requires HarflowMCP registered in that harness and its MCP approval.
+The CLI channel requires a shell able to write `~/.harflow/tasks` and run `ps`.
 OS sandboxes, including Codex read-only/workspace-write and native profiles with empty
 writable roots, block that CLI path. These are channel requirements, not a claim that every
 harness is certified to support registration. No permission is added by registration.
@@ -105,9 +105,9 @@ get_task_artifacts(task_id="<task_id>", limit=20)
 ```
 
 ```bash
-polybridge-ctl task-artifacts <task_id> --limit 20 --json
-polybridge-ctl task-artifacts <task_id> --limit 20 --cursor '<next_cursor>' --json
-polybridge-ctl status <task_id> --brief --json
+harflow-ctl task-artifacts <task_id> --limit 20 --json
+harflow-ctl task-artifacts <task_id> --limit 20 --cursor '<next_cursor>' --json
+harflow-ctl status <task_id> --brief --json
 ```
 
 A verified human caller can inspect a known task, including workflow-bound tasks. A dispatched
@@ -142,7 +142,7 @@ show the capability as unavailable. The view does not automatically preview cont
 or execute registered files.
 
 Paths and notes can disclose sensitive information even without file contents. Submit
-only metadata appropriate for the task's readers; Polybridge does not certify that
+only metadata appropriate for the task's readers; HarflowMCP does not certify that
 notes or file contents are nonsensitive. Artifact metadata is not added to completion
 webhooks by this change.
 
@@ -167,7 +167,7 @@ get_workflow_artifacts(workflow_run_id="<run_id>", execution_id="<execution_id>"
 ```
 
 ```bash
-polybridge-ctl workflow-artifacts <run_id> --execution-id <execution_id> --limit 20 --json
+harflow-ctl workflow-artifacts <run_id> --execution-id <execution_id> --limit 20 --json
 ```
 
 Humans can read any run. Delegation orchestrators can read their own run and linked

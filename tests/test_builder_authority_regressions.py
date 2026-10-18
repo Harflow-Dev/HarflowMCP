@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 import json
 import pytest
-from polybridge import server, workflows as w, workflow_inspection as wi, backends
+from harflow_mcp import server, workflows as w, workflow_inspection as wi, backends
 from test_workflows import FakeRegistry, definition
 
 @pytest.mark.parametrize('kind', ['mcp', 'cli'])
@@ -12,14 +12,14 @@ async def test_builder_reader_is_scoped_without_delegation_contract(tmp_path, mo
     monkeypatch.setattr(w.WorkflowStore,'task_owner',lambda *a,**k:association)
     monkeypatch.setattr(w.WorkflowStore,'get_run',lambda *a:run)
     if kind=='mcp':
-        from polybridge import workflow_hooks
+        from harflow_mcp import workflow_hooks
         async def caller():return source
         monkeypatch.setattr(server,'_verified_workflow_caller',caller)
         monkeypatch.setattr(server,'_reg',lambda:SimpleNamespace(log_dir=tmp_path/'tasks'))
         monkeypatch.setattr(workflow_hooks,'owner',lambda *a,**k:association)
         value=await server._managed_workflow_reader()
     else:
-        from polybridge import lineage
+        from harflow_mcp import lineage
         monkeypatch.setattr(lineage,'detect_caller',lambda *a,**k:source)
         value=wi.managed_reader(tmp_path/'tasks')
     assert value==(association,run)
@@ -39,7 +39,7 @@ async def test_create_builder_autosave_checks_captured_caller(tmp_path, monkeypa
     descriptor={'name':'example','orchestrator':{'backend':'codex'},'nodes':[],'connections':[]}
     run=storage.create_run(descriptor,'Create',tmp_path,kind='builder')
     # Captured caller must govern publication, even after the original caller exits.
-    from polybridge.store import TaskRecord
+    from harflow_mcp.store import TaskRecord
     from dataclasses import asdict
     from datetime import datetime, timezone
     caller=TaskRecord(task_id='caller', backend='codex', session_id='s', repo_path=str(tmp_path), prompt='create', started_at=datetime.now(timezone.utc).isoformat(), status='completed', freedom='read_only', network=False, enforcement=backends.get('codex').enforcement('read_only',False).as_dict())
@@ -90,7 +90,7 @@ async def test_builder_cannot_use_own_run_details_as_unrelated_inspection(monkey
 
 
 async def test_verified_builder_caller_survives_transient_redetection(tmp_path, monkeypatch):
-    from polybridge import lineage, store, workflow_hooks
+    from harflow_mcp import lineage, store, workflow_hooks
     from datetime import datetime, timezone
     record=store.TaskRecord(task_id='caller',backend='codex',session_id='s',repo_path=str(tmp_path),prompt='create',started_at=datetime.now(timezone.utc).isoformat(),status='completed',freedom='read_only',network=False,enforcement=backends.get('codex').enforcement('read_only',False).as_dict())
     source=lineage.Caller(record,'ancestry')
@@ -124,7 +124,7 @@ async def test_verified_builder_caller_survives_transient_redetection(tmp_path, 
 
 @pytest.mark.parametrize('entry',['build','start'])
 async def test_direct_workflow_entry_refuses_uncertain_caller_before_persistence(tmp_path,monkeypatch,entry):
-    from polybridge import lineage
+    from harflow_mcp import lineage
     monkeypatch.setattr(lineage,'detect_caller',lambda *a,**k:None)
     monkeypatch.setattr(lineage,'detect_caller_detail',lambda *a,**k:lineage.Detection(None,'unreadable ancestry'))
     monkeypatch.setattr(w,'_launch',lambda *a:(_ for _ in ()).throw(AssertionError('must not launch')))

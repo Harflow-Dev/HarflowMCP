@@ -5,9 +5,9 @@ import json
 
 import pytest
 
-from polybridge import workflow_delegation as d
-from polybridge import workflow_references as refs
-from polybridge import workflows as w
+from harflow_mcp import workflow_delegation as d
+from harflow_mcp import workflow_references as refs
+from harflow_mcp import workflows as w
 
 from test_workflow_delegation import Registry, Task, storage
 
@@ -583,7 +583,7 @@ async def test_read_only_child_uses_writer_roots_pooled_checkout_strength(tmp_pa
 
 
 async def test_pooled_checkout_lease_is_shared_and_another_tree_waits(tmp_path):
-    from polybridge.workflow_invocation import WorkflowTree
+    from harflow_mcp.workflow_invocation import WorkflowTree
 
     store = w.WorkflowStore(tmp_path)
     repo = tmp_path / "repo"

@@ -17,7 +17,7 @@ import pytest
 WORKER_RESULT = json.dumps({"status": "succeeded", "result": {"summary": "CHILD_RESULT_SENTINEL", "verdict": "approved"}, "evidence": ["fixture"]})
 
 pytestmark = [pytest.mark.cli_integration, pytest.mark.skipif(
-    not os.environ.get("PB_CLI_INTEGRATION"), reason="opt in with PB_CLI_INTEGRATION=1")]
+    not os.environ.get("HARFLOW_CLI_INTEGRATION"), reason="opt in with HARFLOW_CLI_INTEGRATION=1")]
 
 
 @contextmanager
@@ -64,7 +64,7 @@ def fake_codex_api(repo, child_failure=False, freedom="read_only", batch=False):
             nonce = "pb_node_nonce_second" if "pb_node_nonce_second" in serialized else "pb_node_nonce_first"
             if batch and not child:
                 nonce = "pb_node_nonce_first" if not any(call.get("name") == "spawn_agent" and "pb_node_nonce_first" in call.get("call_id", "") for call in calls) else "pb_node_nonce_second"
-            from polybridge.backends.codex_native import CodexNativeAdapter
+            from harflow_mcp.backends.codex_native import CodexNativeAdapter
             if batch and child:
                 child_requests_seen.add(nonce)
                 if len(child_requests_seen) == 2:
@@ -124,8 +124,8 @@ def fake_codex_api(repo, child_failure=False, freedom="read_only", batch=False):
 @pytest.mark.parametrize("child_failure", [False, True])
 @pytest.mark.parametrize("freedom,effort", [("read_only", None), ("write_in_repo", "high")])
 def test_real_codex_native_namespace_read_only_and_persisted_resume(tmp_path, monkeypatch, child_failure, freedom, effort):
-    from polybridge.backends.codex import CodexBackend
-    from polybridge.backends.codex_native import CodexNativeAdapter
+    from harflow_mcp.backends.codex import CodexBackend
+    from harflow_mcp.backends.codex_native import CodexNativeAdapter
     executable = shutil.which("codex")
     if not executable:
         pytest.skip("Codex CLI not installed")
@@ -242,8 +242,8 @@ def test_real_codex_native_namespace_read_only_and_persisted_resume(tmp_path, mo
 
 @pytest.mark.parametrize("owner_freedom", ["read_only", "write_in_repo"])
 def test_real_codex_native_parallel_batch_and_child_permission_narrowing(tmp_path, monkeypatch, owner_freedom):
-    from polybridge.backends.codex import CodexBackend
-    from polybridge.backends.codex_native import CodexNativeAdapter, CERTIFIED_VERSION, rollout_records
+    from harflow_mcp.backends.codex import CodexBackend
+    from harflow_mcp.backends.codex_native import CodexNativeAdapter, CERTIFIED_VERSION, rollout_records
     executable = shutil.which("codex")
     if not executable or subprocess.run([executable, "--version"], capture_output=True, text=True).stdout.strip() != "codex-cli " + CERTIFIED_VERSION:
         pytest.skip("Requires certified installed CLI")

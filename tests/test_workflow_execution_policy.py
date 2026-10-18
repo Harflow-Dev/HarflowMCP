@@ -1,4 +1,4 @@
-from polybridge import workflow_execution_policy as p
+from harflow_mcp import workflow_execution_policy as p
 
 
 def test_visit_budget_counts_retries_but_not_previous_visits():
@@ -82,7 +82,7 @@ async def test_loop_visit_does_not_exhaust_node_attempts(storage, tmp_path):
 
 @pytest.mark.parametrize('settles', [True, False])
 async def test_timeout_settles_before_fallback(storage, tmp_path, monkeypatch, settles):
-    from polybridge import workflows as w
+    from harflow_mcp import workflows as w
     definition = graph()
     definition['nodes'][1].update(timeout_seconds=1, agent={'backend': 'codex', 'fallbacks': [{'backend': 'claude'}]})
     notices = []
@@ -120,7 +120,7 @@ async def test_timeout_settles_before_fallback(storage, tmp_path, monkeypatch, s
 
 
 def test_caller_grant_retries_settled_block_without_permission_escalation():
-    from polybridge import workflow_delegation as d
+    from harflow_mcp import workflow_delegation as d
     activation = {'id': 'blocked', 'role': 'node', 'node_id': 'work', 'status': 'failed', 'tasks': [{'status': 'completed', 'result': {'status': 'completed', 'permission_denials': [{'reason': 'command shape refused'}]}}], 'node_result': {'status': 'blocked', 'result': {'blocker_category': 'missing_context'}}}
     run = {'blocker_retry_authorizations': {'blocked': {'node_id': 'work', 'reason': 'Use the supplied file instead'}}}
     assert d.retry_eligible(activation, guided=True, run=run)
@@ -129,7 +129,7 @@ def test_caller_grant_retries_settled_block_without_permission_escalation():
 
 
 async def test_resolved_end_block_grant_offers_retry_and_preserves_access(storage, tmp_path):
-    from polybridge import workflows as w, workflow_delegation as d
+    from harflow_mcp import workflows as w, workflow_delegation as d
     definition = graph()
     def policy(context, registry):
         if context['current_stage']['node_id'] in {'work', 'end'} and any(r['status'] == 'blocked' for r in context['input_results']):
@@ -156,7 +156,7 @@ async def test_resolved_end_block_grant_offers_retry_and_preserves_access(storag
 
 
 async def test_fallback_pre_spawn_refusal_preserves_started_activation(storage, tmp_path, monkeypatch):
-    from polybridge import workflows as w
+    from harflow_mcp import workflows as w
     definition = graph()
     definition['nodes'][1]['agent']['fallbacks'] = [{'backend': 'claude'}]
     run = storage.create_run(w.validate_definition(definition), 'go', tmp_path)
@@ -183,7 +183,7 @@ async def test_fallback_pre_spawn_refusal_preserves_started_activation(storage, 
 
 @pytest.mark.parametrize('value', [-1, True, False, 1.5, {}, '900'])
 def test_invalid_timeout_definition_is_rejected(value):
-    from polybridge import workflows as w
+    from harflow_mcp import workflows as w
     definition = graph()
     definition['nodes'][1]['timeout_seconds'] = value
     with pytest.raises(w.WorkflowError, match='timeout_seconds'):
@@ -191,7 +191,7 @@ def test_invalid_timeout_definition_is_rejected(value):
 
 
 async def test_expired_serial_session_starts_fresh_without_duplication(storage, tmp_path):
-    from polybridge.tasks import SessionUnknownError
+    from harflow_mcp.tasks import SessionUnknownError
     class ExpiredRegistry(Registry):
         async def resume(self, previous, prompt, **kwargs):
             if 'Assignment:\n' in prompt and 'Focused assignment for second' in prompt:
@@ -221,7 +221,7 @@ async def test_serial_resume_outage_fallback_is_fresh(storage, tmp_path):
 
 
 def test_previous_session_never_substitutes_historical_candidate(tmp_path):
-    from polybridge import workflows as w
+    from harflow_mcp import workflows as w
     definition = w.validate_definition(serial())
     def execution(eid, backend):
         return {'id': eid, 'role': 'node', 'node_id': 'work', 'status': 'completed', 'tasks': [{'task_id': eid, 'candidate': {'backend': backend}, 'status': 'completed', 'result': {'session_id': 'session-' + eid}, 'repo_path': str(tmp_path), 'freedom': 'publish', 'network': None}]}
@@ -265,7 +265,7 @@ async def test_incompatible_network_candidate_is_rejected_before_spawn(storage, 
 
 
 def test_review_block_and_generic_three_way_gate_have_existing_contracts():
-    from polybridge import workflow_delegation as d
+    from harflow_mcp import workflow_delegation as d
     import json
     for role, value in [('review', {'status': 'blocked', 'result': {'blocker_category': 'missing_context'}, 'evidence': []}), ('task', {'status': 'succeeded', 'result': {'verdict': 'retry'}, 'evidence': []})]:
         node = {'role': role}
@@ -310,7 +310,7 @@ async def test_loop_continue_previous_reuses_target_session(storage, tmp_path):
     assert executions[1]['tasks'][0]['resume_task_id'] == executions[0]['tasks'][0]['task_id']
 
 async def test_builder_cancel_before_activation_has_no_start_lookup(storage, tmp_path):
-    from polybridge import workflows as w
+    from harflow_mcp import workflows as w
     run = storage.create_run({'name': 'builder', 'orchestrator': {'backend': 'codex'}}, 'Generate', tmp_path, kind='builder', freedom='read_only')
     storage.control(run['workflow_run_id'], 'cancel')
     registry = Registry(storage.root)
@@ -319,7 +319,7 @@ async def test_builder_cancel_before_activation_has_no_start_lookup(storage, tmp
     assert registry.calls == []
 
 async def test_worker_scratch_path_is_literal_and_internal(storage, tmp_path):
-    from polybridge import scratch
+    from harflow_mcp import scratch
     run, registry = await run_flow(storage, tmp_path, guided=True)
     prompt, kwargs = next((p, k) for p, k in registry.calls if 'Assignment:\n' in p)
     path = str(scratch.directory(registry._log_dir, kwargs['task_id']).resolve())
@@ -328,7 +328,7 @@ async def test_worker_scratch_path_is_literal_and_internal(storage, tmp_path):
     assert 'publish-review' not in prompt and 'GitHub' not in prompt
 
 async def test_recovered_timeout_uses_unused_fallback_without_repeat(storage, tmp_path):
-    from polybridge import workflows as w
+    from harflow_mcp import workflows as w
     definition = graph()
     definition['nodes'][1].update(timeout_seconds=1, agent={'backend': 'codex', 'fallbacks': [{'backend': 'claude'}]})
     run = storage.create_run(w.validate_definition(definition), 'Request', tmp_path)
@@ -346,7 +346,7 @@ async def test_recovered_timeout_uses_unused_fallback_without_repeat(storage, tm
     assert len([a for a in restored['activations'] if a['role'] == 'node']) == 1
 
 async def test_continue_previous_retry_uses_own_session_not_predecessor(storage, tmp_path):
-    from polybridge import workflow_delegation as d
+    from harflow_mcp import workflow_delegation as d
     definition = serial()
     run, _ = await run_flow(storage, tmp_path, definition, guided=True)
     node = run['definition']['nodes'][2]
@@ -380,7 +380,7 @@ async def test_timeout_persists_deadline_before_cancellation(storage, tmp_path):
     assert next(a for a in run['activations'] if a['role'] == 'node')['tasks'][0]['result']['timed_out']
 
 async def test_restart_of_timed_live_task_requires_attention(storage, tmp_path, monkeypatch):
-    from polybridge import workflows as w
+    from harflow_mcp import workflows as w
     run = storage.create_run(w.validate_definition(graph()), 'Request', tmp_path)
     def seed(r):
         r.update(status='running', pending=[{'id': 'visit', 'node_id': 'work', 'stack': []}], execution_initialized=True)
@@ -395,7 +395,7 @@ async def test_restart_of_timed_live_task_requires_attention(storage, tmp_path, 
 
 async def test_timeout_allows_sigkill_grace_before_fallback(storage, tmp_path):
     import asyncio
-    from polybridge import workflows as w
+    from harflow_mcp import workflows as w
     definition = graph()
     definition['nodes'][1].update(timeout_seconds=1, agent={'backend': 'codex', 'fallbacks': [{'backend': 'claude'}]})
     class GraceRegistry(Registry):
@@ -420,7 +420,7 @@ async def test_timeout_allows_sigkill_grace_before_fallback(storage, tmp_path):
     assert execution['tasks'][1]['candidate']['backend'] == 'claude'
 
 def test_timeout_intent_restores_only_authoritative_settled_cancellation(storage, tmp_path, monkeypatch):
-    from polybridge import workflows as w, store
+    from harflow_mcp import workflows as w, store
     definition = w.validate_definition(graph())
     definition['nodes'][1]['timeout_seconds'] = 1
     run = storage.create_run(definition, 'Request', tmp_path)
@@ -454,7 +454,7 @@ async def test_successful_retry_forwards_its_session_to_next_serial_node(storage
 
 
 async def test_forward_continuity_ignores_previous_target_history_after_source_retry(storage, tmp_path):
-    from polybridge import workflow_delegation as d
+    from harflow_mcp import workflow_delegation as d
     run, _ = await run_flow(storage, tmp_path, serial(), guided=True)
     source = next(a for a in run['activations'] if a['role'] == 'node' and a['node_id'] == 'work')
     source_node = next(n for n in run['definition']['nodes'] if n['id'] == 'work')

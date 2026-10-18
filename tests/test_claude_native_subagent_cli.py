@@ -10,12 +10,12 @@ from contextlib import contextmanager
 
 import pytest
 
-from polybridge.backends.claude import ClaudeBackend
-from polybridge.backends.claude_native import ClaudeNativeAdapter, PROFILE, PROFILE_NAME
+from harflow_mcp.backends.claude import ClaudeBackend
+from harflow_mcp.backends.claude_native import ClaudeNativeAdapter, PROFILE, PROFILE_NAME
 
 pytestmark = [
     pytest.mark.cli_integration,
-    pytest.mark.skipif(not os.environ.get("PB_CLI_INTEGRATION"), reason="opt in with PB_CLI_INTEGRATION=1"),
+    pytest.mark.skipif(not os.environ.get("HARFLOW_CLI_INTEGRATION"), reason="opt in with HARFLOW_CLI_INTEGRATION=1"),
 ]
 
 
@@ -154,7 +154,7 @@ def test_real_claude_read_only_native_child_activity_eof_and_resume(tmp_path, ma
             assert any(update["native_update"] == "activity" and update["event_kind"] == "tool_call" for update in updates)
             assert state["terminal"] is True
 
-        events = run(False, "PB_NODE_NONCE_FIRST")
+        events = run(False, "HARFLOW_NODE_NONCE_FIRST")
         if child_cap is not None:
             native = next(e["tool_use_result"] for e in events if isinstance(e.get("tool_use_result"), dict) and "agentId" in e["tool_use_result"])
             # The CLI calls exhausted native children completed. Their harness note is not a worker report.
@@ -169,19 +169,19 @@ def test_real_claude_read_only_native_child_activity_eof_and_resume(tmp_path, ma
             assert not (tmp_path / "forbidden-shell").exists()
             assert (tmp_path / "input.txt").read_text() == ("bad" if freedom == "write_in_repo" else "fixture")
             return
-        verify_adapter_observation(events, "PB_NODE_NONCE_FIRST")
+        verify_adapter_observation(events, "HARFLOW_NODE_NONCE_FIRST")
         (tmp_path / "native-events.jsonl").write_text("\n".join(json.dumps(e) for e in events))
         started = next(e for e in events if e.get("subtype") == "task_started")
         assert started["task_type"] == "local_agent"
         assert started["is_backgrounded"] is False
-        assert started["tool_use_id"] == "toolu_PB_NODE_NONCE_FIRST"
+        assert started["tool_use_id"] == "toolu_HARFLOW_NODE_NONCE_FIRST"
         child_id = started["task_id"]
         terminal = next(e for e in events if e.get("subtype") == "task_notification")
         assert terminal["task_id"] == child_id and terminal["status"] == "completed"
         completed = next(e["tool_use_result"] for e in events if isinstance(e.get("tool_use_result"), dict) and "agentId" in e["tool_use_result"])
         assert completed["agentId"] == child_id and completed["status"] == "completed"
         assert completed["resolvedModel"] == "claude-sonnet-4-6"
-        child_events = [e for e in events if e.get("parent_tool_use_id") == "toolu_PB_NODE_NONCE_FIRST"]
+        child_events = [e for e in events if e.get("parent_tool_use_id") == "toolu_HARFLOW_NODE_NONCE_FIRST"]
         assert "CHILD_RESULT_SENTINEL" in json.dumps(child_events)
         child_results = [b for e in child_events for b in e.get("message", {}).get("content", []) if b.get("type") == "tool_result"]
         for tool_id in ("child-write", "child-edit", "child-bash"):
@@ -196,17 +196,17 @@ def test_real_claude_read_only_native_child_activity_eof_and_resume(tmp_path, ma
         assert {t["name"] for t in child_requests[0]["tools"]} == ({"Read", "Glob", "Grep", "Write", "Edit"} if freedom == "write_in_repo" else {"Read", "Glob", "Grep"})
         assert events[-1]["type"] == "result" and events[-1]["is_error"] is False
         assert events[-1]["subagent_stats"]["completed"] == 1
-        resumed = run(True, "PB_NODE_NONCE_SECOND")
-        verify_adapter_observation(resumed, "PB_NODE_NONCE_SECOND")
+        resumed = run(True, "HARFLOW_NODE_NONCE_SECOND")
+        verify_adapter_observation(resumed, "HARFLOW_NODE_NONCE_SECOND")
         second_started = next(e for e in resumed if e.get("subtype") == "task_started")
-        assert second_started["tool_use_id"] == "toolu_PB_NODE_NONCE_SECOND"
+        assert second_started["tool_use_id"] == "toolu_HARFLOW_NODE_NONCE_SECOND"
         assert second_started["task_id"] != child_id
         assert second_started["is_backgrounded"] is False
         second_completed = next(e["tool_use_result"] for e in resumed if isinstance(e.get("tool_use_result"), dict) and "agentId" in e["tool_use_result"])
         assert second_completed["agentId"] == second_started["task_id"]
         assert second_completed["status"] == "completed"
         assert "CHILD_RESULT_SENTINEL" in json.dumps(second_completed["content"])
-        assert any(e.get("parent_tool_use_id") == "toolu_PB_NODE_NONCE_SECOND" for e in resumed)
+        assert any(e.get("parent_tool_use_id") == "toolu_HARFLOW_NODE_NONCE_SECOND" for e in resumed)
         assert resumed[-1]["type"] == "result" and resumed[-1]["session_id"] == session
         assert resumed[-1]["is_error"] is False
 

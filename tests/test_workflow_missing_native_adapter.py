@@ -4,7 +4,7 @@ from dataclasses import replace
 
 import pytest
 
-from polybridge import store, workflows as w
+from harflow_mcp import store, workflows as w
 from test_workflow_delegation import Registry
 from test_workflow_explicit_parallel import explicit
 from test_workflow_run_node_execution import workflow_policy

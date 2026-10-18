@@ -5,11 +5,16 @@ from dataclasses import replace
 
 import pytest
 
-from polybridge import store, workflows as w
-from polybridge.workflow_native_policy import orchestrator_contract
+from harflow_mcp import store, workflows as w
+from harflow_mcp.workflow_native_policy import orchestrator_contract
 from test_workflow_delegation import Task
 from test_workflow_native import NativeRegistry, MODEL, native_events, native_graph
 from test_workflow_run_node_execution import parent_graph, run_tree, child_runs, workflow_policy
+
+
+@pytest.fixture(autouse=True)
+def qualified_native_adapter(monkeypatch):
+    monkeypatch.setattr("harflow_mcp.backends.claude.RENAMED_NATIVE_QUALIFIED", True)
 
 
 class RuntimeRegistry(NativeRegistry):

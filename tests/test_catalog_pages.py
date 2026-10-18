@@ -7,8 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from polybridge import catalog, ctl, lineage, server, store, workflows
-from polybridge.workflow_inspection import managed_page_reader
+from harflow_mcp import catalog, ctl, lineage, server, store, workflows
+from harflow_mcp.workflow_inspection import managed_page_reader
 
 
 def record(identifier, *, stamp='2026-10-01T00:00:00+00:00', status='completed', **kwargs):
@@ -230,7 +230,7 @@ def test_nonfinite_or_boolean_cursor_timestamp_is_rejected(tmp_path, stamp):
 
 
 def test_retention_deletion_removes_task_and_caller_index(tmp_path):
-    from polybridge import retention
+    from harflow_mcp import retention
     task = record('old')
     store.write(tmp_path, task)
     store.list_page(tmp_path)
@@ -241,7 +241,7 @@ def test_retention_deletion_removes_task_and_caller_index(tmp_path):
 
 
 async def test_managed_task_page_cannot_leak_unrelated_ancestor_headers(tmp_path, monkeypatch, capsys):
-    from polybridge import workflow_inspection
+    from harflow_mcp import workflow_inspection
     directory = tmp_path / 'tasks'
     store.write(directory, record('secret-parent'))
     store.write(directory, replace(record('secret-child'), spawned_by='secret-parent'))
@@ -326,7 +326,7 @@ def test_selected_snapshot_caches_dead_stream_outcome_without_rewriting_metadata
     original = (tmp_path / 'old.meta.json').read_bytes()
     monkeypatch.setattr(store.identity, 'identity_check', lambda value: 'dead')
     assert store.list_page(tmp_path)['items'][0]['needs_reconciliation']
-    from polybridge.backends import Accumulator
+    from harflow_mcp.backends import Accumulator
     monkeypatch.setattr(store, '_resolve', lambda *a, **k: ('completed', 'Terminal stream proves completion', Accumulator(), [], False))
     assert store.snapshot(tmp_path, task)['status'] == 'completed'
     item = store.list_page(tmp_path, task_ids=['old'])['items'][0]
@@ -364,7 +364,7 @@ def test_rolling_active_identity_inventory_converges_and_detects_unloaded_death(
 
 
 def test_oversized_legacy_metadata_is_discoverable_without_reading_or_claiming_complete_history(tmp_path, monkeypatch):
-    from polybridge.catalog import Catalog, METADATA_BYTES
+    from harflow_mcp.catalog import Catalog, METADATA_BYTES
     (tmp_path / 'oversized.meta.json').write_bytes(b' ' * (METADATA_BYTES + 1))
     store.write(tmp_path, record('known'))
     original_read = store.read
@@ -385,7 +385,7 @@ def test_oversized_legacy_metadata_is_discoverable_without_reading_or_claiming_c
 
 
 def test_listing_metadata_batch_budget_bounds_decoding(tmp_path):
-    from polybridge.catalog import Catalog, METADATA_BATCH_BYTES
+    from harflow_mcp.catalog import Catalog, METADATA_BATCH_BYTES
     size = 1024 * 1024
     for number in range(12):
         (tmp_path / f'{number:02}.meta.json').write_bytes(b' ' * size)
@@ -403,7 +403,7 @@ def test_listing_metadata_batch_budget_bounds_decoding(tmp_path):
 
 
 def test_oversized_run_header_defers_decode_until_selected_detail(tmp_path, monkeypatch):
-    from polybridge.catalog import METADATA_BYTES
+    from harflow_mcp.catalog import METADATA_BYTES
     storage = workflows.WorkflowStore(tmp_path)
     run = storage.create_run(definition(), 'Large historical run', tmp_path)
     identifier = run['workflow_run_id']
@@ -423,9 +423,9 @@ def test_oversized_run_header_defers_decode_until_selected_detail(tmp_path, monk
 
 
 def test_oversized_task_authority_fails_closed_until_direct_snapshot_without_rewriting_metadata(tmp_path, monkeypatch):
-    from polybridge.catalog import METADATA_BYTES
-    from polybridge.workflow_inspection import page_indexing_response
-    from polybridge.backends import Accumulator
+    from harflow_mcp.catalog import METADATA_BYTES
+    from harflow_mcp.workflow_inspection import page_indexing_response
+    from harflow_mcp.backends import Accumulator
     directory = tmp_path / 'tasks'
     directory.mkdir()
     task = replace(record('oversized'), prompt='x' * (METADATA_BYTES + 1))
@@ -445,7 +445,7 @@ def test_oversized_task_authority_fails_closed_until_direct_snapshot_without_rew
 
 
 def test_batch_budget_placeholder_refresh_restores_creation_order_automatically(tmp_path):
-    from polybridge.catalog import Catalog
+    from harflow_mcp.catalog import Catalog
     for number in range(3):
         (tmp_path / f'{number}.meta.json').write_bytes(b' ' * (3 * 1024 * 1024))
     def load(identifier):
@@ -461,7 +461,7 @@ def test_batch_budget_placeholder_refresh_restores_creation_order_automatically(
 
 
 def test_oversized_owner_receipts_are_bounded_without_json_decode_and_authority_fails_closed(tmp_path, monkeypatch):
-    from polybridge import bounded_io
+    from harflow_mcp import bounded_io
     directory = tmp_path / 'tasks'
     owners = tmp_path / 'workflow-owners'
     owners.mkdir()
@@ -481,7 +481,7 @@ def test_oversized_owner_receipts_are_bounded_without_json_decode_and_authority_
 
 def test_actual_opened_metadata_bytes_respect_batch_budget_when_path_stat_is_stale(tmp_path, monkeypatch):
     from pathlib import Path
-    from polybridge.catalog import Catalog, METADATA_BATCH_BYTES
+    from harflow_mcp.catalog import Catalog, METADATA_BATCH_BYTES
     original_stat = Path.stat
     for number in range(3):
         task = replace(record(str(number)), prompt='x' * (3 * 1024 * 1024))
@@ -505,7 +505,7 @@ def test_actual_opened_metadata_bytes_respect_batch_budget_when_path_stat_is_sta
 
 
 def test_cached_caller_projection_omits_large_nonidentity_fields_and_refuses_oversized_identity(tmp_path):
-    from polybridge.catalog import Catalog
+    from harflow_mcp.catalog import Catalog
     task = replace(record('small'), repo_path='x' * (3 * 1024 * 1024), owner={'large': 'y' * (3 * 1024 * 1024)}, markers=['codex'])
     store.write(tmp_path, task)
     with Catalog(tmp_path, '.meta.json').connect() as db:
@@ -523,8 +523,8 @@ def test_cached_caller_projection_omits_large_nonidentity_fields_and_refuses_ove
 
 
 def test_many_legacy_receipt_decorations_share_one_workflow_metadata_budget(tmp_path, monkeypatch):
-    from polybridge import bounded_io
-    from polybridge.catalog import METADATA_BATCH_BYTES
+    from harflow_mcp import bounded_io
+    from harflow_mcp.catalog import METADATA_BATCH_BYTES
     storage = workflows.WorkflowStore(tmp_path)
     run_ids = []
     for number in range(5):
@@ -603,7 +603,7 @@ async def test_selected_workflow_polling_never_scans_retained_task_history(tmp_p
 
 @pytest.mark.parametrize('role', ['orchestrator', 'node'])
 async def test_bounded_selected_read_preserves_managed_owner_authority(tmp_path, monkeypatch, role):
-    from polybridge import workflow_inspection
+    from harflow_mcp import workflow_inspection
     monkeypatch.setattr(server, '_reg', lambda: SimpleNamespace(log_dir=tmp_path / 'tasks'))
     managed = ({'role': role}, {'workflow_run_id': 'owned', 'definition': {}, 'activations': []})
     monkeypatch.setattr(workflow_inspection, 'managed_page_reader', lambda path: (True, managed))
@@ -667,7 +667,7 @@ def test_schema_three_cache_rebuild_is_bounded_without_decoding_old_headers(tmp_
 
 def test_monitor_definition_list_uses_bounded_authority_but_public_first_read_is_unchanged(tmp_path, monkeypatch, capsys):
     from unittest.mock import Mock
-    from polybridge import workflow_inspection
+    from harflow_mcp import workflow_inspection
     human_authority(monkeypatch)
     directory = tmp_path / 'tasks'
     legacy_tasks(directory, 250)
@@ -698,7 +698,7 @@ def test_monitor_definition_list_uses_bounded_authority_but_public_first_read_is
 
 @pytest.mark.parametrize('role', ['orchestrator', 'builder', 'node'])
 async def test_monitor_definition_list_retains_managed_scope(tmp_path, monkeypatch, role):
-    from polybridge import workflow_inspection
+    from harflow_mcp import workflow_inspection
     monkeypatch.setattr(server, '_reg', lambda: SimpleNamespace(log_dir=tmp_path / 'tasks'))
     managed = ({'role': role}, {'workflow_run_id': 'owned', 'definition': {'name': 'owned'}})
     monkeypatch.setattr(workflow_inspection, 'managed_page_reader', lambda path: (True, managed))
@@ -711,7 +711,7 @@ async def test_monitor_definition_list_retains_managed_scope(tmp_path, monkeypat
 
 async def test_public_definition_list_does_not_require_catalog_bootstrap(tmp_path, monkeypatch):
     from unittest.mock import AsyncMock
-    from polybridge import workflow_inspection
+    from harflow_mcp import workflow_inspection
     monkeypatch.setattr(server, '_managed_workflow_reader', AsyncMock(return_value=None))
     monkeypatch.setattr(workflow_inspection, 'managed_page_reader', lambda *args: pytest.fail('private Monitor reader'))
     storage = workflows.WorkflowStore(root=tmp_path)
@@ -894,7 +894,7 @@ def test_catalog_advisory_lock_coordinates_a_separate_writer_process(tmp_path, c
     script = '''
 import json, os, sys
 from pathlib import Path
-from polybridge import catalog, store
+from harflow_mcp import catalog, store
 root = Path(sys.argv[1])
 with catalog.catalog_lock(root):
     index = catalog.Catalog(root, store.RECORD_SUFFIX)
@@ -929,7 +929,7 @@ with catalog.catalog_lock(root):
 
 
 def test_stale_selected_snapshot_cannot_stamp_a_newer_task_source(tmp_path, monkeypatch):
-    from polybridge.backends import Accumulator
+    from harflow_mcp.backends import Accumulator
     stale = record('repair', title='old')
     store.write(tmp_path, stale)
     store.list_page(tmp_path)
@@ -968,7 +968,7 @@ def test_direct_workflow_repair_retains_the_source_identity_it_decoded(tmp_path,
 
 
 def test_managed_ownership_decode_and_page_share_one_aggregate_budget(tmp_path, monkeypatch):
-    from polybridge import bounded_io
+    from harflow_mcp import bounded_io
     directory = tmp_path / 'tasks'
     storage = workflows.WorkflowStore(tmp_path)
     run = storage.create_run(definition(), 'x' * (3 * 1024 * 1024), tmp_path)
@@ -1044,7 +1044,7 @@ def test_active_page_never_publishes_a_changed_row_after_decode_budget_is_exhaus
 
 @pytest.mark.parametrize('kind', ['tasks', 'runs'])
 def test_explicit_changed_headers_defer_neutrally_after_one_ownership_decode(tmp_path, kind):
-    from polybridge.bounded_io import read_json
+    from harflow_mcp.bounded_io import read_json
     directory = tmp_path / 'tasks'
     if kind == 'tasks':
         identifiers = [f'changed{number:03}' for number in range(100)]
@@ -1145,8 +1145,8 @@ def test_metadata_disappearing_during_decode_defers_without_a_listing_error(tmp_
 async def test_concurrent_caller_preparation_survives_worker_hops_without_shared_diagnostics(tmp_path, monkeypatch):
     import asyncio
     from contextvars import ContextVar
-    from polybridge.bounded_io import read_json
-    from polybridge.workflow_inspection import page_indexing_response
+    from harflow_mcp.bounded_io import read_json
+    from harflow_mcp.workflow_inspection import page_indexing_response
     directory = tmp_path / 'tasks'
     storage = workflows.WorkflowStore(tmp_path)
     callers = {name: record(name) for name in ('blocked-caller', 'preparing-caller')}

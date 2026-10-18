@@ -3,7 +3,7 @@ import asyncio
 import copy
 import json
 
-from polybridge import workflow_delegation as d, workflow_inspection as inspection, workflows as w
+from harflow_mcp import workflow_delegation as d, workflow_inspection as inspection, workflows as w
 from test_workflow_delegation import storage  # noqa: F401
 from test_workflow_optional_refusal import ANSWER, DENIAL, suspended
 
@@ -98,7 +98,7 @@ def test_large_sidecar_is_bounded_and_losslessly_inspectable():
 
 
 def test_nested_invocation_preserves_refusal_context_and_preview_budget(monkeypatch, tmp_path):
-    from polybridge import workflow_inspection, workflow_invocation
+    from harflow_mcp import workflow_inspection, workflow_invocation
     leaf = evidence_run()
     monkeypatch.setattr(workflow_inspection, '_authorized_linked_run', lambda run, root, target_id: leaf)
     nodes = {'child': {'role': 'review'}}

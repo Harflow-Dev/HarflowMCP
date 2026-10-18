@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from polybridge.workflow_inspection import assigned_input_page, guard_task_read, make_assigned_input_ref
+from harflow_mcp.workflow_inspection import assigned_input_page, guard_task_read, make_assigned_input_ref
 
 
 def fixture_run():
@@ -75,7 +75,7 @@ def test_assigned_input_caller_authority(tmp_path):
 
 
 def test_assigned_input_requires_verified_child_chain(tmp_path, monkeypatch):
-    from polybridge.workflows import WorkflowStore
+    from harflow_mcp.workflows import WorkflowStore
     run, child = fixture_run(), fixture_run()
     child.update(workflow_run_id="child", workflow_id="child-definition", parent_link={"workflow_run_id": "run", "execution_id": "source", "node_id": "before"})
     run.update(workflow_id="parent-definition", dependency_tree={"edges": [{"from": "parent-definition", "to": "child-definition", "node_id": "before"}]})
@@ -91,8 +91,8 @@ def test_assigned_input_requires_verified_child_chain(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_server_worker_reader_and_inspection_restriction(tmp_path, monkeypatch):
-    from polybridge import server
-    from polybridge.workflows import WorkflowStore
+    from harflow_mcp import server
+    from harflow_mcp.workflows import WorkflowStore
     run = fixture_run()
     managed = authorize(run, tmp_path)
     async def reader():
@@ -106,7 +106,7 @@ async def test_server_worker_reader_and_inspection_restriction(tmp_path, monkeyp
 
 
 def test_cli_assigned_input_parity(monkeypatch, capsys):
-    from polybridge import ctl, workflow_inspection, workflow_node_reads
+    from harflow_mcp import ctl, workflow_inspection, workflow_node_reads
     seen = []
     managed = object()
     monkeypatch.setattr(workflow_inspection, "managed_reader", lambda log_dir: managed)
@@ -121,7 +121,7 @@ def test_cli_assigned_input_parity(monkeypatch, capsys):
 
 def test_cli_inspect_parity(monkeypatch, capsys):
     """`workflow-inspect` routes through the shared node-read body, never the server module."""
-    from polybridge import ctl, workflow_inspection, workflow_node_reads
+    from harflow_mcp import ctl, workflow_inspection, workflow_node_reads
     seen = []
     managed = object()
     monkeypatch.setattr(workflow_inspection, "managed_reader", lambda log_dir: managed)

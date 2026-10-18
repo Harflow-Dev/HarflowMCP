@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 
 import pytest
-from polybridge import runtime_paths
+from harflow_mcp import runtime_paths
 
 
 def test_existing_aliases_and_single_links(tmp_path):

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from polybridge import approval_runtime, approvals, identity, store
+from harflow_mcp import approval_runtime, approvals, identity, store
 
 
 def _task(directory: Path, *, generation: str = "generation-1") -> SimpleNamespace:
@@ -65,7 +65,7 @@ async def test_managed_worker_cannot_list_or_get_even_when_pb_task_id_is_cleared
 ) -> None:
     row = _admit(tmp_path)
     registry = _Registry(tmp_path, caller=object())
-    monkeypatch.delenv("PB_TASK_ID", raising=False)
+    monkeypatch.delenv("HARFLOW_TASK_ID", raising=False)
 
     with pytest.raises(ValueError, match="Workers and orchestrators"):
         await approval_runtime.list_requests(registry, task_id="task-1")
@@ -156,7 +156,7 @@ def test_expiry_preserves_caller_decision_but_forces_wire_reject_in_either_event
 
 
 def test_workflow_traversal_requires_reciprocal_root_owned_child_link(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from polybridge import workflows
+    from harflow_mcp import workflows
 
     runs = {
         "root": {"workflow_run_id": "root", "activations": [{"id": "edge", "tasks": [], "invocation": {"child_workflow_run_id": "child"}}]},

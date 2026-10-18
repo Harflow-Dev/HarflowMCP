@@ -7,11 +7,17 @@ from pathlib import Path
 
 import pytest
 
-from polybridge import backends, store, workflows as w
-from polybridge.backends.codex_native import CodexNativeAdapter, CERTIFIED_MODEL
+from harflow_mcp import backends, store, workflows as w
+from harflow_mcp.backends.codex_native import CodexNativeAdapter, CERTIFIED_MODEL
 from test_codex_native import PARENT, lifecycle, native_rollouts
 import test_codex_native as fixtures
 from test_workflow_delegation import Registry, Task, graph
+
+
+@pytest.fixture(autouse=True)
+def qualified_native_adapter(monkeypatch):
+    """Opt legacy adapter contract fixtures into the separately certified test seam."""
+    monkeypatch.setattr("harflow_mcp.backends.codex.RENAMED_NATIVE_QUALIFIED", True)
 
 
 def codex_graph():

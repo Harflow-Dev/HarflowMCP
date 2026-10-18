@@ -1,10 +1,10 @@
 """Drives the real client CLIs against sandboxed config directories.
 
-Opt-in, and deliberately *not* under `PB_INTEGRATION`, which means runs that spend money. These
+Opt-in, and deliberately *not* under `HARFLOW_INTEGRATION`, which means runs that spend money. These
 spend nothing — but they depend on optional external binaries, and on those binaries' current flag
 and output shapes, which is exactly what the default suite promises not to.
 
-    PB_CLI_INTEGRATION=1 uv run pytest -m cli_integration
+    HARFLOW_CLI_INTEGRATION=1 uv run pytest -m cli_integration
 
 Everything the fake-runner tests assert about *policy* is asserted there. What can only be learned
 here is whether the argv still means what it meant when it was measured.
@@ -20,24 +20,24 @@ from pathlib import Path
 
 import pytest
 
-from polybridge import setup_client
-from polybridge.clients import Registration, run_cli
-from polybridge.clients.antigravity import AntigravityClient
-from polybridge.clients.claude_code import ClaudeCodeClient
-from polybridge.clients.codex import CodexClient
-from polybridge.clients.opencode import OpencodeClient
-from polybridge.clients.vibe import VibeClient
+from harflow_mcp import setup_client
+from harflow_mcp.clients import Registration, run_cli
+from harflow_mcp.clients.antigravity import AntigravityClient
+from harflow_mcp.clients.claude_code import ClaudeCodeClient
+from harflow_mcp.clients.codex import CodexClient
+from harflow_mcp.clients.opencode import OpencodeClient
+from harflow_mcp.clients.vibe import VibeClient
 
 pytestmark = [
     pytest.mark.cli_integration,
     pytest.mark.skipif(
-        not os.environ.get("PB_CLI_INTEGRATION"),
-        reason="drives real client CLIs; opt in with PB_CLI_INTEGRATION=1",
+        not os.environ.get("HARFLOW_CLI_INTEGRATION"),
+        reason="drives real client CLIs; opt in with HARFLOW_CLI_INTEGRATION=1",
     ),
 ]
 
-SERVER = "/opt/polybridge/bin/polybridge-server"
-REGISTRATION = Registration(key="polybridge", command=SERVER, path_env="/sandbox/bin:/usr/bin")
+SERVER = "/opt/harflow_mcp/bin/harflow-server"
+REGISTRATION = Registration(key="harflow_mcp", command=SERVER, path_env="/sandbox/bin:/usr/bin")
 
 
 @pytest.fixture
@@ -104,8 +104,8 @@ def test_claude_code_writes_a_stdio_entry(sandbox: Path) -> None:
 
     assert result.status == "applied", result
     config = json.loads((sandbox / "claude" / ".claude.json").read_text())
-    assert config["mcpServers"]["polybridge"]["command"] == SERVER
-    assert config["mcpServers"]["polybridge"]["env"]["PATH"] == REGISTRATION.path_env
+    assert config["mcpServers"]["harflow_mcp"]["command"] == SERVER
+    assert config["mcpServers"]["harflow_mcp"]["env"]["PATH"] == REGISTRATION.path_env
 
 
 def test_claude_code_replaces_rather_than_refusing_on_a_second_run(sandbox: Path) -> None:
@@ -113,14 +113,14 @@ def test_claude_code_replaces_rather_than_refusing_on_a_second_run(sandbox: Path
     needs("claude")
     client = ClaudeCodeClient()
     assert client.apply(REGISTRATION, run_cli).status == "applied"
-    moved = Registration(key="polybridge", command=SERVER, path_env="/moved:/usr/bin")
+    moved = Registration(key="harflow_mcp", command=SERVER, path_env="/moved:/usr/bin")
 
     result = client.apply(moved, run_cli)
 
     assert result.status == "applied", result
     assert "replaced" in result.detail
     servers = json.loads((sandbox / "claude" / ".claude.json").read_text())["mcpServers"]
-    assert servers["polybridge"]["env"]["PATH"] == "/moved:/usr/bin"
+    assert servers["harflow_mcp"]["env"]["PATH"] == "/moved:/usr/bin"
     assert len(servers) == 1, "the remove-then-add should not leave a duplicate behind"
 
 
@@ -135,8 +135,8 @@ def test_codex_writes_the_entry_and_keeps_the_rest_of_the_file(sandbox: Path) ->
     raw = (codex_home / "config.toml").read_text()
     assert "# hand written" in raw
     config = tomllib.loads(raw)
-    assert config["mcp_servers"]["polybridge"]["command"] == SERVER
-    assert config["mcp_servers"]["polybridge"]["env"]["PATH"] == REGISTRATION.path_env
+    assert config["mcp_servers"]["harflow_mcp"]["command"] == SERVER
+    assert config["mcp_servers"]["harflow_mcp"]["env"]["PATH"] == REGISTRATION.path_env
 
 
 def test_codex_overwrites_on_a_second_run(sandbox: Path) -> None:
@@ -147,17 +147,17 @@ def test_codex_overwrites_on_a_second_run(sandbox: Path) -> None:
     config = sandbox / "codex" / "config.toml"
 
     assert client.apply(REGISTRATION, run_cli).status == "applied"
-    assert tomllib.loads(config.read_text())["mcp_servers"]["polybridge"]["env"]["PATH"] == (
+    assert tomllib.loads(config.read_text())["mcp_servers"]["harflow_mcp"]["env"]["PATH"] == (
         REGISTRATION.path_env
     )
 
     result = client.apply(
-        Registration(key="polybridge", command=SERVER, path_env="/moved"), run_cli
+        Registration(key="harflow_mcp", command=SERVER, path_env="/moved"), run_cli
     )
 
     assert result.status == "applied", result
     servers = tomllib.loads(config.read_text())["mcp_servers"]
-    assert servers["polybridge"]["env"]["PATH"] == "/moved"
+    assert servers["harflow_mcp"]["env"]["PATH"] == "/moved"
     assert len(servers) == 1, "it should have replaced the entry, not added a second one"
 
 
@@ -169,7 +169,7 @@ def test_opencode_writes_its_own_shape(sandbox: Path) -> None:
 
     assert result.status == "applied", result
     written = json.loads((sandbox / "config" / "opencode" / "opencode.jsonc").read_text())
-    entry = written["mcp"]["polybridge"]
+    entry = written["mcp"]["harflow_mcp"]
     assert entry["type"] == "local"
     assert entry["command"] == [SERVER]
     assert entry["environment"] == {"PATH": REGISTRATION.path_env}
@@ -181,17 +181,17 @@ def test_opencode_overwrites_on_a_second_run(sandbox: Path) -> None:
     config = sandbox / "config" / "opencode" / "opencode.jsonc"
 
     assert client.apply(REGISTRATION, run_cli).status == "applied"
-    assert json.loads(config.read_text())["mcp"]["polybridge"]["environment"] == {
+    assert json.loads(config.read_text())["mcp"]["harflow_mcp"]["environment"] == {
         "PATH": REGISTRATION.path_env
     }
 
     result = client.apply(
-        Registration(key="polybridge", command=SERVER, path_env="/moved"), run_cli
+        Registration(key="harflow_mcp", command=SERVER, path_env="/moved"), run_cli
     )
 
     assert result.status == "applied", result
     servers = json.loads(config.read_text())["mcp"]
-    assert servers["polybridge"]["environment"] == {"PATH": "/moved"}
+    assert servers["harflow_mcp"]["environment"] == {"PATH": "/moved"}
     assert len(servers) == 1, "it should have replaced the entry, not added a second one"
 
 
@@ -203,34 +203,34 @@ def test_claude_code_inspect_and_remove_round_trip(sandbox: Path) -> None:
     client = ClaudeCodeClient()
     assert client.apply(REGISTRATION, run_cli).status == "applied"
 
-    inspection = client.inspect("polybridge", run_cli)
+    inspection = client.inspect("harflow_mcp", run_cli)
     assert (inspection.installed, inspection.command, inspection.path_env) == (
         True,
         SERVER,
         REGISTRATION.path_env,
     )
 
-    assert client.remove("polybridge", run_cli).status == "removed"
-    assert client.inspect("polybridge", run_cli).installed is False
-    assert client.remove("polybridge", run_cli).status == "not_installed"
+    assert client.remove("harflow_mcp", run_cli).status == "removed"
+    assert client.inspect("harflow_mcp", run_cli).installed is False
+    assert client.remove("harflow_mcp", run_cli).status == "not_installed"
 
 
 def test_codex_inspect_and_remove_round_trip(sandbox: Path) -> None:
     needs("codex")
     client = CodexClient()
-    assert client.inspect("polybridge", run_cli).installed is False
+    assert client.inspect("harflow_mcp", run_cli).installed is False
     assert client.apply(REGISTRATION, run_cli).status == "applied"
 
-    inspection = client.inspect("polybridge", run_cli)
+    inspection = client.inspect("harflow_mcp", run_cli)
     assert (inspection.installed, inspection.command, inspection.path_env) == (
         True,
         SERVER,
         REGISTRATION.path_env,
     )
 
-    assert client.remove("polybridge", run_cli).status == "removed"
-    assert client.inspect("polybridge", run_cli).installed is False
-    assert client.remove("polybridge", run_cli).status == "not_installed", "measured: exit 0 both ways"
+    assert client.remove("harflow_mcp", run_cli).status == "removed"
+    assert client.inspect("harflow_mcp", run_cli).installed is False
+    assert client.remove("harflow_mcp", run_cli).status == "not_installed", "measured: exit 0 both ways"
     assert "projects" not in tomllib.loads((sandbox / "codex" / "config.toml").read_text())
 
 
@@ -241,14 +241,14 @@ def test_opencode_inspect_reads_what_add_wrote_and_remove_changes_nothing(sandbo
     config = sandbox / "config" / "opencode" / "opencode.jsonc"
     before = config.read_text()
 
-    inspection = client.inspect("polybridge", run_cli)
+    inspection = client.inspect("harflow_mcp", run_cli)
     assert (inspection.installed, inspection.command, inspection.path_env) == (
         True,
         SERVER,
         REGISTRATION.path_env,
     )
 
-    result = client.remove("polybridge", run_cli)
+    result = client.remove("harflow_mcp", run_cli)
     assert result.status == "skipped"
     assert str(config) in result.detail
     assert config.read_text() == before
@@ -262,21 +262,21 @@ def test_vibe_inspect_and_remove_round_trip_keeps_a_backup_with_the_comments(san
     with config.open("a") as handle:
         handle.write("# a comment vibe mcp remove will strip\n")
 
-    inspection = client.inspect("polybridge", run_cli)
+    inspection = client.inspect("harflow_mcp", run_cli)
     assert (inspection.installed, inspection.command, inspection.path_env) == (
         True,
         SERVER,
         REGISTRATION.path_env,
     )
 
-    result = client.remove("polybridge", run_cli)
+    result = client.remove("harflow_mcp", run_cli)
     assert result.status == "removed", result
     assert "# a comment" not in config.read_text(), "the measured reason for the backup"
     backups = [p for p in config.parent.iterdir() if p.name.startswith("config.toml.bak-")]
     assert len(backups) == 1 and "# a comment" in backups[0].read_text()
     assert any(str(backups[0]) in line for line in result.diagnostics)
-    assert client.inspect("polybridge", run_cli).installed is False
-    assert client.remove("polybridge", run_cli).status == "not_installed"
+    assert client.inspect("harflow_mcp", run_cli).installed is False
+    assert client.remove("harflow_mcp", run_cli).status == "not_installed"
 
 
 def test_antigravity_writes_the_entry_and_overwrites_on_a_second_run(sandbox: Path) -> None:
@@ -288,35 +288,35 @@ def test_antigravity_writes_the_entry_and_overwrites_on_a_second_run(sandbox: Pa
 
     assert client.apply(REGISTRATION, run_cli).status == "applied"
     servers = json.loads(config.read_text())["mcpServers"]
-    assert servers["polybridge"]["command"] == SERVER
-    assert servers["polybridge"]["env"]["PATH"] == REGISTRATION.path_env
+    assert servers["harflow_mcp"]["command"] == SERVER
+    assert servers["harflow_mcp"]["env"]["PATH"] == REGISTRATION.path_env
 
     result = client.apply(
-        Registration(key="polybridge", command=SERVER, path_env="/moved"), run_cli
+        Registration(key="harflow_mcp", command=SERVER, path_env="/moved"), run_cli
     )
 
     assert result.status == "applied", result
     servers = json.loads(config.read_text())["mcpServers"]
-    assert servers["polybridge"]["env"]["PATH"] == "/moved"
-    assert len([name for name in servers if name == "polybridge"]) == 1
+    assert servers["harflow_mcp"]["env"]["PATH"] == "/moved"
+    assert len([name for name in servers if name == "harflow_mcp"]) == 1
 
 
 def test_antigravity_inspect_and_remove_round_trip(sandbox: Path) -> None:
     needs("agy")
     client = AntigravityClient()
-    assert client.inspect("polybridge", run_cli).installed is False
+    assert client.inspect("harflow_mcp", run_cli).installed is False
     assert client.apply(REGISTRATION, run_cli).status == "applied"
 
-    inspection = client.inspect("polybridge", run_cli)
+    inspection = client.inspect("harflow_mcp", run_cli)
     assert (inspection.installed, inspection.command, inspection.path_env) == (
         True,
         SERVER,
         REGISTRATION.path_env,
     )
 
-    assert client.remove("polybridge", run_cli).status == "removed"
-    assert client.inspect("polybridge", run_cli).installed is False
-    assert client.remove("polybridge", run_cli).status == "not_installed", "measured: exit 1"
+    assert client.remove("harflow_mcp", run_cli).status == "removed"
+    assert client.inspect("harflow_mcp", run_cli).installed is False
+    assert client.remove("harflow_mcp", run_cli).status == "not_installed", "measured: exit 1"
 
 
 def test_setup_install_status_uninstall_end_to_end(
@@ -325,7 +325,7 @@ def test_setup_install_status_uninstall_end_to_end(
     """The whole command line against real CLIs, every config inside the sandbox."""
     for binary in ("claude", "codex", "opencode", "vibe", "agy"):
         needs(binary)
-    server = tmp_path / "bin" / "polybridge-server"
+    server = tmp_path / "bin" / "harflow-server"
     server.parent.mkdir()
     server.write_text("#!/bin/sh\nexit 0\n")
     server.chmod(0o755)

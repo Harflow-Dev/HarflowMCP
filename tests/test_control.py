@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from polybridge import control, store
+from harflow_mcp import control, store
 
 
 def make_record(**overrides) -> store.TaskRecord:

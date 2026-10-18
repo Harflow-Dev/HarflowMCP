@@ -3,8 +3,8 @@ import asyncio
 
 import pytest
 
-from polybridge.workflow_invocation import TreeSlots
-from polybridge.workflows import DispatchNotStarted
+from harflow_mcp.workflow_invocation import TreeSlots
+from harflow_mcp.workflows import DispatchNotStarted
 
 
 async def test_multiple_waiters_receive_permits_once_in_order():

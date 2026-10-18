@@ -5,10 +5,10 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from polybridge import store
-from polybridge.backends import get
-from polybridge.backends.base import Accumulator
-from polybridge.task_continuation import context, continue_task, validate_budget
+from harflow_mcp import store
+from harflow_mcp.backends import get
+from harflow_mcp.backends.base import Accumulator
+from harflow_mcp.task_continuation import context, continue_task, validate_budget
 
 
 @pytest.mark.parametrize('value', [-1, 11, True, 1.0, '1', None])
@@ -59,7 +59,7 @@ class Registry:
 
 @pytest.mark.asyncio
 async def test_manual_preserves_settings_and_is_idempotent(tmp_path, monkeypatch):
-    monkeypatch.setattr('polybridge.workflow_hooks.refuse_managed', lambda *args: None)
+    monkeypatch.setattr('harflow_mcp.workflow_hooks.refuse_managed', lambda *args: None)
     source = record(tmp_path, model='model', reasoning_effort='high', network=False, freedom='read_only', group='group', title='title', spawned_by='b' * 32, root_task_id='c' * 32, depth=2)
     registry = Registry(tmp_path)
     child = await continue_task(registry, source.task_id, 'More  prose\n')
@@ -78,7 +78,7 @@ async def test_manual_preserves_settings_and_is_idempotent(tmp_path, monkeypatch
 
 @pytest.mark.asyncio
 async def test_missing_drain_evidence_refuses_old_record(tmp_path, monkeypatch):
-    monkeypatch.setattr('polybridge.workflow_hooks.refuse_managed', lambda *args: None)
+    monkeypatch.setattr('harflow_mcp.workflow_hooks.refuse_managed', lambda *args: None)
     source = record(tmp_path)
     payload = json.loads(store.record_path(tmp_path, source.task_id).read_text())
     payload.pop('output_drained')
@@ -91,7 +91,7 @@ async def test_missing_drain_evidence_refuses_old_record(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_interrupted_reservation_refuses_duplicate(tmp_path, monkeypatch):
-    monkeypatch.setattr('polybridge.workflow_hooks.refuse_managed', lambda *args: None)
+    monkeypatch.setattr('harflow_mcp.workflow_hooks.refuse_managed', lambda *args: None)
     source = record(tmp_path)
     (tmp_path / f'{source.task_id}.continuation.json').write_text(json.dumps({'task_id': 'd' * 32, 'state': 'reserved', 'request_fingerprint': __import__('hashlib').sha256(json.dumps({'prompt': context(Registry(tmp_path), source, None, None), 'automatic': False}, ensure_ascii=False).encode()).hexdigest()}))
     registry = Registry(tmp_path)
@@ -113,7 +113,7 @@ def test_oversized_notes_are_referenced_and_prose_preserved(tmp_path):
 @pytest.mark.asyncio
 async def test_concurrent_identical_callers_get_one_successor(tmp_path, monkeypatch):
     import asyncio
-    monkeypatch.setattr('polybridge.workflow_hooks.refuse_managed', lambda *args: None)
+    monkeypatch.setattr('harflow_mcp.workflow_hooks.refuse_managed', lambda *args: None)
     source = record(tmp_path)
     registry = Registry(tmp_path)
     a, b = await asyncio.gather(continue_task(registry, source.task_id), continue_task(registry, source.task_id))
@@ -123,11 +123,11 @@ async def test_concurrent_identical_callers_get_one_successor(tmp_path, monkeypa
 
 @pytest.mark.asyncio
 async def test_proven_not_started_can_retry_same_reserved_id(tmp_path, monkeypatch):
-    monkeypatch.setattr('polybridge.workflow_hooks.refuse_managed', lambda *args: None)
+    monkeypatch.setattr('harflow_mcp.workflow_hooks.refuse_managed', lambda *args: None)
     source = record(tmp_path)
     registry = Registry(tmp_path)
     failure = OSError('no executable')
-    failure.polybridge_not_started = True
+    failure.harflow_not_started = True
     registry.start.side_effect = failure
     with pytest.raises(OSError):
         await continue_task(registry, source.task_id)
@@ -142,7 +142,7 @@ async def test_proven_not_started_can_retry_same_reserved_id(tmp_path, monkeypat
 @pytest.mark.parametrize('legacy', [False, True])
 async def test_manual_recovers_failed_automatic_preflight_once(tmp_path, monkeypatch, legacy):
     import asyncio
-    monkeypatch.setattr('polybridge.workflow_hooks.refuse_managed', lambda *args: None)
+    monkeypatch.setattr('harflow_mcp.workflow_hooks.refuse_managed', lambda *args: None)
     source = record(tmp_path, auto_continue=2)
     registry = Registry(tmp_path)
     done = asyncio.Event()
@@ -150,7 +150,7 @@ async def test_manual_recovers_failed_automatic_preflight_once(tmp_path, monkeyp
     registry.children[source.task_id] = SimpleNamespace(done=done, proc=None, cancel_requested=False,
         acc=Accumulator(terminal={'subtype': 'error_max_turns'}), snapshot=lambda: {'summary': 'Stopped on cap'})
     failure = OSError('no executable')
-    failure.polybridge_not_started = True
+    failure.harflow_not_started = True
     registry.start.side_effect = failure
     with pytest.raises(OSError):
         await continue_task(registry, source.task_id, automatic=True)
@@ -174,7 +174,7 @@ async def test_manual_recovers_failed_automatic_preflight_once(tmp_path, monkeyp
 @pytest.mark.parametrize('changed', ['prose', 'notes', 'uncertain', 'started', 'live_child', 'durable_child'])
 async def test_manual_cannot_take_over_different_or_launched_automatic_request(tmp_path, monkeypatch, changed):
     import hashlib
-    monkeypatch.setattr('polybridge.workflow_hooks.refuse_managed', lambda *args: None)
+    monkeypatch.setattr('harflow_mcp.workflow_hooks.refuse_managed', lambda *args: None)
     source = record(tmp_path, auto_continue=2)
     registry = Registry(tmp_path)
     identifier = 'd' * 32
@@ -196,7 +196,7 @@ async def test_manual_cannot_take_over_different_or_launched_automatic_request(t
 
 @pytest.mark.asyncio
 async def test_uncertain_spawn_failure_cannot_repeat(tmp_path, monkeypatch):
-    monkeypatch.setattr('polybridge.workflow_hooks.refuse_managed', lambda *args: None)
+    monkeypatch.setattr('harflow_mcp.workflow_hooks.refuse_managed', lambda *args: None)
     source = record(tmp_path)
     registry = Registry(tmp_path)
     registry.start.side_effect = RuntimeError('after process creation')
@@ -229,7 +229,7 @@ def test_vibe_cutoff_requires_exact_live_turn_envelope():
 @pytest.mark.asyncio
 async def test_automatic_decrements_budget_and_requires_cutoff(tmp_path, monkeypatch):
     import asyncio
-    monkeypatch.setattr('polybridge.workflow_hooks.refuse_managed', lambda *args: None)
+    monkeypatch.setattr('harflow_mcp.workflow_hooks.refuse_managed', lambda *args: None)
     source = record(tmp_path, auto_continue=2)
     registry = Registry(tmp_path)
     done = asyncio.Event()
@@ -245,7 +245,7 @@ async def test_automatic_decrements_budget_and_requires_cutoff(tmp_path, monkeyp
 @pytest.mark.parametrize('excluded', ['cancelled', 'denial', 'usage', 'generic', 'zero_budget'])
 async def test_automatic_exclusions(tmp_path, monkeypatch, excluded):
     import asyncio
-    monkeypatch.setattr('polybridge.workflow_hooks.refuse_managed', lambda *args: None)
+    monkeypatch.setattr('harflow_mcp.workflow_hooks.refuse_managed', lambda *args: None)
     source = record(tmp_path, auto_continue=0 if excluded == 'zero_budget' else 2)
     registry = Registry(tmp_path)
     done = asyncio.Event()
@@ -266,8 +266,8 @@ async def test_automatic_exclusions(tmp_path, monkeypatch, excluded):
 
 @pytest.mark.asyncio
 async def test_cancel_before_reserved_spawn_prevents_restart(tmp_path, monkeypatch):
-    from polybridge.task_continuation import stop_chain
-    monkeypatch.setattr('polybridge.workflow_hooks.refuse_managed', lambda *args: None)
+    from harflow_mcp.task_continuation import stop_chain
+    monkeypatch.setattr('harflow_mcp.workflow_hooks.refuse_managed', lambda *args: None)
     source = record(tmp_path, auto_continue=1)
     registry = Registry(tmp_path)
     await stop_chain(registry, source.task_id)
@@ -279,8 +279,8 @@ async def test_cancel_before_reserved_spawn_prevents_restart(tmp_path, monkeypat
 @pytest.mark.asyncio
 async def test_cancel_waits_for_inflight_spawn_then_blocks_successors(tmp_path, monkeypatch):
     import asyncio
-    from polybridge.task_continuation import stop_chain
-    monkeypatch.setattr('polybridge.workflow_hooks.refuse_managed', lambda *args: None)
+    from harflow_mcp.task_continuation import stop_chain
+    monkeypatch.setattr('harflow_mcp.workflow_hooks.refuse_managed', lambda *args: None)
     source = record(tmp_path, auto_continue=1)
     registry = Registry(tmp_path)
     spawning = asyncio.Event()
@@ -308,9 +308,9 @@ async def test_cancel_waits_for_inflight_spawn_then_blocks_successors(tmp_path, 
 async def test_cancel_waits_for_other_process_first_manual_reservation(tmp_path, monkeypatch, end_to_end):
     import asyncio
     import sys
-    from polybridge import control
-    from polybridge.task_continuation import stop_chain
-    from polybridge.tasks import TaskRegistry
+    from harflow_mcp import control
+    from harflow_mcp.task_continuation import stop_chain
+    from harflow_mcp.tasks import TaskRegistry
     source = record(tmp_path)  # No automatic budget or reservation yet.
     lock = control.session_lock_path(tmp_path, 'continuation-' + source.task_id)
     lock.parent.mkdir(parents=True, exist_ok=True)
@@ -318,7 +318,7 @@ async def test_cancel_waits_for_other_process_first_manual_reservation(tmp_path,
     script = '''import fcntl,json,sys
 from dataclasses import replace
 from pathlib import Path
-from polybridge import store
+from harflow_mcp import store
 with open(sys.argv[1], 'a') as lock:
  fcntl.flock(lock, fcntl.LOCK_EX)
  print('locked', flush=True)
@@ -363,7 +363,7 @@ with open(sys.argv[1], 'a') as lock:
 
 @pytest.mark.asyncio
 async def test_cancel_ordinary_task_does_not_create_chain_stop(tmp_path):
-    from polybridge.task_continuation import stop_chain
+    from harflow_mcp.task_continuation import stop_chain
     source = record(tmp_path)
     await stop_chain(Registry(tmp_path), source.task_id)
     assert not (tmp_path / f'{source.task_id}.continuation-stopped.json').exists()
@@ -373,10 +373,10 @@ async def test_cancel_ordinary_task_does_not_create_chain_stop(tmp_path):
 async def test_fake_executable_certifies_fresh_cap_successor_and_durable_drain(tmp_path, monkeypatch):
     import asyncio
     import sys
-    from polybridge.backends import Invocation
-    from polybridge.backends.claude import ClaudeBackend
-    from polybridge.tasks import TaskRegistry
-    from polybridge.detached import _wait_started
+    from harflow_mcp.backends import Invocation
+    from harflow_mcp.backends.claude import ClaudeBackend
+    from harflow_mcp.tasks import TaskRegistry
+    from harflow_mcp.detached import _wait_started
     counter = tmp_path / 'counter'
     class FixtureBackend(ClaudeBackend):
         def build_start_argv(self, prompt, **kwargs):
@@ -393,9 +393,9 @@ print(json.dumps({{"type":"result","subtype":"error_max_turns" if n==0 else "suc
         def assert_safe(self, *args):
             pass
     backend = FixtureBackend()
-    monkeypatch.setattr('polybridge.tasks.get_backend', lambda name: backend)
-    monkeypatch.setattr('polybridge.task_continuation.get_backend', lambda name: backend)
-    monkeypatch.setattr('polybridge.workflow_hooks.refuse_managed', lambda *args: None)
+    monkeypatch.setattr('harflow_mcp.tasks.get_backend', lambda name: backend)
+    monkeypatch.setattr('harflow_mcp.task_continuation.get_backend', lambda name: backend)
+    monkeypatch.setattr('harflow_mcp.workflow_hooks.refuse_managed', lambda *args: None)
     registry = TaskRegistry(log_dir=tmp_path / 'tasks')
     registry._mutation_caller = AsyncMock(return_value=None)
     source = await registry.start('Preserve  assignment\n', tmp_path, backend=backend, max_turns=1, auto_continue=1)
@@ -444,10 +444,10 @@ def test_vibe_cap_rejects_unrelated_error(error):
 async def test_abandoned_drainer_does_not_establish_complete_evidence(tmp_path, monkeypatch):
     import asyncio
     from datetime import datetime, timezone
-    from polybridge.tasks import Task, _finish_draining
+    from harflow_mcp.tasks import Task, _finish_draining
     task = Task(task_id='a' * 32, backend='claude', session_id='session', repo_path=tmp_path, prompt='request', max_turns=1, log_path=tmp_path / 'raw.jsonl', started_at=datetime.now(timezone.utc))
     task.watchers = [asyncio.create_task(asyncio.sleep(100))]
-    monkeypatch.setattr('polybridge.tasks.DRAIN_GRACE_SECONDS', 0.001)
+    monkeypatch.setattr('harflow_mcp.tasks.DRAIN_GRACE_SECONDS', 0.001)
     assert await _finish_draining(task) is False
     assert not task.output_drained
 
@@ -457,9 +457,9 @@ async def test_abandoned_drainer_does_not_establish_complete_evidence(tmp_path, 
 async def test_real_registry_preflight_failure_retries_reserved_successor(tmp_path, monkeypatch, failure_point):
     import asyncio
     import sys
-    from polybridge.backends import Invocation
-    from polybridge.backends.claude import ClaudeBackend
-    from polybridge.tasks import TaskRegistry
+    from harflow_mcp.backends import Invocation
+    from harflow_mcp.backends.claude import ClaudeBackend
+    from harflow_mcp.tasks import TaskRegistry
 
     counter = tmp_path / 'launches'
     class FixtureBackend(ClaudeBackend):
@@ -473,8 +473,8 @@ async def test_real_registry_preflight_failure_retries_reserved_successor(tmp_pa
     registry = TaskRegistry(log_dir=tmp_path / 'tasks')
     source = record(registry.log_dir)
     registry._mutation_caller = AsyncMock(return_value=None)
-    monkeypatch.setattr('polybridge.task_continuation.get_backend', lambda name: backend)
-    monkeypatch.setattr('polybridge.workflow_hooks.refuse_managed', lambda *args: None)
+    monkeypatch.setattr('harflow_mcp.task_continuation.get_backend', lambda name: backend)
+    monkeypatch.setattr('harflow_mcp.workflow_hooks.refuse_managed', lambda *args: None)
     with monkeypatch.context() as fault:
         if failure_point == 'argv':
             fault.setattr(backend, 'build_start_argv', lambda *a, **k: (_ for _ in ()).throw(ValueError('argv')))
@@ -489,14 +489,14 @@ async def test_real_registry_preflight_failure_retries_reserved_successor(tmp_pa
             fault.setattr(backend, 'with_writable_directory', lambda invocation, *a: invocation, raising=False)
             fault.setattr(backend, 'assert_safe', Mock(side_effect=[None, ValueError('unsafe writable invocation')]))
         elif failure_point == 'scratch':
-            fault.setattr('polybridge.scratch.create', lambda *a: (_ for _ in ()).throw(OSError('scratch')))
+            fault.setattr('harflow_mcp.scratch.create', lambda *a: (_ for _ in ()).throw(OSError('scratch')))
         else:
-            fault.setattr('polybridge.task_outcomes.baseline', lambda *a: (_ for _ in ()).throw(asyncio.CancelledError()))
+            fault.setattr('harflow_mcp.task_outcomes.baseline', lambda *a: (_ for _ in ()).throw(asyncio.CancelledError()))
         with pytest.raises((ValueError, OSError, asyncio.CancelledError)):
             await registry.continue_task(source.task_id)
     reservation = json.loads((registry.log_dir / f'{source.task_id}.continuation.json').read_text())
     assert reservation['state'] == 'not_started'
-    from polybridge.scratch import directory
+    from harflow_mcp.scratch import directory
     assert not directory(registry.log_dir, reservation['task_id']).exists()
     assert not counter.exists()
     registry._mutation_caller = AsyncMock(return_value=None)
@@ -512,9 +512,9 @@ async def test_real_registry_preflight_failure_retries_reserved_successor(tmp_pa
 async def test_real_registry_ambiguous_launch_keeps_reservation(tmp_path, monkeypatch, failure_point):
     import asyncio
     import sys
-    from polybridge.backends import Invocation
-    from polybridge.backends.claude import ClaudeBackend
-    from polybridge.tasks import TaskRegistry
+    from harflow_mcp.backends import Invocation
+    from harflow_mcp.backends.claude import ClaudeBackend
+    from harflow_mcp.tasks import TaskRegistry
 
     class FixtureBackend(ClaudeBackend):
         def build_start_argv(self, prompt, **kwargs):
@@ -525,8 +525,8 @@ async def test_real_registry_ambiguous_launch_keeps_reservation(tmp_path, monkey
     registry = TaskRegistry(log_dir=tmp_path / 'tasks')
     source = record(registry.log_dir)
     registry._mutation_caller = AsyncMock(return_value=None)
-    monkeypatch.setattr('polybridge.task_continuation.get_backend', lambda name: backend)
-    monkeypatch.setattr('polybridge.workflow_hooks.refuse_managed', lambda *args: None)
+    monkeypatch.setattr('harflow_mcp.task_continuation.get_backend', lambda name: backend)
+    monkeypatch.setattr('harflow_mcp.workflow_hooks.refuse_managed', lambda *args: None)
     real_spawn = asyncio.create_subprocess_exec
     processes = []
     async def spawn(*args, **kwargs):

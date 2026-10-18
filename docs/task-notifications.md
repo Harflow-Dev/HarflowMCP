@@ -1,9 +1,9 @@
 # Task completion notifications
 
-Administrators configure `PB_NOTIFY_DESTINATIONS` in the server environment:
+Administrators configure `HARFLOW_NOTIFY_DESTINATIONS` in the server environment:
 
 ```json
-{"builds":{"url":"https://receiver.example/hooks/polybridge","secret_env":"PB_WEBHOOK_SECRET"}}
+{"builds":{"url":"https://receiver.example/hooks/harflow_mcp","secret_env":"HARFLOW_WEBHOOK_SECRET"}}
 ```
 
 Callers supply only the destination alias (`builds`), never a URL or secret. HTTPS
@@ -40,8 +40,8 @@ outcome projection, and diagnostic task-record reference. Payloads are at most
 16 KiB. Receivers must deduplicate using `notification_id`: receipt is not guaranteed after bounded retries, and duplicates are possible
 when a receiver accepts a request just before a server crash.
 
-Headers include `X-Polybridge-Notification-ID` and `X-Polybridge-Timestamp`.
-When `secret_env` is configured, `X-Polybridge-Signature` is `sha256=` plus the
+Headers include `X-HarflowMCP-Notification-ID` and `X-HarflowMCP-Timestamp`.
+When `secret_env` is configured, `X-HarflowMCP-Signature` is `sha256=` plus the
 hex HMAC-SHA256 of `id + "." + timestamp + "." + raw_body`. The secret is read
 from the server environment on each attempt and never persisted. Verify the
 signature and timestamp freshness, and deduplicate IDs at the receiver.
@@ -99,7 +99,7 @@ These MCP tools require a direct caller before destination configuration is read
 `unsubscribe_workflow(workflow_run_id, notify=None)` stops all aliases, or supply one.
 `get_workflow_notifications(workflow_run_id)` reads subscriptions and at most 50
 recent deliveries. The read-only CLI equivalent is
-`polybridge-ctl workflow-notifications <run_id> --json`; management is MCP-only.
+`harflow-ctl workflow-notifications <run_id> --json`; management is MCP-only.
 The Monitor does not expose subscription management or workflow notifications.
 
 `workflow.settled` reports completed, failed, or cancelled root runs after settlement.

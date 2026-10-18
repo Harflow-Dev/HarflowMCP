@@ -1,10 +1,10 @@
 from datetime import datetime, timezone
 from pathlib import Path
 
-from polybridge import store
-from polybridge.tasks import Task, TaskRegistry
-from polybridge.backends.base import Accumulator
-from polybridge.backends.claude import ClaudeBackend, ALLOWED_TOOLS
+from harflow_mcp import store
+from harflow_mcp.tasks import Task, TaskRegistry
+from harflow_mcp.backends.base import Accumulator
+from harflow_mcp.backends.claude import ClaudeBackend, ALLOWED_TOOLS
 
 
 def test_complete_assignment_persisted(tmp_path):
@@ -33,7 +33,7 @@ def test_publish_does_not_allow_approval_or_raw_api():
 
 def test_vibe_unified_session_model(tmp_path, monkeypatch):
     import json
-    from polybridge.backends.vibe import VibeBackend
+    from harflow_mcp.backends.vibe import VibeBackend
     monkeypatch.setenv('VIBE_HOME', str(tmp_path))
     directory = tmp_path/'logs/session/unified/native-session'
     generation = directory/'generations/0000000000000001'
@@ -46,7 +46,7 @@ def test_vibe_unified_session_model(tmp_path, monkeypatch):
 
 
 def test_codex_large_prompt_uses_closed_one_shot_stdin(tmp_path):
-    from polybridge.backends.codex import CodexBackend
+    from harflow_mcp.backends.codex import CodexBackend
     backend = CodexBackend()
     prompt = 'assignment ' + 'x' * 1_050_838
     for method, session in ((backend.build_start_argv, None), (backend.build_resume_argv, 'native-thread')):
@@ -62,8 +62,8 @@ def test_codex_large_prompt_uses_closed_one_shot_stdin(tmp_path):
 async def test_large_codex_stdin_delivers_all_bytes_then_eof(tmp_path, monkeypatch):
     import asyncio
     import sys
-    from polybridge.backends.codex import CodexBackend
-    import polybridge.tasks as tasks
+    from harflow_mcp.backends.codex import CodexBackend
+    import harflow_mcp.tasks as tasks
     backend = CodexBackend()
     prompt = 'assignment ' + 'x' * 1_050_838
     invocation = backend.build_start_argv(prompt, repo=tmp_path, freedom='read_only', session_id=None,
@@ -90,8 +90,8 @@ async def test_large_codex_stdin_delivers_all_bytes_then_eof(tmp_path, monkeypat
 def test_scratch_extension_only_matches_adapter_owned_path(tmp_path):
     from dataclasses import replace
     import pytest
-    from polybridge.backends.codex import CodexBackend
-    from polybridge.backends.claude import ClaudeBackend
+    from harflow_mcp.backends.codex import CodexBackend
+    from harflow_mcp.backends.claude import ClaudeBackend
     for backend in (CodexBackend(), ClaudeBackend()):
         invocation = backend.build_start_argv('assignment', repo=tmp_path, freedom='write_in_repo',
                                               session_id='scratch-session' if isinstance(backend, ClaudeBackend) else None, model=None, max_turns=None, reasoning_effort=None)
@@ -108,13 +108,13 @@ async def test_scratch_spawn_scope_and_environment(tmp_path, monkeypatch):
     import asyncio
     import json
     import sys
-    from polybridge.backends.codex import CodexBackend
+    from harflow_mcp.backends.codex import CodexBackend
     backend = CodexBackend()
     create = asyncio.create_subprocess_exec
-    monkeypatch.setenv('PB_TASK_SCRATCH', '/inherited/other-task')
+    monkeypatch.setenv('HARFLOW_TASK_SCRATCH', '/inherited/other-task')
     captured = []
     async def fake_exec(*argv, **kwargs):
-        captured.append((argv, kwargs['env'].get('PB_TASK_SCRATCH')))
+        captured.append((argv, kwargs['env'].get('HARFLOW_TASK_SCRATCH')))
         return await create(sys.executable, '-c', 'print(\'{"type":"turn.completed"}\')', **kwargs)
     monkeypatch.setattr(asyncio, 'create_subprocess_exec', fake_exec)
     registry = TaskRegistry(log_dir=tmp_path/'tasks')
@@ -141,24 +141,24 @@ async def test_scratch_spawn_scope_and_environment(tmp_path, monkeypatch):
 async def test_positive_not_started_spawn_cleans_scratch(tmp_path, monkeypatch):
     import asyncio
     import pytest
-    from polybridge.backends.codex import CodexBackend
+    from harflow_mcp.backends.codex import CodexBackend
     backend = CodexBackend()
     invocation = backend.build_start_argv('assignment', repo=tmp_path, freedom='write_in_repo', session_id=None,
                                           model=None, max_turns=None, reasoning_effort=None)
     async def refused(*argv, **kwargs):
-        assert Path(kwargs['env']['PB_TASK_SCRATCH']).is_dir()
+        assert Path(kwargs['env']['HARFLOW_TASK_SCRATCH']).is_dir()
         raise OSError('executable unavailable')
     monkeypatch.setattr(asyncio, 'create_subprocess_exec', refused)
     with pytest.raises(OSError) as failure:
         await TaskRegistry(log_dir=tmp_path/'tasks')._spawn(invocation, backend=backend, prompt='assignment',
             repo_path=tmp_path, session_id=None, freedom='write_in_repo', max_turns=None, model=None,
             reasoning_effort=None, task_id='not-started')
-    assert failure.value.polybridge_not_started
+    assert failure.value.harflow_not_started
     assert not (tmp_path/'scratch/not-started').exists()
 
 
 def test_retention_keeps_record_when_scratch_cleanup_fails(tmp_path, monkeypatch):
-    from polybridge import retention, scratch
+    from harflow_mcp import retention, scratch
     task_id = 'retained-scratch'
     log_dir = tmp_path/'tasks'
     log_dir.mkdir()
@@ -174,7 +174,7 @@ def test_retention_keeps_record_when_scratch_cleanup_fails(tmp_path, monkeypatch
 async def test_uncertain_spawn_retains_scratch(tmp_path, monkeypatch):
     import asyncio
     import pytest
-    from polybridge.backends.codex import CodexBackend
+    from harflow_mcp.backends.codex import CodexBackend
     backend = CodexBackend()
     invocation = backend.build_start_argv('assignment', repo=tmp_path, freedom='write_in_repo', session_id=None,
                                           model=None, max_turns=None, reasoning_effort=None)
@@ -195,7 +195,7 @@ def test_no_github_rules_injected_without_publish():
 
 
 def test_codex_reports_inherited_configured_writable_roots(tmp_path, monkeypatch):
-    from polybridge.backends.codex import CodexBackend
+    from harflow_mcp.backends.codex import CodexBackend
     home = tmp_path/'codex-home'
     home.mkdir()
     (home/'config.toml').write_text('[sandbox_workspace_write]\nwritable_roots=["/extra/docs"]\n')
@@ -207,7 +207,7 @@ def test_codex_reports_inherited_configured_writable_roots(tmp_path, monkeypatch
 
 
 def test_codex_profile_writable_roots_override_global(tmp_path, monkeypatch):
-    from polybridge.backends.codex import CodexBackend
+    from harflow_mcp.backends.codex import CodexBackend
     home = tmp_path/'codex-home'
     home.mkdir()
     (home/'config.toml').write_text('profile="work"\n[sandbox_workspace_write]\nwritable_roots=["/global"]\n[profiles.work.sandbox_workspace_write]\nwritable_roots=["/profile"]\n')
@@ -235,7 +235,7 @@ import pytest
 @pytest.mark.parametrize('state', [[], None, 'invalid', 42, True])
 def test_vibe_nonobject_runtime_state_is_ignored(tmp_path, monkeypatch, state):
     import json
-    from polybridge.backends.vibe import VibeBackend
+    from harflow_mcp.backends.vibe import VibeBackend
     monkeypatch.setenv('VIBE_HOME', str(tmp_path))
     directory = tmp_path/'logs/session/unified/native-session'
     generation = directory/'generations/0000000000000001'

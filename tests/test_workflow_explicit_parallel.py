@@ -3,7 +3,7 @@ import copy
 
 import pytest
 
-from polybridge import workflows as w
+from harflow_mcp import workflows as w
 from test_workflow_delegation import Registry, default_decision, run_flow, storage  # noqa: F401
 
 

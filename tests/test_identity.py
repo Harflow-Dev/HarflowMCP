@@ -7,7 +7,7 @@ import subprocess
 
 import pytest
 
-from polybridge import identity
+from harflow_mcp import identity
 
 
 def test_capture_and_check_round_trip_for_our_own_process() -> None:

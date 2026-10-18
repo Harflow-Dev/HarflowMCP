@@ -12,11 +12,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from polybridge import backends, tasks as tasks_module
-from polybridge.backends import Invocation
-from polybridge.backends.base import Enforcement
-from polybridge.events import EventLog, events_path
-from polybridge.tasks import Task, TaskRegistry
+from harflow_mcp import backends, tasks as tasks_module
+from harflow_mcp.backends import Invocation
+from harflow_mcp.backends.base import Enforcement
+from harflow_mcp.events import EventLog, events_path
+from harflow_mcp.tasks import Task, TaskRegistry
 
 
 class _RecordingBackend:
@@ -357,7 +357,7 @@ async def test_a_hanging_git_baseline_is_cut_off_by_its_own_budget(
         time.sleep(5)
         return "should-not-be-seen", False
 
-    from polybridge import task_outcomes
+    from harflow_mcp import task_outcomes
     monkeypatch.setattr(task_outcomes, "baseline", hang)
     backend = registered(_RecordingBackend(_two_line_script()))
     registry = TaskRegistry(log_dir=git_repo / ".streams")
@@ -377,7 +377,7 @@ async def test_a_hanging_git_baseline_is_cut_off_by_its_own_budget(
 async def test_owner_and_start_time_land_in_the_persisted_record(
     tmp_path: Path, registered
 ) -> None:
-    from polybridge import store
+    from harflow_mcp import store
 
     owner = {"pid": 4242, "start_time": "Wed Jan  1 00:00:00 2000", "markers": []}
     # A brief sleep so the process is still alive when `_spawn` captures its own start time —
@@ -435,10 +435,10 @@ def test_an_unserializable_event_is_dropped_without_disabling_the_log(tmp_path: 
 
 import re as _re  # noqa: E402
 
-from polybridge import events as events_module  # noqa: E402
-from polybridge.backends import normalize as nz  # noqa: E402
+from harflow_mcp import events as events_module  # noqa: E402
+from harflow_mcp.backends import normalize as nz  # noqa: E402
 
-_SRC = Path(__file__).resolve().parent.parent / "src" / "polybridge"
+_SRC = Path(__file__).resolve().parent.parent / "src" / "harflow_mcp"
 
 
 @pytest.mark.allow_unknown_event_kinds

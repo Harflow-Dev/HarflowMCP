@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from polybridge import lineage, store, workflows
+from harflow_mcp import lineage, store, workflows
 
 
 def connected_graph():

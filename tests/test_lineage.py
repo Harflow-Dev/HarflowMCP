@@ -1,8 +1,8 @@
-"""Best-effort caller detection: PB_TASK_ID, then session match, then ancestry walk.
+"""Best-effort caller detection: HARFLOW_TASK_ID, then session match, then ancestry walk.
 
 Every `detect_caller` call here injects `environ`/`getsid`/`getpid`/`process_table`/`check`, so
 none of it touches the real process tree — records are written to `tmp_path` via `store.write`,
-never to `~/.polybridge`.
+never to `~/.harflow`.
 """
 
 from __future__ import annotations
@@ -12,12 +12,12 @@ from pathlib import Path
 
 import pytest
 
-from polybridge import lineage, store
+from harflow_mcp import lineage, store
 # Captured at import time, before the autouse `no_caller_detected` fixture in conftest.py
 # monkeypatches `lineage.detect_caller` to a stub that always returns None — this module tests
 # the real thing, so every call below goes through this name rather than the module attribute.
-from polybridge.lineage import detect_caller as real_detect_caller
-from polybridge.store import TaskRecord
+from harflow_mcp.lineage import detect_caller as real_detect_caller
+from harflow_mcp.store import TaskRecord
 
 NOW = datetime(2026, 9, 24, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -56,7 +56,7 @@ def always(verdict: str):
 
 def test_vibe_caller_uses_backend_retitled_identity(tmp_path, monkeypatch):
     from types import SimpleNamespace
-    from polybridge import identity
+    from harflow_mcp import identity
     record = make_record(tmp_path, "retitled", backend="vibe", markers=["vibe", str(tmp_path)])
     monkeypatch.setattr(identity, "_run_ps", lambda _: SimpleNamespace(returncode=0, stdout=record.start_time + " Vibe CLI\n", stderr=""))
     assert identity.identity_check(lineage._candidate_identity(record)) == "alive"
@@ -68,7 +68,7 @@ def raising_getsid(pid: int) -> int:
     raise OSError("no session for this process")
 
 
-# --- PB_TASK_ID (method 1) ----------------------------------------------------------------------
+# --- HARFLOW_TASK_ID (method 1) ----------------------------------------------------------------------
 
 
 def test_pb_task_id_confirmed_by_session_match(tmp_path: Path) -> None:
@@ -76,7 +76,7 @@ def test_pb_task_id_confirmed_by_session_match(tmp_path: Path) -> None:
 
     caller = real_detect_caller(
         tmp_path,
-        environ={"PB_TASK_ID": "aaaaaaaa"},
+        environ={"HARFLOW_TASK_ID": "aaaaaaaa"},
         getsid=lambda pid: 555,
         getpid=lambda: 999,
         process_table=lambda: {},
@@ -94,7 +94,7 @@ def test_pb_task_id_confirmed_by_ancestry(tmp_path: Path) -> None:
 
     caller = real_detect_caller(
         tmp_path,
-        environ={"PB_TASK_ID": "bbbbbbbb"},
+        environ={"HARFLOW_TASK_ID": "bbbbbbbb"},
         getsid=lambda pid: 777,  # matches nobody's pgid
         getpid=lambda: 999,
         process_table=lambda: table,
@@ -112,7 +112,7 @@ def test_pb_task_id_naming_a_dead_record_falls_through(tmp_path: Path) -> None:
 
     caller = real_detect_caller(
         tmp_path,
-        environ={"PB_TASK_ID": "cccccccc"},
+        environ={"HARFLOW_TASK_ID": "cccccccc"},
         getsid=lambda pid: 555,
         getpid=lambda: 999,
         process_table=lambda: {},
@@ -131,7 +131,7 @@ def test_pb_task_id_naming_an_undecidable_record_falls_through(tmp_path: Path) -
 
     caller = real_detect_caller(
         tmp_path,
-        environ={"PB_TASK_ID": "eeeeeeee"},
+        environ={"HARFLOW_TASK_ID": "eeeeeeee"},
         getsid=lambda pid: 1,
         getpid=lambda: 999,
         process_table=lambda: table,
@@ -148,7 +148,7 @@ def test_pb_task_id_with_invalid_chars_is_ignored(tmp_path: Path) -> None:
 
     caller = real_detect_caller(
         tmp_path,
-        environ={"PB_TASK_ID": "../etc/passwd"},
+        environ={"HARFLOW_TASK_ID": "../etc/passwd"},
         getsid=lambda pid: 555,
         getpid=lambda: 999,
         process_table=lambda: {},
@@ -168,7 +168,7 @@ def test_stale_pb_task_id_unrelated_to_this_process_falls_through(tmp_path: Path
 
     caller = real_detect_caller(
         tmp_path,
-        environ={"PB_TASK_ID": "hhhhhhhh"},
+        environ={"HARFLOW_TASK_ID": "hhhhhhhh"},
         getsid=lambda pid: 555,
         getpid=lambda: 999,
         process_table=lambda: {},  # empty: no ancestry relation to "hhhhhhhh" either
@@ -310,14 +310,14 @@ def test_unobserved_terminal_record_is_still_a_candidate(tmp_path: Path) -> None
 
 
 def test_precedence_pb_task_id_beats_session_and_ancestry(tmp_path: Path) -> None:
-    make_record(tmp_path, "by-pb-task-id", pid=100, pgid=555)
+    make_record(tmp_path, "by-harflow-task-id", pid=100, pgid=555)
     make_record(tmp_path, "by-session", pid=200, pgid=555)
     make_record(tmp_path, "by-ancestry", pid=300, pgid=None)
     table = {999: 300}
 
     caller = real_detect_caller(
         tmp_path,
-        environ={"PB_TASK_ID": "by-pb-task-id"},
+        environ={"HARFLOW_TASK_ID": "by-harflow-task-id"},
         getsid=lambda pid: 555,
         getpid=lambda: 999,
         process_table=lambda: table,
@@ -326,7 +326,7 @@ def test_precedence_pb_task_id_beats_session_and_ancestry(tmp_path: Path) -> Non
 
     assert caller is not None
     assert caller.method == "pb_task_id"
-    assert caller.record.task_id == "by-pb-task-id"
+    assert caller.record.task_id == "by-harflow-task-id"
 
 
 def test_precedence_session_beats_ancestry(tmp_path: Path) -> None:
@@ -472,17 +472,17 @@ def test_process_table_cache_honours_its_ttl(monkeypatch: pytest.MonkeyPatch) ->
     ],
 )
 def test_max_depth_default(raw: str | None, expected: int) -> None:
-    env = {} if raw is None else {"PB_MAX_DEPTH": raw}
+    env = {} if raw is None else {"HARFLOW_MAX_DEPTH": raw}
     assert lineage.max_depth_default(env) == expected
 
 
 def test_max_depth_default_reads_the_real_environment_by_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("PB_MAX_DEPTH", raising=False)
+    monkeypatch.delenv("HARFLOW_MAX_DEPTH", raising=False)
     assert lineage.max_depth_default() == lineage.DEFAULT_MAX_DEPTH
 
-    monkeypatch.setenv("PB_MAX_DEPTH", "7")
+    monkeypatch.setenv("HARFLOW_MAX_DEPTH", "7")
     assert lineage.max_depth_default() == 7
 
 
@@ -510,7 +510,7 @@ def test_ancestry_is_not_shadowed_by_a_dead_record_that_once_held_the_same_pid(
 
 # --- detect_caller_detail: the fail-closed variant (takeover's gate) ------------------------------
 
-from polybridge.lineage import detect_caller_detail as real_detect_caller_detail  # noqa: E402
+from harflow_mcp.lineage import detect_caller_detail as real_detect_caller_detail  # noqa: E402
 
 
 def test_detail_positively_no_caller_once_the_negative_is_checked(tmp_path: Path) -> None:

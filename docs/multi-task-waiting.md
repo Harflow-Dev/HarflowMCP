@@ -58,7 +58,7 @@ settlement through the same status resolution as `get_task_status`, never the re
 status. A record that cannot be re-read for 3 consecutive rounds stops an `until="terminal"` wait
 with `observation_unavailable`. A recovered task whose process is confirmed gone but whose exit was
 never observed stops either mode with `observation_unavailable` and `outcome_observed: false`
-(unless its owning polybridge server is still alive, in which case the wait keeps observing for a
+(unless its owning HarflowMCP server is still alive, in which case the wait keeps observing for a
 15 second grace while that server persists the outcome); `outcome_observed` is present only once the task is finished or the wait stopped as
 `observation_unavailable` (true when the outcome was observed, never present on a task still
 running); a bounded hold that runs out while the owner is still alive keeps `stop_reason: timeout`
@@ -87,7 +87,7 @@ unavailable for 3 rounds, and `mode=any` when every unsettled task does. With `m
 last good snapshot is returned with `observation_unavailable`. Under `until="terminal"`, a
 terminal run that stays `settling` with its run file unchanged for 300 seconds also stops with
 `observation_unavailable` (the run is unaffected; inspect it with `get_workflow_status`).
-`polybridge-ctl workflow-wait <run> [--timeout-seconds N | --until terminal]` exposes the same
+`harflow-ctl workflow-wait <run> [--timeout-seconds N | --until terminal]` exposes the same
 contract. The initial read still fails
 for an unknown run id.
 
@@ -118,12 +118,12 @@ configurations were not measured.
   Probe configuration notes: Codex reaches MCP tools through code-mode `exec`, which yields
   ("Script running with cell ID N") after about 30 seconds and the model collects the result with
   `wait`; and under `approval_policy="never"` the server entry needed
-  `default_tools_approval_mode = "approve"` or the call was refused. Polybridge's installer does
+  `default_tools_approval_mode = "approve"` or the call was refused. HarflowMCP's installer does
   not set either.
 
 Guidance: on Codex, a wait longer than 300 seconds needs `tool_timeout_sec` raised on the
-polybridge server entry; otherwise call the wait again with the same arguments, or keep bounded
+HarflowMCP server entry; otherwise call the wait again with the same arguments, or keep bounded
 waits at or below 270 seconds. On Claude Code, `MCP_TOOL_TIMEOUT` (if set) bounds every wait.
-Polybridge still sends progress every 5 seconds because it is cheap and other clients may honour
+HarflowMCP still sends progress every 5 seconds because it is cheap and other clients may honour
 it, but neither measured client extends its deadline on progress. When unsure of a client's
 deadline, keep holds short.

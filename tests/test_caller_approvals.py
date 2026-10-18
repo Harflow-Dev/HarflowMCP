@@ -11,12 +11,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from polybridge import approvals
-from polybridge import approval_runtime
-from polybridge.backends import get
-from polybridge.backends.base import UnsupportedCapability
-from polybridge.backends.claude_approvals import decode, encode, validate
-from polybridge.backends import Accumulator
+from harflow_mcp import approvals
+from harflow_mcp import approval_runtime
+from harflow_mcp.backends import get
+from harflow_mcp.backends.base import UnsupportedCapability
+from harflow_mcp.backends.claude_approvals import decode, encode, validate
+from harflow_mcp.backends import Accumulator
 
 
 def _task(tmp_path: Path) -> SimpleNamespace:
@@ -247,8 +247,8 @@ async def test_tool_result_racing_local_send_is_reconciled_without_stale_pump_fa
     monkeypatch.setattr(approval_runtime, "context", lambda *_args: {"interaction_owner": "caller", "workflow_run_id": None, "root_workflow_run_id": None, "workflow_node_id": None, "workflow_execution_id": None})
     monkeypatch.setattr(approval_runtime.approvals, "summary", lambda *_args: {"pending_count": 0, "interaction_state": None, "requests": []})
     monkeypatch.setattr(approval_runtime.identity, "identity_check", lambda _identity: "alive")
-    import polybridge.tasks
-    monkeypatch.setattr(polybridge.tasks, "_write_stdin", lambda *_args: True)
+    import harflow_mcp.tasks
+    monkeypatch.setattr(harflow_mcp.tasks, "_write_stdin", lambda *_args: True)
 
     original_update = approvals.update
     raced = False

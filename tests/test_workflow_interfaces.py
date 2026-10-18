@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from polybridge import ctl, server
+from harflow_mcp import ctl, server
 
 
 async def test_start_task_workflow_has_explicit_run_identity(monkeypatch):
@@ -75,8 +75,8 @@ async def test_wait_workflow_checks_timeout():
 
 
 def test_managed_agent_cannot_directly_dispatch(monkeypatch, tmp_path):
-    from polybridge import workflow_hooks
-    from polybridge.backends.base import NestedDispatchRefused
+    from harflow_mcp import workflow_hooks
+    from harflow_mcp.backends.base import NestedDispatchRefused
     monkeypatch.setattr(workflow_hooks, "owner", lambda *args, **kwargs: {"role": "node", "status": "running"})
     with pytest.raises(NestedDispatchRefused) as refused:
         workflow_hooks.refuse_managed(tmp_path, "reserved-1")
@@ -84,15 +84,15 @@ def test_managed_agent_cannot_directly_dispatch(monkeypatch, tmp_path):
 
 
 def test_external_control_does_not_reopen_terminal_workflow(monkeypatch, tmp_path):
-    from polybridge import workflow_hooks
+    from harflow_mcp import workflow_hooks
     monkeypatch.setattr(workflow_hooks, "owner", lambda *args: {"workflow_run_id": "r1", "status": "completed"})
     workflow_hooks.pause_for_task(tmp_path, "t1", "manual resume")
 
 
 async def test_workflow_mutation_refuses_managed_caller(monkeypatch, tmp_path):
     from types import SimpleNamespace
-    from polybridge import workflow_hooks
-    from polybridge.tasks import TaskRegistry
+    from harflow_mcp import workflow_hooks
+    from harflow_mcp.tasks import TaskRegistry
     registry = TaskRegistry(log_dir=tmp_path / "tasks", owner={})
     async def caller(*args, **kwargs):
         return SimpleNamespace(record=SimpleNamespace(task_id="managed-1"))
@@ -105,7 +105,7 @@ async def test_workflow_mutation_refuses_managed_caller(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("action,key", [("list", "workflows"), ("list-runs", "runs")])
 def test_cli_workflow_collections_are_result_objects(action, key, monkeypatch, capsys):
-    from polybridge import workflow_reads
+    from harflow_mcp import workflow_reads
     async def invoke(action, **kwargs):
         return [{"name": "review"}]
     monkeypatch.setattr(workflow_reads, "call", invoke)
@@ -118,8 +118,8 @@ def test_cli_workflow_collections_are_result_objects(action, key, monkeypatch, c
 
 
 async def test_registry_honors_reserved_id_and_refuses_reuse(tmp_path, git_repo, fake_backend_clis):
-    from polybridge import backends, store
-    from polybridge.tasks import TaskRegistry
+    from harflow_mcp import backends, store
+    from harflow_mcp.tasks import TaskRegistry
     registry = TaskRegistry(log_dir=tmp_path / "tasks", owner={}, open_monitor=False)
     task = await registry.start("test", git_repo, backend=backends.get("claude"), task_id="reserved-id")
     await task.done.wait()
@@ -133,8 +133,8 @@ async def test_registry_honors_reserved_id_and_refuses_reuse(tmp_path, git_repo,
 def managed_workflow_run(tmp_path, monkeypatch):
     """Use durable reserved-ID ownership, rather than a fabricated guard verdict."""
     from types import SimpleNamespace
-    from polybridge import workflows
-    from polybridge.tasks import TaskRegistry
+    from harflow_mcp import workflows
+    from harflow_mcp.tasks import TaskRegistry
     monkeypatch.setenv("HOME", str(tmp_path))
     storage = workflows.WorkflowStore()
     definition = storage.save("guarded", {
@@ -224,7 +224,7 @@ def test_cli_validation_is_authoritative_and_creates_no_workflow_state(tmp_path,
     result = json.loads(capsys.readouterr().out)["result"]
     assert result["valid"] is False
     assert "orphan" in result["error"]
-    assert not (tmp_path / ".polybridge").exists()
+    assert not (tmp_path / ".harflow").exists()
 
 
 def test_cli_validation_reports_malformed_input_as_transport_error(tmp_path, capsys):
@@ -278,7 +278,7 @@ def test_cli_builder_followup_preserves_run_and_message(monkeypatch, capsys):
 
 
 async def test_builder_apply_uses_verified_caller_and_revision(monkeypatch):
-    from polybridge import workflows
+    from harflow_mcp import workflows
     marker = object()
     async def detect(*args, **kwargs):
         return marker
@@ -319,7 +319,7 @@ def test_builder_cli_omits_repo_but_workflow_execution_requires_it(monkeypatch, 
 @pytest.mark.parametrize('role', ['node', 'orchestrator', 'builder'])
 async def test_managed_caller_cannot_send_to_ordinary_task(monkeypatch,tmp_path,role):
     from types import SimpleNamespace
-    from polybridge import workflow_hooks
+    from harflow_mcp import workflow_hooks
     async def caller():return SimpleNamespace(record=SimpleNamespace(task_id='managed'))
     monkeypatch.setattr(server,'_verified_workflow_caller',caller)
     monkeypatch.setattr(workflow_hooks,'owner',lambda *a,**k:{'role':role})
@@ -332,7 +332,7 @@ async def test_managed_caller_cannot_send_to_ordinary_task(monkeypatch,tmp_path,
 def test_migration_refuses_undecidable_caller(monkeypatch,capsys):
     async def caller():raise ValueError('authority undecidable')
     monkeypatch.setattr(server,'_verified_workflow_caller',caller)
-    from polybridge import workflows
+    from harflow_mcp import workflows
     monkeypatch.setattr(workflows,'migrate_workflows',lambda: (_ for _ in ()).throw(AssertionError('migration must not occur')))
     assert ctl.main(['workflow-migrate','--json'])==1
     assert 'authority undecidable' in capsys.readouterr().out
@@ -341,7 +341,7 @@ def test_migration_refuses_undecidable_caller(monkeypatch,capsys):
 @pytest.mark.parametrize('role', ['node', 'orchestrator', 'builder'])
 def test_cli_managed_caller_cannot_send_to_ordinary_task(monkeypatch, capsys, role):
     from types import SimpleNamespace
-    from polybridge import lineage, workflow_hooks, inbox
+    from harflow_mcp import lineage, workflow_hooks, inbox
     detection = SimpleNamespace(undecidable=None, caller=SimpleNamespace(record=SimpleNamespace(task_id='managed')))
     monkeypatch.setattr(lineage, 'detect_caller_detail', lambda *args, **kwargs: detection)
     monkeypatch.setattr(workflow_hooks, 'owner', lambda *a, **k: {'role': role})
@@ -367,4 +367,4 @@ def test_cli_context_delivery_type_error_is_validation_result(tmp_path, monkeypa
     result = json.loads(capsys.readouterr().out)["result"]
     assert result["valid"] is False
     assert "context_delivery" in result["error"]
-    assert not (tmp_path / ".polybridge").exists()
+    assert not (tmp_path / ".harflow").exists()

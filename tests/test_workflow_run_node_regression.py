@@ -1,7 +1,7 @@
 """N4 amendment regression: runs without workflow nodes behave exactly as before."""
 import asyncio
 
-from polybridge import workflows as w
+from harflow_mcp import workflows as w
 
 from test_workflow_delegation import Registry, default_decision, graph, run_flow, storage
 

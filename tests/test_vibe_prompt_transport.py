@@ -5,9 +5,9 @@ from dataclasses import replace
 
 import pytest
 
-from polybridge.backends.vibe import VibeBackend, UnsafeInvocationError
-from polybridge.backends.base import UnsupportedCapability
-from polybridge.tasks import TaskRegistry
+from harflow_mcp.backends.vibe import VibeBackend, UnsafeInvocationError
+from harflow_mcp.backends.base import UnsupportedCapability
+from harflow_mcp.tasks import TaskRegistry
 
 
 @pytest.mark.parametrize("resume", [False, True])

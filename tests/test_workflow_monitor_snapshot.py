@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from polybridge import workflow_responses
+from harflow_mcp import workflow_responses
 
 
 def test_snapshot_pages_remain_lossless_when_live_run_changes(tmp_path):
@@ -60,7 +60,7 @@ def test_finished_paging_removes_snapshot_file(tmp_path):
 
 
 def test_cli_snapshot_pages_do_not_reload_changing_run(monkeypatch, tmp_path, capsys):
-    from polybridge import ctl, workflow_reads
+    from harflow_mcp import ctl, workflow_reads
     from unittest.mock import AsyncMock
     monkeypatch.setattr(ctl, "default_log_dir", lambda: tmp_path / "tasks")
     monkeypatch.setattr(workflow_reads, "bounded_caller", AsyncMock(return_value=None))
@@ -73,7 +73,7 @@ def test_cli_snapshot_pages_do_not_reload_changing_run(monkeypatch, tmp_path, ca
 
 
 def test_managed_cli_snapshot_is_refused_before_any_content(monkeypatch, tmp_path, capsys):
-    from polybridge import ctl, workflow_reads
+    from harflow_mcp import ctl, workflow_reads
     from unittest.mock import AsyncMock
     monkeypatch.setattr(ctl, "default_log_dir", lambda: tmp_path / "tasks")
     monkeypatch.setattr(workflow_reads, "bounded_caller", AsyncMock(return_value=object()))
@@ -112,7 +112,7 @@ def test_snapshot_changed_cache_is_rejected(change, tmp_path):
 def test_fresh_snapshot_provider_reads_only_requested_chunk_and_bounded_receipt(tmp_path, monkeypatch):
     import importlib
     from pathlib import Path
-    from polybridge import workflow_monitor_snapshot as provider
+    from harflow_mcp import workflow_monitor_snapshot as provider
     first = provider.snapshot({'workflow_run_id': 'run', 'summary': 'x' * (provider.CHUNK_SIZE * 40)}, 'run', tmp_path)
     read_bytes = []
     original_open = Path.open
@@ -148,7 +148,7 @@ def test_fresh_snapshot_provider_reads_only_requested_chunk_and_bounded_receipt(
 
 
 def test_monitor_detail_cli_freezes_only_view_and_never_reloads_on_continuations(monkeypatch, tmp_path, capsys):
-    from polybridge import ctl, workflow_reads
+    from harflow_mcp import ctl, workflow_reads
     from unittest.mock import AsyncMock
     monkeypatch.setattr(ctl, 'default_log_dir', lambda: tmp_path / 'tasks')
     guard = AsyncMock(return_value=None)
@@ -175,7 +175,7 @@ def test_monitor_detail_cli_freezes_only_view_and_never_reloads_on_continuations
 
 
 def test_monitor_detail_cursor_cannot_change_view_or_bypass_managed_guard(monkeypatch, tmp_path, capsys):
-    from polybridge import ctl, workflow_reads
+    from harflow_mcp import ctl, workflow_reads
     from unittest.mock import AsyncMock
     page = workflow_responses.monitor_detail({'workflow_run_id': 'run', 'summary': 'x' * 400000}, 'run', 'summary', tmp_path)
     with pytest.raises(ValueError):
@@ -190,7 +190,7 @@ def test_monitor_detail_cursor_cannot_change_view_or_bypass_managed_guard(monkey
 
 
 def test_default_workflow_detail_cli_keeps_public_cursor_semantics(monkeypatch, capsys):
-    from polybridge import ctl, workflow_reads
+    from harflow_mcp import ctl, workflow_reads
     from unittest.mock import AsyncMock
     public = AsyncMock(return_value={'legacy': True})
     monkeypatch.setattr(workflow_reads, 'call', public)
@@ -204,7 +204,7 @@ def test_default_workflow_detail_cli_keeps_public_cursor_semantics(monkeypatch, 
 def test_monitor_cli_cold_and_unknown_authority_never_uses_legacy_detection(monkeypatch, tmp_path, capsys, action, cursor):
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
-    from polybridge import ctl, lineage, store, workflow_reads, workflow_inspection
+    from harflow_mcp import ctl, lineage, store, workflow_reads, workflow_inspection
     from dataclasses import asdict
     import os
     directory = tmp_path / 'tasks'

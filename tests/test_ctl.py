@@ -1,4 +1,4 @@
-"""`polybridge-ctl`: the CLI over on-disk task records (read-only, except `send`)."""
+"""`harflow-ctl`: the CLI over on-disk task records (read-only, except `send`)."""
 
 from __future__ import annotations
 
@@ -14,8 +14,8 @@ from mcp import MCPError
 
 from conftest import ALIVE_OWNER
 
-from polybridge import ctl, identity, inbox, store
-from polybridge.tasks import TaskRegistry
+from harflow_mcp import ctl, identity, inbox, store
+from harflow_mcp.tasks import TaskRegistry
 
 
 def _iso(dt: datetime) -> str:
@@ -41,14 +41,14 @@ def make_record(**overrides) -> store.TaskRecord:
 
 @pytest.fixture(autouse=True)
 def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """`ctl` reads `tasks.default_log_dir()`, which is `Path.home() / ".polybridge" / "tasks"` —
-    redirect HOME so nothing here ever touches the real `~/.polybridge`."""
+    """`ctl` reads `tasks.default_log_dir()`, which is `Path.home() / ".harflow" / "tasks"` —
+    redirect HOME so nothing here ever touches the real `~/.harflow`."""
     monkeypatch.setenv("HOME", str(tmp_path))
     return tmp_path
 
 
 def _log_dir(home: Path) -> Path:
-    from polybridge.tasks import default_log_dir
+    from harflow_mcp.tasks import default_log_dir
 
     return default_log_dir()
 
@@ -212,7 +212,7 @@ def test_status_batch_mixes_authorized_unauthorized_and_unknown_ids(
             ],
         },
     )
-    from polybridge import workflow_inspection
+    from harflow_mcp import workflow_inspection
 
     monkeypatch.setattr(workflow_inspection, "managed_reader", lambda log_dir: managed)
 
@@ -237,7 +237,7 @@ def test_status_batch_reports_unknown_task_for_a_human_like_single_status(
     home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
     store.write(_log_dir(home), make_record(task_id="present"))
-    from polybridge import workflow_inspection
+    from harflow_mcp import workflow_inspection
 
     monkeypatch.setattr(workflow_inspection, "managed_reader", lambda log_dir: None)
     assert ctl.main(["status-batch", "--task-ids", "present,missing", "--json"]) == 0
@@ -253,7 +253,7 @@ def test_status_batch_fails_whole_on_undecidable_authority(
     home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
     """Undecidable caller authority refuses the whole batch — never partial data."""
-    from polybridge import workflow_inspection
+    from harflow_mcp import workflow_inspection
 
     def undecidable(log_dir):
         raise ValueError("Workflow caller authority is undecidable: ps denied")
@@ -306,10 +306,10 @@ def test_ctl_never_constructs_a_task_registry(
     home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
     """ctl is read-only: it must not start retention or hold a live registry."""
-    from polybridge import tasks as tasks_module
+    from harflow_mcp import tasks as tasks_module
 
     def boom(*args, **kwargs):
-        raise AssertionError("polybridge-ctl must never construct a TaskRegistry")
+        raise AssertionError("harflow-ctl must never construct a TaskRegistry")
 
     monkeypatch.setattr(tasks_module, "TaskRegistry", boom)
     store.write(_log_dir(home), make_record())
@@ -456,7 +456,7 @@ def test_send_without_json_prints_a_line(
 def test_backends_json_reports_the_registry_in_order(
     home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
-    from polybridge import backends as backends_module
+    from harflow_mcp import backends as backends_module
 
     claude_binary = backends_module.BACKENDS["claude"].binary
     monkeypatch.setattr(
@@ -489,7 +489,7 @@ def test_backends_json_capabilities_extra_writable_paths_reflect_declared_suppor
     """The v10 contract promises capability metadata on backend documents: each entry carries the
     backend's own `extra_path_support` under `capabilities.extra_writable_paths`, so discovery does
     not need a version or model call to tell which backends accept bounded extra-path grants."""
-    from polybridge import backends as backends_module
+    from harflow_mcp import backends as backends_module
 
     monkeypatch.setattr(
         backends_module.shutil, "which", lambda binary: f"/usr/local/bin/{binary}"
@@ -507,14 +507,14 @@ def test_backends_json_capabilities_extra_writable_paths_reflect_declared_suppor
     for name, backend in backends_module.BACKENDS.items():
         extra = entries[name]["capabilities"]["extra_writable_paths"]
         assert extra == backend.extra_path_support()
-        assert extra["supported"] is (name == "codex")
-    assert entries["codex"]["capabilities"]["extra_writable_paths"]["supported"] is True
+        assert extra["supported"] is False
+    assert entries["codex"]["capabilities"]["extra_writable_paths"]["supported"] is False
 
 
 def test_backends_plain_text_is_one_line_per_backend(
     home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
-    from polybridge import backends as backends_module
+    from harflow_mcp import backends as backends_module
 
     vibe_binary = backends_module.BACKENDS["vibe"].binary
     monkeypatch.setattr(
@@ -540,7 +540,7 @@ def test_backends_never_spawns_a_subprocess(
     """`backends` answers from `shutil.which` alone — unlike `describe()`, it never probes
     `--version`, so it stays fast enough for the Monitor's refresh cadence."""
 
-    from polybridge import backends as backends_module
+    from harflow_mcp import backends as backends_module
 
     def boom(*args, **kwargs):
         raise AssertionError("ctl backends must never spawn a subprocess")
@@ -565,7 +565,7 @@ def test_current_task_documents_preserve_usage_limit_diagnostics(home, capsys, c
 
 
 def test_compact_list_refuses_managed_callers_before_global_reads(home, monkeypatch, capsys):
-    from polybridge import task_reads, workflow_inspection
+    from harflow_mcp import task_reads, workflow_inspection
 
     monkeypatch.setattr(workflow_inspection, 'managed_page_reader', lambda path: (True, ({}, {})))
 
@@ -584,7 +584,7 @@ def test_compact_list_refuses_managed_callers_before_global_reads(home, monkeypa
 
 
 def test_compact_list_direct_caller_can_page_to_older_filtered_tasks(home, monkeypatch, capsys):
-    from polybridge import workflow_inspection
+    from harflow_mcp import workflow_inspection
 
     monkeypatch.setattr(workflow_inspection, 'managed_page_reader', lambda path: (True, None))
     now = datetime.now(timezone.utc)
@@ -607,7 +607,7 @@ def test_compact_list_direct_caller_can_page_to_older_filtered_tasks(home, monke
 
 
 def test_compact_list_preserves_authority_preparing_response(home, monkeypatch, capsys):
-    from polybridge import task_reads, workflow_inspection
+    from harflow_mcp import task_reads, workflow_inspection
 
     monkeypatch.setattr(workflow_inspection, 'managed_page_reader', lambda path: (False, None))
     monkeypatch.setattr(task_reads, 'list_tasks', lambda *a, **k: pytest.fail('global query while preparing'))

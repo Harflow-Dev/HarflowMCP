@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from polybridge import workflows as w
+from harflow_mcp import workflows as w
 from test_workflow_delegation import Registry, default_decision, graph, run_flow
 
 
@@ -104,7 +104,7 @@ def test_deterministic_benchmark_has_every_scenario():
 
 
 async def test_fallback_is_fresh_bootstrap(storage, tmp_path):
-    from polybridge.backends import UnsupportedCapability
+    from harflow_mcp.backends import UnsupportedCapability
     class FallbackRegistry(ContextRegistry):
         async def start(self, prompt, repo, **kwargs):
             if kwargs.get("model") == "unavailable-fixture":
@@ -135,7 +135,7 @@ def test_saved_definitions_always_optimize_and_historical_runs_keep_legacy(stora
     old = storage.save("old", old_graph)
     assert old["context_delivery"] == "optimized_v1"
     historical = {"definition": {**graph(), "context_delivery": "legacy"}}
-    from polybridge.workflow_prompt_delivery import optimized
+    from harflow_mcp.workflow_prompt_delivery import optimized
     assert not optimized(historical)
     assert not optimized({"definition": graph()})
     raw = graph()
@@ -179,7 +179,7 @@ async def test_supervisor_restart_bootstraps_retained_session(storage, tmp_path)
 
 
 async def test_oversized_worker_evidence_is_authorized_before_spawn(storage, tmp_path):
-    from polybridge.workflow_inspection import assigned_input_page
+    from harflow_mcp.workflow_inspection import assigned_input_page
     definition = graph()
     definition["context_delivery"] = "optimized_v1"
     definition["nodes"].insert(2, {"id": "consume", "type": "agent", "instructions": "Consume complete predecessor evidence", "execution_mode": "headless", "agent": {"backend": "codex"}})
@@ -215,9 +215,9 @@ async def test_oversized_worker_evidence_is_authorized_before_spawn(storage, tmp
 
 
 def test_linked_child_large_evidence_has_separate_authorized_manifest(storage, tmp_path):
-    from polybridge.workflow_delegation import result_inputs, worker_prompt
-    from polybridge.workflow_inspection import assigned_input_page
-    from polybridge.workflow_prompt_delivery import render_worker_inputs, worker_input_refs
+    from harflow_mcp.workflow_delegation import result_inputs, worker_prompt
+    from harflow_mcp.workflow_inspection import assigned_input_page
+    from harflow_mcp.workflow_prompt_delivery import render_worker_inputs, worker_input_refs
     parent = storage.create_run(w.validate_definition(graph()), "Parent", tmp_path)
     child = storage.create_run(w.validate_definition(graph()), "Child", tmp_path)
     evidence = "雪🙂 child evidence " * 10000
@@ -264,7 +264,7 @@ async def test_exhausted_orchestrator_inspections_preserve_oversized_evidence(st
     registry = ContextRegistry(storage.root)
     registry.outputs = {"work": {"status": "succeeded", "result": {"summary": evidence}, "evidence": ["observed"]}}
     # Force the production checkpoint to reflect already exhausted inspection authority.
-    from polybridge import workflow_delegation as delegation
+    from harflow_mcp import workflow_delegation as delegation
     original = delegation.decision_context
     def exhausted(*args, **kwargs):
         context = original(*args, **kwargs)
@@ -347,8 +347,8 @@ async def test_inspection_turn_has_persisted_classification(storage, tmp_path):
 
 
 def test_issued_inspection_pages_fit_escaped_response_and_remaining_budget():
-    from polybridge.workflow_inspection import result_page
-    from polybridge.workflow_prompt_delivery import orchestrator_input_manifests
+    from harflow_mcp.workflow_inspection import result_page
+    from harflow_mcp.workflow_prompt_delivery import orchestrator_input_manifests
     text = '"\\' * 40000
     run = {'workflow_run_id': 'escaped-run', 'execution_contract': 'delegation',
            'activations': [{'id': 'source', 'role': 'node', 'node_id': 'work', 'status': 'completed',
@@ -372,7 +372,7 @@ def test_issued_inspection_pages_fit_escaped_response_and_remaining_budget():
 
 
 async def test_input_markers_inside_assignment_never_replace_constraints(storage, tmp_path):
-    from polybridge.workflow_delegation import result_inputs
+    from harflow_mcp.workflow_delegation import result_inputs
     definition = {**graph(), 'context_delivery': 'optimized_v1'}
     definition['nodes'].insert(2, {'id': 'consume', 'type': 'agent', 'instructions': 'Keep literal assignment constraints', 'execution_mode': 'headless', 'agent': {'backend': 'codex'}})
     definition['nodes'][1]['execution_mode'] = 'headless'
