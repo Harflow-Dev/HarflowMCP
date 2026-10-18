@@ -176,7 +176,26 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     attach_p.add_argument("--pid", type=int, required=True)
     attach_p.add_argument("--json", action="store_true")
 
+    approval_list = sub.add_parser("approval-list", help="List permission request metadata")
+    approval_target = approval_list.add_mutually_exclusive_group(required=True)
+    approval_target.add_argument("--task-id")
+    approval_target.add_argument("--workflow-run-id")
+    approval_list.add_argument("--cursor")
+    approval_list.add_argument("--limit", type=int, default=16)
+    approval_list.add_argument("--json", action="store_true")
+    for command in ("approval-get", "approval-respond"):
+        approval = sub.add_parser(command, help="Inspect or answer an exact-action permission request")
+        approval.add_argument("task_id")
+        approval.add_argument("request_id")
+        approval.add_argument("--monitor", action="store_true", help="Verified human Monitor interaction owner")
+        approval.add_argument("--json", action="store_true")
+        if command == "approval-respond":
+            approval.add_argument("--action-digest", required=True)
+            approval.add_argument("--owner-revision", type=int, required=True)
+            approval.add_argument("--decision", choices=("approve", "reject"), required=True)
+
     run_p = sub.add_parser("run", help="start a task, owned by a detached process until it settles")
+    run_p.add_argument("--caller-approvals", action="store_true", default=None, help="Opt in to qualified exact-action caller Bash decisions")
     run_p.add_argument("--backend", default=None)
     run_p.add_argument("--workflow", default=None)
     run_goal = run_p.add_mutually_exclusive_group()
@@ -198,6 +217,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     run_p.add_argument("--json", action="store_true")
 
     preview_p = sub.add_parser("permission-preview", help="validate and preview standalone permissions without launching")
+    preview_p.add_argument("--caller-approvals", action="store_true")
     preview_p.add_argument("--repo", required=True)
     preview_p.add_argument("--backend", required=True)
     preview_p.add_argument("--freedom", default=None)
@@ -325,6 +345,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
             prompt_group.add_argument("--prompt")
             prompt_group.add_argument("--prompt-file", help="UTF-8 prompt file")
             wp.add_argument("--backend", required=action == "build")
+            wp.add_argument("--caller-approvals", action="store_true", default=None)
             wp.add_argument("--model")
             wp.add_argument("--reasoning-effort")
             wp.add_argument("--max-turns", type=int)
@@ -729,6 +750,8 @@ def _run_action(args: argparse.Namespace):
             group=args.group,
             title=title,
             auto_continue=args.auto_continue,
+            caller_approvals=bool(args.caller_approvals),
+            interaction_owner="monitor" if args.monitor else "caller",
             **({'extra_writable_paths': args.extra_writable_path} if args.extra_writable_path is not None else {}),
         )
 
@@ -924,7 +947,7 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
         if action in {"start", "build", "preview"}:
             prompt = _workflow_prompt(args) if action != "preview" else ""
             candidate = {k: v for k, v in {"backend": args.backend, "model": args.model,
-                         "reasoning_effort": args.reasoning_effort, "max_turns": args.max_turns}.items() if v is not None}
+                         "reasoning_effort": args.reasoning_effort, "max_turns": args.max_turns, "caller_approvals": args.caller_approvals}.items() if v is not None}
             if action == "preview":
                 return await server._workflow_call("preview", name=args.name, repo_path=args.repo, overrides=candidate or None, network=_network(args.network))
             if action == "build":
@@ -982,6 +1005,24 @@ def _main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
 
+    if args.command in {"approval-list", "approval-get", "approval-respond"}:
+        from . import approval_runtime, server
+        registry = server.install_cli_registry()
+        async def approval_action():
+            reg = server._reg()
+            if args.command == "approval-list":
+                return await approval_runtime.list_requests(reg, args.task_id, args.workflow_run_id, args.cursor, args.limit)
+            owner = "monitor" if args.monitor else "caller"
+            if args.command == "approval-get":
+                return await approval_runtime.get_request(reg, args.task_id, args.request_id, interaction_owner=owner)
+            return await approval_runtime.respond_request(reg, args.task_id, args.request_id, args.action_digest, args.owner_revision, args.decision, owner)
+        try:
+            result = asyncio.run(approval_action())
+        except Exception as exc:
+            return _fail(args, "approval_error", str(exc))
+        print(json.dumps({"v": CTL_JSON_VERSION, "result": result}) if args.json else json.dumps(result, indent=2))
+        return 0
+
     if args.command == 'workflow-notifications':
         from .takeover import caller_refusal
         from .workflow_notifications import status
@@ -1014,6 +1055,7 @@ def _main(argv: list[str] | None = None) -> int:
             result = asyncio.run(server.preview_task_permissions(
                 repo_path=args.repo, backend=args.backend, freedom=args.freedom,
                 network=_network(args.network), extra_writable_paths=args.extra_writable_path,
+                caller_approvals=args.caller_approvals,
             ))
         except Exception as exc:
             return _fail(args, "invalid_params", str(exc))

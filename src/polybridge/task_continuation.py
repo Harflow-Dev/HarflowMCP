@@ -176,7 +176,7 @@ async def continue_task(registry: Any, task_id: str, extra_prompt: str | None = 
             _write(path, {'task_id': identifier, 'state': 'reserved', 'chain_root_task_id': root, 'automatic': automatic, 'request_fingerprint': fingerprint})
             try:
                 spawn_called = True
-                child = await registry.start(prompt, Path(source.repo_path), backend=get_backend(source.backend), freedom=source.freedom, model=source.model, reasoning_effort=source.reasoning_effort, network=source.network, max_turns=source.max_turns, group=source.group, title=source.title, task_id=identifier, auto_continue=max(source.auto_continue - 1, 0) if automatic else 0, continuation_of_task_id=task_id, chain_root_task_id=root, chain_prompt=None, **({'message_ids': attempt.ids} if attempt is not None else {}))
+                child = await registry.start(prompt, Path(source.repo_path), backend=get_backend(source.backend), freedom=source.freedom, model=source.model, reasoning_effort=source.reasoning_effort, network=source.network, caller_approvals=source.caller_approvals, interaction_owner=source.interaction_owner, max_turns=source.max_turns, group=source.group, title=source.title, task_id=identifier, auto_continue=max(source.auto_continue - 1, 0) if automatic else 0, continuation_of_task_id=task_id, chain_root_task_id=root, chain_prompt=None, **({'message_ids': attempt.ids} if attempt is not None else {}))
                 # Preserve delegation ownership, independently of fresh-session ancestry.
                 child.spawned_by, child.root_task_id = source.spawned_by, source.root_task_id
                 child.depth, child.max_depth = source.depth, source.max_depth

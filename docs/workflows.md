@@ -1661,3 +1661,21 @@ scope, routing/question origin, checkpoint, status, timing, execution/result ref
 (nullable for native execution). `polybridge-ctl workflow detail RUN --view on_demand_calls`
 provides lossless paged calls; `on_demand_nodes` and `on_demand_state` are detail views too.
 The CTL JSON contract is version 14. Historical records without these fields remain readable.
+
+### Caller approval interaction
+
+Each agent candidate, including every fallback, can save `caller_approvals: true`; omitted values
+remain false. The qualified scope is [exact-action Claude caller approvals](harness-permissions.md#exact-action-caller-approvals).
+For opted-in candidates the implicit 100-turn default is omitted. An explicit turn cap is
+incompatible and rejected. Resume and continuation inherit the saved policy; candidate/session
+compatibility includes this setting. Native execution cannot carry this policy and its preview
+explains the Headless requirement.
+
+A pending permission request is `waiting_for_approval` interaction state while its task remains
+running. It is separate from orchestrator `needs_input`: ordinary workflow resume, user messages
+and queued follow-ups cannot answer it. Dependent work waits for its existing worker; completed
+work, nested workflow state and independent active branches are retained. Task and workflow waits
+return `stop_reason: "attention"` with bounded metadata/handles. List the root tree with
+`list_approval_requests(workflow_run_id=...)`, then inspect and answer one request at a time.
+The root's caller/Monitor interaction ownership remains authoritative; no transfer is introduced.
+A decision does not itself establish successful execution or workflow completion.

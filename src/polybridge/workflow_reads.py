@@ -41,7 +41,7 @@ async def bounded_caller(directory: Path):
 
 def managed_run_summary(run: dict[str, Any]) -> dict[str, Any]:
     """Expose current routing state; goal history remains in paged detail reads."""
-    keys = ("workflow_run_id", "name", "kind", "status", "goal", "goal_revision", "goal_assessment", "goal_replanning_required", "parent_goal", "definition", "revision", "prompt", "execution_contract", "tasks", "checklist_disposition", "decisions", "transitions", "settling", "input_question", "input_decision_id", "interaction_owner", "reason", "instructions", "created_at", "updated_at", "on_demand_nodes", "on_demand_calls", "on_demand_state")
+    keys = ("workflow_run_id", "name", "kind", "status", "goal", "goal_revision", "goal_assessment", "goal_replanning_required", "parent_goal", "definition", "revision", "prompt", "execution_contract", "tasks", "checklist_disposition", "decisions", "transitions", "settling", "input_question", "input_decision_id", "interaction_owner", "reason", "instructions", "created_at", "updated_at", "on_demand_nodes", "on_demand_calls", "on_demand_state", "approval_summary")
     summary = {key: run[key] for key in keys if key in run}
     if isinstance(run.get("technical_plan"), str):
         summary.update(technical_plan=run["technical_plan"][:16000], technical_plan_truncated=len(run["technical_plan"]) > 16000, technical_plan_execution_id=run.get("technical_plan_execution_id"))
@@ -211,6 +211,6 @@ async def cli_read(action: str, args: Any, directory: Path) -> Any:
 
 def on_demand_projection(storage: Any, run: dict[str, Any]) -> dict[str, Any]:
     from .workflow_on_demand import projection
-    if run.get("kind") == "builder":
-        return run
-    return {**run, **projection(storage, run)}
+    from .approval_runtime import workflow_summary
+    view = {} if run.get("kind") == "builder" else projection(storage, run)
+    return {**run, **view, "approval_summary": workflow_summary(storage.root / "tasks", run["workflow_run_id"])}

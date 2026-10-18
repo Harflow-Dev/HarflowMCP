@@ -185,6 +185,11 @@ You can use the same bridge without a workflow. `start_task(prompt, repo_path, b
 returns a **`task_id`** immediately. Follow it with `get_task_status` or `wait_for_task`, then use
 `resume_task` for a follow-up. Independent tasks can run in parallel.
 
+Opt-in [`caller_approvals`](docs/harness-permissions.md#exact-action-caller-approvals) supports
+individual exact-action Bash decisions on qualified uncapped non-native Claude Code 2.1.302
+write/publish tasks. Task/workflow waits surface pending requests as attention; inspect the full
+action before approving once or rejecting. Other transports remain unsupported.
+
 `send_message(task_id, text)` adds a message to a running live-input task (`delivery: "live_input"`).
 A task without live input (a backend that has none, or claude with `max_turns`) queues it instead
 (`delivery: "next_continuation"`): nothing is started or delivered, and the next continuation you

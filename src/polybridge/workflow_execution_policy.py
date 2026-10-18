@@ -60,7 +60,7 @@ def previous_session_reason(run, node, token, *, root=None):
     source = next((a for a in reversed(run['activations']) if a['id'] in refs and a['role'] == 'node'), None) if len(refs) == 1 else None
     if source and source.get('tasks'):
         task = source['tasks'][-1]
-        differences = [key + ' differs' for key in ('backend', 'model', 'reasoning_effort', 'max_turns') if task.get('candidate', {}).get(key) != node['agent'].get(key)]
+        differences = [key + ' differs' for key in ('backend', 'model', 'reasoning_effort', 'max_turns', 'caller_approvals') if task.get('candidate', {}).get(key, False if key == 'caller_approvals' else None) != node['agent'].get(key, False if key == 'caller_approvals' else None)]
         network = False if run.get('network') is False else node.get('network', run.get('network'))
         differences += [label + ' differs' for label, actual, expected in [('freedom', task.get('freedom'), w.run_effective_freedom(run, node)), ('network', task.get('network'), network), ('repository', task.get('repo_path'), run['repo_path'])] if actual != expected]
         if differences:

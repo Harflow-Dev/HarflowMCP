@@ -94,7 +94,7 @@ def offer(store: Any, run: dict[str, Any], node: dict[str, Any], exclude_executi
         config = definition["orchestrator"]
         candidates = [config] + config.get("fallbacks", [])
         candidate = next((copy.deepcopy(c) for c in candidates if "orchestrator:" + _candidate_key(c) == binding.get("candidate")), None)
-        if candidate is None or (record.backend, record.model, record.reasoning_effort, record.max_turns) != (candidate["backend"], candidate.get("model"), candidate.get("reasoning_effort"), candidate.get("max_turns")):
+        if candidate is None or (record.backend, record.model, record.reasoning_effort, record.max_turns, record.caller_approvals) != (candidate["backend"], candidate.get("model"), candidate.get("reasoning_effort"), candidate.get("max_turns"), candidate.get("caller_approvals", False)):
             return refuse("Latest child actual orchestrator candidate or launch configuration changed")
         from .workflow_native_policy import child_contracts, orchestrator_contract
         target_contracts = child_contracts(run, node["workflow_ref"]["workflow_id"])
@@ -195,7 +195,7 @@ async def _recover_first_turn(supervisor: Any) -> None:
         expected = inherited["candidate"]
         from .workflow_native_policy import orchestrator_contract
         contract = orchestrator_contract(child, expected)
-        if owned_attempt.get("candidate") != expected or (receipt.backend, receipt.model, receipt.reasoning_effort, receipt.max_turns, receipt.freedom, receipt.network, str(Path(receipt.repo_path).resolve())) != (expected["backend"], expected.get("model"), expected.get("reasoning_effort"), expected.get("max_turns"), contract["freedom"], contract["network"], str(Path(child["repo_path"]).resolve())):
+        if {k: v for k, v in owned_attempt.get("candidate", {}).items() if k != "caller_approvals" or v} != {k: v for k, v in expected.items() if k != "caller_approvals" or v} or (receipt.backend, receipt.model, receipt.reasoning_effort, receipt.max_turns, receipt.caller_approvals, receipt.freedom, receipt.network, str(Path(receipt.repo_path).resolve())) != (expected["backend"], expected.get("model"), expected.get("reasoning_effort"), expected.get("max_turns"), expected.get("caller_approvals", False), contract["freedom"], contract["network"], str(Path(child["repo_path"]).resolve())):
             return
         owned.add(receipt.task_id)
         source_task = receipt.task_id
@@ -211,7 +211,7 @@ async def _recover_first_turn(supervisor: Any) -> None:
         record = tasks.read(supervisor.store.root / "tasks", attempt["task_id"])
         if record is None or record.status != "completed" or tasks.outcome_unobserved(record) or record.parent_task_id != attempt.get("resume_task_id") or record.session_id != sid:
             return
-        if (record.backend, record.model, record.reasoning_effort, record.max_turns, record.freedom, record.network, str(Path(record.repo_path).resolve())) != (candidate["backend"], candidate.get("model"), candidate.get("reasoning_effort"), candidate.get("max_turns"), contract["freedom"], contract["network"], str(Path(child["repo_path"]).resolve())):
+        if (record.backend, record.model, record.reasoning_effort, record.max_turns, record.caller_approvals, record.freedom, record.network, str(Path(record.repo_path).resolve())) != (candidate["backend"], candidate.get("model"), candidate.get("reasoning_effort"), candidate.get("max_turns"), candidate.get("caller_approvals", False), contract["freedom"], contract["network"], str(Path(child["repo_path"]).resolve())):
             return
         if sid in tasks.live_session_ids(supervisor.store.root / "tasks") or tasks.session_successor_task_ids(supervisor.store.root / "tasks", record.task_id, sid):
             return

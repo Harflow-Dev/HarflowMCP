@@ -377,6 +377,8 @@ async def start_task(
     max_turns: int | None = None,
     reasoning_effort: str | None = None,
     network: StrictBool | None = None,
+    caller_approvals: StrictBool = False,
+    interaction_owner: str = "caller",
     group: str | None = None,
     title: str | None = None,
     workflow: str | None = None,
@@ -416,6 +418,11 @@ async def start_task(
             silently ignores an unsupported level rather than erroring, and on antigravity a model
             id that encodes its own level makes the CLI refuse --effort at startup. See
             list_backends' per-backend reasoning_effort caveats for what is and is not known there.
+        caller_approvals: Opt in to version-qualified exact-action Bash caller decisions. Only
+            uncapped non-native Claude Code 2.1.302 write_in_repo/publish is supported. Defaults off;
+            worker self-approval is prohibited. Decisions do not override saved policy or grant
+            reusable access. Inspect list_approval_requests and get_approval_request before responding.
+        interaction_owner: caller by default; monitor requires the verified human Monitor path.
         network: Optional boolean asking for network access independently of `freedom`: True
             asks polybridge to impose no network barrier of its own, False asks it to impose one,
             and None (the default) keeps each freedom's historical behaviour exactly. The
@@ -491,6 +498,8 @@ async def start_task(
         raise MCPError(INVALID_PARAMS, str(exc)) from None
 
     if workflow is not None:
+        if caller_approvals or interaction_owner != "caller":
+            raise MCPError(INVALID_PARAMS, "Workflow approval policy and ownership belong to saved candidates and root workflow launch")
         if extra_writable_paths is not None:
             raise MCPError(INVALID_PARAMS, "extra_writable_paths is unavailable for workflow launches")
         if auto_continue:
@@ -545,6 +554,8 @@ async def start_task(
             max_turns=max_turns,
             reasoning_effort=reasoning_effort,
             network=network,
+            caller_approvals=caller_approvals,
+            interaction_owner=interaction_owner,
             group=group,
             title=normalized_title,
             auto_continue=auto_continue,
@@ -580,11 +591,62 @@ async def start_task(
 
 
 @mcp.tool()
+@bounded_request
+async def list_approval_requests(task_id: str | None = None, workflow_run_id: str | None = None, cursor: str | None = None, limit: StrictInt = 16) -> dict[str, Any]:
+    """List bounded permission request metadata for exactly one task or root workflow tree.
+
+    Default page size 16, maximum 32. Raw actions appear only in get_approval_request.
+    Workers and orchestrators cannot inspect caller approval records. A pending request is
+    an interaction substate; underlying execution remains running. No approval is inferred
+    from agent prose, errors or already denied actions.
+    """
+    from .approval_runtime import list_requests
+    try:
+        return await list_requests(_reg(), task_id, workflow_run_id, cursor, limit)
+    except (OSError, ValueError) as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+
+@mcp.tool()
+@bounded_request
+async def get_approval_request(task_id: str, request_id: str) -> dict[str, Any]:
+    """Read the complete exact action for an authorized direct caller.
+
+    Inspect this payload before approving; request IDs, digest and revision are comparison
+    fields, never authorization tokens. Payloads may contain sensitive command arguments.
+    """
+    from .approval_runtime import get_request
+    try:
+        return await get_request(_reg(), task_id, request_id)
+    except (OSError, ValueError) as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+
+@mcp.tool()
+@bounded_request
+async def respond_approval_request(task_id: str, request_id: str, action_digest: str, owner_revision: StrictInt, decision: str, interaction_owner: str = "caller") -> dict[str, Any]:
+    """Reserve approve/reject for one exact action, with stale/duplicate answer protection.
+
+    Only the authoritative root interaction owner can answer; workers/orchestrators cannot
+    self-approve or claim Monitor ownership. Approval preserves exact original input and never
+    installs permission suggestions or reusable grants. Reservation, local pipe delivery and
+    observed tool outcome are separate states. No ambiguous decision is automatically resent.
+    Use explicit recovery after settled refusal; ordinary messages/resume are not decisions.
+    """
+    from .approval_runtime import respond_request
+    try:
+        return await respond_request(_reg(), task_id, request_id, action_digest, owner_revision, decision, interaction_owner)
+    except (OSError, ValueError) as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+
+@mcp.tool()
 async def preview_task_permissions(
     repo_path: str,
     backend: str | None = None,
     freedom: str | None = None,
     network: StrictBool | None = None,
+    caller_approvals: StrictBool = False,
     extra_writable_paths: list[StrictStr] | None = None,
 ) -> dict[str, Any]:
     """Preview standalone task permissions without launching an agent or allocating scratch.
@@ -610,6 +672,7 @@ async def preview_task_permissions(
         return await _reg().preview_permissions(
             path, backend=chosen, freedom=access, network=network,
             extra_writable_paths=extra_writable_paths,
+            caller_approvals=caller_approvals,
         )
     except (ValueError, backends.UnsupportedCapability) as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
@@ -748,14 +811,22 @@ async def _await_with_progress(task: Task, plan: wait_policy.WaitPlan, ctx: Cont
     clock = plan.begin()
     step = 0
     while True:
+        if task.caller_approvals:
+            from . import approvals
+            attention = await asyncio.to_thread(approvals.summary, _reg().log_dir, task.task_id)
+            task.approval_view = attention
+            if attention.get("interaction_state"):
+                return wait_policy.STOP_ATTENTION
         if task.done.is_set():
             return wait_policy.STOP_TERMINAL
         remaining = clock.remaining()
         if remaining <= 0:
             return plan.expiry_reason
         try:
-            await asyncio.wait_for(task.done.wait(), timeout=min(wait_policy.PROGRESS_INTERVAL_SECONDS, remaining))
-            return wait_policy.STOP_TERMINAL
+            await asyncio.wait_for(task.done.wait(), timeout=min(1.0 if task.caller_approvals else wait_policy.PROGRESS_INTERVAL_SECONDS, remaining))
+            # Re-evaluate terminal versus unresolved approval attention after the
+            # event wakes us; settlement can occur during this await.
+            continue
         except asyncio.TimeoutError:
             pass
 
@@ -822,6 +893,11 @@ async def _poll_recovered(
     failed_rounds = 0
     draining_since: float | None = None
     while True:
+        if record.caller_approvals:
+            from . import approvals
+            attention = await asyncio.to_thread(approvals.summary, _reg().log_dir, record.task_id)
+            if attention.get("interaction_state"):
+                return record, wait_policy.STOP_ATTENTION, False
         round_failed = False
         try:
             status, gone = await asyncio.to_thread(_recovered_settlement, _reg().log_dir, record)
@@ -843,7 +919,7 @@ async def _poll_recovered(
         remaining = clock.remaining()
         if remaining <= 0:
             return record, plan.expiry_reason, True
-        await asyncio.sleep(min(wait_policy.PROGRESS_INTERVAL_SECONDS, remaining))
+        await asyncio.sleep(min(1.0 if record.caller_approvals else wait_policy.PROGRESS_INTERVAL_SECONDS, remaining))
 
         try:
             fresh = _reg().recover(record.task_id)
@@ -1615,7 +1691,8 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
                 raise ValueError("Only a verified human Monitor caller can claim monitor interaction ownership: " + refusal[1])
         from .workflow_reads import READ_ACTIONS, call
         if action in READ_ACTIONS:
-            return await call(action, directory=_reg().log_dir, reader=_managed_workflow_reader, _bounded_read=bounded_read, **kwargs)
+            result = await call(action, directory=_reg().log_dir, reader=_managed_workflow_reader, _bounded_read=bounded_read, **kwargs)
+            return result
         if action == "preview":
             caller = await _verified_workflow_caller()
             if caller is not None:
@@ -2092,6 +2169,11 @@ async def _wait_workflow_full(
     step = 0
     next_progress = clock.started + wait_policy.PROGRESS_INTERVAL_SECONDS
     while True:
+        from .approval_runtime import workflow_summary
+        if "approval_summary" in result:
+            result["approval_summary"] = await asyncio.to_thread(workflow_summary, _reg().log_dir, workflow_run_id)
+        if result.get("approval_summary", {}).get("interaction_state"):
+            return finish(wait_policy.STOP_ATTENTION)
         phase = wait_policy.workflow_phase(result.get("status"), bool(result.get("settling")))
         if phase == "terminal":
             return finish(wait_policy.STOP_TERMINAL)

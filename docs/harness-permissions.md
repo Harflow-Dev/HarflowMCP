@@ -342,3 +342,72 @@ the current run state; a fresh task or workflow can verify the corrected setup.
 Bridge mapping sources: [Claude](../src/polybridge/backends/claude.py), [Codex](../src/polybridge/backends/codex.py),
 [OpenCode](../src/polybridge/backends/opencode.py),
 [Vibe](../src/polybridge/backends/vibe.py), [Antigravity](../src/polybridge/backends/antigravity.py).
+
+## Exact-action caller approvals
+
+`caller_approvals` is a strict boolean, defaulting to `false`. The initial adapter is limited to
+Claude Code **2.1.302**, non-native uncapped stream JSON, `write_in_repo` or `publish`, and
+foreground-owned Bash permission requests. Other backends, native children, explicit turn caps,
+read-only and unrestricted launches reject the opt-in before spawning. The capability catalog
+reports `supports_caller_approvals` and `caller_approval_support`; installed-version qualification
+is checked again at launch. No alternative transport or permission mode is selected implicitly.
+
+The adapter retains `acceptEdits`, saved Git deny/allow rules and the harness's managed policies.
+It cannot override an explicit deny, plan mode or a sandbox restriction. Bash requests that ask to
+disable the harness sandbox are unsupported. Claude does not gain a bridge OS sandbox through this
+feature. Some actions are already allowed or denied by the harness and never ask the caller.
+Agent prose, error messages and completed denials never create actionable approval requests.
+
+Standalone MCP example:
+
+```text
+start_task(prompt="Run the requested check", repo_path="/path/to/repo",
+           backend="claude", caller_approvals=true)
+list_approval_requests(task_id="TASK_ID")
+get_approval_request(task_id="TASK_ID", request_id="REQUEST_ID")
+respond_approval_request(task_id="TASK_ID", request_id="REQUEST_ID",
+                        action_digest="DIGEST_FROM_GET", owner_revision=1,
+                        decision="approve")
+```
+
+Inspect the complete action returned by `get_approval_request` before choosing `approve` or
+`reject`. Approval sends the exact original input once. Suggestions to change permissions,
+settings or modes are never applied. Decisions are separate from ordinary messages and do not
+consume user turns. A reserved decision, a local stdin write (`sent`) and an observed tool result
+(`execution_outcome`) are different facts; `sent` is not a harness acknowledgement or proof of
+execution. Duplicate, stale, mismatched and expired answers fail rather than being replayed.
+
+The equivalent CLI commands are:
+
+```bash
+polybridge-ctl run --backend claude --repo /path/to/repo --prompt 'Run the check' --caller-approvals --json
+polybridge-ctl approval-list --task-id TASK_ID --json
+polybridge-ctl approval-get TASK_ID REQUEST_ID --json
+polybridge-ctl approval-respond TASK_ID REQUEST_ID --action-digest DIGEST --owner-revision REVISION --decision reject --json
+```
+
+Only direct callers may inspect full actions or answer. Workers, orchestrators and their children
+cannot approve their own work. Standalone requests default to caller ownership. Monitor launches
+explicitly select Monitor ownership through the existing verified-human path; `--monitor` alone
+cannot bypass caller/ancestry checks. Workflow requests inherit their authoritative root owner;
+Monitor presents caller-owned requests read-only. This uses the existing same-OS-user metadata
+trust boundary and does not defend against malicious same-user filesystem/process tampering.
+
+Requests expire 1800 seconds after receipt, or at an earlier workflow node execution deadline.
+Pending requests keep stdin open and pause bridge inactivity expiry, while hard deadlines and
+cancellation remain effective. Caller disconnect does not cancel the request. Expiry sends a
+reject only to the same verified live process/request; lost ownership leaves uncertainty and no
+blind resend. Restart does not reattach a lost stdin owner. Cancellation and process exit invalidate
+unanswered requests. Settle and inspect the prior execution before explicit recovery; changing
+configuration or resuming is a separate action and never a permission response.
+
+Storage is bounded per task: 64 KiB canonical request payload, 16 pending requests, 128 lifetime
+records and a 2 MiB ledger, with 256 KiB reserved for decisions/outcomes. Full or invalid ledgers
+stop owned execution without approving. Records remain until normal task retention/deletion.
+Lists contain metadata only (16 by default, maximum 32). Active requests appear first, unresolved
+delivery uncertainty next, and retained history last; each group is oldest first, with request IDs
+breaking timestamp ties. This order is applied before pagination. Full commands may contain sensitive
+arguments and appear only in authorized full reads and the protected local ledger.
+
+Root-tree reads have shared source byte/count budgets and return unavailable/retry guidance rather than
+silently omitting unverified pending work.

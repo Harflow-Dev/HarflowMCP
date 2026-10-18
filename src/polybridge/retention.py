@@ -564,7 +564,7 @@ def _delete_task_files_locked(log_dir: Path, task_id: str) -> bool:
         entries = list(log_dir.iterdir())
     except OSError:
         return False
-    lock_names = {f"{task_id}.lock", f"{task_id}.inbox.jsonl", f"{task_id}{followups.LOCK_SUFFIX}"}
+    lock_names = {f"{task_id}.approvals.json.lock", f"{task_id}.lock", f"{task_id}.inbox.jsonl", f"{task_id}{followups.LOCK_SUFFIX}"}
     record_name = f"{task_id}{store.RECORD_SUFFIX}"
     prefix = f"{task_id}."
     record_path: Path | None = None

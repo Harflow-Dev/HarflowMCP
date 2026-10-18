@@ -55,6 +55,7 @@ class Invocation:
     extra_path_configuration: tuple[Any, ...] | None = None
     scratch_directory: str | None = None
     native_subagent: bool = False
+    caller_approvals: bool = False
     native_settings: dict[str, Any] | None = None
 
     @property
@@ -206,6 +207,9 @@ class Capabilities(NamedTuple):
     not: it folds a mid-turn message into the running turn (measured, claude 2.1.281), so however
     many messages landed, exactly one further result settles the run. Default False so the
     folding semantics stay the behaviour of every backend that does not say otherwise."""
+
+    supports_caller_approvals: bool = False
+    """Whether a version-qualified exact-action caller control transport exists."""
 
     resume_may_start_fresh: bool = False
     """Whether an unavailable conversation can silently create a new one on resume.
@@ -377,7 +381,34 @@ class NestedDispatchRefused(UnsupportedCapability):
 
 
 class ExtraPathsUnsupported:
-    """Default fail-closed seam for harnesses without bounded-path certification."""
+    """Default fail-closed seams for uncertified optional execution capabilities."""
+
+    def caller_approval_support(self) -> dict[str, Any]:
+        return {"supported": False}
+
+    def validate_caller_approvals(self, enabled, freedom, max_turns, native=False):
+        if type(enabled) is not bool:
+            raise ValueError("caller_approvals must be a boolean")
+        if enabled:
+            raise UnsupportedCapability("This backend has no qualified caller approval transport")
+
+    def qualify_caller_approvals(self):
+        raise UnsupportedCapability("This backend has no qualified caller approval transport")
+
+    def configure_caller_approvals(self, invocation, freedom, max_turns):
+        raise UnsupportedCapability("This backend has no qualified caller approval transport")
+
+    def decode_approval_request(self, event):
+        return None
+
+    def encode_approval_response(self, request, decision):
+        raise UnsupportedCapability("This backend has no qualified caller approval transport")
+
+    def decode_approval_cancellation(self, event):
+        return None
+
+    def approval_outcomes(self, event):
+        return []
 
     def execution_configuration_namespaces(self, repo):
         raise UnsupportedCapability("backend execution configuration namespaces are not qualified")
@@ -427,6 +458,15 @@ class Backend(Protocol):
     def assert_extra_writable_paths(self, invocation, grants, freedom, network=None) -> None: ...
     def qualify_extra_writable_paths(self, invocation, grants, freedom, network=None) -> Invocation: ...
     def extra_path_enforcement(self, enforcement, grants, repo) -> Enforcement: ...
+
+    def caller_approval_support(self) -> dict[str, Any]: ...
+    def validate_caller_approvals(self, enabled: bool, freedom: str, max_turns: int | None, native: bool = False) -> None: ...
+    def qualify_caller_approvals(self) -> None: ...
+    def configure_caller_approvals(self, invocation: Invocation, freedom: str, max_turns: int | None) -> Invocation: ...
+    def decode_approval_request(self, event: dict[str, Any]) -> dict[str, Any] | None: ...
+    def encode_approval_response(self, request: dict[str, Any], decision: str) -> bytes: ...
+    def decode_approval_cancellation(self, event: dict[str, Any]) -> str | None: ...
+    def approval_outcomes(self, event: dict[str, Any]) -> list[tuple[str, str]]: ...
 
     def usage_limit_diagnostic(self, event: dict[str, Any]) -> dict[str, Any] | None: ...
 

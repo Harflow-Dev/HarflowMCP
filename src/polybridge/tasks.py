@@ -693,6 +693,12 @@ class Task:
     output_drained: bool = False
     chain_prompt: str | None = None
     freedom: str = "write_in_repo"
+    caller_approvals: bool = False
+    interaction_owner: str = "caller"
+    approval_generation: str = field(default_factory=lambda: str(uuid.uuid4()))
+    approval_pending: bool = False
+    approval_receiving: bool = False
+    approval_view: dict[str, Any] = field(default_factory=lambda: {"pending_count": 0, "interaction_state": None, "requests": []})
     network: bool | None = None
     """The network request this task was dispatched under: True/False explicit, None the
     freedom's historical default. Kept raw rather than resolved so a resume inherits exactly
@@ -847,7 +853,11 @@ class Task:
         describe the dispatch instead, and a recovered task carries them on its record with no
         replay cost — so live and recovered listings can hold the same shape.
         """
+        from . import approvals
         return {
+            "caller_approvals": self.caller_approvals,
+            "interaction_owner": self.interaction_owner,
+            "approval_summary": self.approval_view,
             "task_id": self.task_id,
             "continuation_of_task_id": self.continuation_of_task_id,
             "chain_root_task_id": self.chain_root_task_id,
@@ -882,7 +892,11 @@ class Task:
     def snapshot(self) -> dict[str, Any]:
         """Full current state of the run, safe to call at any point."""
         from . import artifacts
+        from . import approvals
         snap = self.brief() | {
+            "caller_approvals": self.caller_approvals,
+            "interaction_owner": self.interaction_owner,
+            "approval_summary": self.approval_view,
             "artifact_summary": artifacts.summary(self.log_path.parent, self.task_id),
             # Overrides brief's bridge-only list with the full merge; see `brief`.
             "notices": self._notices(),
@@ -1099,8 +1113,12 @@ class TaskRegistry:
                                    invocation.scratch_directory if invocation is not None else None)
 
     @_with_authority_check_budget
-    async def preview_permissions(self, repo_path: Path, *, backend: Backend, freedom: str = "write_in_repo", network: bool | None = None, extra_writable_paths: list[str] | None = None) -> dict[str, Any]:
+    async def preview_permissions(self, repo_path: Path, *, backend: Backend, freedom: str = "write_in_repo", network: bool | None = None, caller_approvals: bool = False, extra_writable_paths: list[str] | None = None) -> dict[str, Any]:
         from .extra_paths import serialize_paths
+        from . import approval_runtime
+        approval_runtime.validate(backend, caller_approvals, freedom, None)
+        if caller_approvals:
+            await asyncio.to_thread(backend.qualify_caller_approvals)
         caller = await self._mutation_caller()
         grants = await self._resolve_extra_paths_async(caller, extra_writable_paths, backend)
         if grants:
@@ -1121,7 +1139,7 @@ class TaskRegistry:
         # the future root symbolically and never feeds it to the nested-authority comparison.
         if freedom != "read_only" and getattr(backend, "with_writable_directory", None) is not None:
             enforcement = replace(enforcement, writable_roots=(*enforcement.writable_roots, FUTURE_TASK_SCRATCH_ROOT))
-        return {"backend": backend.name, "freedom": freedom, "network": network, "repo_path": str(repo_path), "extra_writable_paths": serialize_paths(grants), "extra_path_certification": backend.extra_path_support().get("certification") if grants else None, "enforcement": enforcement.as_dict(), "limitations": "Existing typed path identities are checked before launch; grants are unavailable to native workflows and interactive takeover."}
+        return {"backend": backend.name, "caller_approvals": caller_approvals, "caller_approval_support": backend.caller_approval_support() if getattr(backend.capabilities, "supports_caller_approvals", False) else {"supported": False}, "approval_scope": "exact_action_once" if caller_approvals else None, "approval_transport": "stdio_control" if caller_approvals else None, "approval_limitations": "Exact original Bash input only; saved harness rules remain effective. Claude has no bridge OS sandbox.", "freedom": freedom, "network": network, "repo_path": str(repo_path), "extra_writable_paths": serialize_paths(grants), "extra_path_certification": backend.extra_path_support().get("certification") if grants else None, "enforcement": enforcement.as_dict(), "limitations": "Existing typed path identities are checked before launch; grants are unavailable to native workflows and interactive takeover."}
 
     @_with_authority_check_budget
     async def start(
@@ -1135,6 +1153,8 @@ class TaskRegistry:
         model: str | None = None,
         reasoning_effort: str | None = None,
         network: bool | None = None,
+        caller_approvals: bool = False,
+        interaction_owner: str = "caller",
         task_id: str | None = None,
         display_prompt: str | None = None,
         workflow_builder: bool = False,
@@ -1156,11 +1176,17 @@ class TaskRegistry:
             validate_budget(auto_continue)
             if auto_continue and not backend.capabilities.supports_auto_continue:
                 raise ValueError(f"{backend.name} has no certified automatic continuation cutoff; use explicit continue_task")
+            from . import approval_runtime
+            approval_runtime.validate(backend, caller_approvals, freedom, max_turns)
+            if interaction_owner not in {"caller", "monitor"}:
+                raise ValueError("interaction_owner must be caller or monitor")
+            if interaction_owner == "monitor":
+                await approval_runtime.authorize(self, interaction_owner="monitor")
             caller = await self._mutation_caller()
             source = await _bounded_extra_path_check(store.read, self._log_dir, continuation_of_task_id) if continuation_of_task_id is not None else None
             if continuation_of_task_id is not None and source is None:
                 raise ValueError("Continuation source unavailable")
-            if source is not None and (source.backend != backend.name or source.freedom != freedom or source.network != network or Path(source.repo_path) != repo_path or source.model != model or source.reasoning_effort != reasoning_effort):
+            if source is not None and (source.backend != backend.name or source.freedom != freedom or source.network != network or Path(source.repo_path) != repo_path or source.model != model or source.reasoning_effort != reasoning_effort or source.caller_approvals != caller_approvals or source.interaction_owner != interaction_owner):
                 raise ValueError("Continuation settings must match saved source authority")
             grants = await self._resolve_extra_paths_async(caller, extra_writable_paths, backend, source)
             if grants and workflow_builder:
@@ -1178,6 +1204,8 @@ class TaskRegistry:
                 reasoning_effort=reasoning_effort,
                 network=network,
             )
+
+            invocation = await approval_runtime.configure(backend, invocation, caller_approvals, freedom, max_turns)
 
             spawned_by, root_task_id, depth, max_depth, lineage_detected = self._resolve_lineage(
                 caller,
@@ -1210,6 +1238,8 @@ class TaskRegistry:
             model=model,
             reasoning_effort=reasoning_effort,
             network=network,
+            caller_approvals=caller_approvals,
+            interaction_owner=interaction_owner,
             spawned_by=spawned_by,
             root_task_id=root_task_id,
             depth=depth,
@@ -1333,6 +1363,8 @@ class TaskRegistry:
                     followup_prompt=followup_prompt,
                     max_turns=max_turns,
                     effective_network=effective_network,
+                    caller_approvals=parent.caller_approvals,
+                    interaction_owner=parent.interaction_owner,
                     grants=grants,
                     native_subagent=native_subagent,
                     native_settings=native_settings,
@@ -1367,6 +1399,8 @@ class TaskRegistry:
         followup_prompt: str | None,
         max_turns: int | None,
         effective_network: bool | None,
+        caller_approvals: bool,
+        interaction_owner: str,
         grants: tuple,
         native_subagent: bool,
         native_settings: dict[str, Any] | None,
@@ -1421,6 +1455,9 @@ class TaskRegistry:
                     reasoning_effort=reasoning_effort,
                     network=effective_network,
                 )
+                from . import approval_runtime
+                approval_runtime.validate(backend, caller_approvals, freedom, max_turns, native_subagent)
+                invocation = await approval_runtime.configure(backend, invocation, caller_approvals, freedom, max_turns)
                 if native_subagent:
                     from .backends.native import adapter
                     native = adapter(backend)
@@ -1446,6 +1483,8 @@ class TaskRegistry:
                 model=model,
                 reasoning_effort=reasoning_effort,
                 network=effective_network,
+                caller_approvals=caller_approvals,
+                interaction_owner=interaction_owner,
                 parent_task_id=parent_task_id,
                 spawned_by=spawned_by,
                 root_task_id=root_task_id,
@@ -1479,6 +1518,8 @@ class TaskRegistry:
         model: str | None,
         reasoning_effort: str | None,
         network: bool | None = None,
+        caller_approvals: bool = False,
+        interaction_owner: str = "caller",
         parent_task_id: str | None = None,
         spawned_by: str | None = None,
         root_task_id: str | None = None,
@@ -1510,6 +1551,12 @@ class TaskRegistry:
         # antigravity run, is live). Classic runs use DEVNULL or a backend-validated one-shot
         # prompt pipe which closes immediately at EOF, without a live-input pump.
         with _before_spawn():
+            from . import approval_runtime
+            approval_runtime.validate(backend, caller_approvals, freedom, max_turns, invocation.native_subagent)
+            if invocation.caller_approvals != caller_approvals:
+                raise ValueError("Caller approval launch policy does not match invocation")
+            if caller_approvals:
+                await asyncio.to_thread(backend.qualify_caller_approvals)
             if extra_path_grants or invocation.extra_writable_paths:
                 # Version probes can block for seconds. Qualify once per execution off loop,
                 # even for externally supplied invocations, before allocating scratch; the
@@ -1523,6 +1570,9 @@ class TaskRegistry:
                 raise ValueError("Extra writable paths are unavailable to workflow builders")
 
             task_id = store.validate_task_id(task_id) if task_id else str(uuid.uuid4())
+            if caller_approvals:
+                approval_context = await asyncio.to_thread(approval_runtime.context, self._log_dir, task_id, interaction_owner)
+                interaction_owner = approval_context["interaction_owner"]
             if self.get(task_id) is not None or store.read(self._log_dir, task_id) is not None:
                 raise ValueError(f"task_id already exists: {task_id}")
             # A root task (no detected caller) is the root of its own dispatch chain.
@@ -1574,6 +1624,8 @@ class TaskRegistry:
             # polybridge imposes rather than about reachability. Sync, so the no-await window below
             # is untouched.
             bridge_notices: list[str] = [publish_notice] if publish_notice else []
+            if caller_approvals:
+                bridge_notices.append("Caller approvals use version-qualified stdio control for one exact Bash action. Existing harness permissions remain authoritative; Claude has no bridge OS sandbox. No reusable permission grant is installed.")
             if network is True and enforcement.network_access == "not_controlled":
                 bridge_notices.append(_UNCONTROLLED_NETWORK_NOTICE)
 
@@ -1680,6 +1732,8 @@ class TaskRegistry:
             chain_prompt=chain_prompt,
             freedom=freedom,
             network=network,
+            caller_approvals=caller_approvals,
+            interaction_owner=interaction_owner,
             extra_writable_paths=serialize_paths(extra_path_grants),
             extra_path_certification=backend.extra_path_support().get("certification") if extra_path_grants else None,
             enforcement=enforcement.as_dict(),
@@ -2076,6 +2130,8 @@ class TaskRegistry:
     def _close_still_warranted(self, task: Task, kind: str, bound: float) -> bool:
         """Re-made under the inbox lock: the idle state the pump saw before waiting for the lock
         may be gone by now (a follow-up turn, a new background task)."""
+        if task.caller_approvals and task.approval_pending and kind in {CLOSE_IDLE, CLOSE_IDLE_BOUND}:
+            return False
         if kind == CLOSE_IDLE:
             # Every owed result must have arrived, not merely the latest one: on a backend where
             # each written message is its own turn (agy), awaiting_input after the first of
@@ -2258,6 +2314,14 @@ class TaskRegistry:
                 acc = task.acc
                 reason = self._stop_reason(task)
                 kind: str | None = CLOSE_STOP if reason is not None else None
+                from . import approval_runtime
+                approval_pending = await approval_runtime.pump(self, task)
+                if kind is None and approval_pending:
+                    try:
+                        await asyncio.wait_for(task.pump_wake.wait(), timeout=PUMP_POLL_SECONDS)
+                    except (asyncio.TimeoutError, TimeoutError):
+                        pass
+                    continue
                 if kind is None and await self._forward_pending(task):
                     continue
                 if kind is None and acc.awaiting_input and acc.result_count >= task.results_owed:
@@ -2281,6 +2345,8 @@ class TaskRegistry:
             raise
         except Exception:
             log.exception("task %s: input pump failed", task.task_id)
+            if task.caller_approvals:
+                self._stop_native_transport(task)
             # Bookkeeping must never change an outcome — but an open stdin would keep the run
             # from ever settling, so the input is closed regardless.
             _close_stdin(task)
@@ -2290,6 +2356,13 @@ class TaskRegistry:
         `task_finished`. That close is itself bounded (`EXIT_CLOSE_GIVE_UP_SECONDS`), so this waits
         for it; `PUMP_STOP_GRACE_SECONDS` only backstops a pump that is stuck somewhere else.
         Called by `_monitor` after the process exits."""
+        if task.caller_approvals:
+            from . import approvals
+            try:
+                await asyncio.to_thread(approvals.invalidate, self._log_dir, task.task_id, "cancelled" if task.cancel_requested else "invalidated", task.approval_generation)
+                task.approval_view = await asyncio.to_thread(approvals.summary, self._log_dir, task.task_id)
+            except (OSError, ValueError):
+                task.bridge_notices.append("Approval ledger invalidation failed; prior answers cannot be reused")
         pump = task.pump
         if pump is not None and not pump.done():
             task.pump_wake.set()
@@ -2365,6 +2438,9 @@ class TaskRegistry:
                 reasoning_effort=task.reasoning_effort,
                 max_turns=task.max_turns,
                 network=task.network,
+                caller_approvals=task.caller_approvals,
+                interaction_owner=task.interaction_owner,
+                approval_generation=task.approval_generation,
                 parent_task_id=task.parent_task_id,
                 continuation_of_task_id=task.continuation_of_task_id,
                 chain_root_task_id=task.chain_root_task_id,
@@ -3295,6 +3371,8 @@ class TaskRegistry:
                     followup_prompt=followup_prompt,
                     max_turns=max_turns,
                     effective_network=effective_network,
+                    caller_approvals=record.caller_approvals,
+                    interaction_owner=record.interaction_owner,
                     grants=grants,
                     native_subagent=native_subagent,
                     native_settings=native_settings,
@@ -3546,6 +3624,12 @@ async def _drain_stdout(task: Task, registry: TaskRegistry) -> None:
                 break
 
             text = raw.decode("utf-8", errors="replace")
+            control_event = parse_line(text.rstrip("\n"))
+            if isinstance(control_event, dict) and control_event.get("type") == "control_request" and task.caller_approvals:
+                from . import approval_runtime
+                await approval_runtime.observe(registry, task, get_backend(task.backend), control_event)
+                task.last_output_at = time.monotonic()
+                continue
             raw_offset: int | None = None
             if handle is not None:
                 try:
@@ -3584,6 +3668,9 @@ async def _drain_stdout(task: Task, registry: TaskRegistry) -> None:
                     registry._stop_native_transport(task)
                     log.warning("Native lifecycle observation failed for %s; transport stop requested and draining continues", task.task_id, exc_info=True)
             backend = get_backend(task.backend)
+            if task.caller_approvals:
+                from . import approval_runtime
+                await approval_runtime.observe(registry, task, backend, event)
             previous_diagnostic = task.acc.failure_diagnostic
             backend.ingest(event, task.acc)
             if task.acc.failure_diagnostic is not None and previous_diagnostic is None:
@@ -3861,6 +3948,8 @@ async def _monitor(task: Task, registry: TaskRegistry) -> None:
                     task.outcome["structured_evidence_complete"] = task.output_drained and not task.acc.normalize_errors
                 except Exception:
                     log.warning("task %s: outcome inspection unavailable", task.task_id, exc_info=True)
+            if task.caller_approvals and task.exit_code is not None and task.output_drained:
+                task.approval_view = {"pending_count": 0, "delivery_uncertain_count": 0, "interaction_state": None, "requests": [], "uncertainty_requests": []}
             task.done.set()
             try:
                 registry.persist(task)

@@ -118,6 +118,8 @@ FORBIDDEN_FLAGS = ("--strict-mcp-config", "--setting-sources", "--safe-mode", "-
 # writes them, so admitting them here would reopen the same hole under a different spelling.
 BOOLEAN_FLAGS = ("--verbose", "--include-partial-messages", "--forward-subagent-text")
 VALUE_FLAGS = (
+    "--permission-prompt-tool",
+    "--permission-prompts",
     "--add-dir",
     "--output-format",
     "--input-format",
@@ -401,11 +403,45 @@ class ClaudeBackend(ExtraPathsUnsupported):
             caveats=(_NETWORK_CONTROL_CAVEAT,),
         ),
         supports_live_input=True,
+        supports_caller_approvals=True,
         # Explicit, not just the default: claude folds a mid-turn message into the running turn
         # (measured, 2.1.281 — one result however many messages landed), so one further result
         # settles the run regardless of how many messages were queued. agy is the contrast case.
         live_input_message_is_turn=False,
     )
+
+    def caller_approval_support(self):
+        from .claude_approvals import support
+        return support()
+
+    def validate_caller_approvals(self, enabled, freedom, max_turns, native=False):
+        from .claude_approvals import validate
+        validate(enabled, freedom, max_turns, native)
+
+    def qualify_caller_approvals(self):
+        from .claude_approvals import qualify
+        qualify(self)
+
+    def configure_caller_approvals(self, invocation, freedom, max_turns):
+        from .claude_approvals import configure
+        return configure(invocation, freedom, max_turns)
+
+    def decode_approval_request(self, event):
+        from .claude_approvals import decode
+        return decode(event)
+
+    def encode_approval_response(self, request, decision):
+        from .claude_approvals import encode
+        return encode(request, decision)
+
+    def decode_approval_cancellation(self, event):
+        if event.get("type") == "control_cancel_request" and isinstance(event.get("request_id"), str):
+            return event["request_id"]
+        return None
+
+    def approval_outcomes(self, event):
+        from .claude_approvals import outcome
+        return outcome(event)
 
     @property
     def native_subagent_adapter(self):
@@ -673,6 +709,8 @@ class ClaudeBackend(ExtraPathsUnsupported):
         from .claude_native import validate_native
         validate_native(invocation, freedom)
         seen = self._parse_options(options, argv)
+        from .claude_approvals import assert_safe as assert_approvals_safe
+        assert_approvals_safe(invocation, freedom, seen, live)
         expected_directories = [invocation.scratch_directory] if invocation.scratch_directory else []
         if seen.get("--add-dir", []) != expected_directories or (expected_directories and freedom == "read_only"):
             raise UnsafeInvocationError("additional directory must match this invocation's writable scratch directory")

@@ -94,6 +94,8 @@ def history_page(runs: list[dict[str, Any]], offset: int = 0, limit: int = 100) 
 def compact(run: dict[str, Any]) -> dict[str, Any]:
     keys = ("workflow_run_id", "name", "revision", "goal_revision", "goal_replanning_required", "can_revise_goal", "goal_revision_reason", "kind", "status", "created_at", "updated_at", "interaction_owner", "settling", "can_cancel_from_monitor", "monitor_cancel_reason", "input_decision_id", "optional_review_skip_available", "execution_contract", "draft_revision", "scheduling_policy", "preview_hash")
     result = {key: run[key] for key in keys if key in run and isinstance(run[key], (str, int, float, bool, type(None)))}
+    if isinstance(run.get("approval_summary"), dict):
+        result["approval_summary"] = run["approval_summary"]
     link = run.get("parent_link") or {}
     if link:
         # A child run reports its place in the tree; bounded identifiers only.

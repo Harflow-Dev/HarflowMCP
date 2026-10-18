@@ -65,6 +65,9 @@ class TaskRecord:
     max_turns: int | None = None
     extra_writable_paths: list[dict[str, Any]] = field(default_factory=list)
     extra_path_certification: str | None = None
+    caller_approvals: bool = False
+    interaction_owner: str = "caller"
+    approval_generation: str | None = None
     network: bool | None = None
     """The network request this run was dispatched with: True/False explicit, None the freedom's
     historical default. The *outcome* lives in `enforcement.network_access` — this records what
@@ -878,7 +881,11 @@ def snapshot(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
 
     from . import followups
     queued_followups = followups.view(log_dir, record.task_id)
+    from . import approvals
     return {
+        "caller_approvals": record.caller_approvals,
+        "interaction_owner": record.interaction_owner,
+        "approval_summary": approvals.summary(log_dir, record.task_id),
         "pending_messages": pending,
         "queued_followups": queued_followups,
         "queued_followup_count": followups.count_outstanding(queued_followups),
@@ -948,9 +955,12 @@ def brief(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
     stream replayed, which a listing should not pay for — and they are stream detail, which is what
     `snapshot` is for. Uses `detail=False`, so a settled, observed task costs no replay here either.
     """
-    from . import followups
+    from . import followups, approvals
     status, _, state, _, owned = _resolve(log_dir, record, detail=False)
     return {
+        "caller_approvals": record.caller_approvals,
+        "interaction_owner": record.interaction_owner,
+        "approval_summary": approvals.summary(log_dir, record.task_id),
         "task_id": record.task_id,
         "workflow_builder": record.workflow_builder,
         "backend": record.backend,

@@ -46,6 +46,17 @@ def plan_owner_contracts(definition: dict[str, Any], tree: dict[str, Any] | None
     definitions[root_id] = definition
     owners: dict[str, Any] = {}
     versions: dict[str, str | None] = {}
+    approvals_qualified: set[str] = set()
+
+    def approval_contract(candidate, access):
+        from .approval_runtime import validate
+        backend = backends.get(candidate["backend"])
+        enabled = candidate.get("caller_approvals", False)
+        validate(backend, enabled, access, candidate.get("max_turns"))
+        if enabled and backend.name not in approvals_qualified:
+            backend.qualify_caller_approvals()
+            approvals_qualified.add(backend.name)
+        return {"caller_approvals": enabled, "approval_scope": "exact_action_once" if enabled else None, "approval_transport": "stdio_control" if enabled else None}
 
     def compatible(native: Any, parent: Any, item: dict[str, Any]) -> str | None:
         if parent.backend not in versions:
@@ -97,6 +108,8 @@ def plan_owner_contracts(definition: dict[str, Any], tree: dict[str, Any] | None
                     reason = "Native child Resume is not certified"
                 elif item["candidate"]["backend"] != candidate["backend"]:
                     reason = "The node harness differs from its owning orchestrator"
+                elif item["candidate"].get("caller_approvals") or candidate.get("caller_approvals"):
+                    reason = "Caller approvals require Headless execution; native approval transport is unsupported"
                 elif native is None:
                     reason = "This harness has no certified native execution adapter"
                 elif item["parallel"] and not getattr(native, "supports_parallel", False):
@@ -108,7 +121,9 @@ def plan_owner_contracts(definition: dict[str, Any], tree: dict[str, Any] | None
                         reason = compatible(native, parent, item)
                     except (ValueError, OSError) as exc:
                         reason = "Native compatibility cannot be verified: " + str(exc)
+                approval = approval_contract(item["candidate"], item["freedom"])
                 outcome = {key: copy.deepcopy(item[key]) for key in ("workflow_id", "node_id", "title", "freedom", "network", "candidate", "candidate_position")}
+                outcome.update(approval)
                 outcome.update(execution_kind="headless" if reason else "native_subagent", fallback_reason=reason)
                 outcomes.append(outcome)
                 if reason is None:
@@ -133,7 +148,8 @@ def plan_owner_contracts(definition: dict[str, Any], tree: dict[str, Any] | None
                     break
                 accepted = [item for item in accepted if item not in rejected]
             owner_freedom, owner_network = _requirements(accepted, network)
-            plans[candidate_key(candidate)] = {"candidate": copy.deepcopy(candidate), "freedom": owner_freedom, "network": owner_network, "nodes": outcomes, "contributing_nodes": [{key: copy.deepcopy(item[key]) for key in ("workflow_id", "node_id", "candidate", "candidate_position")} for item in accepted]}
+            owner_approval = approval_contract(candidate, owner_freedom)
+            plans[candidate_key(candidate)] = {**owner_approval, "candidate": copy.deepcopy(candidate), "freedom": owner_freedom, "network": owner_network, "nodes": outcomes, "contributing_nodes": [{key: copy.deepcopy(item[key]) for key in ("workflow_id", "node_id", "candidate", "candidate_position")} for item in accepted]}
         owners[ident] = {"workflow_id": ident, "name": current["name"], "candidates": plans}
         for child in children:
             plan(child)

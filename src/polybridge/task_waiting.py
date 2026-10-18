@@ -174,6 +174,9 @@ async def wait_for_tasks(
                         source, status, note, status_source = fresh
                     summary = None
                 row = {"task_id": task_id, "backend": _text(source.backend, 80), "session_id": _text(source.session_id, 128), "title": _text(source.title, 192), "status": status, "recovered": task is None, "status_source": status_source, "note": _text(note, 192), "summary": _text(summary, 512), "diagnostic_reference": {"tool": "get_task_status", "task_id": task_id}}
+                if getattr(source, "caller_approvals", False):
+                    from . import approvals
+                    row["approval_summary"] = await asyncio.to_thread(approvals.summary, registry.log_dir, task_id)
                 diagnostic = _failure_diagnostic(task.acc if task is not None else source)
                 if diagnostic is not None:
                     row["failure_diagnostic"] = diagnostic
@@ -195,7 +198,9 @@ async def wait_for_tasks(
             unsettled = [row["task_id"] for row in rows if row["task_id"] not in settled]
             satisfied = bool(settled) if mode == "any" else not unsettled
             stop_reason = None
-            if satisfied:
+            if any(row.get("approval_summary", {}).get("interaction_state") for row in rows):
+                stop_reason = wait_policy.STOP_ATTENTION
+            elif satisfied:
                 stop_reason = wait_policy.STOP_TERMINAL
             elif plan.terminal_mode and persistent and (mode == "all" or all(task_id in persistent for task_id in unsettled)):
                 stop_reason = wait_policy.STOP_UNAVAILABLE
