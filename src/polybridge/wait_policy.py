@@ -49,6 +49,25 @@ STOP_TIMEOUT = "timeout"
 STOP_CEILING = "ceiling"
 
 
+# Workflow run statuses. A run in an active status is still moving on its own: a wait keeps
+# holding through it. Every other non-terminal status (needs_input, needs_attention, paused) needs
+# the caller, so it ends a wait as `attention`.
+WORKFLOW_ACTIVE = frozenset({"running", "pending", "building", "pausing", "starting", "cancelling"})
+WORKFLOW_TERMINAL = frozenset({"completed", "failed", "cancelled"})
+
+
+def workflow_phase(status: Any, settling: bool, tree_settling: bool = False) -> str:
+    """Classify a workflow run: terminal, settling, attention or active.
+
+    A terminal status with a task (or its tree) still settling is `settling`, not `terminal`.
+    """
+    if status in WORKFLOW_TERMINAL:
+        return "settling" if settling or tree_settling else "terminal"
+    if status in WORKFLOW_ACTIVE:
+        return "active"
+    return "attention"
+
+
 def monotonic() -> float:
     """The clock waits measure deadlines and elapsed time with (a seam for tests)."""
     return time.monotonic()

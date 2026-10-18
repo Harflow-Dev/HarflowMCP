@@ -1950,13 +1950,6 @@ async def get_workflow_status(workflow_run_id: str) -> dict[str, Any]:
     return compact(await _workflow_call("status", run_id=workflow_run_id))
 
 
-# Statuses in which a run is still moving on its own: a wait keeps holding through them. Every
-# other non-terminal status (needs_input, needs_attention, paused) needs the caller, so it ends a
-# wait as `attention`.
-_WORKFLOW_ACTIVE = frozenset({"running", "pending", "building", "pausing", "starting", "cancelling"})
-_WORKFLOW_TERMINAL = frozenset({"completed", "failed", "cancelled"})
-
-
 async def _wait_workflow_full(
     workflow_run_id: str,
     timeout_seconds: int | None = None,
@@ -1985,16 +1978,16 @@ async def _wait_workflow_full(
     step = 0
     next_progress = clock.started + wait_policy.PROGRESS_INTERVAL_SECONDS
     while True:
-        status = result.get("status")
-        if status in _WORKFLOW_TERMINAL:
+        phase = wait_policy.workflow_phase(result.get("status"), bool(result.get("settling")))
+        if phase == "terminal":
+            return finish(wait_policy.STOP_TERMINAL)
+        if phase == "settling":
             # A terminal run whose tasks are still settling is not done yet.
-            if not result.get("settling"):
-                return finish(wait_policy.STOP_TERMINAL)
             if (plan.terminal_mode
                     and wait_policy.monotonic() - revision_changed_at >= WORKFLOW_SETTLING_STALL_SECONDS):
                 # Settling that has made no visible progress for this long is not going to.
                 return finish(wait_policy.STOP_UNAVAILABLE)
-        elif status not in _WORKFLOW_ACTIVE:
+        elif phase == "attention":
             return finish(wait_policy.STOP_ATTENTION)
         remaining = clock.remaining()
         if remaining <= 0:

@@ -737,3 +737,25 @@ async def test_live_task_reports_outcome_observed_once_finished(tmp_path):
     server._reg().get("t").status = "completed"
     server._reg().get("t").done.set()
     assert (await server.wait_for_task("t", 0))["outcome_observed"] is True
+
+
+@pytest.mark.parametrize("item,reason", [
+    ({"status": "completed", "settling": False}, "terminal"),
+    ({"status": "failed", "settling": False}, "terminal"),
+    ({"status": "needs_attention"}, "attention"),
+    ({"status": "some_new_status"}, "attention"),
+])
+async def test_workflow_wait_follows_shared_phase(monkeypatch, fast_clock, item, reason):
+    from polybridge import wait_policy
+    workflow_status(monkeypatch, [{"status": "running"}, item])
+    result = await server.wait_for_workflow("r", until="terminal")
+    assert result["stop_reason"] == reason
+    assert wait_policy.workflow_phase(item["status"], bool(item.get("settling"))) == reason
+
+
+async def test_workflow_wait_settling_phase_holds(monkeypatch, fast_clock):
+    from polybridge import wait_policy
+    assert wait_policy.workflow_phase("cancelled", True) == "settling"
+    workflow_status(monkeypatch, [{"status": "cancelled", "settling": True}])
+    result = await server.wait_for_workflow("r", 10)
+    assert result["stop_reason"] == "timeout"

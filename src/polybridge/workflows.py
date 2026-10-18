@@ -904,6 +904,18 @@ class WorkflowStore:
             queue[0:0] = [header[key] for key in ('parent_workflow_run_id', 'root_workflow_run_id', 'orchestrator_session_owner_run_id') if header.get(key) and header[key] not in seen]
         return result
 
+    @staticmethod
+    def _record_notification_point(run: dict[str, Any], previous_status: Any, event: str, previous_checkpoint: Any = None) -> None:
+        """Compute markers and the notification point before the write; never changes an outcome."""
+        try:
+            from . import workflow_notification_points as points
+            if not points.is_root(run):
+                return
+            points.update_markers(run, previous_status, event, previous_checkpoint)
+            points.record_point(run, event)
+        except Exception:
+            logging.getLogger(__name__).warning("Unable to record notification point for %s", run.get("workflow_run_id"), exc_info=True)
+
     def update_run(self, run_id: str, mutator: Any, event: str, detail: Any = None) -> dict[str, Any]:
         observed = self.get_run(run_id)
         root_id = (observed.get("parent_link") or {}).get("root_workflow_run_id") or run_id
@@ -917,6 +929,7 @@ class WorkflowStore:
                 if root.get("status") not in runnable or event != "child_decision_reopened" and run.get("status") not in runnable:
                     raise DispatchNotStarted("Scheduling stopped before reservation")
             attention_before = (run.get("status"), run.get("attention_reason"), run.get("failure_reason"), run.get("failed_decision_id"))
+            checkpoint_before = run.get("attention_checkpoint")
             mutator(run)
             attention_after = (run.get("status"), run.get("attention_reason"), run.get("failure_reason"), run.get("failed_decision_id"))
             if run.get("status") in {"needs_attention", "paused", "failed"}:
@@ -926,6 +939,7 @@ class WorkflowStore:
                 run.pop("attention_checkpoint", None)
             run["updated_at"] = time.time()
             run["sequence"] = run.get("sequence", 0) + 1
+            self._record_notification_point(run, attention_before[0], event, checkpoint_before)
             run.pop("settling", None)
             run.pop("can_cancel_from_monitor", None)
             run.pop("monitor_cancel_reason", None)
