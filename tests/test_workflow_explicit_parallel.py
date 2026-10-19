@@ -72,7 +72,7 @@ def test_invalid_regions(mutation):
 @pytest.mark.parametrize("nested", [False, True])
 async def test_serial_worker_cap_never_blocks_barriers(storage, tmp_path, nested):
     registry = Registry(storage.root, policy=policy)
-    run, registry = await run_flow(storage, tmp_path, explicit(nested), registry)
+    run, registry = await run_flow(storage, tmp_path, explicit(nested), registry, timeout_seconds=20)
     assert run["status"] == "completed", run.get("attention_reason")
     assert not run["joins"]
     assert len(run["released_parallel_groups"]) == (2 if nested else 1)

@@ -7,6 +7,8 @@ import os
 import signal
 import subprocess
 import time
+import sys
+import gc
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -77,23 +79,56 @@ async def spawn_sleep_task(
 
 
 async def cleanup(*tasks: Task) -> None:
+    body_error = sys.exception()
+    errors: list[str] = []
     for task in tasks:
         if task.proc is not None and task.proc.returncode is None:
             try:
-                tasks_module._signal_group(task, signal.SIGKILL)
-            except Exception:
+                os.killpg(task.proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
                 pass
-        if task.monitor is not None:
-            await asyncio.gather(task.monitor, return_exceptions=True)
-        for watcher in task.watchers:
-            watcher.cancel()
-        if task.watchers:
-            await asyncio.gather(*task.watchers, return_exceptions=True)
+            except Exception as exc:
+                errors.append(f"{task.task_id} kill process group: {exc!r}")
         if task.proc is not None:
             try:
                 await asyncio.wait_for(task.proc.wait(), timeout=2)
-            except (asyncio.TimeoutError, ProcessLookupError):
-                pass
+            except Exception as exc:
+                errors.append(f"{task.task_id} process wait: {exc!r}")
+        if task.monitor is not None:
+            done, pending = await asyncio.wait({task.monitor}, timeout=2)
+            if pending:
+                task.monitor.cancel()
+                done, pending = await asyncio.wait({task.monitor}, timeout=2)
+            if pending:
+                errors.append(f"{task.task_id} monitor: cleanup incomplete")
+            for finished in done:
+                if not finished.cancelled() and finished.exception() is not None:
+                    errors.append(f"{task.task_id} monitor: {finished.exception()!r}")
+        for watcher in task.watchers:
+            watcher.cancel()
+        if task.watchers:
+            done, pending = await asyncio.wait(task.watchers, timeout=2)
+            for watcher in pending:
+                watcher.cancel()
+            if pending:
+                done2, pending = await asyncio.wait(pending, timeout=2)
+                done |= done2
+            if pending:
+                errors.append(f"{task.task_id} watcher: cleanup incomplete")
+            for watcher in done:
+                if not watcher.cancelled() and watcher.exception() is not None:
+                    errors.append(f"{task.task_id} watcher: {watcher.exception()!r}")
+        if task.proc is not None:
+            try:
+                await asyncio.wait_for(task.proc.communicate(), timeout=2)
+            except Exception as exc:
+                errors.append(f"{task.task_id} pipe drainage: {exc!r}")
+    if errors:
+        failure = AssertionError("test process cleanup failed: " + "; ".join(errors))
+        if body_error is not None:
+            body_error.add_note(str(failure))
+        else:
+            raise failure
 
 
 # --- A: local cancel delivery ordering ----------------------------------------------------------
@@ -107,16 +142,17 @@ async def test_local_cancel_delivers_synchronously_before_task_done_is_touched(
     `task.done`. This is the property that makes ordering versus the monitor unobservable."""
     registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
     task = await spawn_sleep_task(registry, "t0", tmp_path, with_monitor=False)
+    try:
+        registry._deliver_local_cancel(task)
 
-    registry._deliver_local_cancel(task)
+        assert task.cancel_requested is True
+        assert not task.done.is_set()
+        payload = control.read_phase(tmp_path, "t0", control.CANCEL, 1, "sig")
+        assert payload is not None
+        assert payload["leader_alive"] is True
 
-    assert task.cancel_requested is True
-    assert not task.done.is_set()
-    payload = control.read_phase(tmp_path, "t0", control.CANCEL, 1, "sig")
-    assert payload is not None
-    assert payload["leader_alive"] is True
-
-    await cleanup(task)
+    finally:
+        await cleanup(task)
 
 
 async def test_local_cancel_req_failure_signals_nothing_and_does_not_set_the_flag(
@@ -124,23 +160,27 @@ async def test_local_cancel_req_failure_signals_nothing_and_does_not_set_the_fla
 ) -> None:
     registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
     task = await spawn_sleep_task(registry, "t0", tmp_path, with_monitor=False)
+    try:
+        def boom(*args, **kwargs):
+            raise control.PhaseWriteError("disk is gone")
 
-    def boom(*args, **kwargs):
-        raise control.PhaseWriteError("disk is gone")
+        monkeypatch.setattr(control, "begin_attempt", boom)
+        signalled: list[int] = []
+        monkeypatch.setattr(
+            tasks_module, "_signal_group", lambda t, sig: signalled.append(sig) or True
+        )
 
-    monkeypatch.setattr(control, "begin_attempt", boom)
-    signalled: list[int] = []
-    monkeypatch.setattr(
-        tasks_module, "_signal_group", lambda t, sig: signalled.append(sig) or True
-    )
+        with pytest.raises(control.PhaseWriteError):
+            registry._deliver_local_cancel(task)
 
-    with pytest.raises(control.PhaseWriteError):
-        registry._deliver_local_cancel(task)
+        assert task.cancel_requested is False
+        assert signalled == []
 
-    assert task.cancel_requested is False
-    assert signalled == []
-
-    await cleanup(task)
+    finally:
+        await cleanup(task)
+    assert task.proc.returncode is not None
+    assert await asyncio.wait_for(task.proc.communicate(), timeout=2) == (b"", b"")
+    gc.collect()
 
 
 async def test_a_joined_local_cancel_writes_no_phase_file_of_its_own(tmp_path: Path) -> None:
@@ -148,16 +188,17 @@ async def test_a_joined_local_cancel_writes_no_phase_file_of_its_own(tmp_path: P
     second attempt — it joins the one already pending."""
     registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
     task = await spawn_sleep_task(registry, "t0", tmp_path, with_monitor=False)
+    try:
+        registry._deliver_local_cancel(task)
+        assert control.latest_attempt(tmp_path, "t0", control.CANCEL) == 1
 
-    registry._deliver_local_cancel(task)
-    assert control.latest_attempt(tmp_path, "t0", control.CANCEL) == 1
+        registry._deliver_local_cancel(task)
 
-    registry._deliver_local_cancel(task)
+        assert control.latest_attempt(tmp_path, "t0", control.CANCEL) == 1
+        assert control.attempt_outcome(tmp_path, "t0", control.CANCEL, 1) == "sig"
 
-    assert control.latest_attempt(tmp_path, "t0", control.CANCEL) == 1
-    assert control.attempt_outcome(tmp_path, "t0", control.CANCEL, 1) == "sig"
-
-    await cleanup(task)
+    finally:
+        await cleanup(task)
 
 
 async def test_full_cancel_settles_with_the_monitor_reading_its_own_flag(tmp_path: Path) -> None:
@@ -165,14 +206,15 @@ async def test_full_cancel_settles_with_the_monitor_reading_its_own_flag(tmp_pat
     without needing to consult the cross-process phase files at all (the owner's own rule wins)."""
     registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
     task = await spawn_sleep_task(registry, "t0", tmp_path)
+    try:
+        result = await asyncio.wait_for(registry.cancel(task), timeout=5)
 
-    result = await asyncio.wait_for(registry.cancel(task), timeout=5)
+        assert result.status == "cancelled"
+        assert result.finished
+        assert store.read(tmp_path, "t0").status == "cancelled"
 
-    assert result.status == "cancelled"
-    assert result.finished
-    assert store.read(tmp_path, "t0").status == "cancelled"
-
-    await cleanup(task)
+    finally:
+        await cleanup(task)
 
 
 # --- B: the monitor's cross-process wait ----------------------------------------------------------
@@ -381,16 +423,20 @@ async def test_monitor_with_no_attempt_files_classifies_normally(tmp_path: Path)
 
 async def test_cascade_cancels_a_local_target_and_its_local_child(tmp_path: Path) -> None:
     registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
-    root = await spawn_sleep_task(registry, "root", tmp_path)
-    child = await spawn_sleep_task(registry, "child", tmp_path, spawned_by="root")
+    spawned = []
+    try:
+        root = await spawn_sleep_task(registry, "root", tmp_path)
+        spawned.append(root)
+        child = await spawn_sleep_task(registry, "child", tmp_path, spawned_by="root")
+        spawned.append(child)
+        result = await asyncio.wait_for(registry.cancel_cascade("root"), timeout=5)
 
-    result = await asyncio.wait_for(registry.cancel_cascade("root"), timeout=5)
+        assert root.status == "cancelled"
+        assert child.status == "cancelled"
+        assert result["cancelled_descendants"] == ["child"]
 
-    assert root.status == "cancelled"
-    assert child.status == "cancelled"
-    assert result["cancelled_descendants"] == ["child"]
-
-    await cleanup(root, child)
+    finally:
+        await cleanup(*spawned)
 
 
 async def test_cascade_reports_a_failed_descendant_and_still_cancels_the_rest(
@@ -398,29 +444,34 @@ async def test_cascade_reports_a_failed_descendant_and_still_cancels_the_rest(
 ) -> None:
     """One target's phase file failing must neither abort the cascade nor orphan its siblings."""
     registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
-    root = await spawn_sleep_task(registry, "root", tmp_path)
-    broken = await spawn_sleep_task(registry, "broken", tmp_path, spawned_by="root")
-    sibling = await spawn_sleep_task(registry, "sibling", tmp_path, spawned_by="root")
+    spawned = []
+    try:
+        root = await spawn_sleep_task(registry, "root", tmp_path)
+        spawned.append(root)
+        broken = await spawn_sleep_task(registry, "broken", tmp_path, spawned_by="root")
+        spawned.append(broken)
+        sibling = await spawn_sleep_task(registry, "sibling", tmp_path, spawned_by="root")
+        spawned.append(sibling)
+        real_begin = control.begin_attempt
 
-    real_begin = control.begin_attempt
+        def begin(log_dir, task_id, *args, **kwargs):
+            if task_id == "broken":
+                raise control.PhaseWriteError("disk full")
+            return real_begin(log_dir, task_id, *args, **kwargs)
 
-    def begin(log_dir, task_id, *args, **kwargs):
-        if task_id == "broken":
-            raise control.PhaseWriteError("disk full")
-        return real_begin(log_dir, task_id, *args, **kwargs)
+        monkeypatch.setattr(control, "begin_attempt", begin)
 
-    monkeypatch.setattr(control, "begin_attempt", begin)
+        result = await asyncio.wait_for(registry.cancel_cascade("root"), timeout=5)
 
-    result = await asyncio.wait_for(registry.cancel_cascade("root"), timeout=5)
+        assert root.status == "cancelled"
+        assert sibling.status == "cancelled"
+        assert not broken.cancel_requested
+        assert result["cancelled_descendants"] == ["sibling"]
+        assert [entry["task_id"] for entry in result["not_signalled"]] == ["broken"]
+        assert "phase write failed" in result["not_signalled"][0]["reason"]
 
-    assert root.status == "cancelled"
-    assert sibling.status == "cancelled"
-    assert not broken.cancel_requested
-    assert result["cancelled_descendants"] == ["sibling"]
-    assert [entry["task_id"] for entry in result["not_signalled"]] == ["broken"]
-    assert "phase write failed" in result["not_signalled"][0]["reason"]
-
-    await cleanup(root, broken, sibling)
+    finally:
+        await cleanup(*spawned)
 
 
 def _child_record(tmp_path: Path, *, pid: int = 424242) -> store.TaskRecord:
@@ -679,41 +730,42 @@ async def test_cascade_reaches_a_fixed_point_across_rounds(
     monkeypatch.setattr(tasks_module, "CANCEL_VERDICT_POLL_SECONDS", 0.01)
     registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
     root = await spawn_sleep_task(registry, "root", tmp_path, with_monitor=False)
+    try:
+        wrote_grandchild = {"v": False}
+        real_signal_group = tasks_module._signal_group
 
-    wrote_grandchild = {"v": False}
-    real_signal_group = tasks_module._signal_group
+        def fake_signal_group(task, sig):
+            if task.task_id == "root" and not wrote_grandchild["v"]:
+                wrote_grandchild["v"] = True
+                store.write(
+                    tmp_path,
+                    store.TaskRecord(
+                        task_id="grandchild",
+                        backend="claude",
+                        session_id="s-gc",
+                        markers=["m"],
+                        repo_path=str(tmp_path),
+                        started_at=_now_iso(),
+                        pid=42,
+                        pgid=None,
+                        owner={"pid": 55555, "start_time": None, "markers": []},
+                        spawned_by="root",
+                        status="running",
+                    ),
+                )
+            return real_signal_group(task, sig)
 
-    def fake_signal_group(task, sig):
-        if task.task_id == "root" and not wrote_grandchild["v"]:
-            wrote_grandchild["v"] = True
-            store.write(
-                tmp_path,
-                store.TaskRecord(
-                    task_id="grandchild",
-                    backend="claude",
-                    session_id="s-gc",
-                    markers=["m"],
-                    repo_path=str(tmp_path),
-                    started_at=_now_iso(),
-                    pid=42,
-                    pgid=None,
-                    owner={"pid": 55555, "start_time": None, "markers": []},
-                    spawned_by="root",
-                    status="running",
-                ),
-            )
-        return real_signal_group(task, sig)
+        monkeypatch.setattr(tasks_module, "_signal_group", fake_signal_group)
+        monkeypatch.setattr(identity, "check_detail", lambda ident: ("alive", "start_time_match"))
+        monkeypatch.setattr(identity, "may_signal", lambda ident: True)
 
-    monkeypatch.setattr(tasks_module, "_signal_group", fake_signal_group)
-    monkeypatch.setattr(identity, "check_detail", lambda ident: ("alive", "start_time_match"))
-    monkeypatch.setattr(identity, "may_signal", lambda ident: True)
+        result = await asyncio.wait_for(registry.cancel_cascade("root"), timeout=5)
 
-    result = await asyncio.wait_for(registry.cancel_cascade("root"), timeout=5)
+        assert result["rounds"] >= 2
+        assert any(entry["task_id"] == "grandchild" for entry in result["not_signalled"])
 
-    assert result["rounds"] >= 2
-    assert any(entry["task_id"] == "grandchild" for entry in result["not_signalled"])
-
-    await cleanup(root)
+    finally:
+        await cleanup(root)
 
 
 async def test_cascade_reaches_through_a_settled_intermediate_and_via_root_task_id(

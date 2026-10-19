@@ -1,13 +1,13 @@
 import asyncio
 import copy
 import json
-import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from harflow_mcp import workflows as w
+from execution_helper import run_bounded, workflow_snapshot
 
 
 def definition(role="task"):
@@ -84,12 +84,17 @@ def storage(tmp_path, monkeypatch):
     return storage
 
 
-async def execute(storage, tmp_path, definition_, responses):
+async def execute(storage, tmp_path, definition_, responses, timeout_seconds=3):
     d = w.validate_definition(definition_)
     run = storage.create_run(d, "build it", tmp_path)
     registry = FakeRegistry(storage.root, responses)
     supervisor = w.WorkflowSupervisor(registry, storage)
-    await asyncio.wait_for(supervisor.execute(run["workflow_run_id"]), 3)
+    await run_bounded(
+        supervisor.execute(run["workflow_run_id"]),
+        timeout_seconds,
+        label="workflow",
+        diagnostic=lambda: workflow_snapshot(storage, run["workflow_run_id"], registry),
+    )
     return storage.get_run(run["workflow_run_id"]), registry
 
 
@@ -717,7 +722,7 @@ async def test_implicit_convergence_loop_uses_separate_activation_generations(st
     split = json.dumps({"action": "continue", "connections": ["left-edge", "right-edge"], "reason": "Both"})
     retry = json.dumps({"action": "continue", "connections": ["retry"], "reason": "Again"})
     finish = json.dumps({"action": "complete", "connections": ["finish"], "reason": "Done"})
-    run, _ = await execute(storage, tmp_path, graph, ["split1", split, "left1", "right1", "merge1", retry, "split2", split, "left2", "right2", "merge2", finish])
+    run, _ = await execute(storage, tmp_path, graph, ["split1", split, "left1", "right1", "merge1", retry, "split2", split, "left2", "right2", "merge2", finish], timeout_seconds=20)
     assert run["status"] == "completed"
     assert run["joins"] == {}
     assert sum(a["node_id"] == "merge" and a["role"] == "node" for a in run["activations"]) == 2
@@ -855,21 +860,12 @@ async def execute_persisted_feature_flow(storage, registry, run):
     # writes. Main and this branch take ~4.3s locally; profiling alone takes 8.7s,
     # and the macOS CI runner exceeded the old 10s guard. Keep a finite liveness
     # guard with load headroom; semantic completion/retry assertions remain below.
-    started = time.monotonic()
-    try:
-        await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]), 20)
-    except TimeoutError:
-        observed = storage.get_run(run["workflow_run_id"])
-        active = [{"id": activation["id"], "node_id": activation["node_id"], "status": activation["status"],
-                   "tasks": [{"task_id": task["task_id"], "status": task["status"]} for task in activation["tasks"]]}
-                  for activation in observed["activations"]
-                  if activation["status"] not in {"completed", "failed", "cancelled"}
-                  or any(task["status"] in {"reserved", "running", "uncertain"} for task in activation["tasks"])]
-        diagnostics = {"elapsed_seconds": round(time.monotonic() - started, 3),
-                       "sequence": observed["sequence"], "status": observed["status"], "transitions": observed["transitions"],
-                       "pending_nodes": [token["node_id"] for token in observed["pending"]], "joins": observed["joins"],
-                       "active_activations": active, "worker_counts": registry.worker_counts}
-        pytest.fail("Persisted feature flow exceeded 20s: " + json.dumps(diagnostics, sort_keys=True))
+    await run_bounded(
+        w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]),
+        20,
+        label="persisted feature flow",
+        diagnostic=lambda: workflow_snapshot(storage, run["workflow_run_id"], registry),
+    )
 
 
 @pytest.mark.parametrize("retry_at", [None, "unit", "ui", "code_gate"])

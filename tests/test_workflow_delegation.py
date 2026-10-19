@@ -11,6 +11,7 @@ from harflow_mcp import workflows as w
 from harflow_mcp import workflow_delegation as d
 from harflow_mcp import state_ownership
 from harflow_mcp.state_layout import resolve_layout
+from execution_helper import run_bounded, workflow_snapshot
 
 
 def graph(role="task"):
@@ -116,7 +117,12 @@ async def run_flow(storage, tmp_path, definition=None, registry=None, *, guided=
     run = storage.create_run(w.validate_definition(definition or graph()), "ORIGINAL PRIVATE REQUEST", tmp_path)
     storage.update_run(run["workflow_run_id"], lambda current: current.update(runner_policy="guided") if guided else current.pop("runner_policy", None), "test_runner_policy")
     registry = registry or Registry(storage.root)
-    await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]), timeout_seconds)
+    await run_bounded(
+        w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]),
+        timeout_seconds,
+        label="workflow",
+        diagnostic=lambda: workflow_snapshot(storage, run["workflow_run_id"], registry),
+    )
     return storage.get_run(run["workflow_run_id"]), registry
 
 
