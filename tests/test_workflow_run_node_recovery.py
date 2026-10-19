@@ -1,6 +1,8 @@
 """Run workflow node outcomes, control, recovery and question forwarding."""
 import asyncio
 import copy
+import json
+import time
 import uuid
 
 import pytest
@@ -471,23 +473,47 @@ async def test_invocation_timeout_cancels_live_child_and_classifies_timeout(stor
         def __init__(self, root):
             super().__init__(root)
             self.cancelled = []
+            self.cancel_attempts = []
+            self.events = []
+            self.work_started = asyncio.Event()
 
         async def start(self, prompt, repo, **kwargs):
             task = await super().start(prompt, repo, **kwargs)
             if kwargs.get('title') == 'child · work':
                 task.result['status'] = 'running'
                 task.done.clear()
+                self.events.append(('start', task.task_id))
+                self.work_started.set()
             return task
 
         async def cancel_cascade(self, task_id, **kwargs):
+            self.cancel_attempts.append(task_id)
             task = self.tasks.get(task_id)
             if task is not None:
                 self.cancelled.append(task_id)
+                self.events.append(('cancel', task_id))
                 task.result['status'] = 'cancelled'
                 task.done.set()
             return {}
 
+    class InvocationClock:
+        def __init__(self, readiness: asyncio.Event, *, timeout: float):
+            self._real = time
+            self._base = time.monotonic()
+            self._readiness = readiness
+            self._timeout = timeout
+            self._offset = 0.0
+
+        def monotonic(self):
+            if self._readiness.is_set():
+                self._offset += self._timeout + 1.0
+            return self._base + self._offset
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
     registry = LiveRegistry(store.root)
+    monkeypatch.setattr(inv, 'time', InvocationClock(registry.work_started, timeout=1.0))
     run, _ = await run_tree(store, tmp_path, 'parent', registry, timeout=10)
     activation = invocation_activation(run)
     assert activation['node_result']['result']['child_outcome']['kind'] == 'timeout'
@@ -495,8 +521,103 @@ async def test_invocation_timeout_cancels_live_child_and_classifies_timeout(stor
     child = child_runs(store, run)[0]
     assert child['status'] == 'cancelled'
     work = next(a for a in child['activations'] if a['role'] == 'node')
-    assert work['tasks'][0]['task_id'] in registry.cancelled
+    work_task_id = work['tasks'][0]['task_id']
+    assert work_task_id in registry.cancelled
+    assert work_task_id in registry.cancel_attempts
+    assert registry.events.index(('start', work_task_id)) < registry.events.index(('cancel', work_task_id))
     assert work['tasks'][0]['status'] == 'cancelled'
+
+
+async def test_invocation_timeout_before_child_work_launch_settles_reservation(store, tmp_path, monkeypatch, foreign_default_state):
+    monkeypatch.setattr(inv, 'INVOCATION_WATCH_INTERVAL', 0.1)
+    definition = store.get('parent')
+    definition['nodes'][1]['timeout_seconds'] = 1
+    store.save('parent', definition, definition['revision'])
+
+    checkout_reached = asyncio.Event()
+    release_checkout = asyncio.Event()
+    decision_finished = asyncio.Event()
+    reserved_work_id = None
+    original_enter = w.CheckoutLease.__aenter__
+
+    class PrelaunchRegistry(TreeRegistry):
+        def __init__(self, root):
+            super().__init__(root)
+            self.cancel_attempts = []
+            self.work_started = False
+
+        async def start(self, prompt, repo, **kwargs):
+            if kwargs.get('title') in {'parent · Decision', 'child · Decision'}:
+                task = await super().start(prompt, repo, **kwargs)
+                if kwargs.get('title') == 'child · Decision':
+                    decision_finished.set()
+                return task
+            if kwargs.get('title') == 'child · work':
+                self.work_started = True
+            return await super().start(prompt, repo, **kwargs)
+
+        async def cancel_cascade(self, task_id, **kwargs):
+            self.cancel_attempts.append(task_id)
+            if task_id == reserved_work_id:
+                release_checkout.set()
+            return {}
+
+    async def gated_enter(lease):
+        nonlocal reserved_work_id
+        if decision_finished.is_set() and not checkout_reached.is_set():
+            for path in store.runs.glob('*.json'):
+                candidate = json.loads(path.read_text(encoding='utf-8'))
+                for activation in candidate.get('activations', []):
+                    if activation.get('role') != 'node':
+                        continue
+                    for task in activation.get('tasks', []):
+                        if task.get('status') == 'reserved' and task.get('dispatch_stage') == 'preparing':
+                            reserved_work_id = task['task_id']
+                            break
+                    if reserved_work_id:
+                        break
+                if reserved_work_id:
+                    break
+            checkout_reached.set()
+            await asyncio.wait_for(release_checkout.wait(), timeout=10)
+        return await original_enter(lease)
+
+    class InvocationClock:
+        def __init__(self):
+            self._real = time
+            self._base = time.monotonic()
+            self._offset = 0.0
+
+        def monotonic(self):
+            if checkout_reached.is_set():
+                self._offset += 2.0
+            return self._base + self._offset
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    registry = PrelaunchRegistry(store.root)
+    monkeypatch.setattr(w.CheckoutLease, '__aenter__', gated_enter)
+    monkeypatch.setattr(inv, 'time', InvocationClock())
+    try:
+        run, _ = await asyncio.wait_for(run_tree(store, tmp_path, 'parent', registry, timeout=10), timeout=15)
+    finally:
+        release_checkout.set()
+
+    activation = invocation_activation(run)
+    assert checkout_reached.is_set()
+    assert reserved_work_id is not None
+    assert activation['node_result']['result']['child_outcome']['kind'] == 'timeout'
+    assert activation['invocation']['timeout_confirmed'] is True
+    child = child_runs(store, run)[0]
+    assert child['status'] == 'cancelled'
+    work = next(a for a in child['activations'] if a['role'] == 'node')
+    reservation = work['tasks'][0]
+    assert reservation['status'] == 'not_started'
+    assert reservation['dispatch_stage'] == 'preparing'
+    assert reservation['task_id'] == reserved_work_id
+    assert reservation['task_id'] in registry.cancel_attempts
+    assert registry.work_started is False
 
 
 async def test_cancel_subtree_includes_nested_grandchildren_only(store, tmp_path):
