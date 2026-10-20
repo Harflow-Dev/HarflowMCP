@@ -972,7 +972,7 @@ async def test_conditional_feature_bypasses_and_parallel_review_converge_once(st
     assert sum(e["backward"] for e in normalized["connections"]) == 4
     run = storage.create_run(normalized, "Implement requested feature", tmp_path)
     registry = BypassFeatureRegistry(storage.root, trivial=trivial, skip_ui=skip_ui, retry_at=retry_at)
-    await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]), 10)
+    await execute_persisted_feature_flow(storage, registry, run)
     observed = storage.get_run(run["workflow_run_id"])
     assert observed["status"] == "completed"
     assert observed["joins"] == {}
