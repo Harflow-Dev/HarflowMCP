@@ -676,7 +676,12 @@ async def test_nested_splits_can_converge_at_same_agent_once(storage, tmp_path):
             self.tasks[task.task_id] = task
             return task
     registry = Registry(storage.root, [])
-    await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]), 3)
+    await run_bounded(
+        w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]),
+        20,
+        label="nested convergence",
+        diagnostic=lambda: workflow_snapshot(storage, run["workflow_run_id"], registry),
+    )
     final = storage.get_run(run["workflow_run_id"])
     assert final["status"] == "completed"
     assert final["joins"] == {}

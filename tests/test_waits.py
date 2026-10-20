@@ -1,6 +1,8 @@
 """The shared wait contract: wait_for_task, wait_for_tasks and wait_for_workflow. No model calls."""
 import asyncio
 import json
+import math
+import os
 import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -11,6 +13,7 @@ from mcp import MCPError
 from harflow_mcp import ctl, identity, server, state_ownership, store, task_waiting, wait_policy
 from harflow_mcp.state_layout import resolve_layout
 from harflow_mcp.tasks import Task, TaskRegistry
+from execution_helper import run_bounded
 
 SCALE = 1000.0
 
@@ -564,17 +567,42 @@ async def test_workflow_settling_with_no_file_change_stops_an_until_terminal_wai
     assert bounded["stop_reason"] == "timeout"
 
 
-async def test_workflow_settling_that_makes_progress_is_not_stalled(monkeypatch, fast_clock, workflow_run_file):
+async def test_workflow_settling_that_makes_progress_is_not_stalled(monkeypatch, workflow_run_file):
     monkeypatch.setattr(server, "WORKFLOW_SETTLING_STALL_SECONDS", 20.0)
+    monkeypatch.setattr(server, "WORKFLOW_POLL_SECONDS", 1.0)
+    simulated = [100.0]
+    monkeypatch.setattr(wait_policy, "monotonic", lambda: simulated[0])
+    captured_asyncio = asyncio
+
+    class AsyncioProxy:
+        def __getattr__(self, name):
+            return getattr(captured_asyncio, name)
+
+        async def sleep(self, delay):
+            if (isinstance(delay, bool) or not isinstance(delay, (int, float))
+                    or not math.isfinite(delay) or delay != 1.0):
+                raise AssertionError(f"unexpected polling delay: {delay!r}")
+            simulated[0] += delay
+            await captured_asyncio.sleep(0)
+
+    monkeypatch.setattr(server, "asyncio", AsyncioProxy())
     run_file = workflow_run_file
     counter = {"n": 0}
     async def call(action, **kwargs):
         counter["n"] += 1
         run_file.write_text(json.dumps({"workflow_run_id": "r", "revision": counter["n"]}))
+        revision_ns = 2_000_000_000_000_000_000 + counter["n"] * 1_000_000_000
+        os.utime(run_file, ns=(revision_ns, revision_ns))
         return {"workflow_run_id": "r", "status": "completed", "settling": counter["n"] < 40}
     monkeypatch.setattr(server, "_workflow_call", call)
-    result = await server.wait_for_workflow("r", until="terminal")
+    result = await run_bounded(
+        server.wait_for_workflow("r", until="terminal"),
+        10,
+        label="settling progress",
+    )
     assert result["stop_reason"] == "terminal"
+    assert counter["n"] == 40
+    assert result["elapsed_seconds"] > server.WORKFLOW_SETTLING_STALL_SECONDS
 
 
 def test_ctl_workflow_wait_passes_until_and_timeout(monkeypatch, capsys):
