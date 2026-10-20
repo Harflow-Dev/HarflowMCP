@@ -13,4 +13,6 @@ Use `harflow-ctl version-info --json` to inspect runtime identity and compatibil
 - [Public contracts and runtime compatibility](docs/contracts.md)
 - [Development and technical references](docs/development.md)
 
+See the [Changelog](CHANGELOG.md) for change history.
+
 Licensed under [Apache-2.0](LICENSE). Git history preserves source authorship; the license notice does not assert ownership of prior contributions.
