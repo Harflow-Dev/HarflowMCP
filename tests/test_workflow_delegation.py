@@ -14,6 +14,10 @@ from harflow_mcp.state_layout import resolve_layout
 from execution_helper import run_bounded, workflow_snapshot
 
 
+# Finite whole-graph fixture liveness guard, not a performance assertion.
+DEFAULT_WORKFLOW_TIMEOUT_SECONDS = 10
+
+
 def graph(role="task"):
     return {"name": "delegation", "orchestrator": {"backend": "codex"}, "nodes": [{"id": "start", "type": "start", "prompt": "Overall purpose"}, {"id": "work", "type": "agent", "role": role, "instructions": "Node-only instruction", "agent": {"backend": "codex"}}, {"id": "end", "type": "end"}], "connections": [{"id": "begin", "source": "start", "target": "work"}, {"id": "finish", "source": "work", "target": "end"}]}
 
@@ -113,7 +117,7 @@ def storage(tmp_path, monkeypatch):
     return w.WorkflowStore(tmp_path)
 
 
-async def run_flow(storage, tmp_path, definition=None, registry=None, *, guided=False, timeout_seconds=5):
+async def run_flow(storage, tmp_path, definition=None, registry=None, *, guided=False, timeout_seconds=DEFAULT_WORKFLOW_TIMEOUT_SECONDS):
     run = storage.create_run(w.validate_definition(definition or graph()), "ORIGINAL PRIVATE REQUEST", tmp_path)
     storage.update_run(run["workflow_run_id"], lambda current: current.update(runner_policy="guided") if guided else current.pop("runner_policy", None), "test_runner_policy")
     registry = registry or Registry(storage.root)
