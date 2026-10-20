@@ -272,4 +272,3 @@ def test_qualified_old_definition_without_workflow_id_or_execution_mode_keeps_id
     saved = store.save("fixture", definition("fixture"), expected_revision=4)
     assert saved["revision"] == 5
     assert saved["workflow_id"] == loaded["workflow_id"]
-

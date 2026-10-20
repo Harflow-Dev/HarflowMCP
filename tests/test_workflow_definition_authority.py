@@ -268,4 +268,3 @@ def test_migration_final_replace_guard_preserves_replacement_after_backup(tmp_pa
     assert len(backups) == 1
     assert json.loads(backups[0].read_text()) == documents.encode(expected_backup)
     assert not list(store.definitions.glob(".*.tmp"))
-
