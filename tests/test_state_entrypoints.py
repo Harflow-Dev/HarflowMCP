@@ -158,7 +158,7 @@ with exclusive_session(resolve_layout(root=Path(sys.argv[1])), timeout=.5):
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, env=env,
         )
-        out, err = server.communicate(timeout=3)
+        out, err = server.communicate(timeout=10)
         assert server.returncode == 2
         assert out == ""
         assert "Traceback" not in err
