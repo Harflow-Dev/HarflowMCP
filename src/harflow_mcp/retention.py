@@ -564,6 +564,8 @@ def _delete_task_files_locked(log_dir: Path, task_id: str) -> bool:
     it past a failed unlink would orphan that file (prompts, raw output) for good. False when
     anything, the record included, was left behind."""
     assert_task_owned(log_dir)
+    # Every deletion path, including direct cleanup callers, qualifies metadata first.
+    qualified = store.read(log_dir, task_id)
     try:
         entries = list(log_dir.iterdir())
     except OSError:
@@ -573,6 +575,18 @@ def _delete_task_files_locked(log_dir: Path, task_id: str) -> bool:
     prefix = f"{task_id}."
     record_path: Path | None = None
     complete = True
+    # Cooperating writers hold the catalog lock; an external writer may not.
+    # Refuse an observed replacement before deleting any task-family evidence.
+    from .catalog import source_identity
+    try:
+        current_source = source_identity(store.record_path(log_dir, task_id).stat())
+    except FileNotFoundError:
+        current_source = None
+    except OSError:
+        return False
+    expected_source = getattr(qualified, '_source_identity', None)
+    if current_source != expected_source:
+        return False
     for path in entries:
         name = path.name
         if name in lock_names or not name.startswith(prefix):

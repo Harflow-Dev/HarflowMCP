@@ -1,4 +1,7 @@
 from harflow_mcp import scratch, retention
+from harflow_mcp import store
+from harflow_mcp.backends.claude import ClaudeBackend
+from datetime import datetime, timezone
 from harflow_mcp import state_ownership
 from harflow_mcp.state_layout import resolve_layout
 
@@ -6,7 +9,12 @@ def test_task_retention_removes_scratch_without_following_symlinks(tmp_path):
     root = tmp_path / 'state'
     with state_ownership.state_session(resolve_layout(root=root)):
         pass
-    log=root/'tasks';log.mkdir();(log/'worker.meta.json').write_text('{}')
+    log=root/'tasks';log.mkdir()
+    store.write(log, store.TaskRecord(
+        task_id='worker', backend='claude', session_id=None, repo_path=str(tmp_path),
+        started_at=datetime.now(timezone.utc).isoformat(),
+        enforcement=ClaudeBackend().enforcement('write_in_repo').as_dict(),
+    ))
     path=scratch.create(log,'worker');(path/'payload').write_text('review')
     with state_ownership.state_session(resolve_layout(root=root)):
         assert retention._delete_task_files(log,'worker')

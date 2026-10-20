@@ -214,6 +214,7 @@ def _compact(doc: dict[str, Any]) -> None:
 def _store(log_dir: Path, task_id: str, doc: dict[str, Any], limit: int = READ_BUDGET_BYTES) -> None:
     """Replace the document atomically. Raises `_TooLarge` or `OSError`."""
     assert_task_owned(log_dir)
+    store.read(log_dir, task_id, include_prompt=False)
     _compact(doc)
     data = _serialize(doc)
     if len(data) > limit:
@@ -256,7 +257,7 @@ def _retry_pending(log_dir: Path, task_id: str) -> None:
         for successor, ids, outcome, reason in pending:
             _apply_terminal(doc, successor, ids, outcome, reason)
         _store(log_dir, task_id, doc)
-    except (Unavailable, _TooLarge, OSError):
+    except (Unavailable, _TooLarge, OSError, store.TaskDocumentError):
         log.warning("task %s: pending follow-up terminal write still cannot land", task_id, exc_info=True)
         return
     with _PENDING_GUARD:
@@ -285,7 +286,7 @@ def _reserved_verdict(log_dir: Path, item: dict[str, Any]) -> str | None:
     if not isinstance(successor, str):
         return DELIVERY_UNKNOWN
     try:
-        landed = store.record_path(log_dir, successor).exists()
+        landed = store.read(log_dir, successor, include_prompt=False) is not None
     except store.InvalidTaskId:
         return DELIVERY_UNKNOWN
     if landed:
@@ -309,20 +310,12 @@ def _reserved_verdict(log_dir: Path, item: dict[str, Any]) -> str | None:
 def successor_candidates(log_dir: Path, record: store.TaskRecord, *, cached: bool = False) -> list[str]:
     """Same-session successors and continuations of `record`, oldest first."""
     key = _key(log_dir, record.task_id)
-    if cached:
-        hit = _SUCCESSOR_CACHE.get(key)
-        if hit is not None and time.monotonic() - hit[0] < SUCCESSOR_CACHE_SECONDS:
-            return hit[1]
+    # Requalify history before using a result; cached absence is not current authority.
+    records = store.scan(log_dir).require_complete()
     found: set[str] = set()
     if record.session_id:
-        try:
-            found |= store.session_successor_task_ids(log_dir, record.task_id, record.session_id)
-        except (ValueError, OSError):
-            pass  # incomplete history proves nothing either way
-    try:
-        found |= {r.task_id for r in store.read_all(log_dir) if r.continuation_of_task_id == record.task_id}
-    except OSError:
-        pass
+        found |= store.session_successor_task_ids(log_dir, record.task_id, record.session_id)
+    found |= {r.task_id for r in records if r.continuation_of_task_id == record.task_id}
     found.discard(record.task_id)
 
     def started(identifier: str) -> tuple[str, str]:
@@ -346,6 +339,7 @@ def _resolve(
     """Apply the read-time rules to `doc` in place; whether anything changed. These only repair
     what a crash or a failed terminal write left behind."""
     assert_task_owned(log_dir)
+    store.scan(log_dir).require_complete()
     changed = False
     now = _now()
     verdicts: dict[str, str] = {}
@@ -628,6 +622,8 @@ def view(log_dir: Path, task_id: str) -> dict[str, Any]:
         if record is not None:
             _resolve(log_dir, record, doc, _lazy(lambda: successor_candidates(log_dir, record, cached=True)))
         return _present(doc)
+    except store.TaskDocumentError as exc:
+        return dict(_UNAVAILABLE_VIEW) | {"history_incomplete": True, "refused_tasks": [exc.as_dict()]}
     except Unavailable:
         return dict(_UNAVAILABLE_VIEW)
     except StateOwnershipError:
@@ -679,7 +675,7 @@ def reconcile_all(log_dir: Path) -> None:
                 doc = _load(log_dir, task_id)
                 if _resolve(log_dir, record, doc, _lazy(lambda: successor_candidates(log_dir, record))):
                     _persist(log_dir, task_id, doc)
-        except (control.LockTimeout, Unavailable, store.InvalidTaskId, OSError):
+        except (control.LockTimeout, Unavailable, store.InvalidTaskId, OSError, store.TaskDocumentError):
             continue
         except StateOwnershipError:
             raise
@@ -825,7 +821,7 @@ def finish(
             _apply_terminal(doc, successor, ids, outcome, reason)
             _store(log_dir, task_id, doc)
         return True
-    except (control.LockTimeout, Unavailable, _TooLarge, OSError):
+    except (control.LockTimeout, Unavailable, _TooLarge, OSError, store.TaskDocumentError):
         log.warning("task %s: follow-up %s write failed; will retry", task_id, outcome, exc_info=True)
         with _PENDING_GUARD:
             _PENDING.setdefault(_key(log_dir, task_id), []).append((successor, ids, outcome, reason))

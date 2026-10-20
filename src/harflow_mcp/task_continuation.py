@@ -151,10 +151,11 @@ async def continue_task(registry: Any, task_id: str, extra_prompt: str | None = 
                         or registry.get(reservation['task_id']) is not None
                         or store.read(registry.log_dir, reservation['task_id']) is not None):
                     raise ValueError('Continuation already reserved for a different caller request; use its successor for further work')
+            saved_child = store.read(registry.log_dir, reservation['task_id'])
             child = registry.get(reservation['task_id'])
-            if child is not None:
+            if child is not None and saved_child is not None:
                 return child
-            if store.read(registry.log_dir, reservation['task_id']) is not None:
+            if saved_child is not None:
                 raise ValueError(f"Continuation already exists: {reservation['task_id']}")
             if reservation.get('state') != 'not_started':
                 raise ValueError(f"Continuation reservation unsettled: {reservation['task_id']}; refusing duplicate execution")
@@ -189,6 +190,10 @@ async def continue_task(registry: Any, task_id: str, extra_prompt: str | None = 
                 child.spawned_by, child.root_task_id = source.spawned_by, source.root_task_id
                 child.depth, child.max_depth = source.depth, source.max_depth
                 registry.persist(child)
+                if not child.latest_record_landed:
+                    if child.persistence_error is not None:
+                        raise child.persistence_error
+                    raise RuntimeError('Continuation started but its metadata update did not land')
             except BaseException as exc:
                 if getattr(exc, 'harflow_not_started', False):
                     _write(path, {'task_id': identifier, 'state': 'not_started', 'chain_root_task_id': root, 'request_fingerprint': fingerprint}, layout=registry.state_layout)
@@ -206,6 +211,9 @@ async def continue_task(registry: Any, task_id: str, extra_prompt: str | None = 
 @storage_operation
 def schedule_automatic(registry: Any, task: Any) -> None:
     """Run after durable settlement; retain the source until the reservation resolves."""
+    if not task.latest_record_landed or task.persistence_error is not None:
+        registry.prune()
+        return
     if task.status == 'cancelled' or task.cancel_requested or task.acc.denials or task.acc.failure_diagnostic or get_backend(task.backend).continuation_reason(task.acc, task.exit_code) is None:
         registry.prune()
         return

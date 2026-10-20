@@ -103,12 +103,14 @@ def result_page(run: dict[str, Any], execution_id: str, *, task_id: str | None =
 def decorate_tasks(entries: list[dict[str, Any]], log_dir: Any) -> list[dict[str, Any]]:
     """Resolve requested task receipts and ancestors; never scan run history."""
     import logging
+    from .catalog import METADATA_BYTES, current_metadata_budget
     from . import store as task_store
     from .workflows import WorkflowStore, _identifier
     storage = WorkflowStore(root=log_dir.parent)
     by_id = {entry["task_id"]: entry for entry in entries if entry.get("task_id")}
     run_cache: dict[str, dict[str, dict[str, Any]]] = {}
     resolved: dict[str, dict[str, Any] | None] = {}
+    refusals: dict[str, dict[str, Any]] = {}
     inherited = ("workflow_run_id", "workflow_name", "workflow_status", "workflow_settling", "interaction_owner", "execution_contract")
 
     def run_index(run_id: str) -> dict[str, dict[str, Any]]:
@@ -140,6 +142,10 @@ def decorate_tasks(entries: list[dict[str, Any]], log_dir: Any) -> list[dict[str
         visited = visited | {task_id}
         association = None
         try:
+            # Receipts and supplied projections cannot qualify task identity.
+            record = task_store.read(log_dir, task_id, include_prompt=False,
+                                     metadata_byte_limit=METADATA_BYTES, metadata_budget=current_metadata_budget())
+            # Verified absence allows independent workflow receipts, including native children.
             receipt = storage.owners / f"{_identifier(task_id)}.json"
             if receipt.exists():
                 from .bounded_io import read_receipt
@@ -148,23 +154,40 @@ def decorate_tasks(entries: list[dict[str, Any]], log_dir: Any) -> list[dict[str
                 if association is None:
                     raise ValueError("Task receipt does not match its workflow run")
             else:
-                entry = by_id.get(task_id)
-                ancestors = (entry.get("parent_task_id"), entry.get("spawned_by")) if entry is not None else ()
-                if not any(ancestors):
-                    record = task_store.read(log_dir, task_id)
-                    ancestors = (record.parent_task_id, record.spawned_by) if record is not None else ()
+                entry = by_id.get(task_id, {})
+                ancestors = ((record.parent_task_id, record.spawned_by) if record is not None
+                             else (entry.get("parent_task_id"), entry.get("spawned_by")))
                 for ancestor in dict.fromkeys(ancestors):
                     if ancestor:
                         parent = owner(ancestor, visited)
+                        if ancestor in refusals:
+                            refusals[task_id] = refusals[ancestor]
+                            break
                         if parent is not None:
                             association = {key: parent[key] for key in inherited if key in parent}
                             break
+        except task_store.TaskDocumentError as exc:
+            refusals[task_id] = exc.as_dict()
         except (OSError, ValueError, KeyError, TypeError):
             logging.getLogger(__name__).warning("Workflow decoration unavailable for %s", task_id, exc_info=True)
         resolved[task_id] = association
         return association
 
-    return [{**entry, **(owner(entry["task_id"], set()) or {})} if entry.get("task_id") else entry for entry in entries]
+    result = []
+    for entry in entries:
+        task_id = entry.get("task_id")
+        if not task_id:
+            result.append(entry)
+            continue
+        association = owner(task_id, set())
+        # Replace old decoration rather than retaining authority from a stale page.
+        clean = {key: value for key, value in entry.items()
+                 if not key.startswith("workflow_") and key not in
+                 {"root_workflow_run_id", "suspended_via_root", "execution_contract"}}
+        if task_id in refusals:
+            clean.update(history_incomplete=True, refused_tasks=[refusals[task_id]])
+        result.append(clean | (association or {}))
+    return result
 
 
 @task_operation(parameter="log_dir")

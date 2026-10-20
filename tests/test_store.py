@@ -14,8 +14,36 @@ from harflow_mcp import control, identity, store
 from harflow_mcp import state_ownership
 from harflow_mcp.state_layout import resolve_layout
 from harflow_mcp.store import TaskRecord
+from harflow_mcp.backends.claude import ClaudeBackend
 
 SESSION = "0b4147f7-3a0e-4fe1-8399-d8c9964ccb2e"
+
+
+@pytest.fixture(autouse=True)
+def persist_recovered_fixture(monkeypatch):
+    """Recovered-status APIs now require the metadata sidecar to exist."""
+    original_resolve, original_brief = store.resolve_status, store.brief
+    original_snapshot = store.snapshot
+
+    def ensure(log_dir, record):
+        if not store.record_path(log_dir, record.task_id).exists():
+            store.write(log_dir, record)
+
+    def resolve(log_dir, record, **kwargs):
+        ensure(log_dir, record)
+        return original_resolve(log_dir, record, **kwargs)
+
+    def brief(log_dir, record):
+        ensure(log_dir, record)
+        return original_brief(log_dir, record)
+
+    def snapshot(log_dir, record):
+        ensure(log_dir, record)
+        return original_snapshot(log_dir, record)
+
+    monkeypatch.setattr(store, "resolve_status", resolve)
+    monkeypatch.setattr(store, "brief", brief)
+    monkeypatch.setattr(store, "snapshot", snapshot)
 
 
 @pytest.fixture
@@ -51,6 +79,8 @@ def make_record(**overrides) -> TaskRecord:
         "max_turns": 20,
         "prompt": "do a thing",
     }
+    if "enforcement" not in overrides:
+        base["enforcement"] = ClaudeBackend().enforcement("write_in_repo").as_dict()
     return TaskRecord(**(base | overrides))
 
 
@@ -119,6 +149,7 @@ def test_live_and_recovered_briefs_both_expose_the_same_title(tmp_path: Path) ->
     from harflow_mcp.tasks import Task
 
     record = make_record(title="Fix login", status="completed", exit_code=0)
+    store.write(tmp_path, record)
     write_log(tmp_path, record.task_id, RESULT_EVENT)
     live = Task(
         task_id="t",
@@ -145,6 +176,10 @@ def test_round_trips_enforcement_and_bridge_notices(tmp_path: Path) -> None:
         "writable_roots": ["repo"],
         "commit_push_blocked": False,
         "direct_commit_commands_denied": True,
+        "publish_attempts_allowed_by_polybridge": False,
+        "network_access": "blocked",
+        "extra_writable_paths": [],
+        "extra_path_certification": None,
         "caveats": [],
     }
     record = make_record(enforcement=enforcement, bridge_notices=["dispatched under write_in_repo"])
@@ -194,9 +229,14 @@ def test_recovered_enforcement_reports_the_persisted_value_not_a_fresh_derivatio
         "writable_roots": ["repo"],
         "commit_push_blocked": False,
         "direct_commit_commands_denied": False,
+        "publish_attempts_allowed_by_polybridge": False,
+        "network_access": "blocked",
+        "extra_writable_paths": [],
+        "extra_path_certification": None,
         "caveats": [],
     }
     record = make_record(enforcement=persisted)
+    store.write(tmp_path, record)
 
     result = store.snapshot(tmp_path, record)
 
@@ -205,6 +245,7 @@ def test_recovered_enforcement_reports_the_persisted_value_not_a_fresh_derivatio
 
 def test_legacy_record_with_no_persisted_enforcement_reports_not_recorded(tmp_path: Path) -> None:
     record = make_record(enforcement=None)
+    store.write(tmp_path, record)
 
     result = store.snapshot(tmp_path, record)
 
@@ -220,6 +261,7 @@ def test_recovered_notices_merge_bridge_first_without_mutating_either_source(
         pid=999_999_999,
         bridge_notices=["dispatched under write_in_repo"],
     )
+    store.write(tmp_path, record)
     write_log(
         tmp_path,
         record.task_id,
@@ -244,6 +286,7 @@ def test_a_recovered_brief_carries_bridge_notices_but_not_the_backends(
     """
     monkeypatch.setattr(store, "process_alive", lambda pid, markers: False)
     record = make_record(status="failed", exit_code=None, bridge_notices=["dispatch note"])
+    store.write(tmp_path, record)
     write_log(tmp_path, record.task_id, RESULT_EVENT)
 
     brief = store.brief(tmp_path, record)
@@ -263,6 +306,7 @@ def test_live_and_recovered_listings_hold_the_same_keys(
 
     monkeypatch.setattr(store, "process_alive", lambda pid, markers: False)
     record = make_record(status="failed", exit_code=None)
+    store.write(tmp_path, record)
     write_log(tmp_path, record.task_id, RESULT_EVENT)
     recovered = set(store.brief(tmp_path, record)) - {"recovered"}
 
@@ -324,10 +368,12 @@ def test_unknown_fields_are_ignored_so_newer_records_still_load(tmp_path: Path) 
 
 
 @pytest.mark.parametrize("contents", ["{not json", '"a string"', ""])
-def test_unreadable_records_are_skipped_not_raised(tmp_path: Path, contents: str) -> None:
+def test_malformed_records_are_refused_instead_of_reported_missing(tmp_path: Path, contents: str) -> None:
     store.record_path(tmp_path, "task-1").write_text(contents, encoding="utf-8")
 
-    assert store.read(tmp_path, "task-1") is None
+    with pytest.raises(store.TaskDocumentError) as caught:
+        store.read(tmp_path, "task-1")
+    assert caught.value.code == "task_incompatible"
 
 
 def test_read_all_is_ordered_by_start_time(tmp_path: Path) -> None:
@@ -358,6 +404,7 @@ def test_process_alive_rejects_a_reused_pid() -> None:
 def test_recovers_a_finished_run_from_its_own_output(tmp_path: Path) -> None:
     """The server that started it died before recording the outcome; the log still has it."""
     record = make_record(pid=999_999_999)
+    store.write(tmp_path, record)
     write_log(tmp_path, record.task_id, {"type": "system", "subtype": "init"}, RESULT_EVENT)
 
     snap = store.snapshot(tmp_path, record)
@@ -372,6 +419,7 @@ def test_recovers_a_finished_run_from_its_own_output(tmp_path: Path) -> None:
 
 def test_recovers_max_turns_exhaustion_as_timed_out(tmp_path: Path) -> None:
     record = make_record(pid=999_999_999)
+    store.write(tmp_path, record)
     write_log(tmp_path, record.task_id, RESULT_EVENT | {"subtype": "error_max_turns"})
 
     assert store.snapshot(tmp_path, record)["status"] == "timed_out"
@@ -394,6 +442,7 @@ def test_a_recovered_turn_cap_exhaustion_is_not_described_as_missing_evidence(
 
 def test_a_gone_process_with_no_result_reads_as_interrupted(tmp_path: Path) -> None:
     record = make_record(pid=999_999_999)
+    store.write(tmp_path, record)
     write_log(tmp_path, record.task_id, {"type": "system", "subtype": "init"})
 
     snap = store.snapshot(tmp_path, record)
@@ -406,12 +455,15 @@ def test_a_gone_process_with_no_result_reads_as_interrupted(tmp_path: Path) -> N
 
 def test_a_recorded_terminal_status_is_trusted(tmp_path: Path) -> None:
     record = make_record(status="cancelled", exit_code=143, finished_at="2026-07-29T10:05:00+00:00")
+    store.write(tmp_path, record)
 
     assert store.snapshot(tmp_path, record)["status"] == "cancelled"
 
 
 def test_a_missing_log_does_not_break_recovery(tmp_path: Path) -> None:
-    snap = store.snapshot(tmp_path, make_record(pid=999_999_999))
+    record = make_record(pid=999_999_999)
+    store.write(tmp_path, record)
+    snap = store.snapshot(tmp_path, record)
 
     assert snap["status"] == "failed"
     assert snap["summary"] is None
@@ -433,7 +485,9 @@ def test_recovered_snapshot_matches_the_live_snapshot_shape(tmp_path: Path) -> N
         started_at=datetime.now(timezone.utc),
     ).snapshot()
 
-    recovered = store.snapshot(tmp_path, make_record(pid=999_999_999))
+    record = make_record(pid=999_999_999)
+    store.write(tmp_path, record)
+    recovered = store.snapshot(tmp_path, record)
 
     assert set(live) - set(recovered) == set()
     # Recovery adds provenance the live path has no need for, and the follow-up ledger, which a live
@@ -457,7 +511,9 @@ def test_both_snapshot_builders_carry_the_resume_command(tmp_path: Path) -> None
         started_at=datetime.now(timezone.utc),
     ).snapshot()
 
-    recovered = store.snapshot(tmp_path, make_record(repo_path=str(tmp_path)))
+    record = make_record(repo_path=str(tmp_path))
+    store.write(tmp_path, record)
+    recovered = store.snapshot(tmp_path, record)
 
     expected = f"cd {tmp_path} && claude --resume {SESSION}"
     assert live["resume_command"] == expected
@@ -478,9 +534,9 @@ def test_both_snapshot_builders_report_null_with_no_session_id(tmp_path: Path) -
         started_at=datetime.now(timezone.utc),
     ).snapshot()
 
-    recovered = store.snapshot(
-        tmp_path, make_record(session_id=None, markers=[], repo_path=str(tmp_path))
-    )
+    record = make_record(session_id=None, markers=[], repo_path=str(tmp_path))
+    store.write(tmp_path, record)
+    recovered = store.snapshot(tmp_path, record)
 
     assert live["resume_command"] is None
     assert recovered["resume_command"] is None
@@ -551,6 +607,7 @@ def test_a_terminal_status_may_still_be_corrected_to_another_terminal_one(tmp_pa
 def test_listing_and_status_never_disagree(tmp_path: Path) -> None:
     """A task reported one way by get_task_status must not be listed as something else."""
     record = make_record(pid=999_999_999)
+    store.write(tmp_path, record)
     write_log(tmp_path, record.task_id, RESULT_EVENT)
 
     assert store.brief(tmp_path, record)["status"] == store.snapshot(tmp_path, record)["status"]
@@ -846,6 +903,7 @@ def test_a_running_vibe_record_whose_process_was_retitled_still_reads_running(
     whole run. A matching start time keeps it `running`.
     """
     record = _retitled_record(backend="vibe", status="running", exit_code=None)
+    store.write(tmp_path, record)
     write_log(tmp_path, record.task_id, *VIBE_LIVE_TURN_STREAM)
 
     status, note, state, _ = store.resolve_status(tmp_path, record)
@@ -914,6 +972,7 @@ def test_brief_and_snapshot_report_running_for_the_retitled_live_record(
     """`ctl list` (brief) and `get_task_status`/the Monitor sidebar (snapshot) must agree, so the
     reproduced record reads `running` through both — not `failed` in the listing."""
     record = _retitled_record(backend="vibe", status="running", exit_code=None)
+    store.write(tmp_path, record)
     write_log(tmp_path, record.task_id, *VIBE_LIVE_TURN_STREAM)
 
     assert store.brief(tmp_path, record)["status"] == "running"
@@ -1150,6 +1209,7 @@ def test_snapshot_always_replays_even_for_an_observed_terminal_record(
 
     monkeypatch.setattr(store, "replay_log", spying_replay)
     record = make_record(status="completed", exit_code=0)
+    store.write(tmp_path, record)
     write_log(tmp_path, record.task_id, RESULT_EVENT)
 
     snap = store.snapshot(tmp_path, record)
@@ -1184,6 +1244,7 @@ def test_owned_by_live_server_note_and_flag_when_identity_check_reports_alive(
     # A pid, so the liveness probe below has a process to attest to (a record with no pid is
     # settled by definition — nothing was ever observed to spawn).
     record = make_record(status="running", exit_code=None, pid=4321, owner=owner)
+    store.write(tmp_path, record)
 
     status, note, _, _ = store.resolve_status(tmp_path, record)
 
@@ -1208,6 +1269,7 @@ def test_owned_by_live_server_is_false_when_identity_check_cannot_confirm_it(
     monkeypatch.setattr(store, "process_alive", lambda pid, markers: True)
     monkeypatch.setattr(store.identity, "identity_check", lambda owner: "undecidable")
     record = make_record(status="running", exit_code=None, pid=4321)
+    store.write(tmp_path, record)
 
     status, note, _, _ = store.resolve_status(tmp_path, record)
 
@@ -1242,6 +1304,7 @@ def test_recovered_builder_marker_is_retained_in_listing(tmp_path, monkeypatch):
 def test_recovered_builder_snapshot_survives_pending_bookkeeping_failure(tmp_path, monkeypatch, error):
     from harflow_mcp import workflows
     record = make_record(workflow_builder=True, status="completed", exit_code=0)
+    store.write(tmp_path, record)
     write_log(tmp_path, record.task_id, RESULT_EVENT)
     def broken(*args):
         raise error

@@ -3643,6 +3643,7 @@ def test_vibe_task_payload_carries_the_warning_and_a_recovered_record_stays_fail
         status="running",
         exit_code=None,
     )
+    store.write(log_dir, record)
     store.log_path(log_dir, record.task_id).write_text(
         "".join(json.dumps(event) + "\n" for event in VIBE_DENIED_RUN), encoding="utf-8"
     )

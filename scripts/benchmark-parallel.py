@@ -52,7 +52,7 @@ def fixture(home: Path, conversations=8, chain=1, activity='sparse', workflow=Fa
                 record = store.TaskRecord(task_id, 'codex', f'parallel-session-{conversation:04}', '/benchmark', timestamp,
                     status='completed', exit_code=0, group=GROUP, parent_task_id=prior,
                     title=f'Synthetic conversation {conversation:04}', prompt='Synthetic benchmark input')
-                (directory / f'{task_id}.meta.json').write_text(json.dumps(asdict(record), sort_keys=True))
+                (directory / f'{task_id}.meta.json').write_text(json.dumps(store.encode_task(asdict(record)), sort_keys=True))
                 rows = [event(task_id, 0, 'task_started', backend='codex'), event(task_id, 1, 'user_message', text='Synthetic benchmark input')]
                 for index in range(2 if activity == 'sparse' else 256):
                     call_id = f'call-{index:04}'
@@ -72,7 +72,7 @@ def fixture(home: Path, conversations=8, chain=1, activity='sparse', workflow=Fa
                 {'id': 'a', 'source': 'start', 'target': 'work'}, {'id': 'b', 'source': 'work', 'target': 'end'}],
                 'orchestrator': {'backend': 'codex'}})
             definition.update(workflow_id='parallel-workflow', revision=1)
-            (storage.definitions / 'parallel-workflow.json').write_text(json.dumps(definition, sort_keys=True))
+            workflows._write(storage.definitions / 'parallel-workflow.json', definition, layout=storage.state_layout)
             task_ids = [f'parallel-{conversation:04}-{turn:02}' for conversation in range(conversations) for turn in range(chain)]
             associations = [{'task_id': task_id, 'backend': 'codex', 'status': 'completed', 'summary': 'Synthetic benchmark answer'} for task_id in task_ids]
             run = dict(workflow_run_id='parallel-run', kind='workflow', name='Synthetic parallel workflow', definition=definition,
@@ -81,7 +81,7 @@ def fixture(home: Path, conversations=8, chain=1, activity='sparse', workflow=Fa
                 tasks=associations, joins={}, instructions='', supervisor_pid=None, summary='Synthetic parallel benchmark',
                 activations=[dict(id='parallel-execution', node_id='work', role='node', status='completed', created_at=1790812800.0,
                     tasks=associations, summary='Synthetic parallel benchmark', node_result={'status': 'succeeded', 'result': {}, 'evidence': []})])
-            (storage.runs / 'parallel-run.json').write_text(json.dumps(run, sort_keys=True))
+            workflows._write(storage.runs / 'parallel-run.json', run, layout=storage.state_layout)
     manifest = dict(version=1, conversations=conversations, chain=chain, activity=activity, tasks=conversations*chain, group=GROUP, workflow=workflow)
     (home / MARKER).write_text(json.dumps(manifest, sort_keys=True))
     (home / 'monitor-benchmark-fixture.json').write_text(json.dumps(dict(version=1, size='parallel', definitions=int(workflow), runs=int(workflow), tasks=manifest['tasks'])))

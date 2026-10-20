@@ -17,7 +17,12 @@ def setup(tmp_path, monkeypatch):
     logs.mkdir(parents=True)
     repo = tmp_path / 'repo'
     repo.mkdir()
-    record = store.TaskRecord('owner', 'codex', None, str(repo), '2026-01-01T00:00:00+00:00', pid=123, pgid=456, start_time='start')
+    record = store.TaskRecord('owner', 'codex', None, str(repo), '2026-01-01T00:00:00+00:00', pid=123, pgid=456, start_time='start',
+                              enforcement={'freedom': 'write_in_repo', 'mechanism': 'test', 'os_enforced': False,
+                                           'writes_confined': True, 'writable_roots': [str(repo)],
+                                           'commit_push_blocked': True, 'direct_commit_commands_denied': True,
+                                           'publish_attempts_allowed_by_polybridge': False, 'network_access': 'blocked',
+                                           'extra_writable_paths': [], 'extra_path_certification': None, 'caveats': []})
     store.write(logs, record)
     monkeypatch.setattr(lineage, '_default_process_table', lambda: {os.getpid(): 123, 123: 1, 1: 0})
     monkeypatch.setattr(identity, 'identity_check', lambda _: 'alive')
@@ -244,7 +249,7 @@ def test_own_scratch_and_sibling_refusal(setup):
     sibling = scratch.create(logs, 'sibling')
     (own / 'capture').write_text('own')
     (sibling / 'capture').write_text('sibling')
-    store.write(logs, replace(record, enforcement={'writable_roots': [str(own)]}))
+    store.write(logs, replace(record, enforcement={**record.enforcement, 'writable_roots': [str(own)]}))
     assert artifacts.register(logs, str(own / 'capture'), 'screenshot')['path'] == str(own / 'capture')
     with pytest.raises(ValueError):
         artifacts.register(logs, str(sibling / 'capture'), 'screenshot')
@@ -405,7 +410,7 @@ def test_missing_repository_preserves_independent_scratch_and_grant_authority(se
     scratch_target.write_text('scratch')
     grant = repo.parent / 'external-report'
     grant.write_text('grant')
-    with_grant = replace(record, enforcement={'writable_roots': [str(own)]},
+    with_grant = replace(record, enforcement={**record.enforcement, 'writable_roots': [str(own)]},
                          extra_writable_paths=serialize_paths(normalize_paths([str(grant)])))
     store.write(logs, with_grant)
     artifacts.register(logs, str(scratch_target), 'screenshot')
@@ -532,8 +537,15 @@ def test_overlapping_covering_grants_are_independent_but_structure_is_strict(set
     assert artifacts.get(logs, record.task_id)['items'][0]['availability']['state'] == 'changed'
     artifacts.register(logs, str(target), 'report', 'broad grant')
     grants[-1]['inode'] = 'malformed unrelated grant'
-    store.write(logs, replace(record, extra_writable_paths=grants))
-    assert artifacts.get(logs, record.task_id)['items'][0]['availability']['state'] == 'unavailable'
+    assert not store.write_landed(logs, replace(record, extra_writable_paths=grants))
+    assert artifacts.get(logs, record.task_id)['items'][0]['availability']['state'] == 'changed'
+    # A cooperating writer refuses malformed bytes. Model an uncooperative external
+    # replacement separately and ensure the artifact projection fails closed.
+    raw = json.loads(store.record_path(logs, record.task_id).read_text())
+    raw['extra_writable_paths'] = grants
+    store.record_path(logs, record.task_id).write_text(json.dumps(raw))
+    with pytest.raises(store.TaskDocumentError, match='Malformed path grant.inode'):
+        artifacts.get(logs, record.task_id)
     with pytest.raises(ValueError):
         artifacts.register(logs, str(target), 'report')
 
@@ -628,7 +640,7 @@ def test_ready_caller_does_not_deserialize_unrelated_history(setup, monkeypatch)
         store.write(logs, replace(record, task_id=f'unrelated-{number}', pid=10000 + number, pgid=20000))
     while store.bootstrap_catalog(logs):
         pass
-    original = store.read
+    original = store._read
     reads = []
     def read(directory, task_id, **kwargs):
         reads.append(task_id)
@@ -645,12 +657,12 @@ def test_caller_cold_catalog_advances_boundedly_and_retries(setup, monkeypatch):
         store.write(logs, replace(record, task_id=f'unrelated-{number:03}', pid=10000 + number, pgid=20000))
     for path in logs.glob('.listing.v9.sqlite3*'):
         path.unlink()
-    original = store.read
+    original = store._read
     reads = []
     def read(*args, **kwargs):
         reads.append(args[1])
         return original(*args, **kwargs)
-    monkeypatch.setattr(store, 'read', read)
+    monkeypatch.setattr(store, '_read', read)
     for expected in (100, 200):
         with pytest.raises(ValueError, match='preparation is incomplete'):
             artifacts._caller(logs)

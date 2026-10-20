@@ -42,8 +42,9 @@ def active_builder(storage, tmp_path):
         kind="builder",
         freedom="read_only",
     )
-    record = store.TaskRecord(task_id="builder-task", backend="codex", session_id="session", repo_path=str(tmp_path), started_at=1, status="running")
+    record = store.TaskRecord(task_id="builder-task", backend="codex", session_id="session", repo_path=str(tmp_path), started_at="2026-10-01T00:00:00+00:00", status="running")
     store.write(storage.root / "tasks", record)
+    assert store.read(storage.root / "tasks", record.task_id) is not None
     activation = {"id": "activation", "node_id": "builder", "role": "builder", "status": "running", "tasks": [{"task_id": record.task_id, "status": "running"}]}
     storage.update_run(run["workflow_run_id"], lambda r: r.update(status="running", activations=[activation], draft_revision=0), "test_active")
     return run["workflow_run_id"], lineage.Caller(record, "ancestry")

@@ -3,6 +3,7 @@ import asyncio
 import json
 import math
 import os
+import re
 import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -11,6 +12,7 @@ import pytest
 from mcp import MCPError
 
 from harflow_mcp import ctl, identity, server, state_ownership, store, task_waiting, wait_policy
+from harflow_mcp.backends.codex import CodexBackend
 from harflow_mcp.state_layout import resolve_layout
 from harflow_mcp.tasks import Task, TaskRegistry
 from execution_helper import run_bounded
@@ -55,10 +57,15 @@ class Ctx:
 def add_task(task_id, tmp_path, status="running"):
     task = Task(task_id=task_id, backend="codex", session_id=None, repo_path=tmp_path.parent,
                 prompt="x", max_turns=None, log_path=tmp_path / "tasks" / f"{task_id}.jsonl",
-                started_at=datetime.now(timezone.utc), status=status)
+                started_at=datetime.now(timezone.utc), status=status,
+                enforcement=CodexBackend().enforcement("write_in_repo").as_dict())
     if status != "running":
         task.done.set()
     server._reg()._tasks[task_id] = task
+    server._reg().persist(task)
+    assert task.latest_record_landed is True
+    assert task.persistence_error is None
+    assert store.read(server._reg().log_dir, task_id) is not None
     return task
 
 
@@ -143,7 +150,9 @@ async def test_wait_for_task_honours_more_than_45_seconds(tmp_path, fast_clock):
     assert result["requested_timeout_seconds"] == result["effective_timeout_seconds"] == 120
     assert result["until"] == "timeout" and result["timed_out"]
     assert result["stop_reason"] == "timeout" and result["elapsed_seconds"] >= 120
-    assert result["polling_guidance"] and "45" not in result["polling_guidance"]
+    assert result["polling_guidance"]
+    assert not re.search(r"(?<!\d)45(?!\d)\s*(?:s\b|sec)", result["polling_guidance"])
+    assert "call wait_for_task again" in result["polling_guidance"].lower()
 
 
 @pytest.mark.parametrize("final", ["completed", "failed", "cancelled", "timed_out"])
@@ -246,6 +255,62 @@ async def test_recovered_disappearing_record_reports_observation_unavailable(tmp
     result = await server.wait_for_task("rec", until="terminal")
     assert result["stop_reason"] == "observation_unavailable" and not result["timed_out"]
     assert "get_task_status" in result["next_step"]
+
+
+@pytest.mark.parametrize("poll", ["settlement", "refresh"])
+async def test_recovered_wait_rejects_incompatible_metadata_from_either_poll(
+    tmp_path, fast_clock, monkeypatch, poll
+):
+    write_record(tmp_path)
+    error = store.TaskDocumentError("rec", "metadata schema is incompatible", code="task_incompatible")
+    if poll == "settlement":
+        monkeypatch.setattr(server, "_recovered_settlement", lambda *args: (_ for _ in ()).throw(error))
+    else:
+        monkeypatch.setattr(server, "_recovered_settlement", lambda *args: ("running", False))
+        monkeypatch.setattr(server._reg(), "recover", lambda task_id: (_ for _ in ()).throw(error))
+    with pytest.raises(MCPError, match="metadata schema is incompatible"):
+        await server.wait_for_task("rec", timeout_seconds=1)
+
+
+@pytest.mark.parametrize("poll", ["settlement", "refresh"])
+async def test_recovered_wait_retries_typed_unavailable_metadata_from_either_poll(
+    tmp_path, fast_clock, monkeypatch, poll
+):
+    record = write_record(tmp_path, status="completed", exit_code=0)
+    error = store.TaskDocumentError("rec", "metadata disappeared", code="task_unavailable")
+    original_sleep = asyncio.sleep
+
+    async def no_sleep(*_args):
+        await original_sleep(0)
+
+    monkeypatch.setattr(server.asyncio, "sleep", no_sleep)
+    if poll == "settlement":
+        attempts = iter([error, ("completed", False)])
+
+        def settle(*args):
+            outcome = next(attempts)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        monkeypatch.setattr(server, "_recovered_settlement", settle)
+    else:
+        settlements = iter([("running", False), ("completed", False)])
+        monkeypatch.setattr(server, "_recovered_settlement", lambda *args: next(settlements))
+        # The first read materializes the recovered task; the injected refusal is the
+        # subsequent refresh performed inside _poll_recovered.
+        refreshes = iter([record, error, record])
+
+        def recover(task_id):
+            outcome = next(refreshes)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        monkeypatch.setattr(server._reg(), "recover", recover)
+    result = await server.wait_for_task("rec", until="terminal")
+    assert result["stop_reason"] == "terminal"
+    assert result["outcome_observed"] is True
 
 
 async def test_bounded_wait_on_vanished_record_keeps_its_timeout(tmp_path, fast_clock, monkeypatch):
@@ -701,7 +766,7 @@ async def test_wait_for_task_keeps_observing_while_the_owner_is_draining(tmp_pat
     monkeypatch.setattr(wait_policy, "UNTIL_TERMINAL_CEILING_SECONDS", 30)
     owner = ["alive"]
     _owner_stub(monkeypatch, owner)
-    write_record(tmp_path, owner={"pid": 999, "start_time": "x"})
+    write_record(tmp_path, owner={"pid": 999, "start_time": "x", "markers": []})
     result = await server.wait_for_task("rec", until="terminal")
     # It kept observing for the whole hold (the owner is still persisting the outcome), and only
     # the final reconciliation reports the still-unobserved outcome.
@@ -712,7 +777,7 @@ async def test_wait_for_task_keeps_observing_while_the_owner_is_draining(tmp_pat
 async def test_wait_for_task_stops_once_the_owner_is_gone_or_the_grace_lapses(tmp_path, fast_clock, monkeypatch):
     owner = ["dead"]
     _owner_stub(monkeypatch, owner)
-    write_record(tmp_path, owner={"pid": 999, "start_time": "x"})
+    write_record(tmp_path, owner={"pid": 999, "start_time": "x", "markers": []})
     result = await server.wait_for_task("rec", until="terminal")
     assert result["stop_reason"] == "observation_unavailable" and result["outcome_observed"] is False
     owner[0] = "alive"
@@ -737,7 +802,7 @@ async def test_final_snapshot_reconciliation_applies_the_unobserved_rule(tmp_pat
 
 async def test_bounded_wait_keeps_timeout_when_the_owner_is_still_alive(tmp_path, monkeypatch):
     """The hold ran out with the owner alive and persisting: `timeout`, not observation_unavailable."""
-    record = write_record(tmp_path, owner={"pid": 999, "start_time": "x"})
+    record = write_record(tmp_path, owner={"pid": 999, "start_time": "x", "markers": []})
     _owner_stub(monkeypatch, ["alive"])
     monkeypatch.setattr(store, "record_process_alive", lambda r: True)
     async def poll(rec, plan, ctx):
@@ -763,7 +828,7 @@ async def test_outcome_observed_is_absent_on_a_running_recovered_task(tmp_path, 
 async def test_wait_for_tasks_keeps_observing_while_the_owner_is_draining(tmp_path, monkeypatch, fake_clock):
     owner = ["alive"]
     _owner_stub(monkeypatch, owner)
-    write_record(tmp_path, owner={"pid": 999, "start_time": "x"})
+    write_record(tmp_path, owner={"pid": 999, "start_time": "x", "markers": []})
     monkeypatch.setattr(wait_policy, "OWNER_DRAIN_GRACE_SECONDS", 20.0)
     result = await server.wait_for_tasks(["rec"], "all", 10)
     assert result["stop_reason"] == "timeout" and result["undecidable_task_ids"] == []

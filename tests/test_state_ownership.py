@@ -656,6 +656,7 @@ async def test_schedule_automatic_retains_actual_continuation_until_late_write(t
         task_id="source", backend="claude", status="completed", cancel_requested=False,
         acc=Accumulator(terminal={"subtype": "error_max_turns"}), exit_code=0,
         bridge_notices=[],
+        latest_record_landed=True, persistence_error=None,
     )
 
     async def fake_continue(*args, **kwargs):

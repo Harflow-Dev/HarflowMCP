@@ -226,6 +226,7 @@ async def test_resume_saved_authority_failure_is_actionable_before_spawn(
         repo_path=str(git_repo), started_at='2026-10-14T00:00:00Z', status='completed', exit_code=0,
         extra_writable_paths=serialize_paths(grants), extra_path_certification=backend.extra_path_support()['certification'],
         enforcement=enforcement)
+    valid_record = record
     if alter == 'replaced':
         replacement = tmp_path / 'replacement'
         replacement.write_text('new')
@@ -238,11 +239,27 @@ async def test_resume_saved_authority_failure_is_actionable_before_spawn(
         record = replace(record, enforcement={})
     saved = record.extra_writable_paths.copy()
     if recovered:
-        store.write_landed(registry.log_dir, record)
+        # Land a qualified envelope first, then inject the malformed authority bytes externally.
+        store.write_landed(registry.log_dir, valid_record)
+        if alter == 'certificate' or alter == 'enforcement':
+            path = store.record_path(registry.log_dir, record.task_id)
+            payload = json.loads(path.read_text())
+            payload['extra_path_certification'] = 'corrupt' if alter == 'certificate' else valid_record.extra_path_certification
+            payload['enforcement'] = {} if alter == 'enforcement' else payload['enforcement']
+            path.write_text(json.dumps(payload))
     else:
         registry._tasks['parent'] = SimpleNamespace(**(record.__dict__ | {'repo_path': git_repo, 'finished': True}))
     spawn = AsyncMock()
     monkeypatch.setattr(registry, '_spawn', spawn)
+    if alter == 'enforcement' and recovered:
+        source = store.record_path(registry.log_dir, record.task_id).read_bytes()
+        with pytest.raises(MCPError) as error:
+            await server.resume_task('parent', 'Continue')
+        assert error.value.code == -32602
+        assert error.value.data['code'] == 'task_incompatible'
+        spawn.assert_not_called()
+        assert store.record_path(registry.log_dir, record.task_id).read_bytes() == source
+        return
     with pytest.raises(MCPError, match='extra writable path') as error:
         await server.resume_task('parent', 'Continue')
     assert error.value.code == -32602
@@ -256,8 +273,10 @@ async def test_resume_unmarked_value_error_is_not_translated(git_repo, monkeypat
     from types import SimpleNamespace
     from harflow_mcp import store
     registry = server._reg()
+    backend = backends.get('codex')
     record = store.TaskRecord(task_id='parent', backend='codex', session_id='session',
-        repo_path=str(git_repo), started_at='2026-10-14T00:00:00Z', status='completed', exit_code=0)
+        repo_path=str(git_repo), started_at='2026-10-14T00:00:00Z', status='completed', exit_code=0,
+        enforcement=backend.enforcement('write_in_repo').as_dict())
     if recovered:
         store.write_landed(registry.log_dir, record)
     else:

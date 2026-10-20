@@ -8,6 +8,7 @@ from typing import Any
 from types import SimpleNamespace
 
 from . import identity, store, wait_policy
+from .catalog import DeferredRead
 from .tasks import TERMINAL_STATUSES, TaskRegistry
 
 MAX_TASKS = 32
@@ -129,19 +130,28 @@ async def wait_for_tasks(
     def unavailable():
         return (SimpleNamespace(backend=None, session_id=None, title=None), "unavailable", "Bounded metadata observation unavailable; retry or inspect task diagnostics.", "unavailable")
 
-    async def read_recovered(task_id):
+    async def read_source(task_id, *, live=False):
         remaining = io_deadline - _now()
         try:
             if remaining <= 0:
                 raise asyncio.TimeoutError
+            if live:
+                return await asyncio.wait_for(
+                    asyncio.to_thread(store.read, registry.log_dir, task_id, include_prompt=False, metadata_byte_limit=METADATA_BYTES),
+                    remaining,
+                )
             return await asyncio.wait_for(asyncio.to_thread(_recovered, registry.log_dir, task_id), remaining)
-        except (asyncio.TimeoutError, OSError, ValueError, TypeError):
+        except store.TaskDocumentError as exc:
+            if exc.code != "task_unavailable":
+                raise
+            return unavailable()
+        except (asyncio.TimeoutError, OSError, ValueError, TypeError, DeferredRead):
             return unavailable()
 
     # Resolve the complete set before creating observers; no partial wait on missing ids.
     for task_id in task_ids:
         task = live_tasks[task_id]
-        record = None if task is not None else await read_recovered(task_id)
+        record = await read_source(task_id, live=task is not None)
         if task is None and record is None:
             record = unavailable()
         sources.append((task_id, task, record))
@@ -159,15 +169,22 @@ async def wait_for_tasks(
             rows = []
             for task_id, task, record in sources:
                 if task is not None:
-                    status, summary = task.status, task.acc.summary
+                    # Runtime objects cannot bless a subsequently replaced persisted source.
+                    qualified = await read_source(task_id, live=True)
+                    if qualified is None or isinstance(qualified, tuple):
+                        source, status, note, status_source = unavailable()
+                        summary = None
+                    else:
+                        source = task
+                        status, summary = task.status, task.acc.summary
+                        note = None
+                        status_source = "live_task"
                     settling = status in TERMINAL_STATUSES and not task.done.is_set()
                     if settling:
                         status = "running"
-                    source = task
-                    note = None
-                    status_source = "live_settling" if settling else "live_task"
+                        status_source = "live_settling"
                 else:
-                    fresh = await read_recovered(task_id)
+                    fresh = await read_source(task_id)
                     if fresh is None:
                         source, status, note, status_source = record[0], "unavailable", "Task metadata disappeared or became unreadable while waiting.", "unavailable"
                     else:
@@ -177,7 +194,7 @@ async def wait_for_tasks(
                 if getattr(source, "caller_approvals", False):
                     from . import approvals
                     row["approval_summary"] = await asyncio.to_thread(approvals.summary, registry.log_dir, task_id)
-                diagnostic = _failure_diagnostic(task.acc if task is not None else source)
+                diagnostic = _failure_diagnostic(task.acc if task is not None and status_source != "unavailable" else source)
                 if diagnostic is not None:
                     row["failure_diagnostic"] = diagnostic
                 if status_source == "recovered_owner_draining":

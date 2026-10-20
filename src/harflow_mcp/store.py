@@ -25,6 +25,7 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from contextvars import ContextVar
 
 from . import control, events, identity
 from .backends import Accumulator
@@ -32,8 +33,16 @@ from .backends import get as get_backend
 from .backends import resume_command
 from .extra_paths import has_extra_path_authority
 from .stream import parse_line
+from .task_documents import TaskDocumentError, decode as decode_task, encode as encode_task
 
 log = logging.getLogger(__name__)
+
+_write_error: ContextVar[TaskDocumentError | None] = ContextVar("task_write_error", default=None)
+
+def last_write_error() -> TaskDocumentError | None:
+    """Diagnostic for the latest write attempt in this execution context."""
+    return _write_error.get()
+
 
 RECORD_SUFFIX = ".meta.json"
 
@@ -189,6 +198,7 @@ def write(log_dir: Path, record: TaskRecord) -> None:
 
 @task_operation
 def write_landed(log_dir: Path, record: TaskRecord) -> bool:
+    _write_error.set(None)
     from .catalog import catalog_lock
     import sqlite3
     try:
@@ -199,7 +209,8 @@ def write_landed(log_dir: Path, record: TaskRecord) -> bool:
     try:
         with catalog_lock(log_dir, layout=task_layout(log_dir)):
             return _write_landed_locked(log_dir, record)
-    except (OSError, sqlite3.Error):
+    except (OSError, sqlite3.Error) as exc:
+        _write_error.set(TaskDocumentError(record.task_id, str(exc), code="task_unavailable"))
         log.warning("could not lock record for task %s", record.task_id, exc_info=True)
         return False
 
@@ -211,6 +222,7 @@ def _write_landed_locked(log_dir: Path, record: TaskRecord) -> bool:
     failure. For a caller that must tell the user when a status it published did not stick.
     """
     assert_task_owned(log_dir)
+    import sqlite3
     previous_directory_mtime = log_dir.stat().st_mtime_ns if log_dir.exists() else None
     try:
         target = record_path(log_dir, record.task_id)
@@ -218,7 +230,13 @@ def _write_landed_locked(log_dir: Path, record: TaskRecord) -> bool:
         log.warning("refusing to persist a record for an invalid task id")
         return False
 
-    existing = read(log_dir, record.task_id, include_prompt=False)
+    try:
+        existing = _read(log_dir, record.task_id, include_prompt=False)
+    except TaskDocumentError as exc:
+        _write_error.set(exc)
+        log.warning("task document persistence refused for %s", record.task_id, exc_info=True)
+        return False
+    expected_source = getattr(existing, "_source_identity", None)
     if (
         existing is not None
         and existing.status in TERMINAL_RECORD_STATUSES
@@ -234,9 +252,10 @@ def _write_landed_locked(log_dir: Path, record: TaskRecord) -> bool:
 
     try:
         from .catalog import Catalog
+        payload = encode_task(asdict(record))
+        decode_task(payload, record.task_id, TaskRecord)
         Catalog(log_dir, RECORD_SUFFIX, layout=task_layout(log_dir)).invalidate(record.task_id)
         log_dir.mkdir(parents=True, exist_ok=True)
-        payload = asdict(record)
         if len(record.prompt) > PROMPT_PREVIEW_CHARS:
             digest = hashlib.sha256(record.prompt.encode("utf-8")).hexdigest()
             source = log_dir / f"{record.task_id}.prompt.{digest}.txt"
@@ -262,11 +281,26 @@ def _write_landed_locked(log_dir: Path, record: TaskRecord) -> bool:
                 handle.flush()
                 os.fsync(handle.fileno())
                 written_source = os.fstat(handle.fileno())
+            from .catalog import source_identity
+            try:
+                current_source = source_identity(target.stat())
+            except FileNotFoundError:
+                current_source = None
+            if current_source != expected_source:
+                Path(handle.name).unlink(missing_ok=True)
+                _write_error.set(TaskDocumentError(record.task_id, "Task source changed before persistence", code="task_unavailable"))
+                log.warning("task document source changed before persistence: %s", record.task_id)
+                return False
             os.replace(handle.name, target)
         except BaseException:
             Path(handle.name).unlink(missing_ok=True)
             raise
-    except OSError:
+    except TaskDocumentError as exc:
+        _write_error.set(exc)
+        log.warning("refusing malformed task record %s", record.task_id)
+        return False
+    except (OSError, sqlite3.Error) as exc:
+        _write_error.set(TaskDocumentError(record.task_id, str(exc), code="task_unavailable"))
         log.warning("could not persist record for task %s", record.task_id, exc_info=True)
         return False
     from .catalog import Catalog
@@ -277,9 +311,14 @@ def _write_landed_locked(log_dir: Path, record: TaskRecord) -> bool:
     return True
 
 
-@task_operation
-def read(log_dir: Path, task_id: str, *, include_prompt: bool = True, metadata_byte_limit: int | None = None, metadata_budget: Any = None) -> TaskRecord | None:
+def _read(log_dir: Path, task_id: str, *, include_prompt: bool = True, metadata_byte_limit: int | None = None, metadata_budget: Any = None) -> TaskRecord | None:
     path = record_path(log_dir, task_id)
+    initial_source = None
+
+    def refusal(reason: str, code: str) -> TaskDocumentError:
+        error = TaskDocumentError(task_id, reason, code=code)
+        error._source_identity = initial_source
+        return error
     try:
         from .catalog import source_identity
         initial_source = source_identity(path.stat())
@@ -294,15 +333,12 @@ def read(log_dir: Path, task_id: str, *, include_prompt: bool = True, metadata_b
         from .bounded_io import ReadLimit
         if isinstance(exc, ReadLimit):
             raise
-        log.warning("ignoring unreadable task record %s", path, exc_info=True)
-        return None
-    if not isinstance(raw, dict):
-        return None
+        code = "task_unavailable" if isinstance(exc, OSError) else "task_incompatible"
+        raise refusal(str(exc), code) from exc
 
-    fields = {f for f in TaskRecord.__dataclass_fields__}
     try:
         # Unknown keys are dropped so a record written by a newer version still loads.
-        record = TaskRecord(**{k: v for k, v in raw.items() if k in fields})
+        record = decode_task(raw, task_id, TaskRecord)
         if include_prompt and record.prompt_truncated:
             try:
                 source = record.prompt_source
@@ -320,22 +356,96 @@ def read(log_dir: Path, task_id: str, *, include_prompt: bool = True, metadata_b
                 reason = "Full task assignment is unavailable; prompt preview is not authoritative: " + str(exc)
                 log.warning("task %s: %s", task_id, reason)
                 record = replace(record, prompt="", prompt_error=reason)
-        if source_identity(path.stat()) == initial_source:
-            object.__setattr__(record, '_source_identity', initial_source)
+        if source_identity(path.stat()) != initial_source:
+            raise refusal('Task metadata changed while reading', 'task_unavailable')
+        object.__setattr__(record, '_source_identity', initial_source)
         return record
+    except TaskDocumentError as exc:
+        exc._source_identity = initial_source
+        raise
     except (TypeError, ValueError, OSError):
-        log.warning("ignoring malformed task record or unavailable full prompt %s", path)
-        return None
+        raise refusal("Task metadata became unavailable", "task_unavailable")
+
+
+@task_operation
+def read(log_dir: Path, task_id: str, *, include_prompt: bool = True, metadata_byte_limit: int | None = None, metadata_budget: Any = None) -> TaskRecord | None:
+    """Read qualified identity; only a verified absent source returns None."""
+    try:
+        return _read(log_dir, task_id, include_prompt=include_prompt, metadata_byte_limit=metadata_byte_limit, metadata_budget=metadata_budget)
+    except TaskDocumentError as exc:
+        # Reconcile derivative authority only for reads, never for a refused write.
+        from .catalog import Catalog
+        header, stamp, active = _blocker(log_dir, task_id, exc)
+        Catalog(log_dir, RECORD_SUFFIX, layout=task_layout(log_dir)).record(header, stamp, active, task_id)
+        raise
+
+
+def _blocker(log_dir: Path, identifier: str, exc: TaskDocumentError):
+    header = {"task_id": identifier, "status": "unknown", "needs_direct_lookup": True,
+              "index_blocker": "incompatible_metadata" if exc.code == "task_incompatible" else "unavailable_metadata",
+              "task_error": exc.as_dict(), "note": exc.reason}
+    # Only the source actually observed by the failed read can authorize a blocker.
+    # An unobserved or replaced source must be qualified by a later request.
+    header["_source_identity"] = getattr(exc, "_source_identity", None) or (-1, -1, -1, -1)
+    return header, 0.0, True
+
+
+@dataclass(frozen=True)
+class TaskScan:
+    records: list[TaskRecord]
+    refusals: dict[str, TaskDocumentError]
+
+    @property
+    def history_incomplete(self) -> bool:
+        return bool(self.refusals)
+
+    def require_complete(self) -> list[TaskRecord]:
+        if self.refusals:
+            raise next(iter(self.refusals.values()))
+        return self.records
+
+    def diagnostics(self) -> dict[str, Any]:
+        return {"history_incomplete": self.history_incomplete,
+                "refused_tasks": [error.as_dict() for error in self.refusals.values()]}
+
+
+@task_operation
+def scan(log_dir: Path) -> TaskScan:
+    records, refusals = [], {}
+    try:
+        with os.scandir(log_dir) as entries:
+            paths = sorted(log_dir / entry.name for entry in entries if entry.name.endswith(RECORD_SUFFIX))
+    except FileNotFoundError:
+        return TaskScan([], {})
+    except OSError as exc:
+        raise TaskDocumentError("*", str(exc), code="task_unavailable") from exc
+    for path in paths:
+        identifier = path.name[:-len(RECORD_SUFFIX)]
+        try:
+            record = read(log_dir, identifier, include_prompt=False)
+            if record is not None:
+                records.append(record)
+        except TaskDocumentError as exc:
+            refusals[identifier] = exc
+        except InvalidTaskId as exc:
+            refusals[identifier] = TaskDocumentError(identifier, str(exc))
+    return TaskScan(sorted(records, key=lambda record: record.started_at), refusals)
 
 
 @task_operation
 def read_all(log_dir: Path) -> list[TaskRecord]:
+    """Read complete qualified history, refusing omitted task identities."""
+    return scan(log_dir).require_complete()
+
+
+def _catalog_load(log_dir: Path, identifier: str, *, _metadata_budget=None):
     try:
-        paths = sorted(log_dir.glob(f"*{RECORD_SUFFIX}"))
-    except OSError:
-        return []
-    records = [read(log_dir, path.name[: -len(RECORD_SUFFIX)], include_prompt=False) for path in paths]
-    return sorted((r for r in records if r is not None), key=lambda r: r.started_at)
+        record = _read(log_dir, identifier, include_prompt=False, metadata_byte_limit=4 * 1024 * 1024, metadata_budget=_metadata_budget)
+        return listing_header(record) if record is not None else None
+    except TaskDocumentError as exc:
+        return _blocker(log_dir, identifier, exc)
+    except InvalidTaskId as exc:
+        return _blocker(log_dir, identifier, TaskDocumentError(identifier, str(exc)))
 
 
 def listing_header(record: TaskRecord) -> tuple[dict[str, Any], float, bool]:
@@ -371,8 +481,7 @@ def listing_header(record: TaskRecord) -> tuple[dict[str, Any], float, bool]:
 def bootstrap_catalog(log_dir: Path) -> bool:
     from .catalog import Catalog, DeferredRead
     def load(identifier: str, *, _metadata_budget=None):
-        record = read(log_dir, identifier, include_prompt=False, metadata_byte_limit=4 * 1024 * 1024, metadata_budget=_metadata_budget)
-        return listing_header(record) if record is not None else None
+        return _catalog_load(log_dir, identifier, _metadata_budget=_metadata_budget)
     load.bounded_metadata = True
     catalog = Catalog(log_dir, RECORD_SUFFIX, layout=task_layout(log_dir))
     with catalog.connect() as db:
@@ -409,13 +518,12 @@ def _project_indexed_status(header: dict[str, Any], record: TaskRecord) -> bool:
 def list_page(log_dir: Path, *, limit: int = 100, cursor: str | None = None, active_only: bool = False, session_id: str | None = None, task_ids: list[str] | None = None, filters: dict[str, Any] | None = None) -> dict[str, Any]:
     from .catalog import Catalog, DeferredRead, apply_read_state
     def load(identifier: str, *, _metadata_budget=None):
-        record = read(log_dir, identifier, include_prompt=False, metadata_byte_limit=4 * 1024 * 1024, metadata_budget=_metadata_budget)
-        return listing_header(record) if record is not None else None
+        return _catalog_load(log_dir, identifier, _metadata_budget=_metadata_budget)
     load.bounded_metadata = True
     catalog = Catalog(log_dir, RECORD_SUFFIX, layout=task_layout(log_dir))
     with catalog.connect() as db:
         # Upgrade existing headers without decoding metadata or losing chronology.
-        db.execute("UPDATE entries SET active=1,payload=json_set(payload,'$.needs_reconciliation',json('true'),'$.observed_exit',json('false'),'$.persisted_status',json_extract(payload,'$.status'),'$.status','running') WHERE id IN (SELECT id FROM callers WHERE terminal=0) AND json_type(payload,'$.needs_reconciliation') IS NULL")
+        db.execute("UPDATE entries SET active=1,payload=json_set(payload,'$.needs_reconciliation',json('true'),'$.observed_exit',json('false'),'$.persisted_status',json_extract(payload,'$.status'),'$.status','running') WHERE id IN (SELECT id FROM callers WHERE terminal=0) AND json_type(payload,'$.needs_reconciliation') IS NULL AND COALESCE(json_extract(payload,'$.needs_direct_lookup'),0)!=1")
     if task_ids is not None:
         identifiers = [validate_task_id(identifier) for identifier in task_ids]
         page = catalog.header_page(identifiers, load)
@@ -429,6 +537,8 @@ def list_page(log_dir: Path, *, limit: int = 100, cursor: str | None = None, act
     workflow_catalog = Catalog(workflow_storage.runs, '.json', layout=workflow_storage.state_layout)
     workflow_catalog.share_budget(catalog)
     for item in page['items']:
+        if item.get('needs_direct_lookup'):
+            continue
         try:
             from .bounded_io import read_receipt
             receipt = read_receipt(log_dir.parent / 'workflow-owners' / f"{validate_task_id(item['task_id'])}.json")
@@ -452,8 +562,30 @@ def list_page(log_dir: Path, *, limit: int = 100, cursor: str | None = None, act
     from .catalog import bound_header
     with catalog.connect() as db:
         for item in page['items']:
+            if item.get('needs_direct_lookup'):
+                continue
             row = db.execute('SELECT payload FROM callers WHERE id=?', (item['task_id'],)).fetchone()
             if row is None:
+                continue
+            try:
+                if catalog._changed(db, item['task_id']):
+                    value = catalog._load_bounded(item['task_id'], load)
+                    if value is None:
+                        catalog._remove(db, item['task_id'])
+                        continue
+                    updated, stamp, active = value
+                    catalog._put(db, updated, stamp, active, item['task_id'])
+                    identifier = item['task_id']
+                    item.clear()
+                    item.update({key: value for key, value in updated.items() if not key.startswith('_')})
+                    if item.get('needs_direct_lookup'):
+                        continue
+                    row = db.execute('SELECT payload FROM callers WHERE id=?', (identifier,)).fetchone()
+                    if row is None:
+                        continue
+            except DeferredRead:
+                db.execute('INSERT OR IGNORE INTO pending VALUES (?)', (item['task_id'],))
+                apply_read_state(page, catalog.state(db))
                 continue
             record = TaskRecord(**json.loads(row[0]))
             active = _project_indexed_status(item, record)
@@ -473,7 +605,27 @@ def list_page(log_dir: Path, *, limit: int = 100, cursor: str | None = None, act
         for identifier, stamp, payload, caller in rotating:
             header = json.loads(payload)
             previous_status = header.get('status')
-            active = _project_indexed_status(header, TaskRecord(**json.loads(caller)))
+            try:
+                if catalog._changed(db, identifier):
+                    value = catalog._load_bounded(identifier, load)
+                    if value is None:
+                        catalog._remove(db, identifier)
+                        continue
+                    header, stamp, active = value
+                    catalog._put(db, header, stamp, active, identifier)
+                    if header.get('needs_direct_lookup'):
+                        continue
+                    row = db.execute('SELECT payload FROM callers WHERE id=?', (identifier,)).fetchone()
+                    if row is None:
+                        continue
+                    caller = row[0]
+                    header = {key: value for key, value in header.items() if not key.startswith("_")}
+            except DeferredRead:
+                db.execute('INSERT OR IGNORE INTO pending VALUES (?)', (identifier,))
+                apply_read_state(page, catalog.state(db))
+                continue
+            record = TaskRecord(**json.loads(caller))
+            active = _project_indexed_status(header, record)
             rotating_status_changed |= header.get('status') != previous_status
             db.execute('UPDATE entries SET active=?,payload=? WHERE id=?', (int(active), json.dumps(bound_header(header), ensure_ascii=True, separators=(',', ':')), identifier))
         if rotating:
@@ -524,7 +676,6 @@ def list_page(log_dir: Path, *, limit: int = 100, cursor: str | None = None, act
                 break
             header = json.loads(row[0])
             if header.get('needs_direct_lookup'):
-                apply_read_state(page, catalog.state(db))
                 continue
             try:
                 from .bounded_io import read_receipt
@@ -537,6 +688,7 @@ def list_page(log_dir: Path, *, limit: int = 100, cursor: str | None = None, act
                 pass
             related.append(header)
             queue[0:0] = [header[key] for key in ('parent_task_id', 'continuation_of_task_id', 'chain_root_task_id', 'spawned_by', 'root_task_id') if header.get(key) and header[key] not in visited]
+        apply_read_state(page, catalog.state(db))
     page['related_headers'] = related
     return page
 
@@ -669,6 +821,10 @@ def resolve_status(
     use for the summary/usage/etc. it would buy. `detail=True` (the default, used by `snapshot`)
     always replays.
     """
+    fresh = read(log_dir, record.task_id, include_prompt=False)
+    if fresh is None:
+        raise TaskDocumentError(record.task_id, "Task metadata disappeared", code="task_unavailable")
+    record = fresh
     status, note, state, tail, _owned = _resolve(log_dir, record, detail=detail)
     return status, note, state, tail
 
@@ -873,6 +1029,10 @@ def _notices(record: TaskRecord, state: Accumulator) -> list[str]:
 def snapshot(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
     """A recovered task's state, shaped like a live snapshot so callers need no special casing."""
     from . import artifacts
+    qualified = read(log_dir, record.task_id, include_prompt=False)
+    if qualified is None:
+        raise TaskDocumentError(record.task_id, 'Task metadata disappeared', code='task_unavailable')
+    record = qualified
     if record.prompt_truncated:
         authoritative = read(log_dir, record.task_id)
         if authoritative is None:
@@ -962,6 +1122,7 @@ def snapshot(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
         "resume_command": None if has_extra_path_authority(record) else resume_command(record.backend, record.session_id, record.repo_path),
         "extra_writable_paths": record.extra_writable_paths,
         "extra_path_certification": record.extra_path_certification,
+        "metadata_persisted": True,
         "recovered": True,
         "note": note,
     } | control.taken_over_fields(log_dir, record.task_id)
@@ -976,6 +1137,10 @@ def brief(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
     stream replayed, which a listing should not pay for — and they are stream detail, which is what
     `snapshot` is for. Uses `detail=False`, so a settled, observed task costs no replay here either.
     """
+    fresh = read(log_dir, record.task_id, include_prompt=False)
+    if fresh is None:
+        raise TaskDocumentError(record.task_id, "Task metadata disappeared", code="task_unavailable")
+    record = fresh
     from . import followups, approvals
     status, _, state, _, owned = _resolve(log_dir, record, detail=False)
     return {
@@ -1009,6 +1174,7 @@ def brief(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
         "failure_diagnostic": state.failure_diagnostic or record.failure_diagnostic,
         "owner": record.owner,
         "owned_by_live_server": owned if status == "running" else None,
+        "metadata_persisted": True,
         "recovered": True,
     } | control.taken_over_fields(log_dir, record.task_id)
 

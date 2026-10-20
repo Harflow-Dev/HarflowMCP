@@ -47,6 +47,7 @@ def make_task(tmp_path: Path, task_id: str, **overrides) -> Task:
         max_turns=5,
         log_path=tmp_path / f"{task_id}.jsonl",
         started_at=datetime.now(timezone.utc),
+        enforcement=tasks_module.get_backend("claude").enforcement("write_in_repo").as_dict(),
     )
     defaults.update(overrides)
     return Task(**defaults)
@@ -472,6 +473,65 @@ async def test_cascade_reports_a_failed_descendant_and_still_cancels_the_rest(
 
     finally:
         await cleanup(*spawned)
+
+
+async def test_cascade_cancels_valid_descendants_but_reports_foreign_history_as_incomplete(
+    tmp_path: Path,
+) -> None:
+    registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
+    spawned = []
+    foreign = tmp_path / "foreign.meta.json"
+    foreign_bytes = b'{"product":"foreign","format":"other"}'
+    foreign.write_bytes(foreign_bytes)
+    try:
+        root = spawn_noop_local_task(registry, tmp_path)
+        child = await spawn_sleep_task(registry, "child", tmp_path, spawned_by="root")
+        spawned.append(child)
+
+        result = await asyncio.wait_for(registry.cancel_cascade(root.task_id), timeout=5)
+
+        assert child.status == "cancelled"
+        assert result["cancelled_descendants"] == ["child"]
+        assert result["cascade_incomplete"] and result["history_incomplete"]
+        assert result["not_signalled"] == []
+        assert result["refused_tasks"] == [
+            {"task_id": "foreign", "code": "task_incompatible", "reason": "Missing or foreign task product/format"}
+        ]
+        assert foreign.read_bytes() == foreign_bytes
+    finally:
+        await cleanup(*spawned)
+
+
+async def test_cascade_reports_already_signalled_when_foreign_replacement_follows_delivery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
+    record = _child_record(tmp_path)
+    store.write(tmp_path, record)
+    path = store.record_path(tmp_path, record.task_id)
+    foreign_bytes = b'{"product":"foreign","format":"other"}'
+
+    monkeypatch.setattr(identity, "check_detail", lambda ident: ("alive", "start_time_match"))
+    monkeypatch.setattr(identity, "identity_check", lambda ident: "dead")
+    delivered = False
+
+    def signal_then_replace(current, sig):
+        nonlocal delivered
+        assert sig == signal.SIGTERM
+        delivered = True
+        path.write_bytes(foreign_bytes)
+        return True
+
+    monkeypatch.setattr(tasks_module, "_signal_recorded_group", signal_then_replace)
+
+    outcomes = await registry._cascade_case3_batch([record])
+
+    assert delivered
+    assert outcomes[record.task_id][0] == "not_recorded"
+    assert "signalled" in (outcomes[record.task_id][1] or "")
+    assert "not_signalled" not in (outcomes[record.task_id][1] or "")
+    assert path.read_bytes() == foreign_bytes
+    assert control.attempt_outcome(tmp_path, record.task_id, control.CANCEL, 1) == "sig"
 
 
 def _child_record(tmp_path: Path, *, pid: int = 424242) -> store.TaskRecord:
@@ -1134,13 +1194,14 @@ async def test_sigkill_is_never_sent_once_the_leader_is_no_longer_ours(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     record = _child_record(tmp_path)
+    registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
     monkeypatch.setattr(identity, "check_detail", lambda ident: ("dead", "start_time_differs"))
     signals: list[int] = []
     monkeypatch.setattr(
         tasks_module, "_signal_recorded_group", lambda record, sig: signals.append(sig) or True
     )
 
-    assert TaskRegistry._kill_if_ours(record) is False
+    assert registry._kill_if_ours(record) is False
     assert signals == []
 
 

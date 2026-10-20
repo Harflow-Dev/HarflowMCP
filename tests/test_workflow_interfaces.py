@@ -132,7 +132,7 @@ async def test_registry_honors_reserved_id_and_refuses_reuse(tmp_path, git_repo,
     from harflow_mcp import backends, store
     from harflow_mcp.tasks import TaskRegistry
     state_root = tmp_path / "state"
-    registry = TaskRegistry(log_dir=state_root / "tasks", owner={}, open_monitor=False)
+    registry = TaskRegistry(log_dir=state_root / "tasks", owner={"pid": 12345, "start_time": "2026-10-01T00:00:00+00:00", "markers": ["harflow-mcp"]}, open_monitor=False)
     task = await registry.start("test", git_repo, backend=backends.get("claude"), task_id="reserved-id")
     await task.done.wait()
     assert task.task_id == "reserved-id"

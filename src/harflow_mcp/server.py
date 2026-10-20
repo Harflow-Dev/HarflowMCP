@@ -14,6 +14,7 @@ import subprocess
 import sys
 import unicodedata
 import uuid
+from functools import wraps
 from pathlib import Path
 from typing import Any, Literal
 
@@ -90,6 +91,17 @@ def _status_payload(
             for line in tail[-SHORT_TAIL_LINES:]
         ]
     return payload
+
+
+def _task_document_errors(function):
+    """Keep task qualification refusals stable on every MCP tool boundary."""
+    @wraps(function)
+    async def wrapped(*args, **kwargs):
+        try:
+            return await function(*args, **kwargs)
+        except store.TaskDocumentError as exc:
+            raise MCPError(INVALID_PARAMS, str(exc), data=exc.as_dict()) from None
+    return wrapped
 
 
 mcp = MCPServer(
@@ -363,6 +375,7 @@ async def _validate_repo_path(repo_path: str) -> Path:
 
 
 @mcp.tool()
+@_task_document_errors
 async def list_backends() -> list[dict[str, Any]]:
     """Report the available agent backends, what is installed, and what each can actually do.
 
@@ -390,7 +403,7 @@ async def _notification_io(function, directory, *args, **kwargs):
                 await asyncio.shield(operation)
             except asyncio.CancelledError:
                 continue
-            except StateOwnershipError:
+            except (StateOwnershipError, store.TaskDocumentError):
                 raise
             except Exception:
                 break
@@ -400,6 +413,7 @@ async def _notification_io(function, directory, *args, **kwargs):
 
 
 @mcp.tool()
+@_task_document_errors
 async def start_task(
     prompt: str,
     repo_path: str,
@@ -574,12 +588,12 @@ async def start_task(
             # No dispatch has begun, and the reservation thread has finished committing.
             try:
                 await _notification_io(discard_unstarted, _reg().log_dir, reserved_id)
-            except StateOwnershipError:
+            except (StateOwnershipError, store.TaskDocumentError):
                 raise
             except Exception:
                 log.warning('Notification reservation cleanup unavailable for task %s', reserved_id)
             raise
-        except StateOwnershipError:
+        except (StateOwnershipError, store.TaskDocumentError):
             raise
         except Exception:
             raise MCPError(INTERNAL_ERROR, 'Notification reservation failed; no task was started') from None
@@ -610,7 +624,7 @@ async def start_task(
             if not_started and _reg().get(reserved_id) is None:
                 try:
                     cleaned = await _notification_io(discard_unstarted, _reg().log_dir, reserved_id)
-                except StateOwnershipError:
+                except (StateOwnershipError, store.TaskDocumentError):
                     raise
                 except Exception:
                     log.warning('Notification reservation cleanup unavailable for task %s', reserved_id)
@@ -632,6 +646,7 @@ async def start_task(
 
 
 @mcp.tool()
+@_task_document_errors
 @bounded_request
 async def list_approval_requests(task_id: str | None = None, workflow_run_id: str | None = None, cursor: str | None = None, limit: StrictInt = 16) -> dict[str, Any]:
     """List bounded permission request metadata for exactly one task or root workflow tree.
@@ -649,6 +664,7 @@ async def list_approval_requests(task_id: str | None = None, workflow_run_id: st
 
 
 @mcp.tool()
+@_task_document_errors
 @bounded_request
 async def get_approval_request(task_id: str, request_id: str) -> dict[str, Any]:
     """Read the complete exact action for an authorized direct caller.
@@ -664,6 +680,7 @@ async def get_approval_request(task_id: str, request_id: str) -> dict[str, Any]:
 
 
 @mcp.tool()
+@_task_document_errors
 @bounded_request
 async def respond_approval_request(task_id: str, request_id: str, action_digest: str, owner_revision: StrictInt, decision: str, interaction_owner: str = "caller") -> dict[str, Any]:
     """Reserve approve/reject for one exact action, with stale/duplicate answer protection.
@@ -684,6 +701,7 @@ async def respond_approval_request(task_id: str, request_id: str, action_digest:
 
 
 @mcp.tool()
+@_task_document_errors
 async def preview_task_permissions(
     repo_path: str,
     backend: str | None = None,
@@ -722,6 +740,7 @@ async def preview_task_permissions(
 
 
 @mcp.tool()
+@_task_document_errors
 async def subscribe(task_id: str, notify: str) -> dict[str, Any]:
     """Durably subscribe to one task's observed terminal settlement using a configured alias.
 
@@ -748,6 +767,7 @@ async def subscribe(task_id: str, notify: str) -> dict[str, Any]:
 
 
 @mcp.tool()
+@_task_document_errors
 async def get_task_notifications(task_id: str) -> list[dict[str, Any]]:
     """Read bounded subscription delivery states; this never establishes task success."""
     await _notification_authority()
@@ -759,6 +779,7 @@ async def get_task_notifications(task_id: str) -> list[dict[str, Any]]:
 
 
 @mcp.tool()
+@_task_document_errors
 async def unsubscribe(task_id: str, notify: str | None = None) -> list[dict[str, Any]]:
     """Stop future attempts for a task/alias (or all aliases); in-flight requests may finish."""
     from .caller_policy import require_mutation
@@ -772,6 +793,7 @@ async def unsubscribe(task_id: str, notify: str | None = None) -> list[dict[str,
 
 
 @mcp.tool()
+@_task_document_errors
 async def get_task_status(
     task_id: str,
     include_tail: bool = False,
@@ -899,7 +921,7 @@ def _owner_alive(record: store.TaskRecord) -> bool:
     """Whether the harflow_mcp server that owns this record is still running."""
     try:
         return identity.identity_check(record.owner) == "alive"
-    except StateOwnershipError:
+    except (StateOwnershipError, store.TaskDocumentError):
         raise
     except Exception:
         return False
@@ -950,6 +972,11 @@ async def _poll_recovered(
         round_failed = False
         try:
             status, gone = await asyncio.to_thread(_recovered_settlement, _reg().log_dir, record)
+        except store.TaskDocumentError as exc:
+            if exc.code != "task_unavailable":
+                raise
+            status, gone = None, False
+            round_failed = True
         except StateOwnershipError:
             raise
         except Exception:
@@ -974,6 +1001,10 @@ async def _poll_recovered(
 
         try:
             fresh = _reg().recover(record.task_id)
+        except store.TaskDocumentError as exc:
+            if exc.code != "task_unavailable":
+                raise
+            fresh = None
         except StateOwnershipError:
             raise
         except Exception:
@@ -994,6 +1025,7 @@ async def _poll_recovered(
 
 
 @mcp.tool()
+@_task_document_errors
 async def wait_for_task(
     task_id: str,
     timeout_seconds: StrictInt | None = None,
@@ -1057,7 +1089,7 @@ async def wait_for_task(
         record, stop_reason, outcome_observed = await _poll_recovered(record, plan, ctx)
         try:
             snapshot = await asyncio.to_thread(store.snapshot, _reg().log_dir, record)
-        except StateOwnershipError:
+        except (StateOwnershipError, store.TaskDocumentError):
             raise
         except Exception:
             if stop_reason != wait_policy.STOP_UNAVAILABLE:
@@ -1107,7 +1139,7 @@ async def wait_for_task(
         payload = await asyncio.to_thread(
             _status_payload, snapshot, include_tail=include_tail, log_dir=_reg().log_dir, task_id=task_id
         )
-    except StateOwnershipError:
+    except (StateOwnershipError, store.TaskDocumentError):
         raise
     except Exception:
         if stop_reason != wait_policy.STOP_UNAVAILABLE:
@@ -1128,6 +1160,7 @@ async def wait_for_task(
 
 
 @mcp.tool()
+@_task_document_errors
 async def wait_for_tasks(
     task_ids: list[str], mode: str = "any", timeout_seconds: StrictInt | None = None,
     until: Literal["timeout", "terminal"] = "timeout",
@@ -1157,7 +1190,7 @@ async def wait_for_tasks(
     try:
         task_waiting.validate(task_ids, mode, timeout_seconds, until)
         for task_id in task_ids:
-            await _guard_task_read(task_id)
+            await _guard_task_read(task_id, qualify_source=False)
         return await task_waiting.wait_for_tasks(
             _reg(), task_ids, mode, timeout_seconds,
             ctx.report_progress if ctx is not None else None,
@@ -1168,6 +1201,7 @@ async def wait_for_tasks(
 
 
 @mcp.tool()
+@_task_document_errors
 async def continue_task(task_id: str, extra_prompt: str | None = None, notes_path: str | None = None) -> dict[str, Any]:
     """Start a fresh session from a conclusively settled standalone task.
 
@@ -1198,6 +1232,7 @@ async def continue_task(task_id: str, extra_prompt: str | None = None, notes_pat
 
 
 @mcp.tool()
+@_task_document_errors
 async def resume_task(
     task_id: str,
     followup_prompt: str | None = None,
@@ -1295,6 +1330,7 @@ async def resume_task(
 
 
 @mcp.tool()
+@_task_document_errors
 async def list_tasks(
     status: str | None = None, backend: str | None = None,
     group: str | None = None, title_contains: str | None = None, repo: str | None = None,
@@ -1345,7 +1381,7 @@ async def list_tasks(
     entries = [task.brief() for task in live]
     entries.extend(_reg().recovered_briefs(exclude={task.task_id for task in live}))
     entries = await _filter_task_reads(entries)
-    entries.sort(key=lambda entry: entry["started_at"])
+    entries.sort(key=lambda entry: (entry.get("started_at") or "", entry["task_id"]))
 
     if status is not None:
         entries = [entry for entry in entries if entry["status"] == status]
@@ -1356,6 +1392,7 @@ async def list_tasks(
 
 
 @mcp.tool()
+@_task_document_errors
 @bounded_request
 async def list_task_page(limit: int = 100, cursor: str | None = None, active_only: bool = False, session_id: str | None = None, task_ids: list[str] | None = None) -> dict[str, Any]:
     """Stable newest-first persisted task headers; inspect a task for reconciled status/output.
@@ -1385,6 +1422,7 @@ async def list_task_page(limit: int = 100, cursor: str | None = None, active_onl
 
 
 @mcp.tool()
+@_task_document_errors
 async def cancel_task(task_id: str) -> dict[str, Any]:
     """Stop a running task, terminating the agent and any processes it spawned, and cascade the
     same stop to any live descendants this bridge can find.
@@ -1437,6 +1475,7 @@ async def cancel_task(task_id: str) -> dict[str, Any]:
 
 
 @mcp.tool()
+@_task_document_errors
 async def get_task_events(
     task_id: str,
     limit: int = 50,
@@ -1527,6 +1566,7 @@ async def get_task_events(
 
 
 @mcp.tool()
+@_task_document_errors
 @bounded_request
 async def get_task_event_page(
     task_id: str, limit: int = 100, cursor: str | None = None,
@@ -1576,6 +1616,7 @@ async def get_task_event_page(
 
 
 @mcp.tool()
+@_task_document_errors
 async def send_message(task_id: str, text: str) -> dict[str, Any]:
     """Add a message to a running live-input task, as if the user had typed it mid-run — or queue
     it for the next continuation of a task that has no live input.
@@ -1640,6 +1681,7 @@ async def send_message(task_id: str, text: str) -> dict[str, Any]:
 
 
 @mcp.tool()
+@_task_document_errors
 async def cancel_queued_message(task_id: str, message_id: str) -> dict[str, Any]:
     """Withdraw a follow-up that send_message queued for a task's next continuation.
 
@@ -1736,7 +1778,13 @@ def _managed_run_summary(run: dict[str, Any]) -> dict[str, Any]:
     return managed_run_summary(run)
 
 
-async def _guard_task_read(task_id: str) -> None:
+async def _guard_task_read(task_id: str, *, qualify_source: bool = True) -> None:
+    try:
+        store.validate_task_id(task_id)
+    except store.InvalidTaskId as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+    if qualify_source:
+        await asyncio.to_thread(store.read, _reg().log_dir, task_id, include_prompt=False)
     from .workflow_inspection import guard_task_read
     try:
         guard_task_read(task_id, await _managed_workflow_reader())
@@ -1887,18 +1935,21 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
 
 
 @mcp.tool()
+@_task_document_errors
 async def list_workflows() -> list[dict[str, Any]]:
     """List saved workflow definitions."""
     return await _workflow_call("list")
 
 
 @mcp.tool()
+@_task_document_errors
 async def get_workflow(name: str) -> dict[str, Any]:
     """Read a saved workflow definition and revision."""
     return await _workflow_call("get", name=name)
 
 
 @mcp.tool()
+@_task_document_errors
 async def save_workflow(name: str, definition: dict[str, Any], expected_revision: int | None = None, expected_workflow_id: str | None = None) -> dict[str, Any]:
     """Validate and save an explicit workflow; expected_revision protects concurrent edits.
 
@@ -1936,6 +1987,7 @@ async def save_workflow(name: str, definition: dict[str, Any], expected_revision
 
 
 @mcp.tool()
+@_task_document_errors
 async def delete_workflow(name: str) -> dict[str, Any]:
     """Delete a definition; historical run snapshots remain available."""
     from .caller_policy import require_mutation
@@ -1944,6 +1996,7 @@ async def delete_workflow(name: str) -> dict[str, Any]:
 
 
 @mcp.tool()
+@_task_document_errors
 async def workflow_builder(name: str, prompt: str, repo_path: str | None = None, agent: dict[str, Any] | None = None, fallbacks: list[dict[str, Any]] | None = None, definition: dict[str, Any] | None = None, source: dict[str, Any] | None = None) -> dict[str, Any]:
     """Generate a workflow, or refine the current canvas into an unsaved validated proposal.
 
@@ -1994,6 +2047,7 @@ async def workflow_builder(name: str, prompt: str, repo_path: str | None = None,
 
 
 @mcp.tool()
+@_task_document_errors
 async def followup_workflow_builder(run_id: str, prompt: str) -> dict[str, Any]:
     """Queue a message in the same workflow-builder conversation without saving its draft.
 
@@ -2013,6 +2067,7 @@ async def followup_workflow_builder(run_id: str, prompt: str) -> dict[str, Any]:
 
 
 @mcp.tool()
+@_task_document_errors
 async def apply_workflow_draft(definition: dict[str, Any], expected_draft_revision: int) -> dict[str, Any]:
     """Publish a preview from the verified active builder task; never write a saved workflow.
 
@@ -2042,6 +2097,7 @@ async def apply_workflow_draft(definition: dict[str, Any], expected_draft_revisi
 
 
 @mcp.tool()
+@_task_document_errors
 async def preview_workflow_run(name: str, repo_path: str, overrides: dict[str, Any] | None = None, network: StrictBool | None = None) -> dict[str, Any]:
     """Preview native ownership, inherited permissions and fallback reasons without launching.
 
@@ -2053,6 +2109,7 @@ async def preview_workflow_run(name: str, repo_path: str, overrides: dict[str, A
 
 
 @mcp.tool()
+@_task_document_errors
 async def start_workflow(name: str, prompt: str, repo_path: str, overrides: dict[str, Any] | None = None, freedom: str | None = None, network: StrictBool | None = None, expected_preview_hash: str | None = None, goal: str | None = None, notify: str | None = None, notify_events: list[str] | None = None) -> dict[str, Any]:
     """Start a durable workflow run; returns workflow_run_id rather than task_id.
 
@@ -2094,7 +2151,7 @@ async def start_workflow(name: str, prompt: str, repo_path: str, overrides: dict
         except asyncio.CancelledError:
             await _notification_io(notifications.discard_unstarted, _reg().log_dir, reserved_id)
             raise
-        except StateOwnershipError:
+        except (StateOwnershipError, store.TaskDocumentError):
             raise
         except Exception:
             raise MCPError(INVALID_PARAMS, 'Notification reservation failed; no workflow was started') from None
@@ -2116,7 +2173,7 @@ async def start_workflow(name: str, prompt: str, repo_path: str, overrides: dict
         except FileNotFoundError:
             await _notification_io(notifications.discard_unstarted, _reg().log_dir, reserved_id)
             raise exc
-        except StateOwnershipError:
+        except (StateOwnershipError, store.TaskDocumentError):
             raise
         except Exception:
             if isinstance(exc, asyncio.CancelledError):
@@ -2133,7 +2190,7 @@ async def start_workflow(name: str, prompt: str, repo_path: str, overrides: dict
         try:
             await _notification_io(notifications.activate, _reg().log_dir, reserved_id)
             notification['state'] = 'active'
-        except StateOwnershipError:
+        except (StateOwnershipError, store.TaskDocumentError):
             raise
         except Exception:
             result.setdefault('notices', []).append('Workflow started; notification activation is pending recovery by the server worker')
@@ -2143,6 +2200,7 @@ async def start_workflow(name: str, prompt: str, repo_path: str, overrides: dict
 
 
 @mcp.tool()
+@_task_document_errors
 async def subscribe_workflow(workflow_run_id: str, notify: str, events: list[str] | None = None) -> dict[str, Any]:
     """Subscribe a root workflow to configured webhooks (terminal, attention, or both).
 
@@ -2162,6 +2220,7 @@ async def subscribe_workflow(workflow_run_id: str, notify: str, events: list[str
 
 
 @mcp.tool()
+@_task_document_errors
 async def unsubscribe_workflow(workflow_run_id: str, notify: str | None = None) -> dict[str, Any]:
     """Stop future workflow delivery attempts for one configured alias, or every alias."""
     from .caller_policy import require_mutation
@@ -2175,6 +2234,7 @@ async def unsubscribe_workflow(workflow_run_id: str, notify: str | None = None) 
 
 
 @mcp.tool()
+@_task_document_errors
 async def get_workflow_notifications(workflow_run_id: str) -> dict[str, Any]:
     """Read root workflow subscriptions and at most 50 recent delivery states; direct callers only."""
     await _notification_authority()
@@ -2186,6 +2246,7 @@ async def get_workflow_notifications(workflow_run_id: str) -> dict[str, Any]:
 
 
 @mcp.tool()
+@_task_document_errors
 async def revise_workflow_goal(run_id: str, goal: str, expected_revision: StrictInt) -> dict[str, Any]:
     """Revise a root run goal at a quiescent paused or awaiting-input checkpoint.
 
@@ -2201,6 +2262,7 @@ async def revise_workflow_goal(run_id: str, goal: str, expected_revision: Strict
 
 
 @mcp.tool()
+@_task_document_errors
 async def list_workflow_runs(offset: int = 0, limit: int = 10) -> dict[str, Any]:
     """List recorded workflow runs."""
     from .workflow_responses import compact
@@ -2219,6 +2281,7 @@ async def list_workflow_runs(offset: int = 0, limit: int = 10) -> dict[str, Any]
 
 
 @mcp.tool()
+@_task_document_errors
 async def list_workflow_run_page(limit: int = 100, cursor: str | None = None, active_only: bool = False, related_run_id: str | None = None, run_ids: list[str] | None = None) -> dict[str, Any]:
     """Stable newest-first run headers, with bounded ancestor/session-owner lookups.
 
@@ -2230,6 +2293,7 @@ async def list_workflow_run_page(limit: int = 100, cursor: str | None = None, ac
 
 
 @mcp.tool()
+@_task_document_errors
 async def get_workflow_status(workflow_run_id: str) -> dict[str, Any]:
     """Read a workflow run's execution state and task associations.
 
@@ -2298,7 +2362,7 @@ async def _wait_workflow_full(
         if current_revision is None or current_revision != previous_revision:
             try:
                 result = await _workflow_call("status", run_id=workflow_run_id)
-            except StateOwnershipError:
+            except (StateOwnershipError, store.TaskDocumentError):
                 raise
             except Exception:
                 # Keep the last good snapshot; only a failure that persists ends the wait.
@@ -2322,6 +2386,7 @@ async def _wait_workflow_full(
 
 
 @mcp.tool()
+@_task_document_errors
 async def wait_for_workflow(
     workflow_run_id: str,
     timeout_seconds: StrictInt | None = None,
@@ -2352,6 +2417,7 @@ async def wait_for_workflow(
 
 
 @mcp.tool()
+@_task_document_errors
 async def get_workflow_run_detail(workflow_run_id: str, view: str, cursor: str | None = None, limit: int = 8000) -> dict[str, Any]:
     """Losslessly read executions, decisions, checklist, technical_plan, definition, owner_contracts, builder_draft, generated_definition, question, reason or wait_reason.
 
@@ -2366,6 +2432,7 @@ async def get_workflow_run_detail(workflow_run_id: str, view: str, cursor: str |
 
 
 @mcp.tool()
+@_task_document_errors
 async def pause_workflow(workflow_run_id: str) -> dict[str, Any]:
     """Stop scheduling while active steps settle."""
     from .workflow_responses import compact
@@ -2373,6 +2440,7 @@ async def pause_workflow(workflow_run_id: str) -> dict[str, Any]:
 
 
 @mcp.tool()
+@_task_document_errors
 async def resume_workflow(workflow_run_id: str, instructions: str | None = None, additional_attempts: int = 0, decision_id: str | None = None, allow_optional_review_skip: StrictBool = False) -> dict[str, Any]:
     """Resume a caller-owned run with instructions and optional explicit attempt grants.
 
@@ -2406,6 +2474,7 @@ async def resume_workflow(workflow_run_id: str, instructions: str | None = None,
 
 
 @mcp.tool()
+@_task_document_errors
 async def read_workflow_assigned_input(workflow_run_id: str, execution_id: str, source_run_id: str | None = None, task_id: str | None = None, cursor: str | None = None, limit: int = 16000) -> dict[str, Any]:
     """Read an immutable input explicitly assigned to your active worker activation.
 
@@ -2421,6 +2490,7 @@ async def read_workflow_assigned_input(workflow_run_id: str, execution_id: str, 
 
 
 @mcp.tool()
+@_task_document_errors
 async def inspect_workflow_node(workflow_run_id: str, execution_id: str, task_id: str | None = None, view: str = "result", cursor: str | None = None, limit: int | None = None, before_seq: int | None = None, after_seq: int | None = None) -> dict[str, Any]:
     """Inspect any fully settled node execution in your workflow, including older executions.
 
@@ -2439,6 +2509,7 @@ async def inspect_workflow_node(workflow_run_id: str, execution_id: str, task_id
 
 
 @mcp.tool()
+@_task_document_errors
 async def recover_workflow(workflow_run_id: str, reason: str, additional_attempts: int = 0) -> dict[str, Any]:
     """Explicitly recover a failed settled run; retain completed work and supply a reason.
 
@@ -2455,6 +2526,7 @@ async def recover_workflow(workflow_run_id: str, reason: str, additional_attempt
 
 
 @mcp.tool()
+@_task_document_errors
 async def cancel_workflow(workflow_run_id: str) -> dict[str, Any]:
     """Stop root scheduling and cascade cancellation to associated tasks and children.
 
@@ -2508,6 +2580,7 @@ def main() -> None:
 
 
 @mcp.tool()
+@_task_document_errors
 async def register_artifact(path: str, kind: str, note: str = '') -> dict[str, Any]:
     """Register an existing regular-file metadata reference for the verified calling task.
 
@@ -2534,6 +2607,7 @@ async def register_artifact(path: str, kind: str, note: str = '') -> dict[str, A
 
 
 @mcp.tool()
+@_task_document_errors
 async def get_task_artifacts(task_id: str, cursor: str | None = None, limit: int = 20) -> dict[str, Any]:
     """Page at most 50 artifact references with current stat observations, not content verification.
 
@@ -2554,6 +2628,7 @@ async def get_task_artifacts(task_id: str, cursor: str | None = None, limit: int
 
 
 @mcp.tool()
+@_task_document_errors
 async def get_workflow_artifacts(workflow_run_id: str, cursor: str | None = None, limit: int = 20,
                                  execution_id: str | None = None, task_id: str | None = None) -> dict[str, Any]:
     """Page artifact references registered by the attempts of a workflow run and its linked child runs.

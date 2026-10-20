@@ -283,6 +283,7 @@ class Catalog:
         result = {'status': status, 'source': 'task_catalog' if self.suffix == '.meta.json' else 'workflow_catalog',
                   'pending_records': pending, 'blocked_records': blocked}
         if blocked:
+            result['blocked_sources'] = [dict(id=row[0], reason=row[1], code=row[2]) for row in db.execute("SELECT id,json_extract(payload,'$.note'),json_extract(payload,'$.task_error.code') FROM entries WHERE json_extract(payload,'$.needs_direct_lookup')=1 ORDER BY id LIMIT 20")]
             result['blocker_types'] = [row[0] for row in db.execute("SELECT DISTINCT COALESCE(json_extract(payload,'$.index_blocker'),'direct_inspection') FROM entries WHERE json_extract(payload,'$.needs_direct_lookup')=1 LIMIT 10")]
         if status != 'ready':
             result['reason'] = 'Metadata or caller identity requires direct inspection' if blocked else 'Preparing bounded metadata index'
@@ -321,6 +322,10 @@ class Catalog:
             size = initial_source.st_size
         except FileNotFoundError:
             return None
+        except OSError:
+            if self.suffix == ".meta.json":
+                return loader(identifier, _metadata_budget=self)
+            raise
         def placeholder():
             key = 'task_id' if self.suffix == '.meta.json' else 'workflow_run_id'
             return {key: identifier, 'status': 'unknown', 'needs_direct_lookup': True,
@@ -350,6 +355,10 @@ class Catalog:
             final_source = path.stat()
         except FileNotFoundError:
             raise DeferredRead() from None
+        except OSError:
+            if self.suffix == ".meta.json":
+                return loader(identifier, _metadata_budget=self)
+            raise
         if source_identity(initial_source) != source_identity(final_source):
             raise DeferredRead()
         if value is not None:
@@ -445,6 +454,11 @@ class Catalog:
             db.execute('DELETE FROM seen')
             db.execute('DELETE FROM state')
             db.execute("INSERT INTO state VALUES ('schema_version','10')")
+        if self.suffix == '.meta.json' and db.execute("SELECT value FROM state WHERE key='task_projection_version'").fetchone() != ('1',):
+            for table in ('entries', 'callers', 'task_groups', 'checkout_tasks', 'associations', 'sources', 'seen', 'pending'):
+                db.execute(f'DELETE FROM {table}')
+            db.execute("DELETE FROM state WHERE key!='schema_version'")
+            db.execute("INSERT INTO state VALUES ('task_projection_version','1')")
         # Build only after invalidating old derivative headers. The partial index
         # makes warm authority readiness independent of retained history size.
         db.execute("CREATE INDEX IF NOT EXISTS incomplete_headers ON entries(id) WHERE json_extract(payload,'$.needs_direct_lookup')=1")
@@ -473,8 +487,10 @@ class Catalog:
             try:
                 if tuple(expected_source) != source_identity((self.directory / (identifier + self.suffix)).stat()):
                     raise DeferredRead()
-            except FileNotFoundError:
-                raise DeferredRead() from None
+            except OSError:
+                if not (self.suffix == ".meta.json" and header.get("index_blocker") == "unavailable_metadata"):
+                    raise DeferredRead() from None
+                expected_source = None
         checkout = header.pop('_checkout', [])
         db.execute('DELETE FROM checkout_tasks WHERE run_id=?', (identifier,))
         for task in checkout:
@@ -483,6 +499,9 @@ class Catalog:
                 header.update(needs_direct_lookup=True, status='unknown')
                 continue
             db.execute('INSERT OR REPLACE INTO checkout_tasks VALUES (?,?,?,?)', (task['task_id'], identifier, task['repo_path'], encoded))
+        if self.suffix == '.meta.json' and header.get('needs_direct_lookup'):
+            db.execute('DELETE FROM callers WHERE id=?', (identifier,))
+            db.execute('DELETE FROM associations WHERE id=?', (identifier,))
         caller = header.pop('_caller', None)
         associations = header.pop('_associations', {})
         db.execute("DELETE FROM associations WHERE json_extract(payload,'$.workflow_run_id')=?", (identifier,))
@@ -526,7 +545,11 @@ class Catalog:
             db.execute('INSERT OR REPLACE INTO sources VALUES (?,?,?,?,?)', (identifier, *(tuple(expected_source) if expected_source is not None else source_identity(source))))
             db.execute('DELETE FROM pending WHERE id=?', (identifier,))
         except OSError:
-            raise DeferredRead() from None
+            if self.suffix == ".meta.json" and header.get("index_blocker") == "unavailable_metadata":
+                db.execute("DELETE FROM sources WHERE id=?", (identifier,))
+                db.execute("DELETE FROM pending WHERE id=?", (identifier,))
+            else:
+                raise DeferredRead() from None
 
     def _changed(self, db: sqlite3.Connection, identifier: str) -> bool:
         assert_owned(self.state_layout)
@@ -535,7 +558,7 @@ class Catalog:
             source = (self.directory / f'{identifier}{self.suffix}').stat()
             placeholder = db.execute("SELECT json_extract(payload,'$.needs_direct_lookup') FROM entries WHERE id=?", (identifier,)).fetchone()
             return row != (source.st_mtime_ns, source.st_size, getattr(source, 'st_ino', 0), getattr(source, 'st_dev', 0))
-        except FileNotFoundError:
+        except OSError:
             return True
 
     def _remove(self, db: sqlite3.Connection, identifier: str) -> None:
@@ -576,6 +599,7 @@ class Catalog:
         self.deferred_headers = set()
         self.blocked_headers = {}
         with self.connect() as db:
+            self._discover(db)
             for identifier in dict.fromkeys(identifiers):
                 row = db.execute('SELECT payload FROM entries WHERE id=?', (identifier,)).fetchone()
                 if row is not None and not self._changed(db, identifier):
@@ -614,6 +638,7 @@ class Catalog:
                  'pending_records': len(self.deferred_headers), 'blocked_records': len(blocked)}
         if blocked:
             state['blocker_types'] = sorted(set(blocked.values()))
+            state['blocked_sources'] = [{'id': identifier, 'reason': reason} for identifier, reason in list(blocked.items())[:20]]
         return state
 
     @layout_operation

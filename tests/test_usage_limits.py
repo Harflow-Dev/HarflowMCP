@@ -68,6 +68,7 @@ def test_recovered_live_limit_with_lost_owner_requires_attention(tmp_path, monke
     record = make_record(status=status, failure_diagnostic=diagnostic)
     monkeypatch.setattr(store, 'record_process_alive', lambda record: True)
     monkeypatch.setattr(store.identity, 'identity_check', lambda owner: 'unknown')
+    store.write(tmp_path, record)
     snapshot = store.snapshot(tmp_path, record)
     assert snapshot['status'] == 'running'
     assert snapshot['failure_diagnostic']['settlement'] == 'needs_attention'
@@ -83,6 +84,7 @@ def test_live_and_recovered_briefs_retain_durable_usage_evidence(tmp_path):
     from test_store import make_record
     diagnostic = {'category': 'usage_limit', 'reason': 'Quota reached', 'source': 'stderr', 'reset_at': 1234}
     record = make_record(status='failed', exit_code=1, failure_diagnostic=diagnostic)
+    store.write(tmp_path, record)
     live = Task(task_id='t', backend='claude', session_id='s', repo_path=tmp_path,
                 prompt='work', max_turns=5, log_path=tmp_path / 't.jsonl',
                 started_at=datetime.now(timezone.utc))
@@ -244,10 +246,16 @@ async def test_sensitive_stderr_does_not_enter_durable_public_usage_metadata(tmp
                 prompt='work', max_turns=None, log_path=tmp_path / 'limited.jsonl',
                 started_at=datetime.now(timezone.utc))
     task.acc.failure_diagnostic = diagnostic
+    task.enforcement = get_backend(name).enforcement('write_in_repo').as_dict()
     registry._record_usage_limit(task)
+    assert task.latest_record_landed is True
+    assert task.persistence_error is None
+    assert store.last_write_error() is None
     await task.usage_settlement
     persisted = store.read(registry.log_dir, task.task_id)
+    assert persisted is not None
     assert persisted.failure_diagnostic == diagnostic
+    assert persisted.enforcement == task.enforcement
     storage = w.WorkflowStore(tmp_path.parent)
     definition = w.validate_definition(graph())
     run = storage.create_run(definition, 'Work', tmp_path)

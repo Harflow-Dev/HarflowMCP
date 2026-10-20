@@ -37,7 +37,7 @@ def fixture(home: Path, size: str) -> dict:
             'orchestrator': {'backend': 'codex'}})
         for i in range(definitions):
             value = definition | {'name': f'bench-{i:04}', 'revision': 1, 'workflow_id': f'bench-{i:04}'}
-            (storage.definitions / f'bench-{i:04}.json').write_text(json.dumps(value))
+            workflows._write(storage.definitions / f'bench-{i:04}.json', value, layout=storage.state_layout)
         for i in range(runs):
             rid = f'run-{i:04}'
             run = {'workflow_run_id': rid, 'kind': 'workflow', 'name': 'bench', 'definition': definition,
@@ -53,14 +53,14 @@ def fixture(home: Path, size: str) -> dict:
                 run['activations'].append({'id': 'child-call', 'node_id': 'work', 'role': 'node', 'status': 'completed', 'tasks': [], 'invocation': {'child_workflow_run_id': f'run-{i+1:04}', 'workflow_id': 'bench-0000', 'stage': 'settled'}})
             if i % 2:
                 run['parent_link'] = {'workflow_run_id': f'run-{i-1:04}', 'root_workflow_run_id': f'run-{i-1:04}', 'execution_id': 'child-call'}
-            (storage.runs / f'{rid}.json').write_text(json.dumps(run))
+            workflows._write(storage.runs / f'{rid}.json', run, layout=storage.state_layout)
         directory = root / 'tasks'
         directory.mkdir()
         for i in range(tasks):
             value = store.TaskRecord(f'task-{i:04}', 'codex', 'synthetic-session', '/benchmark',
                                      '2026-10-01T00:00:00+00:00', status='completed', exit_code=0,
                                      title=f'Synthetic task {i}')
-            (directory / f'{value.task_id}.meta.json').write_text(json.dumps(asdict(value)))
+            (directory / f'{value.task_id}.meta.json').write_text(json.dumps(store.encode_task(asdict(value))))
             events = [{'type': 'thread.started', 'thread_id': 'synthetic-session'}, {'type': 'item.completed', 'item': {'id': 'answer', 'type': 'agent_message', 'text': f'Synthetic task summary {i}'}}, {'type': 'turn.completed', 'usage': {'input_tokens': 0, 'cached_input_tokens': 0, 'output_tokens': 0}}]
             (directory / f'{value.task_id}.jsonl').write_text(''.join(json.dumps(event) + '\n' for event in events))
     # Persistent malformed history exercises the blocked projection without permission changes.

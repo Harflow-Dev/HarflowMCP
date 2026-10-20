@@ -555,6 +555,7 @@ def related_catalog_candidates(log_dir: Path, chain: list[int], sid: int) -> lis
                 (sid, *chain)).fetchall()
         if len(rows) > 100:
             raise ValueError('More than 100 related caller identities require reconciliation')
+        # Discovery only: artifacts._caller requalifies the selected source before authority.
         return [store.TaskRecord(**json.loads(row[0])) for row in rows]
     except (OSError, sqlite3.Error, TypeError, KeyError) as exc:
         raise ValueError('Task catalog caller identity is unavailable') from exc
@@ -590,7 +591,8 @@ def detect_catalog_caller(log_dir: Path, *, environ: Mapping[str, str] | None = 
             rows = db.execute(f'SELECT payload FROM callers WHERE terminal=0 AND (pgid=? OR pid IN ({placeholders}) OR id=?) LIMIT 101', (sid, *chain, env.get(ENV_TASK_ID, ''))).fetchall()
         if len(rows) > 100:
             return Detection(None, 'More than 100 related caller identities require reconciliation')
-        candidates = [store.TaskRecord(**json.loads(row[0])) for row in rows]
+        candidates = [store.read(log_dir, json.loads(row[0])["task_id"], include_prompt=False) for row in rows]
+        candidates = [record for record in candidates if record is not None]
         found = _by_harflow_task_id(log_dir, env, candidates, getsid, getpid, lambda: table, check_fn)
         found = found or _by_session(candidates, getsid, check_fn) or _by_ancestry(candidates, getpid, lambda: table, check_fn)
         if found is not None:

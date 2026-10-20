@@ -199,10 +199,21 @@ def test_cli_task_list_uses_managed_scope(run, monkeypatch, tmp_path, capsys, ro
     from harflow_mcp import workflow_inspection
     monkeypatch.setattr(workflow_inspection, "managed_reader", reader)
     monkeypatch.setattr(ctl, "default_log_dir", lambda: tmp_path / "tasks")
-    monkeypatch.setattr(store, "read_all", lambda path: ["first", "second", "third", "foreign"])
-    monkeypatch.setattr(store, "brief", lambda path, record: {"task_id": record})
+    scan = store.TaskScan(
+        [store.TaskRecord(task_id=task_id, backend="codex", session_id=None, repo_path=str(tmp_path), started_at="2026-10-01T00:00:00+00:00") for task_id in ["first", "second", "third", "foreign"]],
+        {},
+    )
+    monkeypatch.setattr(
+        store,
+        "scan",
+        lambda path: scan,
+    )
+    monkeypatch.setattr(store, "brief", lambda path, record: {"task_id": record.task_id})
     assert ctl.main(["list", "--json"]) == 0
-    assert [t["task_id"] for t in json.loads(capsys.readouterr().out)["tasks"]] == expected
+    output = json.loads(capsys.readouterr().out)
+    assert [t["task_id"] for t in output["tasks"]] == expected
+    assert output["history_incomplete"] is False
+    assert output["refused_tasks"] == []
 
 
 @pytest.mark.parametrize("task_id", ["third", "foreign"])

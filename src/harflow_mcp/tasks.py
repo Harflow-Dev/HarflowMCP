@@ -679,6 +679,13 @@ def default_log_dir() -> Path:
     return resolve_layout().tasks_directory
 
 
+class _CascadeTargets(set):
+    """Per-discovery targets with explicit refused history, isolated between calls."""
+    def __init__(self, targets, refusals):
+        super().__init__(targets)
+        self.refusals = refusals
+
+
 @dataclass
 class Task:
     task_id: str
@@ -830,6 +837,8 @@ class Task:
     # Whether any `persist` of this task landed on disk. A record that did and is now gone was
     # deleted (retention); one that never did is merely unwritten, and resuming it stays allowed.
     record_landed: bool = False
+    latest_record_landed: bool = False
+    persistence_error: store.TaskDocumentError | None = None
     drain_failed: bool = False
 
     # Held so the event loop keeps strong references: a bare create_task() result is only weakly
@@ -869,6 +878,8 @@ class Task:
         """
         from . import approvals
         return {
+            "metadata_persisted": self.latest_record_landed,
+            **({"persistence_error": self.persistence_error.as_dict()} if self.persistence_error is not None else {}),
             "caller_approvals": self.caller_approvals,
             "interaction_owner": self.interaction_owner,
             "approval_summary": self.approval_view,
@@ -906,6 +917,8 @@ class Task:
     @layout_operation
     def snapshot(self) -> dict[str, Any]:
         """Full current state of the run, safe to call at any point."""
+        if self.persistence_error is None:
+            store.read(self.log_path.parent, self.task_id, include_prompt=False)
         from . import artifacts
         from . import approvals
         snap = self.brief() | {
@@ -1322,6 +1335,7 @@ class TaskRegistry:
         `followup_prompt`, which may be omitted only when something is queued. It is a flag of its
         own, never inferred from `task_id`, which keeps marking supervisor-owned resumes.
         """
+        store.read(self._log_dir, parent.task_id, include_prompt=False)
         from .state_layout import require_dispatch_layout
         require_dispatch_layout(self._log_dir)
         if followup_prompt is None and not consume_followups:
@@ -1378,6 +1392,8 @@ class TaskRegistry:
                 # The retention sweep takes this session lock before it deletes, so a parent still
                 # on disk here cannot vanish under the spawn below — and one that landed and is
                 # gone means the sweep deleted first, leaving nothing for the child to resume from.
+                if parent.persistence_error is not None:
+                    raise parent.persistence_error
                 if (
                     parent.record_landed
                     and await asyncio.to_thread(store.read, self._log_dir, parent.task_id) is None
@@ -2014,6 +2030,7 @@ class TaskRegistry:
         Takes the same inbox lock as the close protocol, so a message is either accepted before
         the close (and then forwarded or reported undelivered) or refused after it.
         """
+        store.read(self._log_dir, task.task_id, include_prompt=False)
         from .workflow_hooks import refuse_direct_message
         await asyncio.to_thread(refuse_direct_message, self._log_dir, task.task_id)
         if not task.live_input:
@@ -2100,6 +2117,11 @@ class TaskRegistry:
     def _write_messages(self, task: Task, messages: list[dict[str, Any]]) -> int:
         """Write each message to stdin, synchronously. A message that cannot be written — and every
         one after it — is reported undelivered rather than dropped silently."""
+        try:
+            store.read(self._log_dir, task.task_id, include_prompt=False)
+        except store.TaskDocumentError:
+            self._report_undelivered(task, messages, "task metadata qualification was refused")
+            raise
         backend = get_backend(task.backend)
         written = 0
         for index, message in enumerate(messages):
@@ -2198,6 +2220,7 @@ class TaskRegistry:
         try:
             if self._stop_reason(task) is not None:
                 return False
+            store.read(self._log_dir, task.task_id, include_prompt=False)
             try:
                 pending = self._take_pending(task)
             except OSError:
@@ -2271,6 +2294,8 @@ class TaskRegistry:
             exited = task.proc is None or task.proc.returncode is not None
             if reason is None and not self._close_still_warranted(task, kind, bound):
                 return False
+            if reason is None:
+                store.read(self._log_dir, task.task_id, include_prompt=False)
             try:
                 pending = self._take_pending(task)
             except OSError:
@@ -2511,6 +2536,8 @@ class TaskRegistry:
 
     @layout_operation
     def persist(self, task: Task) -> None:
+        task.latest_record_landed = False
+        task.persistence_error = None
         landed = store.write_landed(
             self._log_dir,
             store.TaskRecord(
@@ -2566,8 +2593,14 @@ class TaskRegistry:
                 input_after_result=task.input_after_result,
             ),
         )
+        task.latest_record_landed = landed
+        task.persistence_error = store.last_write_error()
         if landed:
             task.record_landed = True
+        elif task.persistence_error is not None:
+            notice = f"Task metadata persistence refused ({task.persistence_error.code}): {task.persistence_error.reason}"
+            if notice not in task.bridge_notices:
+                task.bridge_notices.append(notice)
 
     def get(self, task_id: str) -> Task | None:
         return self._tasks.get(task_id)
@@ -2580,11 +2613,17 @@ class TaskRegistry:
     @layout_operation
     def recovered_briefs(self, exclude: set[str]) -> list[dict[str, Any]]:
         """Listing entries for on-disk tasks not held in memory."""
-        return [
-            store.brief(self._log_dir, record)
-            for record in store.read_all(self._log_dir)
-            if record.task_id not in exclude
-        ]
+        scanned = store.scan(self._log_dir)
+        entries = []
+        for record in scanned.records:
+            if record.task_id in exclude:
+                continue
+            try:
+                entries.append(store.brief(self._log_dir, record))
+            except store.TaskDocumentError as exc:
+                scanned.refusals[record.task_id] = exc
+        entries.extend({"task_id": identifier, "status": "unknown", "history_incomplete": True, "needs_direct_lookup": True, "task_error": exc.as_dict()} for identifier, exc in scanned.refusals.items() if identifier not in exclude)
+        return entries
 
     def list(self, status: str | None = None) -> list[Task]:
         tasks = sorted(self._tasks.values(), key=lambda t: t.started_at)
@@ -2619,6 +2658,7 @@ class TaskRegistry:
         flag set and a harmless repeat SIGTERM, but writes no phase file of its own — the owning
         controller's attempt is the one of record.
         """
+        store.read(self._log_dir, task.task_id, include_prompt=False)
         attempt = control.begin_attempt(self._log_dir, task.task_id, control.CANCEL, self._owner)
         task.cancel_requested = True
         delivered = _signal_group(task, signal.SIGTERM)
@@ -2705,6 +2745,7 @@ class TaskRegistry:
         Safe to call concurrently: the termination sequence is owned by the task, so repeat callers
         join the one already in flight rather than starting a second.
         """
+        store.read(self._log_dir, task.task_id, include_prompt=False)
         if task.finished:
             return task
 
@@ -2756,11 +2797,12 @@ class TaskRegistry:
         Runs in a worker thread (it reads every record), so the in-memory tasks arrive as a
         snapshot `(task_id, spawned_by, root_task_id)` taken on the event loop.
         """
-        records = store.read_all(self._log_dir)
+        scanned = store.scan(self._log_dir)
+        records = scanned.records
         lineage_rows = [(r.task_id, r.spawned_by, r.root_task_id) for r in records]
         lineage_rows.extend((r.task_id, r.continuation_of_task_id, r.root_task_id) for r in records if r.continuation_of_task_id)
         lineage_rows.extend(local_lineage)
-        return lineage.lineage_closure(lineage_rows, task_id)
+        return _CascadeTargets(lineage.lineage_closure(lineage_rows, task_id), scanned.refusals)
 
     @layout_operation
     def _triage_target(self, task_id: str) -> tuple[str, Any]:
@@ -2809,6 +2851,10 @@ class TaskRegistry:
         now, that signal worked, so it still reports `signalled`.
         """
         task_id = record.task_id
+        fresh = store.read(self._log_dir, task_id, include_prompt=False)
+        if fresh is None:
+            return "gone", None
+        record = fresh
         leader = identity.task_identity(record.pid, record.start_time, record.markers)
         verdict, reason = identity.check_detail(leader)
         if not identity.signalable(verdict, reason):
@@ -3092,10 +3138,13 @@ class TaskRegistry:
                 log.warning("cancel of %s: %s retry failed unexpectedly", task_id, phase, exc_info=True)
                 delay = min(delay * 2, SIG_RETRY_MAX_SECONDS)
 
-    @staticmethod
-    def _kill_if_ours(record: store.TaskRecord) -> bool:
+    def _kill_if_ours(self, record: store.TaskRecord) -> bool:
         """SIGKILL the recorded group only if the leader is still provably ours — checked in the
         same worker call as the signal, so no await separates the evidence from the act."""
+        fresh = store.read(self._log_dir, record.task_id, include_prompt=False)
+        if fresh is None:
+            return False
+        record = fresh
         leader = identity.task_identity(record.pid, record.start_time, record.markers)
         if not identity.signalable(*identity.check_detail(leader)):
             return False
@@ -3179,11 +3228,14 @@ class TaskRegistry:
         outcomes: dict[str, tuple[str, str | None]] = {}
         signalled: list[tuple[store.TaskRecord, dict]] = []
         for record in records:
-            kind, reason = await asyncio.to_thread(
-                self._deliver_recorded_cancel,
-                record,
-                already_signalled=record.task_id in already_signalled,
-            )
+            try:
+                kind, reason = await asyncio.to_thread(
+                    self._deliver_recorded_cancel, record,
+                    already_signalled=record.task_id in already_signalled,
+                )
+            except store.TaskDocumentError as exc:
+                outcomes[record.task_id] = ("not_recorded" if record.task_id in already_signalled else "not_signalled", f"{exc.code}: {exc}")
+                continue
             if kind == "signalled":
                 leader = identity.task_identity(record.pid, record.start_time, record.markers)
                 signalled.append((record, leader))
@@ -3209,11 +3261,16 @@ class TaskRegistry:
         survivors = await _not_yet_dead(signalled, SIGKILL_GRACE_SECONDS)
         if survivors:
             for record, _leader in survivors:
-                await asyncio.to_thread(self._kill_if_ours, record)
+                try:
+                    await asyncio.to_thread(self._kill_if_ours, record)
+                except store.TaskDocumentError as exc:
+                    outcomes[record.task_id] = ("not_recorded", f"Already signalled; further signal refused: {exc.code}: {exc}")
             survivors = await _not_yet_dead(survivors, SIGKILL_GRACE_SECONDS)
 
         survivor_ids = {record.task_id for record, _leader in survivors}
         for record, _leader in signalled:
+            if record.task_id in outcomes:
+                continue
             survivor = record.task_id in survivor_ids
             reason: str | None = None
             try:
@@ -3225,13 +3282,13 @@ class TaskRegistry:
                         r, status="cancelled", finished_at=r.finished_at or _now().isoformat()
                     ),
                 )
-            except (control.LockTimeout, OSError) as exc:
+            except (control.LockTimeout, OSError, store.TaskDocumentError) as exc:
                 # The signals have already gone out; raising here would lose the whole cascade
                 # result to an unstructured error after an irreversible cancel. The record is left
                 # exactly as it was — nothing half-written — and the caller is told it was not
                 # published.
                 log.warning("cascade: could not record %s as cancelled", record.task_id, exc_info=True)
-                reason = f"signalled, but the cancellation could not be recorded: {exc}"
+                reason = f"signalled, but the cancellation could not be recorded: {getattr(exc, 'code', 'write_failed')}: {exc}"
             else:
                 # "terminal" is benign — whoever settled it (its owner, or another canceller) got
                 # there first, and the status that stands is theirs — so it is not reported.
@@ -3252,6 +3309,7 @@ class TaskRegistry:
         Same reason `cancel` shields `_escalate`: the SIGKILL escalation for tasks this server does
         not own lives inside the cascade, and a client disconnecting mid-call must not abandon it.
         """
+        store.read(self._log_dir, task_id, include_prompt=False)
         if not workflow_control:
             from .workflow_hooks import pause_for_task, refuse_managed, refuse_native_control
             refuse_native_control(self._log_dir, task_id)
@@ -3278,6 +3336,7 @@ class TaskRegistry:
         already processed are acted on — so this converges to a fixed point rather than looping
         forever on a lineage that keeps growing, bounded at `CASCADE_MAX_ROUNDS` either way.
         """
+        refusals: dict[str, store.TaskDocumentError] = {}
         processed: set[str] = set()
         sigkill_survivors: list[str] = []
         owner_still_settling: list[str] = []
@@ -3290,6 +3349,7 @@ class TaskRegistry:
             local_lineage = [(t.task_id, t.spawned_by, t.root_task_id) for t in self._tasks.values()]
             local_lineage.extend((t.task_id, t.continuation_of_task_id, t.root_task_id) for t in self._tasks.values() if t.continuation_of_task_id)
             targets = await asyncio.to_thread(self._cascade_targets, task_id, local_lineage)
+            refusals.update(getattr(targets, "refusals", {}))
             new_targets = sorted(targets - processed)
             if not new_targets:
                 converged = True
@@ -3297,6 +3357,12 @@ class TaskRegistry:
             rounds = round_index
             from .task_continuation import stop_chain
             for target_id in new_targets:
+                try:
+                    store.read(self._log_dir, target_id, include_prompt=False)
+                except store.TaskDocumentError as exc:
+                    refusals[target_id] = exc
+                    not_signalled.append({"task_id": target_id, "reason": str(exc), "code": exc.code})
+                    continue
                 await stop_chain(self, target_id)
             processed.update(new_targets)
 
@@ -3308,13 +3374,20 @@ class TaskRegistry:
             handed_off: set[str] = set()
 
             for tid in new_targets:
+                if tid in refusals:
+                    continue
                 local_task = self._tasks.get(tid)
                 if local_task is not None and not local_task.finished:
                     local_ids.append(tid)
                     local_coros.append(self.cancel(local_task))
                     continue
 
-                kind, payload = await asyncio.to_thread(self._triage_target, tid)
+                try:
+                    kind, payload = await asyncio.to_thread(self._triage_target, tid)
+                except store.TaskDocumentError as exc:
+                    refusals[tid] = exc
+                    not_signalled.append({"task_id": tid, "reason": str(exc), "code": exc.code})
+                    continue
                 if kind == "not_signalled":
                     not_signalled.append({"task_id": tid, "reason": payload})
                 elif kind == "case3":
@@ -3331,6 +3404,8 @@ class TaskRegistry:
                     if isinstance(outcome, BaseException):
                         if isinstance(outcome, asyncio.CancelledError):
                             raise outcome
+                        if isinstance(outcome, store.TaskDocumentError):
+                            refusals[tid] = outcome
                         log.warning("cascade: cancelling %s failed", tid, exc_info=outcome)
                         reason = (
                             f"phase write failed: {outcome}"
@@ -3342,7 +3417,12 @@ class TaskRegistry:
                     if not isinstance(outcome, _Case2Outcome):
                         continue
                     if outcome.kind == "handoff":
-                        fresh = await asyncio.to_thread(store.read, self._log_dir, outcome.task_id)
+                        try:
+                            fresh = await asyncio.to_thread(store.read, self._log_dir, outcome.task_id)
+                        except store.TaskDocumentError as exc:
+                            refusals[outcome.task_id] = exc
+                            not_recorded.append({"task_id": outcome.task_id, "reason": "Already signalled; metadata refused: " + str(exc), "code": exc.code})
+                            continue
                         if fresh is not None:
                             case3_records.append(fresh)
                             handed_off.add(outcome.task_id)
@@ -3376,17 +3456,22 @@ class TaskRegistry:
             local_lineage = [(t.task_id, t.spawned_by, t.root_task_id) for t in self._tasks.values()]
             local_lineage.extend((t.task_id, t.continuation_of_task_id, t.root_task_id) for t in self._tasks.values() if t.continuation_of_task_id)
             final_targets = await asyncio.to_thread(self._cascade_targets, task_id, local_lineage)
+            refusals.update(getattr(final_targets, "refusals", {}))
             unconverged = sorted(final_targets - processed)
 
         cancelled_descendants: list[str] = []
         for tid in processed:
             if tid == task_id:
                 continue
+            try:
+                fresh = await asyncio.to_thread(store.read, self._log_dir, tid, include_prompt=False)
+            except store.TaskDocumentError as exc:
+                refusals[tid] = exc
+                continue
             local_task = self._tasks.get(tid)
             if local_task is not None:
                 status = local_task.status
             else:
-                fresh = await asyncio.to_thread(store.read, self._log_dir, tid)
                 if fresh is None:
                     continue
                 status = (
@@ -3402,7 +3487,9 @@ class TaskRegistry:
             "not_signalled": not_signalled,
             "not_recorded": not_recorded,
             "rounds": rounds,
-            "cascade_incomplete": bool(unconverged),
+            "cascade_incomplete": bool(unconverged) or bool(refusals),
+            "history_incomplete": bool(refusals),
+            "refused_tasks": [exc.as_dict() for exc in refusals.values()],
             "unconverged": unconverged,
         }
 
@@ -4167,7 +4254,7 @@ async def _monitor(task: Task, registry: TaskRegistry) -> None:
                 task.done.set()
                 try:
                     registry.persist(task)
-                    if task.auto_continue and task.output_drained:
+                    if task.auto_continue and task.output_drained and task.latest_record_landed:
                         from .task_continuation import schedule_automatic
                         schedule_automatic(registry, task)
                     else:

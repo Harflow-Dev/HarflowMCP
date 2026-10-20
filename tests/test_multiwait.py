@@ -9,15 +9,21 @@ from mcp import MCPError
 
 from harflow_mcp import server, store, task_waiting, wait_policy
 from harflow_mcp.tasks import Task
+from harflow_mcp.backends.codex import CodexBackend
 
 
 def add_task(task_id, tmp_path, status="running"):
     task = Task(task_id=task_id, backend="codex", session_id=None, repo_path=tmp_path,
                 prompt="x", max_turns=None, log_path=tmp_path / f"{task_id}.jsonl",
-                started_at=datetime.now(timezone.utc), status=status)
+                started_at=datetime.now(timezone.utc), status=status,
+                enforcement=CodexBackend().enforcement("write_in_repo").as_dict())
     if status != "running":
         task.done.set()
     server._reg()._tasks[task_id] = task
+    server._reg().persist(task)
+    assert task.latest_record_landed is True
+    assert task.persistence_error is None
+    assert store.read(server._reg().log_dir, task_id) is not None
     return task
 
 
@@ -86,7 +92,7 @@ async def test_missing_validates_before_observers(tmp_path):
 
 async def test_all_guards_precede_reads(monkeypatch):
     guarded = []
-    async def guard(task_id):
+    async def guard(task_id, **kwargs):
         guarded.append(task_id)
         if task_id == "forbidden":
             raise ValueError("forbidden")
@@ -95,6 +101,56 @@ async def test_all_guards_precede_reads(monkeypatch):
     with pytest.raises(MCPError, match="forbidden"):
         await server.wait_for_tasks(["ok", "forbidden"])
     assert guarded == ["ok", "forbidden"]
+
+
+async def test_all_target_authorization_reads_use_bounded_metadata(tmp_path, monkeypatch):
+    add_task("a", tmp_path, "completed")
+    add_task("b", tmp_path, "completed")
+    calls = []
+    original = store.read
+
+    def read(*args, **kwargs):
+        calls.append(kwargs)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(store, "read", read)
+    result = await server.wait_for_tasks(["a", "b"], "all", 0)
+    assert result["terminal_task_ids"] == ["a", "b"]
+    assert len(calls) >= 2
+    assert all(
+        call.get("include_prompt") is False
+        and call.get("metadata_byte_limit") == task_waiting.METADATA_BYTES
+        for call in calls
+    )
+
+
+async def test_slow_live_metadata_shares_the_observation_budget_across_targets(tmp_path, monkeypatch):
+    import threading
+    import time
+
+    first = add_task("slow-a", tmp_path)
+    second = add_task("slow-b", tmp_path)
+    first.acc.summary = second.acc.summary = "stale live summary"
+    monkeypatch.setattr(task_waiting, "OBSERVATION_IO_SECONDS", .01)
+    release = threading.Event()
+    calls = []
+
+    def slow_read(*args, **kwargs):
+        calls.append(kwargs)
+        release.wait(1)
+        return None
+
+    monkeypatch.setattr(store, "read", slow_read)
+    started = time.monotonic()
+    try:
+        result = await server.wait_for_tasks(["slow-a", "slow-b"], "all", 0)
+    finally:
+        release.set()
+    assert [row["status"] for row in result["tasks"]] == ["unavailable", "unavailable"]
+    assert all(row["status_source"] == "unavailable" and row["summary"] is None for row in result["tasks"])
+    assert not result["terminal_task_ids"]
+    assert len(calls) == 2
+    assert time.monotonic() - started < .2
 
 
 async def test_concurrent_waits_and_caller_cancellation(tmp_path):
@@ -122,7 +178,8 @@ async def test_recovered_uses_bounded_headers(tmp_path, monkeypatch):
     record = store.TaskRecord(task_id="r", backend="codex", session_id=None,
                               repo_path=str(tmp_path), started_at=datetime.now(timezone.utc).isoformat(),
                               status="failed", exit_code=None, prompt_truncated=True,
-                              prompt_source="r.prompt.unavailable.txt")
+                              prompt_source="r.prompt.unavailable.txt",
+                              enforcement=CodexBackend().enforcement("write_in_repo").as_dict())
     store.write(server._reg().log_dir, record)
     monkeypatch.setattr(store, "resolve_status", lambda *a, **kw: pytest.fail("stream replay forbidden"))
     monkeypatch.setattr(server._reg(), "recover", lambda *a: pytest.fail("unbounded recovery forbidden"))
@@ -135,7 +192,12 @@ async def test_recovered_uses_bounded_headers(tmp_path, monkeypatch):
     result = await server.wait_for_tasks(["r"], timeout_seconds=0)
     assert result["tasks"][0]["status"] == "unknown"
     assert result["terminal_task_ids"] == []
-    assert all(call["include_prompt"] is False and call["metadata_byte_limit"] for call in calls)
+    assert calls
+    assert all(
+        call.get("include_prompt") is False
+        and call.get("metadata_byte_limit") == task_waiting.METADATA_BYTES
+        for call in calls
+    )
     assert result["tasks"][0]["status_source"] == "recovered_liveness"
 
 
@@ -216,7 +278,8 @@ async def test_size_adversarial_maximum_fields(tmp_path):
 async def test_observed_recovered_terminal_avoids_detail(tmp_path, monkeypatch):
     record = store.TaskRecord(task_id="r", backend="codex", session_id=None,
                               repo_path=str(tmp_path), started_at=datetime.now(timezone.utc).isoformat(),
-                              status="completed", exit_code=0)
+                              status="completed", exit_code=0,
+                              enforcement=CodexBackend().enforcement("write_in_repo").as_dict())
     store.write(server._reg().log_dir, record)
     monkeypatch.setattr(store, "resolve_status", lambda *a, **kw: pytest.fail("detail replay forbidden"))
     result = await server.wait_for_tasks(["r"], timeout_seconds=0)
@@ -227,7 +290,8 @@ async def test_observed_recovered_terminal_avoids_detail(tmp_path, monkeypatch):
 async def test_oversized_metadata_unavailable(tmp_path):
     record = store.TaskRecord(task_id="r", backend="codex", session_id=None,
                               repo_path=str(tmp_path), started_at=datetime.now(timezone.utc).isoformat(),
-                              prompt="x" * (task_waiting.METADATA_BYTES + 1))
+                              prompt="x" * (task_waiting.METADATA_BYTES + 1),
+                              enforcement=CodexBackend().enforcement("write_in_repo").as_dict())
     store.write(server._reg().log_dir, record)
     # Write a deliberately oversized persisted metadata record, bypassing prompt compaction.
     path = store.record_path(server._reg().log_dir, "r")
@@ -242,15 +306,18 @@ async def test_corrupt_existing_metadata_is_unavailable():
     registry = server._reg()
     registry.log_dir.mkdir(parents=True, exist_ok=True)
     store.record_path(registry.log_dir, 'corrupt').write_text('{not json')
-    result = await server.wait_for_tasks(['corrupt'], timeout_seconds=0)
-    assert result['tasks'][0]['status'] == 'unavailable'
-    assert result['terminal_task_ids'] == []
+    with pytest.raises(MCPError, match='corrupt:') as error:
+        await server.wait_for_tasks(['corrupt'], timeout_seconds=0)
+    assert error.value.code == -32602
+    assert error.value.data['code'] == 'task_incompatible'
+    assert error.value.data['task_id'] == 'corrupt'
 
 
 async def test_invalid_listing_header_field_is_unavailable_alongside_live_terminal(tmp_path):
     record = store.TaskRecord(task_id="bad-header", backend="codex", session_id=None,
                               repo_path=str(tmp_path), started_at=datetime.now(timezone.utc).isoformat(),
-                              status="completed", exit_code=0)
+                              status="completed", exit_code=0,
+                              enforcement=CodexBackend().enforcement("write_in_repo").as_dict())
     store.write(server._reg().log_dir, record)
     path = store.record_path(server._reg().log_dir, "bad-header")
     raw = json.loads(path.read_text())
@@ -259,13 +326,11 @@ async def test_invalid_listing_header_field_is_unavailable_alongside_live_termin
     path.write_text(json.dumps(raw))
     live = add_task("live-terminal", tmp_path, "completed")
 
-    result = await server.wait_for_tasks(["bad-header", "live-terminal"], "all", 0)
-
-    assert result["tasks"][0]["status"] == "unavailable"
-    assert result["tasks"][0]["status_source"] == "unavailable"
-    assert result["tasks"][1]["status"] == "completed"
-    assert result["terminal_task_ids"] == ["live-terminal"]
-    assert result["timed_out"]
+    with pytest.raises(MCPError, match='bad-header:') as error:
+        await server.wait_for_tasks(["bad-header", "live-terminal"], "all", 0)
+    assert error.value.code == -32602
+    assert error.value.data['code'] == 'task_incompatible'
+    assert error.value.data['task_id'] == 'bad-header'
     assert live.done.is_set()
 
 
@@ -273,7 +338,11 @@ async def test_missing_after_slow_metadata_is_rejected_before_reads(tmp_path, mo
     live = add_task("live", tmp_path)
     registry = server._reg()
     registry.log_dir.mkdir(parents=True, exist_ok=True)
-    store.record_path(registry.log_dir, "early").write_text("{}")
+    store.write(registry.log_dir, store.TaskRecord(
+        task_id="early", backend="codex", session_id=None, repo_path=str(tmp_path),
+        started_at=datetime.now(timezone.utc).isoformat(),
+        enforcement=CodexBackend().enforcement("write_in_repo").as_dict(),
+    ))
     monkeypatch.setattr(task_waiting, "OBSERVATION_IO_SECONDS", .02)
     import threading
     release = threading.Event()

@@ -334,5 +334,35 @@
     "literal": "PB_CLI_INTEGRATION",
     "reason": "Remove legacy paid-test opt-in flags from isolated subprocess environments.",
     "count": 2
+  },
+  {
+    "file": "src/harflow_mcp/task_documents.py",
+    "literal": "polybridge",
+    "reason": "Validate the unchanged historical enforcement payload field without renaming stored caller contracts.",
+    "count": 1
+  },
+  {
+    "file": "tests/test_store.py",
+    "literal": "polybridge",
+    "reason": "Exercise the unchanged historical enforcement field in qualified task metadata.",
+    "count": 2
+  },
+  {
+    "file": "tests/test_task_documents.py",
+    "literal": "polybridge",
+    "reason": "Exercise the unchanged historical enforcement field in qualified task metadata.",
+    "count": 1
+  },
+  {
+    "file": "tests/test_artifacts.py",
+    "literal": "polybridge",
+    "reason": "Model the unchanged historical enforcement field in qualified artifact owner fixtures.",
+    "count": 1
+  },
+  {
+    "file": "tests/test_task_document_authority.py",
+    "literal": "polybridge",
+    "reason": "Verify foreign task metadata cannot authorize engine controls or persistence.",
+    "count": 2
   }
 ]

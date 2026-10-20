@@ -105,6 +105,29 @@ def test_list_since_filters_out_older_tasks(home: Path, capsys: pytest.CaptureFi
     assert task_ids == {"recent"}
 
 
+def test_list_preserves_valid_rows_when_record_disappears_after_scan(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    log_dir = _log_dir(home)
+    store.write(log_dir, make_record(task_id="valid"))
+    store.write(log_dir, make_record(task_id="gone"))
+    original = store.brief
+
+    def brief(directory: Path, record: store.TaskRecord) -> dict:
+        if record.task_id == "gone":
+            raise store.TaskDocumentError("gone", "Task metadata disappeared", code="task_unavailable")
+        return original(directory, record)
+
+    monkeypatch.setattr(store, "brief", brief)
+    assert ctl.main(["list", "--json"]) == 0
+    document = json.loads(capsys.readouterr().out)
+    assert [task["task_id"] for task in document["tasks"]] == ["valid"]
+    assert document["history_incomplete"] is True
+    assert document["refused_tasks"] == [
+        {"task_id": "gone", "code": "task_unavailable", "reason": "Task metadata disappeared"}
+    ]
+
+
 def test_a_bad_since_value_is_a_usage_error(home: Path, capsys: pytest.CaptureFixture) -> None:
     with pytest.raises(SystemExit) as exc_info:
         ctl.main(["list", "--since", "not-a-duration", "--json"])
@@ -618,8 +641,17 @@ def test_compact_list_preserves_authority_preparing_response(home, monkeypatch, 
 
 
 def test_v10_status_document_exposes_bounded_path_authority(home, capsys):
-    grants = [{"path": "/outside/output", "kind": "directory"}]
-    enforcement = {"extra_writable_paths": grants, "extra_path_certification": "cert"}
+    from harflow_mcp.backends import get as get_backend
+
+    grants = [{
+        "requested": "/outside/output",
+        "path": "/outside/output",
+        "kind": "directory",
+        "device": 1,
+        "inode": 1,
+    }]
+    enforcement = get_backend("claude").enforcement("write_in_repo").as_dict()
+    enforcement.update(extra_writable_paths=grants, extra_path_certification="cert")
     store.write(_log_dir(home), make_record(extra_writable_paths=grants,
         extra_path_certification="cert", enforcement=enforcement))
     assert ctl.main(["status", "task-1", "--json"]) == 0

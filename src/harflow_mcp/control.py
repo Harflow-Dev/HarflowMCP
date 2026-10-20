@@ -576,6 +576,9 @@ def close_record_if_open(
             return "owner_not_dead", None
         updated = update(record)
         if not store.write_landed(log_dir, updated):
+            error = store.last_write_error()
+            if error is not None:
+                raise error
             return "write_failed", None
         return "written", updated
     finally:

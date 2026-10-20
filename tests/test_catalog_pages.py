@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from harflow_mcp import catalog, ctl, lineage, server, store, workflows
+from harflow_mcp import catalog, ctl, lineage, server, store, task_documents, workflows
 from harflow_mcp import state_ownership
 from harflow_mcp.state_layout import resolve_layout
 from harflow_mcp.workflow_inspection import managed_page_reader
@@ -17,18 +17,24 @@ def record(identifier, *, stamp='2026-10-01T00:00:00+00:00', status='completed',
     return store.TaskRecord(identifier, 'codex', 'session', '/repo', stamp, status=status, exit_code=0 if status == 'completed' else None, **kwargs)
 
 
-def legacy_tasks(directory, count):
-    """Populate historical records inside an already-owned current store.
+def write_external(directory, task):
+    store.record_path(directory, task.task_id).write_text(
+        json.dumps(task_documents.encode(asdict(task)))
+    )
 
-    These fixtures exercise legacy metadata contents and index recovery; they do
-    not test adopting an unmarked directory as a state root.
-    """
-    with state_ownership.state_session(resolve_layout(log_dir=directory)):
-        pass
-    directory.mkdir(parents=True, exist_ok=True)
-    for number in range(count):
-        task = record(f't{number:04}', stamp=f'2026-10-01T00:{number // 60:02}:{number % 60:02}+00:00')
-        (directory / f'{task.task_id}.meta.json').write_text(json.dumps(asdict(task)))
+
+def legacy_tasks(directory, count):
+    """Populate qualified records inside an already-owned current store."""
+    layout = resolve_layout(log_dir=directory)
+    with state_ownership.state_session(layout):
+        directory.mkdir(parents=True, exist_ok=True)
+        for number in range(count):
+            task = record(f't{number:04}', stamp=f'2026-10-01T00:{number // 60:02}:{number % 60:02}+00:00')
+            store.write(directory, task)
+        # Keep the qualified metadata but force this fixture through the cold
+        # bootstrap path under test.
+        for suffix in ('.listing.v9.sqlite3', '.listing.v9.sqlite3-shm', '.listing.v9.sqlite3-wal'):
+            (directory / suffix).unlink(missing_ok=True)
 
 
 def human_authority(monkeypatch):
@@ -43,8 +49,8 @@ def test_bootstrap_is_resumable_bounded_and_does_not_modify_legacy_records(tmp_p
     legacy_tasks(directory, 205)
     originals = {p.name: p.read_bytes() for p in directory.glob('*.meta.json')}
     calls = []
-    read = store.read
-    monkeypatch.setattr(store, 'read', lambda *args, **kwargs: (calls.append(args[1]), read(*args, **kwargs))[1])
+    read = store._read
+    monkeypatch.setattr(store, '_read', lambda *args, **kwargs: (calls.append(args[1]), read(*args, **kwargs))[1])
     for expected in (100, 100, 5):
         calls.clear()
         page = store.list_page(directory)
@@ -195,8 +201,8 @@ def test_whole_cli_page_including_authority_decodes_at_most_100_metadata(tmp_pat
     legacy_tasks(directory, 205)
     human_authority(monkeypatch)
     monkeypatch.setattr(ctl, 'default_log_dir', lambda: directory)
-    calls, original = [], store.read
-    monkeypatch.setattr(store, 'read', lambda *a, **k: (calls.append(a[1]), original(*a, **k))[1])
+    calls, original = [], store._read
+    monkeypatch.setattr(store, '_read', lambda *a, **k: (calls.append(a[1]), original(*a, **k))[1])
     for expected in (100, 100, 5, 0):
         calls.clear()
         assert ctl.main(['task-list-page', '--json']) == 0
@@ -212,8 +218,8 @@ async def test_whole_server_page_has_bounded_authority_and_no_legacy_scan(tmp_pa
     legacy_tasks(directory, 103)
     human_authority(monkeypatch)
     monkeypatch.setattr(server, '_reg', lambda: SimpleNamespace(log_dir=directory))
-    calls, original = [], store.read
-    monkeypatch.setattr(store, 'read', lambda *a, **k: (calls.append(a[1]), original(*a, **k))[1])
+    calls, original = [], store._read
+    monkeypatch.setattr(store, '_read', lambda *a, **k: (calls.append(a[1]), original(*a, **k))[1])
     page = await server.list_task_page()
     assert page['bootstrap_pending'] and page['items'] == [] and len(calls) == 100
     calls.clear()
@@ -296,7 +302,7 @@ def test_child_page_contains_unloaded_task_ancestor_header(tmp_path):
     page = store.list_page(directory, limit=1)
     assert [item['task_id'] for item in page['items']] == ['child']
     assert [item['task_id'] for item in page['related_headers']] == ['parent']
-    (directory / 'parent.meta.json').write_text(json.dumps(asdict(record('parent'))))
+    write_external(directory, record('parent'))
     assert store.list_page(directory, limit=1)['related_headers'][0]['status'] == 'completed'
 
 
@@ -473,7 +479,12 @@ def test_oversized_legacy_metadata_is_discoverable_without_reading_or_claiming_c
     assert items['oversized']['needs_direct_lookup'] and items['oversized']['status'] == 'unknown'
     assert not Catalog(directory, '.meta.json', layout=layout).ready()
     monkeypatch.setattr(store, 'read', original_read)
-    store.write(directory, record('oversized'))
+    before = (directory / 'oversized.meta.json').read_bytes()
+    assert not store.write_landed(directory, record('oversized'))
+    assert (directory / 'oversized.meta.json').read_bytes() == before
+    replacement = directory / '.oversized-replacement'
+    replacement.write_text(json.dumps(task_documents.encode(asdict(record('oversized')))))
+    os.replace(replacement, directory / 'oversized.meta.json')
     assert not store.list_page(directory)['history_incomplete']
 
 
@@ -531,7 +542,7 @@ def test_oversized_task_authority_fails_closed_until_direct_snapshot_without_rew
     directory.mkdir(parents=True, exist_ok=True)
     task = replace(record('oversized'), prompt='x' * (METADATA_BYTES + 1))
     path = directory / 'oversized.meta.json'
-    path.write_text(json.dumps(asdict(task)))
+    write_external(directory, task)
     original = path.read_bytes()
     human_authority(monkeypatch)
     assert managed_page_reader(directory) == (False, None)
@@ -601,7 +612,7 @@ def test_actual_opened_metadata_bytes_respect_batch_budget_when_path_stat_is_sta
     directory.mkdir(parents=True, exist_ok=True)
     for number in range(3):
         task = replace(record(str(number)), prompt='x' * (3 * 1024 * 1024))
-        (directory / f'{number}.meta.json').write_text(json.dumps(asdict(task)))
+        write_external(directory, task)
     def stale_stat(path, *args, **kwargs):
         result = original_stat(path, *args, **kwargs)
         if path.name.endswith('.meta.json'):
@@ -624,7 +635,12 @@ def test_cached_caller_projection_omits_large_nonidentity_fields_and_refuses_ove
     from harflow_mcp.catalog import Catalog
     directory = tmp_path / 'state' / 'tasks'
     layout = resolve_layout(log_dir=directory)
-    task = replace(record('small'), repo_path='x' * (3 * 1024 * 1024), owner={'large': 'y' * (3 * 1024 * 1024)}, markers=['codex'])
+    task = replace(record('small'), repo_path='x' * (3 * 1024 * 1024), owner={
+        'pid': 1,
+        'start_time': '2026-10-01T00:00:00+00:00',
+        'markers': ['codex'],
+        'large': 'y' * (3 * 1024 * 1024),
+    }, markers=['codex'])
     store.write(directory, task)
     with Catalog(directory, '.meta.json', layout=layout).connect() as db:
         payload = db.execute("SELECT payload FROM callers WHERE id='small'").fetchone()[0]
@@ -783,8 +799,8 @@ def test_schema_three_cache_rebuild_is_bounded_without_decoding_old_headers(tmp_
         # Invalid old payload proves partial-index construction never evaluates it.
         db.executemany('INSERT INTO entries VALUES (?,0,0,NULL,?)', [(f'old{i}', 'invalid JSON') for i in range(250)])
     reads = []
-    original = store.read
-    monkeypatch.setattr(store, 'read', lambda *args, **kwargs: (reads.append(args[1]), original(*args, **kwargs))[1])
+    original = store._read
+    monkeypatch.setattr(store, '_read', lambda *args, **kwargs: (reads.append(args[1]), original(*args, **kwargs))[1])
     page = store.list_page(directory)
     assert page['bootstrap_pending'] and len(reads) == 100
     with index.connect() as db:
@@ -851,14 +867,14 @@ async def test_public_definition_list_does_not_require_catalog_bootstrap(tmp_pat
 def test_discovery_queue_survives_unrelated_churn_and_new_earlier_names(tmp_path, monkeypatch):
     directory = tmp_path / 'state' / 'tasks'
     legacy_tasks(directory, 350)
-    calls, original = [], store.read
-    monkeypatch.setattr(store, 'read', lambda *a, **k: (calls.append(a[1]), original(*a, **k))[1])
+    calls, original = [], store._read
+    monkeypatch.setattr(store, '_read', lambda *a, **k: (calls.append(a[1]), original(*a, **k))[1])
     for number, expected in enumerate((100, 100, 100, 51)):
         calls.clear()
         (directory / f'churn{number}.jsonl').write_text('noise')
         (directory / f'.temporary{number}').write_text('noise')
         if number == 1:
-            (directory / '000-earlier.meta.json').write_text(json.dumps(asdict(record('000-earlier'))))
+            write_external(directory, record('000-earlier'))
         page = store.list_page(directory)
         assert len(calls) == expected
         assert page['bootstrap_pending'] == (number < 3)
@@ -923,7 +939,7 @@ def test_changed_discovery_snapshot_does_not_prune_or_claim_ready(tmp_path, monk
     (directory / 'removed.meta.json').unlink()
     original = catalog.Catalog._changed
     def changing(index, db, identifier):
-        (directory / 'arriving.meta.json').write_text(json.dumps(asdict(record('arriving'))))
+        write_external(directory, record('arriving'))
         return original(index, db, identifier)
     monkeypatch.setattr(catalog.Catalog, '_changed', changing)
     index = catalog.Catalog(directory, store.RECORD_SUFFIX, layout=layout)
@@ -934,6 +950,43 @@ def test_changed_discovery_snapshot_does_not_prune_or_claim_ready(tmp_path, monk
     page = store.list_page(directory)
     assert page['catalog_state']['status'] == 'ready'
     assert {item['task_id'] for item in page['items']} == {'arriving', 'retained'}
+
+
+def test_foreign_task_replacement_quarantines_cached_caller_authority(tmp_path):
+    directory = tmp_path / 'state' / 'tasks'
+    task = record('caller', status='running')
+    store.write(directory, task)
+    first = store.list_page(directory)
+    assert first['catalog_state']['status'] == 'ready'
+    path = store.record_path(directory, task.task_id)
+    path.write_text(json.dumps({'product': 'foreign', 'format': 'harflow.task', 'v': 1}), encoding='utf-8')
+
+    page = store.list_page(directory)
+
+    assert page['catalog_state']['status'] == 'blocked'
+    assert page['catalog_state']['source'] == 'task_catalog'
+    assert page['catalog_state']['blocked_sources'][0]['id'] == task.task_id
+    with catalog.Catalog(directory, store.RECORD_SUFFIX, layout=resolve_layout(log_dir=directory)).connect() as db:
+        assert db.execute("SELECT 1 FROM callers WHERE id=?", (task.task_id,)).fetchone() is None
+
+
+def test_task_catalog_reset_does_not_modify_independent_workflow_catalog(tmp_path):
+    directory = tmp_path / 'state' / 'tasks'
+    storage = workflows.WorkflowStore(tmp_path)
+    run = storage.create_run(definition(), 'Assignment', tmp_path)
+    before = storage.list_run_page()
+    assert before['items']
+    task = record('caller')
+    store.write(directory, task)
+    store.list_page(directory)
+    store.record_path(directory, task.task_id).write_text(json.dumps({'product': 'foreign'}), encoding='utf-8')
+    blocked = store.list_page(directory)
+
+    after = storage.list_run_page()
+    assert blocked['catalog_state']['status'] == 'blocked'
+    assert after['items'] == before['items']
+    assert after['catalog_state']['status'] == before['catalog_state']['status']
+    assert run['workflow_run_id'] == before['items'][0]['workflow_run_id']
 
 
 def test_unsupported_caller_identity_is_persistent_without_redecode(tmp_path, monkeypatch):
@@ -970,7 +1023,7 @@ def test_old_live_catalog_schema_is_untouched_and_old_writer_replacement_recover
     # its original derivative schema remain usable during the rolling install.
     path = directory / 'oldwriter.meta.json'
     temporary = directory / '.oldwriter-temp'
-    temporary.write_text(json.dumps(asdict(record('oldwriter', title='second'))))
+    temporary.write_text(json.dumps(task_documents.encode(asdict(record('oldwriter', title='second')))))
     os.replace(temporary, path)
     with sqlite3.connect(legacy) as db:
         db.execute('INSERT INTO sources VALUES (?,?,?)', ('oldwriter', path.stat().st_mtime_ns, path.stat().st_size))
@@ -1015,7 +1068,7 @@ def test_foreign_writer_overlapping_projection_cannot_acknowledge_stale_header(t
     def overlapping(index, header, *args, **kwargs):
         path = directory / 'overlap.meta.json'
         foreign = directory / '.foreign-temp'
-        foreign.write_text(json.dumps(asdict(record('overlap', title='foreign'))))
+        foreign.write_text(json.dumps(task_documents.encode(asdict(record('overlap', title='foreign')))))
         os.replace(foreign, path)
         return original(index, header, *args, **kwargs)
     monkeypatch.setattr(catalog.Catalog, 'record', overlapping)
@@ -1143,7 +1196,7 @@ def test_managed_ownership_decode_and_page_share_one_aggregate_budget(tmp_path, 
         assert ready and managed[0]['role'] == 'orchestrator'
         for number in range(100):
             historical = record(f'new{number:03}', prompt='x' * (100 * 1024))
-            (directory / f'{historical.task_id}.meta.json').write_text(json.dumps(asdict(historical)))
+            write_external(directory, historical)
         page = store.list_page(directory)
         assert page['bootstrap_pending']
         assert sum(consumed) <= catalog.METADATA_BATCH_BYTES
@@ -1505,7 +1558,7 @@ def test_explicit_unsupported_caller_first_projection_is_blocked(tmp_path):
     with state_ownership.state_session(layout):
         pass
     directory.mkdir(parents=True, exist_ok=True)
-    (directory / 'unsupported.meta.json').write_text(json.dumps(asdict(record('unsupported', markers=['x' * 5000]))))
+    write_external(directory, record('unsupported', markers=['x' * 5000]))
     page = store.list_page(directory, task_ids=['unsupported'])
     assert page['items'] == []
     assert page['catalog_state']['status'] == 'blocked'
@@ -1550,7 +1603,7 @@ def test_explicit_task_page_loads_unindexed_parent_and_reports_blocker(tmp_path)
     directory = tmp_path / 'tasks'
     store.write(directory, record('child', parent_task_id='legacy-parent'))
     parent = record('legacy-parent', prompt='x' * (catalog.METADATA_BYTES + 1))
-    (directory / 'legacy-parent.meta.json').write_text(json.dumps(asdict(parent)))
+    write_external(directory, parent)
     page = store.list_page(directory, task_ids=['child'])
     assert page['related_headers'] == []
     assert page['catalog_state']['status'] == 'blocked'
@@ -1563,7 +1616,7 @@ def test_foreign_insertion_between_writer_prestamp_and_replacement_requires_disc
     store.write(directory, record('known', title='original'))
     store.list_page(directory)
     index = catalog.Catalog(directory, store.RECORD_SUFFIX, layout=layout)
-    original_read = store.read
+    original_read = store._read
     original_discover = catalog.Catalog._discover
     inserted = False
     discovery_calls = []
@@ -1574,13 +1627,13 @@ def test_foreign_insertion_between_writer_prestamp_and_replacement_requires_disc
         if identifier == 'known' and not inserted:
             inserted = True
             temporary = directory / '.foreign-temp'
-            temporary.write_text(json.dumps(asdict(record('foreign', title='older process insertion'))))
+            temporary.write_text(json.dumps(task_documents.encode(asdict(record('foreign', title='older process insertion')))))
             os.replace(temporary, directory / 'foreign.meta.json')
         return result
 
-    monkeypatch.setattr(store, 'read', foreign_during_guard)
+    monkeypatch.setattr(store, '_read', foreign_during_guard)
     assert store.write_landed(directory, record('known', title='updated'))
-    monkeypatch.setattr(store, 'read', original_read)
+    monkeypatch.setattr(store, '_read', original_read)
     # Inspect readiness before reconciliation: the writer has projected its own
     # record, but the prestamp cannot account for this unrelated insertion.
     with index.connect() as db:
@@ -1720,9 +1773,9 @@ def test_live_schema_seven_runtime_cannot_reset_schema_eight_discovery_progress(
         db.execute('CREATE TABLE state(key TEXT PRIMARY KEY,value TEXT)')
         db.execute("INSERT INTO state VALUES ('schema_version','7')")
         db.execute("INSERT INTO state VALUES ('legacy_runtime','preserved')")
-    original_read = store.read
+    original_read = store._read
     calls = []
-    monkeypatch.setattr(store, 'read', lambda *args, **kwargs: (calls.append(args[1]), original_read(*args, **kwargs))[1])
+    monkeypatch.setattr(store, '_read', lambda *args, **kwargs: (calls.append(args[1]), original_read(*args, **kwargs))[1])
     for expected in (100, 100, 5):
         calls.clear()
         page = store.list_page(directory)
@@ -1910,8 +1963,7 @@ def test_filtered_cursor_advances_past_refreshed_excluded_rows(tmp_path, exclude
     # An older writer changes existing metadata without projecting the catalog.
     # The directory namespace is unchanged, so page materialization refreshes it.
     for identifier in excluded:
-        store.record_path(directory, identifier).write_text(json.dumps(asdict(
-            replace(record(identifier), group='excluded'))))
+        write_external(directory, replace(record(identifier), group='excluded'))
 
     listing = catalog.Catalog(directory, store.RECORD_SUFFIX, layout=layout)
     loads = []
@@ -1972,15 +2024,15 @@ def test_v8_cache_preserved_while_v9_group_index_bootstraps_bounded(tmp_path, mo
     group = '😀' * 128
     original = store.read(directory, 't0204')
     # Write metadata directly to model pre-v9 persisted history.
-    (directory / 't0204.meta.json').write_text(json.dumps(asdict(replace(original, group=group))))
+    write_external(directory, replace(original, group=group))
     old_path = directory / '.listing.v8.sqlite3'
     with sqlite3.connect(old_path) as db:
         db.execute('CREATE TABLE state (key TEXT PRIMARY KEY, value TEXT)')
         db.execute("INSERT INTO state VALUES ('schema_version','8')")
     old_bytes = old_path.read_bytes()
     reads = []
-    original_read = store.read
-    monkeypatch.setattr(store, 'read', lambda *a, **kw: (reads.append(a[1]), original_read(*a, **kw))[1])
+    original_read = store._read
+    monkeypatch.setattr(store, '_read', lambda *a, **kw: (reads.append(a[1]), original_read(*a, **kw))[1])
     for expected in (100, 100, 5):
         reads.clear()
         page = store.list_page(directory, filters={'group': group})

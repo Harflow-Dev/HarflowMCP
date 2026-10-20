@@ -1191,8 +1191,11 @@ def active_builder(storage, tmp_path, *, role="builder"):
     from harflow_mcp import store, lineage
     run = storage.create_run({"name": "example", "orchestrator": {"backend": "codex"}}, "Build", tmp_path, kind="builder", freedom="read_only")
     tid = "builder-task"
-    record = store.TaskRecord(task_id=tid, backend="codex", session_id="session", repo_path=str(tmp_path), started_at=1, status="running")
+    freedom = "write_in_repo"
+    network = None
+    record = store.TaskRecord(task_id=tid, backend="codex", session_id="session", repo_path=str(tmp_path), started_at="2026-10-01T00:00:00+00:00", freedom=freedom, network=network, status="running", enforcement=w.backends.get("codex").enforcement(freedom, network).as_dict())
     store.write(storage.root / "tasks", record)
+    assert store.read(storage.root / "tasks", record.task_id) is not None
     activation = {"id": "activation", "node_id": "builder", "role": role, "status": "running", "tasks": [{"task_id": tid, "status": "running"}]}
     storage.update_run(run["workflow_run_id"], lambda r: r.update(status="running", activations=[activation], draft_revision=0), "test_active")
     return run["workflow_run_id"], lineage.Caller(record, "ancestry")
@@ -1249,8 +1252,11 @@ async def test_live_builder_applied_draft_wins_over_stale_final_json(storage, tm
     storage.update_run(run["workflow_run_id"], lambda r: r.update(editing_definition=baseline, editing_source={"name": "example", "revision": 1, "saved_definition": baseline}, draft_revision=0), "editing")
     class ApplyingRegistry(FakeRegistry):
         async def start(self, prompt, repo_path, **kwargs):
-            record = store.TaskRecord(task_id=kwargs["task_id"], backend="codex", session_id="s", repo_path=str(repo_path), started_at=1, status="running")
+            freedom = "write_in_repo"
+            network = None
+            record = store.TaskRecord(task_id=kwargs["task_id"], backend="codex", session_id="s", repo_path=str(repo_path), started_at="2026-10-01T00:00:00+00:00", freedom=freedom, network=network, status="running", enforcement=w.backends.get("codex").enforcement(freedom, network).as_dict())
             store.write(self._log_dir, record)
+            assert store.read(self._log_dir, record.task_id) is not None
             newer = definition()
             newer["description"] = "Live graph wins"
             await w.apply_workflow_draft(newer, 0, caller=lineage.Caller(record, "ancestry"), root=storage.root)
@@ -1480,8 +1486,11 @@ async def test_registry_display_projection_keeps_full_backend_prompt_and_normali
     await registry.start(full, tmp_path, backend=w.backends.get("codex"), freedom="read_only", display_prompt="USER REQUEST")
     assert full in captured["argv"]
     assert captured["prompt"] == full and captured["display_prompt"] == "USER REQUEST"
-    task = tasks.Task(task_id="display", backend="codex", session_id="s", repo_path=tmp_path, prompt=full, display_prompt="USER REQUEST", workflow_builder=True, max_turns=5, log_path=state / "raw", started_at=datetime.now(timezone.utc))
+    task = tasks.Task(task_id="display", backend="codex", session_id="s", repo_path=tmp_path, prompt=full, display_prompt="USER REQUEST", workflow_builder=True, max_turns=5, log_path=state / "raw", started_at=datetime.now(timezone.utc), enforcement=w.backends.get("codex").enforcement("write_in_repo", None).as_dict())
     registry.persist(task)
+    assert task.latest_record_landed is True
+    assert task.persistence_error is None
+    assert store.read(state, task.task_id) is not None
     assert store.read(state, "display").prompt == "USER REQUEST"
     assert store.read(state, "display").workflow_builder is True
     assert task.brief()["workflow_builder"] is True
@@ -1500,10 +1509,13 @@ async def test_registry_workflow_followup_display_keeps_full_resume_input(tmp_pa
     state = tmp_path / "state" / "tasks"
     state.mkdir(parents=True, exist_ok=True)
     registry = tasks.TaskRegistry(log_dir=state)
-    parent = tasks.Task(task_id="parent", backend="claude", session_id="session", repo_path=tmp_path, prompt="Previous full prompt", display_prompt="Previous user request", max_turns=5, log_path=state / "parent.log", started_at=datetime.now(timezone.utc))
+    parent = tasks.Task(task_id="parent", backend="claude", session_id="session", repo_path=tmp_path, prompt="Previous full prompt", display_prompt="Previous user request", max_turns=5, log_path=state / "parent.log", started_at=datetime.now(timezone.utc), enforcement=w.backends.get("claude").enforcement("write_in_repo", None).as_dict())
     parent.status = "completed"; parent.done.set()
     registry._tasks[parent.task_id] = parent
     registry.persist(parent)
+    assert parent.latest_record_landed is True
+    assert parent.persistence_error is None
+    assert store.read(state, parent.task_id) is not None
     observed = {}
     async def spawn(invocation, **kwargs):
         observed.update(kwargs, argv=invocation.argv, initial_input=invocation.initial_input)
@@ -1596,10 +1608,12 @@ def test_failed_stderr_survives_registry_persistence_and_recovered_snapshot(tmp_
     from harflow_mcp import tasks, store
     state = tmp_path / "state" / "tasks"
     registry = tasks.TaskRegistry(log_dir=state)
-    task = tasks.Task(task_id="failed", backend="codex", session_id=None, repo_path=tmp_path, prompt="Prompt", max_turns=5, log_path=state / "failed.jsonl", started_at=datetime.now(timezone.utc))
+    task = tasks.Task(task_id="failed", backend="codex", session_id=None, repo_path=tmp_path, prompt="Prompt", max_turns=5, log_path=state / "failed.jsonl", started_at=datetime.now(timezone.utc), enforcement=w.backends.get("codex").enforcement("write_in_repo", None).as_dict())
     task.status = "failed"; task.exit_code = 1; task.finished_at = datetime.now(timezone.utc)
     task.stderr_tail.append("Not inside a trusted directory")
     registry.persist(task)
+    assert task.latest_record_landed is True
+    assert task.persistence_error is None
     record = store.read(state, "failed")
     assert record.stderr_tail == ["Not inside a trusted directory"]
     assert store.snapshot(state, record)["stderr_tail"] == record.stderr_tail

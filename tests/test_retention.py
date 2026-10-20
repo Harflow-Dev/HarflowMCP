@@ -833,6 +833,75 @@ def test_a_failed_artifact_delete_keeps_the_record_for_a_later_sweep(
     assert not stream.exists() and store.read(log_dir, record.task_id) is None
 
 
+def test_sweep_refuses_foreign_history_before_deleting_compatible_record_family(
+    tmp_path: Path,
+) -> None:
+    log_dir = tmp_path / "tasks"
+    log_dir.mkdir()
+    record = make_record(prompt="p" * 5000)
+    assert store.write_landed(log_dir, record)
+    prompt_sidecars = sorted(log_dir.glob(f"{record.task_id}.prompt.*.txt"))
+    assert len(prompt_sidecars) == 1
+    prompt_bytes = prompt_sidecars[0].read_bytes()
+    stream = log_dir / f"{record.task_id}.jsonl"
+    stream.write_text("raw output\n")
+    artifact = log_dir / f"{record.task_id}.artifacts.json"
+    artifact.write_text('{"items":[{"path":"report"}]}')
+    metadata = store.record_path(log_dir, record.task_id)
+    foreign = log_dir / "foreign.meta.json"
+    foreign_bytes = b'{"product":"foreign","format":"other"}'
+    foreign.write_bytes(foreign_bytes)
+
+    with pytest.raises(store.TaskDocumentError, match="foreign"):
+        retention.sweep(log_dir, 30, datetime.now(timezone.utc))
+
+    assert metadata.exists() and stream.exists() and artifact.exists()
+    assert prompt_sidecars[0].read_bytes() == prompt_bytes
+    assert foreign.read_bytes() == foreign_bytes
+
+    foreign.unlink()
+    assert retention.sweep(log_dir, 30, datetime.now(timezone.utc))["deleted_tasks"] == 1
+    assert not metadata.exists() and not stream.exists() and not artifact.exists()
+    assert not prompt_sidecars[0].exists()
+
+
+def test_retention_preserves_foreign_replacement_after_preflight_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log_dir = tmp_path / "tasks"
+    log_dir.mkdir()
+    record = make_record(prompt="p" * 5000)
+    assert store.write_landed(log_dir, record)
+    prompt_sidecars = sorted(log_dir.glob(f"{record.task_id}.prompt.*.txt"))
+    assert len(prompt_sidecars) == 1
+    prompt_bytes = prompt_sidecars[0].read_bytes()
+    stream = log_dir / f"{record.task_id}.jsonl"
+    stream.write_text("raw output\n")
+    artifact = log_dir / f"{record.task_id}.artifacts.json"
+    artifact.write_text('{"items":[{"path":"report"}]}')
+    metadata = store.record_path(log_dir, record.task_id)
+    foreign_bytes = b'{"product":"foreign","format":"other"}'
+    real_read = store.read
+    replaced = False
+
+    def read_then_replace(directory, task_id, *args, **kwargs):
+        nonlocal replaced
+        value = real_read(directory, task_id, *args, **kwargs)
+        if task_id == record.task_id and not replaced:
+            replaced = True
+            temporary = directory / ".foreign-replacement"
+            temporary.write_bytes(foreign_bytes)
+            os.replace(temporary, metadata)
+        return value
+
+    monkeypatch.setattr(store, "read", read_then_replace)
+    assert not retention._delete_task_files(log_dir, record.task_id)
+    assert replaced
+    assert metadata.read_bytes() == foreign_bytes
+    assert stream.exists() and artifact.exists()
+    assert prompt_sidecars[0].read_bytes() == prompt_bytes
+
+
 def test_supported_retention_removal_waits_for_catalog_decode_before_unlinking(tmp_path):
     import threading
     from concurrent.futures import ThreadPoolExecutor

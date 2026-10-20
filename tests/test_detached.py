@@ -47,11 +47,13 @@ def backend(monkeypatch):
 
 def _granted_record(task_id, repo, backend, *, certification):
     records = serialize_paths(normalize_paths([str(repo)]))
+    enforcement = backend.enforcement('write_in_repo').as_dict()
+    enforcement.update(extra_writable_paths=records, extra_path_certification=certification)
     return store.TaskRecord(
         task_id=task_id, backend=backend.name, session_id='session', repo_path=str(repo),
         started_at='2026-01-01T00:00:00+00:00',
         extra_writable_paths=records, extra_path_certification=certification,
-        enforcement={'extra_writable_paths': records, 'extra_path_certification': certification},
+        enforcement=enforcement,
     )
 
 

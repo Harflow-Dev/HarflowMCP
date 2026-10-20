@@ -57,6 +57,7 @@ def make_task(
         log_path=(log_dir or tmp_path) / f"{task_id}.jsonl",
         started_at=datetime.now(timezone.utc) - timedelta(seconds=age_seconds),
     )
+    task.enforcement = backends.get(task.backend).enforcement(task.freedom, task.network).as_dict()
     if finished:
         task.status = "completed"
         task.done.set()

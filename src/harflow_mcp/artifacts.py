@@ -332,6 +332,8 @@ def summary(log_dir: Path, task_id: str) -> dict:
         _authority(log_dir, record)
     except StateOwnershipError:
         raise
+    except store.TaskDocumentError as exc:
+        return {'count': 0, 'state': 'unavailable', 'history_incomplete': True, 'refused_tasks': [exc.as_dict()]}
     except Exception:
         return {'count': 0, 'state': 'unavailable'}
     try:
@@ -792,6 +794,12 @@ def workflow_page(log_dir: Path, workflow_run_id: str, *, cursor: str | None = N
                     if record is None:
                         try:
                             record = _read_owner(log_dir, owner_id)
+                        except store.TaskDocumentError as exc:
+                            refused = owner_entry(owner_id, run_id, activation.get('id'), 'unavailable')
+                            refused.update(history_incomplete=True, refused_tasks=[exc.as_dict()])
+                            if not append_owner(refused, position, owner_id, after):
+                                done = False
+                            break
                         except (OSError, ValueError, KeyError, TypeError):
                             if not append_owner(owner_entry(owner_id, run_id, activation.get('id'), 'unavailable'), position, owner_id, after):
                                 done = False
@@ -835,11 +843,11 @@ def owner_references(log_dir: Path, owner_task_id: str) -> list[dict]:
     Used by workflow delivery, which needs the same stat observation as the readers. A manifest or
     owner record that cannot be read raises ``ValueError`` so a caller never mistakes it for none.
     """
+    record = _read_owner(log_dir, owner_task_id)
     try:
         items, _ = _load(log_dir, owner_task_id)
     except (OSError, KeyError, TypeError) as exc:
         raise ValueError('Artifact manifest is unavailable') from exc
     if not items:
         return []
-    record = _read_owner(log_dir, owner_task_id)
     return [item | {'availability': {'state': 'unavailable' if record is None else _availability(log_dir, record, item), 'observed_at': _now()}} for item in items]

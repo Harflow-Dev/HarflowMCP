@@ -100,7 +100,9 @@ class Certified(_TrivialBackend):
 
 def owner(tmp_path, grants):
     records=serialize_paths(grants)
-    return store.TaskRecord(task_id='owner', backend='codex', session_id='session', repo_path=str(tmp_path), started_at='2026-01-01T00:00:00+00:00', extra_writable_paths=records, extra_path_certification='fixture-v1', enforcement={'extra_writable_paths': records, 'extra_path_certification': 'fixture-v1'})
+    enforcement = Certified().enforcement('write_in_repo').as_dict()
+    enforcement.update(extra_writable_paths=records, extra_path_certification='fixture-v1')
+    return store.TaskRecord(task_id='owner', backend='codex', session_id='session', repo_path=str(tmp_path), started_at='2026-01-01T00:00:00+00:00', extra_writable_paths=records, extra_path_certification='fixture-v1', enforcement=enforcement)
 
 
 @pytest.fixture
@@ -201,7 +203,7 @@ async def test_resume_inherits_saved_identities_and_refuses_native(tmp_path,monk
     monkeypatch.setattr(registry,'session_has_live_run',lambda _:False)
     capture=AsyncMock(return_value=SimpleNamespace(task_id='child'))
     monkeypatch.setattr(registry,'_spawn',capture)
-    parent=record if recovered else SimpleNamespace(**record.__dict__,record_landed=True)
+    parent=record if recovered else SimpleNamespace(**record.__dict__,record_landed=True,latest_record_landed=True,persistence_error=None)
     if not recovered:parent.repo_path=tmp_path
     resume=registry.resume_record if recovered else registry.resume
     await resume(parent,'Continue',task_id='child')
@@ -356,15 +358,22 @@ AUTHORITY_MARKERS = [
     {"enforcement": {"extra_path_certification": False}},
     {"enforcement": {"extra_path_certification": ""}},
 ]
-LEGACY_MARKERS = [{}, {"enforcement": None}, {"enforcement": {}},
-                  {"extra_writable_paths": [], "extra_path_certification": None,
-                   "enforcement": {"extra_writable_paths": [], "extra_path_certification": None}}]
+# Empty certification is well-typed but incompatible; it must reach the authority refusal path.
+MALFORMED_MARKERS = [marker for marker in AUTHORITY_MARKERS if marker != {"extra_path_certification": ""}]
+LEGACY_MARKERS = [{}, {"enforcement": None}]
+INCOMPLETE_ENFORCEMENT_MARKERS = [
+    {"enforcement": {}},
+    {"extra_writable_paths": [], "extra_path_certification": None,
+     "enforcement": {"extra_writable_paths": [], "extra_path_certification": None}},
+]
 
 
-def persisted_markers(tmp_path, markers):
+def persisted_source(tmp_path, markers):
     import json
+    enforcement = Certified().enforcement('write_in_repo').as_dict()
     record = store.TaskRecord(task_id="saved", backend="codex", session_id="session",
-                              repo_path=str(tmp_path), started_at="2026-01-01T00:00:00+00:00")
+                              repo_path=str(tmp_path), started_at="2026-01-01T00:00:00+00:00",
+                              enforcement=enforcement)
     log_dir = _state_logs(tmp_path)
     store.write_landed(log_dir, record)
     path = store.record_path(log_dir, record.task_id)
@@ -373,12 +382,28 @@ def persisted_markers(tmp_path, markers):
         payload.pop(key, None)
     payload.update(markers)
     path.write_text(json.dumps(payload))
+    return log_dir, path, record
+
+
+def persisted_markers(tmp_path, markers):
+    log_dir, _path, record = persisted_source(tmp_path, markers)
     return store.read(log_dir, record.task_id)
 
 
-@pytest.mark.parametrize("markers,blocked", [(m, True) for m in AUTHORITY_MARKERS] + [(m, False) for m in LEGACY_MARKERS])
+@pytest.mark.parametrize("markers,blocked", [(m, True) for m in AUTHORITY_MARKERS + INCOMPLETE_ENFORCEMENT_MARKERS] + [(m, False) for m in LEGACY_MARKERS])
 def test_live_and_recovered_snapshot_saved_markers(tmp_path, monkeypatch, markers, blocked):
     from datetime import datetime, timezone
+    if markers in MALFORMED_MARKERS or markers in INCOMPLETE_ENFORCEMENT_MARKERS:
+        log_dir, path, record = persisted_source(tmp_path, markers)
+        source = path.read_bytes()
+        with pytest.raises(store.TaskDocumentError) as error:
+            store.read(log_dir, record.task_id)
+        assert error.value.code == "task_incompatible"
+        with pytest.raises(store.TaskDocumentError) as snapshot_error:
+            store.snapshot(log_dir, record)
+        assert snapshot_error.value.code == "task_incompatible"
+        assert path.exists() and path.read_bytes() == source
+        return
     record = persisted_markers(tmp_path, markers)
     monkeypatch.setattr(store, "resume_command", lambda *args: "ordinary resume")
     monkeypatch.setattr(tasks, "resume_command", lambda *args: "ordinary resume")
@@ -392,10 +417,29 @@ def test_live_and_recovered_snapshot_saved_markers(tmp_path, monkeypatch, marker
     assert store.snapshot(log_dir, record)["resume_command"] == expected
 
 
-@pytest.mark.parametrize("markers", AUTHORITY_MARKERS)
+@pytest.mark.parametrize("markers", AUTHORITY_MARKERS + INCOMPLETE_ENFORCEMENT_MARKERS)
 async def test_saved_markers_refuse_resume_and_takeover_before_mutation(tmp_path, monkeypatch, backend, markers):
-    record = persisted_markers(tmp_path, markers)
     from unittest.mock import AsyncMock
+    if markers in MALFORMED_MARKERS or markers in INCOMPLETE_ENFORCEMENT_MARKERS:
+        log_dir, path, held = persisted_source(tmp_path, markers)
+        source = path.read_bytes()
+        parent = SimpleNamespace(**(held.__dict__ | {"repo_path": tmp_path, "finished": True,
+            "latest_record_landed": True, "record_landed": True, "persistence_error": None}))
+        spawn = AsyncMock()
+        registry = tasks.TaskRegistry(log_dir=log_dir)
+        monkeypatch.setattr(registry, "_spawn", spawn)
+        with pytest.raises(store.TaskDocumentError) as resume_error:
+            await registry.resume(parent, "Continue")
+        assert resume_error.value.code == "task_incompatible"
+        monkeypatch.setattr(takeover, "_refuse_agents", lambda *args: None)
+        with pytest.raises(store.TaskDocumentError) as takeover_error:
+            await takeover.take_over(log_dir, held.task_id, registry_factory=lambda: registry)
+        assert takeover_error.value.code == "task_incompatible"
+        assert not spawn.await_args_list
+        assert path.exists() and path.read_bytes() == source
+        assert control.takeover_attempt(log_dir, held.task_id) is None
+        return
+    record = persisted_markers(tmp_path, markers)
     log_dir = _state_logs(tmp_path)
     registry = tasks.TaskRegistry(log_dir=log_dir)
     monkeypatch.setattr(registry, "_mutation_caller", AsyncMock(return_value=None))
@@ -513,7 +557,7 @@ async def test_saved_authority_resolution_timeout_prevents_effects(tmp_path, mon
     registry = tasks.TaskRegistry(log_dir=_state_logs(tmp_path), open_monitor=False)
     record = replace(owner(tmp_path, normalize_paths([str(tmp_path)])), backend=backend.name, live_input=True)
     store.write_landed(registry.log_dir, record)
-    parent = SimpleNamespace(**record.__dict__, record_landed=True)
+    parent = SimpleNamespace(**record.__dict__, latest_record_landed=True, persistence_error=None)
     parent.live_input = True
     parent.repo_path = tmp_path
     monkeypatch.setattr(registry, '_mutation_caller', AsyncMock(return_value=None))

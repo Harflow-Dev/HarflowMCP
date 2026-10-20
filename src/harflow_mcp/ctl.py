@@ -416,7 +416,8 @@ def _print_table(entries: list[dict[str, Any]]) -> None:
 
 def _cmd_list(args: argparse.Namespace, parser: _ArgumentParser) -> int:
     log_dir = default_log_dir()
-    records = store.read_all(log_dir)
+    scanned = store.scan(log_dir)
+    records = scanned.records
 
     if args.since is not None:
         try:
@@ -440,18 +441,26 @@ def _cmd_list(args: argparse.Namespace, parser: _ArgumentParser) -> int:
         records = kept
 
     from .workflow_inspection import decorate_tasks
-    entries = decorate_tasks([store.brief(log_dir, record) for record in records], log_dir)
+    entries = []
+    for record in records:
+        try:
+            entries.append(store.brief(log_dir, record))
+        except store.TaskDocumentError as exc:
+            scanned.refusals[record.task_id] = exc
+    entries = decorate_tasks(entries, log_dir)
     from .workflow_inspection import filter_task_reads, managed_reader
     try:
         entries = filter_task_reads(entries, managed_reader(log_dir))
-    except StateOwnershipError:
+    except (StateOwnershipError, store.TaskDocumentError):
         raise
     except Exception as exc:
         return _fail(args, "workflow_read_refused", str(exc))
     if args.json:
-        print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "tasks": entries})))
+        print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "tasks": entries, **scanned.diagnostics()})))
     else:
         _print_table(entries)
+        if scanned.history_incomplete:
+            print("harflow-ctl: task history incomplete: " + ", ".join(scanned.refusals), file=sys.stderr)
     return 0
 
 
@@ -490,14 +499,14 @@ def _status_snapshot(log_dir: Path, task_id: str, managed: Any) -> dict[str, Any
     id, so a batch entry and a direct status call can never disagree. `task_id` must already be
     validated (invariant 8: an id is validated before it can become a path).
     """
+    record = store.read(log_dir, task_id)
     from .workflow_inspection import guard_task_read
     try:
         guard_task_read(task_id, managed)
-    except StateOwnershipError:
+    except (StateOwnershipError, store.TaskDocumentError):
         raise
     except Exception as exc:
         raise _StatusReadRefused("workflow_read_refused", str(exc)) from None
-    record = store.read(log_dir, task_id)
     if record is None:
         raise _StatusReadRefused("unknown_task", f"unknown task_id: {task_id}")
     from .workflow_inspection import decorate_tasks
@@ -511,10 +520,12 @@ def _cmd_status(args: argparse.Namespace) -> int:
     except store.InvalidTaskId:
         return _fail(args, "invalid_task_id", f"not a valid task id: {args.task_id!r}")
 
+    # Task qualification precedes workflow guards so direct errors retain their code.
+    store.read(log_dir, task_id, include_prompt=False)
     from .workflow_inspection import managed_reader
     try:
         managed = managed_reader(log_dir)
-    except StateOwnershipError:
+    except (StateOwnershipError, store.TaskDocumentError):
         raise
     except Exception as exc:
         return _fail(args, "workflow_read_refused", str(exc))
@@ -563,7 +574,7 @@ def _cmd_status_batch(args: argparse.Namespace) -> int:
     from .workflow_inspection import managed_reader
     try:
         managed = managed_reader(log_dir)
-    except StateOwnershipError:
+    except (StateOwnershipError, store.TaskDocumentError):
         raise
     except Exception as exc:
         # Undecidable caller authority refuses the whole batch — never partial data.
@@ -573,6 +584,8 @@ def _cmd_status_batch(args: argparse.Namespace) -> int:
     for task_id in valid:
         try:
             tasks.append(_status_snapshot(log_dir, task_id, managed))
+        except store.TaskDocumentError as exc:
+            errors[task_id] = {"code": exc.code, "message": str(exc)}
         except _StatusReadRefused as exc:
             errors[task_id] = {"code": exc.code, "message": exc.message}
 
@@ -602,7 +615,7 @@ def _cmd_send(args: argparse.Namespace) -> int:
 
     try:
         by = identity.own_identity()
-    except StateOwnershipError:
+    except (StateOwnershipError, store.TaskDocumentError):
         raise
     except Exception:
         by = None
@@ -981,7 +994,7 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
         return await server._workflow_call(action, run_id=args.workflow_run_id, **({"interaction_owner": "monitor"} if getattr(args, "monitor", False) else {}))
     try:
         result = asyncio.run(invoke())
-    except StateOwnershipError:
+    except (StateOwnershipError, store.TaskDocumentError):
         raise
     except Exception as exc:
         return _fail(args, "workflow_error", str(exc), getattr(getattr(exc, "error", None), "data", None))
@@ -1032,7 +1045,7 @@ def _main(argv: list[str] | None = None) -> int:
     try:
         with state_session(task_layout(default_log_dir())):
             return _execute(args, list_p)
-    except StateOwnershipError as exc:
+    except (StateOwnershipError, store.TaskDocumentError) as exc:
         return _fail(args, getattr(exc, "code", "state_incompatible"), str(exc))
 
 
@@ -1059,7 +1072,7 @@ def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
             return await approval_runtime.respond_request(reg, args.task_id, args.request_id, args.action_digest, args.owner_revision, args.decision, owner)
         try:
             result = asyncio.run(approval_action())
-        except StateOwnershipError:
+        except (StateOwnershipError, store.TaskDocumentError):
             raise
         except Exception as exc:
             return _fail(args, "approval_error", str(exc))
@@ -1100,7 +1113,7 @@ def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
                 network=_network(args.network), extra_writable_paths=args.extra_writable_path,
                 caller_approvals=args.caller_approvals,
             ))
-        except StateOwnershipError:
+        except (StateOwnershipError, store.TaskDocumentError):
             raise
         except Exception as exc:
             return _fail(args, "invalid_params", str(exc))

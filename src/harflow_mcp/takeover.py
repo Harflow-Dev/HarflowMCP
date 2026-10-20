@@ -331,9 +331,8 @@ async def take_over(
         store.validate_task_id(task_id)
     except store.InvalidTaskId as exc:
         raise control.TakeoverRefused("invalid_task_id", str(exc)) from None
-    await asyncio.to_thread(_refuse_agents, log_dir, environ)
-
     record = await asyncio.to_thread(store.read, log_dir, task_id)
+    await asyncio.to_thread(_refuse_agents, log_dir, environ)
     if record is None:
         raise control.TakeoverRefused("unknown_task", f"unknown task_id: {task_id}")
     if has_extra_path_authority(record):
@@ -394,6 +393,8 @@ async def take_over(
         # Synchronous on purpose: this path includes a cancellation, where awaiting is unreliable.
         if n is not None:
             _fail(log_dir, task_id, n, f"error: {exc!r}")
+        if isinstance(exc, (store.TaskDocumentError, store.StateOwnershipError)):
+            raise
         if isinstance(exc, Exception):
             raise control.TakeoverRefused("internal_error", f"takeover failed: {exc}") from exc
         raise
@@ -441,9 +442,8 @@ def attach(
         raise control.TakeoverRefused("invalid_task_id", str(exc)) from None
     if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 1:
         raise control.TakeoverRefused("invalid_pid", f"not a usable pid: {pid!r}")
-    _refuse_agents(log_dir, environ)
-
     record = store.read(log_dir, task_id)
+    _refuse_agents(log_dir, environ)
     if record is None:
         raise control.TakeoverRefused("unknown_task", f"unknown task_id: {task_id}")
     if has_extra_path_authority(record):

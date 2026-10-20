@@ -52,7 +52,11 @@ class Registry:
         self.children = {}
 
     async def spawn(self, prompt, path, **kwargs):
-        child = SimpleNamespace(task_id=kwargs['task_id'], spawned_by=None, root_task_id=None, depth=0, max_depth=None)
+        child = SimpleNamespace(task_id=kwargs['task_id'], spawned_by=None, root_task_id=None, depth=0, max_depth=None,
+                                repo_path=str(path), backend='claude', session_id=None,
+                                started_at='2026-01-01T00:02:00+00:00', prompt=prompt,
+                                freedom=kwargs.get('freedom', 'write_in_repo'), status='running',
+                                latest_record_landed=False, persistence_error=None)
         self.children[child.task_id] = child
         return child
 
@@ -60,7 +64,18 @@ class Registry:
         return self.children.get(task_id)
 
     def persist(self, child):
-        pass
+        # Model the real registry contract: persistence records the child durably and
+        # reports the latest write outcome on the in-memory task.
+        persisted = store.TaskRecord(task_id=child.task_id, backend=child.backend,
+                                     session_id=child.session_id, repo_path=child.repo_path,
+                                     started_at=child.started_at, freedom=child.freedom,
+                                     prompt=child.prompt, status=child.status,
+                                     spawned_by=child.spawned_by, root_task_id=child.root_task_id,
+                                     depth=child.depth, max_depth=child.max_depth,
+                                     continuation_of_task_id=child.continuation_of_task_id if hasattr(child, 'continuation_of_task_id') else None,
+                                     chain_root_task_id=child.chain_root_task_id if hasattr(child, 'chain_root_task_id') else None)
+        child.latest_record_landed = store.write_landed(self.log_dir, persisted)
+        child.persistence_error = store.last_write_error()
 
 
 @pytest.mark.asyncio

@@ -227,7 +227,11 @@ def test_monitor_cli_cold_and_unknown_authority_never_uses_legacy_detection(monk
     directory = tmp_path
     for number in range(103):
         task = store.TaskRecord(f'cold{number:03}', 'codex', 'session', '/repo', '2026-10-01T00:00:00+00:00', status='completed', exit_code=0)
-        (directory / f'{task.task_id}.meta.json').write_text(json.dumps(asdict(task)))
+        payload = store.encode_task(asdict(task))
+        path = directory / f'{task.task_id}.meta.json'
+        path.write_text(json.dumps(payload))
+        recovered = store.decode_task(json.loads(path.read_text()), task.task_id, store.TaskRecord)
+        assert recovered.task_id == task.task_id
     monkeypatch.setattr(lineage, '_default_process_table', lambda: {os.getpid(): 1, 1: 0})
     monkeypatch.setattr(ctl, 'default_log_dir', lambda: directory)
     monkeypatch.setattr(store, 'read_all', lambda *args: pytest.fail('retained metadata scan'))

@@ -175,9 +175,14 @@ async def test_a_devnull_invocation_never_gets_a_pipe(
 
 def test_a_record_written_before_live_input_existed_loads_as_not_live(tmp_path: Path) -> None:
     path = store.record_path(_task_dir(tmp_path), "old")
+    enforcement = backends.get("claude").enforcement("write_in_repo").as_dict()
     path.write_text(
         json.dumps(
             {
+                "product": "harflow",
+                "format": "harflow.task",
+                "v": 1,
+                "product_version": "1.0.0",
                 "task_id": "old",
                 "backend": "claude",
                 "session_id": "s",
@@ -185,6 +190,7 @@ def test_a_record_written_before_live_input_existed_loads_as_not_live(tmp_path: 
                 "started_at": "2026-01-01T00:00:00+00:00",
                 "status": "completed",
                 "exit_code": 0,
+                "enforcement": enforcement,
             }
         )
     )
@@ -809,6 +815,7 @@ def _stub_task(log_dir: Path, stdin: _Stdin, task_id: str = "live1") -> Task:
         started_at=datetime.now(timezone.utc),
         live_input=True,
     )
+    task.enforcement = backends.get(task.backend).enforcement(task.freedom, task.network).as_dict()
     task.proc = SimpleNamespace(stdin=stdin, returncode=None, pid=None)
     task.events = EventLog(events_path(log_dir, task_id), task_id)
     return task

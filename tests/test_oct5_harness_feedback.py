@@ -18,6 +18,7 @@ def test_complete_assignment_persisted(tmp_path):
     task = Task(task_id='full-prompt', backend='claude', session_id='session', repo_path=tmp_path,
                 prompt=prompt, max_turns=None, log_path=directory/'full-prompt.jsonl',
                 started_at=datetime.now(timezone.utc))
+    task.enforcement = ClaudeBackend().enforcement(task.freedom, task.network).as_dict()
     TaskRegistry(log_dir=directory).persist(task)
     assert store.read(directory, task.task_id).prompt == prompt
 
@@ -172,7 +173,11 @@ def test_retention_keeps_record_when_scratch_cleanup_fails(tmp_path, monkeypatch
     log_dir = root/'tasks'
     log_dir.mkdir()
     record = log_dir/f'{task_id}.meta.json'
-    record.write_text('{}')
+    store.write(log_dir, store.TaskRecord(
+        task_id=task_id, backend='claude', session_id=None, repo_path=str(tmp_path),
+        started_at=datetime.now(timezone.utc).isoformat(),
+        enforcement=ClaudeBackend().enforcement('write_in_repo').as_dict(),
+    ))
     def fail(*args):
         raise OSError('scratch busy')
     monkeypatch.setattr(scratch, 'remove', fail)

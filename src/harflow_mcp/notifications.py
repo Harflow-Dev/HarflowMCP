@@ -345,11 +345,16 @@ def _tick(log_dir: Path):
     for candidate in candidates:
         with _db(log_dir) as db:
             db.execute('UPDATE subscriptions SET updated=? WHERE id=?', (time.time(), candidate['id']))
+        try:
+            if store.read(log_dir, candidate["task_id"], include_prompt=False, metadata_byte_limit=262144) is None:
+                continue
+        except (store.TaskDocumentError, OSError, ValueError):
+            continue
         body = candidate['payload']
         if body is None:
             try:
                 record = store.read(log_dir, candidate['task_id'], include_prompt=False, metadata_byte_limit=262144)
-            except (OSError, ValueError, TypeError):
+            except (OSError, ValueError, TypeError, store.TaskDocumentError):
                 continue
             if record is None or record.status not in TERMINAL or record.exit_code is None or not record.finished_at:
                 continue

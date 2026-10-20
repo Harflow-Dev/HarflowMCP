@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 from mcp import Client, MCPError
 
-from harflow_mcp import identity, server, store, wait_policy
+from harflow_mcp import backends, identity, server, store, wait_policy
 from harflow_mcp import state_ownership
 from harflow_mcp.state_layout import resolve_layout
 from harflow_mcp.tasks import Task, TAIL_LINES_RETURNED
@@ -52,9 +52,15 @@ def event_json(payload: dict) -> str:
     })
 
 
+def persistable(task: Task) -> Task:
+    """Mirror the complete enforcement contract emitted by a real spawn."""
+    task.enforcement = backends.get(task.backend).enforcement(task.freedom, task.network).as_dict()
+    return task
+
+
 @pytest.fixture
 def fake_task(tmp_path: Path) -> Task:
-    task = Task(
+    task = persistable(Task(
         task_id="task-1",
         backend="claude",
         session_id="session-1",
@@ -63,7 +69,7 @@ def fake_task(tmp_path: Path) -> Task:
         max_turns=None,
         log_path=server._reg().log_dir / "task-1.jsonl",
         started_at=datetime.now(timezone.utc),
-    )
+    ))
     server._reg()._tasks[task.task_id] = task
     return task
 
@@ -208,7 +214,7 @@ async def test_valid_reasoning_effort_reaches_the_argv_and_the_persisted_record(
         )
         registry = server._reg()
         registry._tasks[task.task_id] = task
-        registry.persist(task)
+        registry.persist(persistable(task))
         return task
 
     monkeypatch.setattr(server._reg(), "_spawn", fake_spawn)
@@ -274,6 +280,8 @@ async def test_cancel_task_response_carries_a_cascade_summary(fake_task: Task) -
         "not_recorded",
         "rounds",
         "cascade_incomplete",
+        "history_incomplete",
+        "refused_tasks",
         "unconverged",
     }
     assert response["cascade"]["rounds"] >= 1
@@ -661,7 +669,7 @@ async def test_resume_forwards_network_through_both_server_branches(
         parent.status = "completed"
         parent.done.set()
         registry._tasks[parent.task_id] = parent
-        registry.persist(parent)
+        registry.persist(persistable(parent))
         task_id = parent.task_id
     else:
         record = store.TaskRecord(
@@ -711,7 +719,7 @@ async def test_resume_preserves_followup_prompt_bytes_through_transport_and_reco
             network=kwargs.get("network"),
         )
         server._reg()._tasks[task.task_id] = task
-        server._reg().persist(task)
+        server._reg().persist(persistable(task))
         return task
 
     monkeypatch.setattr(server._reg(), "_spawn", fake_spawn)
@@ -729,7 +737,7 @@ async def test_resume_preserves_followup_prompt_bytes_through_transport_and_reco
     parent.status = "completed"
     parent.done.set()
     server._reg()._tasks[parent.task_id] = parent
-    server._reg().persist(parent)
+    server._reg().persist(persistable(parent))
 
     result = await call("resume_task", task_id=parent.task_id, followup_prompt=prompt)
 
