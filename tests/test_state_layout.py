@@ -19,6 +19,7 @@ from harflow_mcp.state_layout import (
 )
 from harflow_mcp.tasks import TaskRegistry
 from harflow_mcp.workflows import WorkflowStore
+from harflow_mcp.workflow_definition_documents import encode as encode_definition
 
 
 def test_default_and_patched_home_use_canonical_tasks_directory(tmp_path, monkeypatch):
@@ -140,14 +141,15 @@ async def test_server_workflow_reads_selected_registry_root_not_ambient_store(tm
     ambient = tmp_path / "root-b"
     selected_store = WorkflowStore(root=selected)
     ambient_store = WorkflowStore(root=ambient)
-    selected_store.definitions.joinpath("sample.json").write_text(json.dumps({"name": "sample", "nodes": [], "connections": []}))
-    ambient_store.definitions.joinpath("sample.json").write_text(json.dumps({"name": "ambient", "nodes": [], "connections": []}))
+    selected_store.definitions.joinpath("sample.json").write_text(json.dumps(encode_definition({"name": "sample", "description": "selected root", "nodes": [], "connections": []})))
+    ambient_store.definitions.joinpath("sample.json").write_text(json.dumps(encode_definition({"name": "sample", "description": "ambient root", "nodes": [], "connections": []})))
     monkeypatch.setenv("HARFLOW_STATE_ROOT", str(ambient))
     registry = TaskRegistry(log_dir=selected / "tasks", owner={})
     registry._detect_caller = AsyncMock(return_value=None)
     monkeypatch.setattr(server, "_registry", registry)
     result = await server.get_workflow("sample")
     assert result["name"] == "sample"
+    assert result["description"] == "selected root"
 
 
 def test_protected_roots_include_selected_legacy_and_valid_ambient(tmp_path):

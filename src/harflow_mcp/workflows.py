@@ -19,6 +19,7 @@ import json
 import math
 import logging
 import os
+import stat
 from pathlib import Path
 import re
 import subprocess
@@ -27,6 +28,7 @@ import time
 import uuid
 from typing import Any
 
+from .workflow_definition_documents import WorkflowDefinitionDocumentError
 from . import backends, store as task_store
 
 SCHEMA_VERSION = 1
@@ -648,7 +650,7 @@ def validate_selection(definition: dict[str, Any], node: dict[str, Any], selecte
     return join_id
 
 
-def _write(path: Path, value: Any, *, layout) -> os.stat_result:
+def _write(path: Path, value: Any, *, layout, before_replace=None) -> os.stat_result:
     require_state_path(layout, path)
     temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     try:
@@ -658,6 +660,8 @@ def _write(path: Path, value: Any, *, layout) -> os.stat_result:
             f.flush()
             os.fsync(f.fileno())
             written_source = os.fstat(f.fileno())
+        if before_replace is not None:
+            before_replace()
         os.replace(temp, path)
         fd = os.open(path.parent, os.O_RDONLY)
         try:
@@ -704,11 +708,64 @@ class WorkflowStore:
         with self.lock("definitions-tree"):
             yield
 
-    @layout_operation
-    def get(self, name: str) -> dict[str, Any]:
+    def _definition_source(self, name: str):
+        from .catalog import source_identity
+        path = self.definitions / f"{_workflow_name(name)}.json"
+        try:
+            source = path.lstat()
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise WorkflowDefinitionDocumentError(name, str(exc), code="workflow_definition_unavailable") from exc
+        if not stat.S_ISREG(source.st_mode):
+            raise WorkflowDefinitionDocumentError(name, "Definition source is not a regular file", code="workflow_definition_unavailable")
+        return source_identity(source)
+
+    def _check_definition_source(self, name: str, expected):
+        if self._definition_source(name) != expected:
+            raise WorkflowDefinitionDocumentError(name, "Definition source changed", code="workflow_definition_unavailable")
+
+    def _read_definition(self, name: str, *, missing_ok: bool = False):
+        from .catalog import source_identity
+        from .workflow_definition_documents import decode
+        path = self.definitions / f"{_workflow_name(name)}.json"
+        source = self._definition_source(name)
+        if source is None:
+            if missing_ok:
+                return None, None
+            raise FileNotFoundError(path)
+        descriptor = None
+        try:
+            descriptor = open_descriptor(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, layout=self.state_layout)
+            if source_identity(os.fstat(descriptor)) != source:
+                raise OSError("Definition source changed before read")
+            with os.fdopen(os.dup(descriptor), encoding="utf-8") as stream:
+                text = stream.read()
+            if source_identity(os.fstat(descriptor)) != source:
+                raise OSError("Definition source changed during read")
+            self._check_definition_source(name, source)
+        except (OSError, UnicodeError) as exc:
+            raise WorkflowDefinitionDocumentError(name, str(exc), code="workflow_definition_unavailable") from exc
+        finally:
+            if descriptor is not None:
+                descriptor.close()
+        try:
+            document = json.loads(text)
+        except (ValueError, RecursionError) as exc:
+            raise WorkflowDefinitionDocumentError(name, str(exc)) from exc
+        return decode(document, name), source
+
+    def _replace_definition(self, name: str, definition: dict[str, Any], source):
+        from .workflow_definition_documents import encode
+        self._check_definition_source(name, source)
+        return _write(self.definitions / f"{_workflow_name(name)}.json", encode(definition), layout=self.state_layout,
+                      before_replace=lambda: self._check_definition_source(name, source))
+
+    @staticmethod
+    def _project_definition(definition):
         from .workflow_references import workflow_identity
         from .workflow_migration import migrate_orchestrator_instructions
-        definition = migrate_orchestrator_instructions(json.loads((self.definitions / f"{_workflow_name(name)}.json").read_text()))
+        definition = migrate_orchestrator_instructions(definition)
         definition.setdefault("workflow_id", workflow_identity(definition))
         for node in definition.get("nodes", []):
             if node.get("type") == "agent":
@@ -716,15 +773,25 @@ class WorkflowStore:
         return definition
 
     @layout_operation
+    def get(self, name: str) -> dict[str, Any]:
+        return self._project_definition(self._read_definition(name)[0])
+
+    @layout_operation
     def list(self) -> list[dict[str, Any]]:
-        from .workflow_references import workflow_identity
-        from .workflow_migration import migrate_orchestrator_instructions
-        definitions = [migrate_orchestrator_instructions(json.loads(p.read_text())) for p in sorted(self.definitions.glob("*.json"))]
-        for definition in definitions:
-            definition.setdefault("workflow_id", workflow_identity(definition))
-            for node in definition.get("nodes", []):
-                if node.get("type") == "agent":
-                    node.setdefault("execution_mode", "headless")
+        definitions = []
+        try:
+            with os.scandir(self.definitions) as entries:
+                names = sorted(entry.name for entry in entries if entry.name.endswith(".json"))
+        except OSError as exc:
+            raise WorkflowDefinitionDocumentError("*", str(exc), code="workflow_definition_unavailable") from exc
+        for filename in names:
+            path = self.definitions / filename
+            try:
+                definitions.append(self.get(path.stem))
+            except FileNotFoundError as exc:
+                raise WorkflowDefinitionDocumentError(path.stem, "Discovered definition disappeared", code="workflow_definition_unavailable") from exc
+            except WorkflowError as exc:
+                raise WorkflowDefinitionDocumentError(path.stem, str(exc)) from exc
         return definitions
 
     @layout_operation
@@ -742,7 +809,7 @@ class WorkflowStore:
         with self.definitions_tree_lock():
             with self.lock(f"definition:{name}"):
                 path = self.definitions / f"{_workflow_name(name)}.json"
-                old = json.loads(path.read_text()) if path.exists() else None
+                old, source = self._read_definition(name, missing_ok=True)
                 if expected_workflow_id is not None:
                     current_id = workflow_identity(old) if old is not None else None
                     if expected_workflow_id != current_id:
@@ -778,7 +845,7 @@ class WorkflowStore:
                 if authority_guard is not None:
                     authority_guard(resolved)
                 d["updated_at"] = time.time()
-                _write(path, d, layout=self.state_layout)
+                self._replace_definition(name, d, source)
         return d
 
     @layout_operation
@@ -786,17 +853,16 @@ class WorkflowStore:
         from .workflow_references import referencing_definitions, workflow_identity
         name = _workflow_name(name)
         with self.definitions_tree_lock():
-            path = self.definitions / f"{name}.json"
-            ident = workflow_identity(json.loads(path.read_text())) if path.exists() else None
             with self.lock(f"definition:{name}"):
-                path.unlink()
+                definition, source = self._read_definition(name)
+                ident = workflow_identity(definition)
+                referenced_by = [item for item in referencing_definitions(self, ident) if item != name]
+                self._check_definition_source(name, source)
+                (self.definitions / f"{name}.json").unlink()
         result: dict[str, Any] = {"deleted": name}
-        if ident is not None:
-            # Deleting a referenced workflow is allowed; the notice names its referrers.
-            referenced_by = [definition for definition in referencing_definitions(self, ident) if definition != name]
-            if referenced_by:
-                result["referenced_by"] = referenced_by
-                result["notice"] = "This workflow is still referenced by: " + ", ".join(referenced_by)
+        if referenced_by:
+            result["referenced_by"] = referenced_by
+            result["notice"] = "This workflow is still referenced by: " + ", ".join(referenced_by)
         return result
 
     @layout_operation

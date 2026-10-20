@@ -9,6 +9,7 @@ import pytest
 
 from harflow_mcp import workflows as w
 from harflow_mcp import workflow_references as refs
+from harflow_mcp import workflow_definition_documents as definition_documents
 
 
 @pytest.fixture
@@ -52,7 +53,7 @@ def test_legacy_definitions_report_name_derived_id_and_persist_on_next_save(stor
     raw = w.validate_definition(child_definition("legacy-one"))
     raw["execution_contract"] = "delegation"
     raw["revision"] = 1
-    w._write(storage.definitions / "legacy-one.json", raw, layout=storage.state_layout)
+    w._write(storage.definitions / "legacy-one.json", definition_documents.encode(raw), layout=storage.state_layout)
     legacy = storage.get("legacy-one")
     assert legacy["workflow_id"] == "legacy-" + refs.workflow_identity(raw).removeprefix("legacy-")
     saved = storage.save("legacy-one", child_definition("legacy-one"), 1)

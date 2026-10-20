@@ -9,6 +9,7 @@ import pytest
 
 from harflow_mcp import workflows as w
 from harflow_mcp import workflow_delegation as d
+from harflow_mcp import workflow_definition_documents as definition_documents
 from harflow_mcp import state_ownership
 from harflow_mcp.state_layout import resolve_layout
 from execution_helper import run_bounded, workflow_snapshot
@@ -399,16 +400,17 @@ def test_migration_backup_preserves_graph_and_revision(storage, tmp_path):
     saved = storage.save("delegation", original)
     saved.pop("execution_contract")
     with state_ownership.state_session(storage.state_layout):
-        w._write(storage.definitions / "delegation.json", saved, layout=storage.state_layout)
-        before = copy.deepcopy(saved)
+        persisted = definition_documents.encode(saved)
+        w._write(storage.definitions / "delegation.json", persisted, layout=storage.state_layout)
+        before = copy.deepcopy(persisted)
         result = w.migrate_workflows(tmp_path)
         assert result["migrated"] == ["delegation"]
         assert json.loads(Path(result["backups"][0]).read_text()) == before
         migrated = storage.get("delegation")
-        assert migrated["revision"] == before["revision"] + 1
-        assert migrated["connections"] == before["connections"]
-        assert migrated["nodes"][0] == before["nodes"][0]
-        expected = {**before["nodes"][1], "session_mode": "agent_decides"}
+        assert migrated["revision"] == before["definition"]["revision"] + 1
+        assert migrated["connections"] == before["definition"]["connections"]
+        assert migrated["nodes"][0] == before["definition"]["nodes"][0]
+        expected = {**before["definition"]["nodes"][1], "session_mode": "agent_decides"}
         assert migrated["nodes"][1] == expected
         assert w.migrate_workflows(tmp_path)["migrated"] == []
 

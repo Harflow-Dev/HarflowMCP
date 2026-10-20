@@ -1681,3 +1681,7 @@ return `stop_reason: "attention"` with bounded metadata/handles. List the root t
 `list_approval_requests(workflow_run_id=...)`, then inspect and answer one request at a time.
 The root's caller/Monitor interaction ownership remains authoritative; no transfer is introduced.
 A decision does not itself establish successful execution or workflow completion.
+
+### Saved definition compatibility
+
+The engine wraps saved definitions in a Harflow product document; author graph payloads through the existing save tools without adding envelope fields. Flat development files and foreign, malformed or incompatible documents are refused rather than adopted. A refused source blocks whole-store listing and dependency indexing, including unrelated saves. Ordinary deletion also refuses unqualified files. See [saved definition contracts](contracts.md#saved-workflow-definition-documents) for error codes, compatibility and manual recovery.

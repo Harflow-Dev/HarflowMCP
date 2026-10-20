@@ -103,6 +103,12 @@ def test_workflow_associates_every_checkpoint_with_selected_node(tmp_path):
     from harflow_mcp import workflows, workflow_responses
     benchmark.fixture(tmp_path, 8, 16, workflow=True)
     storage = workflows.WorkflowStore(tmp_path / '.harflow')
+    saved_definition = storage.get('Synthetic parallel workflow')
+    assert saved_definition['workflow_id'] == 'parallel-workflow'
+    definitions = storage.list()
+    assert len(definitions) == 1
+    assert definitions[0]['name'] == 'Synthetic parallel workflow'
+    assert definitions[0]['workflow_id'] == 'parallel-workflow'
     run = storage.get_run('parallel-run')
     assert run['name'] == 'Synthetic parallel workflow'
     assert run['activations'][0]['node_id'] == 'work'

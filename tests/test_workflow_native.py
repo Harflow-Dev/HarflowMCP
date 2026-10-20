@@ -7,6 +7,7 @@ from dataclasses import replace
 import pytest
 
 from harflow_mcp import state_ownership, store, workflows as w
+from harflow_mcp import workflow_definition_documents as definition_documents
 from harflow_mcp.state_layout import resolve_layout
 from harflow_mcp.backends.claude import ClaudeBackend, UnsafeInvocationError
 from harflow_mcp.backends.claude_native import ClaudeNativeAdapter, NATIVE_ARGS
@@ -261,7 +262,7 @@ def test_new_save_prefers_native_and_legacy_load_edit_preserves_headless(native_
     legacy["name"] = "old"
     legacy["revision"] = 1
     legacy["nodes"][1].pop("execution_mode")
-    (storage.definitions / "old.json").write_text(json.dumps(legacy))
+    (storage.definitions / "old.json").write_text(json.dumps(definition_documents.encode(legacy)))
     loaded = storage.get("old")
     assert loaded["nodes"][1]["execution_mode"] == "headless"
     assert next(d for d in storage.list() if d["name"] == "old")["nodes"][1]["execution_mode"] == "headless"

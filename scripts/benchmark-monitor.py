@@ -22,6 +22,7 @@ sys.path.insert(0, str(REPO / 'src'))
 
 def fixture(home: Path, size: str) -> dict:
     from harflow_mcp import store, workflows
+    from harflow_mcp.workflow_definition_documents import encode
     from harflow_mcp.state_layout import resolve_layout
     from harflow_mcp.state_ownership import state_session
     root = home / '.harflow'
@@ -37,7 +38,7 @@ def fixture(home: Path, size: str) -> dict:
             'orchestrator': {'backend': 'codex'}})
         for i in range(definitions):
             value = definition | {'name': f'bench-{i:04}', 'revision': 1, 'workflow_id': f'bench-{i:04}'}
-            workflows._write(storage.definitions / f'bench-{i:04}.json', value, layout=storage.state_layout)
+            workflows._write(storage.definitions / f'bench-{i:04}.json', encode(value), layout=storage.state_layout)
         for i in range(runs):
             rid = f'run-{i:04}'
             run = {'workflow_run_id': rid, 'kind': 'workflow', 'name': 'bench', 'definition': definition,

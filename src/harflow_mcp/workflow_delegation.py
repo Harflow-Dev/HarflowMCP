@@ -1529,12 +1529,15 @@ def migrate(storage: Any) -> dict[str, Any]:
                 if observed.get("execution_contract") == "delegation":
                     continue
                 with storage.lock("definition:" + name):
-                    current = storage.get(name)
+                    raw, source = storage._read_definition(name)
+                    current = storage._project_definition(raw)
                     if current.get("revision") != observed.get("revision") or current != observed:
                         raise w.WorkflowError(f"Stale workflow revision while migrating {name}")
                     backup = storage.root / "workflow-backups" / (name + "." + str(current.get("revision", 0)) + "." + uuid.uuid4().hex + ".json")
                     backup.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-                    w._write(backup, current, layout=storage.state_layout)
+                    from .workflow_definition_documents import encode
+                    storage._check_definition_source(name, source)
+                    w._write(backup, encode(current), layout=storage.state_layout)
                     changed = copy.deepcopy(current)
                     changed["execution_contract"] = "delegation"
                     changed.setdefault("max_decision_attempts", 3)
@@ -1545,7 +1548,7 @@ def migrate(storage: Any) -> dict[str, Any]:
                             node.setdefault("max_context_questions", 10)
                     changed["revision"] = current.get("revision", 0) + 1
                     changed["updated_at"] = time.time()
-                    w._write(storage.definitions / (name + ".json"), changed, layout=storage.state_layout)
+                    storage._replace_definition(name, changed, source)
                     result["migrated"].append(name)
                     result["backups"].append(str(backup))
             return result

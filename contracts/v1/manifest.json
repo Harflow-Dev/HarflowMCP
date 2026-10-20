@@ -63,6 +63,41 @@
       "required_capabilities": [],
       "valid": true
     },
+    "workflow-definition.json": {
+      "encoding": "json",
+      "expected_product_version": "1.0.0",
+      "format": "harflow.workflow.definition",
+      "required_capabilities": [],
+      "valid": true
+    },
+    "workflow-definition-patch.json": {
+      "encoding": "json",
+      "expected_product_version": "1.0.0",
+      "format": "harflow.workflow.definition",
+      "required_capabilities": [],
+      "valid": true
+    },
+    "invalid-workflow-definition-foreign.json": {
+      "encoding": "json",
+      "expected_product_version": "1.0.0",
+      "format": "harflow.workflow.definition",
+      "required_capabilities": [],
+      "valid": false
+    },
+    "invalid-workflow-definition-raw.json": {
+      "encoding": "json",
+      "expected_product_version": "1.0.0",
+      "format": "harflow.workflow.definition",
+      "required_capabilities": [],
+      "valid": false
+    },
+    "invalid-workflow-definition-version.json": {
+      "encoding": "json",
+      "expected_product_version": "1.0.0",
+      "format": "harflow.workflow.definition",
+      "required_capabilities": [],
+      "valid": false
+    },
     "invalid-boolean-version.json": {
       "encoding": "json",
       "expected_product_version": "1.0.0",
@@ -282,6 +317,9 @@
     "event-historical-writer.jsonl": "4f2ff6362cfbfc7e39d6557ff61b91294192defdbf134ef3a2701dc5179d34ad",
     "event-known.jsonl": "2a76698eed3575567555c66244b04d6b21a27feec9c4f63250f6d2b286a63926",
     "event-unknown.jsonl": "b2c417187f5ac9528e5d0577c20c557d33d94166645b14f0a0b7dba78cc0f5c6",
+    "invalid-workflow-definition-foreign.json": "600b1f5546273aa1e6cc81ec7768fd5c48282d5341bdaed29079c30ef86425d4",
+    "invalid-workflow-definition-raw.json": "528279acbb8c6a3873c826ce94d8b9d181383f7de84cbc4137ca4a44566a8bc1",
+    "invalid-workflow-definition-version.json": "828a3d0369e771aefbf3ad96f8ff4d64cd0675f5f3046422c3124995790af289",
     "invalid-boolean-version.json": "08b28eef01a53502f8004d96265a450e4dcb4562aca2ca2674944d56c7d0ee51",
     "invalid-ctl-inner-event.json": "9a0a258886809a2a44d25ddedb66b75729f55492497d5fa63ac3b235557bda74",
     "invalid-foreign-format.json": "6c63e342f67c555ec180c842b81cd2c76c76d060ed077303cd7c753cf2c6a1d0",
@@ -300,6 +338,8 @@
     "version-info-build-metadata.json": "db18c7ea7e8e8751772a1ff4594e8794529370726341a835ce54a85b4d72d4b5",
     "version-info-patch-backward.json": "2922c8b2f832988bb411437f5664a4fc0f671660cb0bc4747a4be7ba6030f174",
     "version-info-patch-forward.json": "4c4f1185e7d562dd64a406c0034ba7cbca3a3594f9c76a5abc474d648a5ac8b0",
-    "version-info.json": "f67ec6f31ede388b7adf5362b8058e3d7e1251d372b49ef560213ac5d3d7a8f6"
+    "version-info.json": "f67ec6f31ede388b7adf5362b8058e3d7e1251d372b49ef560213ac5d3d7a8f6",
+    "workflow-definition-patch.json": "c17a34d3b82a0c830183ed4ffa893a580c005a7c6c8fcc15bc2978c142715a3d",
+    "workflow-definition.json": "d814614da8e545c3f471d6c576a7ab41c08beba71a91ab89fad030d4c9822afd"
   }
 }

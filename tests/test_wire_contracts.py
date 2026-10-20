@@ -13,6 +13,7 @@ import pytest
 
 from harflow_mcp import events
 from harflow_mcp import state_ownership
+from harflow_mcp import workflow_definition_documents
 from harflow_mcp.state_layout import resolve_layout
 from harflow_mcp.wire_contracts import (
     EVENT_FORMAT,
@@ -71,7 +72,10 @@ def test_manifest_cases_reach_the_wire_validator():
         for document in documents:
             live = case["format"] != EVENT_FORMAT
             if case["valid"]:
-                validate_envelope(document, case["format"], live=live, expected_version=case["expected_product_version"])
+                if case["format"] == workflow_definition_documents.DEFINITION_FORMAT:
+                    assert workflow_definition_documents.decode(document, document["definition"]["name"]) == document["definition"]
+                else:
+                    validate_envelope(document, case["format"], live=live, expected_version=case["expected_product_version"])
             elif name == "invalid-ctl-inner-event.json":
                 validate_envelope(document, case["format"], live=True)
                 with pytest.raises(ValueError):
@@ -81,8 +85,11 @@ def test_manifest_cases_reach_the_wire_validator():
                 required = {"ctl.v1", "setup.v1", "events.v1", "version-info.v1"}
                 assert not required.issubset(set(document.get("capabilities", [])))
             else:
-                with pytest.raises(ValueError):
-                    validate_envelope(document, case["format"], live=live, expected_version=case["expected_product_version"])
+                with pytest.raises((ValueError, workflow_definition_documents.WorkflowDefinitionDocumentError)):
+                    if case["format"] == workflow_definition_documents.DEFINITION_FORMAT:
+                        workflow_definition_documents.decode(document, document.get("definition", {}).get("name", "fixture"))
+                    else:
+                        validate_envelope(document, case["format"], live=live, expected_version=case["expected_product_version"])
 
 
 def test_event_validation_requires_current_identity_before_payload_interpretation():

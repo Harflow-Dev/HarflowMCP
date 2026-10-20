@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .workflow_definition_documents import WorkflowDefinitionDocumentError
+
 from .state_ownership import state_session, StateOwnershipError, owned_job, run_owned_worker
 
 from .state_access import task_layout, task_operation
@@ -99,7 +101,7 @@ def _task_document_errors(function):
     async def wrapped(*args, **kwargs):
         try:
             return await function(*args, **kwargs)
-        except store.TaskDocumentError as exc:
+        except (store.TaskDocumentError, WorkflowDefinitionDocumentError) as exc:
             raise MCPError(INVALID_PARAMS, str(exc), data=exc.as_dict()) from None
     return wrapped
 
@@ -1926,6 +1928,8 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
             from .workflow_node_reads import inspect_node
             return await asyncio.to_thread(inspect_node, managed, kwargs["run_id"], execution_id=kwargs["execution_id"], task_id=kwargs.get("task_id"), view=kwargs.get("view", "result"), cursor=kwargs.get("cursor"), limit=kwargs.get("limit"), before_seq=kwargs.get("before_seq"), after_seq=kwargs.get("after_seq"), root=_reg().log_dir.parent)
         return await asyncio.to_thread(store_.control, action=action, **kwargs)
+    except WorkflowDefinitionDocumentError as exc:
+        raise MCPError(INVALID_PARAMS, str(exc), data=exc.as_dict()) from None
     except (ValueError, KeyError, OSError, backends.UnsupportedCapability) as exc:
         data = None
         if hasattr(exc, "missing_references"):
@@ -1937,7 +1941,7 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
 @mcp.tool()
 @_task_document_errors
 async def list_workflows() -> list[dict[str, Any]]:
-    """List saved workflow definitions."""
+    """List inner saved definitions; any incompatible or unavailable source refuses the whole list."""
     return await _workflow_call("list")
 
 
@@ -1953,6 +1957,8 @@ async def get_workflow(name: str) -> dict[str, Any]:
 async def save_workflow(name: str, definition: dict[str, Any], expected_revision: int | None = None, expected_workflow_id: str | None = None) -> dict[str, Any]:
     """Validate and save an explicit workflow; expected_revision protects concurrent edits.
 
+    The store creates persistence envelopes; supply only the authored graph payload.
+    Incompatible or unavailable saved sources refuse mutation and complete-store indexing.
     expected_workflow_id optionally checks the loaded stable identity, rejecting a
     deleted or replaced same-name definition even if its revision matches.
     Every save normalizes context_delivery to optimized_v1, including omitted or legacy
@@ -1989,7 +1995,7 @@ async def save_workflow(name: str, definition: dict[str, Any], expected_revision
 @mcp.tool()
 @_task_document_errors
 async def delete_workflow(name: str) -> dict[str, Any]:
-    """Delete a definition; historical run snapshots remain available."""
+    """Delete a qualified definition after scanning qualified referrers; historical snapshots remain available."""
     from .caller_policy import require_mutation
     await _guard_mutation()
     return await _workflow_call("delete", name=name)

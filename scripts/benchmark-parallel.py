@@ -65,6 +65,7 @@ def fixture(home: Path, conversations=8, chain=1, activity='sparse', workflow=Fa
                 (directory / f'{task_id}.jsonl').write_text(''.join(json.dumps(row)+'\n' for row in raw))
         if workflow:
             from harflow_mcp import workflows
+            from harflow_mcp.workflow_definition_documents import encode
             storage = workflows.WorkflowStore(home / '.harflow')
             definition = workflows.validate_definition({'name': 'Synthetic parallel workflow', 'nodes': [
                 {'id': 'start', 'type': 'start'}, {'id': 'work', 'type': 'agent', 'name': 'Synthetic parallel tasks', 'agent': {'backend': 'codex'}},
@@ -72,7 +73,7 @@ def fixture(home: Path, conversations=8, chain=1, activity='sparse', workflow=Fa
                 {'id': 'a', 'source': 'start', 'target': 'work'}, {'id': 'b', 'source': 'work', 'target': 'end'}],
                 'orchestrator': {'backend': 'codex'}})
             definition.update(workflow_id='parallel-workflow', revision=1)
-            workflows._write(storage.definitions / 'parallel-workflow.json', definition, layout=storage.state_layout)
+            workflows._write(storage.definitions / 'Synthetic parallel workflow.json', encode(definition), layout=storage.state_layout)
             task_ids = [f'parallel-{conversation:04}-{turn:02}' for conversation in range(conversations) for turn in range(chain)]
             associations = [{'task_id': task_id, 'backend': 'codex', 'status': 'completed', 'summary': 'Synthetic benchmark answer'} for task_id in task_ids]
             run = dict(workflow_run_id='parallel-run', kind='workflow', name='Synthetic parallel workflow', definition=definition,

@@ -24,6 +24,8 @@ reports compatibility without importing the task runtime through the installed l
 
 from __future__ import annotations
 
+from .workflow_definition_documents import WorkflowDefinitionDocumentError
+
 from .state_ownership import state_session, StateOwnershipError
 
 from .state_access import task_layout
@@ -994,10 +996,14 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
         return await server._workflow_call(action, run_id=args.workflow_run_id, **({"interaction_owner": "monitor"} if getattr(args, "monitor", False) else {}))
     try:
         result = asyncio.run(invoke())
-    except (StateOwnershipError, store.TaskDocumentError):
+    except (StateOwnershipError, store.TaskDocumentError, WorkflowDefinitionDocumentError):
         raise
     except Exception as exc:
-        return _fail(args, "workflow_error", str(exc), getattr(getattr(exc, "error", None), "data", None))
+        data = getattr(getattr(exc, "error", None), "data", None)
+        code = data.get("code") if isinstance(data, dict) else None
+        if code not in {"workflow_definition_incompatible", "workflow_definition_unavailable"}:
+            code = "workflow_error"
+        return _fail(args, code, str(exc), data)
     from .read_metrics import span
     with span("serialization"):
         output = json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": result})) if args.json else json.dumps(result, indent=2)
@@ -1045,8 +1051,9 @@ def _main(argv: list[str] | None = None) -> int:
     try:
         with state_session(task_layout(default_log_dir())):
             return _execute(args, list_p)
-    except (StateOwnershipError, store.TaskDocumentError) as exc:
-        return _fail(args, getattr(exc, "code", "state_incompatible"), str(exc))
+    except (StateOwnershipError, store.TaskDocumentError, WorkflowDefinitionDocumentError) as exc:
+        data = exc.as_dict() if isinstance(exc, WorkflowDefinitionDocumentError) else None
+        return _fail(args, getattr(exc, "code", "state_incompatible"), str(exc), data)
 
 
 def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
