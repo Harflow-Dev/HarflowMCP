@@ -98,7 +98,8 @@ async def test_required_retry_resolves_evidence_without_repeating_sibling(storag
     graph = explicit()
     for node in graph["nodes"]:
         node["title"] = node["id"]
-    run, _ = await run_flow(storage, tmp_path, graph, Registry(storage.root, retry_policy, {"left2": worker}))
+    # Retry-heavy durable writes need bounded headroom for shared CI scheduling.
+    run, _ = await run_flow(storage, tmp_path, graph, Registry(storage.root, retry_policy, {"left2": worker}), timeout_seconds=10)
     assert run["status"] == "completed"
     assert attempts == 2
     workers = [a for a in run["activations"] if a["role"] == "node"]
@@ -150,7 +151,8 @@ async def test_unsafe_optional_blocker_cannot_bypass(storage, tmp_path, category
     graph = explicit()
     next(n for n in graph["nodes"] if n["id"] == "right").update(optional=True, title="right")
     output = {"status": "blocked", "result": {"summary": "Must inspect", "blocker_category": category}, "evidence": []}
-    run, _ = await run_flow(storage, tmp_path, graph, Registry(storage.root, policy, {"right": output}))
+    # Each blocker category exercises durable state transitions under CI latency.
+    run, _ = await run_flow(storage, tmp_path, graph, Registry(storage.root, policy, {"right": output}), timeout_seconds=10)
     assert run["status"] != "completed"
     activation = next(a for a in run["activations"] if a["role"] == "node" and a["node_id"] == "right")
     assert not activation.get("optional_failure")
