@@ -448,4 +448,3 @@ def test_pending_messages_taken_before_metadata_guard_are_reported_undelivered(t
         assert rows[-1]["kind"] == "undelivered"
         assert rows[-1]["message_id"] == pending[0]["id"]
         assert task.bridge_notices and "was not delivered" in task.bridge_notices[-1]
-

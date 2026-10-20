@@ -241,4 +241,3 @@ def test_scan_missing_directory_is_complete_empty_history(task_dir: Path) -> Non
     assert scan.refusals == {}
     assert not scan.history_incomplete
     assert store.read_all(missing) == []
-
