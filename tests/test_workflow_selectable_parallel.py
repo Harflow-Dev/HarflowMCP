@@ -292,7 +292,7 @@ def test_excluded_or_unknown_arrival_cannot_mutate_frozen_barrier(storage, tmp_p
     token = {'id': 'arrival', 'node_id': 'merge', 'stack': ['generation'], 'branch_ids': {'generation': branch_id}, 'context': {}, 'failed_execution_refs': ['failed-execution']}
     def seed(r):
         r.update(status='running', pending=[token])
-        r['activations'].append({'id': 'failed-execution', 'tasks': [], 'node_result': {'status': 'failed'}})
+        r['activations'].append({'id': 'failed-execution', 'node_id': 'merge', 'role': 'node', 'status': 'failed', 'created_at': 0.0, 'tasks': [], 'node_result': {'status': 'failed'}})
         r['joins']['generation'] = {'join_id': 'merge', 'split_id': 'split', 'stack': [], 'expected': 1, 'arrived': [], 'selected_connection_ids': ['split-left'], 'excluded_connection_ids': ['split-right'], 'branch_ids': ['split-left']}
     storage.update_run(run['workflow_run_id'], seed, 'test_frozen_barrier')
     before = storage.get_run(run['workflow_run_id'])

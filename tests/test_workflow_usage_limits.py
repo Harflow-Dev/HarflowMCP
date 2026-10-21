@@ -367,8 +367,9 @@ async def test_orchestrator_restart_with_dead_quota_reissues_explicit_caller_rec
     store.write(registry._log_dir, record)
     def crash(r):
         r.update(status='needs_attention')
-        for key in ('orchestrator_usage_recovery', 'input_decision_id', 'input_question', 'supervisor_identity', 'supervisor_pid'):
+        for key in ('orchestrator_usage_recovery', 'input_decision_id', 'input_question', 'supervisor_identity'):
             r.pop(key, None)
+        r['supervisor_pid'] = None
         activation = r['activations'][0]
         activation['status'] = 'running'
         activation['tasks'][0].update(status='running')
@@ -418,8 +419,9 @@ async def test_worker_restart_with_dead_quota_returns_choice_to_orchestrator(sto
     store.log_path(registry._log_dir, task_id).write_text(json.dumps({'type': 'item.completed', 'item': {'type': 'agent_message', 'text': 'Partial progress retained'}}) + '\n')
     def crash(r):
         r.update(status='needs_attention')
-        for key in ('worker_usage_recovery', 'input_decision_id', 'input_question', 'supervisor_identity', 'supervisor_pid'):
+        for key in ('worker_usage_recovery', 'input_decision_id', 'input_question', 'supervisor_identity'):
             r.pop(key, None)
+        r['supervisor_pid'] = None
         activation = next(a for a in r['activations'] if a['id'] == worker['id'])
         activation.update(status='running')
         activation.pop('node_result', None)

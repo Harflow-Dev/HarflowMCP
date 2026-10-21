@@ -7,6 +7,8 @@ workflow context, and checklist. At each stage it selects a valid continuation a
 assignment for the next agent. HarflowMCP validates, dispatches, and durably records the decision.
 Conditions are instructions to the orchestrator, not code executed by HarflowMCP.
 
+Workflow execution records use qualified Harflow run documents. Public workflow responses retain their current payloads. Incompatible or unavailable persisted runs refuse control and complete-history operations; bounded lists show neutral blockers. Preserve refused state and select a fresh state root rather than rewriting files. See [workflow run documents](contracts.md#workflow-run-documents) for qualification, publication and recovery behavior.
+
 ## Context delivery
 
 All newly saved definitions and new workflow runs use bounded context delivery

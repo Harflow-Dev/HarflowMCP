@@ -42,7 +42,8 @@ def foreign_default_state(tmp_path, monkeypatch):
 
 
 def write_run(store, run):
-    w._write(store.runs / f"{run['workflow_run_id']}.json", run, layout=store.state_layout)
+    from harflow_mcp import workflow_run_documents
+    w._write(store.runs / f"{run['workflow_run_id']}.json", workflow_run_documents.encode(run), layout=store.state_layout)
 
 
 def seed_parent(store, tmp_path, parent_name, *, stage, child_id=None, child_run=None):
@@ -64,8 +65,20 @@ def seed_parent(store, tmp_path, parent_name, *, stage, child_id=None, child_run
 def finished_child(store, parent_run, activation, *, status="completed", summary="Done", failed_decision=None, executions=(), permission_denials=None):
     """A synthetic settled child run linked to one parent invocation."""
     child_id = activation["invocation"]["child_workflow_run_id"]
-    child_definition = parent_run["dependency_tree"]["workflows"][activation["invocation"]["workflow_id"]]["definition"]
-    child = {"workflow_run_id": child_id, "kind": "workflow", "name": "child", "definition": child_definition, "workflow_id": activation["invocation"]["workflow_id"], "revision": 0, "prompt": "Focused assignment for call", "repo_path": parent_run["repo_path"], "freedom": "unrestricted", "network": None, "status": status, "created_at": 0.0, "updated_at": 0.0, "sequence": 0, "transitions": 0, "activations": [], "decisions": [], "sessions": {}, "suppressed_candidates": [], "pending": [], "joins": {}, "instructions": "", "attempt_grants": {}, "supervisor_pid": None, "permission_policy": "saved_node", "execution_contract": "delegation", "runner_policy": "guided", "execution_policy": "visit", "retry_counts": {}, "retry_grants": {}, "tasks": [], "parent_link": {"workflow_run_id": parent_run["workflow_run_id"], "execution_id": activation["id"], "node_id": "call", "root_workflow_run_id": parent_run["workflow_run_id"], "depth": 2}, "interaction_owner": "caller", "invocation_inputs": []}
+    node = next((node for node in parent_run["definition"]["nodes"] if node["id"] == activation["node_id"]), None)
+    if node is None:
+        # Nested synthetic parents may intentionally expose only the child
+        # definition. Supply the pinned invocation node explicitly for the
+        # production constructor instead of fabricating a partial child run.
+        node = {
+            "id": activation["node_id"],
+            "workflow_ref": {"workflow_id": activation["invocation"]["workflow_id"]},
+            "orchestrator_mode": activation["invocation"].get("orchestrator_mode", "child"),
+        }
+    # Build positive fixtures through the production constructor so they keep
+    # the complete authority-bearing shape as the runtime evolves.
+    child = inv.child_run_record(store, parent_run, activation, node, activation["invocation"])
+    child.update(status=status, created_at=0.0, updated_at=0.0)
     if failed_decision:
         child["failed_decision_id"] = failed_decision
         child["failure_reason"] = "Child orchestrator failed the objective"
@@ -169,7 +182,7 @@ async def test_recursive_grandchild_permission_surfaces(store, tmp_path):
     activation = {"id": "a1", "node_id": "call", "invocation": {"child_workflow_run_id": "c1", "workflow_id": parent_run["definition"]["nodes"][1]["workflow_ref"]["workflow_id"], "stage": "settled"}}
     child = finished_child(store, parent_run, activation, status="failed")
     # The child failed through its own Run workflow node whose grandchild hit permission.
-    child["activations"].append({"id": "nested", "node_id": "inner-call", "role": "node", "status": "failed", "tasks": [], "created_at": 0.0, "invocation": {"child_workflow_run_id": "g1", "stage": "settled"}, "node_result": {"status": "blocked", "result": {"child_outcome": {"kind": "permission"}, "failure_kind": "permission"}, "evidence": []}, "token": {"id": "tkn"}})
+    child["activations"].append({"id": "nested", "node_id": "inner-call", "role": "node", "status": "failed", "tasks": [], "created_at": 0.0, "invocation": {"child_workflow_run_id": "g1", "workflow_id": child["workflow_id"], "workflow_name": child["name"], "orchestrator_mode": "child", "stage": "settled"}, "node_result": {"status": "blocked", "result": {"child_outcome": {"kind": "permission"}, "failure_kind": "permission"}, "evidence": []}, "token": {"id": "tkn"}})
     grandchild = copy.deepcopy(child)
     grandchild.update(workflow_run_id="g1", activations=[])
     grandchild["parent_link"].update(workflow_run_id=child["workflow_run_id"], execution_id="nested")
@@ -367,7 +380,7 @@ async def test_neither_continuation_is_offered_for_cancelled_or_uncertain_or_per
     node = next(n for n in parent_run["definition"]["nodes"] if n["id"] == "call")
     token = {"id": "t1", "node_id": "call", "stack": [], "context": {}, "execution_complete": True, "execution_activation_id": "a1", "result": {}}
     for kind in ("cancelled", "uncertain", "permission", "authority"):
-        activation = {"id": "a1", "node_id": "call", "role": "node", "status": "failed", "tasks": [], "invocation": {"child_workflow_run_id": "c1", "workflow_id": node["workflow_ref"]["workflow_id"], "stage": "settled"}, "node_result": {"status": "blocked", "result": {"child_outcome": {"kind": kind}, "failure_kind": kind}, "evidence": []}}
+        activation = {"id": "a1", "node_id": "call", "role": "node", "status": "failed", "created_at": 0.0, "tasks": [], "invocation": {"child_workflow_run_id": "c1", "workflow_id": node["workflow_ref"]["workflow_id"], "stage": "settled"}, "node_result": {"status": "blocked", "result": {"child_outcome": {"kind": kind}, "failure_kind": kind}, "evidence": []}}
         def with_activation(r):
             r["activations"] = [activation]
             r["pending"] = [token]
@@ -408,14 +421,16 @@ async def test_child_question_answer_routes_exact_checkpoint_without_repeating_w
 def test_completed_child_with_caller_decision_block_remains_caller_authority_after_specialist_context(store, tmp_path):
     from harflow_mcp.workflow_child_questions import caller_authority_required, protected_input
 
-    parent_run = store.create_run(w.validate_definition(store.get("parent")), "go", tmp_path, permission_policy="saved_node", dependency_tree=refs.resolve_dependencies(store, definition=store.get("parent")))
-    child = {
-        "workflow_run_id": "blocked-child", "status": "needs_input", "input_decision_id": "decision-1",
-        "input_question": "Approve the blocked result?", "input_source": {"workflow_run_id": parent_run["workflow_run_id"]},
-        "pending": [{"id": "token", "decision_id": "decision-1", "execution_activation_id": "blocked-exec"}],
-        "activations": [{"id": "blocked-exec", "node_id": "work", "role": "node", "status": "failed", "tasks": [], "node_result": {"status": "blocked", "result": {"blocker_category": "decision", "failure_kind": "authority"}}}],
-        "blocker_retry_authorizations": {}, "definition": store.get("child"),
-    }
+    parent_run = seed_parent(store, tmp_path, "parent", stage="waiting")
+    child = finished_child(store, parent_run, parent_run["activations"][0], status="needs_input")
+    child.update(
+        input_decision_id="decision-1",
+        input_question="Approve the blocked result?",
+        input_source={"workflow_run_id": parent_run["workflow_run_id"]},
+        pending=[{"id": "token", "decision_id": "decision-1", "execution_activation_id": "blocked-exec"}],
+        activations=[{"id": "blocked-exec", "node_id": "work", "role": "node", "status": "failed", "created_at": 0.0, "tasks": [], "node_result": {"status": "blocked", "result": {"blocker_category": "decision", "failure_kind": "authority"}, "evidence": []}}],
+        blocker_retry_authorizations={},
+    )
     write_run(store, child)
     assert caller_authority_required(child)
     assert protected_input(store, child)
@@ -566,7 +581,8 @@ async def test_invocation_timeout_before_child_work_launch_settles_reservation(s
         nonlocal reserved_work_id
         if decision_finished.is_set() and not checkout_reached.is_set():
             for path in store.runs.glob('*.json'):
-                candidate = json.loads(path.read_text(encoding='utf-8'))
+                from harflow_mcp import workflow_run_documents
+                candidate = workflow_run_documents.decode(json.loads(path.read_text(encoding='utf-8')), path.stem)
                 for activation in candidate.get('activations', []):
                     if activation.get('role') != 'node':
                         continue
@@ -629,7 +645,16 @@ async def test_cancel_subtree_includes_nested_grandchildren_only(store, tmp_path
     grandchild['status'] = 'running'
     grandchild['activations'] = []
     write_run(store, grandchild)
-    store.update_run(child['workflow_run_id'], lambda r: r.update(status='running', activations=[{'id': 'nested', 'tasks': [], 'invocation': {'child_workflow_run_id': grandchild['workflow_run_id']}}]), 'test_live_child')
+    nested_activation = {
+        'id': 'nested', 'node_id': 'inner-call', 'role': 'node', 'status': 'running',
+        'created_at': 0.0, 'tasks': [],
+        'invocation': {
+            'child_workflow_run_id': grandchild['workflow_run_id'],
+            'workflow_id': child['workflow_id'], 'workflow_name': child['name'],
+            'orchestrator_mode': 'child', 'stage': 'running',
+        },
+    }
+    store.update_run(child['workflow_run_id'], lambda r: r.update(status='running', activations=[nested_activation]), 'test_live_child')
     await inv.WorkflowTree(store).cancel_descendants(child['workflow_run_id'], registry, include_self=True)
     assert store.get_run(child['workflow_run_id'])['status'] == 'cancelled'
     assert store.get_run(grandchild['workflow_run_id'])['status'] == 'cancelled'
@@ -730,12 +755,12 @@ async def test_cancellation_does_not_settle_parent_with_uncertain_grandchild(sto
     activation = parent['activations'][0]
     child = finished_child(store, parent, activation, status='running')
     grandchild_id = uuid.uuid4().hex
-    child['activations'] = [{'id': 'nested', 'node_id': 'inner-call', 'role': 'node', 'status': 'running', 'tasks': [], 'invocation': {'child_workflow_run_id': grandchild_id, 'stage': 'running'}}]
+    child['activations'] = [{'id': 'nested', 'node_id': 'inner-call', 'role': 'node', 'status': 'running', 'created_at': 0.0, 'tasks': [], 'invocation': {'child_workflow_run_id': grandchild_id, 'workflow_id': child['workflow_id'], 'workflow_name': child['name'], 'orchestrator_mode': 'child', 'stage': 'running'}}]
     write_run(store, child)
     grandchild = copy.deepcopy(child)
     grandchild['workflow_run_id'] = grandchild_id
     grandchild['parent_link'].update(workflow_run_id=child['workflow_run_id'], execution_id='nested')
-    grandchild['activations'] = [{'id': 'live', 'node_id': 'work', 'role': 'node', 'status': 'running', 'tasks': [{'task_id': 'uncertain-live', 'status': 'uncertain'}]}]
+    grandchild['activations'] = [{'id': 'live', 'node_id': 'work', 'role': 'node', 'status': 'running', 'created_at': 0.0, 'tasks': [{'task_id': 'uncertain-live', 'status': 'uncertain'}]}]
     write_run(store, grandchild)
 
     class RefusedCancel:
@@ -791,7 +816,7 @@ async def test_cancel_unprovable_child_link_keeps_source_unsettled(store, tmp_pa
         write_run(store, child)
     elif kind == 'cycle':
         child = finished_child(store, parent, activation, status='running')
-        child['activations'] = [{'id': 'back', 'tasks': [], 'invocation': {'child_workflow_run_id': parent['workflow_run_id']}}]
+        child['activations'] = [{'id': 'back', 'node_id': 'call', 'role': 'node', 'status': 'running', 'created_at': 0.0, 'tasks': [], 'invocation': {'child_workflow_run_id': parent['workflow_run_id'], 'workflow_id': parent['definition']['workflow_id'], 'workflow_name': parent['definition']['name'], 'orchestrator_mode': 'child', 'stage': 'running'}}]
         write_run(store, child)
         store.update_run(parent['workflow_run_id'], lambda r: r.update(parent_link={'workflow_run_id': child_id, 'execution_id': 'back'}), 'cycle_fixture')
     await inv.WorkflowTree(store).cancel_descendants(parent['workflow_run_id'], object(), include_self=True)
@@ -824,8 +849,8 @@ async def test_terminal_parallel_child_live_tasks_are_signaled_without_overwriti
     child['failure_reason'] = 'One parallel branch failed'
     child['definition'] = child_graph('child', parallel=True, work_count=2)
     child['activations'] = [
-        {'id': 'settled', 'role': 'node', 'node_id': 'work1', 'status': 'failed', 'tasks': [{'task_id': 'completed-work', 'status': 'completed'}, {'task_id': 'failed-work', 'status': 'failed'}]},
-        {'id': 'sibling', 'role': 'node', 'node_id': 'work2', 'status': 'running', 'tasks': [{'task_id': 'running-work', 'status': 'running'}, {'task_id': 'reserved-work', 'status': 'reserved'}, {'task_id': 'uncertain-work', 'status': 'uncertain'}]},
+        {'id': 'settled', 'role': 'node', 'node_id': 'work1', 'status': 'failed', 'created_at': 0.0, 'tasks': [{'task_id': 'completed-work', 'status': 'completed'}, {'task_id': 'failed-work', 'status': 'failed'}]},
+        {'id': 'sibling', 'role': 'node', 'node_id': 'work2', 'status': 'running', 'created_at': 0.0, 'tasks': [{'task_id': 'running-work', 'status': 'running'}, {'task_id': 'reserved-work', 'status': 'reserved'}, {'task_id': 'uncertain-work', 'status': 'uncertain'}]},
     ]
     write_run(store, child)
     if source != 'invocation_timeout':

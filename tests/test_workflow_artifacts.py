@@ -80,6 +80,7 @@ def test_tree_members_uses_catalog_without_loading_run_records(tmp_path, monkeyp
         def connect(self): return DB()
         def _discover(self, db): pass
         def state(self, db): return {"status": "ready"}
+        def _changed(self, db, row): return False
     monkeypatch.setattr("harflow_mcp.catalog.Catalog", Catalog)
     result = storage.tree_members("root")
     assert result["state"] == "ready"

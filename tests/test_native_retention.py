@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from harflow_mcp import retention
+from harflow_mcp import workflow_run_documents
 from harflow_mcp import state_ownership
 from harflow_mcp.state_layout import resolve_layout
 
@@ -29,10 +30,18 @@ def fixture(tmp_path, **changes):
     task = dict(task_id='native-child', execution_kind='native_subagent', status='completed',
                 dispatch_stage='child_settled', native_terminal=True, finished_at=old)
     task.update(changes)
-    run = dict(workflow_run_id='owner', status='completed', created_at=old,
-               activations=[dict(tasks=[task])])
+    if task.get('finished_at') is None:
+        task.pop('finished_at')
+    run = dict(workflow_run_id='owner', kind='workflow', name='Retention', status='completed', created_at=old,
+               updated_at=old, revision=0, sequence=0, transitions=0, prompt='', repo_path=str(tmp_path),
+               freedom='write_in_repo', network=None, instructions='', permission_policy='legacy_ceiling',
+               definition_hash='hash', definition={'name': 'Retention', 'workflow_id': 'wf', 'revision': 1,
+               'orchestrator': {'backend': 'codex'}, 'nodes': [], 'connections': []},
+               activations=[dict(id='activation', node_id='node', role='worker', status='completed',
+                                created_at=old, tasks=[task])], decisions=[], tasks=[], sessions={}, pending=[], joins={},
+               attempt_grants={}, retry_counts={}, retry_grants={}, suppressed_candidates=[], supervisor_pid=None)
     path = runs / 'owner.json'
-    path.write_text(json.dumps(run))
+    path.write_text(json.dumps(workflow_run_documents.encode(run)))
     event = logs / 'native-child.events.jsonl'
     event.write_text('evidence')
     os.utime(event, (old, old))
@@ -64,7 +73,7 @@ def test_both_terminal_time_and_log_bytes_must_age_out(tmp_path, young):
     now, logs, path, event, run = fixture(tmp_path)
     if young == 'finished_at':
         run['activations'][0]['tasks'][0]['finished_at'] = now.timestamp()
-        path.write_text(json.dumps(run))
+        path.write_text(json.dumps(workflow_run_documents.encode(run)))
     else:
         os.utime(event, None)
     retention.sweep(logs, 30, now)
@@ -74,8 +83,9 @@ def test_both_terminal_time_and_log_bytes_must_age_out(tmp_path, young):
 def test_active_linked_root_preserves_child(tmp_path):
     now, logs, path, event, run = fixture(tmp_path)
     run['parent_link'] = {'root_workflow_run_id': 'root'}
-    path.write_text(json.dumps(run))
-    (path.parent / 'root.json').write_text(json.dumps(dict(workflow_run_id='root', status='running', created_at=0, activations=[])))
+    path.write_text(json.dumps(workflow_run_documents.encode(run)))
+    root = dict(run, workflow_run_id='root', status='running', created_at=0, updated_at=0, activations=[])
+    (path.parent / 'root.json').write_text(json.dumps(workflow_run_documents.encode(root)))
     retention.sweep(logs, 30, now)
     assert event.exists()
 
@@ -90,15 +100,18 @@ def test_run_lock_preserves_log(tmp_path):
 
 
 def test_malformed_inventory_and_budget_preserve_evidence(tmp_path, monkeypatch):
-    now, logs, path, event, _ = fixture(tmp_path)
-    run = json.loads(path.read_text())
-    run['activations'].append(dict(id='edge', tasks=[], invocation={'child_workflow_run_id': 'bad'}))
-    path.write_text(json.dumps(run))
+    now, logs, path, event, run = fixture(tmp_path)
+    run = workflow_run_documents.decode(json.loads(path.read_text()), "owner")
+    run['activations'].append(dict(id='edge', node_id='node', role='worker', status='completed',
+                                   created_at=run['created_at'], tasks=[],
+                                   invocation={'child_workflow_run_id': 'bad'}))
+    path.write_text(json.dumps(workflow_run_documents.encode(run)))
     (path.parent / 'bad.json').write_text('{}')
-    retention.sweep(logs, 30, now)
+    with pytest.raises(workflow_run_documents.WorkflowRunDocumentError):
+        retention.sweep(logs, 30, now)
     assert event.exists()
     run['activations'].pop()
-    path.write_text(json.dumps(run))
+    path.write_text(json.dumps(workflow_run_documents.encode(run)))
     (path.parent / 'bad.json').unlink()
     monkeypatch.setattr(retention, '_NATIVE_METADATA_BYTES', 1)
     retention.sweep(logs, 30, now)
@@ -106,7 +119,7 @@ def test_malformed_inventory_and_budget_preserve_evidence(tmp_path, monkeypatch)
 
 
 def test_unlink_failure_retains_discovery_for_retry(tmp_path, monkeypatch):
-    now, logs, path, event, _ = fixture(tmp_path)
+    now, logs, path, event, run = fixture(tmp_path)
     original = type(event).unlink
     with monkeypatch.context() as patch:
         def refuse(self, *args, **kwargs):
@@ -129,7 +142,7 @@ def test_resume_between_snapshot_and_lock_preserves_log(tmp_path, monkeypatch):
         if operation == fcntl.LOCK_EX | fcntl.LOCK_NB and not changed:
             changed = True
             run['status'] = 'running'
-            path.write_text(json.dumps(run))
+            path.write_text(json.dumps(workflow_run_documents.encode(run)))
         return original(fd, operation)
     monkeypatch.setattr(retention.fcntl, 'flock', resume)
     retention.sweep(logs, 30, now)
@@ -137,22 +150,26 @@ def test_resume_between_snapshot_and_lock_preserves_log(tmp_path, monkeypatch):
 
 
 def test_unrelated_history_larger_than_tree_budget_does_not_block_cleanup(tmp_path, monkeypatch):
-    now, logs, path, event, _ = fixture(tmp_path)
+    now, logs, path, event, run = fixture(tmp_path)
     for n in range(257):
         identifier = f'other-{n}'
-        (path.parent / f'{identifier}.json').write_text(json.dumps(dict(workflow_run_id=identifier, status='completed', created_at=0, activations=[])))
+        other = dict(run, workflow_run_id=identifier, status='completed', created_at=0, updated_at=0, activations=[])
+        (path.parent / f'{identifier}.json').write_text(json.dumps(workflow_run_documents.encode(other)))
     retention.sweep(logs, 30, now)
     assert not event.exists()
 
 
 def test_uncertain_descendant_preserves_root_evidence(tmp_path):
     now, logs, path, event, run = fixture(tmp_path)
-    run['activations'].append(dict(id='edge', tasks=[], invocation={'child_workflow_run_id': 'descendant'}))
-    path.write_text(json.dumps(run))
-    child = dict(workflow_run_id='descendant', status='completed', created_at=0,
+    run['activations'].append(dict(id='edge', node_id='node', role='worker', status='completed',
+                                   created_at=run['created_at'], tasks=[],
+                                   invocation={'child_workflow_run_id': 'descendant'}))
+    path.write_text(json.dumps(workflow_run_documents.encode(run)))
+    child = dict(run, workflow_run_id='descendant', status='completed', created_at=0, updated_at=0,
                  parent_link=dict(workflow_run_id='owner', root_workflow_run_id='owner', execution_id='edge'),
-                 activations=[dict(tasks=[dict(task_id='uncertain-child', status='uncertain')])])
-    (path.parent / 'descendant.json').write_text(json.dumps(child))
+                 activations=[dict(id='activation', node_id='node', role='worker', status='uncertain',
+                                  created_at=0, tasks=[dict(task_id='uncertain-child', status='uncertain')])])
+    (path.parent / 'descendant.json').write_text(json.dumps(workflow_run_documents.encode(child)))
     retention.sweep(logs, 30, now)
     assert event.exists()
 
@@ -162,6 +179,6 @@ def test_uncertain_descendant_preserves_root_evidence(tmp_path):
 def test_unknown_or_unproven_sibling_preserves_tree(tmp_path, sibling):
     now, logs, path, event, run = fixture(tmp_path)
     run['activations'][0]['tasks'].append(sibling)
-    path.write_text(json.dumps(run))
+    path.write_text(json.dumps(workflow_run_documents.encode(run)))
     retention.sweep(logs, 30, now)
     assert event.exists()

@@ -7,6 +7,8 @@ tree; the root supervisor awaits the child supervisor over a shared
 """
 from __future__ import annotations
 
+from .workflow_run_documents import WorkflowRunDocumentError
+
 from .state_access import storage_operation, require_state_path
 from .state_ownership import StateOwnershipError, owned_job
 
@@ -100,7 +102,7 @@ class WorkflowTree:
         self.executing_children: set[str] = set()
         self.held: dict[tuple[str, str], bool] = {}
 
-    def tree_running(self, run: dict[str, Any]) -> bool:
+    def tree_running(self, run: dict[str, Any], *, refresh_atomic: bool = False) -> bool:
         """The run is running AND its root is running."""
         if run.get("status") != "running":
             return False
@@ -109,11 +111,11 @@ class WorkflowTree:
         if not root_id or root_id == run.get("workflow_run_id"):
             return True
         try:
-            return self.store.get_run(root_id).get("status") == "running"
+            return self.store.get_run(root_id, refresh_atomic=refresh_atomic).get("status") == "running"
         except (OSError, ValueError, KeyError):
             return False
 
-    def root_suspended(self, run: dict[str, Any]) -> bool:
+    def root_suspended(self, run: dict[str, Any], *, refresh_atomic: bool = False) -> bool:
         """True when an ancestor root holds the tree in a human-gated state.
 
         A child loop exits on this signal; re-entry resumes the same child.
@@ -123,7 +125,7 @@ class WorkflowTree:
         if not root_id or root_id == run.get("workflow_run_id"):
             return False
         try:
-            return self.store.get_run(root_id).get("status") in SUSPENDED
+            return self.store.get_run(root_id, refresh_atomic=refresh_atomic).get("status") in SUSPENDED
         except (OSError, ValueError, KeyError):
             return True
 
@@ -158,6 +160,7 @@ class WorkflowTree:
         # can be arbitrarily large and contains unrelated trees.
         root = self.store.get_run(run_id)
         records, children, unresolved = {run_id: root}, {}, set()
+        errors = []
         ordered, visited, visiting = [], set(), set()
         stack = [(run_id, False)]
         while stack:
@@ -188,6 +191,11 @@ class WorkflowTree:
                         raise ValueError('Child invocation link does not match its parent')
                     if child_id in visiting:
                         raise ValueError('Cyclic child invocation link')
+                except WorkflowRunDocumentError as exc:
+                    unresolved.add(current_id)
+                    errors.append({"workflow_run_id": current_id, "child_workflow_run_id": child_id,
+                                   "error": str(exc)[:2000], "diagnostic": exc.as_dict()})
+                    continue
                 except (OSError, ValueError, KeyError, TypeError, AttributeError):
                     unresolved.add(current_id)
                     continue
@@ -197,7 +205,7 @@ class WorkflowTree:
             for child_id in reversed(linked):
                 if child_id not in visited:
                     stack.append((child_id, False))
-        settled, errors = {}, []
+        settled = {}
         for current_id in ordered:
             observed = records[current_id]
             live = list(dict.fromkeys(t.get('transport_task_id', t['task_id']) for a in observed.get('activations', []) for t in a.get('tasks', []) if t.get('status') in {'running', 'reserved', 'uncertain'}))
@@ -215,6 +223,9 @@ class WorkflowTree:
                             errors.append({"workflow_run_id": current_id, "task_id": task_id, "error": error})
                     except StateOwnershipError:
                         raise
+                    except WorkflowRunDocumentError as exc:
+                        errors.append({"workflow_run_id": current_id, "task_id": task_id,
+                                       "error": str(exc)[:2000], "diagnostic": exc.as_dict()})
                     except Exception as exc:
                         errors.append({"workflow_run_id": current_id, "task_id": task_id, "error": str(exc)[:2000]})
             if selected and observed.get('status') not in _w().TERMINAL:
@@ -273,33 +284,45 @@ def session_owner_id(parent_run: dict[str, Any]) -> str:
 @storage_operation
 def write_child_run(store: Any, run: dict[str, Any]) -> None:
     """Publish a flushed child record exclusively, never a partially written ID."""
+    from .workflow_run_documents import encode
+    document = encode(run)
     path = store.runs / f"{run['workflow_run_id']}.json"
     require_state_path(store.state_layout, path)
     temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    fd, created = None, False
+    fd, created, published = None, False, False
     try:
         fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         created = True
         handle = os.fdopen(fd, "w", encoding="utf-8")
         fd = None  # The text handle now owns the descriptor, including failures.
         with handle:
-            json.dump(run, handle, ensure_ascii=False)
+            json.dump(document, handle, ensure_ascii=False)
             handle.flush()
             os.fsync(handle.fileno())
         # Same-directory hard linking creates the final name atomically and
         # refuses an existing reservation; replace() would overwrite its owner.
         os.link(temp, path)
+        published = True
         temp.unlink()
         directory_fd = os.open(path.parent, os.O_RDONLY)
         try:
             os.fsync(directory_fd)
         finally:
             os.close(directory_fd)
+    except OSError as exc:
+        if published:
+            raise WorkflowRunDocumentError(run['workflow_run_id'], f"Child run published; durability uncertain: {exc}", code="workflow_run_unavailable", published=True) from exc
+        raise
     finally:
         if fd is not None:
             os.close(fd)
         if created:
-            temp.unlink(missing_ok=True)
+            try:
+                temp.unlink(missing_ok=True)
+            except OSError as exc:
+                if published:
+                    raise WorkflowRunDocumentError(run['workflow_run_id'], f"Child run published; temporary cleanup incomplete: {exc}", code="workflow_run_unavailable", published=True) from exc
+                raise
 
 
 def child_run_record(store: Any, parent_run: dict[str, Any], activation: dict[str, Any], node: dict[str, Any], invocation: dict[str, Any]) -> dict[str, Any]:
@@ -608,13 +631,15 @@ def publish_input(store: Any, source: dict[str, Any]) -> None:
     from .workflow_references import MAX_WORKFLOW_NESTING_DEPTH
     budget = Catalog(store.runs, '.json', layout=store.state_layout)
     exhausted = False
+    refusal = None
     def read(identifier: str) -> dict[str, Any]:
-        return store.get_run(identifier, metadata_byte_limit=4 * 1024 * 1024, metadata_budget=budget)
-    def unavailable() -> None:
+        return store.get_run(identifier, metadata_byte_limit=4 * 1024 * 1024, metadata_budget=budget, refresh_atomic=True)
+    def unavailable(diagnostic: dict[str, Any] | None = None) -> None:
         def suspend(r: dict[str, Any]) -> None:
             if r.get('status') not in _w().TERMINAL and r.get('status') != 'needs_input':
                 r.update(status='needs_attention', attention_reason='Workflow input tree could not be completely verified within bounded metadata arbitration; inspect its known runs directly before retrying')
-        store.update_run(root_id, suspend, 'child_input_arbitration_unavailable')
+        store.update_run(root_id, suspend, 'child_input_arbitration_unavailable',
+                         {'diagnostic': diagnostic} if diagnostic is not None else None)
     try:
         root = read(root_id)
     except ReadLimit:
@@ -681,11 +706,15 @@ def publish_input(store: Any, source: dict[str, Any]) -> None:
             except ReadLimit:
                 exhausted = True
                 break
+            except WorkflowRunDocumentError as exc:
+                exhausted = True
+                refusal = exc.as_dict()
+                break
             except (OSError, ValueError, KeyError, TypeError, AttributeError):
                 exhausted = True
                 break
         if exhausted:
-            unavailable()
+            unavailable(refusal)
             return
     if source['workflow_run_id'] not in paths or not waiting:
         return
@@ -939,7 +968,7 @@ async def run_child(supervisor: Any, node: dict[str, Any], token: dict[str, Any]
         timeout_seconds = invocation.get("timeout_seconds")
         last_tick = time.monotonic()
         while not child_task.done():
-            before_wait = store.get_run(child_id)
+            before_wait = store.get_run(child_id, refresh_atomic=True)
             charge_elapsed = supervisor.tree.tree_running(before_wait) or before_wait.get("settling", False)
             await asyncio.wait({child_task}, timeout=INVOCATION_WATCH_INTERVAL)
             now = time.monotonic()
@@ -948,7 +977,7 @@ async def run_child(supervisor: Any, node: dict[str, Any], token: dict[str, Any]
             if timeout_seconds:
                 child_now = None
                 try:
-                    child_now = store.get_run(child_id)
+                    child_now = store.get_run(child_id, refresh_atomic=True)
                 except (OSError, ValueError, KeyError):
                     pass
                 if child_now is not None and charge_elapsed:
@@ -962,7 +991,7 @@ async def run_child(supervisor: Any, node: dict[str, Any], token: dict[str, Any]
                         timeout_reason = f"Run workflow node exceeded its {timeout_seconds}s timeout"
                         try:
                             await asyncio.wait_for(supervisor.tree.cancel_descendants(child_id, supervisor.registry, include_self=True), timeout=30)
-                        except StateOwnershipError:
+                        except (StateOwnershipError, WorkflowRunDocumentError):
                             raise
                         except Exception:
                             pass
@@ -971,7 +1000,7 @@ async def run_child(supervisor: Any, node: dict[str, Any], token: dict[str, Any]
                         break
         if timed_out:
             try:
-                final = store.get_run(child_id)
+                final = store.get_run(child_id, refresh_atomic=True)
             except (OSError, ValueError, KeyError):
                 final = None
             confirmed = final is not None and child_task.done() and child_settled(final, store=store)
@@ -984,7 +1013,7 @@ async def run_child(supervisor: Any, node: dict[str, Any], token: dict[str, Any]
 
     child_final = None
     try:
-        child_final = store.get_run(child_id)
+        child_final = store.get_run(child_id, refresh_atomic=True)
         if child_final.get("child_session_refusal"):
             invocation["child_session_refusal"] = child_final["child_session_refusal"]
     except (OSError, ValueError, KeyError):

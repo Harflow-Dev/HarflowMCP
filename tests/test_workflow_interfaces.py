@@ -158,7 +158,7 @@ def managed_workflow_run(tmp_path, monkeypatch):
     def reserve(run):
         run["status"] = "needs_attention"
         run["tasks"] = [{"id": "check-1", "title": "Implement", "status": "pending"}]
-        run["activations"] = [{"id": "activation-1", "node_id": "worker", "role": "node", "status": "running", "tasks": [{"task_id": "reserved-worker", "status": "reserved"}]}]
+        run["activations"] = [{"id": "activation-1", "node_id": "worker", "role": "node", "status": "running", "created_at": 0.0, "tasks": [{"task_id": "reserved-worker", "status": "reserved"}]}]
     storage.update_run(run_id, reserve, "test_reserved")
     registry = TaskRegistry(log_dir=storage.root / "tasks", owner={})
     async def caller(*args, **kwargs):

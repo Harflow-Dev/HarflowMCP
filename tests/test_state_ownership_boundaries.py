@@ -14,7 +14,7 @@ import sys
 import pytest
 
 from harflow_mcp import artifacts, approvals, catalog, control, events, followups, inbox, notifications
-from harflow_mcp import retention, scratch, store, workflows
+from harflow_mcp import retention, scratch, store, workflows, workflow_run_documents
 from harflow_mcp import state_ownership as ownership
 from harflow_mcp.state_access import open_descriptor
 from harflow_mcp.state_layout import resolve_layout
@@ -32,6 +32,27 @@ def _marker(product: str = "harflow") -> bytes:
         "product_version": "1.0.0",
         "layout_version": 1,
     }, sort_keys=True) + "\n").encode()
+
+
+def _native_run(run_id, task_id, finished_at):
+    return workflow_run_documents.encode({
+        'workflow_run_id': run_id, 'kind': 'workflow', 'name': 'Native', 'status': 'completed',
+        'sequence': 0, 'revision': 0, 'transitions': 0, 'created_at': float(finished_at),
+        'updated_at': float(finished_at), 'prompt': '', 'repo_path': '/repo',
+        'freedom': 'write_in_repo', 'network': None, 'instructions': '',
+        'permission_policy': 'legacy_ceiling', 'definition_hash': 'hash',
+        'definition': {'name': 'Native', 'workflow_id': 'wf', 'revision': 1,
+                       'orchestrator': {'backend': 'codex'}, 'nodes': [], 'connections': []},
+        'activations': [{'id': 'activation', 'node_id': 'node', 'role': 'worker', 'status': 'completed',
+                         'created_at': float(finished_at),
+                         'tasks': [{'task_id': task_id, 'status': 'completed',
+                                    'execution_kind': 'native_subagent',
+                                    'native_terminal': True, 'dispatch_stage': 'child_settled',
+                                    'finished_at': finished_at}]}],
+        'decisions': [], 'tasks': [], 'sessions': {}, 'pending': [], 'joins': {},
+        'attempt_grants': {}, 'retry_counts': {}, 'retry_grants': {},
+        'suppressed_candidates': [], 'supervisor_pid': None,
+    })
 
 
 def _record() -> store.TaskRecord:
@@ -310,18 +331,7 @@ def test_native_event_sweep_skips_contended_run_and_continues(tmp_path):
         pass
     runs.mkdir(parents=True)
     for run_id, task_id in (("run-a", "native-a"), ("run-b", "native-b")):
-        (runs / f"{run_id}.json").write_text(json.dumps({
-            "workflow_run_id": run_id,
-            "status": "completed",
-            "activations": [{"tasks": [{
-                "task_id": task_id,
-                "status": "completed",
-                "execution_kind": "native_subagent",
-                "native_terminal": True,
-                "dispatch_stage": "child_settled",
-                "finished_at": old_finished,
-            }]}],
-        }))
+        (runs / f"{run_id}.json").write_text(json.dumps(_native_run(run_id, task_id, old_finished)))
     tasks.mkdir(parents=True)
     paths = {task_id: tasks / f"{task_id}.events.jsonl" for task_id in ("native-a", "native-b")}
     for path in paths.values():

@@ -1,9 +1,11 @@
 import asyncio
+import copy
 import threading
 import time
 
 import pytest
 
+from harflow_mcp import workflow_run_documents
 from harflow_mcp import workflows as w
 from test_workflows import definition
 
@@ -16,7 +18,7 @@ def storage(tmp_path, monkeypatch):
 
 def seed(storage, repo, *, status='completed', task_status='completed'):
     run = storage.create_run(w.validate_definition(definition()), 'work', repo)
-    storage.update_run(run['workflow_run_id'], lambda r: r.update(status=status, activations=[{'id': 'a', 'node_id': 'work', 'role': 'node', 'status': 'failed', 'tasks': [{'task_id': run['workflow_run_id'], 'status': task_status, 'freedom': 'write_in_repo'}]}]), 'fixture')
+    storage.update_run(run['workflow_run_id'], lambda r: r.update(status=status, activations=[{'id': 'a', 'node_id': 'work', 'role': 'node', 'status': 'failed', 'created_at': 0.0, 'tasks': [{'task_id': run['workflow_run_id'], 'status': task_status, 'freedom': 'write_in_repo'}]}]), 'fixture')
     return run
 
 
@@ -143,9 +145,42 @@ def test_changed_matching_run_refreshes_before_trusting_cached_supervisor(storag
     run = seed(storage, tmp_path, task_status='uncertain')
     ready(storage)
     path = storage.runs / f"{run['workflow_run_id']}.json"
-    value = json.loads(path.read_text())
+    value = workflow_run_documents.decode(json.loads(path.read_text()), run['workflow_run_id'])
     value['activations'][0]['tasks'][0]['status'] = 'completed'
-    path.write_text(json.dumps(value))
+    path.write_text(json.dumps(workflow_run_documents.encode(value)))
     lease = w.CheckoutLease(storage, str(tmp_path), True)
     assert lease._orphan_owner()['task_id'] == 'ownership_refreshed'
     assert lease._orphan_owner() is None
+
+
+def test_unchanged_qualified_owner_reuses_catalog_identity_without_refresh(storage, tmp_path, monkeypatch):
+    run = seed(storage, tmp_path, task_status='uncertain')
+    ready(storage)
+    lease = w.CheckoutLease(storage, str(tmp_path), True)
+    monkeypatch.setattr(storage, '_read_run', lambda *args, **kwargs: pytest.fail('qualified source must not refresh'))
+    first = lease._orphan_owner()
+    second = lease._orphan_owner()
+    assert first == second == {'workflow_run_id': run['workflow_run_id'], 'task_id': run['workflow_run_id']}
+
+
+def test_refresh_substitution_after_locked_read_never_indexes_stale_owner(storage, tmp_path, monkeypatch):
+    import json
+    run = seed(storage, tmp_path, task_status='uncertain')
+    ready(storage)
+    path = storage.runs / f"{run['workflow_run_id']}.json"
+    current = workflow_run_documents.decode(json.loads(path.read_text()), run['workflow_run_id'])
+    current['name'] = 'first replacement'
+    path.write_text(json.dumps(workflow_run_documents.encode(current)))
+    original_index = storage._index_run
+
+    def substitute_before_index(value, **kwargs):
+        replacement = copy.deepcopy(value)
+        replacement['name'] = 'second replacement'
+        path.write_text(json.dumps(workflow_run_documents.encode(replacement)))
+        return original_index(value, **kwargs)
+
+    monkeypatch.setattr(storage, '_index_run', substitute_before_index)
+    owner = w.CheckoutLease(storage, str(tmp_path), True)._orphan_owner()
+    assert owner['workflow_run_id'] == run['workflow_run_id']
+    assert owner['task_id'] == 'ownership_uncertain'
+    assert json.loads(path.read_text())['run']['name'] == 'second replacement'

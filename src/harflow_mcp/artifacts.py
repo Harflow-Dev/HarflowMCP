@@ -19,6 +19,7 @@ from .canonical_paths import canonical
 from .extra_paths import restore_paths, revalidate_paths
 from .catalog import METADATA_BYTES, catalog_lock, current_metadata_budget, metadata_request
 from .bounded_io import ReadLimit
+from .workflow_run_documents import WorkflowRunDocumentError
 
 MAX_BYTES = 1048576
 KINDS = frozenset(('screenshot', 'log', 'report', 'other'))
@@ -334,6 +335,8 @@ def summary(log_dir: Path, task_id: str) -> dict:
         raise
     except store.TaskDocumentError as exc:
         return {'count': 0, 'state': 'unavailable', 'history_incomplete': True, 'refused_tasks': [exc.as_dict()]}
+    except WorkflowRunDocumentError as exc:
+        return {'count': 0, 'state': 'unavailable', 'history_incomplete': True, 'refused_runs': [exc.as_dict()]}
     except Exception:
         return {'count': 0, 'state': 'unavailable'}
     try:
@@ -649,6 +652,7 @@ def workflow_page(log_dir: Path, workflow_run_id: str, *, cursor: str | None = N
     one metadata budget, so an unreadable run or manifest becomes an owner entry rather than a
     failed page, and every page makes progress.
     """
+    from .workflow_run_documents import WorkflowRunDocumentError
     from .bounded_io import ReadLimit
     from .workflows import WorkflowStore
     if not isinstance(workflow_run_id, str) or not workflow_run_id or any(v is not None and (not isinstance(v, str) or not v) for v in (execution_id, task_id)):
@@ -707,7 +711,7 @@ def workflow_page(log_dir: Path, workflow_run_id: str, *, cursor: str | None = N
         position = (run_id, 0, 0)
         try:
             run = storage.get_run(run_id, metadata_byte_limit=METADATA_BYTES, metadata_budget=current_metadata_budget())
-        except (OSError, ValueError, KeyError, TypeError) as exc:
+        except (OSError, ValueError, KeyError, TypeError, WorkflowRunDocumentError) as exc:
             if isinstance(exc, ReadLimit) and produced():
                 state['cursor'] = _page_cursor(workflow_run_id, position, None, None)
                 done = False
@@ -716,7 +720,10 @@ def workflow_page(log_dir: Path, workflow_run_id: str, *, cursor: str | None = N
                 state['cursor'] = _page_cursor(workflow_run_id, position, None, None)
                 done = False
                 break
-            owners.append({'workflow_run_id': run_id, 'state': 'run_unavailable'})
+            owner = {'workflow_run_id': run_id, 'state': 'run_unavailable'}
+            if isinstance(exc, WorkflowRunDocumentError):
+                owner['diagnostic'] = exc.as_dict()
+            owners.append(owner)
             first_run = False
             continue
         for child in (a.get('invocation') or {} for a in run.get('activations', [])):

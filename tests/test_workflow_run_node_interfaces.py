@@ -213,12 +213,12 @@ def test_inspection_of_grandchild_returns_requested_boundary(store, tmp_path):
     middle_run = inv.child_run_record(store, outer, outer_activation, outer["definition"]["nodes"][1], outer_activation["invocation"])
     middle_run["status"] = "completed"
     leaf_id = uuid.uuid4().hex
-    middle_activation = {"id": "middle-call", "node_id": "call", "role": "node", "status": "completed", "tasks": [], "invocation": {"child_workflow_run_id": leaf_id, "workflow_id": store.get("child")["workflow_id"]}}
+    middle_activation = {"id": "middle-call", "node_id": "call", "role": "node", "status": "completed", "created_at": 0.0, "tasks": [], "invocation": {"child_workflow_run_id": leaf_id, "workflow_id": store.get("child")["workflow_id"]}}
     middle_run["activations"] = [middle_activation]
     write_run(store, middle_run)
     leaf = inv.child_run_record(store, middle_run, middle_activation, middle_run["definition"]["nodes"][1], middle_activation["invocation"])
     leaf["status"] = "completed"
-    leaf["activations"] = [{"id": "leaf-work", "node_id": "work", "role": "node", "status": "completed", "tasks": [], "node_result": {"status": "succeeded", "result": {"summary": "grandchild evidence"}, "evidence": []}}]
+    leaf["activations"] = [{"id": "leaf-work", "node_id": "work", "role": "node", "status": "completed", "created_at": 0.0, "tasks": [], "node_result": {"status": "succeeded", "result": {"summary": "grandchild evidence"}, "evidence": []}}]
     write_run(store, leaf)
     page = workflow_inspection.inspect_request(outer, store.root, {"execution_id": "leaf-work", "workflow_run_id": leaf_id, "view": "result"})
     assert page["workflow_run_id"] == leaf_id

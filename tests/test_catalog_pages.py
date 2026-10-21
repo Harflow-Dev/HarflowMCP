@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from harflow_mcp import catalog, ctl, lineage, server, store, task_documents, workflows
+from harflow_mcp import catalog, ctl, lineage, server, store, task_documents, workflow_run_documents, workflows
 from harflow_mcp import state_ownership
 from harflow_mcp.state_layout import resolve_layout
 from harflow_mcp.workflow_inspection import managed_page_reader
@@ -98,7 +98,7 @@ def test_managed_page_reader_decorates_noncanonical_task_directory_from_workflow
         storage.update_run(
             run['workflow_run_id'],
             lambda value: value.update(activations=[{
-                'id': 'execution', 'node_id': 'work', 'role': 'node', 'status': 'running',
+                'id': 'execution', 'node_id': 'work', 'role': 'node', 'status': 'running', 'created_at': 0.0,
                 'tasks': [{'task_id': 'worker', 'status': 'running'}],
             }]),
             'worker',
@@ -254,7 +254,7 @@ def test_nested_caller_inherits_workflow_authority_without_historical_scans(tmp_
     directory.mkdir(parents=True, exist_ok=True)
     storage = workflows.WorkflowStore(root=root)
     run = storage.create_run(definition(), 'Assignment', tmp_path)
-    storage.update_run(run['workflow_run_id'], lambda r: r.update(activations=[{'id': 'execution', 'node_id': 'work', 'role': 'node', 'status': 'running', 'tasks': [{'task_id': 'worker', 'status': 'running'}]}]), 'worker')
+    storage.update_run(run['workflow_run_id'], lambda r: r.update(activations=[{'id': 'execution', 'node_id': 'work', 'role': 'node', 'status': 'running', 'created_at': 0.0, 'tasks': [{'task_id': 'worker', 'status': 'running'}]}]), 'worker')
     store.write(directory, replace(record('worker', status='running'), pid=20, pgid=20))
     store.write(directory, replace(record('nested', status='running'), pid=30, pgid=30, spawned_by='worker'))
     original = lineage.detect_catalog_caller
@@ -286,7 +286,7 @@ def test_external_replacement_and_deletion_refresh_headers_and_counts(tmp_path):
     run = storage.create_run(definition(), 'Run', tmp_path)
     storage.list_run_page()
     replacement = dict(run, status='completed')
-    (storage.runs / f"{run['workflow_run_id']}.json").write_text(json.dumps(replacement))
+    (storage.runs / f"{run['workflow_run_id']}.json").write_text(json.dumps(workflow_run_documents.encode(replacement)))
     assert storage.get_run_header(run['workflow_run_id'])['status'] == 'completed'
     page = storage.list_run_page()
     assert page['items'][0]['status'] == 'completed'
@@ -521,7 +521,7 @@ def test_oversized_run_header_defers_decode_until_selected_detail(tmp_path, monk
     identifier = run['workflow_run_id']
     path = storage.runs / f'{identifier}.json'
     run['legacy_large_field'] = 'x' * (METADATA_BYTES + 1)
-    path.write_text(json.dumps(run))
+    path.write_text(json.dumps(workflow_run_documents.encode(run)))
     original = path.read_bytes()
     read = storage.get_run
     monkeypatch.setattr(storage, 'get_run', lambda *a, **k: pytest.fail('oversized listing opened workflow metadata'))
@@ -667,7 +667,7 @@ def test_many_legacy_receipt_decorations_share_one_workflow_metadata_budget(tmp_
     for number in range(5):
         run = storage.create_run(definition(), str(number), tmp_path)
         run['large_legacy_field'] = 'x' * (3 * 1024 * 1024)
-        (storage.runs / f"{run['workflow_run_id']}.json").write_text(json.dumps(run))
+        (storage.runs / f"{run['workflow_run_id']}.json").write_text(json.dumps(workflow_run_documents.encode(run)))
         run_ids.append(run['workflow_run_id'])
     for number in range(100):
         identifier = f't{number:03}'
@@ -1153,7 +1153,7 @@ def test_direct_workflow_repair_retains_the_source_identity_it_decoded(tmp_path,
     identifier = run['workflow_run_id']
     run['large_legacy_field'] = 'x' * (catalog.METADATA_BYTES + 1)
     path = storage.runs / f'{identifier}.json'
-    path.write_text(json.dumps(run))
+    path.write_text(json.dumps(workflow_run_documents.encode(run)))
     assert storage.list_run_page()['catalog_state']['status'] == 'blocked'
     original = catalog.Catalog.record
     def replace_during_repair(index, header, *args, **kwargs):
@@ -1161,7 +1161,7 @@ def test_direct_workflow_repair_retains_the_source_identity_it_decoded(tmp_path,
         newer.pop('large_legacy_field')
         newer['name'] = 'new'
         temporary = storage.runs / '.newer-run'
-        temporary.write_text(json.dumps(newer))
+        temporary.write_text(json.dumps(workflow_run_documents.encode(newer)))
         os.replace(temporary, path)
         return original(index, header, *args, **kwargs)
     monkeypatch.setattr(catalog.Catalog, 'record', replace_during_repair)
@@ -1178,7 +1178,7 @@ def test_managed_ownership_decode_and_page_share_one_aggregate_budget(tmp_path, 
     directory = tmp_path / 'tasks'
     storage = workflows.WorkflowStore(tmp_path)
     run = storage.create_run(definition(), 'x' * (3 * 1024 * 1024), tmp_path)
-    storage.update_run(run['workflow_run_id'], lambda value: value.update(activations=[{'id': 'execution', 'node_id': 'work', 'role': 'orchestrator', 'status': 'completed', 'tasks': [{'task_id': 'caller', 'status': 'completed'}]}]), 'seed')
+    storage.update_run(run['workflow_run_id'], lambda value: value.update(activations=[{'id': 'execution', 'node_id': 'work', 'role': 'orchestrator', 'status': 'completed', 'created_at': 0.0, 'tasks': [{'task_id': 'caller', 'status': 'completed'}]}]), 'seed')
     task = record('caller')
     store.write(directory, task)
     store.list_page(directory)
@@ -1194,6 +1194,16 @@ def test_managed_ownership_decode_and_page_share_one_aggregate_budget(tmp_path, 
                 run_reads.append(path.name)
         return result
     monkeypatch.setattr(bounded_io, 'read_json', measured)
+    original_run_read = workflows.WorkflowStore._read_run
+    def measured_run_read(instance, run_id, *, metadata_byte_limit=None, metadata_budget=None, refresh_atomic=False):
+        before = None if metadata_budget is None else metadata_budget.metadata_bytes
+        result = original_run_read(instance, run_id, metadata_byte_limit=metadata_byte_limit, metadata_budget=metadata_budget, refresh_atomic=refresh_atomic)
+        if instance.root == storage.root:
+            assert metadata_budget is not None
+            assert metadata_byte_limit == 4 * 1024 * 1024
+            run_reads.append((f'{run_id}.json', before, metadata_budget.metadata_bytes))
+        return result
+    monkeypatch.setattr(workflows.WorkflowStore, '_read_run', measured_run_read)
     with catalog.metadata_request():
         ready, managed = managed_page_reader(directory)
         assert ready and managed[0]['role'] == 'orchestrator'
@@ -1204,7 +1214,8 @@ def test_managed_ownership_decode_and_page_share_one_aggregate_budget(tmp_path, 
         assert page['bootstrap_pending']
         assert sum(consumed) <= catalog.METADATA_BATCH_BYTES
         assert len(consumed) <= catalog.BOOTSTRAP_LIMIT
-        assert run_reads == [f"{run['workflow_run_id']}.json"]
+        assert [name for name, _, _ in run_reads] == [f"{run['workflow_run_id']}.json"]
+        assert run_reads[0][2] > run_reads[0][1]
 
 
 def test_active_page_cursor_does_not_skip_a_byte_budget_deferred_row(tmp_path):
@@ -1284,7 +1295,7 @@ def test_explicit_changed_headers_defer_neutrally_after_one_ownership_decode(tmp
         identifiers = [run['workflow_run_id'] for run in runs]
         query = lambda: storage.list_run_page(run_ids=identifiers)
         paths = [storage.runs / f'{identifier}.json' for identifier in identifiers]
-        change = lambda payload: payload.update(name='new')
+        change = lambda payload: payload['run'].update(name='new')
     assert len(query()['items']) == 100
     for path in paths:
         payload = json.loads(path.read_text())
@@ -1321,8 +1332,8 @@ async def test_managed_explicit_header_deferral_keeps_counts_unavailable_and_rec
     run = storage.create_run(definition(), 'request', tmp_path)
     identifiers = [f'member{number:03}' for number in range(100)]
     storage.update_run(run['workflow_run_id'], lambda value: value.update(activations=[
-        {'id': 'orchestrator', 'node_id': 'orchestrator', 'role': 'orchestrator', 'status': 'completed', 'tasks': [{'task_id': 'caller', 'status': 'completed'}]},
-        {'id': 'execution', 'node_id': 'work', 'role': 'node', 'status': 'completed', 'node_result': {'status': 'succeeded', 'result': {}, 'evidence': []}, 'tasks': [{'task_id': identifier, 'status': 'completed'} for identifier in identifiers]}
+        {'id': 'orchestrator', 'node_id': 'orchestrator', 'role': 'orchestrator', 'status': 'completed', 'created_at': 0.0, 'tasks': [{'task_id': 'caller', 'status': 'completed'}]},
+        {'id': 'execution', 'node_id': 'work', 'role': 'node', 'status': 'completed', 'created_at': 0.0, 'node_result': {'status': 'succeeded', 'result': {}, 'evidence': []}, 'tasks': [{'task_id': identifier, 'status': 'completed'} for identifier in identifiers]}
     ]), 'seed')
     caller = record('caller')
     store.write(directory, caller)
@@ -1394,7 +1405,7 @@ async def test_concurrent_caller_preparation_survives_worker_hops_without_shared
         prompt = 'x' * catalog.METADATA_BYTES if name == 'blocked-caller' else 'request'
         run = storage.create_run(definition(), prompt, tmp_path)
         storage.update_run(run['workflow_run_id'], lambda value, name=name: value.update(activations=[
-            {'id': 'orchestrator', 'node_id': 'orchestrator', 'role': 'orchestrator', 'status': 'completed', 'tasks': [{'task_id': name, 'status': 'completed'}]}
+            {'id': 'orchestrator', 'node_id': 'orchestrator', 'role': 'orchestrator', 'status': 'completed', 'created_at': 0.0, 'tasks': [{'task_id': name, 'status': 'completed'}]}
         ]), 'seed')
         store.write(directory, caller)
     store.list_page(directory)
@@ -1468,7 +1479,7 @@ def large_ancestry(storage, tmp_path):
         if i < 2:
             run['parent_link'] = {'workflow_run_id': runs[i + 1]['workflow_run_id']}
         run['large_legacy_field'] = 'x' * (3 * 1024 * 1024)
-        (storage.runs / f"{run['workflow_run_id']}.json").write_text(json.dumps(run))
+        (storage.runs / f"{run['workflow_run_id']}.json").write_text(json.dumps(workflow_run_documents.encode(run)))
     return [run['workflow_run_id'] for run in runs]
 
 
@@ -1521,9 +1532,9 @@ async def test_workflow_page_propagates_blocked_parent_headers(tmp_path, monkeyp
     child = storage.create_run(definition(), 'Child', tmp_path)
     identifier = child['workflow_run_id']
     child['parent_link'] = {'workflow_run_id': parent['workflow_run_id']}
-    (storage.runs / f"{identifier}.json").write_text(json.dumps(child))
+    (storage.runs / f"{identifier}.json").write_text(json.dumps(workflow_run_documents.encode(child)))
     parent['large_legacy_field'] = 'x' * (catalog.METADATA_BYTES + 1)
-    (storage.runs / f"{parent['workflow_run_id']}.json").write_text(json.dumps(parent))
+    (storage.runs / f"{parent['workflow_run_id']}.json").write_text(json.dumps(workflow_run_documents.encode(parent)))
     directory = tmp_path / 'tasks'
     directory.mkdir()
     monkeypatch.setattr(server, '_reg', lambda: SimpleNamespace(log_dir=directory))
@@ -1544,7 +1555,7 @@ def test_task_page_blocked_receipt_and_ancestor_never_publish_unknown_authority(
     store.write(directory, record('child', parent_task_id='parent'))
     (storage.owners / 'child.json').write_text(json.dumps({'workflow_run_id': run['workflow_run_id']}))
     run['large_legacy_field'] = 'x' * (catalog.METADATA_BYTES + 1)
-    (storage.runs / f"{run['workflow_run_id']}.json").write_text(json.dumps(run))
+    (storage.runs / f"{run['workflow_run_id']}.json").write_text(json.dumps(workflow_run_documents.encode(run)))
     payload = asdict(record('parent', prompt='x' * (catalog.METADATA_BYTES + 1)))
     (directory / 'parent.meta.json').write_text(json.dumps(payload))
     for _ in range(2):
@@ -1587,7 +1598,7 @@ def test_blocked_ancestry_seed_does_not_hide_other_seed_budget_recovery(tmp_path
     storage = workflows.WorkflowStore(tmp_path)
     blocked = storage.create_run(definition(), 'Blocked', tmp_path)
     blocked['large_legacy_field'] = 'x' * (catalog.METADATA_BYTES + 1)
-    (storage.runs / f"{blocked['workflow_run_id']}.json").write_text(json.dumps(blocked))
+    (storage.runs / f"{blocked['workflow_run_id']}.json").write_text(json.dumps(workflow_run_documents.encode(blocked)))
     chain = large_ancestry(storage, tmp_path)
     seeds = [blocked['workflow_run_id'], chain[0]]
     with catalog.metadata_request():
@@ -1832,7 +1843,7 @@ def test_corrupt_derivative_does_not_prevent_authoritative_metadata_writes(tmp_p
         else:
             target = storage.update_run(target['workflow_run_id'], lambda run: run.update(status='completed'), 'finished')
         payload = json.loads((storage.runs / f"{target['workflow_run_id']}.json").read_text())
-        assert payload['status'] == ('starting' if operation == 'workflow_create' else 'completed')
+        assert payload['run']['status'] == ('starting' if operation == 'workflow_create' else 'completed')
         assert historical_path.read_bytes() == historical
 
 

@@ -55,7 +55,7 @@ def test_builder_canonical_ids_mapping_and_claimed_delivery(tmp_path, owned_task
     logs = owned_tasks
     run = storage.create_run({"name": "builder", "orchestrator": {"backend": "codex"}}, "request", tmp_path, kind="builder")
     messages = [{"id": "queued", "prompt": "same", "status": "queued_to_agent", "inbox_message_id": "inboxid"}, {"id": "claimed", "prompt": "same", "status": "claimed"}, {"id": "later", "prompt": "same", "status": "pending"}]
-    storage.update_run(run["workflow_run_id"], lambda r: r.update(builder_messages=messages, activations=[{"id": "activation", "role": "builder", "node_id": "builder", "feedback_ids": ["claimed"], "tasks": [{"task_id": "task", "status": "running"}]}]), "fixture")
+    storage.update_run(run["workflow_run_id"], lambda r: r.update(builder_messages=messages, activations=[{"id": "activation", "role": "builder", "node_id": "builder", "status": "running", "created_at": 0.0, "feedback_ids": ["claimed"], "tasks": [{"task_id": "task", "status": "running"}]}]), "fixture")
     assert workflows.builder_feedback_ids(logs, "task") == ["claimed"]
     rows = workflows.builder_pending_messages(logs, "task", [{"id": "inboxid", "text": "same"}])
     assert [m["id"] for m in rows] == ["queued", "claimed", "later"]

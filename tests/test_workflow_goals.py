@@ -54,7 +54,7 @@ def test_revision_keeps_caller_instructions_separate_from_replan(storage, tmp_pa
     def prepare(current):
         current.update(status="paused", tasks=[{"id": "done", "status": "completed"}])
         if instructions is None:
-            current.pop("instructions", None)
+            current["instructions"] = ""
         else:
             current["instructions"] = instructions
     storage.update_run(rid, prepare, "test")
@@ -63,7 +63,7 @@ def test_revision_keeps_caller_instructions_separate_from_replan(storage, tmp_pa
     g.revise(reloaded_store, rid, "second goal", 2)
     revised = reloaded_store.get_run(rid)
     if instructions is None:
-        assert "instructions" not in revised
+        assert revised["instructions"] == ""
     else:
         assert revised["instructions"].encode("utf-8") == instructions.encode("utf-8")
     assert revised["tasks"] == [{"id": "done", "status": "completed"}]
@@ -86,7 +86,7 @@ def test_revision_rejects_unsafe_checkpoint(storage, tmp_path, status):
 
 def test_revision_rejects_active_even_monitor(storage, tmp_path):
     run = create(storage, tmp_path)
-    storage.update_run(run["workflow_run_id"], lambda r: r.update(status="paused", interaction_owner="monitor", activations=[{"id": "a", "status": "running", "tasks": []}]), "test")
+    storage.update_run(run["workflow_run_id"], lambda r: r.update(status="paused", interaction_owner="monitor", activations=[{"id": "a", "node_id": "work", "role": "node", "status": "running", "created_at": 0.0, "tasks": []}]), "test")
     with pytest.raises(w.WorkflowError, match="active"):
         g.revise(storage, run["workflow_run_id"], "changed", 1, interaction_owner="monitor")
 
@@ -133,8 +133,8 @@ def test_nested_tree_gate_and_constraint_refresh(storage, tmp_path):
     parent = create(storage, tmp_path)
     child = create(storage, tmp_path, None)
     pid, cid = parent["workflow_run_id"], child["workflow_run_id"]
-    storage.update_run(cid, lambda r: r.update(status="paused", parent_link={"workflow_run_id": pid, "root_workflow_run_id": pid, "execution_id": "nested"}, parent_goal={"workflow_run_id": pid, "goal": parent["goal"], "revision": 1}, pending=[{"id": "child-token", "node_id": "work", "assignment_prompt": "Old scoped assignment", "decision_id": "old"}], activations=[{"id": "child-work", "role": "node", "status": "running", "tasks": [{"task_id": "active", "status": "running"}]}]), "test")
-    storage.update_run(pid, lambda r: r.update(status="paused", activations=[{"id": "nested", "status": "waiting", "tasks": [], "invocation": {"stage": "waiting", "child_workflow_run_id": cid}}]), "test")
+    storage.update_run(cid, lambda r: r.update(status="paused", parent_link={"workflow_run_id": pid, "root_workflow_run_id": pid, "execution_id": "nested"}, parent_goal={"workflow_run_id": pid, "goal": parent["goal"], "revision": 1}, pending=[{"id": "child-token", "node_id": "work", "assignment_prompt": "Old scoped assignment", "decision_id": "old"}], activations=[{"id": "child-work", "node_id": "work", "role": "node", "status": "running", "created_at": 0.0, "tasks": [{"task_id": "active", "status": "running"}]}]), "test")
+    storage.update_run(pid, lambda r: r.update(status="paused", activations=[{"id": "nested", "node_id": "work", "role": "node", "status": "waiting", "created_at": 0.0, "tasks": [], "invocation": {"stage": "waiting", "child_workflow_run_id": cid}}]), "test")
     with pytest.raises(w.WorkflowError, match="active|settling"):
         g.revise(storage, pid, "new parent constraint", 1)
     storage.update_run(cid, lambda r: r.update(activations=[]), "test_settled")

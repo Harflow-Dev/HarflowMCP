@@ -7,11 +7,18 @@ from types import SimpleNamespace
 import pytest
 
 from harflow_mcp import workflows as w
+from harflow_mcp import workflow_run_documents
 from execution_helper import run_bounded, workflow_snapshot
 
 
 def definition(role="task"):
     return {"name": "example", "orchestrator": {"backend": "codex"}, "nodes": [{"id": "start", "type": "start"}, {"id": "work", "type": "agent", "role": role, "agent": {"backend": "codex"}, "instructions": "Work"}, {"id": "end", "type": "end"}], "connections": [{"id": "begin", "source": "start", "target": "work"}, {"id": "finish", "source": "work", "target": "end"}]}
+
+
+def make_activation(**values):
+    result = {"id": "activation", "node_id": "work", "role": "node", "status": "running", "created_at": 0.0, "tasks": []}
+    result.update(values)
+    return result
 
 
 
@@ -96,6 +103,58 @@ async def execute(storage, tmp_path, definition_, responses, timeout_seconds=3):
         diagnostic=lambda: workflow_snapshot(storage, run["workflow_run_id"], registry),
     )
     return storage.get_run(run["workflow_run_id"]), registry
+
+
+@pytest.mark.parametrize('force_strict', [False, True])
+async def test_supervisor_main_loop_survives_one_atomic_refresh(storage, tmp_path, monkeypatch, force_strict):
+    run = storage.create_run(w.validate_definition(definition()), "build it", tmp_path)
+    registry = FakeRegistry(storage.root, ["done"])
+    supervisor = w.WorkflowSupervisor(registry, storage)
+    path = storage.runs / f"{run['workflow_run_id']}.json"
+    original_fdopen = w.os.fdopen
+    replaced = False
+    armed = False
+    armed_refresh = None
+    run_calls = []
+    original_run = supervisor.run
+
+    def measured_run(*, refresh_atomic=False):
+        nonlocal armed, armed_refresh
+        run_calls.append(refresh_atomic)
+        if len(run_calls) == 5:
+            armed = True
+            armed_refresh = refresh_atomic
+            if force_strict:
+                refresh_atomic = False
+        return original_run(refresh_atomic=refresh_atomic)
+
+    class Stream:
+        def __init__(self, stream): self.stream = stream
+        def __enter__(self): self.stream.__enter__(); return self
+        def __exit__(self, *args): return self.stream.__exit__(*args)
+        def read(self, *args, **kwargs):
+            nonlocal replaced
+            data = self.stream.read(*args, **kwargs)
+            if armed and not replaced:
+                replaced = True
+                fresh = workflow_run_documents.decode(json.loads(data), run["workflow_run_id"])
+                fresh["prompt"] = "after supervisor atomic refresh"
+                temporary = path.with_suffix(".supervisor-refresh.tmp")
+                temporary.write_text(json.dumps(workflow_run_documents.encode(fresh)))
+                temporary.replace(path)
+            return data
+
+    monkeypatch.setattr(supervisor, "run", measured_run)
+    monkeypatch.setattr(w.os, "fdopen", lambda fd, *args, **kwargs: Stream(original_fdopen(fd, *args, **kwargs)))
+    if force_strict:
+        with pytest.raises(workflow_run_documents.WorkflowRunDocumentError):
+            await run_bounded(supervisor.execute(run["workflow_run_id"]), 10, label="workflow")
+    else:
+        await run_bounded(supervisor.execute(run["workflow_run_id"]), 10, label="workflow")
+    assert armed and replaced and armed_refresh is True
+    assert any(run_calls)
+    if not force_strict:
+        assert storage.get_run(run["workflow_run_id"])["status"] == "completed"
 
 
 def test_definition_revisions_and_immutable_run(storage, tmp_path):
@@ -253,7 +312,7 @@ async def test_pause_after_worker_resume_does_not_repeat(storage, tmp_path, monk
 async def test_uncertain_dispatch_is_never_replayed(storage, tmp_path):
     run = storage.create_run(w.validate_definition(definition()), "task", tmp_path)
     rid = run["workflow_run_id"]
-    storage.update_run(rid, lambda r: r.update(status="running", activations=[{"id": "a", "node_id": "work", "role": "node", "status": "running", "tasks": [{"task_id": "reserved", "status": "reserved"}]}]), "fixture")
+    storage.update_run(rid, lambda r: r.update(status="running", activations=[make_activation(id="a", tasks=[{"task_id": "reserved", "status": "reserved"}])]), "fixture")
     registry = FakeRegistry(storage.root, [])
     await w.WorkflowSupervisor(registry, storage).execute(rid)
     assert storage.get_run(rid)["status"] == "needs_attention"
@@ -293,7 +352,7 @@ def test_stdout_availability_envelopes_only(storage):
 
 async def test_lease_blocks_orphaned_writer(storage, tmp_path):
     run = storage.create_run(w.validate_definition(definition()), "task", tmp_path)
-    storage.update_run(run["workflow_run_id"], lambda r: r.update(status="needs_attention", activations=[{"id": "a", "node_id": "work", "role": "node", "status": "failed", "tasks": [{"task_id": "unknown", "status": "uncertain", "freedom": "write_in_repo"}]}]), "fixture")
+    storage.update_run(run["workflow_run_id"], lambda r: r.update(status="needs_attention", activations=[make_activation(id="a", status="failed", tasks=[{"task_id": "unknown", "status": "uncertain", "freedom": "write_in_repo"}])]), "fixture")
     lease = w.CheckoutLease(storage, str(tmp_path), False)
     pending = asyncio.create_task(lease.__aenter__())
     await asyncio.sleep(.15)
@@ -387,7 +446,7 @@ async def test_completed_activation_crash_gap_never_reexecutes_worker(storage, t
     rid = run["workflow_run_id"]
     token = {"id": "token", "node_id": "work", "stack": [], "context": {}}
     snapshot = FakeTask("settled-worker", "Reviewed").snapshot()
-    activation = {"id": "a", "node_id": "work", "role": "node", "status": "completed", "token": token, "tasks": [{"task_id": "settled-worker", "status": "completed", "result": snapshot}]}
+    activation = make_activation(id="a", status="completed", token=token, tasks=[{"task_id": "settled-worker", "status": "completed", "result": snapshot}])
     storage.update_run(rid, lambda r: r.update(status="running", pending=[token], activations=[activation]), "crash_fixture")
     registry = FakeRegistry(storage.root, [json.dumps({"action": "continue", "connections": ["finish"], "reason": "Review approved"})])
     await w.WorkflowSupervisor(registry, storage).execute(rid)
@@ -1196,7 +1255,7 @@ def active_builder(storage, tmp_path, *, role="builder"):
     record = store.TaskRecord(task_id=tid, backend="codex", session_id="session", repo_path=str(tmp_path), started_at="2026-10-01T00:00:00+00:00", freedom=freedom, network=network, status="running", enforcement=w.backends.get("codex").enforcement(freedom, network).as_dict())
     store.write(storage.root / "tasks", record)
     assert store.read(storage.root / "tasks", record.task_id) is not None
-    activation = {"id": "activation", "node_id": "builder", "role": role, "status": "running", "tasks": [{"task_id": tid, "status": "running"}]}
+    activation = make_activation(node_id="builder", role=role, tasks=[{"task_id": tid, "status": "running"}])
     storage.update_run(run["workflow_run_id"], lambda r: r.update(status="running", activations=[activation], draft_revision=0), "test_active")
     return run["workflow_run_id"], lineage.Caller(record, "ancestry")
 
@@ -1228,7 +1287,7 @@ async def test_live_builder_apply_refuses_worker_and_old_activation(storage, tmp
     run_id, caller = active_builder(storage, tmp_path, role="node")
     with pytest.raises(w.WorkflowError, match="Only the active"):
         await w.apply_workflow_draft({}, 0, caller=caller, root=storage.root)
-    storage.update_run(run_id, lambda r: (r["activations"][0].update(role="builder"), r["activations"].append({"id": "new", "role": "builder", "status": "running", "tasks": []})), "test_new_turn")
+    storage.update_run(run_id, lambda r: (r["activations"][0].update(role="builder"), r["activations"].append({"id": "new", "node_id": "builder", "role": "builder", "status": "running", "created_at": 0.0, "tasks": []})), "test_new_turn")
     with pytest.raises(w.WorkflowError, match="no longer active"):
         await w.apply_workflow_draft({}, 0, caller=caller, root=storage.root)
 
@@ -2021,7 +2080,7 @@ async def test_reconcile_optional_failure_at_task_snapshot_boundary_no_repeat(st
     token = {"id": "optional-token", "node_id": "left", "stack": ["group"]}
     arrived = {"id": "required-token", "node_id": "join", "stack": ["group"], "context": {"summary": "required done"}}
     failed = {"status": "failed", "backend": "codex", "summary": "observed failure", "stderr_tail": ["API Error: 503 unavailable"] if availability else []}
-    activation = {"id": "activation", "node_id": "left", "role": "node", "status": "running", "token": token, "tasks": [{"task_id": "observed-task", "status": "failed", "candidate": left["agent"], "result": failed}]}
+    activation = make_activation(node_id="left", token=token, tasks=[{"task_id": "observed-task", "status": "failed", "candidate": left["agent"], "result": failed}])
     storage.update_run(run["workflow_run_id"], lambda r: r.update(status="needs_attention", pending=[token], activations=[activation], joins={"group": {"join_id": "join", "split_id": "work", "selected_targets": ["left", "right"], "expected": 2, "arrived": [arrived], "stack": []}}), "task_snapshot_boundary")
     reconciled = storage.reconcile_run(run["workflow_run_id"])
     assert reconciled["pending"][0]["recovered_failed_result"] == failed
@@ -2043,7 +2102,7 @@ def test_reconcile_single_selected_optional_preserves_explicit_retry(storage, tm
     run = storage.create_run(graph, "task", tmp_path)
     token = {"id": "single-token", "node_id": "left", "stack": []}
     failed = {"status": "failed", "backend": "codex", "summary": "observed failure"}
-    activation = {"id": "activation", "node_id": "left", "role": "node", "status": "running", "token": token, "tasks": [{"task_id": "failed-task", "status": "failed", "result": failed}]}
+    activation = make_activation(node_id="left", token=token, tasks=[{"task_id": "failed-task", "status": "failed", "result": failed}])
     storage.update_run(run["workflow_run_id"], lambda r: r.update(status="needs_attention", pending=[token], activations=[activation]), "single_failure_boundary")
     recovered = storage.reconcile_run(run["workflow_run_id"])
     assert "recovered_failed_result" not in recovered["pending"][0]
@@ -2058,7 +2117,7 @@ async def test_recovered_optional_fallback_completed_snapshot_survives_second_in
     run = storage.create_run(graph, "task", tmp_path)
     token = {"id": "token", "node_id": "left", "stack": ["group"]}
     failed = {"status": "failed", "backend": "codex", "summary": "", "stderr_tail": ["API Error: 503 unavailable"]}
-    activation = {"id": "activation", "node_id": "left", "role": "node", "status": "running", "token": token, "tasks": [{"task_id": "first", "status": "failed", "candidate": left["agent"], "result": failed}]}
+    activation = make_activation(node_id="left", token=token, tasks=[{"task_id": "first", "status": "failed", "candidate": left["agent"], "result": failed}])
     arrived = {"id": "required", "node_id": "join", "stack": ["group"], "context": {"summary": "required done"}}
     storage.update_run(run["workflow_run_id"], lambda r: r.update(status="running", pending=[token], activations=[activation], joins={"group": {"join_id": "join", "split_id": "work", "selected_targets": ["left", "right"], "expected": 2, "arrived": [arrived], "stack": []}}), "first_interruption")
     first = storage.reconcile_run(run["workflow_run_id"])
@@ -2106,7 +2165,7 @@ def test_resume_uncertain_supervisor_does_not_mutate(storage, tmp_path, monkeypa
     from harflow_mcp import identity
     run = storage.create_run(w.validate_definition(definition()), "request", tmp_path)
     rid = run["workflow_run_id"]
-    before = storage.update_run(rid, lambda r: r.update(status="paused", supervisor_identity={"pid": 123}), "fixture")
+    before = storage.update_run(rid, lambda r: r.update(status="paused", supervisor_identity={"pid": 123, "start_time": None, "markers": []}), "fixture")
     monkeypatch.setattr(identity, "identity_check", lambda _: "undecidable")
     with pytest.raises(w.WorkflowError, match="identity is uncertain"):
         storage.control(rid, "resume")
@@ -2115,7 +2174,7 @@ def test_resume_uncertain_supervisor_does_not_mutate(storage, tmp_path, monkeypa
 
 def test_failed_settling_workflow_keeps_tasks_pinned(storage, tmp_path):
     run = storage.create_run(w.validate_definition(definition()), "request", tmp_path)
-    storage.update_run(run["workflow_run_id"], lambda r: r.update(status="failed", activations=[{"tasks": [{"task_id": "live-worker", "status": "running"}]}]), "fixture")
+    storage.update_run(run["workflow_run_id"], lambda r: r.update(status="failed", activations=[make_activation(status="failed", tasks=[{"task_id": "live-worker", "status": "running"}])]), "fixture")
     assert storage.pinned_tasks() == {"live-worker"}
 
 
@@ -2221,7 +2280,7 @@ def test_builder_preview_accepts_agent_decides_and_planning_brief():
 async def test_cancellation_supervisor_failure_does_not_respawn(storage, tmp_path, monkeypatch):
     run = storage.create_run(w.validate_definition(definition()), "request", tmp_path)
     rid = run["workflow_run_id"]
-    storage.update_run(rid, lambda r: r.update(status="cancelling", activations=[{"id": "active", "role": "node", "tasks": [{"task_id": "live", "status": "running"}]}]), "fixture")
+    storage.update_run(rid, lambda r: r.update(status="cancelling", activations=[make_activation(id="active", tasks=[{"task_id": "live", "status": "running"}])]), "fixture")
     async def broken(self, run_id):
         raise RuntimeError("cancel transport unavailable")
     cancelled = []

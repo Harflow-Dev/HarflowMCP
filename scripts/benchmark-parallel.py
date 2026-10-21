@@ -66,6 +66,8 @@ def fixture(home: Path, conversations=8, chain=1, activity='sparse', workflow=Fa
         if workflow:
             from harflow_mcp import workflows
             from harflow_mcp.workflow_definition_documents import encode
+            from harflow_mcp.workflow_run_documents import encode as encode_run
+            from harflow_mcp.workflow_references import definition_sha256
             storage = workflows.WorkflowStore(home / '.harflow')
             definition = workflows.validate_definition({'name': 'Synthetic parallel workflow', 'nodes': [
                 {'id': 'start', 'type': 'start'}, {'id': 'work', 'type': 'agent', 'name': 'Synthetic parallel tasks', 'agent': {'backend': 'codex'}},
@@ -77,12 +79,14 @@ def fixture(home: Path, conversations=8, chain=1, activity='sparse', workflow=Fa
             task_ids = [f'parallel-{conversation:04}-{turn:02}' for conversation in range(conversations) for turn in range(chain)]
             associations = [{'task_id': task_id, 'backend': 'codex', 'status': 'completed', 'summary': 'Synthetic benchmark answer'} for task_id in task_ids]
             run = dict(workflow_run_id='parallel-run', kind='workflow', name='Synthetic parallel workflow', definition=definition,
-                revision=1, prompt='Synthetic benchmark input', repo_path='/benchmark', freedom='read_only', status='completed',
+                revision=1, prompt='Synthetic benchmark input', repo_path='/benchmark', freedom='read_only', network=None,
+                permission_policy='legacy_ceiling', definition_hash=definition_sha256(definition), transitions=0,
+                attempt_grants={}, retry_counts={}, retry_grants={}, suppressed_candidates=[], status='completed',
                 created_at=1790812800.0, updated_at=1790812800.0, sequence=1, decisions=[], sessions={}, pending=[],
                 tasks=associations, joins={}, instructions='', supervisor_pid=None, summary='Synthetic parallel benchmark',
                 activations=[dict(id='parallel-execution', node_id='work', role='node', status='completed', created_at=1790812800.0,
                     tasks=associations, summary='Synthetic parallel benchmark', node_result={'status': 'succeeded', 'result': {}, 'evidence': []})])
-            workflows._write(storage.runs / 'parallel-run.json', run, layout=storage.state_layout)
+            workflows._write(storage.runs / 'parallel-run.json', encode_run(run), layout=storage.state_layout)
     manifest = dict(version=1, conversations=conversations, chain=chain, activity=activity, tasks=conversations*chain, group=GROUP, workflow=workflow)
     (home / MARKER).write_text(json.dumps(manifest, sort_keys=True))
     (home / 'monitor-benchmark-fixture.json').write_text(json.dumps(dict(version=1, size='parallel', definitions=int(workflow), runs=int(workflow), tasks=manifest['tasks'])))

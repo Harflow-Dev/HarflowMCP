@@ -105,8 +105,18 @@ def decode(document: Any, task_id: str, record_type: type) -> Any:
             raise ValueError("Unsupported task document version")
         if not compatible_line(document.get("product_version")):
             raise ValueError("Incompatible task product major/minor line")
+        return qualify_payload(document, task_id, record_type)
+    except (TypeError, ValueError) as exc:
+        raise TaskDocumentError(task_id, str(exc)) from exc
+
+
+def qualify_payload(payload: Any, task_id: str, record_type: type) -> Any:
+    """Qualify an embedded task payload without inventing a document envelope."""
+    try:
+        if type(payload) is not dict:
+            raise ValueError("Task payload must be an object")
         hints = get_type_hints(record_type)
-        payload = {key: value for key, value in document.items() if key in hints}
+        payload = {key: value for key, value in payload.items() if key in hints}
         _shape(payload, hints, "task")
         record = record_type(**payload)
         if record.task_id != task_id:
@@ -125,14 +135,26 @@ def decode(document: Any, task_id: str, record_type: type) -> Any:
                 raise ValueError(f"Invalid task.{key}")
         _grants(record.extra_writable_paths)
         if record.enforcement is not None:
-            if not {"freedom", "mechanism", "os_enforced", "writes_confined"} <= record.enforcement.keys():
-                raise ValueError("Incomplete enforcement contract")
-            _shape(record.enforcement, {"freedom": str, "mechanism": str, "os_enforced": bool, "writes_confined": bool, "writable_roots": list[str], "commit_push_blocked": bool, "direct_commit_commands_denied": bool, "publish_attempts_allowed_by_polybridge": bool, "network_access": str, "caveats": list[str], "extra_writable_paths": list[dict[str, Any]], "extra_path_certification": str | None}, "enforcement")
-            _grants(record.enforcement.get("extra_writable_paths", []))
+            qualify_enforcement(record.enforcement, require_core=True)
         _nested(record)
         return record
     except (TypeError, ValueError) as exc:
         raise TaskDocumentError(task_id, str(exc)) from exc
+
+
+
+def qualify_enforcement(value: Any, *, require_core: bool = False, path: str = "enforcement") -> None:
+    """Validate supplied enforcement fields without changing saved grants or authority.
+
+    Full task records require the stable contract core; stored workflow result
+    projections retain their existing supplied-field qualification.
+    """
+    if type(value) is not dict:
+        raise ValueError(f"Malformed {path}")
+    if require_core and not {"freedom", "mechanism", "os_enforced", "writes_confined"} <= value.keys():
+        raise ValueError("Incomplete enforcement contract")
+    _shape(value, {"freedom": str, "mechanism": str, "os_enforced": bool, "writes_confined": bool, "writable_roots": list[str], "commit_push_blocked": bool, "direct_commit_commands_denied": bool, "publish_attempts_allowed_by_polybridge": bool, "network_access": str, "caveats": list[str], "extra_writable_paths": list[dict[str, Any]], "extra_path_certification": str | None}, path)
+    _grants(value.get("extra_writable_paths", []))
 
 
 def encode(payload: dict[str, Any]) -> dict[str, Any]:

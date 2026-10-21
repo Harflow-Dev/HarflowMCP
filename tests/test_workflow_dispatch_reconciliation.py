@@ -19,7 +19,12 @@ def owned_cli_state(tmp_path, monkeypatch):
 
 def reserved(storage, tmp_path, stage='spawn_requested'):
     run = storage.create_run(w.validate_definition(definition()), 'go', tmp_path)
-    return storage.update_run(run['workflow_run_id'], lambda r: r.update(status='needs_attention', activations=[{'id':'execution', 'node_id':'work', 'role':'node', 'status':'running', 'tasks':[{'task_id':'missing', 'status':'uncertain', 'dispatch_stage':stage}]}]), 'fixture')
+    def seed(value):
+        task = {'task_id': 'missing', 'status': 'uncertain'}
+        if stage is not None:
+            task['dispatch_stage'] = stage
+        value.update(status='needs_attention', activations=[{'id':'execution', 'node_id':'work', 'role':'node', 'status':'running', 'created_at': 0.0, 'tasks':[task]}])
+    return storage.update_run(run['workflow_run_id'], seed, 'fixture')
 
 
 @pytest.mark.parametrize('stage,expected', [('preparing','not_started'), ('spawn_requested','uncertain'), (None,'uncertain')])

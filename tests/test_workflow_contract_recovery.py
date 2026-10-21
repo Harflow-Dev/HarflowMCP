@@ -207,12 +207,12 @@ def test_store_reconcile_preserves_retry_owner_before_delegation_pass(tmp_path, 
     storage = w.WorkflowStore(tmp_path)
     run = storage.create_run(definition, 'request', tmp_path)
     old_result = {'status': 'failed', 'result': {'reason': 'superseded'}, 'evidence': []}
-    old = {'id': 'old', 'role': 'node', 'node_id': 'work', 'status': old_status, 'tasks': [{'task_id': 'old-task', 'status': old_status, 'result': {'status': old_status, 'summary': 'old output'}}], 'node_result': old_result, 'token': {'id': 'token'}}
+    old = {'id': 'old', 'role': 'node', 'node_id': 'work', 'status': old_status, 'created_at': 0.0, 'tasks': [{'task_id': 'old-task', 'status': old_status, 'result': {'status': old_status, 'summary': 'old output'}}], 'node_result': old_result, 'token': {'id': 'token'}}
     token = {'id': 'token', 'node_id': 'work', 'retry_of_execution_id': 'old', 'assignment_prompt': 'Accepted retry', 'failed_execution_refs': ['old']}
     activations = [old]
     if settled_retry:
         value = {'status': 'succeeded', 'result': {'summary': 'New result'}, 'evidence': []}
-        activations.append({'id': 'retry', 'role': 'node', 'node_id': 'work', 'status': 'completed', 'tasks': [{'task_id': 'retry-task', 'status': 'completed', 'result': {'status': 'completed', 'summary': json.dumps(value)}}], 'node_result': value, 'token': {'id': 'token'}})
+        activations.append({'id': 'retry', 'role': 'node', 'node_id': 'work', 'status': 'completed', 'created_at': 0.0, 'tasks': [{'task_id': 'retry-task', 'status': 'completed', 'result': {'status': 'completed', 'summary': json.dumps(value)}}], 'node_result': value, 'token': {'id': 'token'}})
         token['execution_activation_id'] = 'retry'
     storage.update_run(run['workflow_run_id'], lambda r: r.update(activations=activations, pending=[token]), 'fixture')
     recovered = storage.reconcile_run(run['workflow_run_id'])

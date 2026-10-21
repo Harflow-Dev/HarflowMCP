@@ -4,6 +4,7 @@ import logging
 import pytest
 
 from harflow_mcp import wait_policy, workflow_notification_points as points
+from harflow_mcp import workflow_run_documents
 from harflow_mcp import workflow_responses as responses
 from harflow_mcp import workflows as w
 
@@ -31,7 +32,9 @@ def set_status(store, run_id, status, event="test", **fields):
 
 
 def on_disk(store, run_id):
-    return json.loads((store.runs / f"{run_id}.json").read_text())
+    return workflow_run_documents.decode(
+        json.loads((store.runs / f"{run_id}.json").read_text()), run_id
+    )
 
 
 def task(status):
@@ -138,7 +141,8 @@ def test_terminal_point_persisted_atomically_without_settling(store, run_id):
 def test_settled_point_appears_when_settling_ends(store, run_id):
     def start(run):
         run["status"] = "completed"
-        run["activations"] = [{"id": "a", "tasks": [{"task_id": "t1", "status": "running"}]}]
+        run["activations"] = [{"id": "a", "node_id": "work", "role": "node", "status": "running", "created_at": 0.0,
+                                "tasks": [{"task_id": "t1", "status": "running"}]}]
     result = store.update_run(run_id, start, "test")
     assert result["settling"] is True
     assert "terminal_notification_points" not in on_disk(store, run_id)
@@ -309,8 +313,10 @@ def test_new_keys_do_not_leak_into_responses(store, run_id):
 # --- requires_tree_check ------------------------------------------------------------------------
 
 def invocation_activation(exec_id="x1", child_id="child", stage="running", status="completed"):
-    return {"id": exec_id, "status": status, "tasks": [],
-            "invocation": {"child_workflow_run_id": child_id, "stage": stage}}
+    return {"id": exec_id, "node_id": "work", "role": "node", "status": status, "created_at": 0.0, "tasks": [],
+            "invocation": ({"stage": stage, "workflow_id": "child", "workflow_name": "example",
+                            "orchestrator_mode": "child"}
+                           | ({"child_workflow_run_id": child_id} if child_id is not None else {}))}
 
 
 def test_started_invocation_records_point_immediately_with_tree_check(store, run_id):
@@ -381,7 +387,7 @@ def test_settlement_pending_for_unsettled_child_within_grace(store, run_id, tmp_
 
 
 def test_settlement_unsettled_grandchild_and_unsettled_tasks(store, run_id, tmp_path):
-    child = make_child(store, tmp_path, run_id, "x1", activations=[{"id": "t", "tasks": [{"task_id": "tk1", "status": "running"}]}])
+    child = make_child(store, tmp_path, run_id, "x1", activations=[{"id": "t", "node_id": "work", "role": "node", "status": "running", "created_at": 0.0, "tasks": [{"task_id": "tk1", "status": "running"}]}])
     run = root_with(store, run_id, [invocation_activation("x1", child)])
     assert settle(store, run) == "pending"
 
@@ -410,7 +416,7 @@ def test_settlement_missing_child_pending_at_non_preparing_stage(store, run_id, 
 def test_settlement_missing_child_at_preparing_with_live_supervisor_is_pending(store, run_id, monkeypatch):
     monkeypatch.setattr("harflow_mcp.identity.identity_check", lambda rec: "alive")
     monkeypatch.setattr(w, "_alive", lambda pid: True)
-    for extra in ({"supervisor_identity": {"pid": 1}}, {"supervisor_pid": 4242}):
+    for extra in ({"supervisor_identity": {"pid": 1, "start_time": None, "markers": []}}, {"supervisor_pid": 4242}):
         run = root_with(store, run_id, [invocation_activation("x1", "ghost", stage="preparing")], **extra)
         assert settle(store, run) == "pending"
 
@@ -418,7 +424,7 @@ def test_settlement_missing_child_at_preparing_with_live_supervisor_is_pending(s
 def test_settlement_missing_child_at_preparing_with_dead_supervisor_is_settled(store, run_id, monkeypatch):
     monkeypatch.setattr("harflow_mcp.identity.identity_check", lambda rec: "dead")
     monkeypatch.setattr(w, "_alive", lambda pid: False)
-    for extra in ({"supervisor_identity": {"pid": 1}}, {"supervisor_pid": 4242}, {"supervisor_pid": None}):
+    for extra in ({"supervisor_identity": {"pid": 1, "start_time": None, "markers": []}}, {"supervisor_pid": 4242}, {"supervisor_pid": None}):
         run = root_with(store, run_id, [invocation_activation("x1", "ghost", stage="preparing")], **extra)
         run.pop("supervisor_identity", None) if "supervisor_identity" not in extra else None
         assert settle(store, run) == "settled"

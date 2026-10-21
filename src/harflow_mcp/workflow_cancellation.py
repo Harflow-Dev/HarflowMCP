@@ -1,6 +1,8 @@
 """Human Monitor cancellation is independent of the workflow's interaction owner."""
 from __future__ import annotations
 
+from .workflow_run_documents import WorkflowRunDocumentError
+
 from typing import Any
 
 TERMINAL = {"completed", "failed", "cancelled"}
@@ -72,6 +74,8 @@ def eligibility(store: Any, run: dict[str, Any]) -> tuple[bool, str]:
                     return False, "Workflow descendant link does not match"
             except ReadLimit:
                 return False, "Workflow cancellation eligibility exceeds the bounded metadata budget; inspect its known runs directly"
+            except WorkflowRunDocumentError as exc:
+                return False, f"Workflow descendant record is unavailable ({exc.code}): {exc}"
             except (OSError, ValueError, KeyError, TypeError, AttributeError):
                 return False, "Workflow descendant record is unavailable"
             suspended_child = child.get("status") == "running" and child.get("suspended_via_root") is True and invocation.get("stage") == "waiting"

@@ -14,6 +14,8 @@ delivering it, and delivers an `unconfirmed` result with `tree_settlement_unconf
 """
 from __future__ import annotations
 
+from .workflow_run_documents import WorkflowRunDocumentError
+
 import json
 import logging
 from typing import Any
@@ -144,6 +146,8 @@ def tree_settlement(store: Any, run: dict[str, Any], *, now: float, grace_second
         check = _TreeCheck(store, run)
         if all(check.activation_settled(run, activation) for activation in run.get("activations", [])):
             return "settled"
+    except WorkflowRunDocumentError:
+        raise
     except Exception:
         log.warning("Unable to check workflow tree settlement", exc_info=True)
     start = observed_at if isinstance(observed_at, (int, float)) else run.get("updated_at")

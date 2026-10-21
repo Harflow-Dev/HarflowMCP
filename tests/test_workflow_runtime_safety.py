@@ -8,6 +8,12 @@ from harflow_mcp import workflows as w, workflow_hooks, control
 from test_workflows import definition
 
 
+def make_activation(**values):
+    result = {"id": "activation", "node_id": "work", "role": "node", "status": "running", "created_at": 0.0, "tasks": []}
+    result.update(values)
+    return result
+
+
 @pytest.fixture
 def tmp_path(tmp_path_factory: pytest.TempPathFactory):
     workspace = tmp_path_factory.mktemp("workflow-node")
@@ -57,7 +63,7 @@ def test_cancel_is_not_overwritten_by_pause(tmp_path, monkeypatch):
 def test_takeover_requires_whole_parent_settled(tmp_path,status,settling,allowed):
     storage=w.WorkflowStore(tmp_path / "state")
     run=storage.create_run(w.validate_definition(definition()),"go",tmp_path)
-    storage.update_run(run["workflow_run_id"],lambda r:r.update(status=status,activations=[{"id":"a","node_id":"work","role":"node","status":"completed","tasks":[{"task_id":"child","status":"running" if settling else "completed"}]}]),"fixture")
+    storage.update_run(run["workflow_run_id"],lambda r:r.update(status=status,activations=[make_activation(id="a", status="completed", tasks=[{"task_id":"child","status":"running" if settling else "completed"}])]),"fixture")
     if allowed:
         workflow_hooks.refuse_takeover(tmp_path/"state"/"tasks","child")
     else:
@@ -69,9 +75,11 @@ def test_corrupt_unrelated_run_does_not_break_human_bookkeeping(tmp_path):
     storage=w.WorkflowStore(tmp_path / "state")
     (storage.runs/"corrupt.json").write_text("{")
     workflow_hooks.pause_for_task(tmp_path/"state"/"tasks","ordinary","cancel")
-    assert storage.list_runs()==[]
-    with pytest.raises(w.WorkflowError,match="ownership"):
+    with pytest.raises(w.WorkflowRunDocumentError):
+        storage.list_runs()
+    with pytest.raises(w.WorkflowRunDocumentError) as caught:
         workflow_hooks.refuse_managed(tmp_path/"state"/"tasks","ordinary")
+    assert caught.value.code == "workflow_run_incompatible" and caught.value.run_id == "corrupt"
 
 
 @pytest.mark.parametrize("status,settling,allowed", [("running", False, False), ("needs_input", False, False), ("failed", True, False), ("failed", False, True)])
@@ -80,7 +88,7 @@ async def test_direct_messages_respect_workflow_assignment_authority(tmp_path, s
     from harflow_mcp.tasks import TaskRegistry
     storage = w.WorkflowStore(tmp_path / "state")
     run = storage.create_run(w.validate_definition(definition()), "go", tmp_path)
-    storage.update_run(run["workflow_run_id"], lambda r: r.update(status=status, activations=[{"id": "a", "node_id": "work", "role": "node", "status": "running" if settling else "completed", "tasks": [{"task_id": "child", "status": "running" if settling else "completed"}]}]), "fixture")
+    storage.update_run(run["workflow_run_id"], lambda r: r.update(status=status, activations=[make_activation(id="a", status="running" if settling else "completed", tasks=[{"task_id": "child", "status": "running" if settling else "completed"}])]), "fixture")
     if allowed:
         workflow_hooks.refuse_direct_message(tmp_path / "state" / "tasks", "child")
     else:
@@ -108,7 +116,7 @@ async def test_orphan_process_identity_controls_checkout(tmp_path, monkeypatch, 
     from harflow_mcp import identity, store
     storage = w.WorkflowStore(tmp_path / "state")
     run = storage.create_run(w.validate_definition(definition()), "go", tmp_path)
-    storage.update_run(run["workflow_run_id"], lambda r: r.update(status="needs_attention", activations=[{"id": "a", "node_id": "work", "role": "node", "status": "running", "tasks": [{"task_id": "orphan", "status": "running", "freedom": "write_in_repo"}]}]), "fixture")
+    storage.update_run(run["workflow_run_id"], lambda r: r.update(status="needs_attention", activations=[make_activation(id="a", tasks=[{"task_id": "orphan", "status": "running", "freedom": "write_in_repo"}])]), "fixture")
     record = store.TaskRecord('orphan', 'codex', 'session', str(tmp_path), 'now', status='running', pid=123, start_time='recorded-start', markers=['recorded-worker'])
     store.write(tmp_path / 'state' / 'tasks', record)
     storage.list_run_page()  # Isolate process proof from the first bootstrap barrier.
@@ -142,7 +150,7 @@ async def test_orphan_process_identity_controls_checkout(tmp_path, monkeypatch, 
 async def test_missing_dispatch_stays_blocking_and_wait_is_bounded(tmp_path):
     storage=w.WorkflowStore(tmp_path / "state")
     run=storage.create_run(w.validate_definition(definition()),"go",tmp_path)
-    storage.update_run(run["workflow_run_id"],lambda r:r.update(status="needs_attention",activations=[{"id":"a","node_id":"work","role":"node","status":"uncertain","tasks":[{"task_id":"missing","status":"uncertain","freedom":"write_in_repo"}]}]),"fixture")
+    storage.update_run(run["workflow_run_id"],lambda r:r.update(status="needs_attention",activations=[make_activation(id="a", status="uncertain", tasks=[{"task_id":"missing","status":"uncertain","freedom":"write_in_repo"}])]),"fixture")
     notices=[]
     with pytest.raises(w.DispatchNotStarted,match="reconciliation"):
         async with w.CheckoutLease(storage,str(tmp_path),False,wait_seconds=.01,on_wait=notices.append): pass
@@ -176,7 +184,7 @@ def test_observed_identity_never_comes_from_worker_prose(tmp_path):
 def test_dead_unobserved_outcome_cannot_recover_as_success(tmp_path,monkeypatch):
     storage=w.WorkflowStore(tmp_path / "state")
     run=storage.create_run(w.validate_definition(definition()),"go",tmp_path)
-    storage.update_run(run["workflow_run_id"],lambda r:r.update(status="needs_attention",activations=[{"id":"a","node_id":"work","role":"node","status":"running","tasks":[{"task_id":"dead","status":"running"}]}]),"fixture")
+    storage.update_run(run["workflow_run_id"],lambda r:r.update(status="needs_attention",activations=[make_activation(id="a", tasks=[{"task_id":"dead","status":"running"}])]),"fixture")
     monkeypatch.setattr(w.task_store,"read",lambda *a:SimpleNamespace(status="running"))
     monkeypatch.setattr(w,"task_liveness",lambda *a:{"process_alive":False,"outcome_known":False})
     monkeypatch.setattr(w.task_store,"snapshot",lambda *a:{"status":"completed","summary":"old result"})
@@ -190,12 +198,13 @@ def test_dead_unobserved_outcome_cannot_recover_as_success(tmp_path,monkeypatch)
 def test_known_ownership_receipt_isolated_from_corrupt_other_run(tmp_path):
     storage=w.WorkflowStore(tmp_path / "state")
     run=storage.create_run(w.validate_definition(definition()),"go",tmp_path)
-    storage.update_run(run["workflow_run_id"],lambda r:r.update(status="completed",activations=[{"id":"a","node_id":"work","role":"node","status":"completed","tasks":[{"task_id":"known","status":"completed"}]}]),"fixture")
+    storage.update_run(run["workflow_run_id"],lambda r:r.update(status="completed",activations=[make_activation(id="a", status="completed", tasks=[{"task_id":"known","status":"completed"}])]),"fixture")
     (storage.runs/"broken.json").write_text("{")
     assert storage.task_owner("known",strict=True)["workflow_run_id"]==run["workflow_run_id"]
     workflow_hooks.refuse_takeover(tmp_path/"state"/"tasks","known")
-    with pytest.raises(w.WorkflowError):
+    with pytest.raises(w.WorkflowRunDocumentError) as caught:
         storage.task_owner("unknown",strict=True)
+    assert caught.value.run_id == "broken"
 
 
 @pytest.mark.parametrize("verdict,alive",[("dead",False),("alive",True),("undecidable",None)])
@@ -212,7 +221,7 @@ def test_unobserved_liveness_keeps_unknown_distinct(tmp_path,monkeypatch,verdict
 def test_nested_descendant_inherits_workflow_takeover_gate(tmp_path,monkeypatch):
     storage=w.WorkflowStore(tmp_path / "state")
     run=storage.create_run(w.validate_definition(definition()),"go",tmp_path)
-    storage.update_run(run["workflow_run_id"],lambda r:r.update(status="running",activations=[{"id":"a","node_id":"work","role":"node","status":"completed","tasks":[{"task_id":"worker","status":"completed"}]}]),"fixture")
+    storage.update_run(run["workflow_run_id"],lambda r:r.update(status="running",activations=[make_activation(id="a", status="completed", tasks=[{"task_id":"worker","status":"completed"}])]),"fixture")
     records={"nested":SimpleNamespace(parent_task_id="worker",spawned_by=None)}
     monkeypatch.setattr(w.task_store,"read",lambda root,tid:records.get(tid))
     assert storage.task_owner("nested")["workflow_run_id"]==run["workflow_run_id"]
@@ -223,7 +232,7 @@ def test_nested_descendant_inherits_workflow_takeover_gate(tmp_path,monkeypatch)
 def test_failed_run_cannot_recover_into_taken_over_session(tmp_path,monkeypatch):
     storage=w.WorkflowStore(tmp_path / "state")
     run=storage.create_run(w.validate_definition(definition()),"go",tmp_path)
-    storage.update_run(run["workflow_run_id"],lambda r:r.update(status="failed",activations=[{"id":"a","node_id":"work","role":"node","status":"failed","tasks":[{"task_id":"worker","status":"failed"}]}]),"fixture")
+    storage.update_run(run["workflow_run_id"],lambda r:r.update(status="failed",activations=[make_activation(id="a", status="failed", tasks=[{"task_id":"worker","status":"failed"}])]),"fixture")
     monkeypatch.setattr(w,"_supervisor_present",lambda r:True)
     monkeypatch.setattr(control,"takeover_reservations",lambda root:{"worker":"session"})
     with pytest.raises(w.WorkflowError,match="human takeover"):
@@ -234,7 +243,7 @@ async def test_checkout_timeout_does_not_leave_false_live_activation(tmp_path,mo
     from test_workflows import FakeRegistry
     storage=w.WorkflowStore(tmp_path / "state")
     run=storage.create_run(w.validate_definition(definition()),"go",tmp_path)
-    storage.update_run(run["workflow_run_id"],lambda r:r.update(status="running",activations=[{"id":"a","node_id":"work","role":"node","status":"running","tasks":[]}]),"fixture")
+    storage.update_run(run["workflow_run_id"],lambda r:r.update(status="running",activations=[make_activation(id="a")]),"fixture")
     monkeypatch.setattr(w.backends,"is_installed",lambda backend:True)
     async def blocked(self):
         raise w.DispatchNotStarted("Checkout wait exhausted; reconciliation is required")
@@ -259,7 +268,7 @@ def test_cancel_refuses_uncertain_supervisor_without_run_or_history_mutation(tmp
     from harflow_mcp import identity
     storage=w.WorkflowStore(tmp_path / "state")
     run=storage.create_run(w.validate_definition(definition()),'Run',tmp_path)
-    storage.update_run(run['workflow_run_id'],lambda r:r.update(status='running',supervisor_pid=999,supervisor_identity={'pid':999}),'fixture')
+    storage.update_run(run['workflow_run_id'],lambda r:r.update(status='running',supervisor_pid=999,supervisor_identity={'pid':999, 'start_time': None, 'markers': []}),'fixture')
     before={path:path.read_bytes() for path in storage.root.rglob('*') if path.is_file()}
     values=iter(checks)
     monkeypatch.setattr(identity,'identity_check',lambda _:next(values))
@@ -276,7 +285,7 @@ def test_cancel_verified_supervisor_mutates_and_launches_only_for_dead_owner(tmp
     from harflow_mcp import identity
     storage=w.WorkflowStore(tmp_path / "state")
     run=storage.create_run(w.validate_definition(definition()),'Run',tmp_path)
-    storage.update_run(run['workflow_run_id'],lambda r:r.update(status='running',supervisor_pid=999,supervisor_identity={'pid':999}),'fixture')
+    storage.update_run(run['workflow_run_id'],lambda r:r.update(status='running',supervisor_pid=999,supervisor_identity={'pid':999, 'start_time': None, 'markers': []}),'fixture')
     monkeypatch.setattr(identity,'identity_check',lambda _:identity_state)
     launched=[]
     monkeypatch.setattr(w,'_launch',lambda *a:launched.append(a))

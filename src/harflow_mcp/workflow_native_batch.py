@@ -1,6 +1,8 @@
 """One owning control turn for a bounded batch of certified native children."""
 from __future__ import annotations
 
+from .workflow_run_documents import WorkflowRunDocumentError
+
 import asyncio
 import copy
 import hashlib
@@ -243,7 +245,7 @@ async def _execute(requests: list[dict[str, Any]]) -> list[tuple[bool, dict[str,
             return [results[index] for index in range(len(requests))]
     except DispatchNotStarted:
         return [(True, None) for _ in requests]
-    except StateOwnershipError:
+    except (StateOwnershipError, WorkflowRunDocumentError):
         raise
     except BaseException as exc:
         no_spawn = isinstance(exc, (SessionBusyError, SessionUnknownError, RepoUnavailableError, backends.NestedDispatchRefused, backends.UnsupportedCapability)) or getattr(exc, "harflow_not_started", False) is True

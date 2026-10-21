@@ -23,6 +23,8 @@ sys.path.insert(0, str(REPO / 'src'))
 def fixture(home: Path, size: str) -> dict:
     from harflow_mcp import store, workflows
     from harflow_mcp.workflow_definition_documents import encode
+    from harflow_mcp.workflow_run_documents import encode as encode_run
+    from harflow_mcp.workflow_references import definition_sha256
     from harflow_mcp.state_layout import resolve_layout
     from harflow_mcp.state_ownership import state_session
     root = home / '.harflow'
@@ -43,7 +45,9 @@ def fixture(home: Path, size: str) -> dict:
             rid = f'run-{i:04}'
             run = {'workflow_run_id': rid, 'kind': 'workflow', 'name': 'bench', 'definition': definition,
                    'revision': 1, 'prompt': 'Synthetic benchmark input', 'repo_path': '/benchmark',
-                   'freedom': 'read_only', 'status': 'needs_input' if i % 8 == 0 else 'completed',
+                   'freedom': 'read_only', 'network': None, 'permission_policy': 'legacy_ceiling',
+                   'definition_hash': definition_sha256(definition), 'transitions': 0,
+                   'attempt_grants': {}, 'retry_counts': {}, 'retry_grants': {}, 'suppressed_candidates': [], 'status': 'needs_input' if i % 8 == 0 else 'completed',
                    'created_at': 1790812800.0 + i, 'updated_at': 1790812800.0 + i,
                    'sequence': 1, 'activations': [], 'decisions': [], 'sessions': {}, 'pending': [],
                    'tasks': [], 'joins': {}, 'instructions': '', 'supervisor_pid': None,
@@ -51,10 +55,10 @@ def fixture(home: Path, size: str) -> dict:
             if i == 0:
                 run['activations'] = [{'id': f'execution-{n:04}', 'node_id': 'work', 'role': 'node', 'status': 'completed', 'created_at': 1790812800.0 + n, 'tasks': [{'task_id': f'task-{n:04}', 'backend': 'codex', 'status': 'completed', 'summary': 'Synthetic worker summary'}], 'summary': 'Synthetic worker summary', 'node_result': {'status': 'succeeded', 'result': {}, 'evidence': []}} for n in range(8 if size == 'small' else 200)]
             if i % 2 == 0:
-                run['activations'].append({'id': 'child-call', 'node_id': 'work', 'role': 'node', 'status': 'completed', 'tasks': [], 'invocation': {'child_workflow_run_id': f'run-{i+1:04}', 'workflow_id': 'bench-0000', 'stage': 'settled'}})
+                run['activations'].append({'id': 'child-call', 'node_id': 'work', 'role': 'node', 'status': 'completed', 'created_at': 1790812800.0 + i, 'tasks': [], 'invocation': {'child_workflow_run_id': f'run-{i+1:04}', 'workflow_id': 'bench-0000', 'stage': 'settled'}})
             if i % 2:
-                run['parent_link'] = {'workflow_run_id': f'run-{i-1:04}', 'root_workflow_run_id': f'run-{i-1:04}', 'execution_id': 'child-call'}
-            workflows._write(storage.runs / f'{rid}.json', run, layout=storage.state_layout)
+                run['parent_link'] = {'workflow_run_id': f'run-{i-1:04}', 'root_workflow_run_id': f'run-{i-1:04}', 'execution_id': 'child-call', 'node_id': 'work', 'depth': 2}
+            workflows._write(storage.runs / f'{rid}.json', encode_run(run), layout=storage.state_layout)
         directory = root / 'tasks'
         directory.mkdir()
         for i in range(tasks):

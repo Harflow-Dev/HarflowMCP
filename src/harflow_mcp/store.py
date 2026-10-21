@@ -10,6 +10,8 @@ back, replay the log for the outcome, and check whether the process is still ali
 
 from __future__ import annotations
 
+from .workflow_run_documents import WorkflowRunDocumentError
+
 from .state_access import task_operation, task_layout, assert_task_owned
 from .state_ownership import StateOwnershipError
 
@@ -557,6 +559,11 @@ def list_page(log_dir: Path, *, limit: int = 100, cursor: str | None = None, act
                 item.update(workflow_name=header.get('name'), workflow_status=header.get('status'), root_workflow_run_id=header.get('root_workflow_run_id', header['workflow_run_id']))
                 if item.get('session_id') == header.get('sessions', {}).get('orchestrator') and header.get('orchestrator_session_owner_run_id'):
                     item['workflow_session_owner_run_id'] = header['orchestrator_session_owner_run_id']
+        except WorkflowRunDocumentError as exc:
+            item['workflow_diagnostic'] = exc.as_dict()
+            for key in allowed:
+                item.pop(key, None)
+            page.update(ownership_incomplete=True, history_incomplete=True, counts_complete=False, total_active_count=None, total_active_root_count=None, total_attention_root_count=None)
         except (OSError, ValueError, TypeError) as exc:
             if isinstance(exc, ValueError):
                 page.update(ownership_incomplete=True, history_incomplete=True, counts_complete=False, total_active_count=None, total_active_root_count=None, total_attention_root_count=None)

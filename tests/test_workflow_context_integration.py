@@ -221,8 +221,8 @@ def test_linked_child_large_evidence_has_separate_authorized_manifest(storage, t
     parent = storage.create_run(w.validate_definition(graph()), "Parent", tmp_path)
     child = storage.create_run(w.validate_definition(graph()), "Child", tmp_path)
     evidence = "雪🙂 child evidence " * 10000
-    source = {"id": "invoke", "role": "node", "node_id": "work", "status": "completed", "tasks": [], "raw_output": "Child completed", "invocation": {"child_workflow_run_id": child["workflow_run_id"]}, "node_result": {"status": "succeeded", "result": {"child_outcome": {"status": "completed", "final_result_refs": [{"workflow_run_id": child["workflow_run_id"], "execution_id": "leaf"}]}}, "evidence": []}}
-    leaf = {"id": "leaf", "role": "node", "node_id": "work", "status": "completed", "tasks": [], "node_result": {"status": "succeeded", "result": {"summary": evidence}, "evidence": ["observed"]}, "raw_output": evidence}
+    source = {"id": "invoke", "role": "node", "node_id": "work", "status": "completed", "created_at": 0.0, "tasks": [], "raw_output": "Child completed", "invocation": {"child_workflow_run_id": child["workflow_run_id"]}, "node_result": {"status": "succeeded", "result": {"child_outcome": {"status": "completed", "final_result_refs": [{"workflow_run_id": child["workflow_run_id"], "execution_id": "leaf"}]}}, "evidence": []}}
+    leaf = {"id": "leaf", "role": "node", "node_id": "work", "status": "completed", "created_at": 0.0, "tasks": [], "node_result": {"status": "succeeded", "result": {"summary": evidence}, "evidence": ["observed"]}, "raw_output": evidence}
     storage.update_run(child["workflow_run_id"], lambda r: r.update(workflow_id="child-definition", parent_link={"workflow_run_id": parent["workflow_run_id"], "execution_id": "invoke", "node_id": "work"}, activations=[leaf]), "fixture_child")
     storage.update_run(parent["workflow_run_id"], lambda r: r.update(workflow_id="parent-definition", dependency_tree={"edges": [{"from": "parent-definition", "to": "child-definition", "node_id": "work"}]}, activations=[source]), "fixture_parent")
     parent = storage.get_run(parent["workflow_run_id"])

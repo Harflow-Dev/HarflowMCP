@@ -102,7 +102,7 @@ def test_historical_guard_is_indexed_for_more_than_one_page_of_modern_runs(store
     for _ in range(120):
         run = store.create_run(d, 'modern', tmp_path)
         # Large protected identifiers force nonprotected fields out of headers.
-        store.update_run(run['workflow_run_id'], lambda r: r.update(name='🦋' * 200, parent_link={'workflow_run_id': 'x' * 128, 'root_workflow_run_id': 'y' * 128}, orchestrator_session_owner_run_id='z' * 128), 'large_header')
+        store.update_run(run['workflow_run_id'], lambda r: r.update(name='🦋' * 200, parent_link={'workflow_run_id': 'x' * 90, 'root_workflow_run_id': 'y' * 90, 'execution_id': 'e' * 90, 'node_id': 'n' * 90, 'depth': 1}, orchestrator_session_owner_run_id='z' * 90), 'large_header')
     for _ in range(3):
         store.list_run_page(active_only=True)
     query = "SELECT 1 FROM entries INDEXED BY active_historical WHERE active=1 AND COALESCE(json_extract(payload,'$.kind'),'workflow')!='builder' AND COALESCE(json_extract(payload,'$.execution_contract'),'')!='delegation' LIMIT 1"

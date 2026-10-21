@@ -14,6 +14,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import wraps
 import json
+import stat
 import logging
 import os
 import math
@@ -314,17 +315,31 @@ class Catalog:
             db.execute('INSERT OR IGNORE INTO pending VALUES (?)', (identifier,))
             db.execute("DELETE FROM state WHERE key='complete'")
 
+    def _source_stat(self, path):
+        return path.lstat() if self.suffix == '.json' else path.stat()
+
+    def _invoke_loader(self, identifier, loader, **kwargs):
+        from .workflow_run_documents import WorkflowRunDocumentError
+        try:
+            return loader(identifier, **kwargs)
+        except WorkflowRunDocumentError as exc:
+            # A refused source carries no ownership, lineage, session or outcome.
+            return ({'workflow_run_id': identifier, 'needs_direct_lookup': True,
+                     'index_blocker': exc.code, 'diagnostic': exc.as_dict()}, 0.0, True)
+
     def _load_bounded(self, identifier: str, loader):
         assert_owned(self.state_layout)
         path = self.directory / (identifier + self.suffix)
         try:
-            initial_source = path.stat()
+            initial_source = self._source_stat(path)
             size = initial_source.st_size
+            if self.suffix == '.json' and not stat.S_ISREG(initial_source.st_mode):
+                return self._invoke_loader(identifier, loader, _metadata_budget=self)
         except FileNotFoundError:
             return None
         except OSError:
-            if self.suffix == ".meta.json":
-                return loader(identifier, _metadata_budget=self)
+            if self.suffix in {".meta.json", ".json"}:
+                return self._invoke_loader(identifier, loader, _metadata_budget=self)
             raise
         def placeholder():
             key = 'task_id' if self.suffix == '.meta.json' else 'workflow_run_id'
@@ -337,12 +352,12 @@ class Catalog:
         if getattr(loader, 'bounded_metadata', False):
             from .bounded_io import ReadLimit
             try:
-                value = loader(identifier, _metadata_budget=self)
+                value = self._invoke_loader(identifier, loader, _metadata_budget=self)
             except ReadLimit:
                 # The opened file may have grown since stat. Only a per-record breach
                 # is persistent; aggregate exhaustion must be retried automatically.
                 try:
-                    if path.stat().st_size > METADATA_BYTES:
+                    if self._source_stat(path).st_size > METADATA_BYTES:
                         return placeholder()
                 except FileNotFoundError:
                     raise DeferredRead() from None
@@ -350,14 +365,14 @@ class Catalog:
         else:
             self.metadata_decodes += 1
             self.metadata_bytes += size
-            value = loader(identifier)
+            value = self._invoke_loader(identifier, loader)
         try:
-            final_source = path.stat()
+            final_source = self._source_stat(path)
         except FileNotFoundError:
             raise DeferredRead() from None
         except OSError:
-            if self.suffix == ".meta.json":
-                return loader(identifier, _metadata_budget=self)
+            if self.suffix in {".meta.json", ".json"}:
+                return self._invoke_loader(identifier, loader, _metadata_budget=self)
             raise
         if source_identity(initial_source) != source_identity(final_source):
             raise DeferredRead()
@@ -459,6 +474,11 @@ class Catalog:
                 db.execute(f'DELETE FROM {table}')
             db.execute("DELETE FROM state WHERE key!='schema_version'")
             db.execute("INSERT INTO state VALUES ('task_projection_version','1')")
+        if self.suffix == '.json' and db.execute("SELECT value FROM state WHERE key='run_projection_version'").fetchone() != ('1',):
+            for table in ('entries', 'callers', 'task_groups', 'checkout_tasks', 'associations', 'sources', 'seen', 'pending', 'workflow_links'):
+                db.execute(f'DELETE FROM {table}')
+            db.execute("DELETE FROM state WHERE key!='schema_version'")
+            db.execute("INSERT INTO state VALUES ('run_projection_version','1')")
         # Build only after invalidating old derivative headers. The partial index
         # makes warm authority readiness independent of retained history size.
         db.execute("CREATE INDEX IF NOT EXISTS incomplete_headers ON entries(id) WHERE json_extract(payload,'$.needs_direct_lookup')=1")
@@ -485,10 +505,10 @@ class Catalog:
         expected_source = header.pop('_source_identity', None)
         if expected_source is not None:
             try:
-                if tuple(expected_source) != source_identity((self.directory / (identifier + self.suffix)).stat()):
+                if tuple(expected_source) != source_identity(self._source_stat(self.directory / (identifier + self.suffix))):
                     raise DeferredRead()
             except OSError:
-                if not (self.suffix == ".meta.json" and header.get("index_blocker") == "unavailable_metadata"):
+                if not (header.get("index_blocker") in {"unavailable_metadata", "workflow_run_unavailable"}):
                     raise DeferredRead() from None
                 expected_source = None
         checkout = header.pop('_checkout', [])
@@ -525,9 +545,11 @@ class Catalog:
                 db.execute('DELETE FROM callers WHERE id=?', (identifier,))
                 header.update(status='unknown', needs_direct_lookup=True, index_blocker='unsupported_caller_identity', note='caller identity exceeds bounded index; direct inspection required')
                 active = True
-        if self.suffix == '.json':
+        if self.suffix == '.json' and not header.get('needs_direct_lookup'):
             links = (header.get('root_workflow_run_id') or None, header.get('parent_workflow_run_id') or None)
             db.execute('INSERT OR REPLACE INTO workflow_links VALUES (?,?,?)', (identifier, *links))
+        elif self.suffix == '.json':
+            db.execute('DELETE FROM workflow_links WHERE id=?', (identifier,))
         group = header.get('group')
         db.execute('DELETE FROM task_groups WHERE id=?', (identifier,))
         if isinstance(group, str) and len(group) <= 128:
@@ -539,13 +561,13 @@ class Catalog:
         generation = db.execute("SELECT value FROM state WHERE key='scan_generation'").fetchone()
         db.execute('INSERT OR REPLACE INTO seen VALUES (?,?)', (identifier, int(generation[0]) if generation else 0))
         try:
-            source = (self.directory / f'{identifier}{self.suffix}').stat()
+            source = self._source_stat(self.directory / f'{identifier}{self.suffix}')
             if expected_source is not None and tuple(expected_source) != source_identity(source):
                 raise DeferredRead()
             db.execute('INSERT OR REPLACE INTO sources VALUES (?,?,?,?,?)', (identifier, *(tuple(expected_source) if expected_source is not None else source_identity(source))))
             db.execute('DELETE FROM pending WHERE id=?', (identifier,))
         except OSError:
-            if self.suffix == ".meta.json" and header.get("index_blocker") == "unavailable_metadata":
+            if header.get("index_blocker") in {"unavailable_metadata", "workflow_run_unavailable"}:
                 db.execute("DELETE FROM sources WHERE id=?", (identifier,))
                 db.execute("DELETE FROM pending WHERE id=?", (identifier,))
             else:
@@ -555,7 +577,7 @@ class Catalog:
         assert_owned(self.state_layout)
         row = db.execute('SELECT mtime,size,inode,device FROM sources WHERE id=?', (identifier,)).fetchone()
         try:
-            source = (self.directory / f'{identifier}{self.suffix}').stat()
+            source = self._source_stat(self.directory / f'{identifier}{self.suffix}')
             placeholder = db.execute("SELECT json_extract(payload,'$.needs_direct_lookup') FROM entries WHERE id=?", (identifier,)).fetchone()
             return row != (source.st_mtime_ns, source.st_size, getattr(source, 'st_ino', 0), getattr(source, 'st_dev', 0))
         except OSError:

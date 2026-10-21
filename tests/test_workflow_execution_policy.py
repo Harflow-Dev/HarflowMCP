@@ -166,7 +166,7 @@ async def test_fallback_pre_spawn_refusal_preserves_started_activation(storage, 
     storage.update_run(run['workflow_run_id'], lambda r: r.update(status='running'), 'fixture')
     activation = supervisor._activation('work', 'node')
     def previous_failure(r):
-        r['activations'][0]['tasks'].append({'task_id': 'previous', 'status': 'failed', 'candidate': {'backend': 'codex'}, 'result': {'status': 'failed', 'stderr_tail': 'usage limit reached', 'summary': 'usage limit reached'}})
+        r['activations'][0]['tasks'].append({'task_id': 'previous', 'status': 'failed', 'candidate': {'backend': 'codex'}, 'result': {'status': 'failed', 'stderr_tail': ['usage limit reached'], 'summary': 'usage limit reached'}})
     storage.update_run(run['workflow_run_id'], previous_failure, 'fixture')
     activation = supervisor.run()['activations'][0]
     backend = w.backends.get('claude')
@@ -335,7 +335,7 @@ async def test_recovered_timeout_uses_unused_fallback_without_repeat(storage, tm
     def seed(r):
         token = {'id': 'visit', 'node_id': 'work', 'stack': [], 'assignment_prompt': 'Original assignment', 'execution_session_mode': 'fresh', 'execution_activation_id': 'execution'}
         r.update(status='running', pending=[token], execution_initialized=True)
-        r['activations'] = [{'id': 'execution', 'role': 'node', 'node_id': 'work', 'status': 'running', 'token': copy.deepcopy(token), 'assignment_prompt': 'Original assignment', 'tasks': [{'task_id': 'old', 'candidate': {'backend': 'codex'}, 'status': 'failed', 'result': {'status': 'failed', 'timed_out': True, 'timeout_seconds': 1, 'summary': 'Node timed out after 1 seconds'}}]}]
+        r['activations'] = [{'id': 'execution', 'role': 'node', 'node_id': 'work', 'status': 'running', 'created_at': 0.0, 'token': copy.deepcopy(token), 'assignment_prompt': 'Original assignment', 'tasks': [{'task_id': 'old', 'candidate': {'backend': 'codex'}, 'status': 'failed', 'result': {'status': 'failed', 'timed_out': True, 'timeout_seconds': 1, 'summary': 'Node timed out after 1 seconds'}}]}]
     storage.update_run(run['workflow_run_id'], seed, 'crash_fixture')
     registry = Registry(storage.root)
     await w.WorkflowSupervisor(registry, storage).execute(run['workflow_run_id'])
@@ -384,7 +384,7 @@ async def test_restart_of_timed_live_task_requires_attention(storage, tmp_path, 
     run = storage.create_run(w.validate_definition(graph()), 'Request', tmp_path)
     def seed(r):
         r.update(status='running', pending=[{'id': 'visit', 'node_id': 'work', 'stack': []}], execution_initialized=True)
-        r['activations'] = [{'id': 'execution', 'role': 'node', 'node_id': 'work', 'status': 'running', 'token': {'id': 'visit'}, 'tasks': [{'task_id': 'lost-owner', 'candidate': {'backend': 'codex'}, 'status': 'running', 'dispatch_stage': 'spawn_confirmed', 'timeout_deadline': 1}]}]
+        r['activations'] = [{'id': 'execution', 'role': 'node', 'node_id': 'work', 'status': 'running', 'created_at': 0.0, 'token': {'id': 'visit'}, 'tasks': [{'task_id': 'lost-owner', 'candidate': {'backend': 'codex'}, 'status': 'running', 'dispatch_stage': 'spawn_confirmed', 'timeout_deadline': 1}]}]
     storage.update_run(run['workflow_run_id'], seed, 'crash_fixture')
     registry = Registry(storage.root)
     await w.WorkflowSupervisor(registry, storage).execute(run['workflow_run_id'])
@@ -427,7 +427,7 @@ def test_timeout_intent_restores_only_authoritative_settled_cancellation(storage
     store.write(storage.root / 'tasks', store.TaskRecord(task_id='cancelled-task', backend='codex', session_id='session', repo_path=str(tmp_path), started_at='2026-10-05T00:00:00Z', freedom='write_in_repo', status='cancelled'))
     def seed(r):
         r['pending'] = [{'id': 'visit', 'node_id': 'work', 'stack': [], 'execution_activation_id': 'execution'}]
-        r['activations'] = [{'id': 'execution', 'role': 'node', 'node_id': 'work', 'status': 'running', 'token': {'id': 'visit'}, 'tasks': [{'task_id': 'cancelled-task', 'candidate': {'backend': 'codex'}, 'status': 'uncertain', 'timeout_deadline': 1, 'timeout_requested_at': 2}]}]
+        r['activations'] = [{'id': 'execution', 'role': 'node', 'node_id': 'work', 'status': 'running', 'created_at': 0.0, 'token': {'id': 'visit'}, 'tasks': [{'task_id': 'cancelled-task', 'candidate': {'backend': 'codex'}, 'status': 'uncertain', 'timeout_deadline': 1, 'timeout_requested_at': 2, 'result': {'status': 'uncertain', 'queued_followups': {'state': 'available', 'items': [], 'omitted_final': 0}}}]}]
     storage.update_run(run['workflow_run_id'], seed, 'crash_fixture')
     monkeypatch.setattr(w, 'task_liveness', lambda *a: {'process_alive': False, 'outcome_known': True})
     restored = storage.reconcile_run(run['workflow_run_id'])

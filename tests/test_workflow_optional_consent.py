@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from harflow_mcp import workflow_delegation as d, workflow_responses as responses, workflows as w
+from harflow_mcp import workflow_delegation as d, workflow_responses as responses, workflow_run_documents, workflows as w
 from test_workflow_optional_refusal import ANSWER, suspended
 
 
@@ -14,6 +14,10 @@ def storage(tmp_path, monkeypatch):
     monkeypatch.setattr(w.backends, "is_installed", lambda backend: True)
     monkeypatch.setattr(w, "_launch", lambda *args: None)
     return w.WorkflowStore(tmp_path / "state")
+
+
+def persist_run(storage, run):
+    w._write(storage.runs / f"{run['workflow_run_id']}.json", workflow_run_documents.encode(run), layout=storage.state_layout)
 
 
 @pytest.mark.parametrize('answer', ['No, do not proceed without Vibe', 'Proceed without Vibe'])
@@ -57,7 +61,7 @@ async def forwarded(storage, tmp_path):
     root = copy.deepcopy(child)
     root_id = 'forwarding-root'
     root.update(workflow_run_id=root_id, pending=[], activations=[], joins={}, input_source={'workflow_run_id': child['workflow_run_id']}, optional_review_skip_available=True)
-    (storage.runs / (root_id + '.json')).write_text(json.dumps(root))
+    persist_run(storage, root)
     return root, child
 
 
@@ -86,7 +90,7 @@ async def test_latest_checkpoint_answer_replaces_skip_consent(storage, tmp_path,
         root = copy.deepcopy(asked)
         target_id = 'forwarding-root'
         root.update(workflow_run_id=target_id, pending=[], activations=[], joins={}, input_source={'workflow_run_id': run['workflow_run_id']})
-        (storage.runs / (target_id + '.json')).write_text(json.dumps(root))
+        persist_run(storage, root)
     storage.control(target_id, 'resume', instructions=answer, decision_id=decision_id, allow_optional_review_skip=allow)
     resumed = storage.get_run(run['workflow_run_id'])
     assert resumed['optional_skip_authorizations']['unrelated'] == unrelated

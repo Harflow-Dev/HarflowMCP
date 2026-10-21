@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 from mcp import MCPError
 
-from harflow_mcp import ctl, identity, server, state_ownership, store, task_waiting, wait_policy
+from harflow_mcp import ctl, identity, server, state_ownership, store, task_waiting, wait_policy, workflow_run_documents
 from harflow_mcp.backends.codex import CodexBackend
 from harflow_mcp.state_layout import resolve_layout
 from harflow_mcp.tasks import Task, TaskRegistry
@@ -655,7 +655,18 @@ async def test_workflow_settling_that_makes_progress_is_not_stalled(monkeypatch,
     counter = {"n": 0}
     async def call(action, **kwargs):
         counter["n"] += 1
-        run_file.write_text(json.dumps({"workflow_run_id": "r", "revision": counter["n"]}))
+        run_file.write_text(json.dumps(workflow_run_documents.encode({
+            "workflow_run_id": "r", "kind": "workflow", "name": "Wait",
+            "status": "running", "sequence": counter["n"], "revision": counter["n"],
+            "transitions": counter["n"], "created_at": 1.0, "updated_at": float(counter["n"]),
+            "prompt": "", "repo_path": str(run_file.parent), "freedom": "write_in_repo",
+            "network": None, "instructions": "", "permission_policy": "legacy_ceiling",
+            "definition_hash": "hash", "definition": {"name": "Wait", "workflow_id": "wf",
+            "revision": 1, "orchestrator": {"backend": "codex"}, "nodes": [], "connections": []},
+            "activations": [], "decisions": [], "tasks": [], "sessions": {}, "pending": [],
+            "joins": {}, "attempt_grants": {}, "retry_counts": {}, "retry_grants": {},
+            "suppressed_candidates": [], "supervisor_pid": None,
+        })))
         revision_ns = 2_000_000_000_000_000_000 + counter["n"] * 1_000_000_000
         os.utime(run_file, ns=(revision_ns, revision_ns))
         return {"workflow_run_id": "r", "status": "completed", "settling": counter["n"] < 40}

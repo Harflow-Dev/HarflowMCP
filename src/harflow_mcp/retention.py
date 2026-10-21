@@ -637,7 +637,9 @@ _NATIVE_RUN_BYTES = 4 * 1024 * 1024
 def _sweep_native_events(log_dir: Path, days: int, now: datetime, stats: dict[str, int]) -> None:
     """Reclaim only exact recordless native event logs; keep durable attempts for retries."""
     assert_task_owned(log_dir)
-    from .bounded_io import read_json
+    from .workflow_run_documents import WorkflowRunDocumentError
+    from .workflows import WorkflowStore
+    storage = WorkflowStore(root=log_dir.parent)
     from .events import events_path
     from .workflows import TERMINAL
 
@@ -655,7 +657,7 @@ def _sweep_native_events(log_dir: Path, days: int, now: datetime, stats: dict[st
             remaining -= path.stat().st_size
             if remaining < 0:
                 raise ValueError("Native retention tree exceeds byte budget")
-            run = read_json(path, _NATIVE_RUN_BYTES)
+            run, _ = storage._read_run(identifier, metadata_byte_limit=_NATIVE_RUN_BYTES)
             if run["workflow_run_id"] != identifier:
                 raise ValueError("Mismatched workflow ownership")
             if parent is not None:
@@ -687,7 +689,7 @@ def _sweep_native_events(log_dir: Path, days: int, now: datetime, stats: dict[st
 
     for candidate_path in directory.glob("*.json"):
         try:
-            run = read_json(candidate_path, _NATIVE_RUN_BYTES)
+            run, _ = storage._read_run(candidate_path.stem, metadata_byte_limit=_NATIVE_RUN_BYTES)
             run_id = run["workflow_run_id"]
             if run_id != candidate_path.stem:
                 continue
@@ -748,5 +750,5 @@ def _sweep_native_events(log_dir: Path, days: int, now: datetime, stats: dict[st
                             pass
                         except OSError:
                             stats["kept_delete_failed"] += 1
-        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        except (OSError, ValueError, KeyError, TypeError, AttributeError, WorkflowRunDocumentError):
             log.debug("Native retention ownership unavailable; preserving tree evidence", exc_info=True)

@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from harflow_mcp import workflow_notifications as wn, workflow_notification_points as points
+from harflow_mcp import workflow_run_documents
 from harflow_mcp import state_ownership
 from harflow_mcp.state_layout import resolve_layout
 
@@ -26,7 +27,10 @@ def logs(tmp_path, monkeypatch):
     task_dir.mkdir()
     monkeypatch.setenv("HARFLOW_NOTIFY_DESTINATIONS", json.dumps({"hook": {"url": "https://example.test/hook"}}))
     def direct_run(log_dir, run_id):
-        run = json.loads((Path(log_dir).parent / "workflow-runs" / f"{run_id}.json").read_text())
+        run = workflow_run_documents.decode(
+            json.loads((Path(log_dir).parent / "workflow-runs" / f"{run_id}.json").read_text()),
+            run_id,
+        )
         if run.get("parent_link"):
             raise ValueError("Subscribe to the root workflow run")
         if run.get("kind") == "builder":
@@ -40,15 +44,27 @@ def write_run(logs, *, run_id="root", status="running", sequence=1, **fields):
     path = logs.parent / "workflow-runs"
     path.mkdir(exist_ok=True)
     run = {"workflow_run_id": run_id, "kind": "workflow", "name": "Build", "status": status,
-           "sequence": sequence, "updated_at": f"2026-10-18T00:00:{sequence:02d}+00:00",
-           "definition": {"workflow_id": "wf", "revision": 1}, "activations": [], **fields}
-    (path / f"{run_id}.json").write_text(json.dumps(run))
+           "sequence": sequence, "revision": 0, "transitions": 0, "created_at": float(sequence),
+           "updated_at": float(sequence), "prompt": "", "repo_path": str(logs), "freedom": "write_in_repo",
+           "network": None, "instructions": "", "permission_policy": "legacy_ceiling", "definition_hash": "hash",
+           "definition": {"name": "Build", "workflow_id": "wf", "revision": 1, "orchestrator": {"backend": "codex"}, "nodes": [], "connections": []},
+           "activations": [], "decisions": [], "tasks": [], "sessions": {}, "pending": [], "joins": {},
+           "attempt_grants": {}, "retry_counts": {}, "retry_grants": {}, "suppressed_candidates": [],
+           "supervisor_pid": None, **fields}
+    for activation in run.get("activations", []):
+        activation.setdefault("id", "activation")
+        activation.setdefault("node_id", "node")
+        activation.setdefault("role", "worker")
+        activation.setdefault("status", "running")
+        activation.setdefault("created_at", float(sequence))
+        activation.setdefault("tasks", [])
+    (path / f"{run_id}.json").write_text(json.dumps(workflow_run_documents.encode(run)))
     return run
 
 
 def point(key, event, sequence, status, **extra):
     return {"key": key, "event": event, "sequence": sequence, "status": status,
-            "observed_at": f"2026-10-18T00:00:{sequence:02d}+00:00", "snapshot": {
+            "observed_at": float(sequence), "snapshot": {
                 "name": "Build", "kind": "workflow", "status": status, "goal_revision": 1,
                 "definition": {"workflow_id": "wf", "revision": 1}, **extra}}
 
@@ -132,6 +148,54 @@ def test_mtime_and_size_skip_avoids_duplicate_detection(logs, monkeypatch):
     wn.tick(logs)
     wn.tick(logs)
     assert len(sent) == 1
+
+
+def test_refused_subscription_does_not_block_independent_valid_subscription(logs, monkeypatch):
+    """A qualified source failure is isolated to its subscription during one tick."""
+    monkeypatch.setenv("HARFLOW_NOTIFY_DESTINATIONS", json.dumps({
+        "hook": {"url": "https://example.test/hook"},
+        "hook2": {"url": "https://example.test/hook2"},
+    }))
+    write_run(logs, run_id="refused", status="running", sequence=1)
+    refused = wn.subscribe(logs, "refused", "hook", events=["terminal"])
+    write_run(logs, run_id="valid", status="completed", sequence=2,
+              terminal_notification_points=[point("terminal:completed", points.SETTLED, 2, "completed")])
+    valid = wn.subscribe(logs, "valid", "hook2", events=["terminal"])
+    # Preserve the already-created subscription while making its source invalid.
+    refused_path = logs.parent / "workflow-runs" / "refused.json"
+    refused_path.write_text(json.dumps({"workflow_run_id": "refused"}))
+    sent = []
+    monkeypatch.setattr(wn.transport, "_deliver", lambda *args: sent.append(args))
+    wn.tick(logs)
+
+    assert wn.status(logs, "refused")["deliveries"] == []
+    assert wn.status(logs, "valid")["deliveries"][0]["state"] == "delivered"
+    assert sent and sent[0][0]["url"].endswith("hook2")
+    assert refused["id"] != valid["id"]
+
+
+def test_typed_source_refusal_is_preserved_at_detection_and_delivery(logs):
+    from harflow_mcp.workflow_run_documents import WorkflowRunDocumentError
+
+    write_run(logs, run_id="bad", status="running", sequence=1)
+    sub = wn.subscribe(logs, "bad", "hook", events=["terminal"])
+    path = logs.parent / "workflow-runs" / "bad.json"
+    path.write_text(json.dumps({"workflow_run_id": "bad"}))
+    with pytest.raises(WorkflowRunDocumentError) as detected:
+        wn._detect(logs, db_subscription(logs, sub["id"]))
+    assert detected.value.as_dict()["code"] == "workflow_run_incompatible"
+
+    write_run(logs, run_id="delivery", status="failed", sequence=1,
+              terminal_notification_points=[point("terminal:failed:1", points.SETTLED, 1, "failed")])
+    delivery_sub = wn.subscribe(logs, "delivery", "hook", events=["terminal"])
+    wn._detect(logs, db_subscription(logs, delivery_sub["id"]))
+    from harflow_mcp.workflow_run_documents import WorkflowRunDocumentError
+    error = WorkflowRunDocumentError("delivery", "source substituted")
+    delivery_row = wn.status(logs, "delivery")["deliveries"][0]
+    wn._defer(logs, delivery_row["id"], diagnostic=error.as_dict())
+    row = wn.status(logs, "delivery")["deliveries"][0]
+    assert row["state"] == "pending"
+    assert json.loads(row["error"])["code"] == "workflow_run_incompatible"
 
 
 @pytest.mark.parametrize("bad", [
@@ -313,7 +377,7 @@ def test_reconciled_attention_with_started_invocation_is_immediate(logs, monkeyp
     write_run(logs, status="running", sequence=0)
     subscribe(logs, events=["attention"])
     write_run(logs, status="needs_attention", sequence=1, attention_reason="child question",
-              attention_source={"workflow_run_id": "child", "path": "node"},
+              attention_source={"workflow_run_id": "child", "path": ["node"]},
               activations=[{"invocation": {"started": True}}])
     monkeypatch.setattr(points, "tree_settlement", lambda *a, **k: "pending")
     monkeypatch.setattr(wn.transport, "_deliver", lambda *a: None)
@@ -336,7 +400,7 @@ def test_old_unseen_point_does_not_reactivate_expired_subscription(logs):
     sub = subscribe(logs, events=["terminal"])
     old = time.time() - wn.transport.RETENTION_SECONDS - 1
     terminal = point("terminal:failed:1", points.SETTLED, 1, "failed")
-    terminal["observed_at"] = "2020-01-01T00:00:00+00:00"
+    terminal["observed_at"] = 1577836800.0
     write_run(logs, status="failed", sequence=1, terminal_notification_points=[terminal])
     with wn.transport._db(logs) as db:
         db.execute("UPDATE workflow_subscriptions SET updated=? WHERE id=?", (old, sub["id"]))

@@ -213,7 +213,7 @@ def test_recovered_required_failure_arrival_cannot_release_barrier(storage, tmp_
     token = {"id": "failed-arrival", "node_id": "merge", "stack": ["generation"], "branch_ids": {"generation": "split-right"}, "input_result_refs": ["failed-execution"], "context": {}}
     def seed(r):
         r.update(status="running", pending=[token])
-        r["activations"].append({"id": "failed-execution", "role": "node", "node_id": "right", "status": "failed", "tasks": [], "node_result": {"status": "failed", "result": {}, "evidence": []}})
+        r["activations"].append({"id": "failed-execution", "role": "node", "node_id": "right", "status": "failed", "created_at": 0.0, "tasks": [], "node_result": {"status": "failed", "result": {}, "evidence": []}})
         r["joins"]["generation"] = {"join_id": "merge", "split_id": "split", "stack": [], "expected": 2, "arrived": []}
     storage.update_run(run["workflow_run_id"], seed, "seed")
     supervisor = w.WorkflowSupervisor(Registry(storage.root), storage)

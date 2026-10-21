@@ -38,7 +38,7 @@ def source(store, tmp_path):
     candidate = child["definition"]["orchestrator"]
     binding = {"task_id": tid, "session_id": sid, "candidate": "orchestrator:" + w._candidate_key(candidate)}
     child.update(status="completed", sessions={"orchestrator": binding}, tasks=[{"id": "old-checklist", "status": "completed"}], decisions=[{"action": "complete"}], transitions=7)
-    child["activations"] = [{"id": "old-decision", "role": "orchestrator", "tasks": [{"task_id": tid, "status": "completed", "candidate": copy.deepcopy(candidate)}], "status": "completed"}]
+    child["activations"] = [{"id": "old-decision", "node_id": "orchestrator", "role": "orchestrator", "created_at": 0.0, "tasks": [{"task_id": tid, "status": "completed", "candidate": copy.deepcopy(candidate)}], "status": "completed"}]
     record = tasks.TaskRecord(task_id=tid, backend="codex", session_id=sid, repo_path=str(tmp_path), started_at="2026-10-07T00:00:00Z", freedom="read_only", network=None, model="gpt-6.1-sol", reasoning_effort="high", status="completed", exit_code=0)
     tasks.write(store.root / "tasks", record)
     write_run(store, child)

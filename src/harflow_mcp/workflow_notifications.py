@@ -1,10 +1,13 @@
 """Durable root-workflow notification subscriptions and frozen delivery intents."""
 from __future__ import annotations
 
+from .workflow_run_documents import WorkflowRunDocumentError
+
 from .state_access import task_operation, assert_task_owned, OwnedConnection
 from .state_ownership import StateOwnershipError, StateIncompatible
 
 import json
+import logging
 import math
 import sqlite3
 import time
@@ -102,7 +105,7 @@ def activate(log_dir, run_id):
 
 @task_operation
 def discard_unstarted(log_dir, run_id):
-    if (_storage(log_dir).runs / f'{_identifier(run_id)}.json').exists():
+    if _storage(log_dir)._run_source(_identifier(run_id)) is not None:
         return False
     with transport._db(log_dir) as db:
         return bool(db.execute("DELETE FROM workflow_subscriptions WHERE workflow_run_id=? AND state='reserved'", (run_id,)).rowcount)
@@ -154,7 +157,7 @@ def _artifacts(log_dir, run_id):
             page = artifacts.workflow_page(log_dir, run_id, cursor=None, limit=10)
         result['items'] = [{k: item.get(k) if k not in ('node_id', 'execution_id', 'task_id') else (item.get('workflow') or {}).get(k, item.get(k)) for k in ('artifact_id', 'kind', 'path', 'node_id', 'execution_id', 'task_id', 'availability')} for item in page.get('items', [])]
         result['truncated'] = bool(page.get('next_cursor') or page.get('has_more') or page.get('owners')) or page.get('state') == 'unavailable'
-    except StateOwnershipError:
+    except (StateOwnershipError, WorkflowRunDocumentError):
         raise
     except Exception:
         result['truncated'] = True
@@ -191,13 +194,12 @@ def _detect(log_dir, subscription):
     assert_task_owned(log_dir)
     storage = _storage(log_dir)
     path = storage.runs / (subscription['workflow_run_id'] + '.json')
-    try:
-        stat = path.stat()
-    except FileNotFoundError:
+    run_source = storage._run_source(subscription['workflow_run_id'])
+    if run_source is None:
         if subscription['state'] == 'reserved' and subscription['created'] < time.time() - 5 * transport.LEASE_SECONDS:
             discard_unstarted(log_dir, subscription['workflow_run_id'])
         return
-    if subscription['state'] == 'active' and (stat.st_mtime_ns, stat.st_size) == (subscription['run_mtime_ns'], subscription['run_size']):
+    if subscription['state'] == 'active' and (run_source[0], run_source[1]) == (subscription['run_mtime_ns'], subscription['run_size']):
         return
     run = _run(log_dir, subscription['workflow_run_id'])
     retained = _points(run)
@@ -242,14 +244,15 @@ def _detect(log_dir, subscription):
             if (point['sequence'] > current['last_point_sequence']
                     and type(observed) in (int, float) and math.isfinite(observed)):
                 activity = max(activity, min(now, max(0, observed)))
-        db.execute('UPDATE workflow_subscriptions SET state=?,last_point_sequence=?,run_mtime_ns=?,run_size=?,updated=? WHERE id=?', (state, last, stat.st_mtime_ns, stat.st_size, activity, subscription['id']))
+        db.execute('UPDATE workflow_subscriptions SET state=?,last_point_sequence=?,run_mtime_ns=?,run_size=?,updated=? WHERE id=?', (state, last, run_source[0], run_source[1], activity, subscription['id']))
 
 
-def _defer(log_dir, identifier):
+def _defer(log_dir, identifier, *, diagnostic=None):
     assert_task_owned(log_dir)
     now = time.time()
+    encoded = json.dumps(diagnostic, sort_keys=True) if diagnostic is not None else None
     with transport._db(log_dir) as db:
-        db.execute("UPDATE workflow_deliveries SET updated=? WHERE id=? AND state IN ('pending','retry','delivering') AND lease_until<=?", (now, identifier, now))
+        db.execute("UPDATE workflow_deliveries SET updated=?,error=COALESCE(?,error) WHERE id=? AND state IN ('pending','retry','delivering') AND lease_until<=?", (now, encoded, identifier, now))
 
 
 @task_operation
@@ -266,6 +269,9 @@ def tick(log_dir):
             _detect(log_dir, subscription)
         except StateOwnershipError:
             raise
+        except WorkflowRunDocumentError as exc:
+            logging.getLogger(__name__).warning("Workflow notification subscription refused: %s", json.dumps(exc.as_dict(), sort_keys=True))
+            continue
         except Exception:
             continue
     with transport._db(log_dir) as db:
@@ -278,8 +284,14 @@ def tick(log_dir):
         try:
             run = _run(log_dir, row['workflow_run_id'])
             current_key = points.point_key(run)
+            settled = None
+            if data.get('requires_tree_check'):
+                settled = 'unconfirmed' if current_key != row['event_key'] else points.tree_settlement(_storage(log_dir), run, now=time.time(), observed_at=data.get('observed_at'))
         except StateOwnershipError:
             raise
+        except WorkflowRunDocumentError as exc:
+            _defer(log_dir, row['id'], diagnostic=exc.as_dict())
+            continue
         except Exception:
             _defer(log_dir, row['id'])
             continue
@@ -287,14 +299,12 @@ def tick(log_dir):
             with transport._db(log_dir) as db:
                 db.execute("UPDATE workflow_deliveries SET state='superseded',updated=? WHERE id=? AND lease_until<=?", (time.time(), row['id'], time.time()))
             continue
-        if data.get('requires_tree_check'):
-            settled = 'unconfirmed' if current_key != row['event_key'] else points.tree_settlement(_storage(log_dir), run, now=time.time(), observed_at=data.get('observed_at'))
-            if settled == 'pending':
-                _defer(log_dir, row['id'])
-                continue
-            if settled == 'unconfirmed':
-                data['tree_settlement_unconfirmed'] = True
-                body = json.dumps(data, ensure_ascii=False, separators=(',', ':')).encode()
+        if settled == 'pending':
+            _defer(log_dir, row['id'])
+            continue
+        if settled == 'unconfirmed':
+            data['tree_settlement_unconfirmed'] = True
+            body = json.dumps(data, ensure_ascii=False, separators=(',', ':')).encode()
         lease = str(uuid.uuid4())
         now = time.time()
         with transport._db(log_dir) as db:
@@ -306,6 +316,8 @@ def tick(log_dir):
             transport._deliver(transport.preflight(row['destination']), row['id'], body)
         except StateOwnershipError:
             raise
+        except WorkflowRunDocumentError as exc:
+            error = json.dumps(exc.as_dict(), sort_keys=True)
         except Exception:
             error = 'delivery attempt failed'
         attempts = claimed['attempts']

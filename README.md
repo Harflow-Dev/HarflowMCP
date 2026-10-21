@@ -4,7 +4,7 @@ HarflowMCP is a local MCP server that dispatches coding tasks to Claude Code, Co
 
 Version 1.0.0 is under development and unreleased. [Harflow](https://github.com/Harflow-Dev/HarflowMac), the companion macOS application, is maintained separately; native app integration is currently unavailable.
 
-Use `harflow-ctl version-info --json` to inspect runtime identity and compatibility without initializing state. Engine operations require compatible Harflow state, task metadata and saved workflow definition documents. Use `HARFLOW_STATE_ROOT` to select a separate fresh state directory; see [state ownership and recovery](docs/contracts.md#state-ownership-and-recovery) for compatibility requirements.
+Use `harflow-ctl version-info --json` to inspect runtime identity and compatibility without initializing state. Engine operations require compatible Harflow state, task metadata, saved workflow definitions and workflow run documents. Use `HARFLOW_STATE_ROOT` to select a separate fresh state directory; see [state ownership and recovery](docs/contracts.md#state-ownership-and-recovery) for compatibility requirements.
 
 - [Getting started](docs/getting-started.md)
 - [Workflows](docs/workflows.md)

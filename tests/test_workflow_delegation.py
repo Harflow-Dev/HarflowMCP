@@ -463,7 +463,7 @@ def recovered_fixture(storage, tmp_path, *, status="completed", candidate="codex
     token = {"id": "token", "node_id": "work", "stack": [], "context": {}, "assignment_prompt": "Persisted assignment", "assigned_task_ids": [], "input_result_refs": [], "execution_activation_id": "execution"}
     output = summary or json.dumps({"status": "succeeded", "result": {"summary": "Durable result"}, "evidence": []})
     snapshot = {"status": status, "summary": output, "backend": candidate, "task_id": "attempt", "stderr_tail": ["API Error: 503 Service unavailable"] if status == "failed" else []}
-    activation = {"id": "execution", "node_id": "work", "role": "node", "status": "running", "assignment_prompt": token["assignment_prompt"], "assigned_task_ids": [], "token": copy.deepcopy(token), "tasks": [{"task_id": "attempt", "candidate": copy.deepcopy(node["agent"]), "status": status, "result": snapshot}]}
+    activation = {"id": "execution", "node_id": "work", "role": "node", "status": "running", "created_at": 0.0, "assignment_prompt": token["assignment_prompt"], "assigned_task_ids": [], "token": copy.deepcopy(token), "tasks": [{"task_id": "attempt", "candidate": copy.deepcopy(node["agent"]), "status": status, "result": snapshot}]}
     storage.update_run(run["workflow_run_id"], lambda r: r.update(status="running", pending=[token], activations=[activation]), "recovered_fixture")
     return run["workflow_run_id"]
 
@@ -570,7 +570,7 @@ async def test_old_execution_inventory_remains_discoverable(storage, tmp_path):
     assert d.result_inputs(run, [ref], preview=False)[0]["node_result"]["status"] == "succeeded"
 
 
-@pytest.mark.parametrize("status,extra", [("cancelled", {}), ("failed", {"permission_denials": ["Denied write"]})])
+@pytest.mark.parametrize("status,extra", [("cancelled", {}), ("failed", {"permission_denials": [{"command": "write", "reason": "Denied write"}]})])
 async def test_optional_unsafe_task_outcome_never_bypasses(storage, tmp_path, status, extra):
     registry = Registry(storage.root, outputs={"left": {"status": status, "summary": "", **extra}})
     run, _ = await run_flow(storage, tmp_path, parallel(True), registry)
@@ -1138,13 +1138,13 @@ def resume_outage_checkpoint(storage, tmp_path, *, question=False, attempt_mode_
     if attempt_mode_metadata:
         failed_task.update(session_mode="resume", resume_task_id="source")
     token = {"id": "token", "node_id": "work", "stack": [], "context": {}, "assignment_prompt": "Refine previous work", "execution_activation_id": "current", "execution_session_mode": "fresh" if question else "resume", "resume_task_id": "source", "input_result_refs": [], "assigned_task_ids": []}
-    activation = {"id": "current", "node_id": "work", "role": "node", "status": "running", "assignment_prompt": token["assignment_prompt"], "assigned_task_ids": [], "execution_session_mode": token["execution_session_mode"], "resume_task_id": "source", "token": copy.deepcopy(token), "tasks": [source_task, failed_task] if question else [failed_task]}
+    activation = {"id": "current", "node_id": "work", "role": "node", "status": "running", "created_at": 0.0, "assignment_prompt": token["assignment_prompt"], "assigned_task_ids": [], "execution_session_mode": token["execution_session_mode"], "resume_task_id": "source", "token": copy.deepcopy(token), "tasks": [source_task, failed_task] if question else [failed_task]}
     activations = [activation]
     if question:
         activation.update(pending_question_id="question", resume_question_id="question", questions=[{"question_id": "question", "question": "Which format?", "context": "", "progress": {"question": "Which format?"}, "evidence": [], "origin_task_id": "source", "origin_candidate": candidate, "reply_task_id": "failed-reply", "status": "answered", "answer": "Use JSON", "answer_delivery_state": "settled", "session_mode": "resume", "decision_id": "question-decision", "decision_attempts": 1}])
     else:
         token["resume_source_execution_id"] = "previous"
-        previous = {"id": "previous", "node_id": "work", "role": "node", "status": "completed", "token": {}, "tasks": [source_task], "node_result": {"status": "succeeded", "result": {"summary": "Previous work"}, "evidence": []}, "raw_output": source_task["result"]["summary"]}
+        previous = {"id": "previous", "node_id": "work", "role": "node", "status": "completed", "created_at": 0.0, "token": {}, "tasks": [source_task], "node_result": {"status": "succeeded", "result": {"summary": "Previous work"}, "evidence": []}, "raw_output": source_task["result"]["summary"]}
         activations.insert(0, previous)
     identity = "work:" + w._candidate_key(candidate)
     # Emulate both crash points: the task outcome is durable, and the historical
@@ -1611,7 +1611,7 @@ async def test_resume_optional_timeout_reconciles_old_unmarked_failure(storage, 
         if context["current_stage"]["node_id"] == "left":
             return {"decision_id": context["decision_id"], "action": "needs_input", "reason": "Old optional timeout was blocked", "question": "Continue?"}
         return default_decision(context, registry)
-    registry = Registry(storage.root, policy, outputs={"left": {"status": "failed", "summary": "Timeout", "timed_out": True, "permission_denials": ["Denied incidental read"]}})
+    registry = Registry(storage.root, policy, outputs={"left": {"status": "failed", "summary": "Timeout", "timed_out": True, "permission_denials": [{"command": "read", "reason": "Denied incidental read"}]}})
     run, _ = await run_flow(storage, tmp_path, parallel(True), registry, guided=True)
     assert run["status"] == "needs_input"
     monkeypatch.setattr(d, "mark_optional_failure", original)
@@ -1632,7 +1632,7 @@ async def test_optional_timeout_explicit_parallel_releases_join(storage, tmp_pat
             n.update(role="task", title=n["id"], agent={"backend": "codex"})
     g["orchestrator"] = {"backend": "codex"}
     next(n for n in g["nodes"] if n["id"] == "right").update(optional=True, title="right")
-    registry = Registry(storage.root, policy, {"right": {"status": "failed", "summary": "Timeout", "timed_out": True, "permission_denials": ["Denied read"]}})
+    registry = Registry(storage.root, policy, {"right": {"status": "failed", "summary": "Timeout", "timed_out": True, "permission_denials": [{"command": "read", "reason": "Denied read"}]}})
     run, _ = await run_flow(storage, tmp_path, g, registry, guided=True)
     assert run["status"] == "completed"
     assert len(run["released_parallel_groups"]) == 1

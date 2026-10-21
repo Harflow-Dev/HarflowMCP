@@ -166,11 +166,11 @@ async def call(action: str, *, directory: Path, reader: Callable[[], Awaitable[A
         return await _read(store_.get, kwargs["name"])
     if action == "detail":
         from .workflow_responses import detail
-        run = await _read(store_.get_run, kwargs["run_id"])
+        run = await _read(store_.get_run, kwargs["run_id"], refresh_atomic=True)
         run = await _read(on_demand_projection, store_, run)
         return _project(detail, run, kwargs["view"], kwargs.get("cursor"), kwargs.get("limit", 8000))
     if action == "status":
-        run = await _read(store_.get_run, kwargs["run_id"])
+        run = await _read(store_.get_run, kwargs["run_id"], refresh_atomic=True)
         return await _read(on_demand_projection, store_, run)
 
 

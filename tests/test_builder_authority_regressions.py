@@ -126,8 +126,8 @@ async def test_verified_builder_caller_survives_transient_redetection(tmp_path, 
     initial_runs=[]
     original_write=w._write
     def observed_write(path,value,**kwargs):
-        if Path(path).parent==storage.runs and value.get('sequence')==0:
-            initial_runs.append(dict(value))
+        if Path(path).parent==storage.runs and value.get('run', {}).get('sequence')==0:
+            initial_runs.append(dict(value['run']))
         return original_write(path,value,**kwargs)
     from pathlib import Path
     monkeypatch.setattr(w,'_write',observed_write)

@@ -1,11 +1,14 @@
 """Input arbitration reads only the selected root's verified invocation tree."""
 import copy
+import json
 import uuid
 
 import pytest
 from harflow_mcp import state_ownership
+from harflow_mcp import workflow_run_documents
 
 from harflow_mcp import workflow_invocation as inv
+from harflow_mcp import workflows
 from test_workflow_run_node_recovery import finished_child, seed_parent, store, write_run
 
 
@@ -14,7 +17,7 @@ def owned_workflow_scope(store, monkeypatch):
     monkeypatch.setattr(
         "test_workflow_input_tree.write_run",
         lambda storage, run: __import__("harflow_mcp.workflows", fromlist=["_write"])._write(
-            storage.runs / f"{run['workflow_run_id']}.json", run,
+            storage.runs / f"{run['workflow_run_id']}.json", workflow_run_documents.encode(run),
             layout=storage.state_layout,
         ),
     )
@@ -65,6 +68,72 @@ def test_input_arbitration_never_reads_unrelated_retained_history(store, tmp_pat
     assert unrelated.stat().st_size > 4 * 1024 * 1024
 
 
+@pytest.mark.parametrize('replacement_count', [1, 2])
+def test_input_arbitration_handles_bounded_atomic_refreshes(store, tmp_path, monkeypatch, replacement_count):
+    root = seed_parent(store, tmp_path, 'parent', stage='waiting')
+    active = question(store, root, root['activations'][0], decision='atomic-question')
+    path = store.runs / f"{root['workflow_run_id']}.json"
+    second = None
+    if replacement_count == 2:
+        second_activation = copy.deepcopy(root['activations'][0])
+        second_activation['id'] = uuid.uuid4().hex
+        second_activation['invocation']['child_workflow_run_id'] = uuid.uuid4().hex
+        store.update_run(root['workflow_run_id'], lambda value: value['activations'].append(second_activation), 'fixture')
+        root = store.get_run(root['workflow_run_id'])
+        second = question(store, root, second_activation, decision='second-question')
+    original_fdopen = workflows.os.fdopen
+    reads = 0
+    replacements = 0
+
+    class Stream:
+        def __init__(self, stream): self.stream = stream
+        def __enter__(self): self.stream.__enter__(); return self
+        def __exit__(self, *args): return self.stream.__exit__(*args)
+        def read(self, *args, **kwargs):
+            nonlocal reads, replacements
+            data = self.stream.read(*args, **kwargs)
+            reads += 1
+            if replacement_count == 1 and reads == 1:
+                replacements += 1
+                fresh = workflow_run_documents.decode(json.loads(data), root['workflow_run_id'])
+                fresh['name'] = 'root after atomic refresh'
+                temporary = path.with_suffix('.input-refresh.tmp')
+                temporary.write_text(json.dumps(workflow_run_documents.encode(fresh)))
+                temporary.replace(path)
+            elif replacement_count == 2 and reads == 1:
+                replacements += 1
+                identifier = root['workflow_run_id']
+                fresh = workflow_run_documents.decode(json.loads(data), identifier)
+                fresh['prompt'] = f'atomic refresh {replacements}'
+                target = store.runs / f'{identifier}.json'
+                temporary = target.with_suffix(f'.input-refresh-{replacements}.tmp')
+                temporary.write_text(json.dumps(workflow_run_documents.encode(fresh)))
+                temporary.replace(target)
+            elif replacement_count == 2 and reads in (4, 5):
+                replacements += 1
+                identifier = second['workflow_run_id']
+                fresh = workflow_run_documents.decode(json.loads(data), identifier)
+                fresh['prompt'] = f'atomic refresh {replacements}'
+                target = store.runs / f'{identifier}.json'
+                temporary = target.with_suffix('.input-refresh-second.tmp')
+                temporary.write_text(json.dumps(workflow_run_documents.encode(fresh)))
+                temporary.replace(target)
+            return data
+
+    monkeypatch.setattr(workflows.os, 'fdopen', lambda fd, *args, **kwargs: Stream(original_fdopen(fd, *args, **kwargs)))
+    inv.publish_input(store, active)
+    published = store.get_run(root['workflow_run_id'])
+    assert replacements == (1 if replacement_count == 1 else 3)
+    if replacement_count == 1:
+        assert published['status'] == 'needs_input'
+        assert published['input_decision_id'] == 'atomic-question'
+    else:
+        assert published['status'] == 'needs_attention'
+        assert 'bounded metadata arbitration' in published['attention_reason']
+    journal = (store.runs / f"{root['workflow_run_id']}.jsonl").read_text()
+    assert ('child_input_arbitration_unavailable' in journal) is (replacement_count == 2)
+
+
 @pytest.mark.parametrize('field', ['workflow_run_id', 'execution_id', 'root_workflow_run_id'])
 def test_input_arbitration_rejects_unverified_child_links(store, tmp_path, monkeypatch, field):
     root = seed_parent(store, tmp_path, 'parent', stage='waiting')
@@ -110,9 +179,15 @@ def test_completed_loop_invocations_do_not_read_retained_children(store, tmp_pat
         identifier = uuid.uuid4().hex
         # Corrupt historical records prove even a cold cache never loads them.
         (store.runs / f'{identifier}.json').write_text('invalid' if index else 'x' * (5 * 1024 * 1024))
-        historical.append({'id': uuid.uuid4().hex, 'status': 'completed', 'tasks': [],
-                           'invocation': {'child_workflow_run_id': identifier, 'stage': 'settled'},
-                           'node_result': {'result': {'child_outcome': {'kind': 'completed'}}}})
+        historical_activation = copy.deepcopy(root['activations'][0])
+        historical_activation.update(
+            id=uuid.uuid4().hex,
+            status='completed',
+            tasks=[],
+            invocation={**historical_activation['invocation'], 'child_workflow_run_id': identifier, 'stage': 'settled'},
+            node_result={'status': 'succeeded', 'result': {'child_outcome': {'kind': 'completed'}}, 'evidence': []},
+        )
+        historical.append(historical_activation)
     store.update_run(root['workflow_run_id'], lambda r: r['activations'].extend(historical), 'fixture')
     blocked = {a['invocation']['child_workflow_run_id'] for a in historical}
     original = store.get_run

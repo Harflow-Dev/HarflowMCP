@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Qualify workflow run documents before storage, control, catalog ownership and retention decisions; preserve authored snapshots and public run payloads.
+- Refuse incompatible or unavailable run sources with stable diagnostics and distinguish published runs from incomplete subsequent bookkeeping.
+
 - Preserve multi-task caller cancellation during concurrent metadata/existence I/O completion and progress delivery on Python 3.11.
 - Retry caller candidate acquisition once when every refused task source changed during reading, preserving strict complete-history and direct-read checks.
 - Qualify saved workflow definitions and delegation migration backups with Harflow product identity and stable major/minor compatibility. Refuse unqualified sources and observable source changes before mutation.

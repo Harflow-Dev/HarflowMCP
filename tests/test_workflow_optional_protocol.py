@@ -31,7 +31,7 @@ async def test_optional_malformed_result_with_denials_converges(storage, tmp_pat
 
 
 def protocol_activation():
-    return {'id':'bad', 'role':'node', 'node_id':'work', 'status':'failed', 'tasks':[{'task_id':'task','status':'completed','result':{'status':'completed','permission_denials':DENIALS}}], 'node_result':{'status':'failed','result':{'failure_kind':'protocol'},'evidence':[]}}
+    return {'id':'bad', 'role':'node', 'node_id':'work', 'status':'failed', 'created_at':0.0, 'tasks':[{'task_id':'task','status':'completed','result':{'status':'completed','permission_denials':DENIALS}}], 'node_result':{'status':'failed','result':{'failure_kind':'protocol'},'evidence':[]}}
 
 
 def test_protocol_denials_retry_requires_execution_scoped_caller_grant():

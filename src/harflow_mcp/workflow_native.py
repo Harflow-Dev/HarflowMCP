@@ -6,6 +6,8 @@ before launch; after launch any missing evidence remains uncertain.
 """
 from __future__ import annotations
 
+from .workflow_run_documents import WorkflowRunDocumentError
+
 import copy
 import hashlib
 import json
@@ -240,7 +242,7 @@ async def _dispatch_native_one(supervisor: Any, node: dict[str, Any], assignment
             return True, state["result"]
     except DispatchNotStarted:
         return True, None
-    except StateOwnershipError:
+    except (StateOwnershipError, WorkflowRunDocumentError):
         raise
     except Exception as exc:
         latest = next((t for a in supervisor.run()["activations"] if a["id"] == activation["id"] for t in a["tasks"] if t["task_id"] == execution_id), None)

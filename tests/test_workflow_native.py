@@ -204,7 +204,7 @@ async def test_native_dispatch_accounting_preserves_previous_attempt(native_setu
     definition = w.validate_definition(native_graph())
     run = storage.create_run(definition, "Review", tmp_path)
     historical_accounting = {"total_bytes": 123, "compatibility_reasons": ["historical attempt"]}
-    activation = {"id": "execution", "node_id": "work", "role": "node", "status": "running", "tasks": [{"task_id": "previous", "status": "completed", "context_delivery": historical_accounting}]}
+    activation = {"id": "execution", "node_id": "work", "role": "node", "status": "running", "created_at": 0.0, "tasks": [{"task_id": "previous", "status": "completed", "context_delivery": historical_accounting}]}
     def seed(r):
         r["status"] = "running"
         r["activations"].append(copy.deepcopy(activation))
@@ -279,7 +279,7 @@ def test_uncertain_child_holds_checkout_after_owner_dies(native_setup, tmp_path,
     run = storage.create_run(w.validate_definition(native_graph()), "Review", tmp_path)
     def unresolved(r):
         r.update(status="failed", supervisor_pid=None, supervisor_identity=None)
-        r["activations"] = [{"id": "execution", "node_id": "work", "role": "node", "status": "uncertain", "tasks": [{"task_id": "child-execution", "execution_kind": "native_subagent", "status": "uncertain", "freedom": "read_only", "dispatch_stage": "launch_requested", "transport_task_id": "transport"}]}]
+        r["activations"] = [{"id": "execution", "node_id": "work", "role": "node", "status": "uncertain", "created_at": 0.0, "tasks": [{"task_id": "child-execution", "execution_kind": "native_subagent", "status": "uncertain", "freedom": "read_only", "dispatch_stage": "launch_requested", "transport_task_id": "transport"}]}]
     storage.update_run(run["workflow_run_id"], unresolved, "crash_fixture")
     storage.list_run_page()
     monkeypatch.setattr(w, "_supervisor_present", lambda task: owner_alive)
@@ -298,7 +298,7 @@ def test_native_independent_takeover_is_refused_even_after_run_completed(native_
     from harflow_mcp.workflow_hooks import refuse_takeover
     storage, registry = native_setup
     run = storage.create_run(w.validate_definition(native_graph()), "Review", tmp_path)
-    storage.update_run(run["workflow_run_id"], lambda r: r.update(status="completed", activations=[{"id": "execution", "node_id": "work", "role": "node", "status": "completed", "tasks": [{"task_id": "child-execution", "execution_kind": "native_subagent", "status": "completed"}]}]), "settled_fixture")
+    storage.update_run(run["workflow_run_id"], lambda r: r.update(status="completed", activations=[{"id": "execution", "node_id": "work", "role": "node", "status": "completed", "created_at": 0.0, "tasks": [{"task_id": "child-execution", "execution_kind": "native_subagent", "status": "completed"}]}]), "settled_fixture")
     with pytest.raises(control.TakeoverRefused, match="cannot be taken over independently"):
         refuse_takeover(registry._log_dir, "child-execution")
 
@@ -309,7 +309,7 @@ async def test_live_native_activity_has_child_origin_without_process_record(nati
     storage, registry = native_setup
     with state_ownership.state_session(registry.state_layout):
         run = storage.create_run(w.validate_definition(native_graph()), "Review", tmp_path)
-        observed = storage.update_run(run["workflow_run_id"], lambda r: r.update(status="running", activations=[{"id": "execution", "node_id": "work", "role": "node", "status": "running", "tasks": [{"task_id": "child-execution", "execution_kind": "native_subagent", "status": "running"}]}]), "live_fixture")
+        observed = storage.update_run(run["workflow_run_id"], lambda r: r.update(status="running", activations=[{"id": "execution", "node_id": "work", "role": "node", "status": "running", "created_at": 0.0, "tasks": [{"task_id": "child-execution", "execution_kind": "native_subagent", "status": "running"}]}]), "live_fixture")
         registry._log_dir.mkdir(exist_ok=True)
         log = EventLog(events_path(registry._log_dir, "child-execution"), "child-execution", layout=registry.state_layout)
         log.write("assistant_text", {"text": "Reading source", "native_child_id": "native-actual"})
@@ -518,7 +518,7 @@ async def test_native_transport_direct_cancel_and_takeover_are_refused(native_se
     from harflow_mcp.control import TakeoverRefused
     storage, _ = native_setup
     run = storage.create_run(w.validate_definition(native_graph()), "Review", tmp_path)
-    storage.update_run(run["workflow_run_id"], lambda r: r.update(status="running", activations=[{"id": "transport", "node_id": "orchestrator", "role": "native_control", "status": "running", "tasks": [{"task_id": "transport", "status": "running"}]}]), "transport_fixture")
+    storage.update_run(run["workflow_run_id"], lambda r: r.update(status="running", activations=[{"id": "transport", "node_id": "orchestrator", "role": "native_control", "status": "running", "created_at": 0.0, "tasks": [{"task_id": "transport", "status": "running"}]}]), "transport_fixture")
     registry = TaskRegistry(log_dir=tmp_path / "tasks", open_monitor=False)
     calls = []
     async def cancel(task_id):

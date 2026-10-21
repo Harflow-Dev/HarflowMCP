@@ -3,12 +3,14 @@ import json
 import os
 import subprocess
 import sys
+import copy
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from harflow_mcp import ctl, lineage, server, workflow_inspection, workflow_reads
+from harflow_mcp import ctl, lineage, server, workflow_inspection, workflow_reads, workflows
+from harflow_mcp import workflow_run_documents as documents
 from harflow_mcp import state_ownership
 from harflow_mcp.state_layout import resolve_layout
 
@@ -121,7 +123,7 @@ async def test_real_ownership_receipt_enforces_expected_read_scope(monkeypatch, 
     def reserve(value):
         value.update(status='running', execution_contract='delegation', activations=[{
             'id': 'owned-activation', 'node_id': 'owned-node', 'role': role,
-            'status': 'running', 'tasks': [{'task_id': 'owned-caller', 'status': 'reserved'}],
+            'status': 'running', 'created_at': 0.0, 'tasks': [{'task_id': 'owned-caller', 'status': 'reserved'}],
         }])
     storage.update_run(run_id, reserve, 'synthetic_authority')
     directory = storage.root / 'tasks'
@@ -165,6 +167,53 @@ async def test_verified_human_reads_real_saved_definition(monkeypatch, tmp_path,
     monkeypatch.setattr(lineage, 'detect_caller_detail', lambda *args, **kwargs: detection)
     monkeypatch.setattr(lineage, 'detect_catalog_caller', lambda _: detection)
     assert await workflow_reads.call('list', directory=directory, _bounded_read=bounded) == [saved]
+
+
+@pytest.mark.parametrize('action,kwargs', [
+    ('status', {'run_id': 'run-id'}),
+    ('detail', {'run_id': 'run-id', 'view': 'prompt'}),
+])
+async def test_direct_status_and_detail_read_final_atomic_replacement(tmp_path, monkeypatch, action, kwargs):
+    storage = workflows.WorkflowStore(tmp_path)
+    definition = storage.save('atomic-read', {
+        'nodes': [{'id': 'start', 'type': 'start'}, {'id': 'end', 'type': 'end'}],
+        'connections': [{'id': 'finish', 'source': 'start', 'target': 'end'}],
+    })
+    run = storage.create_run(definition, 'atomic read', tmp_path)
+    run_id = run['workflow_run_id']
+    path = storage.runs / f'{run_id}.json'
+    original_fdopen = workflows.os.fdopen
+    replaced = False
+
+    class Stream:
+        def __init__(self, stream): self.stream = stream
+        def __enter__(self): self.stream.__enter__(); return self
+        def __exit__(self, *args): return self.stream.__exit__(*args)
+        def read(self, *args, **read_kwargs):
+            nonlocal replaced
+            data = self.stream.read(*args, **read_kwargs)
+            if not replaced:
+                replaced = True
+                fresh = copy.deepcopy(run)
+                fresh['name'] = 'final atomic source'
+                fresh['prompt'] = 'final atomic prompt'
+                temporary = path.with_suffix('.workflow-read-refresh.tmp')
+                temporary.write_text(json.dumps(documents.encode(fresh)))
+                temporary.replace(path)
+            return data
+
+    monkeypatch.setattr(workflows.os, 'fdopen', lambda fd, *args, **read_kwargs: Stream(original_fdopen(fd, *args, **read_kwargs)))
+
+    async def no_managed_caller():
+        return None
+
+    kwargs['run_id'] = run_id
+    result = await workflow_reads.call(action, directory=storage.root / 'tasks', reader=no_managed_caller, **kwargs)
+    assert result['workflow_run_id'] == run_id
+    if action == 'status':
+        assert result['name'] == 'final atomic source'
+    else:
+        assert json.loads(result['chunk']) == 'final atomic prompt'
 
 
 async def test_managed_orchestrator_goal_history_is_only_paged(tmp_path):

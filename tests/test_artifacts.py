@@ -4,7 +4,7 @@ import json
 import os
 from pathlib import Path
 import pytest
-from harflow_mcp import artifacts, identity, lineage, state_ownership, store, workflow_hooks
+from harflow_mcp import artifacts, identity, lineage, state_ownership, store, workflow_hooks, workflow_run_documents
 from harflow_mcp.state_layout import resolve_layout
 
 
@@ -32,6 +32,24 @@ def setup(tmp_path, monkeypatch):
         yield logs, repo, record
     finally:
         ownership.__exit__(None, None, None)
+
+
+def qualified_run(run_id, repo_path, *, task_id=None):
+    return workflow_run_documents.encode({
+        'workflow_run_id': run_id, 'kind': 'workflow', 'name': 'Artifacts', 'status': 'completed',
+        'sequence': 0, 'revision': 0, 'transitions': 0, 'created_at': 1.0, 'updated_at': 1.0,
+        'prompt': '', 'repo_path': str(repo_path), 'freedom': 'write_in_repo', 'network': None,
+        'instructions': '', 'permission_policy': 'legacy_ceiling', 'definition_hash': 'hash',
+        'definition': {'name': 'Artifacts', 'workflow_id': 'wf', 'revision': 1,
+                       'orchestrator': {'backend': 'codex'}, 'nodes': [], 'connections': []},
+        'activations': ([{'id': 'activation', 'node_id': 'node', 'role': 'worker',
+                          'status': 'completed', 'created_at': 0.0,
+                          'tasks': [{'task_id': task_id, 'status': 'completed'}]}]
+                        if task_id else []),
+        'decisions': [], 'tasks': [], 'sessions': {}, 'pending': [], 'joins': {},
+        'attempt_grants': {}, 'retry_counts': {}, 'retry_grants': {},
+        'suppressed_candidates': [], 'supervisor_pid': None,
+    })
 
 
 def test_reference_idempotency_and_observation(setup):
@@ -759,7 +777,7 @@ def test_artifact_workflow_preparation_is_bounded_and_summary_unavailable(setup,
     for n in range(205):
         run = {'workflow_run_id': f'run-{n:03}', 'created_at': n, 'status': 'completed',
                'repo_path': str(logs.parent), 'activations': []}
-        (storage.runs / f'run-{n:03}.json').write_text(json.dumps(run))
+        (storage.runs / f'run-{n:03}.json').write_text(json.dumps(qualified_run(f'run-{n:03}', logs.parent)))
     original = WorkflowStore.get_run
     reads = []
     def get_run(self, run_id, **kwargs):
@@ -775,6 +793,18 @@ def test_artifact_workflow_preparation_is_bounded_and_summary_unavailable(setup,
     assert len(reads) == 205
 
 
+def test_summary_preserves_typed_workflow_document_refusal(setup, monkeypatch):
+    logs, _, record = setup
+    refusal = workflow_run_documents.WorkflowRunDocumentError(
+        'run-refused', 'Malformed persisted workflow run'
+    )
+    monkeypatch.setattr(artifacts, '_authority', lambda *args, **kwargs: (_ for _ in ()).throw(refusal))
+    result = artifacts.summary(logs, record.task_id)
+    assert result['state'] == 'unavailable'
+    assert result['history_incomplete'] is True
+    assert result['refused_runs'] == [refusal.as_dict()]
+
+
 @pytest.mark.parametrize('ownership', ['association', 'receipt', 'malformed', 'dangling'])
 def test_real_inherited_workflow_ownership_denies_artifacts(setup, ownership):
     from harflow_mcp.workflows import WorkflowStore
@@ -787,7 +817,7 @@ def test_real_inherited_workflow_ownership_denies_artifacts(setup, ownership):
         run = {'workflow_run_id': 'run', 'created_at': 1, 'status': 'completed',
                'repo_path': str(repo), 'activations': [{'id': 'activation', 'node_id': 'node',
                'role': 'worker', 'tasks': [{'task_id': parent.task_id, 'status': 'completed'}]}]}
-        (storage.runs / 'run.json').write_text(json.dumps(run))
+        (storage.runs / 'run.json').write_text(json.dumps(qualified_run('run', repo, task_id=parent.task_id)))
     else:
         receipt = storage.owners / f'{parent.task_id}.json'
         if ownership == 'dangling':
