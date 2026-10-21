@@ -41,6 +41,7 @@ def human_authority(monkeypatch):
     monkeypatch.delenv(lineage.ENV_TASK_ID, raising=False)
     monkeypatch.setattr(lineage, '_default_process_table', lambda: {os.getpid(): 1, 1: 0})
     monkeypatch.setattr(store, 'read_all', lambda *a, **k: pytest.fail('unbounded task metadata scan'))
+    monkeypatch.setattr(store, 'scan', lambda *a, **k: pytest.fail('unbounded task metadata scan'))
     monkeypatch.setattr(workflows.WorkflowStore, 'list_runs', lambda *a, **k: pytest.fail('unbounded workflow record scan'))
 
 
@@ -113,6 +114,7 @@ def test_managed_page_reader_decorates_noncanonical_task_directory_from_workflow
         lambda *args, **kwargs: SimpleNamespace(caller=SimpleNamespace(record=task), undecidable=None),
     )
     monkeypatch.setattr(store, 'read_all', lambda *args, **kwargs: pytest.fail('legacy task scan'))
+    monkeypatch.setattr(store, 'scan', lambda *args, **kwargs: pytest.fail('legacy task scan'))
     monkeypatch.setattr(storage, 'list_runs', lambda *args, **kwargs: pytest.fail('legacy workflow scan'))
     ready, managed = managed_page_reader(directory)
     assert ready and managed[0]['role'] == 'node'
@@ -258,6 +260,7 @@ def test_nested_caller_inherits_workflow_authority_without_historical_scans(tmp_
     original = lineage.detect_catalog_caller
     monkeypatch.setattr(lineage, 'detect_catalog_caller', lambda logdir: original(logdir, environ={}, getpid=lambda: 40, getsid=lambda pid: 40, process_table=lambda: {40: 30, 30: 20, 20: 1, 1: 0}, check=lambda value: 'alive'))
     monkeypatch.setattr(store, 'read_all', lambda *a, **k: pytest.fail('legacy task scan'))
+    monkeypatch.setattr(store, 'scan', lambda *a, **k: pytest.fail('legacy task scan'))
     monkeypatch.setattr(storage, 'list_runs', lambda *a, **k: pytest.fail('legacy workflow scan'))
     # Already-projected metadata needs no artificial bootstrap barrier.
     ready, managed = managed_page_reader(directory)

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Retry caller candidate acquisition once when every refused task source changed during reading, preserving strict complete-history and direct-read checks.
 - Qualify task metadata with `harflow.task` identity and stable major/minor compatibility; refuse older unqualified development task documents without adoption.
 - Report task incompatibility and I/O unavailability separately, quarantine stale task-catalog authority, and expose incomplete history in listings and cancellation cascades.
 - Prevent stale task updates and failed final persistence from authorizing overwrite or automatic continuation while preserving process cleanup.

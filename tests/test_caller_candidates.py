@@ -57,7 +57,7 @@ def _make_record(**overrides) -> store.TaskRecord:
 
 def test_read_candidates_never_raises_and_the_sentinel_fails_closed(monkeypatch, tmp_path):
     directory = tmp_path / "tasks"
-    monkeypatch.setattr(store, "read_all", lambda log_dir: (_ for _ in ()).throw(ValueError("boom")))
+    monkeypatch.setattr(store, "scan", lambda log_dir: (_ for _ in ()).throw(ValueError("boom")))
     result = lineage.read_candidates(directory).resolve()
     assert isinstance(result, lineage._CandidateReadFailure)
     assert real_detect_caller(directory, candidates=result) is None
@@ -68,7 +68,7 @@ def test_read_candidates_never_raises_and_the_sentinel_fails_closed(monkeypatch,
 
 def test_sentinel_message_is_byte_identical_to_the_scanning_failure(monkeypatch, tmp_path):
     directory = tmp_path / "tasks"
-    monkeypatch.setattr(store, "read_all", lambda log_dir: (_ for _ in ()).throw(OSError("denied")))
+    monkeypatch.setattr(store, "scan", lambda log_dir: (_ for _ in ()).throw(OSError("denied")))
     # Today's path: the scan raises inside each function and the failure message is built there.
     assert real_detect_caller(directory) is None
     scanning = real_detect_caller_detail(directory)
@@ -89,14 +89,14 @@ def test_read_candidates_success_is_reused_by_both_phases(monkeypatch, tmp_path)
 def test_ctl_status_scans_the_metadata_once(monkeypatch, home, capsys):
     store.write(_log_dir(home), _make_record())
     _use_real_detection(monkeypatch)
-    real_read_all = store.read_all
+    real_scan = store.scan
     calls = []
 
     def counting(log_dir):
         calls.append(log_dir)
-        return real_read_all(log_dir)
+        return real_scan(log_dir)
 
-    monkeypatch.setattr(store, "read_all", counting)
+    monkeypatch.setattr(store, "scan", counting)
     assert ctl.main(["status", "task-1", "--json"]) == 0
     assert json_document(capsys)["task"]["task_id"] == "task-1"
     assert len(calls) == 1
@@ -106,23 +106,23 @@ async def test_server_workflow_read_scans_the_metadata_once(monkeypatch, tmp_pat
     directory = tmp_path / "tasks"
     monkeypatch.setattr(server, "_registry", TaskRegistry(log_dir=directory))
     _use_real_detection(monkeypatch)
-    real_read_all = store.read_all
+    real_scan = store.scan
     calls = []
 
     def counting(log_dir):
         calls.append(log_dir)
-        return real_read_all(log_dir)
+        return real_scan(log_dir)
 
-    monkeypatch.setattr(store, "read_all", counting)
+    monkeypatch.setattr(store, "scan", counting)
     assert await server._managed_workflow_reader() is None
     assert len(calls) == 1
 
 
-def _fail_read_all(monkeypatch, exc=ValueError("boom")):
+def _fail_scan(monkeypatch, exc=ValueError("boom")):
     def boom(log_dir):
         raise exc
 
-    monkeypatch.setattr(store, "read_all", boom)
+    monkeypatch.setattr(store, "scan", boom)
 
 
 def test_ctl_status_read_failure_refuses_like_today(monkeypatch, home, capsys):
@@ -133,7 +133,7 @@ def test_ctl_status_read_failure_refuses_like_today(monkeypatch, home, capsys):
     unstubbed) may answer, and it must fail closed.
     """
     monkeypatch.setattr(lineage, "detect_caller_detail", real_detect_caller_detail)
-    _fail_read_all(monkeypatch)
+    _fail_scan(monkeypatch)
     assert ctl.main(["status", "task-1", "--json"]) == 1
     doc = json_document(capsys)
     assert doc["error"]["code"] == "workflow_read_refused"
@@ -148,7 +148,7 @@ async def test_server_read_failure_refuses_like_today(monkeypatch, tmp_path):
     directory = tmp_path / "tasks"
     monkeypatch.setattr(server, "_registry", TaskRegistry(log_dir=directory))
     monkeypatch.setattr(lineage, "detect_caller_detail", real_detect_caller_detail)
-    _fail_read_all(monkeypatch, OSError("unreadable"))
+    _fail_scan(monkeypatch, OSError("unreadable"))
     with pytest.raises(MCPError, match="Workflow caller authority is undecidable: caller detection failed: OSError: unreadable"):
         await server._managed_workflow_reader()
 
@@ -159,6 +159,7 @@ def test_injected_caller_never_scans(monkeypatch, tmp_path):
 
     marker = object()
     monkeypatch.setattr(store, "read_all", lambda log_dir: (_ for _ in ()).throw(AssertionError("must not scan")))
+    monkeypatch.setattr(store, "scan", lambda log_dir: (_ for _ in ()).throw(AssertionError("must not scan")))
     registry = TaskRegistry(log_dir=tmp_path / "tasks", caller_override=marker)
     assert asyncio.run(registry._detect_caller()) is marker
 

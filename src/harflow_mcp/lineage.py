@@ -221,10 +221,20 @@ def _candidates(log_dir: Path) -> list[store.TaskRecord]:
 
     "Observed-terminal" mirrors `store.outcome_unobserved`'s inverse — a terminal status *with* an
     exit code is a run this process actually saw finish, so it can never be today's caller.
+    Retry one whole scan only when every refusal positively identifies a source changed during
+    its read. Require complete history before filtering, and discard the first scan on retry.
     """
+    acquisition = store.scan(log_dir)
+    if acquisition.refusals and all(
+        isinstance(error, store.TaskDocumentError)
+        and getattr(error, "_source_changed_during_read", None) is True
+        for error in acquisition.refusals.values()
+    ):
+        acquisition = store.scan(log_dir)
+    records = acquisition.require_complete()
     return [
         record
-        for record in store.read_all(log_dir)
+        for record in records
         if not (record.status in store.TERMINAL_RECORD_STATUSES and record.exit_code is not None)
     ]
 
@@ -243,10 +253,11 @@ class _CandidateReadFailure:
 
 
 class CandidateScan:
-    """One lazily-read, memoized metadata scan shared by a call site's detection phases.
+    """Lazily memoized caller candidates or failure shared by a call site's detection phases.
 
-    Lazy so a stubbed `detect_caller` (the test seam) never triggers a scan it would ignore, and
-    so the scan happens at most once however many phases consume it.
+    Lazy so a stubbed `detect_caller` (the test seam) never triggers a scan it would ignore.
+    Resolution uses one ordinary scan, or at most two for source-change-only refusals, across
+    however many phases consume it.
     """
 
     __slots__ = ("_log_dir", "_value")
@@ -274,10 +285,10 @@ class CandidateScan:
 
 def read_candidates(log_dir: Path) -> CandidateScan:
     """A shared candidate scan for a call site that needs both `detect_caller` and
-    `detect_caller_detail`: pass it to each as `candidates=` so one `store.read_all` serves both
-    phases instead of three. Never raises; a failed read resolves to the sentinel, which makes
-    `detect_caller` answer None and `detect_caller_detail` fail closed, exactly as a scan raising
-    inside them does today.
+    `detect_caller_detail`: pass it to each as `candidates=` so both phases share one ordinary
+    `store.scan`, or at most two for source-change-only refusals. Never raises; a failed read
+    resolves to the sentinel, which makes `detect_caller` answer None and `detect_caller_detail`
+    fail closed, exactly as a scan raising inside them does today.
     """
     return CandidateScan(log_dir)
 

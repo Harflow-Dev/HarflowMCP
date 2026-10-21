@@ -235,6 +235,7 @@ def test_monitor_cli_cold_and_unknown_authority_never_uses_legacy_detection(monk
     monkeypatch.setattr(lineage, '_default_process_table', lambda: {os.getpid(): 1, 1: 0})
     monkeypatch.setattr(ctl, 'default_log_dir', lambda: directory)
     monkeypatch.setattr(store, 'read_all', lambda *args: pytest.fail('retained metadata scan'))
+    monkeypatch.setattr(store, 'scan', lambda *args: pytest.fail('retained metadata scan'))
     monkeypatch.setattr(workflow_inspection, 'managed_reader', AsyncMock(side_effect=AssertionError('legacy verification')))
     read = AsyncMock()
     monkeypatch.setattr(workflow_reads, 'call', read)

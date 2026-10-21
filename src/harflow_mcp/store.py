@@ -357,7 +357,9 @@ def _read(log_dir: Path, task_id: str, *, include_prompt: bool = True, metadata_
                 log.warning("task %s: %s", task_id, reason)
                 record = replace(record, prompt="", prompt_error=reason)
         if source_identity(path.stat()) != initial_source:
-            raise refusal('Task metadata changed while reading', 'task_unavailable')
+            error = refusal('Task metadata changed while reading', 'task_unavailable')
+            error._source_changed_during_read = True
+            raise error
         object.__setattr__(record, '_source_identity', initial_source)
         return record
     except TaskDocumentError as exc:
