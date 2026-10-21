@@ -20,6 +20,7 @@ import pytest
 
 from harflow_mcp import backends, ctl, identity, store
 from harflow_mcp.tasks import default_log_dir
+from task_polling import read_task_until
 
 SESSION = "0199a3f2-7c1e-7b8a-9d0e-123456789abc"
 CODEX_READ_ONLY = backends.get("codex").enforcement("read_only").as_dict()
@@ -65,11 +66,14 @@ def _doc(capsys: pytest.CaptureFixture) -> dict:
 
 def _settled(task_id: str, timeout: float = 15.0) -> store.TaskRecord:
     deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        record = store.read(default_log_dir(), task_id)
-        if record is not None and record.status in store.TERMINAL_RECORD_STATUSES:
-            return record
-        time.sleep(0.05)
+    record = read_task_until(
+        default_log_dir(),
+        task_id,
+        lambda record: record is not None and record.status in store.TERMINAL_RECORD_STATUSES,
+        deadline=deadline,
+    )
+    if record is not None:
+        return record
     raise AssertionError(f"task {task_id} did not settle")
 
 

@@ -11,6 +11,7 @@ import pytest
 
 from harflow_mcp import detached, state_ownership, store, tasks
 from harflow_mcp.state_layout import UnsupportedStateLayout, resolve_layout
+from task_polling import read_task_until
 
 
 def _run(root: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
@@ -210,17 +211,18 @@ def test_detached_child_retains_root_ownership_through_final_task_writes(tmp_pat
     task_id = document["result"]["task_id"]
     tasks_directory = root / ".harflow" / "tasks"
     layout = selected
-    record = store.read(tasks_directory, task_id)
+    deadline = __import__("time").monotonic() + 8
+    record = read_task_until(tasks_directory, task_id, lambda record: True, deadline=deadline)
     assert record is not None
     with pytest.raises(state_ownership.StateBusy):
         with state_ownership.exclusive_session(layout, timeout=0.2):
             pass
-    deadline = __import__("time").monotonic() + 8
-    while __import__("time").monotonic() < deadline:
-        record = store.read(tasks_directory, task_id)
-        if record is not None and record.status in store.TERMINAL_RECORD_STATUSES:
-            break
-        __import__("time").sleep(0.05)
+    record = read_task_until(
+        tasks_directory,
+        task_id,
+        lambda record: record is not None and record.status in store.TERMINAL_RECORD_STATUSES,
+        deadline=deadline,
+    )
     assert record is not None and record.status == "completed"
     with state_ownership.exclusive_session(layout, timeout=1.0):
         pass
