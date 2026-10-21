@@ -512,7 +512,7 @@ def test_sweep_keeps_a_task_whose_cancel_controller_is_still_live(
     record = make_record()
     store.write(log_dir, record)
     req = {"at": _iso(now - timedelta(seconds=120)), "by": {"pid": 999}, "lease_seconds": 60}
-    (log_dir / f"{record.task_id}.cancel.1.req").write_text(json.dumps(req))
+    control.write_phase(log_dir, record.task_id, control.CANCEL, 1, "req", req)
     monkeypatch.setattr(retention.control.identity, "identity_check", lambda identity: "alive")
 
     stats = retention.sweep(log_dir, 30, now)
@@ -531,7 +531,7 @@ def test_sweep_deletes_a_task_whose_cancel_controller_died_with_an_expired_lease
     record = make_record()
     store.write(log_dir, record)
     req = {"at": _iso(now - timedelta(seconds=120)), "by": {"pid": 999}, "lease_seconds": 60}
-    (log_dir / f"{record.task_id}.cancel.1.req").write_text(json.dumps(req))
+    control.write_phase(log_dir, record.task_id, control.CANCEL, 1, "req", req)
     monkeypatch.setattr(retention.control.identity, "identity_check", lambda identity: "dead")
 
     stats = retention.sweep(log_dir, 30, now)
@@ -541,7 +541,7 @@ def test_sweep_deletes_a_task_whose_cancel_controller_died_with_an_expired_lease
 
 
 def _takeover_phase(log_dir: Path, task_id: str, n: int, phase: str, payload: dict) -> None:
-    (log_dir / f"{task_id}.takeover.{n}.{phase}").write_text(json.dumps(payload))
+    control.write_phase(log_dir, task_id, control.TAKEOVER, n, phase, payload)
 
 
 @pytest.mark.parametrize(

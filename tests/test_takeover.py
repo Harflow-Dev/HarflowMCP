@@ -103,7 +103,7 @@ def finished_record(repo: Path, **overrides) -> store.TaskRecord:
 
 
 def phase(log_dir: Path, task_id: str, n: int, name: str, payload: dict) -> None:
-    (log_dir / f"{task_id}.takeover.{n}.{name}").write_text(json.dumps(payload))
+    control.write_phase(log_dir, task_id, control.TAKEOVER, n, name, payload)
 
 
 def req_payload(at: datetime, controller: dict = CONTROLLER, session_id: str = SESSION) -> dict:
@@ -115,7 +115,9 @@ def phases_on_disk(log_dir: Path, task_id: str = "task-1") -> list[str]:
 
 
 def failed_reason(log_dir: Path, n: int, task_id: str = "task-1") -> str:
-    return json.loads((log_dir / f"{task_id}.takeover.{n}.failed").read_text())["reason"]
+    payload = control.read_phase(log_dir, task_id, control.TAKEOVER, n, "failed")
+    assert payload is not None and payload is not control.UNPARSABLE
+    return payload["reason"]
 
 
 # --- the busy rule ---------------------------------------------------------------------------
@@ -264,7 +266,8 @@ def test_begin_takeover_numbers_attempts_and_only_retries_after_failed(
     log_dir: Path, verdicts: Verdicts
 ) -> None:
     assert control.begin_takeover(log_dir, "task-1", controller=CONTROLLER, session_id=SESSION) == 1
-    req = json.loads((log_dir / "task-1.takeover.1.req").read_text())
+    req = control.read_phase(log_dir, "task-1", control.TAKEOVER, 1, "req")
+    assert req is not None and req is not control.UNPARSABLE
     assert req["session_id"] == SESSION and req["by"] == CONTROLLER and req["lease_seconds"] == 60
 
     with pytest.raises(control.TakeoverRefused) as refused:
@@ -273,6 +276,23 @@ def test_begin_takeover_numbers_attempts_and_only_retries_after_failed(
 
     control.mark_takeover_failed(log_dir, "task-1", 1, "x")
     assert control.begin_takeover(log_dir, "task-1", controller=CONTROLLER, session_id=SESSION) == 2
+
+
+def test_old_flat_takeover_attach_remains_busy(log_dir: Path, verdicts: Verdicts) -> None:
+    phase_path = log_dir / "task-1.takeover.1.attach"
+    phase_path.write_text(json.dumps({"pid": 123, "start_time": "x", "markers": []}))
+    verdicts.by_pid[123] = "dead"
+    assert control.takeover_attempt(log_dir, "task-1").attach is control.UNPARSABLE
+    assert control.takeover_busy(control.takeover_attempt(log_dir, "task-1")) is True
+
+
+def test_old_flat_takeover_request_remains_pending_and_busy(log_dir: Path, verdicts: Verdicts) -> None:
+    (log_dir / "task-1.takeover.1.req").write_text(
+        json.dumps({"at": _iso(NOW), "by": CONTROLLER, "lease_seconds": 60, "session_id": SESSION})
+    )
+    attempt = control.takeover_attempt(log_dir, "task-1")
+    assert attempt.req is control.UNPARSABLE
+    assert control.takeover_busy(attempt) is True
 
 
 def test_begin_takeover_recovers_an_abandoned_pending_attempt(log_dir: Path, verdicts: Verdicts) -> None:
@@ -612,7 +632,8 @@ def test_attach_records_the_terminal_and_the_session_stays_busy_while_it_lives(
     result = takeover.attach(log_dir, "task-1", proc.pid)
 
     assert result["status"] == "attached" and result["pid"] == proc.pid and result["attempt"] == 1
-    payload = json.loads((log_dir / "task-1.takeover.1.attach").read_text())
+    payload = control.read_phase(log_dir, "task-1", control.TAKEOVER, 1, "attach")
+    assert payload is not None and payload is not control.UNPARSABLE
     assert payload["markers"] == ["claude", SESSION] and payload["start_time"]
     # `sleep` does not show the markers, so it reads undecidable — which is busy, as is alive.
     assert SESSION in store.live_session_ids(log_dir)

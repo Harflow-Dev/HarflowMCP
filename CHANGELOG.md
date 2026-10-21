@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Qualify parsed control phase payloads with filename-bound Harflow envelopes and stable-source reads; preserve existing marker-presence, lease, signal and retention semantics, and refuse older flat development payload authority.
 - Qualify next-continuation follow-up ledgers with filename-bound Harflow envelopes and bounded source checks; refuse unqualified or changed sources before queue mutation, continuation launch or retention deletion.
 - Qualify workflow ownership receipts with filename-bound identity, bounded source checks and stable refusal diagnostics across control and display consumers.
 - Preflight receipt targets before run publication, refuse changed targets without overwrite, and stop same-run supervisor relaunch after blocked settlement while preserving ordered partial-write evidence.

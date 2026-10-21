@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import json
 import os
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -12,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from harflow_mcp import control, store
+from harflow_mcp import control_documents
 from harflow_mcp import state_ownership
 from harflow_mcp.state_layout import resolve_layout
 
@@ -89,6 +91,262 @@ def test_read_phase_is_unparsable_for_a_non_object_json_value(tmp_path: Path) ->
     control.phase_path(tmp_path, "t1", control.CANCEL, 1, "req").write_text("[1, 2]")
 
     assert control.read_phase(tmp_path, "t1", control.CANCEL, 1, "req") is control.UNPARSABLE
+
+
+def test_phase_documents_round_trip_optional_null_and_additive_fields(tmp_path: Path) -> None:
+    payload = {
+        "at": "2026-10-21T00:00:00+00:00",
+        "by": {"pid": 17, "start_time": None, "markers": []},
+        "lease_seconds": 60,
+        "session_id": None,
+        "future": {"nested": [1, "two", False]},
+    }
+
+    assert control.write_phase(tmp_path, "t1", control.CANCEL, 1, "req", payload)
+    assert control.read_phase(tmp_path, "t1", control.CANCEL, 1, "req") == payload
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("task_id", "other"),
+        ("family", "takeover"),
+        ("attempt", 2),
+        ("phase", "sig"),
+        ("product", "foreign.product"),
+        ("format", "foreign.format"),
+        ("v", True),
+        ("product_version", "99.0.0"),
+        ("attempt", True),
+    ],
+)
+def test_read_phase_rejects_foreign_or_mismatched_document_identity(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    control.write_phase(tmp_path, "t1", control.CANCEL, 1, "req", {"a": 1})
+    path = control.phase_path(tmp_path, "t1", control.CANCEL, 1, "req")
+    document = json.loads(path.read_text())
+    document[field] = value
+    path.write_text(json.dumps(document))
+
+    assert control.read_phase(tmp_path, "t1", control.CANCEL, 1, "req") is control.UNPARSABLE
+
+
+def test_control_document_codec_rejects_nonfinite_numbers() -> None:
+    with pytest.raises(control_documents.ControlDocumentError):
+        control_documents.encode({"value": float("nan")}, "t1", control.CANCEL, 1, "req")
+
+
+def test_read_phase_rejects_nonfinite_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = control.phase_path(tmp_path, "t1", control.CANCEL, 1, "req")
+    document = control_documents.encode({"value": 1}, "t1", control.CANCEL, 1, "req")
+    document["payload"]["value"] = float("nan")
+    path.write_text(json.dumps(document, allow_nan=True))
+    assert control.read_phase(tmp_path, "t1", control.CANCEL, 1, "req") is control.UNPARSABLE
+
+    # Negative control: without the shared finite-value guard, this same qualified envelope
+    # would be accepted and expose a non-finite payload to consumers.
+    monkeypatch.setattr(control.control_documents, "_json", lambda value: None)
+    assert control.read_phase(tmp_path, "t1", control.CANCEL, 1, "req")["value"] != 1
+
+
+def test_generic_phase_payload_preserves_additive_fields(tmp_path: Path) -> None:
+    payload = {
+        "product": "caller-data", "attempt": "opaque", "at": 123,
+        "by": ["opaque"], "leader_alive": "unknown", "future": [None, True],
+    }
+    assert control.write_phase(tmp_path, "t1", "helper", 7, "checkpoint", payload)
+    assert control.read_phase(tmp_path, "t1", "helper", 7, "checkpoint") == payload
+
+
+@pytest.mark.parametrize(
+    ("family", "attempt", "phase"),
+    [("bad.name", 1, "req"), ("cancel", 0, "req"), ("cancel", True, "req"), ("cancel", 1, "bad.name")],
+)
+def test_write_phase_rejects_unsafe_identity_arguments_before_publication(
+    tmp_path: Path, family: str, attempt: object, phase: str
+) -> None:
+    with pytest.raises(control.PhaseWriteError):
+        control.write_phase(tmp_path, "t1", family, attempt, phase, {"a": 1})
+    assert list(tmp_path.glob(".t1.*")) == []
+
+
+def test_read_phase_rejects_unsafe_identity_arguments(tmp_path: Path) -> None:
+    assert control.read_phase(tmp_path, "t1", "bad.name", 1, "req") is control.UNPARSABLE
+    assert control.read_phase(tmp_path, "t1", control.CANCEL, True, "req") is control.UNPARSABLE
+
+
+def test_write_phase_encoding_failure_does_not_publish_or_leave_temp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def reject(*args, **kwargs):
+        raise control_documents.ControlDocumentError("invalid phase payload")
+
+    monkeypatch.setattr(control_documents, "encode", reject)
+    with pytest.raises(control.PhaseWriteError):
+        control.write_phase(tmp_path, "t1", control.CANCEL, 1, "req", {"a": object()})
+
+    assert not control.phase_path(tmp_path, "t1", control.CANCEL, 1, "req").exists()
+    assert list(tmp_path.glob(".t1.*")) == []
+
+
+def test_write_phase_encoding_failure_does_not_create_a_temp_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    called = False
+    real_mkstemp = control.tempfile.mkstemp
+
+    def spy(*args, **kwargs):
+        nonlocal called
+        called = True
+        return real_mkstemp(*args, **kwargs)
+
+    monkeypatch.setattr(control.tempfile, "mkstemp", spy)
+    monkeypatch.setattr(
+        control.control_documents, "encode",
+        lambda *args, **kwargs: (_ for _ in ()).throw(control_documents.ControlDocumentError("bad")),
+    )
+    with pytest.raises(control.PhaseWriteError):
+        control.write_phase(tmp_path, "t1", control.CANCEL, 1, "req", {"bad": object()})
+    assert called is False
+
+
+def test_write_phase_preserves_a_replaced_owned_temp_on_cleanup_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    replacement = tmp_path / "replacement"
+
+    def replace_then_fail(src, dst):
+        replacement.write_bytes(b"replacement")
+        os.replace(replacement, src)
+        raise OSError("link failed")
+
+    monkeypatch.setattr(control.os, "link", replace_then_fail)
+    with pytest.raises(control.PhaseWriteError):
+        control.write_phase(tmp_path, "t1", control.CANCEL, 1, "req", {"a": 1})
+    leftovers = list(tmp_path.glob(".t1.*"))
+    assert len(leftovers) == 1
+    assert leftovers[0].read_bytes() == b"replacement"
+
+
+def test_signalled_constructor_failure_does_not_publish_signal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        control.control_documents, "encode",
+        lambda *args, **kwargs: (_ for _ in ()).throw(control_documents.ControlDocumentError("bad")),
+    )
+    with pytest.raises(control.PhaseWriteError):
+        control.mark_signalled(tmp_path, "t1", control.CANCEL, 1, leader_alive=True)
+    assert not control.phase_path(tmp_path, "t1", control.CANCEL, 1, "sig").exists()
+
+
+def test_write_phase_collision_preserves_original_bytes_and_inode(tmp_path: Path) -> None:
+    control.write_phase(tmp_path, "t1", control.CANCEL, 1, "req", {"a": 1})
+    path = control.phase_path(tmp_path, "t1", control.CANCEL, 1, "req")
+    before = path.read_bytes()
+    inode = path.stat().st_ino
+
+    assert control.write_phase(tmp_path, "t1", control.CANCEL, 1, "req", {"a": 2}) is False
+    assert path.read_bytes() == before
+    assert path.stat().st_ino == inode
+
+
+def test_read_phase_distinguishes_symlink_and_nonregular_sources(tmp_path: Path) -> None:
+    target = tmp_path / "outside.json"
+    target.write_text(json.dumps({"a": 1}))
+    path = control.phase_path(tmp_path, "t1", control.CANCEL, 1, "req")
+    path.symlink_to(target)
+    assert control.read_phase(tmp_path, "t1", control.CANCEL, 1, "req") is control.UNPARSABLE
+
+    path.unlink()
+    path.mkdir()
+    assert control.read_phase(tmp_path, "t1", control.CANCEL, 1, "req") is control.UNPARSABLE
+
+
+def test_read_phase_rejects_invalid_utf8_and_recursive_json(tmp_path: Path) -> None:
+    path = control.phase_path(tmp_path, "t1", control.CANCEL, 1, "req")
+    path.write_bytes(b"\xff")
+    assert control.read_phase(tmp_path, "t1", control.CANCEL, 1, "req") is control.UNPARSABLE
+
+    path.write_text("[" * 20000 + "]" * 20000)
+    assert control.read_phase(tmp_path, "t1", control.CANCEL, 1, "req") is control.UNPARSABLE
+
+
+def test_read_phase_rejects_dangling_symlink(tmp_path: Path) -> None:
+    path = control.phase_path(tmp_path, "t1", control.CANCEL, 1, "req")
+    path.symlink_to(tmp_path / "missing")
+    assert control.read_phase(tmp_path, "t1", control.CANCEL, 1, "req") is control.UNPARSABLE
+
+
+def test_read_phase_rejects_disappearing_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    control.write_phase(tmp_path, "t1", control.CANCEL, 1, "req", {"a": 1})
+    path = control.phase_path(tmp_path, "t1", control.CANCEL, 1, "req")
+    original_lstat = Path.lstat
+    def disappear(self: Path):
+        if self == path:
+            raise FileNotFoundError(path)
+        return original_lstat(self)
+
+    monkeypatch.setattr(Path, "lstat", disappear)
+    assert control.read_phase(tmp_path, "t1", control.CANCEL, 1, "req") is control.UNPARSABLE
+
+
+def test_read_phase_accepts_unlinking_a_second_hardlink(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    req = {"at": "2026-10-21T00:00:00+00:00", "by": {"pid": 1}, "lease_seconds": 60}
+    sig = {"at": "2026-10-21T00:00:01+00:00", "leader_alive": True}
+    control.write_phase(tmp_path, "t1", control.CANCEL, 1, "req", req)
+    control.write_phase(tmp_path, "t1", control.CANCEL, 1, "sig", sig)
+    path = control.phase_path(tmp_path, "t1", control.CANCEL, 1, "sig")
+    sibling = tmp_path / "sig-sibling"
+    os.link(path, sibling)
+    before = path.stat()
+    original_decode = control.control_documents.decode
+    removed = False
+
+    def decode_and_unlink(*args, **kwargs):
+        nonlocal removed
+        if not removed:
+            removed = True
+            sibling.unlink()
+            after = path.stat()
+            assert after.st_ino == before.st_ino
+            assert after.st_size == before.st_size
+            assert after.st_mtime_ns == before.st_mtime_ns
+            assert after.st_ctime_ns != before.st_ctime_ns
+        return original_decode(*args, **kwargs)
+
+    monkeypatch.setattr(control.control_documents, "decode", decode_and_unlink)
+    assert control.read_phase(tmp_path, "t1", control.CANCEL, 1, "sig") == sig
+    assert control.cancel_verdict(tmp_path, "t1") == "authorized"
+
+
+def test_read_phase_rejects_replaced_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    control.write_phase(tmp_path, "t1", control.CANCEL, 1, "req", {"a": 1})
+    path = control.phase_path(tmp_path, "t1", control.CANCEL, 1, "req")
+    replacement = tmp_path / "replacement"
+    replacement.write_bytes(path.read_bytes())
+    original_decode = control.control_documents.decode
+    replaced = False
+
+    def decode_and_replace(*args, **kwargs):
+        nonlocal replaced
+        if not replaced:
+            replaced = True
+            os.replace(replacement, path)
+        return original_decode(*args, **kwargs)
+
+    monkeypatch.setattr(control.control_documents, "decode", decode_and_replace)
+    assert control.read_phase(tmp_path, "t1", control.CANCEL, 1, "req") is control.UNPARSABLE
+
+
+def test_read_and_write_propagate_state_ownership_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    error = state_ownership.StateOwnershipError("foreign")
+    monkeypatch.setattr(control, "phase_path", lambda *args: (_ for _ in ()).throw(error))
+    with pytest.raises(state_ownership.StateOwnershipError):
+        control.read_phase(tmp_path, "t1", control.CANCEL, 1, "req")
+    with pytest.raises(state_ownership.StateOwnershipError):
+        control.write_phase(tmp_path, "t1", control.CANCEL, 1, "req", {"a": 1})
 
 
 # --- latest_attempt / attempt_outcome -------------------------------------------------------
@@ -177,6 +435,23 @@ def test_recover_abandoned_never_recovers_an_unparsable_req(tmp_path: Path) -> N
 
     assert control.recover_abandoned(tmp_path, "t1", control.CANCEL, 1) is False
     assert control.attempt_outcome(tmp_path, "t1", control.CANCEL, 1) == "pending"
+
+
+def test_old_flat_cancel_request_remains_pending_and_cannot_recover(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    flat = {"at": (now - timedelta(seconds=120)).isoformat(), "by": {"pid": 1}, "lease_seconds": 60}
+    control.phase_path(tmp_path, "t1", control.CANCEL, 1, "req").write_text(json.dumps(flat))
+    monkeypatch.setattr(control.identity, "identity_check", lambda ident: "dead")
+    assert control.recover_abandoned(tmp_path, "t1", control.CANCEL, 1, now=now) is False
+    assert control.attempt_outcome(tmp_path, "t1", control.CANCEL, 1) == "pending"
+
+
+def test_old_flat_cancel_signature_cannot_authorize_cancellation(tmp_path: Path) -> None:
+    control.phase_path(tmp_path, "t1", control.CANCEL, 1, "req").write_text(json.dumps({"at": "x"}))
+    control.phase_path(tmp_path, "t1", control.CANCEL, 1, "sig").write_text(
+        json.dumps({"at": "x", "leader_alive": True})
+    )
+    assert control.cancel_verdict(tmp_path, "t1") == "not_authorized"
 
 
 def test_recover_abandoned_writes_failed_once_abandoned(

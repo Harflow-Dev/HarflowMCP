@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from harflow_mcp import control, identity, store
+from harflow_mcp import control, control_documents, identity, store
 from harflow_mcp import tasks as tasks_module
 from harflow_mcp.tasks import Task, TaskRegistry
 from harflow_mcp import state_ownership
@@ -182,6 +182,31 @@ async def test_local_cancel_req_failure_signals_nothing_and_does_not_set_the_fla
     assert task.proc.returncode is not None
     assert await asyncio.wait_for(task.proc.communicate(), timeout=2) == (b"", b"")
     gc.collect()
+
+
+async def test_local_cancel_codec_failure_signals_nothing_and_does_not_set_the_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = TaskRegistry(log_dir=tmp_path, owner=OWNER)
+    task = await spawn_sleep_task(registry, "t0", tmp_path, with_monitor=False)
+    try:
+        def reject(*args, **kwargs):
+            raise control_documents.ControlDocumentError("invalid phase payload")
+
+        monkeypatch.setattr(control_documents, "encode", reject)
+        signalled: list[int] = []
+        monkeypatch.setattr(
+            tasks_module, "_signal_group", lambda t, sig: signalled.append(sig) or True
+        )
+
+        with pytest.raises(control.PhaseWriteError):
+            registry._deliver_local_cancel(task)
+
+        assert task.cancel_requested is False
+        assert signalled == []
+        assert not control.phase_path(tmp_path, "t0", control.CANCEL, 1, "req").exists()
+    finally:
+        await cleanup(task)
 
 
 async def test_a_joined_local_cancel_writes_no_phase_file_of_its_own(tmp_path: Path) -> None:

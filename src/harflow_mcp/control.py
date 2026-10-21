@@ -42,6 +42,8 @@ import json
 import logging
 import os
 import re
+import stat
+import sys
 import tempfile
 import time
 import uuid
@@ -52,7 +54,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from . import identity, store
+from . import control_documents, identity, store
 
 log = logging.getLogger(__name__)
 
@@ -100,7 +102,7 @@ class Attempt:
 
 
 def phase_path(log_dir: Path, task_id: str, family: str, n: int, phase: str) -> Path:
-    store.validate_task_id(task_id)
+    control_documents.validate_identity(task_id, family, n, phase)
     return log_dir / f"{task_id}.{family}.{n}.{phase}"
 
 
@@ -128,48 +130,95 @@ def write_phase(log_dir: Path, task_id: str, family: str, n: int, phase: str, pa
     already did this step — the caller joins rather than treating that as an error). Any other
     failure raises `PhaseWriteError`; either way the temp file used to build it is removed.
     """
-    store.validate_task_id(task_id)
-    target = phase_path(log_dir, task_id, family, n, phase)
+    try:
+        target = phase_path(log_dir, task_id, family, n, phase)
+        document = control_documents.encode(payload, task_id, family, n, phase)
+        encoded = json.dumps(document, ensure_ascii=False, allow_nan=False).encode("utf-8")
+    except (ValueError, TypeError, UnicodeError, RecursionError, control_documents.ControlDocumentError) as exc:
+        raise PhaseWriteError("control phase candidate failed qualification") from exc
     try:
         log_dir.mkdir(parents=True, exist_ok=True)
         fd, tmp_name = tempfile.mkstemp(dir=log_dir, prefix=f".{task_id}.")
+    except StateOwnershipError:
+        raise
     except OSError as exc:
         raise PhaseWriteError(f"could not write phase file {target}: {exc}") from exc
     tmp_path = Path(tmp_name)
+    temporary_identity = None
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle)
+        with os.fdopen(fd, "wb") as handle:
+            temporary_identity = os.fstat(handle.fileno())
+            handle.write(encoded)
             handle.flush()
             os.fsync(handle.fileno())
         os.link(tmp_path, target)
     except FileExistsError:
         return False
+    except StateOwnershipError:
+        raise
     except OSError as exc:
         raise PhaseWriteError(f"could not write phase file {target}: {exc}") from exc
     finally:
-        tmp_path.unlink(missing_ok=True)
+        active_failure = sys.exc_info()[0] is not None
+        try:
+            current = tmp_path.lstat()
+            if (temporary_identity is not None and stat.S_ISREG(current.st_mode)
+                    and (current.st_dev, current.st_ino) == (temporary_identity.st_dev, temporary_identity.st_ino)):
+                tmp_path.unlink(missing_ok=True)
+        except FileNotFoundError:
+            pass
+        except StateOwnershipError:
+            raise
+        except OSError as exc:
+            if not active_failure:
+                raise PhaseWriteError("could not clean up owned control phase temporary") from exc
     _fsync_dir(log_dir)
     return True
 
 
 @task_operation
 def read_phase(log_dir: Path, task_id: str, family: str, n: int, phase: str) -> dict | None | Any:
-    """The phase file's payload: None if it does not exist, `UNPARSABLE` if it exists but cannot be
-    trusted (unreadable, not JSON, or not a JSON object), else the parsed dict."""
-    path = phase_path(log_dir, task_id, family, n, phase)
+    """Return qualified payload, verified absence, or an undecidable source sentinel.
+
+    Parsed reads reject symlinks, nonregular files and observable source changes. Filename
+    presence latches elsewhere deliberately retain their separate protocol semantics.
+    """
+    descriptor = None
     try:
-        raw = path.read_text(encoding="utf-8")
+        path = phase_path(log_dir, task_id, family, n, phase)
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode):
+            return UNPARSABLE
+        with os.fdopen(os.dup(descriptor), "rb") as handle:
+            raw = handle.read()
+        data = json.loads(raw.decode("utf-8"))
+        payload = control_documents.decode(data, task_id, family, n, phase)
+        final = os.fstat(descriptor)
+        current = path.lstat()
+        def source(info):
+            return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+        if not stat.S_ISREG(current.st_mode) or source(opened) != source(final) or source(opened) != source(current):
+            return UNPARSABLE
+        return payload
+    except StateOwnershipError:
+        raise
     except FileNotFoundError:
-        return None
-    except OSError:
+        if descriptor is None:
+            try:
+                path.lstat()
+            except FileNotFoundError:
+                return None
+            except StateOwnershipError:
+                raise
+            except OSError:
+                pass
         return UNPARSABLE
-    try:
-        data = json.loads(raw)
-    except ValueError:
+    except (OSError, ValueError, TypeError, UnicodeError, RecursionError, control_documents.ControlDocumentError):
         return UNPARSABLE
-    if not isinstance(data, dict):
-        return UNPARSABLE
-    return data
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 
 
 @task_operation

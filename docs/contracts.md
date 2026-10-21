@@ -1,6 +1,6 @@
 # Harflow public wire contracts
 
-HarflowMCP 1.0.0 is unreleased. This specification covers ctl, setup, normalized events and version-info. Persisted task metadata, saved workflow definitions, workflow run documents and ownership receipts use qualified Harflow formats; artifact documents retain their existing format; store ownership is defined below, while migration remains unsupported. Raw vendor streams, MCP negotiation, cursors and internal indexes are unchanged.
+HarflowMCP 1.0.0 is unreleased. This specification covers ctl, setup, normalized events and version-info. Persisted task metadata, saved workflow definitions, workflow run documents, ownership receipts, follow-up ledgers and control phase payloads use qualified Harflow formats; artifact documents retain their existing format; store ownership is defined below, while migration remains unsupported. Raw vendor streams, MCP negotiation, cursors and internal indexes are unchanged.
 
 ## Common envelope
 
@@ -118,3 +118,15 @@ Reads reject unqualified, foreign, incompatible, malformed, symlinked, nonregula
 Every mutation holds the permanent follow-up lock, qualifies the candidate, and checks its captured source identity or absence immediately before replacement. Admission's 960 KiB and internal/read 1 MiB limits count the entire serialized envelope. Terminal bookkeeping failure retains the existing launch outcome and process-local retry obligation; it cannot authorize overwrite of a refused source. Retention rechecks the source before granting deletion permission and keeps the permanent lock inode. These cooperative checks do not eliminate the last-check race with external writers that ignore locks.
 
 Preserve refused files and the old state root for manual inspection outside the engine, then select a separate fresh missing or empty root for recovery. No adoption, historical conversion, or changes to inbox, control, notifications or other persisted families are provided by this ledger contract.
+
+## Control phase payloads
+
+`tasks/<task_id>.<family>.<attempt>.<phase>` carries a private persisted envelope with `product: "harflow"`, `format: "harflow.task.control"`, exact integer `v: 1`, compatible stable major/minor `product_version`, explicit filename-bound `task_id`, `family`, `attempt` and `phase`, and nested `payload`. Safe generic family and phase names remain supported; attempts are positive exact integers. Discovery keeps its existing attempt-number limits. Supplied known payload fields receive structural checks, without adding required fields or process-identity authority. Optional null session/start-time values and additive finite JSON data remain valid. This format is not a public wire capability.
+
+Parsed reads return absence only after verifying the path is missing. Unqualified, foreign, incompatible, malformed, unreadable, symlinked, nonregular or observably changed sources remain undecidable. Reads do not retry or impose a new byte budget. Qualification does not establish process death or authorize signalling, lease recovery or attach release.
+
+Every candidate is fully qualified and encoded before temporary-file creation. Publication retains fsync and once-only hardlink semantics: an existing phase is never overwritten, adopted, repaired or relabelled. Candidate failures raise `PhaseWriteError` before an intent can authorize signalling; ownership errors remain separate. Existing bounded inline phase-write retries and unbounded background phase retries are unchanged.
+
+Filename-presence latches remain a separate protocol: sig outranks failed, nosig resolves its join, failed takeover releases its reservation, and unreadable ready remains conservatively present. Permanent lock files and lease, signal and retention rules are unchanged. Parsed payload qualification does not qualify these presence latches or change their physical symlink policy.
+
+Older flat development req/join documents remain conservatively pending and protect retention; flat takeover req/attach documents retain busy reservations, and flat sig payloads cannot authorize leader cancellation. Preserve the old root for manual inspection and select a separate fresh missing or empty compatible root. No import, rewrite, migration or automatic repair is provided.
