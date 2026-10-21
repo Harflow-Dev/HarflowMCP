@@ -51,6 +51,7 @@ import fcntl
 import json
 import logging
 import os
+import stat
 import threading
 import time
 import uuid
@@ -59,7 +60,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
-from . import control, identity, inbox, store
+from . import control, identity, inbox, store, followup_documents
+from .catalog import source_identity
 
 log = logging.getLogger(__name__)
 
@@ -79,7 +81,7 @@ SUCCESSOR_CACHE_LIMIT = 256
 
 QUEUED, RESERVED, CONSUMED, CANCELLED = "queued", "reserved", "consumed", "cancelled"
 UNDELIVERABLE, DELIVERY_UNKNOWN = "undeliverable", "delivery_unknown"
-STATUSES = frozenset({QUEUED, RESERVED, CONSUMED, CANCELLED, UNDELIVERABLE, DELIVERY_UNKNOWN})
+STATUSES = followup_documents.STATUSES
 FINAL_STATUSES = frozenset({CONSUMED, CANCELLED})
 OUTSTANDING_STATUSES = STATUSES - FINAL_STATUSES
 
@@ -139,57 +141,82 @@ def _empty() -> dict[str, Any]:
     return {"v": 1, "next_seq": 1, "sealed_by": None, "items": [], "omitted_final": 0}
 
 
+class _Document(dict):
+    """Inner ledger with private, nonserialized source provenance."""
+
+    def __init__(self, ledger, task_id, source, envelope=None, *, path):
+        super().__init__(ledger)
+        self.task_id, self.source, self.envelope = task_id, source, envelope
+        self.path = path.absolute()
+
+
 def _valid(doc: Any) -> bool:
-    if not isinstance(doc, dict) or doc.get("v") != 1:
+    try:
+        followup_documents.validate(doc)
+        return True
+    except (ValueError, TypeError, RecursionError):
         return False
-    next_seq, omitted = doc.get("next_seq"), doc.get("omitted_final")
-    if type(next_seq) is not int or next_seq < 1 or type(omitted) is not int or omitted < 0:
-        return False
-    sealed = doc.get("sealed_by")
-    if sealed is not None and not isinstance(sealed, str):
-        return False
-    items = doc.get("items")
-    if not isinstance(items, list):
-        return False
-    seen: set[str] = set()
-    for item in items:
-        if not isinstance(item, dict):
-            return False
-        identifier, seq, status = item.get("id"), item.get("seq"), item.get("status")
-        if not isinstance(identifier, str) or identifier in seen or type(seq) is not int:
-            return False
-        seen.add(identifier)
-        if status not in STATUSES:
-            return False
-        if status in OUTSTANDING_STATUSES and not isinstance(item.get("text"), str):
-            return False
-    return True
+
+
+def _source(path: Path):
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise Unavailable("follow-up source cannot be inspected") from exc
+    if not stat.S_ISREG(info.st_mode):
+        raise Unavailable("follow-up source is not a regular file")
+    return source_identity(info)
+
+
+def _check_source(path: Path, doc: dict[str, Any]) -> None:
+    if not isinstance(doc, _Document) or path.absolute() != doc.path or _source(path) != doc.source:
+        raise Unavailable("follow-up source changed before replacement")
 
 
 def _load(log_dir: Path, task_id: str) -> dict[str, Any]:
-    """The ledger, or an empty one when none exists. Raises `Unavailable`."""
+    """Qualify a bounded source, or capture verified initial absence."""
     assert_task_owned(log_dir)
     path = state_path(log_dir, task_id)
+    descriptor = None
     try:
-        with path.open("rb") as handle:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode):
+            raise Unavailable("follow-up source is not a regular file")
+        source = source_identity(opened)
+        if opened.st_size > READ_BUDGET_BYTES:
+            raise Unavailable("follow-up source exceeds its read budget")
+        with os.fdopen(os.dup(descriptor), "rb") as handle:
             data = handle.read(READ_BUDGET_BYTES + 1)
-    except FileNotFoundError:
-        return _empty()
-    except OSError as exc:
-        raise Unavailable(f"the follow-up ledger of task {task_id} cannot be read: {exc}") from exc
-    if len(data) > READ_BUDGET_BYTES:
-        raise Unavailable(f"the follow-up ledger of task {task_id} exceeds its read budget")
+        if len(data) > READ_BUDGET_BYTES:
+            raise Unavailable("follow-up source exceeds its read budget")
+        if source_identity(os.fstat(descriptor)) != source or _source(path) != source:
+            raise Unavailable("follow-up source changed during read")
+        envelope = json.loads(data.decode("utf-8"))
+        ledger = followup_documents.decode(envelope, task_id)
+        return _Document(ledger, task_id, source, envelope, path=path)
+    except FileNotFoundError as exc:
+        if descriptor is None and _source(path) is None:
+            return _Document(_empty(), task_id, None, path=path)
+        raise Unavailable("follow-up source disappeared during read") from exc
+    except (OSError, ValueError, UnicodeError, TypeError, RecursionError,
+            followup_documents.FollowupDocumentError) as exc:
+        raise Unavailable(f"the follow-up ledger of task {task_id} is unavailable") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _serialize(doc: dict[str, Any], task_id: str | None = None) -> bytes:
     try:
-        doc = json.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError) as exc:
-        raise Unavailable(f"the follow-up ledger of task {task_id} is not valid JSON") from exc
-    if not _valid(doc):
-        raise Unavailable(f"the follow-up ledger of task {task_id} is not a valid ledger")
-    return doc
-
-
-def _serialize(doc: dict[str, Any]) -> bytes:
-    return json.dumps(doc, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        task_id = task_id if task_id is not None else doc.task_id
+        envelope = followup_documents.encode(doc, task_id, envelope=getattr(doc, "envelope", None))
+        return json.dumps(envelope, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
+    except (AttributeError, ValueError, TypeError, RecursionError, UnicodeError,
+            followup_documents.FollowupDocumentError) as exc:
+        raise Unavailable("follow-up candidate failed qualification") from exc
 
 
 def _final(item: dict[str, Any], status: str, at: str) -> dict[str, Any]:
@@ -212,25 +239,35 @@ def _compact(doc: dict[str, Any]) -> None:
 
 
 def _store(log_dir: Path, task_id: str, doc: dict[str, Any], limit: int = READ_BUDGET_BYTES) -> None:
-    """Replace the document atomically. Raises `_TooLarge` or `OSError`."""
+    """Replace a source-bound qualified document; refuse changed or unqualified sources."""
     assert_task_owned(log_dir)
     store.read(log_dir, task_id, include_prompt=False)
+    if not isinstance(doc, _Document) or doc.task_id != task_id:
+        raise Unavailable("follow-up candidate has no source provenance")
+    if not _valid(doc):
+        raise Unavailable("follow-up candidate failed qualification")
     _compact(doc)
-    data = _serialize(doc)
+    data = _serialize(doc, task_id)
     if len(data) > limit:
         raise _TooLarge()
     path = state_path(log_dir, task_id)
     temporary = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
+    created = False
     try:
         with temporary.open("xb") as handle:
+            created = True
             os.fchmod(handle.fileno(), 0o600)
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
+            replacement = source_identity(os.fstat(handle.fileno()))
+        _check_source(path, doc)
         os.replace(temporary, path)
+        doc.source = replacement
         control._fsync_dir(log_dir)
     finally:
-        temporary.unlink(missing_ok=True)
+        if created:
+            temporary.unlink(missing_ok=True)
 
 
 # --- locking ----------------------------------------------------------------------------------
@@ -503,6 +540,8 @@ def send(
                 raise inbox.SendRefused(
                     f"could not queue the message for task {task_id}: {exc}", code="write_failed"
                 ) from exc
+    except Unavailable as exc:
+        raise inbox.SendRefused(str(exc), code="unavailable") from exc
     except control.LockTimeout:
         raise inbox.SendRefused(
             f"task {task_id}'s follow-up queue is locked by another process; try again shortly",
@@ -577,6 +616,8 @@ def cancel(
                 f"task {task_id} has no message {message_id}; it may be older than the retained "
                 "history", code="unknown_message",
             )
+    except Unavailable as exc:
+        raise inbox.SendRefused(str(exc), code="unavailable") from exc
     except control.LockTimeout:
         raise inbox.SendRefused(
             f"task {task_id}'s follow-up queue is locked by another process; try again shortly",
@@ -611,9 +652,9 @@ def view(log_dir: Path, task_id: str) -> dict[str, Any]:
     process still owes are applied to what is shown, and resolutions this read observes are
     persisted by the next lock holder (send, cancel, a consuming continuation, retention)."""
     try:
-        if not state_path(log_dir, task_id).exists():
-            return {"state": "available", "items": [], "omitted_final": 0}
         doc = _load(log_dir, task_id)
+        if doc.source is None:
+            return _present(doc)
         with _PENDING_GUARD:
             owed = list(_PENDING.get(_key(log_dir, task_id), ()))
         for successor, ids, outcome, reason in owed:
@@ -645,8 +686,6 @@ def outstanding_count(log_dir: Path, task_id: str) -> int | None:
     """Outstanding items for a listing: 0 with no ledger, None when it cannot be read. Cheap, and
     without the read-time rules."""
     try:
-        if not state_path(log_dir, task_id).exists():
-            return 0
         doc = _load(log_dir, task_id)
     except (Unavailable, store.InvalidTaskId):
         return None
@@ -742,6 +781,11 @@ def hold_for_delete(log_dir: Path, task_id: str) -> Iterator[str]:
         if any(item["status"] in (QUEUED, RESERVED) for item in doc["items"]):
             yield "blocked"
             return
+        try:
+            _check_source(state_path(log_dir, task_id), doc)
+        except Unavailable:
+            yield "blocked"
+            return
         yield "ok"
     finally:
         control.release(fd)
@@ -783,13 +827,14 @@ def _reserve(
                 doc = _load(log_dir, task_id)
             except Unavailable as exc:
                 raise _not_started(
-                    f"{exc}. Inspect or remove {state_path(log_dir, task_id)} to continue it"
+                    f"{exc}. Inspect the follow-up ledger outside the engine before continuing"
                 ) from exc
             if _resolve(log_dir, record, doc, _lazy(lambda: successor_candidates(log_dir, record))
                         if record is not None else None):
                 _persist(log_dir, task_id, doc)
             queued = sorted((item for item in doc["items"] if item["status"] == QUEUED), key=lambda i: i["seq"])
             if not queued:
+                _check_source(state_path(log_dir, task_id), doc)
                 return []
             now = _now()
             for item in queued:
@@ -798,14 +843,16 @@ def _reserve(
             _INFLIGHT.add(_key(log_dir, successor))
             try:
                 _store(log_dir, task_id, doc)
-            except (_TooLarge, OSError) as exc:
+                return [dict(item) for item in queued]
+            except BaseException:
                 _INFLIGHT.discard(_key(log_dir, successor))
-                raise _not_started(f"could not reserve the queued follow-ups of task {task_id}: {exc}") from exc
-            return [dict(item) for item in queued]
+                raise
     except control.LockTimeout:
         raise _not_started(
             f"task {task_id}'s follow-up queue is locked by another process; try again shortly"
         ) from None
+    except (Unavailable, _TooLarge, OSError) as exc:
+        raise _not_started(f"could not reserve the queued follow-ups of task {task_id}: {exc}") from exc
 
 
 @task_operation

@@ -83,10 +83,11 @@ manual calls with the same `extra_prompt` and notes are the same request whateve
 share one successor; a retry returns or names that successor (from another server process it fails with `Continuation already exists: <id>`) without recomposing consumed prose. After a
 proven pre-exec failure a retry reserves the then-current queue.
 
-An unreadable ledger (damaged, over its read budget, or not a valid ledger) reads as `unavailable`.
+The ledger uses the qualified `harflow.task.followups` envelope described in [contracts](contracts.md#queued-follow-up-ledgers). Observable source replacement can conservatively report unavailable until a later operation reads a stable qualified source.
+
+An unreadable or unqualified ledger (damaged, over its read budget, foreign, unversioned, or incompatible) reads as `unavailable`.
 It blocks consuming `resume_task` and `continue_task` for that task, refuses sends, and keeps the
-task from retention, because it cannot be shown to be empty. The error names the file
-(`<task_id>.followups.json` in the task log directory): inspect it, then repair or delete it.
+task from retention, because it cannot be shown to be empty. The file is `<task_id>.followups.json` in the task log directory. Preserve it for manual inspection outside the engine; readers never repair, relabel or adopt it. For recovery, preserve the old state root and select a separate fresh missing or empty root. No historical conversion is supported.
 `queued_followup_count` is on briefs and full snapshots, but not on the cached compact-listing
 headers (`list_tasks` pages, `task-list-page`). Status reads never write the ledger; a resolution
 they observe is persisted by the next send, cancel, consuming continuation or retention pass.

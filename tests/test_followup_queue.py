@@ -22,7 +22,7 @@ from pathlib import Path
 import pytest
 from mcp import MCPError
 
-from harflow_mcp import backends, control, ctl, followups, inbox, retention, server, store
+from harflow_mcp import backends, control, ctl, followup_documents, followups, inbox, retention, server, store
 from harflow_mcp import state_ownership
 from harflow_mcp.events import events_path
 from harflow_mcp.state_layout import resolve_layout
@@ -53,7 +53,8 @@ def put_record(log_dir: Path, task_id: str = SRC, *, age_days: int = 0, **overri
 
 
 def state_doc(log_dir: Path, task_id: str = SRC) -> dict:
-    return json.loads(followups.state_path(log_dir, task_id).read_text())
+    path = followups.state_path(log_dir, task_id)
+    return followup_documents.decode(json.loads(path.read_text()), task_id)
 
 
 def statuses(log_dir: Path, task_id: str = SRC) -> list[str]:
@@ -257,6 +258,81 @@ def test_an_unreadable_ledger_reads_unavailable_and_refuses_sends(log_dir: Path)
             send(log_dir)
         assert caught.value.code == "unavailable"
         assert followups.outstanding_count(log_dir, SRC) is None
+
+
+def test_verified_absence_status_paths_do_not_scan_task_history(
+    log_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    put_record(log_dir)
+
+    def history_must_not_be_read(*args, **kwargs):
+        raise AssertionError("verified follow-up absence must not scan task history")
+
+    monkeypatch.setattr(store, "scan", history_must_not_be_read)
+    assert followups.view(log_dir, SRC) == {"state": "available", "items": [], "omitted_final": 0}
+    assert followups.outstanding_count(log_dir, SRC) == 0
+
+
+def test_unhashable_inner_ledger_values_are_unavailable_everywhere(log_dir: Path) -> None:
+    put_record(log_dir)
+    document = followup_documents.encode(followups._empty(), SRC)
+    document["ledger"]["items"] = [{"id": [], "seq": 1, "status": "queued", "text": "x"}]
+    followups.state_path(log_dir, SRC).write_text(json.dumps(document), encoding="utf-8")
+
+    assert followups.view(log_dir, SRC)["state"] == "unavailable"
+    assert followups.outstanding_count(log_dir, SRC) is None
+    assert followups.protected_task_ids(log_dir) == {SRC}
+
+
+def test_recursive_additive_ledger_values_are_unavailable_everywhere(log_dir: Path) -> None:
+    put_record(log_dir)
+    document = followup_documents.encode(followups._empty(), SRC)
+    deep = b"[" * 2048 + b"0" + b"]" * 2048
+    raw = json.dumps(document, separators=(",", ":")).encode()
+    raw = raw[:-1] + b',"future_outer":' + deep + b"}"
+    followups.state_path(log_dir, SRC).write_bytes(raw)
+
+    assert followups.view(log_dir, SRC)["state"] == "unavailable"
+    assert followups.outstanding_count(log_dir, SRC) is None
+    assert followups.protected_task_ids(log_dir) == {SRC}
+
+
+def test_candidate_failure_is_an_unavailable_send_and_does_not_append(
+    log_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    put_record(log_dir)
+    send(log_dir, "existing")
+    path = followups.state_path(log_dir, SRC)
+    before = path.read_bytes()
+
+    def candidate_failure(*args, **kwargs):
+        raise followups.Unavailable("candidate history unavailable")
+
+    monkeypatch.setattr(followups, "successor_candidates", candidate_failure)
+    with pytest.raises(inbox.SendRefused) as caught:
+        send(log_dir, "must not append")
+
+    assert caught.value.code == "unavailable"
+    assert path.read_bytes() == before
+
+
+def test_finish_codec_failure_returns_false_and_retains_pending(
+    log_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    put_record(log_dir)
+    send(log_dir, "queued")
+    reserved = followups._reserve(log_dir, SRC, "codec-failure-successor", OWNER)
+    assert reserved
+
+    def codec_failure(*args, **kwargs):
+        raise followups.Unavailable("candidate failed qualification")
+
+    monkeypatch.setattr(followups, "_serialize", codec_failure)
+    assert not followups.finish(
+        log_dir, SRC, "codec-failure-successor", [reserved[0]["id"]], followups.CONSUMED
+    )
+    assert (str(log_dir), SRC) in followups._PENDING
+    assert (str(log_dir), "codec-failure-successor") not in followups._INFLIGHT
 
 
 def test_concurrent_sends_from_threads_get_unique_ordered_seqs(log_dir: Path) -> None:
@@ -688,7 +764,9 @@ def reserved_ledger(log_dir: Path, successor: str, owner: dict) -> None:
     doc = state_doc(log_dir)
     doc["items"][0].update(status="reserved", successor_task_id=successor, owner=owner)
     doc["sealed_by"] = successor
-    followups.state_path(log_dir, SRC).write_text(json.dumps(doc))
+    followups.state_path(log_dir, SRC).write_text(
+        json.dumps(followup_documents.encode(doc, SRC)), encoding="utf-8"
+    )
 
 
 def test_a_reserved_item_whose_successor_exists_reads_consumed_and_the_next_lock_holder_persists_it(
@@ -715,6 +793,86 @@ def test_a_reserved_item_with_a_dead_owner_and_no_successor_is_delivery_unknown(
         send(log_dir)
     assert statuses(log_dir) == ["delivery_unknown"]
     assert state_doc(log_dir)["sealed_by"] == "never-started"
+
+
+async def test_reservation_rejects_source_replacement_after_resolution_to_empty(
+    log_dir: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    put_record(log_dir)
+    send(log_dir, "first")
+    send(log_dir, "second")
+    doc = state_doc(log_dir)
+    for item in doc["items"]:
+        item.update(status="reserved", successor_task_id="existing", owner=OWNER)
+    doc["sealed_by"] = "existing"
+    path = followups.state_path(log_dir, SRC)
+    path.write_text(json.dumps(followup_documents.encode(doc, SRC)), encoding="utf-8")
+    put_record(log_dir, "existing", parent_task_id=SRC)
+
+    real_resolve = followups._resolve
+    replacement = followup_documents.encode(followups._empty(), SRC)
+
+    def resolve_then_replace(*args, **kwargs):
+        changed = real_resolve(*args, **kwargs)
+        if changed:
+            substitute = path.with_name(path.name + ".replacement")
+            substitute.write_text(json.dumps(replacement), encoding="utf-8")
+            os.replace(substitute, path)
+        return changed
+
+    # Resolution consumes both reserved items, leaving no queued item and therefore no normal
+    # persistence path. The source replacement must still prevent a continuation launch.
+    monkeypatch.setattr(followups, "_resolve", resolve_then_replace)
+    with pytest.raises(ValueError) as caught:
+        await followups.begin(log_dir, SRC, "new-successor", OWNER)
+    assert getattr(caught.value, "harflow_not_started", False) is True
+    assert path.read_bytes() == json.dumps(replacement).encode()
+    assert (str(log_dir), "new-successor") not in followups._INFLIGHT
+
+
+@pytest.mark.parametrize("failure", [state_ownership.StateOwnershipError("ownership changed"), store.TaskDocumentError("src", "task changed")])
+async def test_reservation_exception_clears_inflight(
+    log_dir: Path, monkeypatch: pytest.MonkeyPatch, failure: Exception
+) -> None:
+    put_record(log_dir)
+    send(log_dir, "queued")
+
+    def ownership_failure(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(followups, "_store", ownership_failure)
+    with pytest.raises(type(failure)):
+        await followups.begin(log_dir, SRC, "ownership-successor", OWNER)
+    assert (str(log_dir), "ownership-successor") not in followups._INFLIGHT
+
+
+def test_pending_terminal_retry_keeps_foreign_replacement_and_owed_entry(
+    log_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    put_record(log_dir)
+    send(log_dir, "queued")
+    reserved = followups._reserve(log_dir, SRC, "pending-successor", OWNER)
+    assert reserved
+
+    def write_failure(*args, **kwargs):
+        raise OSError("simulated terminal write failure")
+
+    monkeypatch.setattr(followups, "_store", write_failure)
+    assert not followups.finish(
+        log_dir, SRC, "pending-successor", [reserved[0]["id"]], followups.CONSUMED
+    )
+    monkeypatch.undo()
+
+    path = followups.state_path(log_dir, SRC)
+    foreign = followup_documents.encode(followups._empty(), SRC)
+    foreign["product"] = "foreign"
+    path.write_text(json.dumps(foreign), encoding="utf-8")
+    before = path.read_bytes()
+    with state_ownership.state_session(resolve_layout(log_dir=log_dir)):
+        followups._retry_pending(log_dir, SRC)
+
+    assert path.read_bytes() == before
+    assert (str(log_dir), SRC) in followups._PENDING
 
 
 def test_another_live_owners_reservation_stays_reserved(log_dir: Path, identities) -> None:
@@ -1002,7 +1160,9 @@ def test_retention_does_not_block_on_delivery_unknown_or_undeliverable(log_dir: 
     send(log_dir, "unknown fate")
     doc = state_doc(log_dir)
     doc["items"][0].update(status="delivery_unknown", reason="x")
-    followups.state_path(log_dir, SRC).write_text(json.dumps(doc))
+    followups.state_path(log_dir, SRC).write_text(
+        json.dumps(followup_documents.encode(doc, SRC)), encoding="utf-8"
+    )
     assert sweep(log_dir)["deleted_tasks"] == 1 and store.read(log_dir, SRC) is None
 
 
@@ -1087,6 +1247,147 @@ def test_retention_protects_a_task_whose_ledger_cannot_be_read(log_dir: Path) ->
     followups.state_path(log_dir, SRC).write_text("{broken")
     assert followups.protected_task_ids(log_dir) == {SRC}
     assert sweep(log_dir)["deleted_tasks"] == 0
+
+
+@pytest.mark.parametrize("kind", ["dangling", "directory"])
+def test_dangling_or_nonregular_ledger_is_unavailable_and_retained(
+    log_dir: Path, kind: str
+) -> None:
+    put_record(log_dir, age_days=40)
+    path = followups.state_path(log_dir, SRC)
+    if kind == "dangling":
+        path.symlink_to(path.with_name("missing-followup-target"))
+    else:
+        path.mkdir()
+
+    assert followups.view(log_dir, SRC)["state"] == "unavailable"
+    assert followups.outstanding_count(log_dir, SRC) is None
+    assert followups.protected_task_ids(log_dir) == {SRC}
+    assert sweep(log_dir)["deleted_tasks"] == 0
+
+
+def test_hold_for_delete_rechecks_ledger_source_before_yield(
+    log_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    put_record(log_dir, age_days=40)
+    message = send(log_dir, "keep me")
+    followups.cancel(log_dir, SRC, message["message_id"])
+    path = followups.state_path(log_dir, SRC)
+    replacement = followup_documents.encode(followups._empty(), SRC)
+
+    def run_with_source_check(enabled: bool) -> bytes:
+        path.write_text(json.dumps(followup_documents.encode(followups._empty(), SRC)), encoding="utf-8")
+        real_load = followups._load
+
+        def load_then_replace(*args, **kwargs):
+            document = real_load(*args, **kwargs)
+            substitute = path.with_name(path.name + ".replacement")
+            substitute.write_text(json.dumps(replacement), encoding="utf-8")
+            os.replace(substitute, path)
+            return document
+
+        monkeypatch.setattr(followups, "_load", load_then_replace)
+        if not enabled:
+            monkeypatch.setattr(followups, "_check_source", lambda *args, **kwargs: None)
+        with followups.hold_for_delete(log_dir, SRC) as verdict:
+            assert verdict == ("blocked" if enabled else "ok")
+        monkeypatch.undo()
+        return path.read_bytes()
+
+    assert run_with_source_check(True) == json.dumps(replacement).encode()
+    assert run_with_source_check(False) == json.dumps(replacement).encode()
+
+
+def test_two_stores_on_one_loaded_document_refresh_provenance(
+    log_dir: Path,
+) -> None:
+    put_record(log_dir)
+    send(log_dir, "initial")
+    path = followups.state_path(log_dir, SRC)
+    with state_ownership.state_session(resolve_layout(log_dir=log_dir)):
+        document = followups._load(log_dir, SRC)
+        document["items"][0]["text"] = "first store"
+        followups._store(log_dir, SRC, document)
+        document["items"][0]["text"] = "second store"
+        followups._store(log_dir, SRC, document)
+    assert state_doc(log_dir)["items"][0]["text"] == "second store"
+    assert path.exists()
+
+
+@pytest.mark.parametrize("race", ["appears", "disappears", "replacement"])
+def test_store_source_target_races_never_replace_unexpected_bytes(
+    log_dir: Path, race: str
+) -> None:
+    task_id = f"race-{race}"
+    put_record(log_dir, task_id)
+    if race != "appears":
+        send(log_dir, "initial", task_id=task_id)
+    path = followups.state_path(log_dir, task_id)
+    foreign = followup_documents.encode(followups._empty(), task_id)
+    with state_ownership.state_session(resolve_layout(log_dir=log_dir)):
+        document = followups._load(log_dir, task_id)
+        document["next_seq"] += 1
+        if race == "appears":
+            path.write_text(json.dumps(foreign), encoding="utf-8")
+            before = path.read_bytes()
+        elif race == "disappears":
+            path.unlink()
+            before = None
+        else:
+            substitute = path.with_name(path.name + ".replacement")
+            substitute.write_text(json.dumps(foreign), encoding="utf-8")
+            os.replace(substitute, path)
+            before = path.read_bytes()
+        with pytest.raises(followups.Unavailable):
+            followups._store(log_dir, task_id, document)
+    if before is None:
+        assert not path.exists()
+    else:
+        assert path.read_bytes() == before
+
+
+async def test_unchanged_verified_absence_still_allows_empty_reservation(log_dir: Path) -> None:
+    put_record(log_dir, "absence-control")
+    attempt = await followups.begin(log_dir, "absence-control", "absence-successor", OWNER)
+    assert attempt.items == []
+    assert not followups.state_path(log_dir, "absence-control").exists()
+    assert (str(log_dir), "absence-successor") not in followups._INFLIGHT
+
+
+async def test_reservation_lock_timeout_keeps_dedicated_not_started_message(
+    log_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    put_record(log_dir, "lock-timeout")
+    send(log_dir, "queued", task_id="lock-timeout")
+
+    def timeout(*args, **kwargs):
+        raise control.LockTimeout("injected lock timeout")
+
+    # Inject at the actual flock boundary so _reserve's catch ordering is exercised.
+    monkeypatch.setattr(control, "_flock_sync", timeout)
+    with pytest.raises(ValueError) as caught:
+        await followups.begin(log_dir, "lock-timeout", "lock-successor", OWNER)
+
+    assert getattr(caught.value, "harflow_not_started", False) is True
+    assert "locked by another process; try again shortly" in str(caught.value)
+    assert (str(log_dir), "lock-successor") not in followups._INFLIGHT
+
+
+def test_admission_budget_counts_qualified_envelope_bytes(
+    log_dir: Path,
+) -> None:
+    put_record(log_dir)
+    send(log_dir, "initial")
+    with state_ownership.state_session(resolve_layout(log_dir=log_dir)):
+        document = followups._load(log_dir, SRC)
+        document["items"].append({"id": "boundary", "seq": document["next_seq"], "status": "queued", "text": "x"})
+        document["next_seq"] += 1
+        inner_bytes = len(json.dumps(dict(document), ensure_ascii=False, separators=(",", ":")).encode())
+        envelope_bytes = len(followups._serialize(document))
+        assert envelope_bytes > inner_bytes
+        with pytest.raises(followups._TooLarge):
+            followups._store(log_dir, SRC, document, inner_bytes)
+        followups._store(log_dir, SRC, document, envelope_bytes)
 
 
 # --- review round 1: transport, loop and cross-lock behaviour --------------------------------------------------
