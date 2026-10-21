@@ -1,6 +1,6 @@
 # Harflow public wire contracts
 
-HarflowMCP 1.0.0 is unreleased. This specification covers ctl, setup, normalized events and version-info. Persisted task metadata, saved workflow definitions, workflow run documents, ownership receipts, follow-up ledgers, control phase payloads and live-input inbox rows use qualified Harflow formats; artifact documents retain their existing format; store ownership is defined below, while migration remains unsupported. Raw vendor streams, MCP negotiation, cursors and internal indexes are unchanged.
+HarflowMCP 1.0.0 is unreleased. This specification covers ctl, setup, normalized events and version-info. Persisted task metadata, saved workflow definitions, workflow run documents, ownership receipts, follow-up ledgers, control phase payloads, live-input inbox rows and task artifact manifests use qualified Harflow formats; store ownership is defined below, while migration remains unsupported. Raw vendor streams, MCP negotiation, cursors and internal indexes are unchanged.
 
 ## Common envelope
 
@@ -48,7 +48,7 @@ Invalid selected roots produce the existing format-specific JSON `usage` error a
 
 ## State ownership and recovery
 
-An engine operation initializes a missing or empty selected root with `.harflow-store.json` and the stable `.harflow-store.lock`. The marker contains `product: "harflow"`, `format: "harflow.store"`, integer `v: 1`, integer `layout_version: 1`, and the creating engine's `product_version`. Compatible engines require the same stable major/minor product line; patch releases in either direction may share it. This marker establishes root ownership independently of each payload format. Task metadata, saved workflow definitions and workflow runs must also pass their document qualification below. Artifact and event formats are unchanged by store ownership.
+An engine operation initializes a missing or empty selected root with `.harflow-store.json` and the stable `.harflow-store.lock`. The marker contains `product: "harflow"`, `format: "harflow.store"`, integer `v: 1`, integer `layout_version: 1`, and the creating engine's `product_version`. Compatible engines require the same stable major/minor product line; patch releases in either direction may share it. This marker establishes root ownership independently of each payload format. Task metadata, saved workflow definitions and workflow runs must also pass their document qualification below. Artifact manifests require their own qualification below; event formats are unchanged by store ownership.
 
 The marker, lock and `.harflow-store.json.pending` publication file are reserved engine infrastructure. They must be regular files rather than symlinks. Do not delete, replace or edit them to bypass a refusal. The engine recovers only its narrowly recognized interrupted first-initialization state; it does not relabel existing data.
 
@@ -140,3 +140,11 @@ Qualification is row-local: unqualified flat development rows, foreign or incomp
 Writers fully qualify and encode the UTF-8 candidate before opening the append target or terminating a torn tail. Candidate failures use the existing write-failure path and do not change existing bytes. Durable append, sender marker recheck, queued acknowledgements and delivery-event evidence retain their existing meanings. The inbox inode remains the permanent flock identity: no replacement, truncation, reset, historical rewrite or automatic migration occurs. Row qualification does not bind reopened paths to lock descriptors against external substitution or introduce a delivery transaction, retry or recovery guarantee. Pending display qualifies only inbox rows; independently parsed delivery events retain their own format and incomplete-evidence suppression.
 
 Preserve old state for inspection and select a separate missing or empty compatible root for recovery. This unreleased private format is not a public wire capability and does not change the store layout version.
+
+## Task artifact manifests
+
+`tasks/<task_id>.artifacts.json` uses a flat private header with `product: "harflow"`, `format: "harflow.task.artifacts"`, exact integer `v: 1`, compatible stable major/minor `product_version`, filename-bound `task_id`, and the existing `items` array. The full document must contain finite JSON, including additive outer fields. Item, provenance and workflow-binding checks remain independent of this header; qualification grants no caller or path authority. This format is not a public wire capability.
+
+Missing manifests remain empty registration sets. Existing unqualified development manifests, foreign or incompatible headers, malformed documents and unreadable sources report unavailable and cannot be overwritten by registration. No adoption, conversion or repair is provided; preserve old state and select a separate fresh missing or empty compatible root.
+
+The complete persisted bytes, including the header, count toward the existing 1 MiB manifest cap and shared metadata budgets and determine task cursor revisions. Reads retain no-follow regular-file checks; registration retains the existing task/catalog locks and owned-directory atomic publication. Duplicate immutable references, workflow selection and stat-only target observations are unchanged. Manifest qualification does not read, copy or hash referenced file contents.

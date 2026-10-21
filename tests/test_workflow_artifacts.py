@@ -49,16 +49,28 @@ def _binding(task_id="worker", *, role="node", run_id="run", execution_id="exec"
     }
 
 
+def _manifest(task_id, items):
+    """Build a qualified raw manifest for tests that bypass the producer."""
+    return {
+        "product": "harflow",
+        "format": "harflow.task.artifacts",
+        "v": 1,
+        "product_version": "1.0.0",
+        "task_id": task_id,
+        "items": items,
+    }
+
+
 def test_manifest_workflow_binding_is_optional_but_strict(tmp_path):
     logs = tmp_path / "tasks"
     logs.mkdir(exist_ok=True)
     task_id = "worker"
     path = logs / f"{task_id}.artifacts.json"
-    path.write_text(json.dumps({"v": 1, "task_id": task_id, "items": [_item(task_id, workflow=_binding(task_id))]}))
+    path.write_text(json.dumps(_manifest(task_id, [_item(task_id, workflow=_binding(task_id))])))
     assert artifacts._load(logs, task_id)[0][0]["workflow"]["execution_id"] == "exec"
 
     malformed = _item(task_id, workflow=_binding(task_id) | {"task_id": "other"})
-    path.write_text(json.dumps({"v": 1, "task_id": task_id, "items": [malformed]}))
+    path.write_text(json.dumps(_manifest(task_id, [malformed])))
     with pytest.raises(ValueError, match="manifest workflow binding"):
         artifacts._load(logs, task_id)
 

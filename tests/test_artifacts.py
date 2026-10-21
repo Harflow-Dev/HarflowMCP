@@ -261,6 +261,94 @@ def test_manifest_provenance_and_duplicate_id_rejected(setup):
     assert artifacts.summary(logs, record.task_id)['state'] == 'unavailable'
 
 
+def test_manifest_inner_validation_runs_after_qualified_header(setup):
+    logs, repo, record = setup
+    target = repo / 'report'
+    target.write_text('hello')
+    artifacts.register(logs, str(target), 'report')
+    path = artifacts._path(logs, record.task_id)
+    qualified = json.loads(path.read_text())
+    qualified['items'][0]['registered_observation'] = 1
+    path.write_text(json.dumps(qualified))
+    assert artifacts.get(logs, record.task_id)['state'] == 'unavailable'
+
+
+def test_manifest_full_header_bytes_are_subject_to_limit(setup):
+    logs, repo, record = setup
+    target = repo / 'report'
+    target.write_text('hello')
+    artifacts.register(logs, str(target), 'report')
+    path = artifacts._path(logs, record.task_id)
+    document = json.loads(path.read_text())
+    document['future_manifest_field'] = 'x' * artifacts.MAX_BYTES
+    path.write_text(json.dumps(document))
+    assert path.stat().st_size > artifacts.MAX_BYTES
+    with pytest.raises(ValueError):
+        artifacts.register(logs, str(target), 'report', 'replacement')
+
+
+def test_manifest_nonfinite_additive_data_is_unavailable(setup):
+    logs, repo, record = setup
+    target = repo / 'report'
+    target.write_text('hello')
+    artifacts.register(logs, str(target), 'report')
+    path = artifacts._path(logs, record.task_id)
+    document = json.loads(path.read_text())
+    document['future_manifest_field'] = float('nan')
+    path.write_text(json.dumps(document))
+    assert artifacts.summary(logs, record.task_id)['state'] == 'unavailable'
+
+
+def test_manifest_writer_counts_new_header_bytes_before_publication(setup, monkeypatch):
+    logs, repo, record = setup
+    target = repo / 'report'
+    target.write_text('hello')
+    artifacts.register(logs, str(target), 'report', 'note')
+    path = artifacts._path(logs, record.task_id)
+    qualified = json.loads(path.read_text())
+    legacy = {'v': 1, 'task_id': record.task_id, 'items': qualified['items']}
+    legacy_size = len(json.dumps(legacy, ensure_ascii=False).encode('utf-8'))
+    path.unlink()
+    monkeypatch.setattr(artifacts, 'MAX_BYTES', legacy_size)
+    with pytest.raises(ValueError, match='limit'):
+        artifacts.register(logs, str(target), 'report', 'note')
+    assert not path.exists()
+    assert not list(logs.glob(f'{record.task_id}.artifacts-*.tmp'))
+
+
+@pytest.mark.parametrize(
+    'mutator',
+    [
+        lambda value: value.update(product='foreign'),
+        lambda value: value.update(format='harflow.other'),
+        lambda value: value.update(v=True),
+        lambda value: value.update(v=2),
+        lambda value: value.update(product_version='2.0.0'),
+        lambda value: value.update(task_id='other'),
+        lambda value: value.pop('product'),
+        lambda value: value.pop('product_version'),
+    ],
+)
+def test_manifest_header_mismatch_refuses_without_overwriting(setup, mutator):
+    logs, repo, record = setup
+    target = repo / 'report'
+    target.write_text('hello')
+    artifacts.register(logs, str(target), 'report')
+    path = artifacts._path(logs, record.task_id)
+    original = path.read_bytes()
+    document = json.loads(original)
+    mutator(document)
+    path.write_text(json.dumps(document))
+    refused = path.read_bytes()
+    refused_inode = path.stat().st_ino
+    assert artifacts.summary(logs, record.task_id)['state'] == 'unavailable'
+    with pytest.raises(ValueError):
+        artifacts.register(logs, str(target), 'report', 'replacement')
+    assert path.read_bytes() == refused
+    assert path.stat().st_ino == refused_inode
+    assert refused != original
+
+
 def test_own_scratch_and_sibling_refusal(setup):
     logs, repo, record = setup
     from harflow_mcp import scratch
@@ -304,7 +392,11 @@ def test_manifest_bounds_special_shapes_and_no_target_content_read(setup, monkey
     artifacts.register(logs, str(target), 'report')
     manifest = artifacts._path(logs, record.task_id)
     valid = json.loads(manifest.read_text())
-    for shape in (None, 4, [], {'v': 1, 'task_id': record.task_id, 'items': [valid['items'][0] | {'registered_observation': 1}]}, {'v': 1, 'task_id': record.task_id, 'items': [valid['items'][0] | {'registered_observation': ['device', 'inode', 'size', 'mtime_ns']}]}):
+    malformed_observation = dict(valid)
+    malformed_observation['items'] = [valid['items'][0] | {'registered_observation': 1}]
+    malformed_observation_list = dict(valid)
+    malformed_observation_list['items'] = [valid['items'][0] | {'registered_observation': ['device', 'inode', 'size', 'mtime_ns']}]
+    for shape in (None, 4, [], malformed_observation, malformed_observation_list):
         manifest.write_text(json.dumps(shape))
         assert artifacts.get(logs, record.task_id)['state'] == 'unavailable'
     manifest.write_text('[' * 2000 + '0' + ']' * 2000)
@@ -857,7 +949,10 @@ def test_manifest_and_repeated_owner_reads_share_nested_budget(setup, monkeypatc
     logs, _, record = setup
     monkeypatch.setattr(artifacts, '_workflow_owner', lambda *args, **kwargs: None)
     manifest = artifacts._path(logs, record.task_id)
-    manifest.write_text(json.dumps({'v': 1, 'task_id': record.task_id, 'items': []}))
+    manifest.write_text(json.dumps({
+        'product': 'harflow', 'format': 'harflow.task.artifacts', 'v': 1,
+        'product_version': '1.0.0', 'task_id': record.task_id, 'items': [],
+    }))
     owner_size = store.record_path(logs, record.task_id).stat().st_size
     with metadata_request():
         budget = current_metadata_budget()

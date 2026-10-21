@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Qualify flat task artifact manifests with filename-bound Harflow identity and finite JSON; refuse unqualified or incompatible manifests without overwrite while preserving metadata-only references, cursor revisions and existing budgets.
 - Qualify individual live-input inbox rows with filename-bound Harflow envelopes before append; skip unqualified rows while preserving permanent locks, byte offsets, close markers and existing delivery evidence.
 - Qualify parsed control phase payloads with filename-bound Harflow envelopes and stable-source reads; preserve existing marker-presence, lease, signal and retention semantics, and refuse older flat development payload authority.
 - Qualify next-continuation follow-up ledgers with filename-bound Harflow envelopes and bounded source checks; refuse unqualified or changed sources before queue mutation, continuation launch or retention deletion.

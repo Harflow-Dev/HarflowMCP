@@ -19,7 +19,8 @@ from .canonical_paths import canonical
 from .extra_paths import restore_paths, revalidate_paths
 from .catalog import METADATA_BYTES, catalog_lock, current_metadata_budget, metadata_request
 from .bounded_io import ReadLimit
-from .workflow_run_documents import WorkflowRunDocumentError
+from .wire_contracts import PRODUCT, PRODUCT_VERSION, compatible_line
+from .workflow_run_documents import WorkflowRunDocumentError, _json
 
 MAX_BYTES = 1048576
 KINDS = frozenset(('screenshot', 'log', 'report', 'other'))
@@ -282,9 +283,13 @@ def _load(log_dir: Path, task_id: str, directory_fd: int | None = None):
             budget.metadata_decodes += 1
         try:
             data = json.loads(raw)
+            _json(data)
         except RecursionError as exc:
             raise ValueError('Artifact manifest nesting is unavailable') from exc
-        if len(raw) > MAX_BYTES or not isinstance(data, dict) or data.get('v') != 1 or data.get('task_id') != task_id:
+        if (len(raw) > MAX_BYTES or not isinstance(data, dict) or
+                data.get('product') != PRODUCT or data.get('format') != 'harflow.task.artifacts' or
+                type(data.get('v')) is not int or data['v'] != 1 or
+                not compatible_line(data.get('product_version')) or data.get('task_id') != task_id):
             raise ValueError('Artifact manifest is unavailable')
         items = data['items']
         if not isinstance(items, list) or len(items) > 100:
@@ -507,7 +512,9 @@ def register(log_dir: Path, path: str, kind: str, note: str = '') -> dict:
         item = {'artifact_id': str(uuid.uuid4()), 'task_id': record.task_id, 'path': str(target), 'kind': kind, 'note': note, 'registered_at': _now(), 'provenance': {'method': 'verified_process_lineage', 'task_id': record.task_id}, 'registered_observation': observed}
         if binding is not None:
             item['workflow'] = binding
-        raw = json.dumps({'v': 1, 'task_id': record.task_id, 'items': items + [item]}, ensure_ascii=False).encode('utf-8')
+        raw = json.dumps({'product': PRODUCT, 'format': 'harflow.task.artifacts', 'v': 1,
+                          'product_version': PRODUCT_VERSION, 'task_id': record.task_id,
+                          'items': items + [item]}, ensure_ascii=False, allow_nan=False).encode('utf-8')
         if len(raw) > MAX_BYTES:
             raise ValueError('Task artifact manifest limit reached')
         name = f'{record.task_id}.artifacts-{uuid.uuid4().hex}.tmp'

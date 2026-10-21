@@ -126,6 +126,14 @@ than requested. Cursors are bound to the task and manifest revision; restart pag
 when concurrent registration makes a cursor stale. Notes remain complete in detail
 pages. No file-content payload is included, regardless of referenced file size.
 
+Persisted manifests carry the private `harflow.task.artifacts` v1 header with Harflow
+product identity, a compatible stable major/minor product version and the owning task ID.
+The full document must contain finite JSON. Header bytes count toward the same manifest
+and read budgets and are included in task cursor revisions. Older unqualified development
+manifests and incompatible headers are refused without conversion or repair. Preserve old
+state and select a separate fresh missing or empty compatible root when recovery is needed.
+See [the manifest contract](contracts.md#task-artifact-manifests).
+
 Supported standalone tasks without a manifest have an empty registration set.
 Unsupported or unverifiable ownership (including workflow builders and unbound inherited
 descendants) reports an unavailable summary without a detail reference;
