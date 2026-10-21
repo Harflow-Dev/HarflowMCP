@@ -12,7 +12,7 @@ harflow-setup
 
 The commands are `harflow-server`, `harflow-ctl`, and `harflow-setup`. The MCP registration key is `harflow`. State defaults to `~/.harflow`; set `HARFLOW_STATE_ROOT` to a nonempty absolute path to select another root. Tasks use `<root>/tasks`. The override does not change HOME or vendor CLI configuration discovery. Existing Polybridge state is not imported. Invalid overrides fail before state creation; see [state layout and errors](contracts.md#selected-state-layout). The first engine operation initializes a fresh root. Nonempty unmarked roots and incompatible stores are refused; choose a new empty root rather than editing ownership files. See [state ownership and recovery](contracts.md#state-ownership-and-recovery).
 
-Ordinary headless agent dispatch is supported. Native workflow adapters, extra writable path grants, and companion app integration are currently unavailable; see [current qualification limits](development.md#current-qualification-limits).
+Ordinary headless agent dispatch is supported. Native workflow adapters and extra writable path grants are currently unavailable; see [current qualification limits](development.md#current-qualification-limits).
 
 ## Guides
 

@@ -15,7 +15,7 @@ Paid integration tests require explicit opt-in. The default unit suite makes no 
 
 Native Claude and Codex workflow adapters and extra writable path grants remain unavailable pending no-paid requalification of the renamed product. Ordinary headless agent dispatch remains supported. Historical qualification details in the guides do not certify HarflowMCP.
 
-Harflow macOS integration and automatic app opening are unavailable until the companion runtime is integrated. Setting `HARFLOW_OPEN_MONITOR=1` does not enable app opening.
+The companion Harflow macOS app prepares and qualifies its exact paired engine in app-independent managed storage; see its [managed runtime guide](https://github.com/Harflow-Dev/HarflowMac/blob/main/docs/managed-runtime.md). Local fixture validation does not establish PyPI package availability or signed distribution. Automatic app opening remains unavailable. Setting `HARFLOW_OPEN_MONITOR=1` does not enable app opening.
 
 ## Technical references
 
