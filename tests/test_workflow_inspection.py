@@ -9,6 +9,7 @@ from harflow_mcp import ctl, server
 from harflow_mcp import state_ownership
 from harflow_mcp.state_layout import resolve_layout
 from harflow_mcp.workflow_inspection import execution, result_page
+from workflow_receipt_fixtures import persist_receipt
 
 
 @pytest.fixture
@@ -28,7 +29,7 @@ def indexed_run(monkeypatch, tmp_path, value):
     storage = workflows.WorkflowStore(root=tmp_path)
     for activation in value.get("activations", []):
         for task in activation.get("tasks", []):
-            (storage.owners / (task["task_id"] + ".json")).write_text(json.dumps({"workflow_run_id": value["workflow_run_id"]}))
+            persist_receipt(storage.owners / (task["task_id"] + ".json"), task["task_id"], value["workflow_run_id"])
     monkeypatch.setattr(workflows.WorkflowStore, "get_run", lambda self, run_id: value)
     monkeypatch.setattr(workflows.WorkflowStore, "list_runs", lambda self: pytest.fail("Decoration must not scan workflow history"))
 
@@ -388,7 +389,8 @@ def test_ordinary_descendants_do_not_scan_run_history(monkeypatch, tmp_path):
     monkeypatch.setattr(workflows.WorkflowStore, 'task_owner', forbidden)
     store.write(tmp_path / 'tasks', make_record(task_id='root'))
     entries = [{'task_id': f'child-{i}', 'parent_task_id': 'root'} for i in range(40)]
-    assert decorate_tasks(entries, tmp_path / 'tasks') == entries
+    decorated = decorate_tasks(entries, tmp_path / 'tasks')
+    assert decorated == entries
     assert calls == []
 
 
@@ -412,7 +414,7 @@ def test_decoration_loads_only_receipt_runs_once_and_ignores_unrelated_history(m
     for number in range(200):
         (storage.runs / f'unrelated-{number}.json').write_text('invalid unrelated history')
     for task in ('one', 'two'):
-        (storage.owners / f'{task}.json').write_text(json.dumps({'workflow_run_id': 'requested'}))
+        persist_receipt(storage.owners / f'{task}.json', task, 'requested')
     loaded = []
     def get_run(self, run_id):
         loaded.append(run_id)
@@ -433,7 +435,15 @@ def test_bad_receipt_does_not_break_unrelated_task_decoration(monkeypatch, tmp_p
     (storage.owners / 'broken.json').write_text('invalid')
     entries = [{'task_id': 'broken'}, {'task_id': 'ordinary'}]
     monkeypatch.setattr(workflows.WorkflowStore, 'list_runs', lambda self: pytest.fail('Full history scan'))
-    assert decorate_tasks(entries, tmp_path / 'tasks') == entries
+    decorated = decorate_tasks(entries, tmp_path / 'tasks')
+    assert decorated[1] == entries[1]
+    assert decorated[0]["task_id"] == "broken"
+    assert decorated[0]["history_incomplete"] is True
+    assert decorated[0]["refused_tasks"] == [{
+        "task_id": "broken",
+        "code": "workflow_receipt_incompatible",
+        "reason": "Malformed receipt JSON",
+    }]
 
 
 def test_compact_checklist_disposition_exposes_authority_with_bounded_reason():

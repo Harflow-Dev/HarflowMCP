@@ -43,7 +43,5 @@ def read_json(path: Path, limit: int, *, budget: Any = None) -> Any:
 
 
 def read_receipt(path: Path) -> dict[str, Any]:
-    value = read_json(path, RECEIPT_BYTES)
-    if not isinstance(value, dict):
-        raise ValueError('Ownership receipt must be an object')
-    return value
+    from .workflow_receipt_io import read
+    return read(path)[0]

@@ -6,6 +6,7 @@ import pytest
 
 from harflow_mcp import workflows as w, workflow_hooks, control
 from test_workflows import definition
+from workflow_receipt_fixtures import persist_receipt
 
 
 def make_activation(**values):
@@ -103,7 +104,7 @@ async def test_direct_messages_respect_workflow_assignment_authority(tmp_path, s
 def test_optional_decoration_survives_missing_owned_run(tmp_path):
     from harflow_mcp.workflow_inspection import decorate_tasks
     storage = w.WorkflowStore(tmp_path / "state")
-    (storage.owners / "child.json").write_text(json.dumps({"workflow_run_id": "missing"}))
+    persist_receipt(storage.owners / "child.json", "child", "missing")
     entries = [{"task_id": "child", "parent_task_id": "parent", "status": "completed"}]
     assert decorate_tasks(entries, tmp_path / "state" / "tasks") == entries
     from harflow_mcp import inbox

@@ -37,6 +37,7 @@ def pause_for_task(log_dir: Path, task_id: str, reason: str) -> None:
 
     A child run has no public controls of its own: pausing pauses the root.
     """
+    from .workflow_receipt_documents import WorkflowReceiptDocumentError
     from .workflow_run_documents import WorkflowRunDocumentError
     try:
         association = owner(log_dir, task_id)
@@ -48,7 +49,7 @@ def pause_for_task(log_dir: Path, task_id: str, reason: str) -> None:
             run_id = link.get("root_workflow_run_id") or association.get("workflow_run_id") or association.get("run_id")
             if run_id:
                 store.control(run_id, "pause", instructions=reason)
-    except (OSError, ValueError, KeyError, TypeError, WorkflowRunDocumentError):
+    except (OSError, ValueError, KeyError, TypeError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):
         logging.getLogger(__name__).warning("Workflow pause bookkeeping unavailable for %s", task_id, exc_info=True)
 
 

@@ -27,6 +27,9 @@ class WorkflowRunDocumentError(Exception):
         result = {"workflow_run_id": self.run_id, "code": self.code, "reason": self.reason}
         if self.published:
             result["published"] = True
+        diagnostic = getattr(self, "receipt_diagnostic", None)
+        if diagnostic is not None:
+            result["receipt_diagnostic"] = copy.deepcopy(diagnostic)
         return result
 
 

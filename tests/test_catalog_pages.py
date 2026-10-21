@@ -11,6 +11,7 @@ from harflow_mcp import catalog, ctl, lineage, server, store, task_documents, wo
 from harflow_mcp import state_ownership
 from harflow_mcp.state_layout import resolve_layout
 from harflow_mcp.workflow_inspection import managed_page_reader
+from workflow_receipt_fixtures import persist_receipt
 
 
 def record(identifier, *, stamp='2026-10-01T00:00:00+00:00', status='completed', **kwargs):
@@ -107,7 +108,7 @@ def test_managed_page_reader_decorates_noncanonical_task_directory_from_workflow
         store.write(directory, task)
         store.bootstrap_catalog(directory)
         storage.list_run_page()
-        (storage.owners / 'worker.json').write_text(json.dumps({'workflow_run_id': run['workflow_run_id']}))
+        persist_receipt(storage.owners / 'worker.json', 'worker', run['workflow_run_id'])
     monkeypatch.setattr(
         lineage,
         'detect_catalog_caller',
@@ -672,7 +673,7 @@ def test_many_legacy_receipt_decorations_share_one_workflow_metadata_budget(tmp_
     for number in range(100):
         identifier = f't{number:03}'
         store.write(tmp_path / 'tasks', record(identifier))
-        (storage.owners / f'{identifier}.json').write_text(json.dumps({'workflow_run_id': run_ids[number % 5]}))
+        persist_receipt(storage.owners / f'{identifier}.json', identifier, run_ids[number % 5])
     consumed = []
     read = bounded_io.read_json
     def measured(path, limit, *, budget=None):
@@ -1553,7 +1554,7 @@ def test_task_page_blocked_receipt_and_ancestor_never_publish_unknown_authority(
     directory = tmp_path / 'tasks'
     store.write(directory, record('parent'))
     store.write(directory, record('child', parent_task_id='parent'))
-    (storage.owners / 'child.json').write_text(json.dumps({'workflow_run_id': run['workflow_run_id']}))
+    persist_receipt(storage.owners / 'child.json', 'child', run['workflow_run_id'])
     run['large_legacy_field'] = 'x' * (catalog.METADATA_BYTES + 1)
     (storage.runs / f"{run['workflow_run_id']}.json").write_text(json.dumps(workflow_run_documents.encode(run)))
     payload = asdict(record('parent', prompt='x' * (catalog.METADATA_BYTES + 1)))

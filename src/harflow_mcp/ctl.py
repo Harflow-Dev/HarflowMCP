@@ -25,6 +25,7 @@ reports compatibility without importing the task runtime through the installed l
 from __future__ import annotations
 
 from .workflow_definition_documents import WorkflowDefinitionDocumentError
+from .workflow_receipt_documents import WorkflowReceiptDocumentError
 from .workflow_run_documents import WorkflowRunDocumentError
 
 from .state_ownership import state_session, StateOwnershipError
@@ -454,7 +455,7 @@ def _cmd_list(args: argparse.Namespace, parser: _ArgumentParser) -> int:
     from .workflow_inspection import filter_task_reads, managed_reader
     try:
         entries = filter_task_reads(entries, managed_reader(log_dir))
-    except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError):
+    except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):
         raise
     except Exception as exc:
         return _fail(args, "workflow_read_refused", str(exc))
@@ -506,7 +507,7 @@ def _status_snapshot(log_dir: Path, task_id: str, managed: Any) -> dict[str, Any
     from .workflow_inspection import guard_task_read
     try:
         guard_task_read(task_id, managed)
-    except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError):
+    except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):
         raise
     except Exception as exc:
         raise _StatusReadRefused("workflow_read_refused", str(exc)) from None
@@ -528,7 +529,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
     from .workflow_inspection import managed_reader
     try:
         managed = managed_reader(log_dir)
-    except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError):
+    except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):
         raise
     except Exception as exc:
         return _fail(args, "workflow_read_refused", str(exc))
@@ -577,7 +578,7 @@ def _cmd_status_batch(args: argparse.Namespace) -> int:
     from .workflow_inspection import managed_reader
     try:
         managed = managed_reader(log_dir)
-    except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError):
+    except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):
         raise
     except Exception as exc:
         # Undecidable caller authority refuses the whole batch — never partial data.
@@ -618,7 +619,7 @@ def _cmd_send(args: argparse.Namespace) -> int:
 
     try:
         by = identity.own_identity()
-    except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError):
+    except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):
         raise
     except Exception:
         by = None
@@ -997,7 +998,7 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
         return await server._workflow_call(action, run_id=args.workflow_run_id, **({"interaction_owner": "monitor"} if getattr(args, "monitor", False) else {}))
     try:
         result = asyncio.run(invoke())
-    except (StateOwnershipError, store.TaskDocumentError, WorkflowDefinitionDocumentError, WorkflowRunDocumentError):
+    except (StateOwnershipError, store.TaskDocumentError, WorkflowDefinitionDocumentError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):
         raise
     except Exception as exc:
         data = getattr(getattr(exc, "error", None), "data", None)
@@ -1052,8 +1053,8 @@ def _main(argv: list[str] | None = None) -> int:
     try:
         with state_session(task_layout(default_log_dir())):
             return _execute(args, list_p)
-    except (StateOwnershipError, store.TaskDocumentError, WorkflowDefinitionDocumentError, WorkflowRunDocumentError) as exc:
-        data = exc.as_dict() if isinstance(exc, (WorkflowDefinitionDocumentError, WorkflowRunDocumentError)) else ({"published": True, "workflow_run_id": exc.workflow_run_id} if getattr(exc, "published", False) else None)
+    except (StateOwnershipError, store.TaskDocumentError, WorkflowDefinitionDocumentError, WorkflowRunDocumentError, WorkflowReceiptDocumentError) as exc:
+        data = exc.as_dict() if isinstance(exc, (WorkflowDefinitionDocumentError, WorkflowRunDocumentError, WorkflowReceiptDocumentError)) else ({"published": True, "workflow_run_id": exc.workflow_run_id} if getattr(exc, "published", False) else None)
         return _fail(args, getattr(exc, "code", "state_incompatible"), str(exc), data)
 
 
@@ -1080,7 +1081,7 @@ def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
             return await approval_runtime.respond_request(reg, args.task_id, args.request_id, args.action_digest, args.owner_revision, args.decision, owner)
         try:
             result = asyncio.run(approval_action())
-        except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError):
+        except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):
             raise
         except Exception as exc:
             return _fail(args, "approval_error", str(exc))
@@ -1121,7 +1122,7 @@ def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
                 network=_network(args.network), extra_writable_paths=args.extra_writable_path,
                 caller_approvals=args.caller_approvals,
             ))
-        except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError):
+        except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):
             raise
         except Exception as exc:
             return _fail(args, "invalid_params", str(exc))

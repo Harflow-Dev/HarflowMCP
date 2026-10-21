@@ -7,6 +7,7 @@ tree; the root supervisor awaits the child supervisor over a shared
 """
 from __future__ import annotations
 
+from .workflow_receipt_documents import WorkflowReceiptDocumentError
 from .workflow_run_documents import WorkflowRunDocumentError
 
 from .state_access import storage_operation, require_state_path
@@ -223,7 +224,7 @@ class WorkflowTree:
                             errors.append({"workflow_run_id": current_id, "task_id": task_id, "error": error})
                     except StateOwnershipError:
                         raise
-                    except WorkflowRunDocumentError as exc:
+                    except (WorkflowRunDocumentError, WorkflowReceiptDocumentError) as exc:
                         errors.append({"workflow_run_id": current_id, "task_id": task_id,
                                        "error": str(exc)[:2000], "diagnostic": exc.as_dict()})
                     except Exception as exc:
@@ -991,9 +992,11 @@ async def run_child(supervisor: Any, node: dict[str, Any], token: dict[str, Any]
                         timeout_reason = f"Run workflow node exceeded its {timeout_seconds}s timeout"
                         try:
                             await asyncio.wait_for(supervisor.tree.cancel_descendants(child_id, supervisor.registry, include_self=True), timeout=30)
-                        except (StateOwnershipError, WorkflowRunDocumentError):
+                        except (StateOwnershipError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):
                             raise
-                        except Exception:
+                        except Exception as exc:
+                            if getattr(exc, "_receipt_refusal_run_ids", ()):
+                                raise
                             pass
                         if not child_task.done():
                             await asyncio.wait({child_task}, timeout=30)

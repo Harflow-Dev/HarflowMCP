@@ -150,6 +150,26 @@ async def test_real_ownership_receipt_enforces_expected_read_scope(monkeypatch, 
         assert page['next_cursor'] is None
 
 
+async def test_missing_ownership_receipt_falls_back_to_verified_run_membership(monkeypatch, tmp_path):
+    from harflow_mcp import workflows
+    monkeypatch.setenv('HOME', str(tmp_path))
+    storage = workflows.WorkflowStore()
+    definition = storage.save('receipt-disappearance', {
+        'nodes': [{'id': 'start', 'type': 'start'}, {'id': 'end', 'type': 'end'}],
+        'connections': [{'id': 'finish', 'source': 'start', 'target': 'end'}],
+    })
+    run = storage.create_run(definition, 'synthetic assignment', tmp_path)
+    run_id = run['workflow_run_id']
+    storage.update_run(run_id, lambda value: value.update(status='running', activations=[{
+        'id': 'owned-activation', 'node_id': 'owned-node', 'role': 'node',
+        'status': 'running', 'created_at': 0.0, 'tasks': [{'task_id': 'disappearing-caller', 'status': 'reserved'}],
+    }]), 'synthetic_authority')
+    receipt = storage.owners / 'disappearing-caller.json'
+    receipt.unlink()
+    owner = storage.task_owner('disappearing-caller')
+    assert owner and owner['workflow_run_id'] == run_id and owner['role'] == 'node'
+
+
 @pytest.mark.parametrize('bounded', [False, True])
 async def test_verified_human_reads_real_saved_definition(monkeypatch, tmp_path, bounded):
     from harflow_mcp import store, workflows

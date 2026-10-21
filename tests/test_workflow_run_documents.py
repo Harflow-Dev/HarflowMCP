@@ -16,6 +16,9 @@ from harflow_mcp import workflows
 from harflow_mcp import catalog
 from harflow_mcp import followups, store as task_store
 from harflow_mcp import server, state_ownership
+from harflow_mcp import workflow_receipt_documents
+from harflow_mcp import workflow_receipt_io
+from harflow_mcp import bounded_io
 
 
 def _definition() -> dict:
@@ -342,6 +345,27 @@ async def test_mcp_boundary_maps_only_published_state_ownership_errors():
     }
 
 
+@pytest.mark.asyncio
+async def test_mcp_boundary_preserves_structured_receipt_refusal():
+    @server._task_document_errors
+    async def raise_receipt_error():
+        raise workflow_receipt_documents.WorkflowReceiptDocumentError(
+            "task-1",
+            "Receipt task_id does not match its filename",
+            workflow_run_id="run-1",
+        )
+
+    with pytest.raises(MCPError) as caught:
+        await raise_receipt_error()
+
+    assert caught.value.data == {
+        "task_id": "task-1",
+        "workflow_run_id": "run-1",
+        "code": "workflow_receipt_incompatible",
+        "reason": "Receipt task_id does not match its filename",
+    }
+
+
 def test_create_run_reports_postpublication_index_failure(store_and_run, monkeypatch):
     store, existing = store_and_run
     monkeypatch.setattr(store, "_index_run", lambda *args, **kwargs: (_ for _ in ()).throw(OSError("index unavailable")))
@@ -419,6 +443,172 @@ def test_update_receipt_failure_reports_landed_run_and_recovery_evidence(store_a
     assert store.reconcile_run(run["workflow_run_id"])["workflow_run_id"] == run["workflow_run_id"]
 
 
+def test_update_refuses_existing_unqualified_receipt_before_publishing_run(store_and_run):
+    store, run = store_and_run
+    receipt_path = store.owners / "preflight-attempt.json"
+    receipt_path.write_text("{}", encoding="utf-8")
+    before = store.get_run(run["workflow_run_id"])
+
+    with pytest.raises(workflow_receipt_documents.WorkflowReceiptDocumentError) as caught:
+        store.update_run(
+            run["workflow_run_id"],
+            lambda value: value.update(
+                status="running",
+                activations=[{
+                    "id": "execution",
+                    "node_id": "work",
+                    "role": "node",
+                    "status": "running",
+                    "created_at": 0.0,
+                    "tasks": [{"task_id": "preflight-attempt", "status": "reserved"}],
+                }],
+            ),
+            "edit",
+        )
+
+    assert caught.value.code == "workflow_receipt_incompatible"
+    assert caught.value.workflow_run_id == run["workflow_run_id"]
+    assert store.get_run(run["workflow_run_id"]) == before
+    assert receipt_path.read_text(encoding="utf-8") == "{}"
+
+
+def test_receipt_write_failure_after_run_publication_preserves_landed_diagnostic(store_and_run, monkeypatch):
+    store, run = store_and_run
+    original_check = workflow_receipt_io.check_source
+
+    def refuse_receipt(path, expected):
+        if path.parent == store.owners:
+            raise workflow_receipt_documents.WorkflowReceiptDocumentError(
+                path.stem,
+                "Receipt source changed before replacement",
+                code="workflow_receipt_unavailable",
+                workflow_run_id=run["workflow_run_id"],
+            )
+        return original_check(path, expected)
+
+    monkeypatch.setattr(workflow_receipt_io, "check_source", refuse_receipt)
+    with pytest.raises(documents.WorkflowRunDocumentError) as caught:
+        store.update_run(
+            run["workflow_run_id"],
+            lambda value: value.update(
+                status="running",
+                activations=[{
+                    "id": "execution",
+                    "node_id": "work",
+                    "role": "node",
+                    "status": "running",
+                    "created_at": 0.0,
+                    "tasks": [{"task_id": "raced-attempt", "status": "reserved"}],
+                }],
+            ),
+            "edit",
+        )
+
+    assert caught.value.published is True
+    assert caught.value.run_id == run["workflow_run_id"]
+    assert caught.value.receipt_diagnostic == {
+        "task_id": "raced-attempt",
+        "workflow_run_id": run["workflow_run_id"],
+        "code": "workflow_receipt_unavailable",
+        "reason": "Receipt source changed before replacement",
+    }
+    assert caught.value.as_dict()["receipt_diagnostic"] == caught.value.receipt_diagnostic
+    assert store.get_run(run["workflow_run_id"])["status"] == "running"
+    assert not (store.owners / "raced-attempt.json").exists()
+
+
+@pytest.mark.parametrize("race", ["appears", "disappears", "replaced"])
+def test_receipt_target_race_preserves_observed_bytes_after_run_publication(store_and_run, monkeypatch, race):
+    store, run = store_and_run
+    path = store.owners / "raced-target.json"
+    original = workflow_receipt_documents.encode({"workflow_run_id": run["workflow_run_id"], "marker": "before"}, path.stem)
+    path.write_text(json.dumps(original), encoding="utf-8") if race != "appears" else None
+    real_write = workflows._write
+
+    def race_write(target, value, **kwargs):
+        if target == path:
+            if race == "appears":
+                target.write_bytes(b"appeared-before-write")
+            elif race == "disappears":
+                target.unlink()
+            else:
+                target.write_bytes(b"replacement-before-write")
+        return real_write(target, value, **kwargs)
+
+    monkeypatch.setattr(workflows, "_write", race_write)
+    with pytest.raises(documents.WorkflowRunDocumentError) as caught:
+        store.update_run(run["workflow_run_id"], lambda value: value.update(
+            status="running", activations=[{"id": "execution", "node_id": "work", "role": "node",
+            "status": "running", "created_at": 0.0, "tasks": [{"task_id": "raced-target", "status": "reserved"}]}]), "edit")
+    assert caught.value.published is True
+    assert store.get_run(run["workflow_run_id"])["status"] == "running"
+    if race == "disappears":
+        assert not path.exists()
+    else:
+        assert path.read_bytes() in {b"appeared-before-write", b"replacement-before-write"}
+
+
+def test_oversized_serialized_receipt_refuses_before_run_publication(store_and_run):
+    store, run = store_and_run
+    before = store.get_run(run["workflow_run_id"])
+
+    with pytest.raises(bounded_io.ReadLimit):
+        store.update_run(
+            run["workflow_run_id"],
+            lambda value: value.update(
+                name="x" * (bounded_io.RECEIPT_BYTES * 2),
+                status="running",
+                activations=[{
+                    "id": "execution",
+                    "node_id": "work",
+                    "role": "node",
+                    "status": "running",
+                    "created_at": 0.0,
+                    "tasks": [{"task_id": "oversized-attempt", "status": "reserved"}],
+                }],
+            ),
+            "edit",
+        )
+
+    assert store.get_run(run["workflow_run_id"]) == before
+    assert not (store.owners / "oversized-attempt.json").exists()
+
+
+def test_duplicate_task_target_uses_last_activation_receipt_without_self_conflict(store_and_run):
+    store, run = store_and_run
+    store.update_run(run["workflow_run_id"], lambda value: value.update(
+            status="running",
+            activations=[
+                {"id": "first", "node_id": "first-node", "role": "node", "status": "running", "created_at": 0.0,
+                 "tasks": [{"task_id": "duplicate-target", "status": "reserved"}]},
+                {"id": "last", "node_id": "last-node", "role": "node", "status": "running", "created_at": 0.0,
+                 "tasks": [{"task_id": "duplicate-target", "status": "reserved"}]},
+            ]), "edit")
+    document = json.loads((store.owners / "duplicate-target.json").read_text(encoding="utf-8"))
+    receipt = workflow_receipt_documents.decode(document, "duplicate-target")
+    assert receipt["workflow_execution_id"] == "last"
+
+
+def test_bad_receipt_cancel_refusal_preserves_run_catalog_and_journal_bytes(store_and_run, monkeypatch):
+    store, run = store_and_run
+    path = store.owners / "cancel-target.json"
+    path.write_text("{}", encoding="utf-8")
+    run_path = store.runs / f"{run['workflow_run_id']}.json"
+    journal_path = store.runs / f"{run['workflow_run_id']}.jsonl"
+    before_run, before_journal, before_receipt = run_path.read_bytes(), journal_path.read_bytes() if journal_path.exists() else b"", path.read_bytes()
+    invalidations = []
+    monkeypatch.setattr(catalog.Catalog, "invalidate", lambda self, run_id: invalidations.append(run_id))
+
+    with pytest.raises(workflow_receipt_documents.WorkflowReceiptDocumentError):
+        store.update_run(run["workflow_run_id"], lambda value: value.update(
+            status="cancelled", activations=[{"id": "cancel", "node_id": "work", "role": "node", "status": "cancelled", "created_at": 0.0,
+            "tasks": [{"task_id": "cancel-target", "status": "cancelled"}]}]), "cancelled")
+    assert run_path.read_bytes() == before_run
+    assert (journal_path.read_bytes() if journal_path.exists() else b"") == before_journal
+    assert path.read_bytes() == before_receipt
+    assert invalidations == []
+
+
 def test_update_journal_fsync_failure_reports_landed_run_and_recovery_evidence(store_and_run, monkeypatch):
     store, run = store_and_run
     real_fsync = workflows.os.fsync
@@ -460,7 +650,8 @@ def test_update_journal_open_failure_reports_landed_run_and_recovery_evidence(st
 
     assert caught.value.published is True
     assert store.get_run(run["workflow_run_id"])["status"] == "running"
-    receipt = json.loads((store.owners / "journal-attempt.json").read_text())
+    document = json.loads((store.owners / "journal-attempt.json").read_text())
+    receipt = workflow_receipt_documents.decode(document, "journal-attempt")
     assert receipt["workflow_run_id"] == run["workflow_run_id"]
     assert (not journal.exists()) if not before else journal.read_bytes() == before
 

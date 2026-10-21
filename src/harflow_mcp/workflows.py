@@ -29,6 +29,8 @@ import uuid
 from typing import Any
 
 from .workflow_definition_documents import WorkflowDefinitionDocumentError
+from .workflow_receipt_documents import WorkflowReceiptDocumentError
+from .bounded_io import ReadLimit
 from .workflow_run_documents import WorkflowRunDocumentError
 from . import backends, store as task_store
 
@@ -1146,7 +1148,7 @@ class WorkflowStore:
                 return
             points.update_markers(run, previous_status, event, previous_checkpoint)
             points.record_point(run, event)
-        except (StateOwnershipError, WorkflowRunDocumentError):
+        except (StateOwnershipError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):
             raise
         except Exception:
             logging.getLogger(__name__).warning("Unable to record notification point for %s", run.get("workflow_run_id"), exc_info=True)
@@ -1184,16 +1186,38 @@ class WorkflowStore:
             run.pop("monitor_cancel_reason", None)
             from .workflow_run_documents import encode
             document = encode(run)
+            from .workflow_receipt_documents import encode as encode_receipt
+            from .workflow_receipt_io import observe, check_source
+            receipts = {}
+            for activation in run.get("activations", []):
+                for task in activation.get("tasks", []):
+                    receipt = {"workflow_run_id": run_id, "workflow_node_id": activation.get('node_id'), "workflow_execution_id": activation.get('id'), "workflow_role": activation.get('role'), "workflow_name": run.get('name'), "workflow_status": run.get('status'), "execution_contract": run.get('execution_contract'), "interaction_owner": run.get('interaction_owner', 'caller'), "root_workflow_run_id": (run.get('parent_link') or {}).get('root_workflow_run_id', run_id)}
+                    if activation.get('role') == 'orchestrator' and run.get('orchestrator_session_owner_run_id'):
+                        receipt['workflow_session_owner_run_id'] = run['orchestrator_session_owner_run_id']
+                    task_id = _identifier(task['task_id'])
+                    receipts[task_id] = receipt
+            prepared_receipts = []
+            try:
+                for task_id, receipt in receipts.items():
+                    path = self.owners / f"{task_id}.json"
+                    receipt_document = encode_receipt(receipt, task_id)
+                    from .bounded_io import RECEIPT_BYTES
+                    if len(json.dumps(receipt_document, ensure_ascii=False).encode("utf-8")) > RECEIPT_BYTES:
+                        raise ReadLimit("JSON exceeds bounded receipt write budget")
+                    prepared_receipts.append((path, receipt_document, observe(path)))
+            except WorkflowReceiptDocumentError as exc:
+                exc.workflow_run_id = run_id
+                raise
+            except ReadLimit as exc:
+                exc._receipt_refusal_run_ids = {run_id}
+                raise
             previous_directory_mtime = self.runs.stat().st_mtime_ns
             Catalog(self.runs, '.json', layout=self.state_layout).invalidate(run_id)
             written_source = self._replace_run(run_id, document, source)
             try:
-                for activation in run.get("activations", []):
-                    for task in activation.get("tasks", []):
-                        receipt = {"workflow_run_id": run_id, "workflow_node_id": activation.get('node_id'), "workflow_execution_id": activation.get('id'), "workflow_role": activation.get('role'), "workflow_name": run.get('name'), "workflow_status": run.get('status'), "execution_contract": run.get('execution_contract'), "interaction_owner": run.get('interaction_owner', 'caller'), "root_workflow_run_id": (run.get('parent_link') or {}).get('root_workflow_run_id', run_id)}
-                        if activation.get('role') == 'orchestrator' and run.get('orchestrator_session_owner_run_id'):
-                            receipt['workflow_session_owner_run_id'] = run['orchestrator_session_owner_run_id']
-                        _write(self.owners / f"{_identifier(task['task_id'])}.json", receipt, layout=self.state_layout)
+                for path, receipt_document, receipt_source in prepared_receipts:
+                    _write(path, receipt_document, layout=self.state_layout,
+                           before_replace=lambda path=path, expected=receipt_source: check_source(path, expected))
                 with (self.runs / f"{run_id}.jsonl").open("a", encoding="utf-8") as f:
                     f.write(json.dumps({"sequence": run["sequence"], "time": run["updated_at"], "event": event, "detail": detail}) + "\n")
                     f.flush()
@@ -1204,7 +1228,10 @@ class WorkflowStore:
                     exc.published, exc.workflow_run_id = True, run_id
                     exc.args = (f"Run published; subsequent bookkeeping incomplete: {exc}",)
                     raise
-                raise WorkflowRunDocumentError(run_id, f"Run published; subsequent bookkeeping incomplete: {exc}", code="workflow_run_unavailable", published=True) from exc
+                failure = WorkflowRunDocumentError(run_id, f"Run published; subsequent bookkeeping incomplete: {exc}", code="workflow_run_unavailable", published=True)
+                if isinstance(exc, WorkflowReceiptDocumentError):
+                    failure.receipt_diagnostic = exc.as_dict()
+                raise failure from exc
             run["settling"] = any(t.get("status") in {"reserved", "running", "uncertain"} for a in run["activations"] for t in a["tasks"])
             return run
 
@@ -1576,18 +1603,21 @@ class WorkflowStore:
             raise WorkflowError("Cyclic task lineage cannot establish workflow ownership")
         visited.add(task_id)
         indexed = self.owners / f"{_identifier(task_id)}.json"
-        if indexed.exists():
-            from .bounded_io import read_receipt
+        from .bounded_io import read_receipt
+        try:
             receipt = read_receipt(indexed)
-            runs = [self.get_run(receipt["workflow_run_id"], metadata_byte_limit=metadata_byte_limit)]
-        else:
+        except FileNotFoundError:
+            receipt = None
+        if receipt is None:
             runs = self.list_runs()
+        else:
+            runs = [self.get_run(receipt["workflow_run_id"], metadata_byte_limit=metadata_byte_limit)]
         for r in runs:
             for a in r["activations"]:
                 for t in a["tasks"]:
                     if t["task_id"] == task_id:
                         return {"workflow_run_id": r["workflow_run_id"], "workflow_node_id": a["node_id"], "workflow_role": a["role"], "execution_contract": r.get("execution_contract"), "node_id": a["node_id"], "role": a["role"], "activation_id": a["id"], "status": r["status"], "workflow_status": r["status"], "workflow_settling": r.get("settling", False)}
-        if indexed.exists():
+        if receipt is not None:
             raise WorkflowError("Workflow ownership receipt no longer matches its run")
         record = task_store.read(self.root / "tasks", task_id)
         if record is not None:
@@ -1631,7 +1661,7 @@ class WorkflowStore:
         try:
             from . import scratch
             scratch.remove(self.root / "tasks", task_id)
-        except (StateOwnershipError, WorkflowRunDocumentError):
+        except (StateOwnershipError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):
             raise
         except Exception:
             logging.getLogger(__name__).warning("Unable to remove abandoned dispatch scratch for %s", task_id, exc_info=True)
@@ -2819,9 +2849,11 @@ class WorkflowSupervisor:
                                 if not isinstance(cancellation, dict) or any(cancellation.get(key) for key in ("sigkill_survivors", "survivors", "not_signalled", "owner_still_settling", "cascade_incomplete", "unconverged", "not_recorded")):
                                     raise RuntimeError("Task cancellation cascade has unsettled or unverifiable descendants")
                                 await asyncio.wait_for(task.done.wait(), timeout=10)
-                            except (StateOwnershipError, WorkflowRunDocumentError):
+                            except (StateOwnershipError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):
                                 raise
                             except Exception as exc:
+                                if getattr(exc, "_receipt_refusal_run_ids", ()):
+                                    raise
                                 slot_uncertain = True
                                 self._task_update(activation["id"], task_id, {"status": "uncertain", "error": "Timeout cancellation requires reconciliation: " + str(exc)})
                                 self.attention("Timed out node could not be confirmed settled; no fallback dispatched")
@@ -2841,9 +2873,11 @@ class WorkflowSupervisor:
                                     response = await self.registry.send_message(task, message["prompt"])
                                     delivery_id = response.get("message_id") if isinstance(response, dict) else None
                                     status = "queued_to_agent"
-                                except (StateOwnershipError, WorkflowRunDocumentError):
+                                except (StateOwnershipError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):
                                     raise
                                 except Exception as exc:
+                                    if getattr(exc, "_receipt_refusal_run_ids", ()):
+                                        raise
                                     from . import inbox
                                     # SendRefused guarantees that no message entered the inbox.
                                     delivery_id = None
@@ -2978,9 +3012,11 @@ class WorkflowSupervisor:
                 else:
                     self.attention(f"Dispatch configuration refused: {exc}")
                 return None
-            except (StateOwnershipError, WorkflowRunDocumentError):
+            except (StateOwnershipError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):
                 raise
             except Exception as exc:
+                if getattr(exc, "_receipt_refusal_run_ids", ()):
+                    raise
                 # Once a dispatch was reserved, only positive evidence that no spawn happened
                 # permits reconciliation. Unknown exceptions remain uncertain.
                 not_started = capability_stage != "spawn" or getattr(exc, "harflow_not_started", False) is True
@@ -3480,15 +3516,30 @@ class WorkflowSupervisor:
                         del active[tid]
                         try:
                             await task
-                        except (StateOwnershipError, WorkflowRunDocumentError):
+                        except (StateOwnershipError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):
                             raise
                         except Exception as exc:
+                            if getattr(exc, "_receipt_refusal_run_ids", ()):
+                                raise
                             self.attention(f"Workflow scheduling failed: {exc}")
         finally:
+            primary = sys.exception()
             if active:
                 await asyncio.gather(*active.values(), return_exceptions=True)
             self.tree.release_held(run_id)
-            self.update(lambda r: r.update(supervisor_pid=None, supervisor_identity=None), "supervisor_stopped")
+            try:
+                self.update(lambda r: r.update(supervisor_pid=None, supervisor_identity=None), "supervisor_stopped")
+            except (WorkflowReceiptDocumentError, ReadLimit) as cleanup:
+                cleanup_runs = set(getattr(cleanup, "_receipt_refusal_run_ids", ()))
+                if isinstance(cleanup, WorkflowReceiptDocumentError) and cleanup.workflow_run_id is not None:
+                    cleanup_runs.add(cleanup.workflow_run_id)
+                if primary is None or isinstance(cleanup, ReadLimit) and not cleanup_runs:
+                    raise
+                # Preserve the primary diagnostic and scoped cleanup evidence.
+                primary._receipt_refusal_run_ids = set(getattr(primary, "_receipt_refusal_run_ids", ())) | cleanup_runs
+            except (StateOwnershipError, WorkflowRunDocumentError):
+                if not isinstance(primary, WorkflowReceiptDocumentError) and not getattr(primary, "_receipt_refusal_run_ids", ()):
+                    raise
 
     @layout_operation
     async def build(self, run_id: str) -> None:
@@ -3627,31 +3678,42 @@ async def _main(args: Any) -> None:
         from .task_documents import qualify_payload
         caller = lineage.Caller(qualify_payload(run["caller_record"], run["caller_record"]["task_id"], task_store.TaskRecord), run.get("caller_method", "ancestry")) if run.get("caller_record") else None
         supervisor = WorkflowSupervisor(TaskRegistry(log_dir=storage.root / "tasks", open_monitor=False, caller_override=caller), storage)
+        receipt_refused = False
         try:
-            if run["kind"] == "builder" and run["status"] != "cancelling":
-                await supervisor.build(args.run_id)
-            else:
-                await supervisor.execute(args.run_id)
-        except (StateOwnershipError, WorkflowRunDocumentError):
+            try:
+                if run["kind"] == "builder" and run["status"] != "cancelling":
+                    await supervisor.build(args.run_id)
+                else:
+                    await supervisor.execute(args.run_id)
+            except (StateOwnershipError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):
+                raise
+            except Exception as exc:
+                if getattr(exc, "_receipt_refusal_run_ids", ()):
+                    raise
+                supervisor.run_id = args.run_id
+                if storage.get_run(args.run_id)["status"] == "cancelling":
+                    # A failed cancellation must not respawn the same broken supervisor.
+                    # Attempt a bounded settlement, then require explicit reconciliation.
+                    active_ids = [t["task_id"] for a in storage.get_run(args.run_id)["activations"] for t in a["tasks"] if t["status"] in {"running", "reserved", "uncertain"}]
+                    try:
+                        await asyncio.wait_for(asyncio.gather(*(supervisor.registry.cancel_cascade(tid, workflow_control=True) for tid in active_ids), return_exceptions=True), timeout=5)
+                    except TimeoutError:
+                        pass
+                    storage.update_run(args.run_id, lambda r: r.update(status="needs_attention", attention_reason=f"Cancellation interrupted: {exc}; reconcile dispatches before resuming", supervisor_pid=None, supervisor_identity=None), "cancel_supervisor_failed")
+                else:
+                    supervisor.attention(f"Supervisor failure: {exc}")
+        except BaseException as exc:
+            refused_runs = set(getattr(exc, "_receipt_refusal_run_ids", ()))
+            if isinstance(exc, WorkflowReceiptDocumentError):
+                refused_runs.add(exc.workflow_run_id)
+            receipt_refused = args.run_id in refused_runs
             raise
-        except Exception as exc:
-            supervisor.run_id = args.run_id
-            if storage.get_run(args.run_id)["status"] == "cancelling":
-                # A failed cancellation must not respawn the same broken supervisor.
-                # Attempt a bounded settlement, then require explicit reconciliation.
-                active_ids = [t["task_id"] for a in storage.get_run(args.run_id)["activations"] for t in a["tasks"] if t["status"] in {"running", "reserved", "uncertain"}]
-                try:
-                    await asyncio.wait_for(asyncio.gather(*(supervisor.registry.cancel_cascade(tid, workflow_control=True) for tid in active_ids), return_exceptions=True), timeout=5)
-                except TimeoutError:
-                    pass
-                storage.update_run(args.run_id, lambda r: r.update(status="needs_attention", attention_reason=f"Cancellation interrupted: {exc}; reconcile dispatches before resuming", supervisor_pid=None, supervisor_identity=None), "cancel_supervisor_failed")
-            else:
-                supervisor.attention(f"Supervisor failure: {exc}")
         finally:
             lock.close(unlock=True)
-            final = storage.get_run(args.run_id)
-            if (final["kind"] == "builder" and final["status"] == "starting" and any(m["status"] == "pending" for m in final.get("builder_messages", []))) or (final["kind"] != "builder" and final["status"] in {"running", "cancelling"}):
-                _launch(storage, args.run_id)
+            if not receipt_refused:
+                final = storage.get_run(args.run_id)
+                if (final["kind"] == "builder" and final["status"] == "starting" and any(m["status"] == "pending" for m in final.get("builder_messages", []))) or (final["kind"] != "builder" and final["status"] in {"running", "cancelling"}):
+                    _launch(storage, args.run_id)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -3669,6 +3731,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         with state_session(layout):
             asyncio.run(_main(args))
+    except WorkflowReceiptDocumentError as exc:
+        print(json.dumps(exc.as_dict()), file=sys.stderr)
+        return 2
     except StateOwnershipError as exc:
         print(f"harflow-workflows: error: {exc}", file=sys.stderr)
         return 2

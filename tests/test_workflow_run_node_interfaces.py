@@ -14,6 +14,7 @@ from harflow_mcp import workflow_inspection
 from harflow_mcp import workflow_invocation as inv
 from harflow_mcp import workflow_references as refs
 from harflow_mcp import workflows as w
+from workflow_receipt_fixtures import persist_receipt
 
 from test_workflow_run_node_execution import TreeRegistry, _start_tree, _wait_until, child_graph, child_runs, parent_graph, run_tree
 from test_workflow_run_node_recovery import finished_child, seed_parent, write_run
@@ -107,7 +108,7 @@ async def test_takeover_pause_and_direct_message_use_the_tree_gate(store, tmp_pa
     child["status"] = "running"
     write_run(store, child)
     receipt = store.owners / "kid.json"
-    w._write(receipt, {"workflow_run_id": child["workflow_run_id"]}, layout=store.state_layout)
+    persist_receipt(receipt, "kid", child["workflow_run_id"])
     # The root is still active: takeover and direct messages are refused.
     with pytest.raises(control.TakeoverRefused):
         workflow_hooks.refuse_takeover(store.root / "tasks", "kid")
@@ -125,7 +126,7 @@ async def test_retention_pins_tasks_of_every_run_in_an_active_tree(store, tmp_pa
     parent_run, activation, child = seeded_two_level(store, tmp_path)
     child["activations"].append({"id": "orch", "node_id": "work", "role": "orchestrator", "status": "completed", "tasks": [{"task_id": "pinned-kid", "status": "completed", "result": {"status": "completed"}}], "created_at": 0.0, "token": {}})
     write_run(store, child)
-    w._write(store.owners / "pinned-kid.json", {"workflow_run_id": child["workflow_run_id"]}, layout=store.state_layout)
+    persist_receipt(store.owners / "pinned-kid.json", "pinned-kid", child["workflow_run_id"])
     assert "pinned-kid" in store.pinned_tasks()
     store.update_run(parent_run["workflow_run_id"], lambda r: r.update(status="completed"), "fixture")
     assert "pinned-kid" not in store.pinned_tasks()
@@ -137,7 +138,7 @@ async def test_decorate_tasks_reports_tree_fields_and_session_owner(store, tmp_p
     child["orchestrator_session_owner_run_id"] = parent_run["workflow_run_id"]
     child["activations"].append({"id": "orch", "node_id": "work", "role": "orchestrator", "status": "completed", "tasks": [{"task_id": "owned-kid", "status": "completed", "result": {"status": "completed"}}], "created_at": 0.0, "token": {}})
     write_run(store, child)
-    w._write(store.owners / "owned-kid.json", {"workflow_run_id": child["workflow_run_id"]}, layout=store.state_layout)
+    persist_receipt(store.owners / "owned-kid.json", "owned-kid", child["workflow_run_id"])
     decorated = workflow_inspection.decorate_tasks([{"task_id": "owned-kid"}], store.root / "tasks")[0]
     assert decorated["root_workflow_run_id"] == parent_run["workflow_run_id"]
     assert decorated["workflow_session_owner_run_id"] == parent_run["workflow_run_id"]

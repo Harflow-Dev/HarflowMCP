@@ -10,6 +10,7 @@ back, replay the log for the outcome, and check whether the process is still ali
 
 from __future__ import annotations
 
+from .workflow_receipt_documents import WorkflowReceiptDocumentError
 from .workflow_run_documents import WorkflowRunDocumentError
 
 from .state_access import task_operation, task_layout, assert_task_owned
@@ -543,10 +544,10 @@ def list_page(log_dir: Path, *, limit: int = 100, cursor: str | None = None, act
     for item in page['items']:
         if item.get('needs_direct_lookup'):
             continue
+        allowed = {'workflow_run_id', 'workflow_node_id', 'workflow_execution_id', 'workflow_role', 'workflow_name', 'workflow_status', 'workflow_session_owner_run_id', 'root_workflow_run_id', 'interaction_owner', 'execution_contract'}
         try:
             from .bounded_io import read_receipt
             receipt = read_receipt(log_dir.parent / 'workflow-owners' / f"{validate_task_id(item['task_id'])}.json")
-            allowed = {'workflow_run_id', 'workflow_node_id', 'workflow_execution_id', 'workflow_role', 'workflow_name', 'workflow_status', 'workflow_session_owner_run_id', 'root_workflow_run_id', 'interaction_owner', 'execution_contract'}
             item.update({key: str(value)[:100] if isinstance(value, str) else value for key, value in receipt.items() if key in allowed and isinstance(value, (str, bool, int, type(None)))})
             if 'workflow_role' not in receipt:
                 from .workflows import WorkflowStore
@@ -559,7 +560,7 @@ def list_page(log_dir: Path, *, limit: int = 100, cursor: str | None = None, act
                 item.update(workflow_name=header.get('name'), workflow_status=header.get('status'), root_workflow_run_id=header.get('root_workflow_run_id', header['workflow_run_id']))
                 if item.get('session_id') == header.get('sessions', {}).get('orchestrator') and header.get('orchestrator_session_owner_run_id'):
                     item['workflow_session_owner_run_id'] = header['orchestrator_session_owner_run_id']
-        except WorkflowRunDocumentError as exc:
+        except (WorkflowRunDocumentError, WorkflowReceiptDocumentError) as exc:
             item['workflow_diagnostic'] = exc.as_dict()
             for key in allowed:
                 item.pop(key, None)
@@ -691,6 +692,10 @@ def list_page(log_dir: Path, *, limit: int = 100, cursor: str | None = None, act
                 receipt = read_receipt(log_dir.parent / 'workflow-owners' / f'{identifier}.json')
                 header.update({key: str(value)[:100] if isinstance(value, str) else value for key, value in receipt.items() if key.startswith('workflow_') and isinstance(value, (str, bool, int, type(None)))})
                 header = bound_header(header)
+            except WorkflowReceiptDocumentError as exc:
+                header = {key: value for key, value in header.items() if not key.startswith('workflow_') and key not in {'root_workflow_run_id', 'interaction_owner', 'execution_contract'}}
+                header['workflow_diagnostic'] = exc.as_dict()
+                page.update(ownership_incomplete=True, history_incomplete=True, counts_complete=False, total_active_count=None, total_active_root_count=None, total_attention_root_count=None)
             except (OSError, ValueError, TypeError) as exc:
                 if isinstance(exc, ValueError):
                     page.update(ownership_incomplete=True, history_incomplete=True, counts_complete=False, total_active_count=None, total_active_root_count=None, total_attention_root_count=None)

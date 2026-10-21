@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from harflow_mcp import artifacts, identity, lineage, state_ownership, store, workflow_hooks, workflow_run_documents
 from harflow_mcp.state_layout import resolve_layout
+from workflow_receipt_fixtures import persist_receipt
 
 
 @pytest.fixture
@@ -823,7 +824,10 @@ def test_real_inherited_workflow_ownership_denies_artifacts(setup, ownership):
         if ownership == 'dangling':
             receipt.symlink_to(storage.owners / 'missing')
         else:
-            receipt.write_text('{' if ownership == 'malformed' else json.dumps({'workflow_run_id': 'run'}))
+            if ownership == 'malformed':
+                receipt.write_text('{')
+            else:
+                persist_receipt(receipt, parent.task_id, 'run')
     (repo / 'report').write_text('report')
     for action in (lambda: artifacts.register(logs, 'report', 'report'), lambda: artifacts.get(logs, 'owner')):
         with pytest.raises(ValueError, match='Managed'):

@@ -8,6 +8,8 @@ import pytest
 
 from harflow_mcp import workflows as w
 from harflow_mcp import workflow_run_documents
+from harflow_mcp import workflow_receipt_documents
+from harflow_mcp import bounded_io
 from execution_helper import run_bounded, workflow_snapshot
 
 
@@ -2205,6 +2207,146 @@ async def test_supervisor_shutdown_hands_resumed_run_to_new_owner(storage, tmp_p
     monkeypatch.setattr(w, "_launch", launch)
     await w._main(SimpleNamespace(root=str(storage.root), run_id=rid))
     assert launched == [rid]
+
+
+@pytest.mark.asyncio
+async def test_main_does_not_relaunch_run_after_receipt_refusal(storage, tmp_path, monkeypatch):
+    run = storage.create_run(w.validate_definition(definition()), "request", tmp_path)
+    rid = run["workflow_run_id"]
+    storage.update_run(rid, lambda value: value.update(status="running"), "seed")
+
+    class RefusingSupervisor:
+        def __init__(self, registry, store):
+            self.registry = registry
+            self.store = store
+
+        async def execute(self, run_id):
+            raise workflow_receipt_documents.WorkflowReceiptDocumentError(
+                "attempt", "Receipt source changed before replacement", workflow_run_id=run_id
+            )
+
+    launched = []
+    monkeypatch.setattr(w, "WorkflowSupervisor", RefusingSupervisor)
+    monkeypatch.setattr(w, "_launch", lambda *args: launched.append(args))
+
+    with pytest.raises(workflow_receipt_documents.WorkflowReceiptDocumentError):
+        await w._main(SimpleNamespace(root=str(storage.root), run_id=rid))
+    assert launched == []
+
+
+@pytest.mark.asyncio
+async def test_child_receipt_refusal_does_not_suppress_healthy_parent_relaunch(storage, tmp_path, monkeypatch):
+    run = storage.create_run(w.validate_definition(definition()), "request", tmp_path)
+    rid = run["workflow_run_id"]
+    storage.update_run(rid, lambda value: value.update(status="running"), "seed")
+    child_id = "child-receipt-run"
+
+    class RefusingSupervisor:
+        def __init__(self, registry, store):
+            self.store = store
+
+        async def execute(self, run_id):
+            raise workflow_receipt_documents.WorkflowReceiptDocumentError(
+                "child-attempt", "child receipt refused", workflow_run_id=child_id
+            )
+
+    launched = []
+    monkeypatch.setattr(w, "WorkflowSupervisor", RefusingSupervisor)
+    monkeypatch.setattr(w, "_launch", lambda *args: launched.append(args))
+    with pytest.raises(workflow_receipt_documents.WorkflowReceiptDocumentError):
+        await w._main(SimpleNamespace(root=str(storage.root), run_id=rid))
+    assert len(launched) == 1 and launched[0][1] == rid
+
+
+@pytest.mark.asyncio
+async def test_attention_receipt_refusal_preserves_original_error_and_suppresses_relaunch(storage, tmp_path, monkeypatch):
+    run = storage.create_run(w.validate_definition(definition()), "request", tmp_path)
+    rid = run["workflow_run_id"]
+    storage.update_run(rid, lambda value: value.update(status="running"), "seed")
+    primary = RuntimeError("ordinary supervisor failure")
+    refusal = workflow_receipt_documents.WorkflowReceiptDocumentError(
+        "attempt", "attention receipt refused", workflow_run_id=rid
+    )
+
+    class FailingSupervisor:
+        def __init__(self, registry, store):
+            pass
+
+        async def execute(self, run_id):
+            raise primary
+
+        def attention(self, reason):
+            raise refusal
+
+    launched = []
+    monkeypatch.setattr(w, "WorkflowSupervisor", FailingSupervisor)
+    monkeypatch.setattr(w, "_launch", lambda *args: launched.append(args))
+    with pytest.raises(workflow_receipt_documents.WorkflowReceiptDocumentError) as caught:
+        await w._main(SimpleNamespace(root=str(storage.root), run_id=rid))
+    assert caught.value is refusal
+    assert launched == []
+
+
+@pytest.mark.asyncio
+async def test_supervisor_cleanup_preserves_primary_receipt_refusal_and_releases_tree(storage, tmp_path, monkeypatch):
+    run = storage.create_run(w.validate_definition(definition()), "request", tmp_path)
+    rid = run["workflow_run_id"]
+    supervisor = w.WorkflowSupervisor(FakeRegistry(storage.root, []), storage)
+    primary = workflow_receipt_documents.WorkflowReceiptDocumentError(
+        "child-attempt", "receipt write refused", workflow_run_id="child-run"
+    )
+    cleanup = workflow_receipt_documents.WorkflowReceiptDocumentError(
+        "attempt", "cleanup receipt refused", workflow_run_id=rid
+    )
+    original_update = supervisor.update
+    events = []
+
+    def update(mutate, event, detail=None):
+        events.append(event)
+        if event == "supervisor_stopped":
+            raise cleanup
+        return original_update(mutate, event, detail)
+
+    released = []
+    original_release = supervisor.tree.release_held
+    monkeypatch.setattr(supervisor, "update", update)
+    monkeypatch.setattr(supervisor.tree, "release_held", lambda run_id: (released.append(run_id), original_release(run_id))[1])
+    monkeypatch.setattr(supervisor, "_arrive_join", lambda token: (_ for _ in ()).throw(primary))
+
+    with pytest.raises(workflow_receipt_documents.WorkflowReceiptDocumentError) as caught:
+        await supervisor.execute(rid)
+    assert caught.value is primary
+    assert getattr(primary, "_receipt_refusal_run_ids") == {rid}
+    assert released == [rid]
+    assert events[0] == "supervisor_started"
+    assert events[-1] == "supervisor_stopped"
+
+
+@pytest.mark.asyncio
+async def test_main_does_not_relaunch_when_existing_receipt_is_oversized(storage, tmp_path, monkeypatch):
+    run = storage.create_run(w.validate_definition(definition()), "request", tmp_path)
+    rid = run["workflow_run_id"]
+    activation = make_activation(tasks=[{"task_id": "oversized-attempt", "status": "reserved"}])
+    storage.update_run(rid, lambda value: value.update(status="running", activations=[activation]), "seed")
+    (storage.owners / "oversized-attempt.json").write_bytes(b"x" * (bounded_io.RECEIPT_BYTES + 1))
+
+    class RealStoreSupervisor:
+        def __init__(self, registry, store):
+            self.store = store
+
+        async def execute(self, run_id):
+            self.store.update_run(run_id, lambda value: value.update(status="running"), "trigger")
+
+        def attention(self, reason):
+            self.store.update_run(rid, lambda value: value.update(status="needs_attention", attention_reason=reason), "attention")
+
+    launched = []
+    monkeypatch.setattr(w, "WorkflowSupervisor", RealStoreSupervisor)
+    monkeypatch.setattr(w, "_launch", lambda *args: launched.append(args))
+
+    with pytest.raises(bounded_io.ReadLimit):
+        await w._main(SimpleNamespace(root=str(storage.root), run_id=rid))
+    assert launched == []
 
 
 @pytest.mark.asyncio

@@ -1,6 +1,8 @@
 """Bounded inspection of durable, fully settled workflow executions."""
 from __future__ import annotations
 
+from .workflow_receipt_documents import WorkflowReceiptDocumentError
+
 from .state_access import task_operation, task_layout, root_operation
 from .state_ownership import StateOwnershipError, state_session
 
@@ -147,9 +149,13 @@ def decorate_tasks(entries: list[dict[str, Any]], log_dir: Any) -> list[dict[str
                                      metadata_byte_limit=METADATA_BYTES, metadata_budget=current_metadata_budget())
             # Verified absence allows independent workflow receipts, including native children.
             receipt = storage.owners / f"{_identifier(task_id)}.json"
-            if receipt.exists():
-                from .bounded_io import read_receipt
-                run_id = read_receipt(receipt)["workflow_run_id"]
+            from .bounded_io import read_receipt
+            try:
+                receipt_value = read_receipt(receipt)
+            except FileNotFoundError:
+                receipt_value = None
+            if receipt_value is not None:
+                run_id = receipt_value["workflow_run_id"]
                 association = run_index(run_id).get(task_id)
                 if association is None:
                     raise ValueError("Task receipt does not match its workflow run")
@@ -166,7 +172,7 @@ def decorate_tasks(entries: list[dict[str, Any]], log_dir: Any) -> list[dict[str
                         if parent is not None:
                             association = {key: parent[key] for key in inherited if key in parent}
                             break
-        except task_store.TaskDocumentError as exc:
+        except (task_store.TaskDocumentError, WorkflowReceiptDocumentError) as exc:
             refusals[task_id] = exc.as_dict()
         except (OSError, ValueError, KeyError, TypeError):
             logging.getLogger(__name__).warning("Workflow decoration unavailable for %s", task_id, exc_info=True)
@@ -209,7 +215,12 @@ def managed_page_reader(log_dir: Any) -> tuple[bool, tuple[dict[str, Any], dict[
         return True, None
     storage = WorkflowStore(root=log_dir.parent)
     receipt = storage.owners / f'{detection.caller.record.task_id}.json'
-    if not receipt.exists():
+    from .bounded_io import read_receipt
+    try:
+        receipt_value = read_receipt(receipt)
+    except FileNotFoundError:
+        receipt_value = None
+    if receipt_value is None:
         # Missing ownership is not evidence that a verified agent is unmanaged.
         # Resolve only through the bounded run catalog, never list_runs().
         if not storage._ownership_catalog().ready():
@@ -241,8 +252,6 @@ def managed_page_reader(log_dir: Any) -> tuple[bool, tuple[dict[str, Any], dict[
         if association is None:
             return True, None
     else:
-        from .bounded_io import read_receipt
-        receipt_value = read_receipt(receipt)
         association = {'workflow_run_id': receipt_value['workflow_run_id']}
     # Decode once, with the same aggregate budget as the subsequent page reader.
     # Receipt verification must not hide a second unbudgeted run decode.
@@ -268,7 +277,7 @@ def managed_page_reader(log_dir: Any) -> tuple[bool, tuple[dict[str, Any], dict[
         set_authority_preparation(preparation, log_dir)
         return False, None
     run.pop('_source_identity', None)
-    if receipt.exists():
+    if receipt_value is not None:
         matched = next((activation for activation in run.get('activations', []) if any(task.get('task_id') == detection.caller.record.task_id for task in activation.get('tasks', []))), None)
         if matched is None:
             raise ValueError('Workflow ownership receipt no longer matches its run')

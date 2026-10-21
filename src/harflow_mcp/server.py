@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from .workflow_definition_documents import WorkflowDefinitionDocumentError
+from .workflow_receipt_documents import WorkflowReceiptDocumentError
 from .workflow_run_documents import WorkflowRunDocumentError
 
 from .state_ownership import state_session, StateOwnershipError, owned_job, run_owned_worker
@@ -102,7 +103,7 @@ def _task_document_errors(function):
     async def wrapped(*args, **kwargs):
         try:
             return await function(*args, **kwargs)
-        except (store.TaskDocumentError, WorkflowDefinitionDocumentError, WorkflowRunDocumentError) as exc:
+        except (store.TaskDocumentError, WorkflowDefinitionDocumentError, WorkflowRunDocumentError, WorkflowReceiptDocumentError) as exc:
             raise MCPError(INVALID_PARAMS, str(exc), data=exc.as_dict()) from None
         except StateOwnershipError as exc:
             if getattr(exc, "published", False) is not True:
@@ -415,7 +416,7 @@ async def _notification_io(function, directory, *args, **kwargs):
                 await asyncio.shield(operation)
             except asyncio.CancelledError:
                 continue
-            except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError):
+            except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):
                 raise
             except Exception:
                 break
@@ -600,12 +601,12 @@ async def start_task(
             # No dispatch has begun, and the reservation thread has finished committing.
             try:
                 await _notification_io(discard_unstarted, _reg().log_dir, reserved_id)
-            except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError):
+            except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):
                 raise
             except Exception:
                 log.warning('Notification reservation cleanup unavailable for task %s', reserved_id)
             raise
-        except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError):
+        except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):
             raise
         except Exception:
             raise MCPError(INTERNAL_ERROR, 'Notification reservation failed; no task was started') from None
@@ -636,11 +637,11 @@ async def start_task(
             if not_started and _reg().get(reserved_id) is None:
                 try:
                     cleaned = await _notification_io(discard_unstarted, _reg().log_dir, reserved_id)
-                except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError):
+                except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):
                     raise
                 except Exception:
                     log.warning('Notification reservation cleanup unavailable for task %s', reserved_id)
-            if isinstance(exc, asyncio.CancelledError):
+            if isinstance(exc, (asyncio.CancelledError, WorkflowReceiptDocumentError)):
                 raise
             if cleaned is True and _reg().get(reserved_id) is None and request_error:
                 raise MCPError(INVALID_PARAMS, str(exc)) from None
@@ -933,7 +934,7 @@ def _owner_alive(record: store.TaskRecord) -> bool:
     """Whether the harflow_mcp server that owns this record is still running."""
     try:
         return identity.identity_check(record.owner) == "alive"
-    except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError):
+    except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):
         raise
     except Exception:
         return False
@@ -1101,7 +1102,7 @@ async def wait_for_task(
         record, stop_reason, outcome_observed = await _poll_recovered(record, plan, ctx)
         try:
             snapshot = await asyncio.to_thread(store.snapshot, _reg().log_dir, record)
-        except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError):
+        except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):
             raise
         except Exception:
             if stop_reason != wait_policy.STOP_UNAVAILABLE:
@@ -1151,7 +1152,7 @@ async def wait_for_task(
         payload = await asyncio.to_thread(
             _status_payload, snapshot, include_tail=include_tail, log_dir=_reg().log_dir, task_id=task_id
         )
-    except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError):
+    except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):
         raise
     except Exception:
         if stop_reason != wait_policy.STOP_UNAVAILABLE:
@@ -2167,7 +2168,7 @@ async def start_workflow(name: str, prompt: str, repo_path: str, overrides: dict
         except asyncio.CancelledError:
             await _notification_io(notifications.discard_unstarted, _reg().log_dir, reserved_id)
             raise
-        except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError):
+        except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):
             raise
         except Exception:
             raise MCPError(INVALID_PARAMS, 'Notification reservation failed; no workflow was started') from None
@@ -2189,13 +2190,13 @@ async def start_workflow(name: str, prompt: str, repo_path: str, overrides: dict
         except FileNotFoundError:
             await _notification_io(notifications.discard_unstarted, _reg().log_dir, reserved_id)
             raise exc
-        except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError):
+        except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):
             raise
         except Exception:
-            if isinstance(exc, asyncio.CancelledError):
-                raise
+            if isinstance(exc, (asyncio.CancelledError, WorkflowReceiptDocumentError)):
+                raise exc
             raise MCPError(INVALID_PARAMS, f'Start did not return normally; inspect workflow_run_id {reserved_id} before retrying') from None
-        if isinstance(exc, asyncio.CancelledError):
+        if isinstance(exc, (asyncio.CancelledError, WorkflowReceiptDocumentError)):
             _start_notification_worker(_reg())
             raise
         launch_notice = 'Workflow run was created but launch did not return normally; inspect its current status before retrying'
@@ -2206,7 +2207,7 @@ async def start_workflow(name: str, prompt: str, repo_path: str, overrides: dict
         try:
             await _notification_io(notifications.activate, _reg().log_dir, reserved_id)
             notification['state'] = 'active'
-        except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError):
+        except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):
             raise
         except Exception:
             result.setdefault('notices', []).append('Workflow started; notification activation is pending recovery by the server worker')
@@ -2381,7 +2382,7 @@ async def _wait_workflow_full(
         if current_revision is None or current_revision != previous_revision:
             try:
                 result = await _workflow_call("status", run_id=workflow_run_id)
-            except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError):
+            except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):
                 raise
             except Exception:
                 # Keep the last good snapshot; only a failure that persists ends the wait.

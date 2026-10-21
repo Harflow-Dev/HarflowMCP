@@ -70,18 +70,13 @@ def _workflow_owner(log_dir, task_id, *, strict=True):
     from .workflows import WorkflowStore
     storage = WorkflowStore(root=log_dir.parent)
     receipt = storage.owners / f'{store.validate_task_id(task_id)}.json'
+    from .workflow_receipt_documents import WorkflowReceiptDocumentError
     try:
-        receipt.lstat()
+        return {'receipt': read_receipt(receipt)}
     except FileNotFoundError:
         pass
-    except OSError as exc:
-        raise ValueError('Workflow ownership is unavailable') from exc
-    else:
-        try:
-            return {'receipt': read_receipt(receipt)}
-        except (OSError, ValueError):
-            # An unreadable receipt proves ownership exists but cannot be verified.
-            return {'managed_or_unverifiable': True}
+    except (OSError, ValueError, WorkflowReceiptDocumentError):
+        return {'managed_or_unverifiable': True}
     try:
         page = storage.list_run_page(limit=1)
         if page.get('bootstrap_pending') or page.get('history_incomplete'):

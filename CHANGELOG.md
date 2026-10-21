@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Qualify workflow ownership receipts with filename-bound identity, bounded source checks and stable refusal diagnostics across control and display consumers.
+- Preflight receipt targets before run publication, refuse changed targets without overwrite, and stop same-run supervisor relaunch after blocked settlement while preserving ordered partial-write evidence.
 - Qualify workflow run documents before storage, control, catalog ownership and retention decisions; preserve authored snapshots and public run payloads.
 - Refuse incompatible or unavailable run sources with stable diagnostics and distinguish published runs from incomplete subsequent bookkeeping.
 
