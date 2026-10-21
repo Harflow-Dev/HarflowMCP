@@ -145,7 +145,8 @@ async def report_progress(
     if callback is None:
         return
     try:
-        await asyncio.wait_for(callback(progress, total=total, message=message), PROGRESS_CALL_SECONDS)
+        async with asyncio.timeout(PROGRESS_CALL_SECONDS):
+            await callback(progress, total=total, message=message)
     except Exception:
         log.debug("client did not accept progress", exc_info=True)
 

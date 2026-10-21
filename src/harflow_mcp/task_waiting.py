@@ -114,11 +114,11 @@ async def wait_for_tasks(
     # stat errors and timeouts are undecidable, never evidence of a missing ID.
     if recovered_ids:
         try:
-            existence = await asyncio.wait_for(
-                asyncio.gather(*(asyncio.to_thread(_record_exists, registry.log_dir, task_id)
-                                 for task_id in recovered_ids), return_exceptions=True),
-                max(0, io_deadline - _now()),
-            )
+            async with asyncio.timeout(max(0, io_deadline - _now())):
+                existence = await asyncio.gather(
+                    *(asyncio.to_thread(_record_exists, registry.log_dir, task_id)
+                      for task_id in recovered_ids), return_exceptions=True,
+                )
         except asyncio.TimeoutError:
             raise ValueError("Unable to validate task existence within the bounded I/O budget; retry.") from None
         for task_id, exists in zip(recovered_ids, existence):
@@ -136,11 +136,10 @@ async def wait_for_tasks(
             if remaining <= 0:
                 raise asyncio.TimeoutError
             if live:
-                return await asyncio.wait_for(
-                    asyncio.to_thread(store.read, registry.log_dir, task_id, include_prompt=False, metadata_byte_limit=METADATA_BYTES),
-                    remaining,
-                )
-            return await asyncio.wait_for(asyncio.to_thread(_recovered, registry.log_dir, task_id), remaining)
+                async with asyncio.timeout(remaining):
+                    return await asyncio.to_thread(store.read, registry.log_dir, task_id, include_prompt=False, metadata_byte_limit=METADATA_BYTES)
+            async with asyncio.timeout(remaining):
+                return await asyncio.to_thread(_recovered, registry.log_dir, task_id)
         except store.TaskDocumentError as exc:
             if exc.code != "task_unavailable":
                 raise

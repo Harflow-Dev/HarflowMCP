@@ -25,6 +25,9 @@ status only counts after the task completion event confirms output settlement.
 read-only observers: a wait never writes a record, signals a process or resumes a session, and
 timing out or cancelling the request only stops the wait's own temporary observers.
 
+For multi-task waits, caller cancellation also propagates when bounded metadata or existence
+I/O, or progress delivery, completes concurrently with the cancellation request.
+
 - `timeout_seconds` accepts integers 0 through 3600. Zero performs one observation without
   sleeping. Defaults are unchanged: 55 for `wait_for_task`, 30 for `wait_for_tasks` and
   `wait_for_workflow`. A request is honoured as asked and never silently clamped; out of range is
