@@ -16,6 +16,7 @@ dependencies = [
 ]
 
 [project.scripts]
+harflow-mcp = "harflow_mcp.server:main"
 harflow-server = "harflow_mcp.server:main"
 harflow-setup = "harflow_mcp.setup_client:main"
 harflow-ctl = "harflow_mcp.cli:main"

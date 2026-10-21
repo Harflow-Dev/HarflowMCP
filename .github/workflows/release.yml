@@ -1,0 +1,103 @@
+name: Engine release
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+permissions: {}
+jobs:
+  build:
+    if: github.repository == 'Harflow-Dev/HarflowMCP'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.source.outputs.version }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          version: '0.9.26'
+          python-version: '3.13'
+      - name: Validate immutable source
+        id: source
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_SHA: ${{ github.sha }}
+        run: |
+          if [ "$EVENT_NAME" = release ]; then
+            version=$(uv run --locked python -I scripts/release.py source --tag "$RELEASE_TAG" --sha "$EVENT_SHA")
+          else
+            version=$(uv run --locked python -I scripts/release.py source)
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Build and validate exact packages
+        run: |
+          uv sync --locked
+          uv build --no-create-gitignore --build-constraints release-build-constraints.txt
+          uv run --locked python -I scripts/release.py artifacts
+          uv run --locked python -I scripts/release.py smoke --file dist/harflow_mcp-${{ steps.source.outputs.version }}-py3-none-any.whl
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: engine-${{ github.sha }}
+          path: |
+            dist/*
+            server.json
+          if-no-files-found: error
+  pypi:
+    if: github.event_name == 'release' && github.repository == 'Harflow-Dev/HarflowMCP'
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: engine-${{ github.sha }}
+      - name: Verify carried artifacts
+        run: cd dist && sha256sum --check SHA256SUMS && rm SHA256SUMS
+      - uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # v1.13.0
+        with:
+          packages-dir: dist/
+  registry:
+    if: github.event_name == 'release' && github.repository == 'Harflow-Dev/HarflowMCP'
+    needs: [build, pypi]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          version: '0.9.26'
+          python-version: '3.13'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: engine-${{ github.sha }}
+          path: release-input
+      - name: Validate exact public package and publisher
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          uv run --locked python -I scripts/release.py checksums --dist release-input/dist
+          cmp server.json release-input/server.json
+          uv run --locked python -I scripts/release.py source
+          uv run --locked python -I scripts/release.py pypi --version "$VERSION" --file "release-input/dist/harflow_mcp-$VERSION-py3-none-any.whl"
+          curl --fail --show-error --silent --location --proto '=https' --tlsv1.2 https://github.com/modelcontextprotocol/registry/releases/download/v1.8.1/mcp-publisher_linux_amd64.tar.gz --output publisher.tar.gz
+          uv run --locked python -I scripts/release.py publisher --file publisher.tar.gz
+          mkdir publisher
+          tar -xzf publisher.tar.gz -C publisher mcp-publisher
+          publisher/mcp-publisher validate
+      - name: Publish registry metadata with GitHub OIDC
+        run: |
+          publisher/mcp-publisher login github-oidc
+          publisher/mcp-publisher publish
