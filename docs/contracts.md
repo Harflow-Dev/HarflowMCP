@@ -1,10 +1,10 @@
 # Harflow public wire contracts
 
-HarflowMCP 1.0.0 is unreleased. This specification covers ctl, setup, normalized events and version-info. Persisted task metadata, saved workflow definitions, workflow run documents, ownership receipts, follow-up ledgers, control phase payloads, live-input inbox rows, task artifact manifests and approval ledgers use qualified Harflow formats; store ownership is defined below, while migration remains unsupported. Raw vendor streams, MCP negotiation, cursors and internal indexes are unchanged.
+HarflowMCP 0.0.1 is unreleased. This specification covers ctl, setup, normalized events and version-info. Persisted task metadata, saved workflow definitions, workflow run documents, ownership receipts, follow-up ledgers, control phase payloads, live-input inbox rows, task artifact manifests and approval ledgers use qualified Harflow formats; store ownership is defined below, while migration remains unsupported. Raw vendor streams, MCP negotiation, cursors and internal indexes are unchanged.
 
 ## Common envelope
 
-Every wire document contains `product: "harflow"`, a format discriminator, integer `v: 1`, and `product_version: "1.0.0"`. Booleans are not integer versions. The formats are `harflow.ctl`, `harflow.setup`, `harflow.event` and `harflow.version-info`.
+Every wire document contains `product: "harflow"`, a format discriminator, integer `v: 1`, and `product_version: "0.0.1"`. Booleans are not integer versions. The formats are `harflow.ctl`, `harflow.setup`, `harflow.event` and `harflow.version-info`.
 
 Validate identity and format before interpreting either a payload or an error. Missing or foreign product/format, unsupported versions and malformed product versions are rejected. Unknown optional fields and unknown normalized event kinds are additive. Payload fields cannot override the reserved common envelope fields.
 
@@ -70,7 +70,7 @@ Writers qualify an existing source before creating prompt sidecars or replacing 
 
 Lists may display compatible unrelated tasks while reporting `history_incomplete`, refused task ids/reasons or neutral `needs_direct_lookup` blockers. Task-catalog blockers use `incompatible_metadata` or `unavailable_metadata`, expose no caller/lineage/workflow authority, and invalidate stale task projections. Any blocker makes catalog-based caller authority globally unavailable. Bounded indexing exhaustion remains retryable preparation rather than incompatibility. Complete-history operations, including session reuse, retention and automatic follow-up reconciliation, fail closed when task history is incomplete. Cancellation cascades process known compatible descendants and report `cascade_incomplete` plus refused ids. Independent workflow-owned logical children may have receipts without standalone process metadata; a verified missing metadata file does not invalidate that independent workflow association, while an existing incompatible file is always refused.
 
-This unreleased development change intentionally refuses earlier unqualified HarflowMCP 1.0.0 task documents, even inside a compatibly marked root. It does not bump `layout_version`, relabel, backfill or adopt those documents. Preserve the old root and select a fresh missing or empty root for ordinary development use. Identified files may be inspected or quarantined manually outside the engine; there is no automatic repair, deletion or migration command.
+The task-document qualification change intentionally refuses earlier unqualified development task documents (then labeled HarflowMCP 1.0.0), even inside a compatibly marked root. It does not bump `layout_version`, relabel, backfill or adopt those documents. Preserve the old root and select a fresh missing or empty root for ordinary development use. Identified files may be inspected or quarantined manually outside the engine; there is no automatic repair, deletion or migration command.
 
 ## Saved workflow definition documents
 

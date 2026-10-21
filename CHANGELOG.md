@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Set the initial product version to 0.0.1 while preserving v1 wire and storage contracts.
+
 - Qualify the shared notification database before task/workflow access; atomically bootstrap fresh storage, refuse incomplete or foreign schemas and WAL state, and preserve narrowly qualified native rollback recovery.
 
 - Qualify task approval ledgers and request task identities with a bounded Harflow header; refuse incompatible sources before decisions while preserving action digests, permanent locks and existing delivery gates.

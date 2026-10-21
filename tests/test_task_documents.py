@@ -12,6 +12,7 @@ import pytest
 from harflow_mcp import store, task_documents
 from harflow_mcp import state_ownership
 from harflow_mcp.state_layout import resolve_layout
+from harflow_mcp.wire_contracts import PRODUCT_VERSION
 
 
 TASK_ID = "task-1"
@@ -55,23 +56,24 @@ def test_encode_stamps_exact_task_envelope_and_decode_round_trips() -> None:
         "format": "harflow.task",
         "v": 1,
     }
-    assert payload["product_version"].split(".")[:2] == ["1", "0"]
+    assert payload["product_version"] == PRODUCT_VERSION
     assert decode() == record()
 
 
 @pytest.mark.parametrize(
-    ("field", "value"),
+    ("field", "value", "reason"),
     [
-        ("product", "foreign"),
-        ("format", "harflow.event"),
-        ("v", True),
-        ("v", 2),
-        ("product_version", "1.1.0"),
-        ("product_version", "1.0"),
-        ("product_version", "1.0.0-rc.1"),
+        ("product", "foreign", "Missing or foreign task product/format"),
+        ("format", "harflow.event", "Missing or foreign task product/format"),
+        ("v", True, "Unsupported task document version"),
+        ("v", 2, "Unsupported task document version"),
+        ("product_version", "0.1.0", "Incompatible task product major/minor line"),
+        ("product_version", "1.0.0", "Incompatible task product major/minor line"),
+        ("product_version", "1.0", "Malformed product version; prereleases are unsupported"),
+        ("product_version", "0.0.1-beta.1", "Malformed product version; prereleases are unsupported"),
     ],
 )
-def test_reserved_identity_mismatch_is_a_typed_refusal(field, value) -> None:
+def test_reserved_identity_mismatch_is_a_typed_refusal(field, value, reason) -> None:
     payload = document()
     payload[field] = value
 
@@ -81,12 +83,13 @@ def test_reserved_identity_mismatch_is_a_typed_refusal(field, value) -> None:
     error = caught.value
     assert error.code == "task_incompatible"
     assert error.task_id == TASK_ID
+    assert error.reason == reason
     assert error.as_dict() == {"task_id": TASK_ID, "code": error.code, "reason": error.reason}
 
 
 def test_patch_version_and_unknown_additive_fields_are_compatible() -> None:
     payload = document()
-    payload["product_version"] = "1.0.0+fixture"
+    payload["product_version"] = "0.0.1+fixture"
     payload["future_field"] = {"preserve": "as input"}
 
     loaded = decode(payload)
@@ -94,7 +97,7 @@ def test_patch_version_and_unknown_additive_fields_are_compatible() -> None:
     assert loaded == record()
 
 
-@pytest.mark.parametrize("product_version", ["1.0.1", "1.0.99+fixture"])
+@pytest.mark.parametrize("product_version", ["0.0.0", "0.0.99+fixture"])
 def test_both_patch_directions_and_build_metadata_round_trip(product_version: str) -> None:
     payload = document()
     payload["product_version"] = product_version

@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from harflow_mcp import artifacts, identity, lineage, state_ownership, store, workflow_hooks, workflow_run_documents
 from harflow_mcp.state_layout import resolve_layout
+from harflow_mcp.wire_contracts import PRODUCT_VERSION
 from workflow_receipt_fixtures import persist_receipt
 
 
@@ -951,7 +952,7 @@ def test_manifest_and_repeated_owner_reads_share_nested_budget(setup, monkeypatc
     manifest = artifacts._path(logs, record.task_id)
     manifest.write_text(json.dumps({
         'product': 'harflow', 'format': 'harflow.task.artifacts', 'v': 1,
-        'product_version': '1.0.0', 'task_id': record.task_id, 'items': [],
+        'product_version': PRODUCT_VERSION, 'task_id': record.task_id, 'items': [],
     }))
     owner_size = store.record_path(logs, record.task_id).stat().st_size
     with metadata_request():

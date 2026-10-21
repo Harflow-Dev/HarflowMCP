@@ -140,8 +140,8 @@ def test_ownership_errors_do_not_claim_no_startup_proof(error_type):
     _marker(product="other"),
     _marker(v=True),
     _marker(layout_version=True),
-    _marker(product_version="1.1.0"),
-    _marker(product_version="1.0.0-rc.1"),
+    _marker(product_version="0.1.0"),
+    _marker(product_version="0.0.1-rc.1"),
 ])
 def test_rejected_marker_preserves_bytes_and_does_not_create_lock(tmp_path, raw):
     root = tmp_path / "state"
@@ -149,7 +149,7 @@ def test_rejected_marker_preserves_bytes_and_does_not_create_lock(tmp_path, raw)
     _assert_refused_without_lock(root, raw)
 
 
-@pytest.mark.parametrize("version", ["1.0.1", "1.0.0+local.build"])
+@pytest.mark.parametrize("version", ["0.0.0", "0.0.1+local.build"])
 def test_same_major_minor_marker_versions_are_accepted(tmp_path, version):
     root = tmp_path / "state"
     _write_marker(root, _marker(product_version=version))

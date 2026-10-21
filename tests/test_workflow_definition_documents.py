@@ -52,7 +52,7 @@ def test_encode_decode_round_trip_keeps_authored_payload_and_stamps_envelope():
 
 @pytest.mark.parametrize(
     "version",
-    ["1.0.7", "1.0.0+build.7", "1.0.0"],
+    ["0.0.7", "0.0.1+build.7", "0.0.1"],
 )
 def test_decode_accepts_compatible_stable_versions(version):
     document = documents.encode(definition())
@@ -67,8 +67,9 @@ def test_decode_accepts_compatible_stable_versions(version):
         lambda value: value.update(product="other"),
         lambda value: value.update(format="harflow.task"),
         lambda value: value.update(v=True),
-        lambda value: value.update(product_version="2.0.0"),
-        lambda value: value.update(product_version="1.0.0-alpha"),
+        lambda value: value.update(product_version="0.1.0"),
+        lambda value: value.update(product_version="1.0.0"),
+        lambda value: value.update(product_version="0.0.1-beta.1"),
         lambda value: value.update(definition=[]),
         lambda value: value.update(definition={"name": 1}),
     ],

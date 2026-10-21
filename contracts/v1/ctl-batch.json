@@ -1,1 +1,1 @@
-{"errors":{"missing":{"code":"not_found","message":"Task not found"}},"format":"harflow.ctl","product":"harflow","product_version":"1.0.0","tasks":[{"status":"completed","task_id":"task-fixture"}],"v":1}
+{"errors":{"missing":{"code":"not_found","message":"Task not found"}},"format":"harflow.ctl","product":"harflow","product_version":"0.0.1","tasks":[{"status":"completed","task_id":"task-fixture"}],"v":1}

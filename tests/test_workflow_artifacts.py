@@ -9,6 +9,7 @@ from harflow_mcp import artifacts, store, workflows
 from harflow_mcp.bounded_io import ReadLimit
 from harflow_mcp import state_ownership
 from harflow_mcp.state_layout import resolve_layout
+from harflow_mcp.wire_contracts import PRODUCT_VERSION
 
 
 @pytest.fixture
@@ -55,7 +56,7 @@ def _manifest(task_id, items):
         "product": "harflow",
         "format": "harflow.task.artifacts",
         "v": 1,
-        "product_version": "1.0.0",
+        "product_version": PRODUCT_VERSION,
         "task_id": task_id,
         "items": items,
     }

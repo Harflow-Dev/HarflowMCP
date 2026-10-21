@@ -19,6 +19,7 @@ from harflow_mcp.events import events_path
 from harflow_mcp.tasks import TaskRegistry
 from harflow_mcp import state_ownership
 from harflow_mcp.state_layout import resolve_layout
+from harflow_mcp.wire_contracts import PRODUCT_VERSION
 
 OWNER = {"pid": 1, "start_time": "t", "markers": []}
 
@@ -183,7 +184,7 @@ def test_a_record_written_before_live_input_existed_loads_as_not_live(tmp_path: 
                 "product": "harflow",
                 "format": "harflow.task",
                 "v": 1,
-                "product_version": "1.0.0",
+                "product_version": PRODUCT_VERSION,
                 "task_id": "old",
                 "backend": "claude",
                 "session_id": "s",

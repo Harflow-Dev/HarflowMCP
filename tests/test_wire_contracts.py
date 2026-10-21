@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import tomllib
 
 from harflow_mcp import events
 from harflow_mcp import state_ownership
@@ -22,6 +23,7 @@ from harflow_mcp.wire_contracts import (
     compatible_line,
     parse_version,
     validate_envelope,
+    PRODUCT_VERSION,
 )
 
 
@@ -65,6 +67,11 @@ def test_canonical_fixture_manifest_digest_matches_bytes():
         assert hashlib.sha256(path.read_bytes()).hexdigest() == expected_hash
 
 
+def test_project_release_declaration_matches_wire_contract_version():
+    project = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())
+    assert project["project"]["version"] == PRODUCT_VERSION
+
+
 def test_manifest_cases_reach_the_wire_validator():
     root = Path(__file__).parents[1] / "contracts" / "v1"
     manifest = json.loads((root / "manifest.json").read_text())
@@ -81,20 +88,39 @@ def test_manifest_cases_reach_the_wire_validator():
                     validate_envelope(document, case["format"], live=live, expected_version=case["expected_product_version"])
             elif name == "invalid-ctl-inner-event.json":
                 validate_envelope(document, case["format"], live=True)
-                with pytest.raises(ValueError):
+                with pytest.raises(ValueError, match="product/format"):
                     validate_envelope(document["result"]["events"][0], EVENT_FORMAT, live=False)
             elif name == "invalid-missing-capabilities.json":
                 validate_envelope(document, case["format"], live=True)
                 required = {"ctl.v1", "setup.v1", "events.v1", "version-info.v1"}
                 assert not required.issubset(set(document.get("capabilities", [])))
             else:
-                with pytest.raises((ValueError, workflow_definition_documents.WorkflowDefinitionDocumentError, workflow_run_documents.WorkflowRunDocumentError)):
+                with pytest.raises((ValueError, workflow_definition_documents.WorkflowDefinitionDocumentError, workflow_run_documents.WorkflowRunDocumentError)) as caught:
                     if case["format"] == workflow_definition_documents.DEFINITION_FORMAT:
                         workflow_definition_documents.decode(document, document.get("definition", {}).get("name", "fixture"))
                     elif case["format"] == workflow_run_documents.RUN_FORMAT:
                         workflow_run_documents.decode(document, document.get("run", {}).get("workflow_run_id", "fixture"))
                     else:
                         validate_envelope(document, case["format"], live=live, expected_version=case["expected_product_version"])
+                reason = str(caught.value)
+                if name in {"invalid-major-mismatch.json", "invalid-minor-mismatch.json"}:
+                    assert "major/minor" in reason
+                elif name == "invalid-prerelease.json":
+                    assert "prerelease" in reason
+                elif name == "invalid-malformed-product-version.json":
+                    assert "Malformed product version" in reason
+                elif name == "invalid-overflow-version.json":
+                    assert "exceeds" in reason
+                elif name in {"invalid-foreign-product.json", "invalid-foreign-format.json", "invalid-missing-product.json"}:
+                    assert "product/format" in reason
+                elif name in {"invalid-boolean-version.json", "invalid-unsupported-version.json"}:
+                    assert "wire version" in reason.lower()
+                elif name == "invalid-workflow-definition-version.json":
+                    assert "major/minor" in reason
+                elif name == "invalid-workflow-definition-foreign.json":
+                    assert "product/format" in reason
+                elif name == "invalid-workflow-run.json":
+                    assert "document version" in reason.lower()
 
 
 def test_event_validation_requires_current_identity_before_payload_interpretation():

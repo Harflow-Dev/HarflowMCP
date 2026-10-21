@@ -229,7 +229,7 @@ def test_qualified_ledger_header_and_row_task_identity_are_required(tmp_path: Pa
     assert approvals.rows(tmp_path, "task-1")[0]["request_id"] == row["request_id"]
 
 
-@pytest.mark.parametrize("product_version, accepted", [("1.0.99+fixture", True), ("2.0.0", False), ("1.0.0-rc.1", False)])
+@pytest.mark.parametrize("product_version, accepted", [("0.0.99+fixture", True), ("2.0.0", False), ("0.0.1-rc.1", False)])
 def test_product_version_qualification_preserves_stable_line_policy(
     tmp_path: Path, product_version: str, accepted: bool
 ) -> None:

@@ -7,6 +7,7 @@ from harflow_mcp import event_history as history
 from harflow_mcp.events import PAGE_BUDGET_BYTES
 from harflow_mcp import state_ownership
 from harflow_mcp.state_layout import resolve_layout
+from harflow_mcp.wire_contracts import PRODUCT_VERSION
 
 
 @pytest.fixture
@@ -23,7 +24,7 @@ def event_json(value):
         "product": "harflow",
         "format": "harflow.event",
         "v": 1,
-        "product_version": "1.0.0",
+        "product_version": PRODUCT_VERSION,
         **value,
     })
 
@@ -170,7 +171,7 @@ def test_unreadable_missing_and_hostile_envelope(tmp_path):
     assert page.events == [{
         'seq': 0, 'kind': 'notice', 'observed_at': None,
         'product': 'harflow', 'format': 'harflow.event', 'v': 1,
-        'product_version': '1.0.0',
+        'product_version': PRODUCT_VERSION,
     }]
 
 

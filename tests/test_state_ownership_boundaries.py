@@ -18,6 +18,7 @@ from harflow_mcp import retention, scratch, store, workflows, workflow_run_docum
 from harflow_mcp import state_ownership as ownership
 from harflow_mcp.state_access import open_descriptor
 from harflow_mcp.state_layout import resolve_layout
+from harflow_mcp.wire_contracts import PRODUCT_VERSION
 
 
 def _layout(root: Path):
@@ -29,7 +30,7 @@ def _marker(product: str = "harflow") -> bytes:
         "product": product,
         "format": "harflow.store",
         "v": 1,
-        "product_version": "1.0.0",
+        "product_version": PRODUCT_VERSION,
         "layout_version": 1,
     }, sort_keys=True) + "\n").encode()
 

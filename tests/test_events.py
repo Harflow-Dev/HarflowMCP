@@ -19,6 +19,7 @@ from harflow_mcp.events import EventLog, events_path
 from harflow_mcp import state_ownership
 from harflow_mcp.state_layout import resolve_layout
 from harflow_mcp.tasks import Task, TaskRegistry
+from harflow_mcp.wire_contracts import PRODUCT_VERSION
 
 
 class _RecordingBackend:
@@ -583,7 +584,7 @@ def event_json(value: dict) -> str:
         "product": "harflow",
         "format": "harflow.event",
         "v": 1,
-        "product_version": "1.0.0",
+        "product_version": PRODUCT_VERSION,
         **value,
     })
 
@@ -1014,7 +1015,7 @@ def _line(seq: int, kind: str, **fields) -> str:
         "product": "harflow",
         "format": "harflow.event",
         "v": 1,
-        "product_version": "1.0.0",
+        "product_version": PRODUCT_VERSION,
         "seq": seq,
         "observed_at": f"t{seq}",
         "kind": kind,
@@ -1126,7 +1127,7 @@ def test_read_page_keeps_each_events_timestamp(tmp_path: Path) -> None:
 
     assert events_module.read_page(path, limit=5).events == [
         {"seq": 1, "kind": "notice", "observed_at": "t1", "text": "hi",
-         "product": "harflow", "format": "harflow.event", "v": 1, "product_version": "1.0.0"}
+         "product": "harflow", "format": "harflow.event", "v": 1, "product_version": PRODUCT_VERSION}
     ]
 
 

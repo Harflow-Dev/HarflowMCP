@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from harflow_mcp.wire_contracts import PRODUCT_VERSION
+
 
 def _entrypoint(name: str) -> Path:
     path = Path(sys.executable).with_name(name)
@@ -77,7 +79,7 @@ def test_invalid_state_root_json_entrypoints_fail_before_state_or_client_setup(
     assert document["product"] == "harflow"
     assert document["format"] == format
     assert document["v"] == 1
-    assert document["product_version"] == "1.0.0"
+    assert document["product_version"] == PRODUCT_VERSION
     assert document["error"]["code"] == "usage"
     assert "state root" in document["error"]["message"].lower()
     assert "state_root" not in document

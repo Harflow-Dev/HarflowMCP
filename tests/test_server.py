@@ -17,6 +17,7 @@ from harflow_mcp import backends, identity, server, store, wait_policy
 from harflow_mcp import state_ownership
 from harflow_mcp.state_layout import resolve_layout
 from harflow_mcp.tasks import Task, TAIL_LINES_RETURNED
+from harflow_mcp.wire_contracts import PRODUCT_VERSION
 
 
 async def call(tool: str, **arguments):
@@ -47,7 +48,7 @@ def event_json(payload: dict) -> str:
         "product": "harflow",
         "format": "harflow.event",
         "v": 1,
-        "product_version": "1.0.0",
+        "product_version": PRODUCT_VERSION,
         **payload,
     })
 
