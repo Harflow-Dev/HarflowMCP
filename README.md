@@ -10,6 +10,7 @@ Use `harflow-ctl version-info --json` to inspect runtime identity and compatibil
 - [Workflows](docs/workflows.md)
 - [Task continuation](docs/task-continuation.md)
 - [Task artifacts](docs/task-artifacts.md)
+- [Task and workflow notifications](docs/task-notifications.md) (qualified Harflow database required)
 - [Public contracts and runtime compatibility](docs/contracts.md)
 - [Development and technical references](docs/development.md)
 

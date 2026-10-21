@@ -72,9 +72,21 @@ no process started: persistence can fail after process creation. If cleanup
 or dispatch remains uncertain, the error instead includes the reserved task ID
 for inspection before retrying.
 Status reads use an existing database read-only, without initializing or changing
-storage; an absent database returns an empty list and does not start a worker.
-Unsubscribing with no notification database also returns an empty list without
-initializing storage.
+storage; an absent or zero-byte regular database returns an empty list without
+opening SQLite and does not start a worker.
+Unsubscribing with absent or zero-byte storage also returns an empty result without
+initializing storage, for both tasks and workflows. Existing incompatible storage
+is refused before selecting or delivering rows; missing workflow tables are not
+treated as empty. Retention skips deletion if notification pins cannot be read.
+
+The database requires its Harflow identity and complete notification schema; older
+unqualified databases are not adopted or repaired. WAL state is unsupported and
+refused before SQLite opens. Ordinary rollback journals remain supported. A
+writable operation can perform native hot-journal recovery only after the exact
+SQLite read-only-rollback error, then must qualify the restored database. This
+physical rollback may change even a subsequently refused foreign database; no
+Harflow schema is added to it. See the [database contract](contracts.md#notification-database)
+for qualification, fresh bootstrap and recovery boundaries.
 
 Workers resume when a server opens its task registry if destinations are configured
 or a notification database already exists, within a running event loop. Synchronous

@@ -1,7 +1,8 @@
 """Durable, at-least-once completion webhooks to administrator-configured destinations."""
 from __future__ import annotations
 
-from .state_access import task_operation, task_layout, assert_task_owned, OwnedConnection, bind_connection, open_descriptor
+from .state_access import task_operation
+from .notification_database import NotificationDatabaseError
 from .state_ownership import StateOwnershipError
 
 import asyncio
@@ -67,30 +68,8 @@ def preflight(notify: str) -> dict:
 
 
 def _db(log_dir: Path):
-    assert_task_owned(log_dir)
-    path = Path(log_dir).parent / 'notifications.sqlite3'
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd = open_descriptor(path, os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0), 0o600, layout=task_layout(log_dir))
-    try:
-        os.fchmod(fd, 0o600)
-    finally:
-        fd.close()
-    db = bind_connection(sqlite3.connect(path, timeout=2, factory=OwnedConnection), task_layout(log_dir))
-    try:
-        db.row_factory = sqlite3.Row
-        db.execute('PRAGMA journal_mode=DELETE')
-        db.execute('''CREATE TABLE IF NOT EXISTS subscriptions (
-            id TEXT PRIMARY KEY, task_id TEXT NOT NULL, destination TEXT NOT NULL,
-            state TEXT NOT NULL, created REAL NOT NULL, updated REAL NOT NULL,
-            attempts INTEGER NOT NULL DEFAULT 0, due REAL NOT NULL DEFAULT 0,
-            lease TEXT, lease_until REAL NOT NULL DEFAULT 0, payload BLOB, error TEXT,
-            UNIQUE(task_id,destination))''')
-        from .workflow_notifications import initialize
-        initialize(db)
-    except BaseException:
-        db.close()
-        raise
-    return db
+    from .notification_database import open_database
+    return open_database(log_dir, create=True, mode='rw')
 
 
 def _public(row):
@@ -117,22 +96,9 @@ def subscribe(log_dir: Path, task_id: str, notify: str, *, reservation: bool = F
             return _public(db.execute('SELECT * FROM subscriptions WHERE task_id=? AND destination=?', (task_id, notify)).fetchone())
 
 def _existing_db(log_dir: Path, mode: str):
-    """Open existing notification storage without initializing or recreating it."""
-    assert_task_owned(log_dir)
-    path = Path(log_dir).parent / 'notifications.sqlite3'
-    try:
-        path.stat()
-    except FileNotFoundError:
-        return None
-    try:
-        connection = bind_connection(sqlite3.connect(path.resolve().as_uri() + '?mode=' + mode, uri=True, timeout=2, factory=OwnedConnection), task_layout(log_dir))
-    except sqlite3.OperationalError:
-        try:
-            path.stat()
-        except FileNotFoundError:
-            return None
-        raise
-    return connection
+    """Qualify existing storage without initializing or recreating it."""
+    from .notification_database import open_database
+    return open_database(log_dir, create=False, mode=mode)
 
 
 @task_operation
@@ -172,9 +138,10 @@ def unsubscribe(log_dir: Path, task_id: str, destination: str | None = None) -> 
 
 @task_operation
 def pinned_tasks(log_dir: Path) -> set[str]:
-    if not (Path(log_dir).parent / 'notifications.sqlite3').exists():
+    connection = _existing_db(log_dir, 'ro')
+    if connection is None:
         return set()
-    with _db(log_dir) as db:
+    with closing(connection) as db:
         return {row[0] for row in db.execute("SELECT task_id FROM subscriptions WHERE state IN ('pending','retry','delivering') LIMIT ?", (MAX_SUBSCRIPTIONS,))}
 
 

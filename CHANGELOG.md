@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Qualify the shared notification database before task/workflow access; atomically bootstrap fresh storage, refuse incomplete or foreign schemas and WAL state, and preserve narrowly qualified native rollback recovery.
+
 - Qualify task approval ledgers and request task identities with a bounded Harflow header; refuse incompatible sources before decisions while preserving action digests, permanent locks and existing delivery gates.
 - Qualify flat task artifact manifests with filename-bound Harflow identity and finite JSON; refuse unqualified or incompatible manifests without overwrite while preserving metadata-only references, cursor revisions and existing budgets.
 - Qualify individual live-input inbox rows with filename-bound Harflow envelopes before append; skip unqualified rows while preserving permanent locks, byte offsets, close markers and existing delivery evidence.

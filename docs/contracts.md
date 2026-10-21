@@ -158,3 +158,50 @@ Verified absence returns an empty qualified ledger in memory without creating a 
 Reads use bounded no-follow regular-file descriptors and accept complete generations across ordinary atomic replacement. The complete header counts toward the existing 2 MiB ledger cap and 256 KiB decision/outcome headroom. Writers retain the permanent ledger lock, locked reread and atomic publication; candidates are fully qualified and canonicalized before temporary-file creation. No lock is held across task/workflow persistence or awaits.
 
 Ledger identity is an audit qualification, not reusable permission or proof of execution. Existing owner, workflow, process, session, digest, revision, generation and deadline gates remain independent. The owning stdin pump still persists reservation and sending state before input; uncertain delivery cannot be replayed. Backend capabilities and approval transport support are unchanged.
+
+
+## Notification database
+
+Task and root-workflow subscriptions share `notifications.sqlite3`. Its singleton
+`harflow_notification_identity` row contains `singleton: 1`, `product: "harflow"`,
+`format: "harflow.notifications"`, native SQLite integer `schema_version: 1`, and
+the creating engine's compatible stable major/minor `product_version`. Compatible
+patch reopens preserve the creating version. SQLite integer storage cannot retain
+whether a bound integer originally came from a Python boolean.
+
+Qualification requires this identity and all three current tables: `subscriptions`,
+`workflow_subscriptions` and `workflow_deliveries`. Essential column affinities,
+nullability, primary keys, literal defaults and unconditional BINARY unique keys
+are checked before application writes. Harmless additive columns and indexes are
+accepted; missing tables or constraints are not repaired. Existing unqualified,
+legacy or incompatible databases are refused with `NotificationDatabaseError`,
+a `ValueError`; actual state ownership failures remain separate. No migration,
+adoption, row envelope or new public capability is provided.
+
+Only a verified missing or zero-byte regular main file can bootstrap. SQLite must
+also report empty schema and zero application/user versions under `BEGIN IMMEDIATE`,
+unless another initializer has already committed a qualified database. Identity
+and all three tables commit together before the connection is returned. Existing
+header-bearing schema-empty SQLite files are not fresh. Status, unsubscribe and
+retention pin inspection treat absent or zero-byte storage as empty without opening
+SQLite; they never initialize it. Invalid existing storage is a refusal, including
+when a required workflow table is absent. Retention must skip deletion when pins
+cannot be established.
+
+Harflow creates rollback/DELETE-journal databases. Any observed `-wal`/`-shm` path
+or WAL main-header format is refused before SQLite opens; symlink/nonregular main
+and journal paths are refused. Ordinary regular `-journal` files are permitted,
+and SQLite manages locking and rollback. Read-only status never repairs, changes
+journal mode or chmods storage. Writable existing opens first qualify read-only,
+then qualify their actual writable connection before application PRAGMA, chmod or
+row changes. Normal refusals preserve existing bytes and permissions.
+
+The narrow physical exception is native crash recovery: only an actual extended
+`SQLITE_READONLY_ROLLBACK` (776) from the first read-only qualification query allows
+a writable operation to open the database for SQLite rollback. The restored state
+must then qualify before Harflow writes. This may change the crashed main file or
+remove its journal even if the restored database is foreign and is refused; no
+Harflow schema or metadata is added to that foreign database. Read-only status
+fails until a writable operation recovers it. Other readonly, busy and corruption
+errors do not authorize this exception. These checks do not form a transaction
+against independent external path replacement or certify external WAL writers.

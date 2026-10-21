@@ -3,8 +3,8 @@ from __future__ import annotations
 
 from .workflow_run_documents import WorkflowRunDocumentError
 
-from .state_access import task_operation, assert_task_owned, OwnedConnection
-from .state_ownership import StateOwnershipError, StateIncompatible
+from .state_access import task_operation, assert_task_owned
+from .state_ownership import StateOwnershipError
 
 import json
 import logging
@@ -21,20 +21,9 @@ from .workflows import WorkflowStore, _identifier
 
 
 def initialize(db):
-    if not isinstance(db, OwnedConnection):
-        raise StateIncompatible("Notification schema requires an owned state connection")
-    db._assert()
-    db.execute('''CREATE TABLE IF NOT EXISTS workflow_subscriptions (
-        id TEXT PRIMARY KEY, workflow_run_id TEXT NOT NULL, destination TEXT NOT NULL,
-        events TEXT NOT NULL, state TEXT NOT NULL, from_sequence INTEGER NOT NULL,
-        last_point_sequence INTEGER NOT NULL, run_mtime_ns INTEGER, run_size INTEGER,
-        created REAL NOT NULL, updated REAL NOT NULL, UNIQUE(workflow_run_id,destination))''')
-    db.execute('''CREATE TABLE IF NOT EXISTS workflow_deliveries (
-        id TEXT PRIMARY KEY, subscription_id TEXT NOT NULL, event_key TEXT NOT NULL,
-        event TEXT NOT NULL, state TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
-        due REAL NOT NULL DEFAULT 0, lease TEXT, lease_until REAL NOT NULL DEFAULT 0,
-        payload BLOB NOT NULL, error TEXT, created REAL NOT NULL, updated REAL NOT NULL,
-        UNIQUE(subscription_id,event_key))''')
+    """Create workflow tables only within the private fresh bootstrap."""
+    from .notification_database import create_workflow_tables
+    create_workflow_tables(db)
 
 
 def _events(events):
@@ -119,8 +108,6 @@ def status(log_dir, workflow_run_id):
         return {'subscriptions': [], 'deliveries': []}
     with closing(connection) as db:
         db.row_factory = sqlite3.Row
-        if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='workflow_subscriptions'").fetchone():
-            return {'subscriptions': [], 'deliveries': []}
         subscriptions = [_public(r) for r in db.execute('SELECT * FROM workflow_subscriptions WHERE workflow_run_id=? ORDER BY created LIMIT ?', (workflow_run_id, transport.MAX_SUBSCRIPTIONS))]
         deliveries = [{k: r[k] for k in ('id', 'subscription_id', 'event_key', 'event', 'state', 'attempts', 'error')} for r in db.execute('SELECT d.* FROM workflow_deliveries d JOIN workflow_subscriptions s ON d.subscription_id=s.id WHERE s.workflow_run_id=? ORDER BY d.created DESC LIMIT 50', (workflow_run_id,))]
         return {'subscriptions': subscriptions, 'deliveries': deliveries}
@@ -129,7 +116,10 @@ def status(log_dir, workflow_run_id):
 @task_operation
 def unsubscribe(log_dir, workflow_run_id, notify=None):
     _identifier(workflow_run_id)
-    with transport._db(log_dir) as db:
+    connection = transport._existing_db(log_dir, 'rw')
+    if connection is None:
+        return {'subscriptions': [], 'deliveries': []}
+    with closing(connection) as db, db:
         db.execute('BEGIN IMMEDIATE')
         db.execute("UPDATE workflow_subscriptions SET state='unsubscribed',updated=? WHERE workflow_run_id=? AND (? IS NULL OR destination=?)", (time.time(), workflow_run_id, notify, notify))
         db.execute("UPDATE workflow_deliveries SET state='superseded',lease=NULL,lease_until=0,updated=? WHERE subscription_id IN (SELECT id FROM workflow_subscriptions WHERE workflow_run_id=? AND (? IS NULL OR destination=?)) AND state IN ('pending','retry','delivering')", (time.time(), workflow_run_id, notify, notify))
