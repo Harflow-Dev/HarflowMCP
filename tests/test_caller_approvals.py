@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from harflow_mcp import approvals
+from harflow_mcp import approvals, store
 from harflow_mcp import approval_runtime
 from harflow_mcp.backends import get
 from harflow_mcp.backends.base import UnsupportedCapability
@@ -196,6 +196,217 @@ def test_large_control_request_is_rejected_before_action_is_exposed(tmp_path: Pa
         approvals.admit(tmp_path, task, oversized, {"interaction_owner": "caller"})
 
 
+def _ledger_bytes(path: Path) -> bytes:
+    return path.read_bytes()
+
+
+def test_qualified_ledger_header_and_row_task_identity_are_required(tmp_path: Path) -> None:
+    row = _admit(tmp_path)
+    path = approvals._path(tmp_path, "task-1")
+    original = _ledger_bytes(path)
+    document = json.loads(original)
+    assert document["product"] == "harflow"
+    assert document["format"] == "harflow.task.approvals"
+    assert document["version"] == 1
+    assert document["task_id"] == "task-1"
+
+    for field, value in (("product", "foreign"), ("version", True), ("task_id", "other-task")):
+        candidate = dict(document)
+        candidate[field] = value
+        path.write_bytes(json.dumps(candidate).encode())
+        with pytest.raises(ValueError, match="unreadable|Invalid approval"):
+            approvals.rows(tmp_path, "task-1")
+        assert path.read_bytes() == json.dumps(candidate).encode()
+
+    candidate = dict(document)
+    candidate["requests"] = [dict(row, task_id="other-task")]
+    raw = json.dumps(candidate).encode()
+    path.write_bytes(raw)
+    with pytest.raises(ValueError, match="unreadable|Invalid approval"):
+        approvals.rows(tmp_path, "task-1")
+    assert path.read_bytes() == raw
+    path.write_bytes(original)
+    assert approvals.rows(tmp_path, "task-1")[0]["request_id"] == row["request_id"]
+
+
+@pytest.mark.parametrize("product_version, accepted", [("1.0.99+fixture", True), ("2.0.0", False), ("1.0.0-rc.1", False)])
+def test_product_version_qualification_preserves_stable_line_policy(
+    tmp_path: Path, product_version: str, accepted: bool
+) -> None:
+    _admit(tmp_path)
+    path = approvals._path(tmp_path, "task-1")
+    document = json.loads(path.read_bytes())
+    document["product_version"] = product_version
+    path.write_bytes(approvals.canonical(document))
+    if accepted:
+        assert len(approvals.rows(tmp_path, "task-1")) == 1
+    else:
+        with pytest.raises(ValueError, match="unreadable|Invalid approval"):
+            approvals.rows(tmp_path, "task-1")
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [b"not json", b"\xff\xfe", b"[1, 2, 3]"],
+)
+def test_invalid_or_non_object_ledger_is_unavailable_without_synthesis(tmp_path: Path, raw: bytes) -> None:
+    path = approvals._path(tmp_path, "task-1")
+    path.write_bytes(raw)
+    with pytest.raises(ValueError, match="unreadable|Invalid approval"):
+        approvals.rows(tmp_path, "task-1")
+    assert path.read_bytes() == raw
+
+
+def test_oversized_and_recursive_ledgers_are_rejected_without_truncation(tmp_path: Path) -> None:
+    path = approvals._path(tmp_path, "task-1")
+    oversized = b"{" + b"x" * approvals.MAX_LEDGER_BYTES + b"}"
+    path.write_bytes(oversized)
+    with pytest.raises(ValueError, match="exceeds|unreadable"):
+        approvals.rows(tmp_path, "task-1")
+    assert path.read_bytes() == oversized
+
+    deeply_nested = b"[" * 1200 + b"]" * 1200
+    path.write_bytes(deeply_nested)
+    with pytest.raises(ValueError, match="unreadable|Invalid approval"):
+        approvals.rows(tmp_path, "task-1")
+
+
+def test_bounded_nofollow_reads_reject_symlink_and_nonregular_sources(tmp_path: Path) -> None:
+    path = approvals._path(tmp_path, "task-1")
+    target = tmp_path / "target.json"
+    target.write_bytes(b"{}")
+    path.symlink_to(target)
+    with pytest.raises((OSError, ValueError)):
+        approvals.rows(tmp_path, "task-1")
+    path.unlink()
+    path.mkdir()
+    with pytest.raises(ValueError, match="regular|unreadable"):
+        approvals.rows(tmp_path, "task-1")
+
+
+def test_missing_ledger_is_verified_absence_and_dangling_link_is_not_empty(tmp_path: Path) -> None:
+    path = approvals._path(tmp_path, "task-1")
+    assert approvals.rows(tmp_path, "task-1") == []
+    assert not path.exists()
+    path.symlink_to(tmp_path / "missing-target.json")
+    with pytest.raises((OSError, ValueError)):
+        approvals.rows(tmp_path, "task-1")
+
+
+def test_candidate_qualification_happens_before_temporary_publication(tmp_path: Path) -> None:
+    path = approvals._path(tmp_path, "task-1")
+    before = sorted(tmp_path.iterdir())
+    created: list[Path] = []
+    real_mkstemp = approvals.tempfile.mkstemp
+
+    def spy_mkstemp(*args, **kwargs):
+        created.append(Path(kwargs["dir"]) / "candidate")
+        return real_mkstemp(*args, **kwargs)
+
+    # Invalid candidates must be rejected before any temporary file is created.
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(approvals.tempfile, "mkstemp", spy_mkstemp)
+    with pytest.raises(ValueError, match="full|Invalid approval"):
+        approvals._write(tmp_path, path, "task-1", {"product": "harflow", "version": 1})
+    monkeypatch.undo()
+    assert created == []
+    assert sorted(tmp_path.iterdir()) == before
+
+
+@pytest.mark.parametrize("extra", [float("nan"), object()])
+def test_nonfinite_or_nonserializable_qualified_candidate_never_creates_temp(
+    tmp_path: Path, extra: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    row = _admit(tmp_path)
+    path = approvals._path(tmp_path, "task-1")
+    original = path.read_bytes()
+    original_inode = path.stat().st_ino
+    candidate = json.loads(original)
+    candidate["diagnostic"] = extra
+    created: list[object] = []
+    monkeypatch.setattr(approvals.tempfile, "mkstemp", lambda *args, **kwargs: created.append(True))
+    with pytest.raises((TypeError, ValueError), match="Invalid approval|allow_nan|[Oo]ut of range|serializ"):
+        approvals._write(tmp_path, path, "task-1", candidate)
+    assert created == []
+    assert path.read_bytes() == original
+    assert path.stat().st_ino == original_inode
+    assert approvals.rows(tmp_path, "task-1")[0]["request_id"] == row["request_id"]
+
+
+def test_finite_over_limit_candidate_never_creates_temp_or_changes_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    row = _admit(tmp_path)
+    path = approvals._path(tmp_path, "task-1")
+    original = path.read_bytes()
+    original_inode = path.stat().st_ino
+    candidate = json.loads(original)
+    candidate["diagnostic"] = "x" * approvals.MAX_LEDGER_BYTES
+    created: list[object] = []
+    monkeypatch.setattr(approvals.tempfile, "mkstemp", lambda *args, **kwargs: created.append(True))
+    with pytest.raises(ValueError, match="full"):
+        approvals._write(tmp_path, path, "task-1", candidate)
+    assert created == []
+    assert path.read_bytes() == original
+    assert path.stat().st_ino == original_inode
+    assert approvals.rows(tmp_path, "task-1")[0]["request_id"] == row["request_id"]
+
+
+def test_finite_additive_outer_and_row_metadata_survive_decision_mutations(tmp_path: Path) -> None:
+    row = _admit(tmp_path)
+    path = approvals._path(tmp_path, "task-1")
+    document = json.loads(path.read_bytes())
+    document["diagnostic"] = {"source": "fixture", "count": 1}
+    document["requests"][0]["row_extension"] = {"preserve": True}
+    approvals._write(tmp_path, path, "task-1", document)
+    reserved = approvals.reserve(tmp_path, "task-1", row["request_id"], row["action_digest"], row["owner_revision"], "approve", row["generation"])
+    approvals.update(tmp_path, "task-1", row["request_id"], row["generation"], "reserved", delivery="sending")
+    final = approvals.get(tmp_path, "task-1", row["request_id"])
+    persisted = approvals._read(tmp_path, path, "task-1")
+    assert persisted["diagnostic"] == {"source": "fixture", "count": 1}
+    assert final["row_extension"] == {"preserve": True}
+    assert final["action_digest"] == row["action_digest"] == approvals.digest(final["action"])
+    assert reserved["decision"] == "approve"
+
+
+def test_full_header_counts_toward_admission_storage_bound(tmp_path: Path) -> None:
+    task = _task(tmp_path)
+    context = {"interaction_owner": "caller", "workflow_run_id": None, "root_workflow_run_id": None,
+               "workflow_node_id": None, "workflow_execution_id": None, "diagnostic": "x" * approvals.ADMISSION_BYTES}
+    with pytest.raises(ValueError, match="storage bound"):
+        approvals.admit(tmp_path, task, _request(task), context)
+    assert not approvals._path(tmp_path, "task-1").exists()
+
+
+def test_complete_generation_remains_readable_after_atomic_replacement(tmp_path: Path) -> None:
+    row = _admit(tmp_path)
+    path = approvals._path(tmp_path, "task-1")
+    first = json.loads(path.read_bytes())
+    second = dict(first)
+    second["extra"] = {"fixture": True}
+    replacement = tmp_path / "replacement.json"
+    replacement.write_bytes(approvals.canonical(second))
+    real_qualified = approvals._qualified
+    replaced = False
+
+    def replace_after_qualification(document, task_id):
+        nonlocal replaced
+        result = real_qualified(document, task_id)
+        if not replaced:
+            replaced = True
+            os.replace(replacement, path)
+        return result
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(approvals, "_qualified", replace_after_qualification)
+    try:
+        assert approvals.rows(tmp_path, "task-1")[0]["request_id"] == row["request_id"]
+    finally:
+        monkeypatch.undo()
+    assert replaced is True
+    assert json.loads(path.read_bytes())["extra"] == {"fixture": True}
+
+
 @pytest.mark.asyncio
 async def test_runtime_admits_only_a_real_control_request_and_keeps_prose_out_of_ledger(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     task = _task(tmp_path)
@@ -235,6 +446,102 @@ async def test_runtime_admits_only_a_real_control_request_and_keeps_prose_out_of
     assert len(records) == 1
     assert records[0]["action"]["input"]["command"] == "printf exact"
     assert task.approval_pending is True
+
+
+@pytest.mark.asyncio
+async def test_respond_refuses_foreign_row_before_reservation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A qualified task record cannot be bypassed by changing a persisted row identity."""
+    directory = tmp_path
+    task = _task(directory)
+    store_record = store.TaskRecord(
+        task_id="task-1", backend="claude", session_id="session-1", repo_path=str(directory),
+        started_at="now", status="running", approval_generation=task.approval_generation,
+        start_time=task.start_time, owner=task.owner,
+    )
+    store.write(directory, store_record)
+    row = _admit(directory)
+
+    class Registry:
+        log_dir = directory
+        state_layout = resolve_layout(log_dir=directory)
+        task = SimpleNamespace(pump_wake=SimpleNamespace(set=lambda: None))
+
+        async def _mutation_caller(self):
+            return None
+
+        def get(self, _task_id):
+            return self.task
+
+    monkeypatch.setattr(approval_runtime.identity, "identity_check", lambda _identity: "alive")
+    path = approvals._path(directory, "task-1")
+    valid = path.read_bytes()
+    document = json.loads(path.read_bytes())
+    document["requests"][0]["task_id"] = "foreign-task"
+    raw = approvals.canonical(document)
+    path.write_bytes(raw)
+    before = path.stat()
+    with pytest.raises(ValueError, match="unreadable|Invalid approval"):
+        await approval_runtime.respond_request(
+            Registry(), "task-1", row["request_id"], row["action_digest"], row["owner_revision"], "approve"
+        )
+    assert path.read_bytes() == raw
+    assert json.loads(raw)["requests"][0]["owner_revision"] == row["owner_revision"]
+    assert path.stat().st_ino == before.st_ino
+
+    path.write_bytes(valid)
+    answered = await approval_runtime.respond_request(
+        Registry(), "task-1", row["request_id"], row["action_digest"], row["owner_revision"], "approve"
+    )
+    assert answered["decision"] == "approve"
+    assert answered["delivery"] == "reserved"
+
+
+@pytest.mark.asyncio
+async def test_pump_refuses_foreign_row_without_writing_stdin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    task = _task(tmp_path)
+    task.backend = "claude"
+    task.caller_approvals = True
+    task.interaction_owner = "caller"
+    task.cancel_requested = False
+    task.input_closed = False
+    task.proc.returncode = None
+    task.acc = Accumulator()
+    task.approval_receiving = False
+    task.approval_pending = True
+    task.approval_view = {"pending_count": 1, "interaction_state": "waiting_for_approval", "requests": []}
+    row = _admit(tmp_path)
+    approvals.reserve(tmp_path, "task-1", row["request_id"], row["action_digest"], row["owner_revision"], "approve", row["generation"])
+    path = approvals._path(tmp_path, "task-1")
+    valid = path.read_bytes()
+    document = json.loads(path.read_bytes())
+    document["requests"][0]["task_id"] = "foreign-task"
+    raw = approvals.canonical(document)
+    path.write_bytes(raw)
+    before = path.stat()
+    writes: list[bytes] = []
+    monkeypatch.setattr(approval_runtime.identity, "identity_check", lambda _identity: "alive")
+    monkeypatch.setattr("harflow_mcp.tasks._write_stdin", lambda _task, wire: writes.append(wire) or True)
+
+    class Registry:
+        log_dir = tmp_path
+        state_layout = resolve_layout(log_dir=tmp_path)
+
+        def get(self, _task_id):
+            return task
+
+        def _stop_native_transport(self, value):
+            value.cancel_requested = True
+
+    with pytest.raises(ValueError, match="unreadable|Invalid approval"):
+        await approval_runtime.pump(Registry(), task)
+    assert writes == []
+    assert path.read_bytes() == raw
+    assert path.stat().st_ino == before.st_ino
+
+    # Restore the otherwise eligible generation as a causal positive control.
+    path.write_bytes(valid)
+    assert await approval_runtime.pump(Registry(), task) is False
+    assert len(writes) == 1
 
 
 @pytest.mark.asyncio

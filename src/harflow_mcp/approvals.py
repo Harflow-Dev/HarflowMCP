@@ -12,6 +12,7 @@ import fcntl
 import hashlib
 import json
 import os
+import stat
 import tempfile
 import time
 import uuid
@@ -20,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from .store import validate_task_id
+from .wire_contracts import PRODUCT, PRODUCT_VERSION, compatible_line
 
 MAX_REQUEST_BYTES = 64 * 1024
 MAX_PENDING = 16
@@ -42,27 +44,70 @@ def _path(directory: Path, task_id: str) -> Path:
     return directory / (validate_task_id(task_id) + ".approvals.json")
 
 
-def _read(directory: Path, path: Path) -> dict[str, Any]:
-    require_state_path(task_layout(directory), path)
-    if not path.exists():
-        return {"version": 1, "requests": []}
-    if path.stat().st_size > MAX_LEDGER_BYTES:
-        raise ValueError("Approval ledger exceeds its byte bound")
+def _empty(task_id: str) -> dict[str, Any]:
+    return {"product": PRODUCT, "format": "harflow.task.approvals", "product_version": PRODUCT_VERSION,
+            "version": 1, "task_id": validate_task_id(task_id), "requests": []}
+
+
+def _qualified(data: Any, task_id: str) -> bytes:
+    """Validate the private ledger without changing action digest authority."""
+    validate_task_id(task_id)
     try:
-        data = json.loads(path.read_bytes())
-    except (ValueError, UnicodeError) as exc:
+        if (not isinstance(data, dict) or data.get("product") != PRODUCT or
+                data.get("format") != "harflow.task.approvals" or
+                type(data.get("version")) is not int or data["version"] != 1 or
+                not compatible_line(data.get("product_version")) or data.get("task_id") != task_id or
+                not isinstance(data.get("requests"), list) or len(data["requests"]) > MAX_RECORDS):
+            raise ValueError("Invalid approval ledger")
+        for row in data["requests"]:
+            if (not isinstance(row, dict) or row.get("task_id") != task_id or
+                    not isinstance(row.get("action"), dict) or row.get("action_digest") != digest(row["action"])):
+                raise ValueError("Invalid approval action snapshot")
+        return canonical(data)
+    except (TypeError, UnicodeError, RecursionError) as exc:
+        raise ValueError("Invalid approval ledger") from exc
+
+
+def _read(directory: Path, path: Path, task_id: str) -> dict[str, Any]:
+    layout = task_layout(directory)
+    require_state_path(layout, path)
+    validate_task_id(task_id)
+    try:
+        fd = open_descriptor(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, layout=layout)
+    except FileNotFoundError:
+        # A dangling symlink is not an absent ledger.
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            return _empty(task_id)
+        raise ValueError("Approval ledger is unavailable")
+    try:
+        source = os.fstat(fd)
+        if not stat.S_ISREG(source.st_mode):
+            raise ValueError("Approval ledger is not a regular file")
+        if source.st_size > MAX_LEDGER_BYTES:
+            raise ValueError("Approval ledger exceeds its byte bound")
+        raw = bytearray()
+        while len(raw) <= MAX_LEDGER_BYTES:
+            chunk = os.read(fd, min(64 * 1024, MAX_LEDGER_BYTES + 1 - len(raw)))
+            if not chunk:
+                break
+            raw.extend(chunk)
+        if len(raw) > MAX_LEDGER_BYTES:
+            raise ValueError("Approval ledger exceeds its byte bound")
+    finally:
+        fd.close()
+    try:
+        data = json.loads(raw)
+        _qualified(data, task_id)
+    except (ValueError, UnicodeError, RecursionError) as exc:
         raise ValueError("Approval ledger is unreadable") from exc
-    if not isinstance(data, dict) or data.get("version") != 1 or not isinstance(data.get("requests"), list) or len(data["requests"]) > MAX_RECORDS:
-        raise ValueError("Invalid approval ledger")
-    for row in data["requests"]:
-        if not isinstance(row, dict) or not isinstance(row.get("action"), dict) or row.get("action_digest") != digest(row["action"]):
-            raise ValueError("Invalid approval action snapshot")
     return data
 
 
-def _write(directory: Path, path: Path, data: dict[str, Any]) -> None:
+def _write(directory: Path, path: Path, task_id: str, data: dict[str, Any]) -> None:
     require_state_path(task_layout(directory), path)
-    raw = canonical(data)
+    raw = _qualified(data, task_id)
     if len(raw) > MAX_LEDGER_BYTES:
         raise ValueError("Approval ledger is full")
     fd, temporary = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
@@ -94,9 +139,9 @@ def _locked(directory: Path, task_id: str):
                 if time.monotonic() >= until:
                     raise ValueError("Approval ledger is busy; retry the read or decision")
                 time.sleep(0.01)
-        data = _read(directory, path)
+        data = _read(directory, path, task_id)
         yield data
-        _write(directory, path, data)
+        _write(directory, path, task_id, data)
     finally:
         fd.close(unlock=True)
 
@@ -108,7 +153,7 @@ def metadata(row: dict[str, Any]) -> dict[str, Any]:
 @task_operation
 def rows(directory: Path, task_id: str) -> list[dict[str, Any]]:
     # Atomic replacement makes unlocked readers see a complete generation.
-    return copy.deepcopy(_read(directory, _path(directory, task_id))["requests"])
+    return copy.deepcopy(_read(directory, _path(directory, task_id), task_id)["requests"])
 
 
 @task_operation

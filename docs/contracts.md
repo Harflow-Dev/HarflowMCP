@@ -1,6 +1,6 @@
 # Harflow public wire contracts
 
-HarflowMCP 1.0.0 is unreleased. This specification covers ctl, setup, normalized events and version-info. Persisted task metadata, saved workflow definitions, workflow run documents, ownership receipts, follow-up ledgers, control phase payloads, live-input inbox rows and task artifact manifests use qualified Harflow formats; store ownership is defined below, while migration remains unsupported. Raw vendor streams, MCP negotiation, cursors and internal indexes are unchanged.
+HarflowMCP 1.0.0 is unreleased. This specification covers ctl, setup, normalized events and version-info. Persisted task metadata, saved workflow definitions, workflow run documents, ownership receipts, follow-up ledgers, control phase payloads, live-input inbox rows, task artifact manifests and approval ledgers use qualified Harflow formats; store ownership is defined below, while migration remains unsupported. Raw vendor streams, MCP negotiation, cursors and internal indexes are unchanged.
 
 ## Common envelope
 
@@ -148,3 +148,13 @@ Preserve old state for inspection and select a separate missing or empty compati
 Missing manifests remain empty registration sets. Existing unqualified development manifests, foreign or incompatible headers, malformed documents and unreadable sources report unavailable and cannot be overwritten by registration. No adoption, conversion or repair is provided; preserve old state and select a separate fresh missing or empty compatible root.
 
 The complete persisted bytes, including the header, count toward the existing 1 MiB manifest cap and shared metadata budgets and determine task cursor revisions. Reads retain no-follow regular-file checks; registration retains the existing task/catalog locks and owned-directory atomic publication. Duplicate immutable references, workflow selection and stat-only target observations are unchanged. Manifest qualification does not read, copy or hash referenced file contents.
+
+## Task approval ledgers
+
+`tasks/<task_id>.approvals.json` uses a flat private header with `product: "harflow"`, `format: "harflow.task.approvals"`, exact integer `version: 1`, compatible stable major/minor `product_version`, filename-bound `task_id`, and the existing `requests` array. Every request must carry that same task identity and its existing canonical action digest. The digest covers the action alone. The entire ledger, including additive fields, must be finite JSON. This private format is not a public wire capability and does not change the store layout version.
+
+Verified absence returns an empty qualified ledger in memory without creating a file. Unqualified development ledgers, foreign or incompatible headers, task mismatches, malformed documents, symlinks, nonregular files and unreadable sources are refused before display or decision use. Summary reports approval uncertainty; refusal cannot reserve a decision or authorize stdin delivery. Preserve old state and select a separate fresh missing or empty compatible root; no adoption, import, rewrite or automatic repair is provided.
+
+Reads use bounded no-follow regular-file descriptors and accept complete generations across ordinary atomic replacement. The complete header counts toward the existing 2 MiB ledger cap and 256 KiB decision/outcome headroom. Writers retain the permanent ledger lock, locked reread and atomic publication; candidates are fully qualified and canonicalized before temporary-file creation. No lock is held across task/workflow persistence or awaits.
+
+Ledger identity is an audit qualification, not reusable permission or proof of execution. Existing owner, workflow, process, session, digest, revision, generation and deadline gates remain independent. The owning stdin pump still persists reservation and sending state before input; uncertain delivery cannot be replayed. Backend capabilities and approval transport support are unchanged.

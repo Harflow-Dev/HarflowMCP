@@ -405,7 +405,12 @@ configuration or resuming is a separate action and never a permission response.
 
 Storage is bounded per task: 64 KiB canonical request payload, 16 pending requests, 128 lifetime
 records and a 2 MiB ledger, with 256 KiB reserved for decisions/outcomes. Full or invalid ledgers
-stop owned execution without approving. Records remain until normal task retention/deletion.
+stop owned execution without approving. Ledgers require a compatible Harflow header and matching
+task identity on every request; unqualified or unreadable state reports approval uncertainty and
+cannot authorize a decision. Preserve old state and select a separate fresh missing or empty
+compatible root for recovery; no conversion or repair is provided. See
+[approval ledger contracts](contracts.md#task-approval-ledgers). Records remain until normal task
+retention/deletion.
 Lists contain metadata only (16 by default, maximum 32). Active requests appear first, unresolved
 delivery uncertainty next, and retained history last; each group is oldest first, with request IDs
 breaking timestamp ties. This order is applied before pagination. Full commands may contain sensitive
