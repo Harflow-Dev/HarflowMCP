@@ -594,6 +594,7 @@ def test_virtualenv_external_python_installation_refused_before_probe(qualified,
 @pytest.mark.parametrize('scope', ['repo', 'scratch', 'directory', 'file'])
 def test_existing_writable_hardlink_refused_before_version(qualified, monkeypatch, tmp_path, scope):
     import os
+    from harflow_mcp import extra_paths
     repo = tmp_path / 'repo'
     repo.mkdir()
     grant = tmp_path / 'grant'
@@ -604,6 +605,22 @@ def test_existing_writable_hardlink_refused_before_version(qualified, monkeypatc
     source.write_text('original')
     target = {'repo': repo, 'scratch': scratch, 'directory': grant, 'file': grant}[scope] / 'alias.py'
     os.link(source, target)
+    if scope == 'file':
+        # Keep the original multiply-linked-file test about the production scan.
+        # On Darwin, a hardlink's kernel spelling may vary between observations;
+        # memoize only the first real observation for this exact requested file.
+        real_canonical = extra_paths.canonical
+        first_observation = {}
+
+        def memoize_exact_file(value):
+            if value == target and 'path' in first_observation:
+                return first_observation['path']
+            observed = real_canonical(value)
+            if value == target:
+                first_observation['path'] = observed
+            return observed
+
+        monkeypatch.setattr(extra_paths, 'canonical', memoize_exact_file)
     grants = normalize_paths([str(target if scope == 'file' else grant)])
     invocation = build(qualified, repo)
     if scope == 'scratch':
@@ -614,6 +631,106 @@ def test_existing_writable_hardlink_refused_before_version(qualified, monkeypatc
         qualified.with_extra_writable_paths(invocation, grants, 'write_in_repo')
     assert calls == []
     assert source.read_text() == 'original'
+
+
+def test_alternate_hardlink_spelling_refused_before_probe_with_safe_diagnostic(
+    qualified, monkeypatch, tmp_path
+):
+    """Model a possible Darwin canonical-spelling change without weakening identity checks.
+
+    The first canonical observation is real. After normalization, the controlled
+    seam returns a different spelling of the same hardlinked inode. This is a
+    deterministic model that also runs on Linux; it does not establish that a
+    particular CI runner made this observation.
+    """
+    import os
+    from harflow_mcp import extra_paths
+
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    grant = tmp_path / 'grant'
+    grant.mkdir()
+    source = tmp_path / 'outside-source.py'
+    source.write_bytes(b'preserved bytes')
+    target = grant / 'requested-alias.py'
+    os.link(source, target)
+
+    real_canonical = extra_paths.canonical
+    phase = {'after_normalize': False}
+    first_observation = {}
+
+    def controlled_canonical(value):
+        if value == target and phase['after_normalize']:
+            first = first_observation['path']
+            source_alias = real_canonical(source.parent) / source.name
+            target_alias = real_canonical(target.parent) / target.name
+            second = source_alias if source_alias != first else target_alias
+            assert second != first
+            first_info = os.stat(first)
+            second_info = os.stat(second)
+            assert (first_info.st_dev, first_info.st_ino) == (second_info.st_dev, second_info.st_ino)
+            assert first_info.st_size == second_info.st_size
+            return second
+        observed = real_canonical(value)
+        if value == target:
+            first_observation['path'] = observed
+        return observed
+
+    monkeypatch.setattr(extra_paths, 'canonical', controlled_canonical)
+    monkeypatch.setattr(backends, 'version', lambda *args, **kwargs: pytest.fail('version probe reached'))
+    monkeypatch.setattr(qualified, '_assert_launcher_outside_writes',
+                        lambda *args: pytest.fail('launcher scan reached'))
+    grants = normalize_paths([str(target)])
+    assert str(first_observation['path']) == grants[0].path
+    phase['after_normalize'] = True
+
+    with pytest.raises(ValueError) as caught:
+        qualified.with_extra_writable_paths(build(qualified, repo), grants, 'write_in_repo')
+
+    prefix = 'extra writable path identity or target changed'
+    message = str(caught.value)
+    assert message.startswith(prefix)
+    assert 'path' in message[len(prefix):].lower()
+    assert str(target) not in message
+    assert str(source) not in message
+    for identity in os.stat(target).st_dev, os.stat(target).st_ino:
+        assert str(identity) not in message
+    assert source.read_bytes() == b'preserved bytes'
+
+
+def test_symlink_substitution_diagnostic_names_changed_fields_without_identity_values(
+    qualified, monkeypatch, tmp_path
+):
+    first = tmp_path / 'first-target.py'
+    second = tmp_path / 'second-target.py'
+    first.write_bytes(b'first bytes')
+    second.write_bytes(b'second bytes')
+    link = tmp_path / 'requested-link.py'
+    link.symlink_to(first)
+    grants = normalize_paths([str(link)])
+    original = grants[0]
+    link.unlink()
+    link.symlink_to(second)
+
+    monkeypatch.setattr(backends, 'version', lambda *args, **kwargs: pytest.fail('version probe reached'))
+    monkeypatch.setattr(qualified, '_assert_launcher_outside_writes',
+                        lambda *args: pytest.fail('launcher scan reached'))
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    with pytest.raises(ValueError, match='identity or target changed') as caught:
+        qualified.with_extra_writable_paths(build(qualified, repo), grants, 'write_in_repo')
+
+    prefix = 'extra writable path identity or target changed'
+    message = str(caught.value)
+    assert message.startswith(prefix)
+    diagnostic = message[len(prefix):].lower()
+    assert 'path' in diagnostic
+    assert 'inode' in diagnostic
+    assert str(first) not in message
+    assert str(second) not in message
+    assert str(original.device) not in message
+    assert str(original.inode) not in message
+    assert second.read_bytes() == b'second bytes'
 
 
 def test_final_revalidation_rejects_new_writable_file_alias(qualified, tmp_path):
@@ -642,6 +759,7 @@ def test_final_recheck_rejects_grant_replaced_during_final_scan(qualified, monke
     grant = tmp_path / 'grant-file'
     grant.write_text('original')
     grants = normalize_paths([str(grant)])
+    original_identity = os.stat(grant)
     scans = []
     real_scan = runtime_paths.assert_single_link_writable_files
     monkeypatch.setattr(runtime_paths, 'assert_single_link_writable_files',
@@ -658,9 +776,16 @@ def test_final_recheck_rejects_grant_replaced_during_final_scan(qualified, monke
         os.replace(replacement, grant)
         return result
     monkeypatch.setattr(qualified, '_assert_launcher_outside_writes', replace_grant_mid_scan)
-    with pytest.raises(ValueError, match='identity or target changed'):
+    with pytest.raises(ValueError, match='identity or target changed') as caught:
         qualified.assert_extra_writable_paths(invocation, grants, 'write_in_repo')
     assert len(scans) == 4
+    message = str(caught.value)
+    prefix = 'extra writable path identity or target changed'
+    assert message.startswith(prefix)
+    assert 'inode' in message[len(prefix):].lower()
+    assert str(grant) not in message
+    assert str(original_identity.st_ino) not in message
+    assert str(os.stat(grant).st_ino) not in message
 
 
 def test_final_recheck_rejects_mid_scan_configuration_and_runtime_mutation(qualified, monkeypatch, tmp_path):

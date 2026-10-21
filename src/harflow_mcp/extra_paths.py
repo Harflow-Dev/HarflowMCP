@@ -113,8 +113,16 @@ def restore_paths(records: list[dict]) -> tuple[PathGrant, ...]:
 
 def revalidate_paths(grants: tuple[PathGrant, ...]) -> None:
     for grant in grants:
-        if _grant(grant.requested) != grant:
-            raise ValueError('extra writable path identity or target changed')
+        observed = _grant(grant.requested)
+        if observed != grant:
+            changed = [
+                name for name in ('requested', 'path', 'kind', 'device', 'inode')
+                if getattr(observed, name) != getattr(grant, name)
+            ]
+            message = 'extra writable path identity or target changed'
+            if changed:
+                message += ': ' + ', '.join(changed)
+            raise ValueError(message)
 
 
 def check_child_paths(parent_grants: tuple[PathGrant, ...], child_grants: tuple[PathGrant, ...], parent_repo: str) -> None:
