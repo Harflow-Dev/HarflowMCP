@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from harflow_mcp import backends, store
+from harflow_mcp import inbox_documents
 from harflow_mcp.backends import STDIN_PIPE, Invocation
 from harflow_mcp.backends.base import Enforcement
 from harflow_mcp.events import events_path
@@ -1053,10 +1054,35 @@ def test_a_non_owner_send_appends_one_durable_line(tmp_path: Path) -> None:
     assert inbox.read_new(log_dir, "t1", offset) == ([], offset)
 
 
+def test_send_candidate_failure_maps_to_write_failed_and_releases_inbox_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log_dir = _task_dir(tmp_path)
+    _record(tmp_path)
+    path = inbox.inbox_path(log_dir, "t1")
+    original = b'{"id":"torn","text":"unfinished"'
+    path.write_bytes(original)
+    inode = path.stat().st_ino
+
+    def reject(*args, **kwargs):
+        raise inbox_documents.InboxDocumentError("t1", "candidate rejected")
+
+    monkeypatch.setattr(inbox_documents, "encode", reject)
+    with pytest.raises(inbox.SendRefused) as caught:
+        inbox.send_to_record(log_dir, "t1", "must fail", by=None)
+    assert caught.value.code == "write_failed"
+    assert path.read_bytes() == original
+    assert path.stat().st_ino == inode
+
+    # A failed candidate must not strand the flock held by the sender.
+    fd = inbox.lock_sync(log_dir, "t1", timeout=0.2)
+    inbox.unlock(fd)
+
+
 def test_read_new_leaves_a_torn_line_unread(tmp_path: Path) -> None:
     log_dir = _task_dir(tmp_path)
     path = inbox.inbox_path(log_dir, "t1")
-    good = json.dumps(inbox.make_message("ok", None)) + "\n"
+    good = json.dumps(inbox_documents.encode(inbox.make_message("ok", None), "t1")) + "\n"
     path.write_text(good + "not json\n" + '{"id": "x", "text": "partial')
     messages, offset = inbox.read_new(log_dir, "t1", 0)
     assert [m["text"] for m in messages] == ["ok"]

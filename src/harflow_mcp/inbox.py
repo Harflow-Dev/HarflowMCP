@@ -36,7 +36,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import control, identity, store
+from . import control, identity, inbox_documents, store
 
 INBOX_SUFFIX = ".inbox.jsonl"
 CLOSED_SUFFIX = ".inbox.closed"
@@ -110,9 +110,9 @@ def is_closed(log_dir: Path, task_id: str) -> bool:
         return False
     for line in data.splitlines():
         try:
-            if _is_seal(json.loads(line.decode("utf-8"))):
+            if _is_seal(inbox_documents.decode(json.loads(line.decode("utf-8")), task_id)):
                 return True
-        except (UnicodeDecodeError, ValueError):
+        except (UnicodeDecodeError, ValueError, RecursionError, inbox_documents.InboxDocumentError):
             continue
     return False
 
@@ -206,8 +206,8 @@ def read_new(log_dir: Path, task_id: str, offset: int) -> tuple[list[dict[str, A
     messages: list[dict[str, Any]] = []
     for line in data[: end + 1].splitlines():
         try:
-            message = json.loads(line.decode("utf-8"))
-        except (UnicodeDecodeError, ValueError):
+            message = inbox_documents.decode(json.loads(line.decode("utf-8")), task_id)
+        except (UnicodeDecodeError, ValueError, RecursionError, inbox_documents.InboxDocumentError):
             continue
         if (
             isinstance(message, dict)
@@ -227,7 +227,13 @@ def append_locked(log_dir: Path, task_id: str, message: dict[str, Any]) -> None:
     message along with the fragment — so the fragment is terminated first, becoming a line of its
     own that `read_new` skips.
     """
-    line = (json.dumps(message, ensure_ascii=False, default=str) + "\n").encode("utf-8")
+    try:
+        # Preserve historical writer coercion before qualifying the persisted JSON shape.
+        payload = json.loads(json.dumps(message, ensure_ascii=False, default=str, allow_nan=False))
+        document = inbox_documents.encode(payload, task_id)
+        line = (json.dumps(document, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
+    except (inbox_documents.InboxDocumentError, ValueError, TypeError, UnicodeError, RecursionError) as exc:
+        raise OSError("Inbox candidate could not be encoded") from exc
     path = inbox_path(log_dir, task_id)
     with path.open("ab") as handle:
         if handle.tell() > 0:
@@ -344,7 +350,7 @@ def _json_rows(path: Path, incomplete: list[bool] | None = None, *, layout):
                     continue
                 try:
                     value = json.loads(line)
-                except (ValueError, UnicodeDecodeError):
+                except (ValueError, UnicodeDecodeError, RecursionError):
                     if incomplete is not None:
                         incomplete[0] = True
                     continue
@@ -376,7 +382,14 @@ def delivered_ids(log_dir: Path, task_id: str) -> set[str] | None:
 
 @task_operation
 def pending_messages(log_dir: Path, task_id: str) -> list[dict[str, Any]]:
-    queued = {m["id"]: m for m in _json_rows(inbox_path(log_dir, task_id), layout=task_layout(log_dir)) if isinstance(m.get("id"), str) and isinstance(m.get("text"), str)}
+    queued = {}
+    for row in _json_rows(inbox_path(log_dir, task_id), layout=task_layout(log_dir)):
+        try:
+            message = inbox_documents.decode(row, task_id)
+        except inbox_documents.InboxDocumentError:
+            continue
+        if isinstance(message.get("id"), str) and isinstance(message.get("text"), str):
+            queued[message["id"]] = message
     if not queued:
         return []
     terminal = delivered_ids(log_dir, task_id)

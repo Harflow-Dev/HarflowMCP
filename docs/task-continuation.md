@@ -36,6 +36,9 @@ standalone task, running or settled, appends the text to a durable per-task ledg
 inbox path unchanged and answer `delivery: "live_input"`; a live task whose input has closed is
 still told to `resume_task`, not redirected here. The ledger is separate from the live-input inbox
 and never touches its lock or close protocol. `harflow-ctl send` takes the same route.
+Persisted live-input rows require the private [inbox row contract](contracts.md#live-input-inbox-rows);
+older flat development rows are skipped without conversion. Public queued responses and caller
+message payloads remain unchanged.
 
 **Consumption.** The next continuation a caller starts explicitly from the task consumes every
 queued message, in `seq` order, exactly once: `resume_task`, `continue_task`, `harflow-ctl

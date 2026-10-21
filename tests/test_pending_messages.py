@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from harflow_mcp import events, inbox, workflows
+from harflow_mcp import events, inbox, inbox_documents, workflows
 from harflow_mcp.state_layout import resolve_layout
 from harflow_mcp.state_ownership import state_session
 
@@ -46,8 +46,17 @@ def test_torn_rows_and_oversized_rows_do_not_hide_following_queue(owned_tasks):
     tmp_path = owned_tasks
     message = inbox.make_message("feedback", None)
     path = inbox.inbox_path(tmp_path, "task")
-    path.write_bytes(b"x" * 1_000_002 + b"\n" + (json.dumps(message) + "\n").encode() + b'{"id":"torn"')
+    qualified = inbox_documents.encode(message, "task")
+    path.write_bytes(b"x" * 1_000_002 + b"\n" + (json.dumps(qualified) + "\n").encode() + b'{"id":"torn"')
     assert [m["id"] for m in inbox.pending_messages(tmp_path, "task")] == [message["id"]]
+
+
+def test_pending_qualifies_inbox_rows_but_keeps_independent_delivery_events(owned_tasks):
+    message = inbox.make_message("feedback", None)
+    inbox.append_locked(owned_tasks, "task", message)
+    event_path = events.events_path(owned_tasks, "task")
+    event_path.write_text(json.dumps({"kind": "user_message", "message_id": message["id"]}) + "\n")
+    assert inbox.pending_messages(owned_tasks, "task") == []
 
 
 def test_builder_canonical_ids_mapping_and_claimed_delivery(tmp_path, owned_tasks):

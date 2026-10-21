@@ -1,6 +1,6 @@
 # Harflow public wire contracts
 
-HarflowMCP 1.0.0 is unreleased. This specification covers ctl, setup, normalized events and version-info. Persisted task metadata, saved workflow definitions, workflow run documents, ownership receipts, follow-up ledgers and control phase payloads use qualified Harflow formats; artifact documents retain their existing format; store ownership is defined below, while migration remains unsupported. Raw vendor streams, MCP negotiation, cursors and internal indexes are unchanged.
+HarflowMCP 1.0.0 is unreleased. This specification covers ctl, setup, normalized events and version-info. Persisted task metadata, saved workflow definitions, workflow run documents, ownership receipts, follow-up ledgers, control phase payloads and live-input inbox rows use qualified Harflow formats; artifact documents retain their existing format; store ownership is defined below, while migration remains unsupported. Raw vendor streams, MCP negotiation, cursors and internal indexes are unchanged.
 
 ## Common envelope
 
@@ -130,3 +130,13 @@ Every candidate is fully qualified and encoded before temporary-file creation. P
 Filename-presence latches remain a separate protocol: sig outranks failed, nosig resolves its join, failed takeover releases its reservation, and unreadable ready remains conservatively present. Permanent lock files and lease, signal and retention rules are unchanged. Parsed payload qualification does not qualify these presence latches or change their physical symlink policy.
 
 Older flat development req/join documents remain conservatively pending and protect retention; flat takeover req/attach documents retain busy reservations, and flat sig payloads cannot authorize leader cancellation. Preserve the old root for manual inspection and select a separate fresh missing or empty compatible root. No import, rewrite, migration or automatic repair is provided.
+
+## Live-input inbox rows
+
+Each persisted row in `tasks/<task_id>.inbox.jsonl` uses the private `product: "harflow"`, `format: "harflow.task.inbox"`, exact integer `v: 1`, compatible stable major/minor `product_version`, filename-bound `task_id`, `kind: "message"` or `"seal"`, and nested `payload` envelope. Message payloads require string `id` and `text`; optional fields are not required or restricted beyond finite JSON. Seals require exact `closed: true` and no `id`. The discriminator must agree with the payload. Readers return the original inner message shape and preserve caller prose. Writers retain existing `default=str` coercion before qualifying the resulting JSON; nonfinite values are refused.
+
+Qualification is row-local: unqualified flat development rows, foreign or incompatible envelopes, malformed JSON and invalid UTF-8 complete rows are skipped while byte offsets advance. Readers leave incomplete trailing bytes unread. Closure detection separately recognizes a qualified parseable trailing seal without a final newline; qualified seals never become messages. The physical `.inbox.closed` marker remains an existence latch regardless of its incidental contents.
+
+Writers fully qualify and encode the UTF-8 candidate before opening the append target or terminating a torn tail. Candidate failures use the existing write-failure path and do not change existing bytes. Durable append, sender marker recheck, queued acknowledgements and delivery-event evidence retain their existing meanings. The inbox inode remains the permanent flock identity: no replacement, truncation, reset, historical rewrite or automatic migration occurs. Row qualification does not bind reopened paths to lock descriptors against external substitution or introduce a delivery transaction, retry or recovery guarantee. Pending display qualifies only inbox rows; independently parsed delivery events retain their own format and incomplete-evidence suppression.
+
+Preserve old state for inspection and select a separate missing or empty compatible root for recovery. This unreleased private format is not a public wire capability and does not change the store layout version.
