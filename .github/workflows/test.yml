@@ -13,6 +13,6 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: uv sync --locked
-      - run: uv run pytest --ignore=tests/test_monitor_profile.py --ignore=tests/test_swift_package_runner.py
+      - run: uv run pytest
       - run: bash scripts/check-private-refs.sh
       - run: uv run python scripts/check-legacy-names.py
