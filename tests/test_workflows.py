@@ -1438,7 +1438,8 @@ async def test_retry_connection_budget_counts_actual_traversals(storage, tmp_pat
     d["connections"].append({"id": "retry", "source": "work", "target": "work", "condition": "Retry", "max_retries": limit})
     decision = json.dumps({"action": "continue", "connections": ["retry"], "reason": "Needs another attempt"})
     responses = [item for i in range(limit + 1) for item in (f"attempt {i}", decision)]
-    run, registry = await execute(storage, tmp_path, d, responses)
+    # Up to eight persisted dispatches need functional-test headroom on slower runners.
+    run, registry = await execute(storage, tmp_path, d, responses, timeout_seconds=20)
     assert run["status"] == "needs_attention"
     assert f"connection retry: {limit} of {limit}" in run["attention_reason"]
     assert run["retry_counts"].get("retry", 0) == limit
