@@ -205,3 +205,45 @@ Harflow schema or metadata is added to that foreign database. Read-only status
 fails until a writable operation recovers it. Other readonly, busy and corruption
 errors do not authorize this exception. These checks do not form a transaction
 against independent external path replacement or certify external WAL writers.
+
+### Supervision and recovery activity
+
+Task snapshots add `supervision` with independent tri-state `owner_state` and
+`process_state` (`alive`, `dead`, `undecidable`). `output_capture` aliases its
+`capture_state`: `live`, `lost_with_owner`, `unknown`, or `observed_terminal`.
+`input_channel` aliases `live_input_state`: `open`, `closed`, `closed_with_owner`,
+`unknown`, or `not_applicable`. Confirmed owner death alone supports the loss
+claim; conservative process guards do not establish verified liveness. Observed
+terminal history retains its observed status. `last_captured_output_at` is the
+raw stream file modification time in UTC, or null when unavailable; supervision
+labels its source `raw_stream_log_mtime`.
+
+`recovery-activity TASK_ID --json [--cursor CURSOR] [--limit N]` is an additive
+ctl command. Its `recovery_activity` page carries `source: backend_transcript`,
+`display_only: true`, `events`, `next_cursor`, `reset`, `has_more: false`, and
+bounded `notices`. Limits are 1..100. Events have independent stable `source_id`
+and `source_ts`, with ordinary assistant_text/tool_call/tool_result payloads;
+tool call identities use a `recovery:` prefix. These events never receive task
+log sequence numbers and are never written into a task log. Poll the independent
+cursor to fetch later appends; a replaced, truncated, or evicted tail resets the
+cursor explicitly. Pages omit older activity beyond the bounded tail/page.
+Status snapshots and MCP get_task_events expose the same additive recovery page;
+MCP recent_activity includes a bounded display projection.
+
+Transcript recovery is available only after confirmed capture loss, only for a
+backend with a qualified reader, and only for the exact persisted session.
+It never affects execution classification, usage, outcomes, cancellation or
+settlement. Claude searches at most 512 immediate project directories, reads
+at most 256 KiB from one no-follow regular exact-session file, ignores partial
+JSONL lines, and filters against task start and capture cutoff. Missing or
+ambiguous source data yields notices. The raw-log timestamp cutoff is an
+approximation; absent cutoff data is explicitly disclosed.
+
+Task records and snapshots add effective `background_idle_seconds` (finite,
+positive, at most 21600). Old records without it use the current environment
+default or 600 seconds. The new diagnostic category
+`background_abandoned_at_idle_bound` records the bound, actual idle waiting
+elapsed time, bounded background descriptions and separate runtimes, latest
+result subtype/error/summary and `successful_agent_result`. Earlier failure
+diagnostics take precedence. Ordinary forced close does not claim idle cutoff.
+All additions retain wire v1 and are optional for older consumers.

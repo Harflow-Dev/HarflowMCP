@@ -22,12 +22,14 @@ import time
 import threading
 import uuid
 from contextlib import closing
+from dataclasses import replace
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from . import control, store
 
 MAX_SUBSCRIPTIONS = 1000
+MAX_PINNED_TASKS = 10000
 MAX_ATTEMPTS = 6
 BATCH = 16
 LEASE_SECONDS = 60
@@ -133,6 +135,7 @@ def unsubscribe(log_dir: Path, task_id: str, destination: str | None = None) -> 
         return []
     with closing(connection) as db, db:
         db.execute("UPDATE subscriptions SET state='unsubscribed',updated=?,lease=NULL WHERE task_id=? AND (? IS NULL OR destination=?) AND state IN ('pending','retry','delivering')", (time.time(), task_id, destination, destination))
+        db.execute("UPDATE supervision_deliveries SET state='superseded',lease=NULL,lease_until=0,updated=? WHERE subscription_kind='task' AND subscription_id IN (SELECT id FROM subscriptions WHERE task_id=? AND (? IS NULL OR destination=?)) AND state IN ('pending','retry','delivering')", (time.time(), task_id, destination, destination))
     return status(log_dir, task_id)
 
 
@@ -142,14 +145,29 @@ def pinned_tasks(log_dir: Path) -> set[str]:
     if connection is None:
         return set()
     with closing(connection) as db:
-        return {row[0] for row in db.execute("SELECT task_id FROM subscriptions WHERE state IN ('pending','retry','delivering') LIMIT ?", (MAX_SUBSCRIPTIONS,))}
+        query = "SELECT task_id FROM subscriptions WHERE state IN ('pending','retry','delivering')"
+        if db.execute("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='supervision_deliveries'").fetchone():
+            # Every loss episode owns exactly one affected task; duplicate subscriptions
+            # and deliveries must not consume the distinct-task pin budget.
+            query += " UNION SELECT task_id FROM supervision_deliveries WHERE state IN ('pending','retry','delivering')"
+        else:
+            query = 'SELECT DISTINCT task_id FROM (' + query + ')'
+        rows = db.execute(query + ' LIMIT ?', (MAX_PINNED_TASKS + 1,)).fetchall()
+        if len(rows) > MAX_PINNED_TASKS:
+            # Retention callers abort deletion when a complete pin set is unavailable.
+            raise ValueError('notification task pin budget exceeded; retention must defer deletion')
+        pinned = set()
+        for row in rows:
+            pinned.add(store.validate_task_id(row[0]))
+        return pinned
+
 
 
 def _text(value, limit=1024):
     return value.encode('utf-8')[:limit].decode('utf-8', 'ignore') if isinstance(value, str) else None
 
 
-def _payload(row, record):
+def _payload(row, record, *, recovered=False, evidence=None):
     # Only durable data; never resolve inferred deaths or replay prompt/raw output logs.
     outcome = record.outcome if isinstance(record.outcome, dict) else {}
     projection = {'pushed': outcome.get('pushed') if type(outcome.get('pushed')) is bool else None}
@@ -163,9 +181,26 @@ def _payload(row, record):
         projection['new_commits'] = [_text(item, 128) for item in outcome['new_commits'][:10] if isinstance(item, str)]
     diagnostic = record.failure_diagnostic if isinstance(record.failure_diagnostic, dict) else {}
     failure = {key: _text(diagnostic[key], 256) for key in ('category', 'reason', 'source', 'reset_at') if key in diagnostic}
+    if diagnostic.get('category') == 'background_abandoned_at_idle_bound':
+        for key in ('background_idle_seconds', 'elapsed_background_wait_seconds', 'successful_agent_result'):
+            value = diagnostic.get(key)
+            if type(value) in (int, float, bool):
+                failure[key] = value
+        latest = diagnostic.get('latest_result')
+        if isinstance(latest, dict):
+            failure['latest_result'] = {'is_error': latest.get('is_error') if type(latest.get('is_error')) is bool else None,
+                                        'summary': _text(latest.get('summary'), 512),
+                                        'subtype': _text(latest.get('subtype'), 128)}
+        if isinstance(diagnostic.get('background_tasks'), list):
+            failure['background_tasks'] = [
+                {'id': _text(item.get('id'), 128), 'description': _text(item.get('description'), 128),
+                 'elapsed_seconds': item.get('elapsed_seconds') if type(item.get('elapsed_seconds')) in (int, float) else None}
+                for item in diagnostic['background_tasks'][:16] if isinstance(item, dict)]
     data = {'version': 1, 'notification_id': row['id'], 'event': 'task.settled',
             'task_id': record.task_id, 'title': _text(record.title), 'group': _text(record.group),
             'status': record.status, 'exit_code': record.exit_code, 'finished_at': record.finished_at,
+            'recovered': recovered, 'outcome_observed': record.exit_code is not None,
+            'evidence': evidence or {'source': 'observed_process_exit'},
             'output_drained': record.output_drained, 'summary': _text(getattr(record, 'terminal_summary', None), 4096),
             'outcome': projection, 'failure_diagnostic': failure, 'diagnostics': {'task_record': record.task_id + store.RECORD_SUFFIX}}
     body = json.dumps(data, ensure_ascii=False, separators=(',', ':')).encode()
@@ -301,6 +336,27 @@ def _deliver(config, identifier: str, body: bytes):
             sock.close()
 
 
+def _settlement_payload(log_dir, candidate, record):
+    if not store.outcome_unobserved(record):
+        if record.status in TERMINAL and record.finished_at:
+            return _payload(candidate, record)
+        return None
+    from . import supervision
+    evidence = supervision.evidence(record, store.log_path(log_dir, record.task_id))
+    if evidence['owner_state'] != 'dead' or evidence['process_state'] != 'dead':
+        return None
+    status, _note, state, _tail = store.resolve_status(log_dir, record)
+    if status not in TERMINAL:
+        return None
+    # An inferred settlement is a notification projection; never write a task outcome.
+    projected = replace(record, status=status, exit_code=None,
+                        terminal_summary=state.summary or record.terminal_summary,
+                        failure_diagnostic=state.failure_diagnostic or record.failure_diagnostic)
+    return _payload(candidate, projected, recovered=True,
+                    evidence={'source': 'recovered_status_resolution', 'supervision': evidence,
+                              'execution_outcome': 'unobserved'})
+
+
 @task_operation
 def _tick(log_dir: Path):
     now = time.time()
@@ -323,11 +379,13 @@ def _tick(log_dir: Path):
                 record = store.read(log_dir, candidate['task_id'], include_prompt=False, metadata_byte_limit=262144)
             except (OSError, ValueError, TypeError, store.TaskDocumentError):
                 continue
-            if record is None or record.status not in TERMINAL or record.exit_code is None or not record.finished_at:
+            if record is None:
                 continue
             try:
-                body = _payload(candidate, record)
+                body = _settlement_payload(log_dir, candidate, record)
             except (ValueError, TypeError):
+                continue
+            if body is None:
                 continue
         lease = str(uuid.uuid4())
         now = time.time()
@@ -350,6 +408,8 @@ def _tick(log_dir: Path):
 
 @task_operation
 async def tick(log_dir: Path):
+    from .supervision_notifications import tick as supervision_tick
+    await asyncio.to_thread(supervision_tick, Path(log_dir))
     await asyncio.to_thread(_tick, Path(log_dir))
     from .workflow_notifications import tick as workflow_tick
     await asyncio.to_thread(workflow_tick, Path(log_dir))

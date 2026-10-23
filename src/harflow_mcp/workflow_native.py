@@ -90,6 +90,8 @@ async def _prepare_native(supervisor: Any, node: dict[str, Any], assignment: str
     native = adapter(backend)
     if native is None:
         return "This harness has no certified native execution adapter"
+    if candidate.get("background_idle_seconds") is not None:
+        raise ValueError("Native child transports cannot set an independent background idle bound")
     settings = {**{key: candidate.get(key) for key in ("model", "reasoning_effort", "max_turns")}, "freedom": run_effective_freedom(run, node), "network": False if run["network"] is False else node.get("network", run["network"]), "session_mode": "fresh"}
     import asyncio
     reason = await asyncio.to_thread(native.eligible, record, candidate, settings)

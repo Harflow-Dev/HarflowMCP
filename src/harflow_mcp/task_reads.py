@@ -12,7 +12,7 @@ BRIEF_BYTES = 8192
 TEXT_BYTES = 1024
 LIST_FIELDS = frozenset({'task_id', 'backend', 'status', 'title', 'group', 'repo_path',
     'started_at', 'finished_at', 'session_id', 'parent_task_id', 'root_task_id',
-    'duration_seconds', 'recovered', 'persisted_status', 'observed_exit',
+    'duration_seconds', 'background_idle_seconds', 'output_capture', 'input_channel', 'last_captured_output_at', 'recovered', 'persisted_status', 'observed_exit',
     'needs_reconciliation', 'process_identity_state', 'needs_direct_lookup', 'note'})
 REQUIRED_FIELDS = frozenset({'task_id', 'status', 'needs_reconciliation',
     'needs_direct_lookup', 'persisted_status', 'observed_exit', 'process_identity_state'})
@@ -68,6 +68,8 @@ def brief_status(payload: dict[str, Any]) -> dict[str, Any]:
     keys = LIST_FIELDS | {'exit_code', 'owned_by_live_server', 'workflow_run_id', 'workflow_node_id'}
     result = {key: (_text(value, 256) if isinstance(value, str) else value)
               for key, value in payload.items() if key in keys and (value is None or isinstance(value, (str, bool, int, float)))}
+    if isinstance(payload.get('supervision'), dict):
+        result['supervision'] = payload['supervision']
     artifact = payload.get('artifact_summary')
     if isinstance(artifact, dict):
         count, state = artifact.get('count'), artifact.get('state')
@@ -90,7 +92,7 @@ def brief_status(payload: dict[str, Any]) -> dict[str, Any]:
             result[key] = _text(original)
             if original != result[key]:
                 truncated.append(key)
-    for key, allowed in (('outcome', ('base_commit', 'head_commit', 'new_commits', 'new_commits_truncated', 'local_upstream', 'pushed', 'publication_evidence', 'attribution')), ('failure_diagnostic', ('category', 'reason', 'source', 'reset_at'))):
+    for key, allowed in (('outcome', ('base_commit', 'head_commit', 'new_commits', 'new_commits_truncated', 'local_upstream', 'pushed', 'publication_evidence', 'attribution')), ('failure_diagnostic', ('category', 'reason', 'source', 'reset_at', 'background_idle_seconds', 'elapsed_background_wait_seconds', 'background_tasks', 'latest_result', 'successful_agent_result'))):
         value = payload.get(key)
         if isinstance(value, dict):
             def compact(value, depth=0):

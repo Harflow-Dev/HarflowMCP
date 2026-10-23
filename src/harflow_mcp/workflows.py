@@ -177,7 +177,7 @@ def _candidate(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise WorkflowError("Agent must be an object")
     candidate = copy.deepcopy(raw)
-    unknown = set(candidate) - {"backend", "model", "reasoning_effort", "max_turns", "caller_approvals", "fallbacks"}
+    unknown = set(candidate) - {"backend", "model", "reasoning_effort", "max_turns", "background_idle_seconds", "caller_approvals", "fallbacks"}
     if unknown:
         raise WorkflowError(f"Unknown agent settings: {sorted(unknown)}")
     if not isinstance(candidate.get("fallbacks", []), list):
@@ -192,6 +192,9 @@ def _candidate(raw: Any) -> dict[str, Any]:
         candidate["max_turns"] = 100
     if candidate.get("model") is not None and (not isinstance(candidate["model"], str) or not candidate["model"].strip()):
         raise WorkflowError("Model must be a nonempty string")
+    if candidate.get("background_idle_seconds") is not None:
+        from .background_idle import validate
+        candidate["background_idle_seconds"] = validate(candidate["background_idle_seconds"])
     if candidate.get("max_turns") is not None:
         _positive(candidate["max_turns"], "max_turns")
     effort = candidate.get("reasoning_effort")
@@ -1875,7 +1878,7 @@ def launch_definition(definition: dict[str, Any], overrides: dict[str, Any] | No
     definition["context_delivery"] = "optimized_v1"
     if overrides:
         if overrides.get("backend", definition["orchestrator"]["backend"]) != definition["orchestrator"]["backend"]:
-            for setting in ("model", "reasoning_effort", "max_turns", "caller_approvals"):
+            for setting in ("model", "reasoning_effort", "max_turns", "background_idle_seconds", "caller_approvals"):
                 definition["orchestrator"].pop(setting, None)
         definition["orchestrator"] = {**definition["orchestrator"], **overrides}
     return validate_definition(definition)
@@ -2813,12 +2816,12 @@ class WorkflowSupervisor:
                     if use_resume:
                         parent = self.registry.get(previous["task_id"])
                         if parent:
-                            task = await self.registry.resume(parent, dispatch_prompt, max_turns=candidate.get("max_turns"), network=network, task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder", **({"require_unchanged_session": True} if strict_child_resume else {}))
+                            task = await self.registry.resume(parent, dispatch_prompt, max_turns=candidate.get("max_turns"), background_idle_seconds=candidate.get("background_idle_seconds"), network=network, task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder", **({"require_unchanged_session": True} if strict_child_resume else {}))
                         else:
                             record = task_store.read(self.registry._log_dir, previous["task_id"])
                             if record is None:
                                 raise SessionUnknownError("Previous resume session is unavailable")
-                            task = await self.registry.resume_record(record, dispatch_prompt, max_turns=candidate.get("max_turns"), network=network, task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder", **({"require_unchanged_session": True} if strict_child_resume else {}))
+                            task = await self.registry.resume_record(record, dispatch_prompt, max_turns=candidate.get("max_turns"), background_idle_seconds=candidate.get("background_idle_seconds"), network=network, task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder", **({"require_unchanged_session": True} if strict_child_resume else {}))
                     else:
                         if role == "builder":
                             latest = self.run(refresh_atomic=True)
@@ -2829,7 +2832,7 @@ class WorkflowSupervisor:
                             context_delivery["total_characters"] = context_delivery["serialized_characters"] = len(dispatch_prompt)
                             context_delivery["budget_overflow_bytes"] = max(0, len(dispatch_prompt.encode()) - context_delivery["budget_bytes"])
                             self._task_update(activation["id"], task_id, {"context_delivery": context_delivery})
-                        task = await self.registry.start(dispatch_prompt, Path(run["repo_path"]), backend=backend, freedom=freedom, network=network, caller_approvals=candidate.get("caller_approvals", False), model=candidate.get("model"), reasoning_effort=candidate.get("reasoning_effort"), max_turns=candidate.get("max_turns"), task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder", title=f"{run['name']} · {node.get('title', key)}")
+                        task = await self.registry.start(dispatch_prompt, Path(run["repo_path"]), backend=backend, freedom=freedom, network=network, caller_approvals=candidate.get("caller_approvals", False), model=candidate.get("model"), reasoning_effort=candidate.get("reasoning_effort"), max_turns=candidate.get("max_turns"), background_idle_seconds=candidate.get("background_idle_seconds"), task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder", title=f"{run['name']} · {node.get('title', key)}")
                     self.update(lambda r: r.pop("checkout_wait", None), "checkout_acquired")
                     self._task_update(activation["id"], task_id, {"status": "running", "dispatch_stage": "spawn_confirmed", **({"timeout_deadline": timeout_deadline} if timeout_deadline is not None else {})})
                     timeout_at = time.monotonic() + max(0, timeout_deadline - time.time()) if timeout_deadline is not None else None

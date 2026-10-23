@@ -101,7 +101,7 @@ async def stop_chain(registry: Any, task_id: str) -> None:
 
 
 @storage_operation
-async def continue_task(registry: Any, task_id: str, extra_prompt: str | None = None, notes_path: str | None = None, *, automatic: bool = False, consume_followups: bool = False) -> Any:
+async def continue_task(registry: Any, task_id: str, extra_prompt: str | None = None, notes_path: str | None = None, *, automatic: bool = False, consume_followups: bool = False, background_idle_seconds: float | None = None) -> Any:
     from .state_layout import require_dispatch_layout
     require_dispatch_layout(registry.log_dir)
     store.validate_task_id(task_id)
@@ -117,6 +117,8 @@ async def continue_task(registry: Any, task_id: str, extra_prompt: str | None = 
     source = store.read(registry.log_dir, task_id)
     if source is None:
         raise ValueError(f'Unknown task: {task_id}')
+    from .background_idle import resolve
+    effective_idle = resolve(background_idle_seconds, source.background_idle_seconds)
     root = source.chain_root_task_id or task_id
     async with control.session_lock(registry.log_dir, 'continuation-' + root):
         if (registry.log_dir / f'{root}.continuation-stopped.json').exists():
@@ -132,7 +134,7 @@ async def continue_task(registry: Any, task_id: str, extra_prompt: str | None = 
             raise ValueError('Original assignment unavailable; continuation refused')
         path = registry.log_dir / f'{task_id}.continuation.json'
         prompt = await run_owned_worker(registry.state_layout, context, registry, source, extra_prompt, notes_path)
-        fingerprint = hashlib.sha256(json.dumps({'prompt': prompt, 'automatic': automatic}, ensure_ascii=False).encode('utf-8')).hexdigest()
+        fingerprint = hashlib.sha256(json.dumps({'prompt': prompt, 'automatic': automatic, **({'background_idle_seconds': effective_idle} if background_idle_seconds is not None else {})}, ensure_ascii=False).encode('utf-8')).hexdigest()
         reservation = None
         if path.exists():
             with path.open('rb') as file:
@@ -185,7 +187,7 @@ async def continue_task(registry: Any, task_id: str, extra_prompt: str | None = 
             _write(path, {'task_id': identifier, 'state': 'reserved', 'chain_root_task_id': root, 'automatic': automatic, 'request_fingerprint': fingerprint}, layout=registry.state_layout)
             try:
                 spawn_called = True
-                child = await registry.start(prompt, Path(source.repo_path), backend=get_backend(source.backend), freedom=source.freedom, model=source.model, reasoning_effort=source.reasoning_effort, network=source.network, caller_approvals=source.caller_approvals, interaction_owner=source.interaction_owner, max_turns=source.max_turns, group=source.group, title=source.title, task_id=identifier, auto_continue=max(source.auto_continue - 1, 0) if automatic else 0, continuation_of_task_id=task_id, chain_root_task_id=root, chain_prompt=None, **({'message_ids': attempt.ids} if attempt is not None else {}))
+                child = await registry.start(prompt, Path(source.repo_path), backend=get_backend(source.backend), freedom=source.freedom, model=source.model, reasoning_effort=source.reasoning_effort, network=source.network, caller_approvals=source.caller_approvals, interaction_owner=source.interaction_owner, max_turns=source.max_turns, background_idle_seconds=effective_idle, group=source.group, title=source.title, task_id=identifier, auto_continue=max(source.auto_continue - 1, 0) if automatic else 0, continuation_of_task_id=task_id, chain_root_task_id=root, chain_prompt=None, **({'message_ids': attempt.ids} if attempt is not None else {}))
                 # Preserve delegation ownership, independently of fresh-session ancestry.
                 child.spawned_by, child.root_task_id = source.spawned_by, source.root_task_id
                 child.depth, child.max_depth = source.depth, source.max_depth

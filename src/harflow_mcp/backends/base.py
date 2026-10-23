@@ -197,6 +197,9 @@ class Capabilities(NamedTuple):
     when `max_turns` is set (that combination is unmeasured), so what a *task* got is its own
     `live_input` field, never this one."""
 
+    tracks_background_tasks: bool = False
+    """Whether normalized stream evidence supports live background idle waiting."""
+
     supports_auto_continue: bool = False
     """Whether a structured recoverable cutoff has a certified continuation classifier."""
 
@@ -335,6 +338,8 @@ class Accumulator:
     """A turn is running: the agent has shown activity since the last result. Distinguishes a run
     waiting only on background tasks (the idle bound applies) from one that is simply working."""
 
+    latest_result: dict[str, Any] | None = None
+    background_details: dict[str, dict[str, Any]] = field(default_factory=dict)
     background_open: set[str] = field(default_factory=set)
     """Ids of background tasks the agent started and the stream has not yet reported finished. A
     live-input run is not idle while any are open: closing its stdin would kill them (measured)."""
@@ -382,6 +387,14 @@ class NestedDispatchRefused(UnsupportedCapability):
 
 class ExtraPathsUnsupported:
     """Default fail-closed seams for uncertified optional execution capabilities."""
+
+    def configure_dispatch_context(self, invocation, background_idle_seconds):
+        return invocation
+
+    def recovery_activity(self, record, cutoff, cursor=None, limit=50):
+        return {"source": "backend_transcript", "display_only": True, "events": [],
+                "next_cursor": None, "reset": False, "has_more": False,
+                "notices": ["Backend transcript recovery is unsupported"]}
 
     def caller_approval_support(self) -> dict[str, Any]:
         return {"supported": False}

@@ -123,6 +123,7 @@ def unsubscribe(log_dir, workflow_run_id, notify=None):
         db.execute('BEGIN IMMEDIATE')
         db.execute("UPDATE workflow_subscriptions SET state='unsubscribed',updated=? WHERE workflow_run_id=? AND (? IS NULL OR destination=?)", (time.time(), workflow_run_id, notify, notify))
         db.execute("UPDATE workflow_deliveries SET state='superseded',lease=NULL,lease_until=0,updated=? WHERE subscription_id IN (SELECT id FROM workflow_subscriptions WHERE workflow_run_id=? AND (? IS NULL OR destination=?)) AND state IN ('pending','retry','delivering')", (time.time(), workflow_run_id, notify, notify))
+        db.execute("UPDATE supervision_deliveries SET state='superseded',lease=NULL,lease_until=0,updated=? WHERE subscription_kind='workflow' AND subscription_id IN (SELECT id FROM workflow_subscriptions WHERE workflow_run_id=? AND (? IS NULL OR destination=?)) AND state IN ('pending','retry','delivering')", (time.time(), workflow_run_id, notify, notify))
     return status(log_dir, workflow_run_id)
 
 

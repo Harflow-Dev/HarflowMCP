@@ -509,3 +509,25 @@ encoder needed, just the literal interpolated between quotes.
   - `agy mcp list` prints a human table, not JSON, so inspect reads the JSON file instead.
 
 
+
+### Claude transcript display recovery (2.1.309, 2026-10-23)
+
+Bounded local inspection without a model call confirmed exact-session files
+under the configured Claude `projects/<directory>/<session-id>.jsonl` layout.
+Records carry `sessionId`, `timestamp`, `uuid`, `type` and `message.content`.
+Assistant text blocks carry `type: text` and string `text`; assistant tool_use
+blocks carry string `id`/`name` and object `input`. User tool_result blocks carry
+string `tool_use_id`, string or array `content`, and optional boolean `is_error`.
+Field/type qualification inspected 64 bounded existing tails without displaying
+or copying transcript content. Unsupported or malformed blocks are omitted.
+This is display-only provenance, never a substitute for captured run outcomes.
+
+Claude live dispatch context uses a second text content block in the existing
+single stream-json user message, preserving the first caller text block exactly.
+Its strict validator accepts only the generated bounded runtime note. Other
+backends do not gain unqualified input formats or background tracking claims.
+
+The second runtime text block was verified against installed Claude Code 2.1.309
+using an isolated temporary HOME/config, fake local key and localhost fake
+Anthropic API: one request, exit 0, original caller text block preserved exactly,
+and generated runtime context visible in the request. No model service was used.

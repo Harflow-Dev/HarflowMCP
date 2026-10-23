@@ -19,11 +19,12 @@ import sys
 import unicodedata
 import uuid
 from functools import wraps
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
 
 from mcp import MCPError
-from pydantic import StrictBool, StrictInt, StrictStr
+from pydantic import StrictBool, StrictInt, StrictStr, StrictFloat
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
 from mcp.types import INTERNAL_ERROR, INVALID_PARAMS
@@ -86,6 +87,14 @@ def _status_payload(
         # Read here, in the caller's worker thread, rather than in a live snapshot built on the loop.
         payload["queued_followups"] = followups.view(log_dir, task_id)
     payload["recent_activity"] = read_recent(events_path(log_dir, task_id), limit=RECENT_ACTIVITY_LIMIT, layout=task_layout(log_dir))
+    recovery = payload.get("recovery_activity")
+    if isinstance(recovery, dict):
+        recovery = {**recovery, "events": recovery.get("events", [])[-RECENT_ACTIVITY_LIMIT:]}
+        payload["recovery_activity"] = recovery
+        for item in recovery["events"]:
+            text = item.get("text") or item.get("tool") or item.get("output_tail") or item.get("kind")
+            payload["recent_activity"].append("Recovered transcript: " + " ".join(str(text).split())[:160])
+        payload["recent_activity"] = payload["recent_activity"][-RECENT_ACTIVITY_LIMIT:]
     if include_tail:
         return payload
     tail = payload.pop("last_output_tail", None)
@@ -117,8 +126,27 @@ def _task_document_errors(function):
     return wrapped
 
 
+@asynccontextmanager
+async def _server_lifespan(server):
+    """Reconcile durable notifications even before the first client tool call."""
+    registry = None
+    from .tasks import default_log_dir
+    directory = default_log_dir()
+    if os.environ.get('HARFLOW_NOTIFY_DESTINATIONS') or (directory.parent / 'notifications.sqlite3').is_file():
+        registry = _reg()
+        _start_notification_worker(registry)
+    try:
+        yield {}
+    finally:
+        worker = getattr(registry, '_notification_worker', None) if registry else None
+        if worker is not None:
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+
+
 mcp = MCPServer(
     "harflow",
+    lifespan=_server_lifespan,
     instructions=(
         "Dispatch coding tasks to headless coding agents on this machine — currently Claude Code, "
         "Codex, opencode, vibe and Antigravity (binary `agy`). start_task returns immediately with "
@@ -274,6 +302,15 @@ def _check_freedom(freedom: str) -> str:
             INVALID_PARAMS, f"unknown freedom {freedom!r}; expected one of {list(FREEDOMS)}"
         )
     return freedom
+
+
+def _check_background_idle(value) -> None:
+    if value is not None:
+        from .background_idle import validate
+        try:
+            validate(value)
+        except ValueError as exc:
+            raise MCPError(INVALID_PARAMS, str(exc)) from None
 
 
 def _check_turn_cap(backend, max_turns: int | None) -> None:
@@ -434,6 +471,7 @@ async def start_task(
     freedom: str | None = None,
     model: str | None = None,
     max_turns: int | None = None,
+    background_idle_seconds: StrictFloat | StrictInt | None = None,
     reasoning_effort: str | None = None,
     network: StrictBool | None = None,
     caller_approvals: StrictBool = False,
@@ -466,6 +504,9 @@ async def start_task(
         model: Model for this run, in the backend's own naming. Rejected outright, rather than
             silently ignored, on a backend with no model-selection flag at all — vibe is the one
             such case; see list_backends' capabilities.supports_model_selection.
+        background_idle_seconds: Optional finite positive live-input background wait bound,
+            at most 21600 seconds. Capped/classic runs do not use live-input idle waiting.
+            Continuations inherit the saved effective bound unless overridden.
         max_turns: Cap on agent turns. Only some backends support this; asking for it on one that
             does not is an error rather than being silently ignored.
         reasoning_effort: "low", "medium", "high" or "xhigh", passed to the backend verbatim.
@@ -537,6 +578,7 @@ async def start_task(
     best-effort, not a sandbox boundary — nothing stops an agent from dispatching outside
     harflow_mcp entirely.
     """
+    _check_background_idle(background_idle_seconds)
     _guard_launch_layout()
     from .caller_policy import require_mutation
     await _guard_mutation()
@@ -571,7 +613,7 @@ async def start_task(
         return await start_workflow(
             name=workflow, prompt=prompt, repo_path=repo_path,
             overrides={k: v for k, v in {"backend": backend, "model": model, "max_turns": max_turns,
-                       "reasoning_effort": reasoning_effort}.items() if v is not None},
+                       "reasoning_effort": reasoning_effort, "background_idle_seconds": background_idle_seconds}.items() if v is not None},
             freedom=freedom, network=network,
         )
 
@@ -618,6 +660,7 @@ async def start_task(
             freedom=freedom,
             model=model,
             max_turns=max_turns,
+            background_idle_seconds=background_idle_seconds,
             reasoning_effort=reasoning_effort,
             network=network,
             caller_approvals=caller_approvals,
@@ -1215,7 +1258,7 @@ async def wait_for_tasks(
 
 @mcp.tool()
 @_task_document_errors
-async def continue_task(task_id: str, extra_prompt: str | None = None, notes_path: str | None = None) -> dict[str, Any]:
+async def continue_task(task_id: str, extra_prompt: str | None = None, notes_path: str | None = None, background_idle_seconds: StrictFloat | StrictInt | None = None) -> dict[str, Any]:
     """Start a fresh session from a conclusively settled standalone task.
 
     This differs from resume_task: it reconstructs the original assignment, latest summary and
@@ -1233,12 +1276,13 @@ async def continue_task(task_id: str, extra_prompt: str | None = None, notes_pat
     notes are the same request whatever is queued: the queue is read once, when the successor is
     reserved, and a retry returns that successor. An automatic continuation never consumes.
     """
+    _check_background_idle(background_idle_seconds)
     _guard_launch_layout()
     from .caller_policy import require_mutation
     await _guard_mutation()
     await _guard_task_read(task_id)
     try:
-        task = await _reg().continue_task(task_id, extra_prompt, notes_path, consume_followups=True)
+        task = await _reg().continue_task(task_id, extra_prompt, notes_path, consume_followups=True, **({'background_idle_seconds': background_idle_seconds} if background_idle_seconds is not None else {}))
     except (ValueError, OSError, backends.UnsupportedCapability) as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
     return task.brief() | {"enforcement": task.enforcement}
@@ -1250,6 +1294,7 @@ async def resume_task(
     task_id: str,
     followup_prompt: str | None = None,
     max_turns: int | None = None,
+    background_idle_seconds: StrictFloat | StrictInt | None = None,
     network: StrictBool | None = None,
 ) -> dict[str, Any]:
     """Continue a finished task's session with follow-up instructions.
@@ -1287,6 +1332,7 @@ async def resume_task(
     doing so, its conversation cannot be continued and this says so rather than starting a
     disconnected one.
     """
+    _check_background_idle(background_idle_seconds)
     _guard_launch_layout()
     from .caller_policy import require_mutation
     await _guard_mutation()
@@ -1312,7 +1358,7 @@ async def resume_task(
             _check_turn_cap(backends.get(parent.backend), max_turns)
             _check_network(backends.get(parent.backend), parent.freedom, network)
             task = await _reg().resume(
-                parent, followup_prompt, max_turns=max_turns, network=network,
+                parent, followup_prompt, max_turns=max_turns, network=network, background_idle_seconds=background_idle_seconds,
                 consume_followups=True,
             )
         else:
@@ -1328,7 +1374,7 @@ async def resume_task(
             _check_turn_cap(backends.get(record.backend), max_turns)
             _check_network(backends.get(record.backend), record.freedom, network)
             task = await _reg().resume_record(
-                record, followup_prompt, max_turns=max_turns, network=network,
+                record, followup_prompt, max_turns=max_turns, network=network, background_idle_seconds=background_idle_seconds,
                 consume_followups=True,
             )
     except (SessionBusyError, SessionUnknownError, RepoUnavailableError) as exc:
@@ -1495,6 +1541,7 @@ async def get_task_events(
     before_seq: int | None = None,
     after_seq: int | None = None,
     kinds: list[str] | None = None,
+    recovery_cursor: str | None = None,
 ) -> dict[str, Any]:
     """Fetch normalized events from a task's event log.
 
@@ -1553,7 +1600,10 @@ async def get_task_events(
                 )
 
     task = _reg().get(task_id)
-    record = _reg().recover(task_id) if task is None else None
+    from .catalog import METADATA_BYTES, current_metadata_budget
+    record = await asyncio.to_thread(store.read, _reg().log_dir, task_id,
+        include_prompt=False, metadata_byte_limit=METADATA_BYTES,
+        metadata_budget=current_metadata_budget()) if task is None else None
 
     if task is None and record is None:
         raise MCPError(INVALID_PARAMS, f"unknown task_id: {task_id}")
@@ -1568,8 +1618,12 @@ async def get_task_events(
         kinds=kinds,
     )
 
+    from . import recovery_activity
+    recovered_page = await asyncio.to_thread(recovery_activity.page, _reg().log_dir,
+        record, cursor=recovery_cursor) if record is not None else None
     return {
         "task_id": task_id,
+        "recovery_activity": recovered_page,
         "events": page_result.events,
         "has_more": page_result.has_more,
         "next_before_seq": page_result.next_before_seq,

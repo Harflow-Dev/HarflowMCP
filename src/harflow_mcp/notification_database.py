@@ -53,6 +53,19 @@ _WORKFLOW_DELIVERIES = {
     'payload': ('BLOB', 1, 0, None), 'error': ('TEXT', 0, 0, None),
     **{name: ('REAL', 1, 0, None) for name in ('created', 'updated')},
 }
+_SUPERVISION_DELIVERIES = {
+    **_WORKFLOW_DELIVERIES,
+    'subscription_kind': ('TEXT', 1, 0, None),
+    'task_id': ('TEXT', 1, 0, None),
+    'destination': ('TEXT', 1, 0, None),
+}
+_SUPERVISION_DDL = """CREATE TABLE supervision_deliveries (
+    id TEXT PRIMARY KEY, subscription_id TEXT NOT NULL, subscription_kind TEXT NOT NULL,
+    task_id TEXT NOT NULL, destination TEXT NOT NULL, event_key TEXT NOT NULL,
+    event TEXT NOT NULL, state TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+    due REAL NOT NULL DEFAULT 0, lease TEXT, lease_until REAL NOT NULL DEFAULT 0,
+    payload BLOB NOT NULL, error TEXT, created REAL NOT NULL, updated REAL NOT NULL,
+    UNIQUE(subscription_kind,subscription_id,event_key))"""
 _SCHEMAS = {
     IDENTITY_TABLE: (_IDENTITY, None),
     'subscriptions': (_SUBSCRIPTIONS, ('task_id', 'destination')),
@@ -127,7 +140,11 @@ def qualify(db, tables=None):
     """Read identity and essential schema without repairing existing storage."""
     if tables is None:
         tables = _tables(db)
-    for table, (expected, unique) in _SCHEMAS.items():
+    schemas = dict(_SCHEMAS)
+    if 'supervision_deliveries' in tables:
+        schemas['supervision_deliveries'] = (_SUPERVISION_DELIVERIES,
+                                            ('subscription_kind', 'subscription_id', 'event_key'))
+    for table, (expected, unique) in schemas.items():
         if table not in tables:
             _refuse()
         columns = list(db.execute('PRAGMA table_xinfo(' + _quote(table) + ')'))
@@ -243,6 +260,20 @@ def _bootstrap(db):
         raise
 
 
+def _extend(db):
+    """Add the optional delivery ledger only after qualifying the original schema."""
+    db.execute('BEGIN IMMEDIATE')
+    try:
+        qualify(db)
+        if 'supervision_deliveries' not in _tables(db):
+            db.execute(_SUPERVISION_DDL)
+        qualify(db)
+        db.commit()
+    except BaseException:
+        db.rollback()
+        raise
+
+
 def open_database(log_dir, *, create, mode):
     """Open qualified storage; native rollback is permitted only on writable paths."""
     if mode not in ('ro', 'rw') or (create and mode != 'rw'):
@@ -298,6 +329,7 @@ def open_database(log_dir, *, create, mode):
             qualify(db)  # First rw query may perform SQLite's native hot-journal rollback.
         if db.execute('PRAGMA journal_mode').fetchone()[0].lower() == 'wal':
             _refuse()
+        _extend(db)
         if create:
             db.execute('PRAGMA journal_mode=DELETE')
             fd = open_descriptor(path, os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0), layout=layout)

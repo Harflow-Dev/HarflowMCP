@@ -64,6 +64,7 @@ RENAMED_NATIVE_QUALIFIED = False
 from dataclasses import replace
 
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -323,6 +324,23 @@ class UnsafeInvocationError(RuntimeError):
 
 
 class ClaudeBackend(ExtraPathsUnsupported):
+    @staticmethod
+    def _idle_context(seconds):
+        from ..background_idle import validate
+        bound = validate(seconds)
+        return f"Harflow runtime context: live background work may wait without output for {bound:g} seconds after the agent result. Unfinished background work at that bound closes input and fails the run. Complete required background work before returning the final result."
+
+    def configure_dispatch_context(self, invocation, background_idle_seconds):
+        if not invocation.live_input:
+            return invocation
+        message = json.loads(invocation.initial_input)
+        message['message']['content'].append({'type': 'text', 'text': self._idle_context(background_idle_seconds)})
+        return replace(invocation, initial_input=(json.dumps(message, ensure_ascii=False) + '\n').encode())
+
+    def recovery_activity(self, record, cutoff, cursor=None, limit=50):
+        from .claude_recovery import read_activity
+        return read_activity(record, cutoff, cursor, limit)
+
     def execution_configuration_namespaces(self, repo):
         from .config_namespaces import environment_path, project_namespaces
         home = Path.home()
@@ -384,6 +402,7 @@ class ClaudeBackend(ExtraPathsUnsupported):
     mcp_approval = ClaudeApproval()
     binary = BINARY
     capabilities = Capabilities(
+        tracks_background_tasks=True,
         supports_auto_continue=True,
         chooses_session_id=True,
         supports_turn_cap=True,
@@ -848,7 +867,16 @@ class ClaudeBackend(ExtraPathsUnsupported):
             ) from None
         body = message.get("message") if isinstance(message, dict) else None
         content = body.get("content") if isinstance(body, dict) else None
-        block = content[0] if isinstance(content, list) and len(content) == 1 else None
+        context_valid = isinstance(content, list) and len(content) in (1, 2)
+        if context_valid and len(content) == 2:
+            extra = content[1]
+            text = extra.get('text') if isinstance(extra, dict) else None
+            try:
+                seconds = float(text.split(' for ', 1)[1].split(' seconds ', 1)[0])
+                context_valid = extra == {'type': 'text', 'text': ClaudeBackend._idle_context(seconds)}
+            except (AttributeError, IndexError, ValueError, TypeError):
+                context_valid = False
+        block = content[0] if context_valid else None
         well_formed = (
             isinstance(message, dict)
             and set(message) == {"type", "message"}
@@ -1033,6 +1061,8 @@ class ClaudeBackend(ExtraPathsUnsupported):
             # backgrounded one outlives its turn.
             if task_id is not None and event.get("is_backgrounded") is True:
                 acc.background_open.add(task_id)
+                if len(acc.background_details) < 100:
+                    acc.background_details.setdefault(task_id, {"description": str(event.get("description", ""))[:500], "started": time.monotonic()})
         elif subtype == "task_updated":
             patch = event.get("patch")
             patch = patch if isinstance(patch, dict) else {}
@@ -1041,6 +1071,8 @@ class ClaudeBackend(ExtraPathsUnsupported):
             # Unmeasured, and conservative: a task moved to the background later is open too.
             if patch.get("is_backgrounded") is True:
                 acc.background_open.add(task_id)
+                if len(acc.background_details) < 100:
+                    acc.background_details.setdefault(task_id, {"description": str(event.get("description", ""))[:500], "started": time.monotonic()})
             if patch.get("status") in BACKGROUND_TERMINAL_STATUSES:
                 ClaudeBackend._close_background(task_id, acc)
         elif subtype == "task_notification":
@@ -1059,6 +1091,7 @@ class ClaudeBackend(ExtraPathsUnsupported):
             acc.awaiting_input = True
 
     def _ingest_result(self, event: dict[str, Any], acc: Accumulator) -> None:
+        acc.latest_result = {"is_error": bool(event.get("is_error")), "subtype": str(event.get("subtype", "unknown"))[:100], "summary": str(event.get("result", ""))[:2000]}
         acc.result_count += 1
         acc.turn_open = False
         acc.saw_final_message = True

@@ -110,6 +110,8 @@ def plan_owner_contracts(definition: dict[str, Any], tree: dict[str, Any] | None
                     reason = "The node harness differs from its owning orchestrator"
                 elif item["candidate"].get("caller_approvals") or candidate.get("caller_approvals"):
                     reason = "Caller approvals require Headless execution; native approval transport is unsupported"
+                elif item["candidate"].get("background_idle_seconds") is not None:
+                    reason = "An independent background idle bound requires Headless execution"
                 elif native is None:
                     reason = "This harness has no certified native execution adapter"
                 elif item["parallel"] and not getattr(native, "supports_parallel", False):

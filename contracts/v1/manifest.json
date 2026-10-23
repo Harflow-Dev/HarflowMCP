@@ -326,6 +326,13 @@
         "version-info.v1"
       ],
       "valid": true
+    },
+    "ctl-recovery-activity.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.1",
+      "format": "harflow.ctl",
+      "required_capabilities": [],
+      "valid": true
     }
   },
   "files": {
@@ -333,7 +340,7 @@
     "ctl-error.json": "60046482562348f1583c319396c27e294453dcfd6ab580b9ad3092ee40315260",
     "ctl-event-page-historical-inner.json": "6fa0d3a912e736485c6419368088aed57013b1afb0ff1476b81b4ff4b24d701c",
     "ctl-event-page.json": "2cdcd1926bfedc2b8f96ff99b41b9fc6d407de7b3ddd9af1b0988710d54dcadf",
-    "ctl-success.json": "baf7cdb8c750d4147987b52633ef0560b59d9b453e440f1ff7431ed1a9330623",
+    "ctl-success.json": "1a2f581a199d1754aa7bd3bcf628cf0d82152cfbc997107dbd545d984f14a1e0",
     "ctl-usage.json": "a76fc1cecdef5242f7340c53dba5f199aeeff1aa120868ce1b8e430252a4ed23",
     "event-historical-writer.jsonl": "4f2ff6362cfbfc7e39d6557ff61b91294192defdbf134ef3a2701dc5179d34ad",
     "event-known.jsonl": "5c8c4af69ad9a3dcfdfedf32d6d886c1236e0086e2d27a70c5cad53719ad1f03",
@@ -364,6 +371,7 @@
     "workflow-definition.json": "df51cdc3e2e4d37197e36173bda52cb71ece0e0c19453b947e89c6529b818309",
     "workflow-run.json": "ee491fc8c1f1da76ac4d59c0cd71b22a57416f727afe8defd701fa07c7b1edd7",
     "workflow-run-patch.json": "939649117ce35fcd92a2f5bc8bfbdb292186b5e6ed8359edbf2bd31e62ca4024",
-    "invalid-workflow-run.json": "0df6a874e1f2d697f2e49b81d4cf1e8dba8f4c1faf554f46bdd56a3ea085166c"
+    "invalid-workflow-run.json": "0df6a874e1f2d697f2e49b81d4cf1e8dba8f4c1faf554f46bdd56a3ea085166c",
+    "ctl-recovery-activity.json": "8a871a1c8532521baea5fe6ad47d2b0c182518b7e381f357f66f724e7234d78d"
   }
 }

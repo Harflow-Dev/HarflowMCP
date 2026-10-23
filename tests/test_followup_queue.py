@@ -991,7 +991,7 @@ async def test_ctl_resume_consumes_and_its_text_is_optional(
     put_record(log_dir)
     send(log_dir, "via ctl")
     spawns.finished = True
-    args = argparse.Namespace(task_id=SRC, text=None, max_turns=None, network=None, json=True)
+    args = argparse.Namespace(task_id=SRC, text=None, max_turns=None, background_idle_seconds=None, network=None, json=True)
     task = await ctl._resume_action(args)(registry)
     assert "via ctl" in spawns.prompts[0] and spawns.calls[0]["message_ids"] and statuses(log_dir) == ["consumed"]
     assert task.task_id == spawns.calls[0]["task_id"]

@@ -155,3 +155,37 @@ A start that creates a run but fails during launch retains its subscription and
 identifies the run; inspect it before retrying. Orphan reservations without a run
 are removed after five lease intervals. If post-start activation fails, the returned
 run includes a notice and the worker recovers the reserved subscription.
+
+## Supervision loss and recovered settlement
+
+The live MCP server reconciles existing subscriptions at asynchronous startup and periodically.
+Synchronous CLI reads do not start a notification worker. A confirmed dead owning server creates
+an independent `task.supervision_lost` delivery, leaving the completion subscription available
+for eventual settlement. Undecidable ownership does not establish supervision loss; observed
+terminal histories do not become orphaned when their former server exits.
+
+Loss payloads include `owner_generation`, `affected_nodes`, tri-state process and owner evidence,
+the last captured output timestamp and its source, and a suggested next step. These are bounded
+projections without prompts, raw logs, credentials, or unrestricted task metadata. Workflow root
+subscriptions receive `workflow.supervision_lost` episodes naming verified run, node, execution
+and task membership. Each affected task has a separate durable episode so later-discovered nodes
+from the same original owner remain visible. Database uniqueness prevents concurrent replacement
+servers from creating duplicate episodes. Delivery remains at least once: receivers must deduplicate
+by notification ID. Frozen payloads, retry limits, leases, signing, and transport budgets apply to
+loss deliveries too; unsubscribing supersedes their queued deliveries.
+
+When a recovered task's owner and process are confirmed dead, completion reconciliation may use
+its captured stream to resolve settlement. Such `task.settled` payloads carry `recovered: true`,
+`exit_code: null`, `outcome_observed: false`, and explicit recovery evidence. This reports the
+inferred settlement without fabricating an observed exit or persisting a new execution outcome.
+Pending loss deliveries pin affected task records. Loss episode identities remain while their
+subscription remains retained and eligible, preventing repeated discovery after delivery.
+
+The notification database retains schema version 1. Existing qualified databases remain readable;
+a writable notification operation atomically adds and qualifies the optional supervision delivery
+ledger. Foreign or malformed storage is refused before extension. Reconciliation rotates bounded
+subscription and affected-task batches, so large subscriptions can take multiple ticks to inspect.
+
+Notification retention pins are enumerated by distinct task identity across pending completion
+and loss deliveries. The read permits at most 10,000 distinct pins; exceeding that budget refuses
+the pin read so retention defers deletion instead of acting on an incomplete set.

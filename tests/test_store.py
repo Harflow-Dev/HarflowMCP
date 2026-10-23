@@ -492,7 +492,7 @@ def test_recovered_snapshot_matches_the_live_snapshot_shape(tmp_path: Path) -> N
     assert set(live) - set(recovered) == set()
     # Recovery adds provenance the live path has no need for, and the follow-up ledger, which a live
     # snapshot leaves to the (threaded) status payload so it is never read on the event loop.
-    assert set(recovered) - set(live) == {"recovered", "note", "queued_followups"}
+    assert set(recovered) - set(live) == {"recovered", "note", "queued_followups", "recovery_activity"}
 
 
 def test_both_snapshot_builders_carry_the_resume_command(tmp_path: Path) -> None:
@@ -755,7 +755,7 @@ def test_a_terminal_record_with_no_exit_code_is_rechecked_against_the_process(
     status, note, _, _ = store.resolve_status(tmp_path, record)
 
     assert status == "running"
-    assert "still alive" in note
+    assert "identity is undecidable" in note
 
 
 def test_a_terminal_record_with_an_exit_code_is_believed(
@@ -946,7 +946,7 @@ def test_an_unobserved_terminal_record_with_an_uncertain_identity_still_reads_ru
     resolved, note, _, _ = store.resolve_status(tmp_path, record)
 
     assert resolved == "running"
-    assert "still alive" in note
+    assert "identity is undecidable" in note
 
 
 @pytest.mark.parametrize(

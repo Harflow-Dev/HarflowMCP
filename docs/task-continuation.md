@@ -98,3 +98,21 @@ they observe is persisted by the next send, cancel, consuming continuation or re
 Retention keeps a task while it has queued or reserved messages, and the successor a reservation
 names; `undeliverable` and `delivery_unknown` items do not block it. Cancelling a task leaves its
 queued messages in place: a cancelled task can still be resumed.
+
+## Live background wait bound
+
+Standalone start, resume and continue accept `background_idle_seconds`;
+`harflow-ctl run|resume|continue` accepts `--background-idle-seconds`. The value
+must be finite and greater than zero, at most 21600 seconds; booleans are
+rejected. Omission inherits the effective saved bound for continuation. A fresh
+dispatch resolves `HARFLOW_LIVE_IDLE_SECONDS` once, falling back to 600 seconds
+for invalid environment values, and persists the result. Explicit continuation
+overrides participate in request idempotency. Caller assignment text remains
+verbatim; qualified Claude live input receives a separate runtime context block
+explaining its effective bound. `HARFLOW_BACKGROUND_IDLE_SECONDS` also reports
+it in the child environment.
+
+Only a backend advertising `tracks_background_tasks` applies background idle
+waiting. Classic/capped runs do not use live-input idle waiting. At the bound,
+open background work fails the run even if the latest agent result succeeded;
+status exposes the detailed failure diagnostic instead of implying completion.

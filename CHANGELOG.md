@@ -42,3 +42,9 @@
 - Extract the engine into HarflowMCP with independent package, command, environment, and state identities.
 - Preserve current wire-format versions during extraction.
 - Require requalification before enabling renamed native workflow adapters or extra writable path grants.
+
+### Task supervision and background recovery
+
+- Disclose independent owner/process verdicts, capture continuity and raw-log cutoff.
+- Add bounded exact-session Claude transcript activity with independent display cursors.
+- Persist configurable background idle bounds across dispatch and continuation, with precise idle-bound diagnostics.

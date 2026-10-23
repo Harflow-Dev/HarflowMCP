@@ -1687,3 +1687,9 @@ A decision does not itself establish successful execution or workflow completion
 ### Saved definition compatibility
 
 The engine wraps saved definitions in a Harflow product document; author graph payloads through the existing save tools without adding envelope fields. Flat development files and foreign, malformed or incompatible documents are refused rather than adopted. A refused source blocks whole-store listing and dependency indexing, including unrelated saves. Ordinary deletion also refuses unqualified files. See [saved definition contracts](contracts.md#saved-workflow-definition-documents) for error codes, compatibility and manual recovery.
+
+Agent candidates, including specialist candidates, accept
+`background_idle_seconds` with the standalone finite positive 21600-second
+maximum. Headless dispatches persist the resolved bound; resumed dispatches
+inherit it when omitted. Native child transports cannot independently configure
+this deadline and reject an explicit independent setting.

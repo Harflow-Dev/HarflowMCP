@@ -133,6 +133,9 @@ def qualify_payload(payload: Any, task_id: str, record_type: type) -> Any:
         for key in ("depth", "auto_continue", "input_after_result", "max_depth"):
             if getattr(record, key) is not None and getattr(record, key) < 0:
                 raise ValueError(f"Invalid task.{key}")
+        if record.background_idle_seconds is not None:
+            from .background_idle import validate
+            validate(record.background_idle_seconds)
         _grants(record.extra_writable_paths)
         if record.enforcement is not None:
             qualify_enforcement(record.enforcement, require_core=True)

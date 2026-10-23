@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any
 from contextvars import ContextVar
 
-from . import control, events, identity
+from . import control, events, identity, supervision, background_idle
 from .backends import Accumulator
 from .backends import get as get_backend
 from .backends import resume_command
@@ -78,6 +78,7 @@ class TaskRecord:
     model: str | None = None
     reasoning_effort: str | None = None
     max_turns: int | None = None
+    background_idle_seconds: float | None = None
     extra_writable_paths: list[dict[str, Any]] = field(default_factory=list)
     extra_path_certification: str | None = None
     caller_approvals: bool = False
@@ -468,12 +469,16 @@ def listing_header(record: TaskRecord) -> tuple[dict[str, Any], float, bool]:
         duration = _duration_seconds(record, record.finished_at)
     except (TypeError, ValueError):
         duration = None
+    header.update(background_idle_seconds=background_idle.resolve(inherited=record.background_idle_seconds),
+                  output_capture='unknown' if outcome_unobserved(record) else 'observed_terminal',
+                  input_channel=('unknown' if outcome_unobserved(record) else 'closed') if record.live_input else 'not_applicable',
+                  last_captured_output_at=None)
     header.update(recovered=True, duration_seconds=duration, notices=[str(n)[:500] for n in record.bridge_notices[:4]])
     unobserved = outcome_unobserved(record)
     header.update(persisted_status=record.status, observed_exit=not unobserved, needs_reconciliation=unobserved, status_reconciled=False, process_identity_state=None)
     if unobserved:
         header['status'] = 'running'
-    caller_keys = ('task_id', 'backend', 'session_id', 'repo_path', 'started_at', 'freedom', 'markers', 'pid', 'pgid', 'start_time', 'status', 'exit_code', 'root_task_id', 'parent_task_id', 'continuation_of_task_id', 'chain_root_task_id', 'spawned_by', 'depth', 'max_depth', 'network', 'owner', 'group', 'extra_writable_paths', 'extra_path_certification', 'enforcement')
+    caller_keys = ('task_id', 'backend', 'session_id', 'repo_path', 'started_at', 'freedom', 'markers', 'pid', 'pgid', 'start_time', 'status', 'exit_code', 'root_task_id', 'parent_task_id', 'continuation_of_task_id', 'chain_root_task_id', 'spawned_by', 'depth', 'max_depth', 'network', 'owner', 'group', 'live_input', 'background_idle_seconds', 'extra_writable_paths', 'extra_path_certification', 'enforcement')
     header['_caller'] = {key: getattr(record, key) for key in caller_keys}
     try:
         stamp = datetime.fromisoformat(record.started_at).timestamp()
@@ -494,6 +499,11 @@ def bootstrap_catalog(log_dir: Path) -> bool:
 
 
 def _project_indexed_status(header: dict[str, Any], record: TaskRecord) -> bool:
+    # The caller index intentionally retains only process-arbitration fields.
+    # Display supervision uses the bounded listing header's owner and settings.
+    record = replace(record, owner=header.get('owner', record.owner),
+                     live_input=header.get('live_input', record.live_input),
+                     background_idle_seconds=header.get('background_idle_seconds', record.background_idle_seconds))
     unobserved = outcome_unobserved(record)
     if unobserved and record.pid is not None:
         candidate = identity.task_identity(record.pid, record.start_time, record.markers)
@@ -516,6 +526,14 @@ def _project_indexed_status(header: dict[str, Any], record: TaskRecord) -> bool:
         if needs:
             header['note'] = 'process ended; outcome needs inspection'
     header.update(status=status, persisted_status=record.status, observed_exit=not unobserved, process_identity_state=state, needs_reconciliation=needs)
+    owner_state = identity.identity_check(record.owner) if unobserved and record.owner is not None else 'undecidable'
+    capture = ('observed_terminal' if not unobserved else 'live' if owner_state == 'alive'
+               else 'lost_with_owner' if owner_state == 'dead' else 'unknown')
+    header.update(background_idle_seconds=background_idle.resolve(inherited=record.background_idle_seconds),
+                  output_capture=capture,
+                  input_channel=('closed' if not unobserved else 'closed_with_owner'
+                      if owner_state == 'dead' else 'unknown') if record.live_input else 'not_applicable')
+    header.setdefault('last_captured_output_at', None)
     return active
 
 
@@ -659,6 +677,17 @@ def list_page(log_dir: Path, *, limit: int = 100, cursor: str | None = None, act
                 page.update(history_incomplete=True, counts_complete=False,
                     total_active_count=None, total_active_root_count=None, total_attention_root_count=None,
                     polling_guidance='Retry with the same filters without a cursor; status reconciliation may have changed matches outside this page.')
+    for item in page['items']:
+        item.setdefault('background_idle_seconds', None)
+        item.setdefault('output_capture', 'observed_terminal' if item.get('observed_exit') is True else 'unknown')
+        item.setdefault('input_channel', 'closed' if item.get('observed_exit') is True and item.get('live_input') else 'unknown')
+        item['last_captured_output_at'] = None
+        if item.get('output_capture') == 'lost_with_owner':
+            try:
+                item['last_captured_output_at'] = datetime.fromtimestamp(
+                    log_path(log_dir, item['task_id']).stat().st_mtime, timezone.utc).isoformat()
+            except OSError:
+                pass
     page['items'] = [bound_header(item) for item in page['items']]
     related, visited = [], {item['task_id'] for item in page['items']}
     queue = [item[key] for item in page['items'] for key in ('parent_task_id', 'continuation_of_task_id', 'chain_root_task_id', 'spawned_by', 'root_task_id') if item.get(key) and item[key] not in visited]
@@ -873,32 +902,21 @@ def _resolve(
 
     if alive and state.failure_diagnostic is not None and identity.identity_check(record.owner) != "alive":
         state.failure_diagnostic = {**state.failure_diagnostic, "settlement": "needs_attention"}
-        note = "Recovered usage-limit failure needs attention: the process remains alive but its owning server cannot be verified. Reconcile or cancel it before dispatching a replacement."
+        note = "Recovered failure needs attention: the process may remain alive but its owning server cannot be verified. Reconcile or cancel it before dispatching a replacement."
         state.notices.append(note)
         return ("running", note, state, tail, False)
 
-    if alive and record.status in TERMINAL_RECORD_STATUSES:
-        owned = identity.identity_check(record.owner) == "alive"
-        return (
-            "running",
-            f"Recovered from disk: this task is recorded as '{record.status}', but its process is "
-            "still alive and working — that record was written by a bridge server being shut down "
-            "mid-run, and it was wrong. Cancellation works. Its output, however, is going nowhere: "
-            "the pipes died with that server, so the raw log stops at the teardown and no summary "
-            "will ever arrive for the rest of the run. Judge it by what it changed on disk, or "
-            "cancel it and dispatch again.",
-            state,
-            tail,
-            owned,
-        )
     if alive:
         owned = identity.identity_check(record.owner) == "alive"
         note = (
             _OWNED_BY_LIVE_SERVER_NOTE.format(pid=(record.owner or {}).get("pid"))
             if owned
-            else "Recovered from disk: this task was started by an earlier bridge server process and "
-            "is still running. Status and cancellation work; its live output is not being read by "
-            "this process, so the summary appears only once it finishes."
+            else ("Recovered from disk: the owning server is dead; captured output has stopped. "
+                  "No later captured summary is promised. Inspect recovery activity and repository changes, "
+                  "or cancel before dispatching a replacement."
+                  if identity.identity_check(record.owner) == "dead" else
+                  "Recovered from disk: owning server identity is undecidable. Capture continuity "
+                  "and future summary availability are unknown; retry status before replacing this run.")
         )
         return ("running", note, state, tail, owned)
     if record.status in TERMINAL_RECORD_STATUSES and not unobserved:
@@ -948,7 +966,7 @@ def _resolve(
             False,
         )
     if state.failure_diagnostic is not None and not alive:
-        return "failed", "Recovered confirmed usage-limit failure.", state, tail, False
+        return "failed", "Recovered recorded failure: " + str(state.failure_diagnostic.get("reason", "failure diagnostic available")), state, tail, False
     if state.terminal is not None or state.saw_final_message:
         # `record.exit_code` is passed through as-is, None included. Substituting 0 here used to
         # make every backend look as though it had exited cleanly, so a recovered run carrying a
@@ -1042,7 +1060,7 @@ def _notices(record: TaskRecord, state: Accumulator) -> list[str]:
 @task_operation
 def snapshot(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
     """A recovered task's state, shaped like a live snapshot so callers need no special casing."""
-    from . import artifacts
+    from . import artifacts, recovery_activity
     qualified = read(log_dir, record.task_id, include_prompt=False)
     if qualified is None:
         raise TaskDocumentError(record.task_id, 'Task metadata disappeared', code='task_unavailable')
@@ -1076,6 +1094,7 @@ def snapshot(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
     from . import followups
     queued_followups = followups.view(log_dir, record.task_id)
     from . import approvals
+    supervision_fields = supervision.fields(record, log_path(log_dir, record.task_id), observed_terminal=record.status in TERMINAL_RECORD_STATUSES and not outcome_unobserved(record))
     return {
         "caller_approvals": record.caller_approvals,
         "interaction_owner": record.interaction_owner,
@@ -1085,6 +1104,7 @@ def snapshot(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
         "queued_followup_count": followups.count_outstanding(queued_followups),
         **({"prompt_source": record.prompt_source, "prompt_truncated": record.prompt_truncated, **({"prompt_error": record.prompt_error} if record.prompt_error else {})} if record.prompt_source or record.prompt_error else {}),
         "task_id": record.task_id,
+        **supervision_fields,
         "artifact_summary": artifacts.summary(log_dir, record.task_id),
         "workflow_builder": record.workflow_builder,
         "backend": record.backend,
@@ -1107,6 +1127,8 @@ def snapshot(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
         "title": record.title,
         "lineage_detected": record.lineage_detected,
         "live_input": record.live_input,
+        "background_idle_seconds": background_idle.resolve(inherited=record.background_idle_seconds),
+        "recovery_activity": recovery_activity.page(log_dir, record, supervision_evidence=supervision_fields['supervision']),
         "summary": state.summary,
         "failure_diagnostic": state.failure_diagnostic,
         "is_error": state.is_error,
@@ -1162,6 +1184,7 @@ def brief(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
         "interaction_owner": record.interaction_owner,
         "approval_summary": approvals.summary(log_dir, record.task_id),
         "task_id": record.task_id,
+        **supervision.fields(record, log_path(log_dir, record.task_id), observed_terminal=record.status in TERMINAL_RECORD_STATUSES and not outcome_unobserved(record)),
         "workflow_builder": record.workflow_builder,
         "backend": record.backend,
         "session_id": record.session_id,
@@ -1183,6 +1206,7 @@ def brief(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
         "title": record.title,
         "lineage_detected": record.lineage_detected,
         "live_input": record.live_input,
+        "background_idle_seconds": background_idle.resolve(inherited=record.background_idle_seconds),
         "notices": list(record.bridge_notices),
         "queued_followup_count": followups.outstanding_count(log_dir, record.task_id),
         "failure_diagnostic": state.failure_diagnostic or record.failure_diagnostic,

@@ -19,6 +19,8 @@ Three invariants keep the state machine honest:
 
 from __future__ import annotations
 
+from . import supervision
+
 import asyncio
 import contextvars
 import functools
@@ -283,16 +285,8 @@ CLOSE_IDLE_BOUND = "idle_bound"
 
 def live_idle_seconds(environ: Any = None) -> float:
     """`HARFLOW_LIVE_IDLE_SECONDS`, or the default for anything missing, unparsable, or not > 0."""
-    raw = (os.environ if environ is None else environ).get(LIVE_IDLE_ENV)
-    if raw is None:
-        return DEFAULT_LIVE_IDLE_SECONDS
-    try:
-        value = float(raw)
-    except (TypeError, ValueError):
-        return DEFAULT_LIVE_IDLE_SECONDS
-    if not (value > 0) or value == float("inf"):
-        return DEFAULT_LIVE_IDLE_SECONDS
-    return value
+    from .background_idle import resolve
+    return resolve(environ=environ)
 
 
 def background_idle_bound_reached(acc: Accumulator, silent_for: float, bound: float) -> bool:
@@ -745,6 +739,7 @@ class Task:
     lineage_detected: str | None = None
     """Which `lineage.detect_caller` method found this task's caller (`"pb_task_id"` | `"session"`
     | `"ancestry"`), or None if no caller was detected — i.e. this is a root task."""
+    background_idle_seconds: float = DEFAULT_LIVE_IDLE_SECONDS
     live_input: bool = False
     """Whether this run was spawned with a stdin pipe that takes further messages — taken from the
     run's own `Invocation`, never inferred from the backend. `send_message`, `harflow-ctl send`
@@ -884,6 +879,7 @@ class Task:
             "interaction_owner": self.interaction_owner,
             "approval_summary": self.approval_view,
             "task_id": self.task_id,
+            **supervision.fields(self, self.log_path, observed_terminal=self.finished, live=True, input_closed=self.input_closed),
             "continuation_of_task_id": self.continuation_of_task_id,
             "chain_root_task_id": self.chain_root_task_id,
             "auto_continue": self.auto_continue,
@@ -905,6 +901,7 @@ class Task:
             "title": self.title,
             "lineage_detected": self.lineage_detected,
             "live_input": self.live_input,
+            "background_idle_seconds": self.background_idle_seconds,
             "notices": list(self.bridge_notices),
             "queued_followup_count": followups.outstanding_count(self.log_path.parent, self.task_id),
             "failure_diagnostic": self.acc.failure_diagnostic,
@@ -1192,6 +1189,7 @@ class TaskRegistry:
         backend: Backend,
         freedom: str = "write_in_repo",
         max_turns: int | None = None,
+        background_idle_seconds: float | None = None,
         model: str | None = None,
         reasoning_effort: str | None = None,
         network: bool | None = None,
@@ -1215,6 +1213,8 @@ class TaskRegistry:
         carries them."""
         from .state_layout import require_dispatch_layout
         require_dispatch_layout(self._log_dir)
+        from .background_idle import resolve
+        background_idle_seconds = resolve(background_idle_seconds)
         with _before_spawn():
             from .task_continuation import validate_budget
             validate_budget(auto_continue)
@@ -1279,6 +1279,7 @@ class TaskRegistry:
             session_id=session_id,
             freedom=freedom,
             max_turns=max_turns,
+            background_idle_seconds=background_idle_seconds,
             model=model,
             reasoning_effort=reasoning_effort,
             network=network,
@@ -1301,7 +1302,7 @@ class TaskRegistry:
 
     @_with_authority_check_budget
     @layout_operation
-    async def continue_task(self, task_id: str, extra_prompt: str | None = None, notes_path: str | None = None, *, automatic: bool = False, consume_followups: bool = False) -> Task:
+    async def continue_task(self, task_id: str, extra_prompt: str | None = None, notes_path: str | None = None, *, automatic: bool = False, consume_followups: bool = False, background_idle_seconds: float | None = None) -> Task:
         """Start a fresh session from a durably settled task without broadening access.
 
         `consume_followups` is set by the caller-facing paths only; an automatic continuation never
@@ -1309,7 +1310,7 @@ class TaskRegistry:
         from .state_layout import require_dispatch_layout
         require_dispatch_layout(self._log_dir)
         from .task_continuation import continue_task
-        return await continue_task(self, task_id, extra_prompt, notes_path, automatic=automatic, consume_followups=consume_followups)
+        return await continue_task(self, task_id, extra_prompt, notes_path, automatic=automatic, consume_followups=consume_followups, background_idle_seconds=background_idle_seconds)
 
     @_with_authority_check_budget
     @layout_operation
@@ -1319,6 +1320,7 @@ class TaskRegistry:
         followup_prompt: str | None,
         *,
         max_turns: int | None = None,
+        background_idle_seconds: float | None = None,
         network: bool | None = None,
         task_id: str | None = None,
         display_prompt: str | None = None,
@@ -1353,6 +1355,11 @@ class TaskRegistry:
         # resume, so this matches the existing shape rather than inventing one. An override the
         # parent's freedom cannot honour raises inside the builder below, exactly as on start.
         effective_network = network if network is not None else parent.network
+        from .background_idle import resolve
+        inherited_idle = resolve(inherited=parent.background_idle_seconds)
+        background_idle_seconds = resolve(background_idle_seconds, inherited_idle)
+        if native_subagent and background_idle_seconds != inherited_idle:
+            raise ValueError("Native child transports cannot set an independent background idle bound")
 
         # Caller detection and the nested-dispatch caps run before the session lock — they are
         # read-only and must never block on, or be blocked by, another resume of this session.
@@ -1415,6 +1422,7 @@ class TaskRegistry:
                     title=parent.title,
                     followup_prompt=followup_prompt,
                     max_turns=max_turns,
+                    background_idle_seconds=background_idle_seconds,
                     effective_network=effective_network,
                     caller_approvals=parent.caller_approvals,
                     interaction_owner=parent.interaction_owner,
@@ -1467,6 +1475,7 @@ class TaskRegistry:
         lineage_detected: str | None,
         task_id: str | None,
         consume_followups: bool,
+        background_idle_seconds: float | None = None,
     ) -> Task:
         """Build and spawn a resume, consuming the parent's queued follow-ups when asked to.
 
@@ -1535,6 +1544,7 @@ class TaskRegistry:
                 session_id=session_id,
                 freedom=freedom,
                 max_turns=max_turns,
+                background_idle_seconds=background_idle_seconds,
                 model=model,
                 reasoning_effort=reasoning_effort,
                 network=effective_network,
@@ -1571,6 +1581,7 @@ class TaskRegistry:
         session_id: str | None,
         freedom: str,
         max_turns: int | None,
+        background_idle_seconds: float | None = None,
         model: str | None,
         reasoning_effort: str | None,
         network: bool | None = None,
@@ -1606,6 +1617,8 @@ class TaskRegistry:
         # only ever run with the pipe it was built for (claude without a turn cap, and every
         # antigravity run, is live). Classic runs use DEVNULL or a backend-validated one-shot
         # prompt pipe which closes immediately at EOF, without a live-input pump.
+        from .background_idle import resolve
+        background_idle_seconds = resolve(background_idle_seconds)
         from .state_layout import require_dispatch_layout
         require_dispatch_layout(self._log_dir)
         with _before_spawn():
@@ -1623,6 +1636,9 @@ class TaskRegistry:
                 await _bounded_extra_path_check(self._assert_extra_state, repo_path, extra_path_grants, invocation)
                 invocation = await _bounded_extra_path_check(backend.qualify_extra_writable_paths, invocation, extra_path_grants, freedom, network)
             else:
+                backend.assert_safe(invocation, freedom, network)
+            if getattr(backend.capabilities, "tracks_background_tasks", False) and hasattr(backend, "configure_dispatch_context"):
+                invocation = backend.configure_dispatch_context(invocation, background_idle_seconds)
                 backend.assert_safe(invocation, freedom, network)
             if extra_path_grants and workflow_builder:
                 raise ValueError("Extra writable paths are unavailable to workflow builders")
@@ -1745,6 +1761,7 @@ class TaskRegistry:
                 lineage.ENV_DEPTH: str(depth),
                 "PB_TASK_ID": task_id,
                 "PB_DEPTH": str(depth),
+                "HARFLOW_BACKGROUND_IDLE_SECONDS": str(background_idle_seconds),
             }
 
             spawn_env.pop("HARFLOW_TASK_SCRATCH", None)
@@ -1816,6 +1833,7 @@ class TaskRegistry:
             title=title,
             lineage_detected=lineage_detected,
             live_input=invocation.live_input,
+            background_idle_seconds=background_idle_seconds,
             # A live run owes one result for its initial prompt — plus, on a backend where each
             # written line is its own turn, one more per message the pump writes (see
             # `_note_input_written`). Non-live runs owe nothing: no pump ever runs for them.
@@ -2371,13 +2389,29 @@ class TaskRegistry:
         )
         task.bridge_notices.append(notice)
         _write_event(task, "notice", {"text": notice})
-        if task.acc.background_open and not task.acc.background_abandoned:
-            self._mark_abandoned(task, bound)
+        if task.acc.background_open:
+            task.acc.background_abandoned = True
         task.inbox_closed = True
         _close_stdin(task)
 
     def _mark_abandoned(self, task: Task, bound: float) -> None:
         task.acc.background_abandoned = True
+        latest = task.acc.latest_result
+        if task.acc.failure_diagnostic is None:
+            now = time.monotonic()
+            task.acc.failure_diagnostic = {
+                "category": "background_abandoned_at_idle_bound",
+                "reason": ("Agent result succeeded, but background work remained open at the idle bound"
+                           if latest and not latest.get("is_error") and latest.get("subtype") == "success"
+                           else "Agent result reported an error; background work remained open at the idle bound"),
+                "source": "live_input_pump", "background_idle_seconds": bound,
+                "elapsed_background_wait_seconds": round(now - task.last_output_at, 3),
+                "background_tasks": [{"id": key, "description": task.acc.background_details.get(key, {}).get("description"),
+                    "elapsed_seconds": round(now - task.acc.background_details.get(key, {}).get("started", now), 3)}
+                    for key in sorted(task.acc.background_open)[:50]],
+                "latest_result": latest,
+                "successful_agent_result": bool(latest and not latest.get("is_error") and latest.get("subtype") == "success"),
+            }
         notice = _BACKGROUND_ABANDONED_NOTICE.format(bound=bound)
         task.bridge_notices.append(notice)
         _write_event(task, "notice", {"text": notice})
@@ -2416,7 +2450,7 @@ class TaskRegistry:
         `PUMP_POLL_SECONDS` (which is also how often other processes' appends are noticed). Every
         exit from the loop goes through `_close_input`; a close that did not happen is retried.
         """
-        bound = live_idle_seconds()
+        bound = task.background_idle_seconds
         try:
             while not task.inbox_closed:
                 task.pump_wake.clear()
@@ -2553,6 +2587,7 @@ class TaskRegistry:
                 model=task.model,
                 reasoning_effort=task.reasoning_effort,
                 max_turns=task.max_turns,
+                background_idle_seconds=task.background_idle_seconds,
                 network=task.network,
                 caller_approvals=task.caller_approvals,
                 interaction_owner=task.interaction_owner,
@@ -3532,6 +3567,7 @@ class TaskRegistry:
         followup_prompt: str | None,
         *,
         max_turns: int | None = None,
+        background_idle_seconds: float | None = None,
         network: bool | None = None,
         task_id: str | None = None,
         display_prompt: str | None = None,
@@ -3565,6 +3601,10 @@ class TaskRegistry:
         # also None for a record written before the field existed, resuming at the freedom's
         # historical default — and an explicit boolean overrides it for this subprocess only.
         effective_network = network if network is not None else record.network
+        from .background_idle import resolve
+        background_idle_seconds = resolve(background_idle_seconds, record.background_idle_seconds)
+        if native_subagent and background_idle_seconds != resolve(inherited=record.background_idle_seconds):
+            raise ValueError("Native child transports cannot set an independent background idle bound")
 
         # Same ordering as `resume`: caller detection and the caps run before the session lock.
         caller = await self._mutation_caller()
@@ -3621,6 +3661,7 @@ class TaskRegistry:
                     title=record.title,
                     followup_prompt=followup_prompt,
                     max_turns=max_turns,
+                    background_idle_seconds=background_idle_seconds,
                     effective_network=effective_network,
                     caller_approvals=record.caller_approvals,
                     interaction_owner=record.interaction_owner,

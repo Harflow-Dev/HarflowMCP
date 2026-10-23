@@ -134,6 +134,12 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     status_p.add_argument("--json", action="store_true")
     status_p.add_argument("--brief", action="store_true", help="bounded display projection")
 
+    recovery_p = sub.add_parser("recovery-activity", help="bounded display-only backend transcript activity")
+    recovery_p.add_argument("task_id")
+    recovery_p.add_argument("--json", action="store_true")
+    recovery_p.add_argument("--cursor")
+    recovery_p.add_argument("--limit", type=int, default=50)
+
     status_batch_p = sub.add_parser(
         "status-batch", help="show several tasks' full state in one document (at most 100 ids)"
     )
@@ -203,6 +209,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     run_p.add_argument("--prompt", required=True)
     run_p.add_argument("--model", default=None)
     run_p.add_argument("--max-turns", type=int, default=None)
+    run_p.add_argument("--background-idle-seconds", type=float, help="live-input background wait bound (0 < seconds <= 21600)")
     run_p.add_argument("--auto-continue", type=int, default=0, help="0–10 fresh successors after certified cutoffs; standalone tasks only")
     run_p.add_argument("--reasoning-effort", default=None)
     run_p.add_argument("--network", choices=("true", "false"), default=None)
@@ -230,6 +237,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     resume_p.add_argument("task_id")
     resume_p.add_argument("text", nargs="?", default=None)
     resume_p.add_argument("--max-turns", type=int, default=None)
+    resume_p.add_argument("--background-idle-seconds", type=float)
     resume_p.add_argument("--network", choices=("true", "false"), default=None)
     resume_p.add_argument("--json", action="store_true")
 
@@ -238,6 +246,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     extra = continue_p.add_mutually_exclusive_group()
     extra.add_argument("--extra-prompt")
     extra.add_argument("--extra-prompt-file", help="UTF-8 caller follow-up file")
+    continue_p.add_argument("--background-idle-seconds", type=float)
     continue_p.add_argument("--notes-path", help="Optional UTF-8 notes file")
     continue_p.add_argument("--json", action="store_true")
 
@@ -763,7 +772,7 @@ def _run_action(args: argparse.Namespace):
             backend=chosen,
             freedom=freedom,
             model=args.model,
-            max_turns=args.max_turns,
+            max_turns=args.max_turns, **({'background_idle_seconds': args.background_idle_seconds} if getattr(args, 'background_idle_seconds', None) is not None else {}),
             reasoning_effort=args.reasoning_effort,
             network=network,
             group=args.group,
@@ -803,7 +812,7 @@ def _resume_action(args: argparse.Namespace):
         server._check_turn_cap(backends.get(record.backend), args.max_turns)
         server._check_network(backends.get(record.backend), record.freedom, network)
         return await registry.resume_record(
-            record, args.text, max_turns=args.max_turns, network=network, consume_followups=True
+            record, args.text, max_turns=args.max_turns, **({'background_idle_seconds': args.background_idle_seconds} if getattr(args, 'background_idle_seconds', None) is not None else {}), network=network, consume_followups=True
         )
 
     return action
@@ -815,7 +824,7 @@ def _ctl_log_path() -> Path:
 
 def _continue_action(args: argparse.Namespace):
     async def action(registry: Any) -> Any:
-        return await registry.continue_task(args.task_id, _workflow_text(args, "extra_prompt"), args.notes_path, consume_followups=True)
+        return await registry.continue_task(args.task_id, _workflow_text(args, "extra_prompt"), args.notes_path, consume_followups=True, **({'background_idle_seconds': args.background_idle_seconds} if getattr(args, 'background_idle_seconds', None) is not None else {}))
     return action
 
 
@@ -967,7 +976,7 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
         if action in {"start", "build", "preview"}:
             prompt = _workflow_prompt(args) if action != "preview" else ""
             candidate = {k: v for k, v in {"backend": args.backend, "model": args.model,
-                         "reasoning_effort": args.reasoning_effort, "max_turns": args.max_turns, "caller_approvals": args.caller_approvals}.items() if v is not None}
+                         "reasoning_effort": args.reasoning_effort, "max_turns": args.max_turns, "background_idle_seconds": getattr(args, "background_idle_seconds", None), "caller_approvals": args.caller_approvals}.items() if v is not None}
             if action == "preview":
                 return await server._workflow_call("preview", name=args.name, repo_path=args.repo, overrides=candidate or None, network=_network(args.network))
             if action == "build":
@@ -1213,6 +1222,32 @@ def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
         return _cmd_detached(args, _resume_action(args))
     if args.command == "continue":
         return _cmd_detached(args, _continue_action(args))
+    if args.command == "recovery-activity":
+        from .recovery_activity import page
+        log_dir = default_log_dir()
+        from .workflow_inspection import managed_reader, guard_task_read
+        try:
+            task_id = store.validate_task_id(args.task_id)
+            # Qualify only bounded metadata: this display page never needs the caller's
+            # assignment, raw-stream replay, resolved outcome, or full status snapshot.
+            from .catalog import METADATA_BYTES, current_metadata_budget
+            record = store.read(log_dir, task_id, include_prompt=False,
+                                metadata_byte_limit=METADATA_BYTES, metadata_budget=current_metadata_budget())
+            try:
+                guard_task_read(task_id, managed_reader(log_dir))
+            except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):
+                raise
+            except Exception as exc:
+                raise _StatusReadRefused("workflow_read_refused", str(exc)) from None
+            if record is None:
+                raise _StatusReadRefused("unknown_task", f"unknown task_id: {task_id}")
+            result = page(log_dir, record, args.cursor, args.limit)
+        except _StatusReadRefused as exc:
+            return _fail(args, exc.code, exc.message)
+        except ValueError as exc:
+            return _fail(args, "invalid_params", str(exc))
+        print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "task_id": task_id, "recovery_activity": result})))
+        return 0
     if args.command == "status-batch":
         return _cmd_status_batch(args)
     return _cmd_status(args)
