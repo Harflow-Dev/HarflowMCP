@@ -23,6 +23,33 @@ only after a validated acknowledgement of its prior context in the same session 
 Missing or stale acknowledgements, incompatible sessions and fallback candidates receive bootstrap
 context again. Context acknowledgement does not replace validation against durable workflow state.
 
+Prompt and acknowledgement receipts use internal version 2; the saved `optimized_v1` policy and
+public wire version 1 remain unchanged. Checkpoint sections use full values, digest references to
+acknowledged revisions, or append deltas with an exact list-prefix digest and length. Changed or
+sliding windows receive full replacements. `delivery.sections` identifies each section's mode,
+revision and digest; persisted accounting includes source and delivered sizes. The receipt stores
+only bounded metadata, never a second
+copy of checkpoint prose. Current authority, continuation offers, constraints and recovery
+instructions stay inline. Restart, recovery, repair, definition changes and scope mismatches
+require full delivery; only the actual selected candidate/model and receiving session may
+acknowledge a baseline.
+
+The orchestrator graph contains node identities, purposes, execution constraints and every
+connection and condition. Optional node `purpose` is a nonempty single line of at most 500
+characters. Missing agent purposes produce advisory `warnings` in `workflow-validate`, a context warning,
+and a 240-character instructions excerpt. Existing definitions remain valid. Full verbatim instructions accompany every newly offered executable node, including
+nested parallel entries and retries; only acknowledged same-session instructions can become
+digest references. The orchestrator must transfer relevant requirements, constraints and
+input references into each focused assignment. Workers continue to receive complete node
+instructions. Specialist selection context includes identity, title, candidates, call condition
+and current session choices; the shared catalog and specialist worker instructions remain complete.
+
+An orchestrator can return internal `action: "inspect"` with exactly one request
+`{"node_id":"issued graph node ID","view":"instructions","limit":12000}` to read full
+instructions from the current run's pinned definition. Follow `next_cursor` with `cursor` until
+null and concatenate the verbatim text `chunk` strings. Pages share the existing inspection
+allowance and 32 KiB response ceiling; they grant no cross-run authority or new public tool.
+
 Headless workers receive bounded evidence previews and immutable assigned-input references.
 The assigned-input CLI/MCP reader returns lossless pages only for references persisted on that
 worker's execution; it does not grant access to unrelated executions or workflow controls.

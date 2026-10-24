@@ -401,12 +401,49 @@ def _authorized_linked_run(run: dict[str, Any], root: Any, target_id: str) -> di
     raise ValueError("Linked workflow chain exceeds the nesting limit")
 
 
+def instruction_page(run: dict[str, Any], request: dict[str, Any]) -> dict[str, Any]:
+    """Page verbatim instructions from this run's pinned definition only."""
+    if set(request) - {"node_id", "view", "cursor", "limit"}:
+        raise ValueError("Instruction inspection accepts only node_id, view, cursor and limit")
+    node_id = request.get("node_id")
+    node = next((node for node in run["definition"]["nodes"] if node["id"] == node_id), None)
+    if node is None:
+        raise ValueError("Unknown node in this workflow run")
+    limit = request.get("limit", 12000)
+    if type(limit) is not int or not 1 <= limit <= 32000:
+        raise ValueError("limit must be between 1 and 32000 characters")
+    text = node.get("instructions", "")
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    identity = [run["workflow_run_id"], node_id, "instructions", digest]
+    offset = 0
+    cursor = request.get("cursor")
+    if cursor is not None:
+        try:
+            if not isinstance(cursor, str):
+                raise ValueError()
+            decoded = json.loads(base64.urlsafe_b64decode(cursor.encode()).decode())
+            if not isinstance(decoded, dict) or decoded.get("identity") != identity or type(decoded.get("offset")) is not int or not 0 <= decoded["offset"] < len(text):
+                raise ValueError()
+            offset = decoded["offset"]
+        except (ValueError, TypeError, KeyError, UnicodeError) as exc:
+            raise ValueError("Invalid or stale instruction cursor") from exc
+    chunk = text[offset:offset + limit]
+    end = offset + len(chunk)
+    next_cursor = base64.urlsafe_b64encode(json.dumps({"identity": identity, "offset": end}, separators=(",", ":")).encode()).decode() if end < len(text) else None
+    return {"workflow_run_id": run["workflow_run_id"], "node_id": node_id, "view": "instructions",
+            "encoding": "text", "content_sha256": digest, "offset": offset,
+            "total_characters": len(text), "chunk": chunk, "next_cursor": next_cursor,
+            "has_more": next_cursor is not None}
+
+
 @root_operation
 def inspect_request(run: dict[str, Any], root: Any, request: dict[str, Any]) -> dict[str, Any]:
     """Runner-side inspection, with no MCP server, registry, or agent tool dependency."""
     from .events import events_path, read_page
     if not isinstance(request, dict):
         raise ValueError("Inspection request must be an object")
+    if request.get("view") == "instructions":
+        return instruction_page(run, request)
     allowed = {"execution_id", "task_id", "view", "cursor", "limit", "before_seq", "after_seq", "workflow_run_id"}
     if set(request) - allowed:
         raise ValueError("Unknown inspection request fields")

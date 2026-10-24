@@ -1,5 +1,6 @@
 """Real supervisor with deterministic fake harnesses; no model calls."""
 import copy
+import hashlib
 import json
 
 import pytest
@@ -15,6 +16,7 @@ class ContextRegistry(Registry):
         self.invalid_first = invalid_first
         self.deliveries = []
         self.bootstrap = {}
+        self.section_state = {}
 
     def decision(self, context):
         return default_decision(context, self)
@@ -29,7 +31,33 @@ class ContextRegistry(Registry):
         if "bootstrap" in envelope:
             self.bootstrap = copy.deepcopy(envelope["bootstrap"]["context"])
         self.deliveries.append(envelope)
-        context = {**self.bootstrap, **envelope["checkpoint"]}
+        delivery = envelope["delivery"]
+        session = delivery["acknowledgement"]["session_owner"]
+        checkpoint = copy.deepcopy(envelope["checkpoint"])
+        state = self.section_state.setdefault(session, {})
+        if "bootstrap" in envelope:
+            if delivery.get("mode") == "bootstrap" and self.deliveries[:-1]:
+                state.clear()
+            state["bootstrap"] = copy.deepcopy(envelope["bootstrap"]["context"])
+        # Reconstruct the stable section projection exactly as a receiving
+        # session would: references require an acknowledged section, while
+        # append requires the exact recorded list prefix.
+        for key, value in list(checkpoint.items()):
+            section = key
+            if key == "node_instructions" and isinstance(value, dict):
+                rebuilt = {}
+                for node_id, item in value.items():
+                    rebuilt[node_id] = self._resolve_section(session, "node_instructions:" + node_id, item, delivery.get("sections", {}).get("node_instructions:" + node_id))
+                checkpoint[key] = rebuilt
+                continue
+            checkpoint[key] = self._resolve_section(session, section, value, delivery.get("sections", {}).get(section))
+        context = {**self.bootstrap, **state.get("bootstrap", {}), **checkpoint}
+        for key, value in checkpoint.items():
+            if key != "node_instructions":
+                state[key] = copy.deepcopy(value)
+        if isinstance(checkpoint.get("node_instructions"), dict):
+            for node_id, value in checkpoint["node_instructions"].items():
+                state["node_instructions:" + node_id] = copy.deepcopy(value)
         result = self.decision(context)
         if self.invalid_first and len(self.deliveries) == 1:
             result["next"][0]["continuation_id"] = "invalid"
@@ -40,9 +68,41 @@ class ContextRegistry(Registry):
         original_policy = self.policy
         self.policy = lambda context, registry: result
         try:
-            return await super().start("Context:\n" + json.dumps(context), repo, **kwargs)
+            task = await super().start("Context:\n" + json.dumps(context), repo, **kwargs)
+            result = getattr(task, "result", {})
+            actual_id = result.get("session_id") if isinstance(result, dict) else None
+            if session and actual_id:
+                prefix = session.rsplit(":", 1)[0]
+                actual_owner = prefix + ":" + actual_id
+                if actual_owner != session:
+                    self.section_state[actual_owner] = self.section_state.pop(session)
+            return task
         finally:
             self.policy = original_policy
+
+    def _resolve_section(self, session, section, value, metadata=None):
+        if not isinstance(value, dict) or value.get("mode") not in {"reference", "append"}:
+            return value
+        if section not in self.section_state.get(session, {}):
+            raise AssertionError(f"dangling context section reference: {section}")
+        previous = copy.deepcopy(self.section_state[session][section])
+        digest = hashlib.sha256(json.dumps(previous, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        if value.get("mode") == "reference" and value.get("digest") and value["digest"] != digest:
+            raise AssertionError(f"context section digest mismatch: {section}")
+        if metadata and metadata.get("digest") and metadata["digest"] != digest and value.get("mode") == "reference":
+            raise AssertionError(f"context section metadata mismatch: {section}")
+        if value["mode"] == "reference":
+            return previous
+        if not isinstance(previous, list) or not isinstance(value.get("items"), list):
+            raise AssertionError(f"invalid append section: {section}")
+        if value.get("base_digest") and value["base_digest"] != digest:
+            raise AssertionError(f"context append base mismatch: {section}")
+        rebuilt = previous + copy.deepcopy(value["items"])
+        if metadata and metadata.get("digest"):
+            actual = hashlib.sha256(json.dumps(rebuilt, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            if metadata["digest"] != actual:
+                raise AssertionError(f"context append digest mismatch: {section}")
+        return rebuilt
 
 
 @pytest.fixture
@@ -69,7 +129,7 @@ async def test_supervisor_context_receipts_and_acknowledgement(storage, tmp_path
     orchestrators = [activation for activation in run["activations"] if activation["role"] == "orchestrator"]
     for activation in orchestrators:
         task = activation["tasks"][-1]
-        assert task["context_delivery"]["version"] == 1
+        assert task["context_delivery"]["version"] == 2
         assert task["context_delivery"]["serialized_bytes"] > 0
     assert len([activation for activation in run["activations"] if activation["role"] == "node"]) == 1
 
@@ -85,6 +145,48 @@ async def test_protocol_repair_receives_bootstrap(storage, tmp_path):
     assert len([activation for activation in run["activations"] if activation["role"] == "node"]) == 1
 
 
+async def test_on_demand_catalog_is_slim_but_specialist_receives_verbatim_instructions(storage, tmp_path):
+    definition = graph()
+    exact = "Return exact evidence 🙂\n\tPreserve whitespace and symbols: {raw}."
+    definition.update({"context_delivery": "optimized_v1", "on_demand_nodes": [{
+        "id": "research", "title": "API researcher", "instructions": exact,
+        "call_condition": "Call when API behaviour needs verification.",
+        "agent": {"backend": "codex"}, "freedom": "read_only", "session_mode": "fresh", "execution_mode": "headless",
+    }]})
+
+    class SpecialistRegistry(ContextRegistry):
+        def __init__(self, root):
+            super().__init__(root)
+            self.specialist_prompts = []
+            self.all_prompts = []
+
+        def decision(self, context):
+            return self.policy(context, self)
+
+        async def start(self, prompt, repo, **kwargs):
+            self.all_prompts.append((prompt, kwargs))
+            if "research" in kwargs.get("title", "") or "API researcher" in kwargs.get("title", "") or "Verify API details" in prompt:
+                self.specialist_prompts.append(prompt)
+            return await super().start(prompt, repo, **kwargs)
+
+    called = False
+    def policy(context, registry):
+        nonlocal called
+        if not called and context.get("on_demand_nodes"):
+            called = True
+            return {"decision_id": context["decision_id"], "action": "call_on_demand",
+                    "node_id": "research", "assignment": "Verify API details", "reason": "Need specialist evidence"}
+        return default_decision(context, registry)
+
+    registry = SpecialistRegistry(storage.root)
+    registry.policy = policy
+    run, registry = await run_flow(storage, tmp_path, definition, registry, guided=True)
+    assert run["status"] == "completed", run.get("attention_reason") or run.get("failure_reason")
+    assert any(exact in prompt and "Verify API details" in prompt for prompt, _ in registry.all_prompts)
+    offered = [item for envelope in registry.deliveries for item in envelope["checkpoint"].get("on_demand_nodes", [])]
+    assert offered and all("instructions" not in item for item in offered)
+
+
 def test_deterministic_benchmark_has_every_scenario():
     import importlib.util
     from pathlib import Path
@@ -95,7 +197,7 @@ def test_deterministic_benchmark_has_every_scenario():
     report = module.benchmark()
     assert report == module.benchmark()
     assert report["model_calls"] == 0 and report["token_counts"] is None
-    assert {row["fixture"] for row in report["fixtures"]} == {"small", "large-history", "parallel", "child", "resume", "clarification", "repair"}
+    assert {row["fixture"] for row in report["fixtures"]} == {"small", "large-history", "parallel", "child", "resume", "clarification", "repair", "acknowledged-sections"}
     rows = {row["fixture"]: row for row in report["fixtures"]}
     assert rows["large-history"]["bytes_saved"] > 200000
     assert rows["parallel"]["optimized"]["budget_overflow_bytes"] == 0

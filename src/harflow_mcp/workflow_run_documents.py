@@ -177,7 +177,7 @@ def _source(value, path):
 
 
 def _inspection(value, path):
-    _shape(value, {**_fields("view execution_id", nullable_strings="task_id workflow_run_id cursor"), "limit": _nullable(_counter), "before_seq": _nullable(_counter), "after_seq": _nullable(_counter)}, path)
+    _shape(value, {**_fields("view execution_id node_id", nullable_strings="task_id workflow_run_id cursor"), "limit": _nullable(_counter), "before_seq": _nullable(_counter), "after_seq": _nullable(_counter)}, path)
 
 
 def _question(value, path):
@@ -255,7 +255,7 @@ def _result(value, path):
 
 def _context(value, path):
     receipt = {**_fields("scope digest bootstrap_digest delivery_mode mode owner_prefix compatibility_reason", counters="version revision bytes characters budget prompt_version serialized_bytes serialized_characters total_bytes total_characters budget_bytes budget_overflow_bytes", booleans="acknowledged", nullable_strings="session_owner checkpoint"), "base_revision": _nullable(_counter)}
-    _shape(value, {**receipt, "receipt": _object(receipt), "ack": _object(receipt), "accounting": _object(receipt), "sections": _map(_object({"bytes": _counter, "characters": _counter})), "context_fields": _map(_object({"bytes": _counter, "characters": _counter})), "compatibility_reasons": _array(str), "role": str, "session_mode": str, "classification": str}, path)
+    _shape(value, {**receipt, "receipt": _object(receipt), "ack": _object(receipt), "accounting": _object(receipt), "sections": _map(_object({"bytes": _counter, "characters": _counter})), "context_fields": _map(_object({"bytes": _counter, "characters": _counter})), "section_state": _map(_object({**_fields("digest mode", counters="revision source_bytes source_characters delivered_bytes delivered_characters length")})), "section_delivery": _map(_object({**_fields("digest mode", counters="revision source_bytes source_characters delivered_bytes delivered_characters length")})), "compatibility_reasons": _array(str), "role": str, "session_mode": str, "classification": str}, path)
 
 
 def _artifact(value, path):

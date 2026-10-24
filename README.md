@@ -17,7 +17,7 @@ Live background wait bounds are persisted and configurable; see [task continuati
 Use `harflow-ctl version-info --json` to inspect runtime identity and compatibility without initializing state. Engine operations require compatible Harflow state, task metadata, saved workflow definitions, workflow run documents and workflow ownership receipts. Use `HARFLOW_STATE_ROOT` to select a separate fresh state directory; see [state ownership and recovery](docs/contracts.md#state-ownership-and-recovery) for compatibility requirements.
 
 - [Getting started](docs/getting-started.md)
-- [Workflows](docs/workflows.md)
+- [Workflows](docs/workflows.md), including acknowledged context sections and bounded instruction inspection
 - [Task continuation](docs/task-continuation.md)
 - [Task artifacts](docs/task-artifacts.md)
 - [Task and workflow notifications](docs/task-notifications.md) (qualified Harflow database required)

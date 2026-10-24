@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add acknowledged workflow section references and exact-prefix append delivery, purpose-based orchestrator graph projection, and bounded current-run instruction inspection while preserving complete worker instructions and v1 public contracts.
+
 - Keep task output, live input and automatic continuation with detached task owners across MCP server restarts; reserve launch and session identities before execution.
 - Add explicit interrupted workflow-scheduler recovery with retained decisions, existing task adoption, linked-tree capacity restoration and native observation settlement barriers.
 

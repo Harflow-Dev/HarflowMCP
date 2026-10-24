@@ -6,7 +6,9 @@ Output: JSON report containing serialized bytes, characters, and section breakdo
 Fixture manifests model authorized immutable retrieval; they are not executable references.
 """
 from __future__ import annotations
+import argparse
 import copy
+from pathlib import Path
 import json
 
 from harflow_mcp.workflow_context import acknowledged_receipt, context_ack, render_decision_context
@@ -33,22 +35,50 @@ def fixtures():
     yield "clarification", clarification, {}
     yield "repair", history, {}
     yield "resume", history, {}
+    sections = copy.deepcopy(history)
+    sections["technical_plan"] = "Verified implementation requirements and constraints. " * 300
+    sections["checklist"] = [{"id": str(i), "status": "pending", "description": "Retain exact acceptance evidence " * 20} for i in range(20)]
+    sections["node_instructions"] = {"work": "Verbatim worker instructions " * 300}
+    yield "acknowledged-sections", sections, {}
 
 
-def benchmark():
+def benchmark(baseline_report=None):
     report = []
     for name, context, manifests in fixtures():
         legacy = decision_prompt(context)
         initial = render_decision_context(context, session_owner="fixture-session", scope="fixture", evidence_manifests=manifests)
         options = {"session_owner": "fixture-session", "scope": "fixture", "evidence_manifests": manifests}
-        if name in {"resume", "repair"}:
+        if name in {"resume", "repair", "acknowledged-sections"}:
             options["baseline"] = acknowledged_receipt(initial.receipt, context_ack(initial.receipt))
         if name == "repair":
             options["classification"] = "repair"
+        if name == "acknowledged-sections":
+            context = copy.deepcopy(context)
+            context["checklist"].append({"id": "new", "status": "pending", "description": "New acceptance criterion"})
+            context["decision_id"] = "d2"
         rendered = render_decision_context(context, **options)
+        legacy = decision_prompt(context)
         report.append({"fixture": name, "legacy": {"serialized_bytes": len(legacy.encode()), "serialized_characters": len(legacy)}, "optimized": rendered.accounting, "bytes_saved": len(legacy.encode()) - len(rendered.prompt.encode())})
-    return {"measurement": "injected context only", "model_calls": 0, "token_counts": None, "fixtures": report}
+    if baseline_report is not None:
+        before = {row["fixture"]: row for row in baseline_report["fixtures"]}
+        for row in report:
+            baseline = before.get(row["fixture"])
+            if baseline is None:
+                row["comparison"] = {"kind": "new scenario; no baseline comparison"}
+            elif baseline["legacy"] != row["legacy"]:
+                row["comparison"] = {"kind": "incomparable fixture payload; baseline legacy sizes differ"}
+            else:
+                old = baseline["optimized"]
+                row["comparison"] = {"kind": "same fixture", "baseline_prompt_version": old["prompt_version"],
+                                     "baseline_serialized_bytes": old["serialized_bytes"],
+                                     "current_serialized_bytes": row["optimized"]["serialized_bytes"],
+                                     "bytes_saved_from_baseline": old["serialized_bytes"] - row["optimized"]["serialized_bytes"]}
+    return {"measurement": "injected context only", "model_calls": 0, "token_counts": None, "cache_counts": None, "cost_usd": None, "prompt_version": 2, "fixtures": report}
 
 
 if __name__ == "__main__":
-    print(json.dumps(benchmark(), ensure_ascii=False, indent=2))
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--baseline-report", type=Path, help="Prior JSON report from the same fixtures")
+    args = parser.parse_args()
+    baseline = json.loads(args.baseline_report.read_text()) if args.baseline_report else None
+    print(json.dumps(benchmark(baseline), ensure_ascii=False, indent=2))

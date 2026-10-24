@@ -281,3 +281,16 @@ elapsed time, bounded background descriptions and separate runtimes, latest
 result subtype/error/summary and `successful_agent_result`. Earlier failure
 diagnostics take precedence. Ordinary forced close does not claim idle cutoff.
 All additions retain wire v1 and are optional for older consumers.
+
+### Acknowledged workflow context sections
+
+The public document and wire versions remain 1. Optional node `purpose` is preserved in
+workflow definitions, including the patch compatibility fixture. Internal prompt receipts
+use version 2 with `section_state` metadata keyed by known context section: `digest`,
+`revision`, `mode` (`full`, `reference`, `append`), UTF-8 `source_bytes`, `source_characters`, and list
+`length` where applicable. `section_delivery` exposes the same accounting metadata with `delivered_bytes` and
+`delivered_characters`; generic section `bytes`/`characters` retain actual injected sizes.
+No checkpoint prose is duplicated in this state. Older internal receipts cannot authorize
+version 2 references. The workflow-run patch fixture covers these additive fields.
+Instruction inspection is an internal orchestrator action over the current run's pinned
+definition; it adds no ctl or MCP command and retains the existing inspection limits.

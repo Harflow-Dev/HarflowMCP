@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 from typing import Any
 
@@ -10,6 +11,37 @@ from .workflow_context import DEFAULT_PROMPT_BUDGET_BYTES, account_legacy_prompt
 
 def optimized(run: dict[str, Any]) -> bool:
     return run.get('definition', {}).get('context_delivery', 'legacy') == 'optimized_v1'
+
+
+def project_orchestrator_context(run: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+    """Project only orchestrator prose; worker and public catalogs remain complete."""
+    value = copy.deepcopy(context)
+    value["workflow_definition_digest"] = hashlib.sha256(json.dumps(run["definition"], ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    definitions = {node["id"]: node for node in run["definition"]["nodes"]}
+    from .workflow_definition_documents import definition_warnings
+    warnings = definition_warnings(run["definition"])
+    for node in value["workflow_graph"]["nodes"]:
+        instructions = node.pop("instructions", "")
+        source = definitions[node["id"]]
+        for key in ("execution_mode", "branch_mode", "branch_selection", "selection_guidance"):
+            if key in source:
+                node[key] = copy.deepcopy(source[key])
+        if source.get("purpose"):
+            node["purpose"] = source["purpose"]
+        elif node["type"] == "agent":
+            node["purpose"] = instructions[:240]
+    value["context_warnings"] = warnings
+    offered = set()
+    def visit(choices: list[dict[str, Any]]) -> None:
+        for choice in choices:
+            node_id = choice.get("node_id")
+            if choice.get("requires_prompt") and node_id in definitions:
+                offered.add(node_id)
+            visit(choice.get("branch_continuations", []))
+    visit(value.get("valid_continuations", []))
+    value["node_instructions"] = {node_id: definitions[node_id].get("instructions", "") for node_id in sorted(offered)}
+    value["on_demand_nodes"] = [{key: copy.deepcopy(entry[key]) for key in ("node_id", "title", "agent", "call_condition", "session_mode", "available_sessions") if key in entry} for entry in value.get("on_demand_nodes", [])]
+    return value
 
 
 def delivery_metadata(receipt: dict[str, Any], accounting: dict[str, Any]) -> dict[str, Any]:

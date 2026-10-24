@@ -905,7 +905,8 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
                     error = str(exc)
                     diagnostics = {"missing_references": exc.missing_references, "missing_references_truncated": exc.missing_references_truncated}
             from .backends.native import available as native_available
-            return {**diagnostics, "valid": error is None, "native_subagents_available": native_available(), "definition": canonical, **({"dependencies": dependencies} if dependencies is not None else {}), **({"error": error} if error is not None else {})}
+            from .workflow_definition_documents import definition_warnings
+            return {**diagnostics, "warnings": definition_warnings(canonical), "valid": error is None, "native_subagents_available": native_available(), "definition": canonical, **({"dependencies": dependencies} if dependencies is not None else {}), **({"error": error} if error is not None else {})}
         if action in {"list", "list-runs", "list-page", "get", "status", "detail"}:
             from .read_metrics import span
             with span("import"):

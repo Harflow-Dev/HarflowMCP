@@ -76,7 +76,7 @@ def decode(document: Any, name: str) -> dict[str, Any]:
         for node in value.get("nodes", []) + value.get("on_demand_nodes", []):
             if not isinstance(node, dict):
                 raise ValueError("Malformed definition node")
-            fields = {key: str for key in ("id", "type", "title", "instructions", "prompt", "role", "freedom", "session_mode", "execution_mode", "branch_mode", "branch_selection", "selection_guidance", "parallel_group_id", "join_id", "workflow_name", "orchestrator_mode", "child_session_policy", "call_condition")}
+            fields = {key: str for key in ("id", "type", "title", "purpose", "instructions", "prompt", "role", "freedom", "session_mode", "execution_mode", "branch_mode", "branch_selection", "selection_guidance", "parallel_group_id", "join_id", "workflow_name", "orchestrator_mode", "child_session_policy", "call_condition")}
             fields.update({key: bool for key in ("optional", "require_technical_plan", "require_tasks")})
             fields.update({key: int for key in ("max_attempts", "max_context_questions")})
             fields.update(network=(bool, type(None)), timeout_seconds=(int, type(None)), agent=dict, position=dict, workflow_ref=dict)
@@ -96,6 +96,13 @@ def decode(document: Any, name: str) -> dict[str, Any]:
         return copy.deepcopy(value)
     except (ValueError, TypeError, RecursionError, WorkflowError) as exc:
         raise WorkflowDefinitionDocumentError(name, str(exc)) from exc
+
+
+def definition_warnings(definition: dict[str, Any]) -> list[str]:
+    """Advisories do not reject or rewrite existing workflow definitions."""
+    return ["Agent " + node["id"] + " has no purpose; context uses a bounded instructions excerpt"
+            for node in definition.get("nodes", [])
+            if node.get("type") == "agent" and not node.get("purpose")]
 
 
 def encode(definition: dict[str, Any]) -> dict[str, Any]:
