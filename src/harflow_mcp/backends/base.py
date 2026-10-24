@@ -384,6 +384,15 @@ class Accumulator:
     tasks. Never read by anything outside the backend that wrote it."""
 
 
+def classified_denials(backend: Any, acc: Accumulator, freedom: str | None) -> tuple[list[Any], list[str]]:
+    """The backend's classified denials and their distinct categories; raw denials if classification fails."""
+    try:
+        denials = backend.classify_denials(acc.denials, acc, freedom)
+    except Exception:
+        return acc.denials, []
+    return denials, list(dict.fromkeys(d["denial_category"] for d in denials if isinstance(d, dict) and isinstance(d.get("denial_category"), str)))
+
+
 class UnsupportedCapability(ValueError):
     """A request a backend cannot honour, which must fail rather than be silently dropped."""
 
@@ -417,6 +426,11 @@ class ExtraPathsUnsupported:
 
     def caller_approval_support(self) -> dict[str, Any]:
         return {"supported": False}
+
+    def classify_denials(self, denials, acc, freedom=None):
+        """Backends without measured refusal texts leave every denial unclassified; non-dict entries pass through."""
+        return [{**d, "denial_category": "unclassified", "denial_remedy": "Inspect the refusal text. No remedy is inferred.",
+                 "classification_basis": {"reason": "backend_unmeasured"}} if isinstance(d, dict) else d for d in denials]
 
     def validate_caller_approvals(self, enabled, freedom, max_turns, native=False):
         if type(enabled) is not bool:
@@ -483,6 +497,8 @@ class Backend(Protocol):
     mcp_approval: MCPApprovalPolicy
 
     def execution_configuration_namespaces(self, repo: Path) -> dict[str, Any]: ...
+
+    def classify_denials(self, denials: list[Any], acc: Accumulator, freedom: str | None = None) -> list[Any]: ...
 
     def artifact_configuration_namespaces(self, repo: Path) -> tuple[Path, ...]: ...
     def extra_path_support(self) -> dict[str, Any]: ...

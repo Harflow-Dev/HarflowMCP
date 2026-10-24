@@ -3628,9 +3628,10 @@ def test_vibe_task_payload_carries_the_warning_and_a_recovered_record_stays_fail
 
     assert snap["status"] == "completed"
     assert snap["summary"] is None
-    assert snap["permission_denials"] == [
+    assert [{k: v for k, v in d.items() if k in ("tool", "command", "title")} for d in snap["permission_denials"]] == [
         {"tool": "bash", "command": "git commit -am wip", "title": "Allow bash?"}
     ]
+    assert snap["denial_categories"] == ["unclassified"]
     assert any("An action was refused (`git commit -am wip`)" in n for n in snap["notices"])
 
     # Recovered: nothing observed the exit, so the same stream must not read `completed`.

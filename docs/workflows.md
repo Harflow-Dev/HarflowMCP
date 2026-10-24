@@ -1135,7 +1135,10 @@ The orchestrator may then select the issued `skip_optional_review` continuation.
 This requires an active safe parallel convergence with a required sibling. The skip also discards
 settled protocol failures in that execution's own repair chain, retaining their evidence. It preserves
 the failed result and forwards the denied tool/command with its task identity and the caller's and
-orchestrator's skip reasons to final review. It does not approve the reviewer, retry denied
+orchestrator's skip reasons to final review. Task results and the refusal evidence also carry each
+denial's `denial_category` and `denial_remedy` and a per-task `denial_categories` list (see
+[task outcomes](task-outcomes.md#permission-denial-classification)); they are evidence only and do not change
+retry eligibility. It does not approve the reviewer, retry denied
 tools, grant attempts, or change saved permissions. Required reviewers, child workflows, authority
 blocks, cancelled work, and unknown outcomes cannot use this route. The caller answer alone does
 not skip anything: the orchestrator records its explicit decision and reason. For a question

@@ -369,6 +369,9 @@ def result_evidence(activation: dict[str, Any], run: dict[str, Any] | None = Non
     denials = [{"task_id": task["task_id"], "permission_denials": copy.deepcopy(task["result"]["permission_denials"])} for task in activation.get("tasks", []) if task.get("result", {}).get("permission_denials")]
     if denials:
         evidence["permission_denials"] = denials
+    categories = [{"task_id": task["task_id"], "denial_categories": list(task["result"]["denial_categories"])} for task in activation.get("tasks", []) if task.get("result", {}).get("denial_categories")]
+    if categories:
+        evidence["denial_categories"] = categories
     if activation.get("optional_skip"):
         evidence["optional_skip"] = copy.deepcopy(activation["optional_skip"])
     ancestors = []
@@ -413,7 +416,7 @@ def result_inputs(run: dict[str, Any], refs: list[str], *, preview: bool = True,
         data = {"harness_attempts": [{"task_id": t["task_id"], "metadata": t.get("harness_metadata", {})} for t in activation.get("tasks", [])], "retry_eligible": retry_eligible(activation, guided=run.get("runner_policy") == "guided", node=nodes[activation["node_id"]], run=run, root=root), "result_ref": ref, "execution_id": ref, "node_id": activation["node_id"], "role": nodes[activation["node_id"]].get("role"), "status": value["status"], "attempt": activation.get("attempt_in_visit", 1 + sum(a["role"] == "node" and a["node_id"] == activation["node_id"] for a in run["activations"][:run["activations"].index(activation)])), "truncated": truncated}
         if truncated:
             data["result_preview"] = serialized[:16000]
-            data["inspect"] = "Inspect this execution_id with view=result to retrieve complete node_result, permission_denials and optional_skip/optional_skip_ancestors context"
+            data["inspect"] = "Inspect this execution_id with view=result to retrieve complete node_result, permission_denials (each with denial_category and denial_remedy) and optional_skip/optional_skip_ancestors context"
         else:
             data.update(node_result=value, **evidence)
         found.append(data)

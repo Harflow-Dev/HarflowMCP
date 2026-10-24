@@ -64,10 +64,12 @@ RENAMED_NATIVE_QUALIFIED = False
 from dataclasses import replace
 
 import json
+import re
 import time
 from pathlib import Path
 from typing import Any
 
+from . import claude_denials
 from . import normalize as nz
 from .mcp_approval import ClaudeApproval
 from .base import (
@@ -1012,9 +1014,10 @@ class ClaudeBackend(ExtraPathsUnsupported):
                     tools[block["id"]] = {"tool_name": block.get("name"), "tool_input": block.get("input")}
                 elif block.get("type") == "tool_result" and block.get("is_error"):
                     reason = _tool_result_text(block.get("content"))
-                    if isinstance(reason, str) and any(marker in reason.lower() for marker in (
-                        "this command requires approval", "permission to use", "contains brace with quote character",
-                    )):
+                    errors = acc.stream_state.setdefault("tool_error_text", {})
+                    if isinstance(reason, str) and isinstance(block.get("tool_use_id"), str) and len(errors) < 256:
+                        errors[block["tool_use_id"]] = reason[:4096]
+                    if claude_denials.is_refusal(reason):
                         denial = {**tools.get(block.get("tool_use_id"), {}), "tool_use_id": block.get("tool_use_id"),
                                   "reason": reason, "source": "harness_tool_refusal"}
                         acc.denials = self._union_denials(acc.denials, [denial])
@@ -1058,6 +1061,11 @@ class ClaudeBackend(ExtraPathsUnsupported):
             tools = event.get("tools")
             if isinstance(tools, list):
                 acc.available_tool_count = len(tools)
+            version = event.get("claude_code_version")
+            if isinstance(version, str) and version:
+                # Runs that span several processes with different versions are never trusted as measured.
+                seen = acc.stream_state.get("claude_code_version")
+                acc.stream_state["claude_code_version"] = version[:64] if seen in (None, version[:64]) else "mixed"
         elif subtype == "task_started":
             # A foreground Bash emits task_started too (is_backgrounded false, measured); only a
             # backgrounded one outlives its turn.
@@ -1126,8 +1134,14 @@ class ClaudeBackend(ExtraPathsUnsupported):
         denials = event.get("permission_denials")
         if isinstance(denials, list):
             acc.denials = self._union_denials(acc.denials, denials)
+            ids = acc.stream_state.setdefault("denial_result_ids", set())
+            ids.update(d["tool_use_id"] for d in denials if isinstance(d, dict) and isinstance(d.get("tool_use_id"), str) and d["tool_use_id"])
 
         acc.awaiting_input = not acc.background_open
+
+    def classify_denials(self, denials: list[Any], acc: Accumulator, freedom: str | None = None) -> list[Any]:
+        prefixes = tuple(re.fullmatch(r"Bash\((.+):\*\)", p).group(1) for p in DISALLOWED_TOOLS.split(",")) if freedom in DENY_FREEDOMS else ()
+        return claude_denials.classify(denials, acc.stream_state, prefixes)
 
     @staticmethod
     def _merge_usage(previous: dict[str, Any] | None, usage: dict[str, Any]) -> dict[str, Any]:

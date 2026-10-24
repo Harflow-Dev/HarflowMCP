@@ -31,7 +31,7 @@ from typing import Any
 from contextvars import ContextVar
 
 from . import control, events, identity, supervision, background_idle
-from .backends import Accumulator
+from .backends import Accumulator, classified_denials
 from .backends import get as get_backend
 from .backends import resume_command
 from .extra_paths import has_extra_path_authority
@@ -1096,6 +1096,7 @@ def snapshot(log_dir: Path, record: TaskRecord, *, _replay_provider=None) -> dic
     queued_followups = followups.view(log_dir, record.task_id)
     from . import approvals
     supervision_fields = supervision.fields(record, log_path(log_dir, record.task_id), observed_terminal=record.status in TERMINAL_RECORD_STATUSES and not outcome_unobserved(record))
+    denials, denial_categories = classified_denials(get_backend(record.backend), state, record.freedom)
     return {
         "caller_approvals": record.caller_approvals,
         "interaction_owner": record.interaction_owner,
@@ -1137,7 +1138,8 @@ def snapshot(log_dir: Path, record: TaskRecord, *, _replay_provider=None) -> dic
         "num_turns": state.num_turns,
         "exit_code": record.exit_code,
         **({"stderr_tail": list(record.stderr_tail)} if status == "failed" and record.stderr_tail else {}),
-        "permission_denials": state.denials,
+        "permission_denials": denials,
+        "denial_categories": denial_categories,
         "last_output_tail": tail,
         "raw_stream_log": str(log_path(log_dir, record.task_id)),
         "model": record.model,

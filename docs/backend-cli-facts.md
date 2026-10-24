@@ -542,3 +542,26 @@ The second runtime text block was verified against installed Claude Code 2.1.309
 using an isolated temporary HOME/config, fake local key and localhost fake
 Anthropic API: one request, exit 0, original caller text block preserved exactly,
 and generated runtime context visible in the request. No model service was used.
+
+### Claude refusal texts (2.1.310, 2026-10-24)
+
+Measured with `claude -p --output-format stream-json --permission-mode acceptEdits` against a localhost
+fake Anthropic API, an isolated `HOME`/`CLAUDE_CONFIG_DIR` and no model calls. Each refusal is an
+`is_error` `tool_result` whose `tool_use_id` also appears in the result event's `permission_denials`.
+The `system`/`init` event carries `claude_code_version`.
+
+| Case | Exact `tool_result` text |
+| --- | --- |
+| deny rule (`--disallowedTools Bash(git commit:*)`; deny beats a matching allow) | `Permission to use Bash with command git commit -m x has been denied.` |
+| unlisted command (`python3 -c ...`, `make build`, `git -C . commit`, `bash -c '...'`) | `This command requires approval` |
+| chained command, one unlisted part (`;`, `&&`, `|`) | `This Bash command contains multiple operations. The following part requires approval: python3 -c 'print(1)'` |
+| command substitution | `A nested command in this command can't be checked before it runs` |
+| Read under a directory name ending in a space, even with `--allowedTools Read(**)` | `Claude requested permissions to read from /some/repo/trailing /file.txt, which contains a suspicious Windows path pattern that requires manual approval.` |
+| Write outside the working directory | `Claude requested permissions to write to /some/out/x.txt, but you haven't granted it yet.` |
+| caller rejection through the stdio permission transport (Harflow's own text, `claude_approvals.encode`) | `Caller rejected this exact action` |
+| Harflow system refusal (Harflow's own text; not emitted yet) | `Harflow refused this action: <reason>` |
+
+Harflow classifies only these texts, matched in full. "Contains brace with quote character" was
+not re-measured, so it is detected as a refusal but stays unclassified. Re-capture with
+`HARFLOW_CLI_INTEGRATION=1 uv run pytest -m cli_integration tests/test_claude_denials_cli.py`; on an install that is not in
+the measured set the test skips unless `HARFLOW_QUALIFY_CLAUDE_VERSION` names the exact installed version.

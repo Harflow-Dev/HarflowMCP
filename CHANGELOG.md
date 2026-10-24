@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Classify Claude permission denials from the exact refusal texts measured on 2.1.310: `permission_denials` entries gain `denial_category`, `denial_remedy` and `classification_basis`, tasks gain `denial_categories`, and the `task_finished` event and workflow result evidence carry them. Only denials confirmed by a result event are classified; stream-only matches, unmeasured versions and other backends stay `unclassified`. All fields are additive and retry gating is unchanged.
+
 - Advance the local engine identity to 0.0.2; add explicit private-format storage compatibility, exclusive writer-line promotion, narrow empty-directory adoption, and inspect/confirmed crash-resumable incompatible-state backup/reset without relaxing live runtime gates.
 
 - Advance clean final workflow branches to their own joins or End, support `always_route` opt-outs and validated child entry assignment pass-through, and persist runner decision/transition provenance atomically with token movement.

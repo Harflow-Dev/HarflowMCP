@@ -3,14 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-import http.server
 import json
 import os
 import shutil
 import subprocess
-import threading
 import time
-from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -19,68 +16,13 @@ from harflow_mcp import approval_runtime, approvals
 from harflow_mcp.backends import get
 from harflow_mcp.tasks import TaskRegistry
 
+from fake_anthropic_api import fake_anthropic_api
+
 
 pytestmark = [
     pytest.mark.cli_integration,
     pytest.mark.skipif(not os.environ.get("HARFLOW_CLI_INTEGRATION"), reason="opt in with HARFLOW_CLI_INTEGRATION=1"),
 ]
-
-
-@contextmanager
-def fake_anthropic_api(command: str):
-    requests: list[dict] = []
-
-    class Handler(http.server.BaseHTTPRequestHandler):
-        def log_message(self, *_args):
-            pass
-
-        def do_POST(self):
-            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-            requests.append(body)
-            saw_result = any(
-                block.get("type") == "tool_result"
-                for message in body.get("messages", [])
-                for block in (message.get("content") or [])
-                if isinstance(block, dict)
-            )
-            blocks = ([{"type": "text", "text": "tool rejected"}] if saw_result else [{"type": "tool_use", "id": "caller_bash_1", "name": "Bash", "input": {"command": command, "description": "approval fixture"}}])
-            stop_reason = "end_turn" if saw_result else "tool_use"
-            events = [
-                ("message_start", {"type": "message_start", "message": {"id": f"msg_{len(requests)}", "type": "message", "role": "assistant", "content": [], "model": "claude-sonnet-4-6", "stop_reason": None, "stop_sequence": None, "usage": {"input_tokens": 1, "output_tokens": 0}}}),
-            ]
-            for index, block in enumerate(blocks):
-                initial = dict(block)
-                if block["type"] == "text":
-                    initial["text"] = ""
-                    delta = {"type": "text_delta", "text": block["text"]}
-                else:
-                    initial["input"] = {}
-                    delta = {"type": "input_json_delta", "partial_json": json.dumps(block["input"])}
-                events.extend([
-                    ("content_block_start", {"type": "content_block_start", "index": index, "content_block": initial}),
-                    ("content_block_delta", {"type": "content_block_delta", "index": index, "delta": delta}),
-                    ("content_block_stop", {"type": "content_block_stop", "index": index}),
-                ])
-            events.extend([
-                ("message_delta", {"type": "message_delta", "delta": {"stop_reason": stop_reason, "stop_sequence": None}, "usage": {"output_tokens": 1}}),
-                ("message_stop", {"type": "message_stop"}),
-            ])
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream")
-            self.end_headers()
-            for name, event in events:
-                self.wfile.write(f"event: {name}\ndata: {json.dumps(event)}\n\n".encode())
-                self.wfile.flush()
-
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield f"http://127.0.0.1:{server.server_port}", requests
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=2)
 
 
 async def _wait_for_request(registry: TaskRegistry, task_id: str) -> dict:

@@ -46,6 +46,7 @@ from . import control, followups, identity, inbox, lineage, retention, store
 from .backends import (
     Accumulator,
     Backend,
+    classified_denials,
     Enforcement,
     Invocation,
     NestedDispatchRefused,
@@ -918,6 +919,7 @@ class Task:
             store.read(self.log_path.parent, self.task_id, include_prompt=False)
         from . import artifacts
         from . import approvals
+        denials, denial_categories = classified_denials(get_backend(self.backend), self.acc, self.freedom)
         snap = self.brief() | {
             "caller_approvals": self.caller_approvals,
             "interaction_owner": self.interaction_owner,
@@ -931,7 +933,8 @@ class Task:
             "total_cost_usd": self.acc.total_cost_usd,
             "num_turns": self.acc.num_turns,
             "exit_code": self.exit_code,
-            "permission_denials": self.acc.denials,
+            "permission_denials": denials,
+            "denial_categories": denial_categories,
             "last_output_tail": list(self.tail)[-TAIL_LINES_RETURNED:],
             "raw_stream_log": str(self.log_path),
             "model": self.model,
@@ -4409,6 +4412,7 @@ async def _monitor(task: Task, registry: TaskRegistry) -> None:
                                 "exit_code": task.exit_code,
                                 "summary": task.acc.summary,
                                 "observed": task.exit_code is not None,
+                                **_finished_denials(task),
                             },
                         )
                 except StateOwnershipError:
@@ -4417,6 +4421,12 @@ async def _monitor(task: Task, registry: TaskRegistry) -> None:
                     log.exception("task %s: could not write the task_finished event", task.task_id)
         finally:
             _close_events_after_writers(task)
+
+
+def _finished_denials(task: Task) -> dict[str, Any]:
+    """Authoritative classified denials, only once the final result is in; absent when there are none."""
+    denials, categories = classified_denials(get_backend(task.backend), task.acc, task.freedom)
+    return {"denial_categories": categories, "permission_denials": denials} if denials else {}
 
 
 def _close_events_after_writers(task: Task) -> None:
