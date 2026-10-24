@@ -4,6 +4,8 @@
 
 HarflowMCP is a local MCP server that dispatches coding tasks to Claude Code, Codex, opencode, Vibe, and Antigravity. It provides persistent task history, bounded reads, cancellation, continuation, and reusable workflows.
 
+Vibe runs use its Python CLI entrypoint for headless dispatch; interactive takeover continues with the user's inherited environment.
+
 Version 0.0.1 is under development and unreleased. [Harflow](https://github.com/Harflow-Dev/HarflowMac), the companion macOS application, is maintained separately and prepares its own exact paired engine runtime. Its managed runtime and MCP registrations work independently of the app process; see the [managed runtime guide](https://github.com/Harflow-Dev/HarflowMac/blob/main/docs/managed-runtime.md).
 
 Recovered tasks disclose owner/process uncertainty and capture continuity. Qualified Claude

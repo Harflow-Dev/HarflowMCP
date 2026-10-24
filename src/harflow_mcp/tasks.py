@@ -1756,6 +1756,7 @@ class TaskRegistry:
             from .state_layout import child_environment
             spawn_env = {
                 **child_environment(self.state_layout),
+                **invocation.env,
                 lineage.ENV_TASK_ID: task_id,
                 lineage.ENV_ROOT_TASK_ID: root_task_id,
                 lineage.ENV_DEPTH: str(depth),

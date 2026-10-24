@@ -89,6 +89,7 @@ from .base import (
     check_network,
     check_reasoning_effort,
     interactive_session_id_ok,
+    validate_invocation_env,
     classic_invocation_problem,
 )
 
@@ -711,6 +712,7 @@ class CodexBackend(ExtraPathsUnsupported):
     def assert_safe(
         self, invocation: Invocation, freedom: Freedom, network: bool | None = None
     ) -> None:
+        validate_invocation_env(invocation, {})
         if isinstance(invocation, Invocation) and invocation.native_subagent and invocation.extra_writable_paths:
             raise UnsupportedCapability("native adapter extra writable paths are not certified")
         if isinstance(invocation, Invocation) and invocation.native_subagent:

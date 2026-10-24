@@ -231,6 +231,17 @@ rather than reasoning about it, and record the new measurements here. Do not "ti
   model's variant list.
 
 **vibe (Mistral Vibe CLI 2.25.1)**
+- **Select the Python entrypoint for headless dispatch (2.26.1, 2026-10-24).** The installed
+  `launcher.py` dispatches `VIBE_CLI=python` to the Python entrypoint and `VIBE_CLI=rust` to Rust.
+  With no selector, it follows the cached GrowthBook `vibe_cli_rust_tui_rollout`; the default
+  fallback is Python. Isolated no-paid-call `runpy` stubs showed the default Python path, forced
+  `VIBE_CLI=python` bypassing the rollout, and Rust selection when the rollout was simulated as
+  selected. An isolated temporary-home `VIBE_CLI=python vibe --help` exited 0, emitted no stderr
+  and showed the Python `-p/--output` parser. This invocation selector is validated as an exact
+  environment contribution and applied to headless start/resume, including both prompt transports.
+  Interactive takeover inherits the user's environment. The issue reports the Rust TUI failure
+  text: `You are using the new Vibe TUI, currently in preview… To switch back to the classic TUI,
+  set VIBE_CLI=python.` That crash was reported, not reproduced in this check.
 - `get_prompt_from_stdin()` (`vibe/cli/cli.py:54-67`) runs unconditionally before mode dispatch and
   calls `sys.stdin.read()` whenever stdin is **not a tty** — a pipe that never closes blocks forever.
   Small prompts use `stdin=DEVNULL`. Prompts over 32 KiB use `pipe_once` with trailing

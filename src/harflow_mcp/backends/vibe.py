@@ -144,6 +144,7 @@ from .base import (
     check_network,
     check_reasoning_effort,
     interactive_session_id_ok,
+    validate_invocation_env,
     classic_invocation_problem,
     reject_model,
 )
@@ -480,8 +481,8 @@ class VibeBackend(ExtraPathsUnsupported):
         if len(prompt.encode("utf-8")) > ARGV_PROMPT_BYTES:
             if prompt != prompt.strip():
                 raise UnsupportedCapability("Vibe trims outer whitespace from stdin prompts. Remove outer whitespace or choose another harness for this large assignment.")
-            return Invocation([*argv, "--prompt="], stdin_mode="pipe_once", initial_input=prompt.encode("utf-8"))
-        return Invocation([*argv, f"--prompt={prompt}"])
+            return Invocation([*argv, "--prompt="], stdin_mode="pipe_once", initial_input=prompt.encode("utf-8"), env={"VIBE_CLI": "python"})
+        return Invocation([*argv, f"--prompt={prompt}"], env={"VIBE_CLI": "python"})
 
     @staticmethod
     def _check_prompt(prompt: str) -> str:
@@ -508,6 +509,7 @@ class VibeBackend(ExtraPathsUnsupported):
             problem = classic_invocation_problem(invocation)
         if problem is not None:
             raise UnsafeInvocationError(problem)
+        validate_invocation_env(invocation, {"VIBE_CLI": "python"})
         argv = invocation.argv
         # Rejects an unknown freedom outright rather than letting AGENTS[freedom] raise a bare
         # KeyError below. The network request is validated here too — this is the final

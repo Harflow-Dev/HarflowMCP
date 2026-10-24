@@ -364,5 +364,17 @@
     "literal": "polybridge",
     "reason": "Verify foreign task metadata cannot authorize engine controls or persistence.",
     "count": 2
+  },
+  {
+    "file": "tests/test_backend_child_environment.py",
+    "literal": "PB_TASK_ID",
+    "reason": "Exercise preserved legacy caller lineage in the child environment contract.",
+    "count": 2
+  },
+  {
+    "file": "tests/test_backend_child_environment.py",
+    "literal": "PB_DEPTH",
+    "reason": "Exercise preserved legacy caller depth in the child environment contract.",
+    "count": 3
   }
 ]

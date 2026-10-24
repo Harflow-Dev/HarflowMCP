@@ -22,3 +22,5 @@ The companion Harflow macOS app prepares and qualifies its exact paired engine i
 Tool docstrings in [server.py](../src/harflow_mcp/server.py) define the MCP surface. See [workflow context benchmarks](workflow-context-benchmarks.md) for deterministic fixture definitions and reproducible measurements, and [harness permissions](harness-permissions.md) for backend permission boundaries.
 
 [Architecture](architecture.md) holds the maintainer-facing detail behind the rules in `AGENTS.md`: the backend and client seams, recovery and live input, takeover and ctl, enforcement claims, and caller reporting. [Backend CLI facts](backend-cli-facts.md) records the measured behavior of each agent and client CLI; read it before changing argv, flags, stdin wiring, stream parsing, classification or registration, and record new measurements there.
+
+Backend invocations may contribute only their explicitly validated child environment. Vibe's headless invocation selects `VIBE_CLI=python`; interactive takeover inherits the user's environment.

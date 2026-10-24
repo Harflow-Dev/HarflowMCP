@@ -32,6 +32,12 @@ capability, the seam is missing a method.
 `max_turns` on Codex raises rather than being dropped, checked both in `server.py` and again in the
 backend itself.
 
+`Invocation.env` is the only backend-specific child environment contribution. Every backend
+validates its complete mapping in `assert_safe`; `_spawn` overlays the accepted mapping onto a copy
+of the selected child environment before applying task lineage and scratch authority. Vibe sets
+`VIBE_CLI=python` on both argv and one-shot stdin prompts. Interactive takeover is user-owned and
+inherits the user's environment.
+
 `artifact_configuration_namespaces(repo)` declares backend-owned configuration paths excluded
 from task artifact references. Keep it separate from execution qualification: inline configuration
 that prevents certifying a writable launch is not itself a file namespace. Registration is

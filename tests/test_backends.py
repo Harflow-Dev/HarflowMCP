@@ -166,19 +166,22 @@ def inv(argv):
     untouched."""
     if isinstance(argv, Invocation):
         return argv
+    env = {"VIBE_CLI": "python"} if argv[:1] == ["vibe"] else {}
     if argv[:2] == ["claude", "-p"] and "--" not in argv:
         return Invocation(
             list(argv),
             stdin_mode=STDIN_PIPE,
             initial_input=ClaudeBackend().encode_live_message("do a thing"),
+            env=env,
         )
     if argv[:1] == ["agy"] and "--input-format" in argv:
         return Invocation(
             list(argv),
             stdin_mode=STDIN_PIPE,
             initial_input=AntigravityBackend().encode_live_message("do a thing"),
+            env=env,
         )
-    return Invocation(list(argv))
+    return Invocation(list(argv), env=env)
 
 
 def with_extra_options(argv: list[str], *extra: str) -> list[str]:

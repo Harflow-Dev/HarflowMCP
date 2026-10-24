@@ -35,14 +35,15 @@ STDIN_PIPE: StdinMode = "pipe"
 @dataclass(frozen=True)
 class Invocation:
     """Everything `_spawn` needs to launch one run: the argv, how its stdin is wired, and the first
-    bytes to write to it.
+    bytes to write to it, and the exact backend-approved environment contribution for the child.
 
     Returned by the argv builders instead of a bare argv, so the stdin mode comes from the run that
     was actually built — never from the backend's name or its static capability. A live-input run
     (`stdin_mode="pipe"`) carries its prompt as `initial_input`, because a CLI reading its input as a
     stream ignores a positional prompt (measured on claude). Every other run is `"devnull"` with no
     initial input. Backends may also support "pipe_once": a large prompt is sent as
-    initial bytes and stdin is immediately closed, without a live-input pump.
+    initial bytes and stdin is immediately closed, without a live-input pump. `env` defaults to
+    empty; each backend validates its complete allowed mapping in `assert_safe`.
     """
 
     argv: list[str]
@@ -57,10 +58,28 @@ class Invocation:
     native_subagent: bool = False
     caller_approvals: bool = False
     native_settings: dict[str, Any] | None = None
+    env: Mapping[str, str] = field(default_factory=dict)
 
     @property
     def live_input(self) -> bool:
         return self.stdin_mode == STDIN_PIPE
+
+
+def validate_invocation_env(invocation: Any, expected: Mapping[str, str]) -> None:
+    """Require the invocation's complete environment contribution to match its backend contract."""
+    # Leave shape diagnostics to each backend's existing Invocation validation. In particular,
+    # preserve the established "expected an Invocation" error for bare argv lists.
+    if not isinstance(invocation, Invocation):
+        return
+    env = getattr(invocation, "env", None)
+    if not isinstance(env, Mapping) or any(type(key) is not str or type(value) is not str for key, value in env.items()):
+        raise InvocationEnvironmentError("invocation env must be a string-to-string mapping")
+    if dict(env) != dict(expected):
+        raise InvocationEnvironmentError(f"unrecognised invocation env: {dict(env)!r}")
+
+
+class InvocationEnvironmentError(RuntimeError):
+    """The invocation requested an environment contribution outside its backend contract."""
 
 
 def classic_invocation_problem(invocation: Any) -> str | None:
