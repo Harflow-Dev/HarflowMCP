@@ -138,6 +138,8 @@ def qualify_payload(payload: Any, task_id: str, record_type: type) -> Any:
             from .background_idle import validate
             validate(record.background_idle_seconds)
         _grants(record.extra_writable_paths)
+        from .command_grants import check_bounds
+        check_bounds(record.allowed_commands)
         if record.enforcement is not None:
             qualify_enforcement(record.enforcement, require_core=True)
         _nested(record)
@@ -157,8 +159,10 @@ def qualify_enforcement(value: Any, *, require_core: bool = False, path: str = "
         raise ValueError(f"Malformed {path}")
     if require_core and not {"freedom", "mechanism", "os_enforced", "writes_confined"} <= value.keys():
         raise ValueError("Incomplete enforcement contract")
-    _shape(value, {"freedom": str, "mechanism": str, "os_enforced": bool, "writes_confined": bool, "writable_roots": list[str], "commit_push_blocked": bool, "direct_commit_commands_denied": bool, "publish_attempts_allowed_by_polybridge": bool, "network_access": str, "caveats": list[str], "extra_writable_paths": list[dict[str, Any]], "extra_path_certification": str | None}, path)
+    _shape(value, {"freedom": str, "mechanism": str, "os_enforced": bool, "writes_confined": bool, "writable_roots": list[str], "commit_push_blocked": bool, "direct_commit_commands_denied": bool, "publish_attempts_allowed_by_polybridge": bool, "network_access": str, "caveats": list[str], "extra_writable_paths": list[dict[str, Any]], "extra_path_certification": str | None, "extra_allowed_commands": list[str]}, path)
     _grants(value.get("extra_writable_paths", []))
+    from .command_grants import check_bounds
+    check_bounds(value.get("extra_allowed_commands", []))
 
 
 def encode(payload: dict[str, Any]) -> dict[str, Any]:

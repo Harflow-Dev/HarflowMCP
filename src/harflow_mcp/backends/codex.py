@@ -713,6 +713,8 @@ class CodexBackend(ExtraPathsUnsupported):
         self, invocation: Invocation, freedom: Freedom, network: bool | None = None
     ) -> None:
         validate_invocation_env(invocation, {})
+        if isinstance(invocation, Invocation) and invocation.allowed_commands:
+            raise UnsupportedCapability(self.allowed_commands_support()["reason"])
         if isinstance(invocation, Invocation) and invocation.native_subagent and invocation.extra_writable_paths:
             raise UnsupportedCapability("native adapter extra writable paths are not certified")
         if isinstance(invocation, Invocation) and invocation.native_subagent:

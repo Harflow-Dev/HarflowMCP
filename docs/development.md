@@ -17,13 +17,15 @@ Native Claude and Codex workflow adapters and extra writable path grants remain 
 
 The companion Harflow macOS app prepares and qualifies its exact paired engine in app-independent managed storage; see its [managed runtime guide](https://github.com/Harflow-Dev/HarflowMac/blob/main/docs/managed-runtime.md). Local fixture validation does not establish PyPI package availability or signed distribution. Automatic app opening remains unavailable. Setting `HARFLOW_OPEN_MONITOR=1` does not enable app opening.
 
-Claude caller approvals and denial classification are gated by one measured table, `src/harflow_mcp/backends/claude_qualification.py`; currently 2.1.302 (Bash only, historical) and 2.1.310. To measure a new Claude Code version without changing what the product supports, run the no-paid opt-in suite against a localhost fake API with an isolated `HOME` and `CLAUDE_CONFIG_DIR`, naming the exact installed version:
+Claude caller approvals, denial classification and `allowed_commands` are gated by one measured table, `src/harflow_mcp/backends/claude_qualification.py`; currently 2.1.302 (Bash only, historical) and 2.1.310. To measure a new Claude Code version without changing what the product supports, run the no-paid opt-in suite against a localhost fake API with an isolated `HOME` and `CLAUDE_CONFIG_DIR`, naming the exact installed version:
 
 ```sh
 HARFLOW_QUALIFY_CLAUDE_VERSION=<exact version> HARFLOW_CLI_INTEGRATION=1 uv run pytest -m cli_integration \
   tests/test_claude_denials_cli.py tests/test_claude_caller_approvals_cli.py \
-  tests/test_claude_approval_resume_cli.py tests/test_claude_write_approvals_cli.py
+  tests/test_claude_approval_resume_cli.py tests/test_claude_write_approvals_cli.py tests/test_claude_commands_cli.py
 ```
+
+`allowed_commands` is qualified only on the table's measured versions (currently 2.1.310) and is re-qualified at every launch, resume and continuation; a run that carries grants is also stopped, with a bridge notice, when its init event reports a different version, no version, or a tool event arrives before init. The grammar in `backends/claude_commands.py` is a guard against mistakes, not a security boundary, and path resolution happens at dispatch time only. Other backends refuse the field.
 
 Without the variable these tests skip unless the installed version is already in the table. A passing candidate run is evidence for a new table row, recorded in [backend CLI facts](backend-cli-facts.md); it does not itself qualify the version.
 

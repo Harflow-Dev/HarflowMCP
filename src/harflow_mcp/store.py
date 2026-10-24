@@ -84,6 +84,7 @@ class TaskRecord:
     caller_approvals: bool = False
     caller_write_approvals: bool = False
     caller_approval_version: str | None = None
+    allowed_commands: list[str] = field(default_factory=list)
     interaction_owner: str = "caller"
     approval_generation: str | None = None
     network: bool | None = None
@@ -1165,6 +1166,7 @@ def snapshot(log_dir: Path, record: TaskRecord, *, _replay_provider=None) -> dic
         "resume_command": None if has_extra_path_authority(record) else resume_command(record.backend, record.session_id, record.repo_path),
         "extra_writable_paths": record.extra_writable_paths,
         "extra_path_certification": record.extra_path_certification,
+        "allowed_commands": list(record.allowed_commands),
         "metadata_persisted": True,
         "recovered": True,
         "note": note,

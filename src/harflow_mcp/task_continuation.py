@@ -101,9 +101,12 @@ async def stop_chain(registry: Any, task_id: str) -> None:
 
 
 @storage_operation
-async def continue_task(registry: Any, task_id: str, extra_prompt: str | None = None, notes_path: str | None = None, *, automatic: bool = False, consume_followups: bool = False, background_idle_seconds: float | None = None) -> Any:
+async def continue_task(registry: Any, task_id: str, extra_prompt: str | None = None, notes_path: str | None = None, *, automatic: bool = False, consume_followups: bool = False, background_idle_seconds: float | None = None, allowed_commands: list[str] | None = None) -> Any:
     from .state_layout import require_dispatch_layout
     require_dispatch_layout(registry.log_dir)
+    from .command_grants import normalize
+    # None inherits the source's saved grants (automatic continuation always does); an explicit list replaces them.
+    explicit_commands = normalize(allowed_commands)
     store.validate_task_id(task_id)
     if extra_prompt is not None and not isinstance(extra_prompt, str):
         raise ValueError('extra_prompt must be text')
@@ -117,6 +120,16 @@ async def continue_task(registry: Any, task_id: str, extra_prompt: str | None = 
     source = store.read(registry.log_dir, task_id)
     if source is None:
         raise ValueError(f'Unknown task: {task_id}')
+    # The effective list (explicit, or the saved one when omitted) is fully checked before any reservation exists, so an
+    # invalid, over-broad or unqualifiable request can never poison the chain's reservation.
+    effective_commands = explicit_commands if explicit_commands is not None else tuple(source.allowed_commands)
+    if effective_commands:
+        backend = get_backend(source.backend)
+        backend.validate_allowed_commands(effective_commands, source.freedom, Path(source.repo_path))
+        if caller is not None:
+            registry._resolve_lineage(caller, child_enforcement=backend.allowed_commands_enforcement(backend.enforcement(source.freedom, source.network), effective_commands),
+                                      child_backend=source.backend, child_repo=Path(source.repo_path))
+        await asyncio.to_thread(backend.qualify_allowed_commands)
     from .background_idle import resolve
     effective_idle = resolve(background_idle_seconds, source.background_idle_seconds)
     root = source.chain_root_task_id or task_id
@@ -134,7 +147,7 @@ async def continue_task(registry: Any, task_id: str, extra_prompt: str | None = 
             raise ValueError('Original assignment unavailable; continuation refused')
         path = registry.log_dir / f'{task_id}.continuation.json'
         prompt = await run_owned_worker(registry.state_layout, context, registry, source, extra_prompt, notes_path)
-        fingerprint = hashlib.sha256(json.dumps({'prompt': prompt, 'automatic': automatic, **({'background_idle_seconds': effective_idle} if background_idle_seconds is not None else {})}, ensure_ascii=False).encode('utf-8')).hexdigest()
+        fingerprint = hashlib.sha256(json.dumps({'prompt': prompt, 'automatic': automatic, **({'background_idle_seconds': effective_idle} if background_idle_seconds is not None else {}), **({'allowed_commands': list(explicit_commands)} if explicit_commands is not None else {})}, ensure_ascii=False).encode('utf-8')).hexdigest()
         reservation = None
         if path.exists():
             with path.open('rb') as file:
@@ -187,7 +200,7 @@ async def continue_task(registry: Any, task_id: str, extra_prompt: str | None = 
             _write(path, {'task_id': identifier, 'state': 'reserved', 'chain_root_task_id': root, 'automatic': automatic, 'request_fingerprint': fingerprint}, layout=registry.state_layout)
             try:
                 spawn_called = True
-                child = await registry.start(prompt, Path(source.repo_path), backend=get_backend(source.backend), freedom=source.freedom, model=source.model, reasoning_effort=source.reasoning_effort, network=source.network, caller_approvals=source.caller_approvals, caller_write_approvals=source.caller_write_approvals, interaction_owner=source.interaction_owner, max_turns=source.max_turns, background_idle_seconds=effective_idle, group=source.group, title=source.title, task_id=identifier, auto_continue=max(source.auto_continue - 1, 0) if automatic else 0, continuation_of_task_id=task_id, chain_root_task_id=root, chain_prompt=None, **({'message_ids': attempt.ids} if attempt is not None else {}))
+                child = await registry.start(prompt, Path(source.repo_path), backend=get_backend(source.backend), freedom=source.freedom, model=source.model, reasoning_effort=source.reasoning_effort, network=source.network, caller_approvals=source.caller_approvals, caller_write_approvals=source.caller_write_approvals, interaction_owner=source.interaction_owner, max_turns=source.max_turns, background_idle_seconds=effective_idle, group=source.group, title=source.title, task_id=identifier, auto_continue=max(source.auto_continue - 1, 0) if automatic else 0, continuation_of_task_id=task_id, chain_root_task_id=root, chain_prompt=None, **({'allowed_commands': list(explicit_commands)} if explicit_commands is not None else {}), **({'message_ids': attempt.ids} if attempt is not None else {}))
                 from .task_attachment import AttachedTask
                 if not isinstance(child, AttachedTask):
                     child.spawned_by, child.root_task_id = source.spawned_by, source.root_task_id

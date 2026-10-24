@@ -90,25 +90,27 @@ def _strict(tool: str, action_input: Any) -> None:
 
 
 def _qualified_version(qualified: dict[str, Any] | None) -> tuple[str, bool]:
+    feature = (qualified or {}).get("feature", "caller approvals")
     version = (qualified or {}).get("version")
     if version is None:
-        raise ApprovalRefused("Caller approval qualification is missing; stopping execution without approval")
+        raise ApprovalRefused(f"{feature} qualification is missing; stopping execution without approval")
     observed = (qualified or {}).get("observed")
     if observed != version:
-        raise ApprovalRefused(f"Claude Code reported version {observed or 'none before this request'} but caller approvals were qualified on {version}; stopping execution without approval")
+        raise ApprovalRefused(f"Claude Code reported version {observed or 'none before this request'} but {feature} were qualified on {version}; stopping execution without approval")
     return version, bool((qualified or {}).get("write"))
 
 
 def check_event(event: dict[str, Any], qualified: dict[str, Any] | None) -> None:
     """Raise `ApprovalRefused` unless the run's version is the one qualified before launch.
 
-    Checked at the init event itself, and for any tool use or control request that arrives without a valid init version first."""
+    Checked at the init event itself, and for any tool use or control request that arrives without a valid init version first.
+    `qualified["feature"]` names what was qualified ("caller approvals", or "allowed_commands" for a run carrying command grants)."""
     version = (qualified or {}).get("version")
     kind = event.get("type")
     if kind == "system" and event.get("subtype") == "init":
         reported = event.get("claude_code_version")
         if version is None or reported != version:
-            raise ApprovalRefused(f"Claude Code reported version {reported or 'none'} but caller approvals were qualified on {version}; stopping execution without approval")
+            raise ApprovalRefused(f"Claude Code reported version {reported or 'none'} but {(qualified or {}).get('feature', 'caller approvals')} were qualified on {version}; stopping execution without approval")
         return
     content = (event.get("message") or {}).get("content") if kind == "assistant" and isinstance(event.get("message"), dict) else None
     if kind == "control_request" or (isinstance(content, list) and any(isinstance(b, dict) and b.get("type") == "tool_use" for b in content)):

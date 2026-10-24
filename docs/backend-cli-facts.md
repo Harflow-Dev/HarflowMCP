@@ -29,9 +29,10 @@ rather than reasoning about it, and record the new measurements here. Do not "ti
     headless `-p` has nobody to approve, so the command dies either way.
   - with `--permission-mode acceptEdits --allowedTools "Bash(git commit:*),Bash(git push:*)"`: both
     **succeeded**, `permission_denials` empty, and the commit landed in the bare remote.
-  So the `publish` freedom drops the git denies *and* adds the allow entries; passing both would be
-  self-defeating, since deny beats allow. `--allowedTools` is variadic exactly like
-  `--disallowedTools`, so its patterns are likewise one comma-separated value.
+  So the `publish` freedom drops the git denies *and* adds the allow entries; passing both there would
+  be self-defeating, since deny beats allow. `--allowedTools` is variadic exactly like
+  `--disallowedTools`, so its patterns are likewise one comma-separated value. `write_in_repo` with
+  `allowed_commands` deliberately passes both (see "Claude allowed_commands" below): the deny wins.
 - **`-p` is a boolean flag and the prompt is a separate positional**, so a prompt token equal to a
   real option name is parsed by claude as that option. The prompt therefore rides after a `--`
   separator, as on codex and opencode. Measured both ways: without `--`, a prompt of
@@ -565,6 +566,28 @@ Harflow classifies only these texts, matched in full. "Contains brace with quote
 not re-measured, so it is detected as a refusal but stays unclassified. Re-capture with
 `HARFLOW_CLI_INTEGRATION=1 uv run pytest -m cli_integration tests/test_claude_denials_cli.py`; on an install that is not in
 the measured set the test skips unless `HARFLOW_QUALIFY_CLAUDE_VERSION` names the exact installed version.
+
+### Claude `allowed_commands` (2.1.310, 2026-10-24)
+
+Measured with `claude -p --output-format stream-json --permission-mode acceptEdits` against a localhost fake
+Anthropic API, an isolated `HOME`/`CLAUDE_CONFIG_DIR` and no model calls. Re-run with
+`tests/test_claude_commands_cli.py`.
+
+- An unlisted command (`python3 -m calendar`, `make build`) is refused with `This command requires approval`; the
+  same command listed in `--allowedTools` as `Bash(<command>)` runs with an empty `permission_denials`.
+- `Bash(python3 -m pytest:*)` and `Bash(python3 -m pytest *)` both match `python3 -m pytest`, with or without
+  arguments. Neither matches `python3 -m pytestx`: both respect the word boundary. Harflow accepts both spellings
+  and documents `:*`.
+- A chained command is allowed only when every part is allowed; otherwise the whole command is refused with
+  `The following part requires approval: <part>`, naming the first unlisted part.
+- A deny rule beats a matching allow rule: with `--disallowedTools Bash(git commit:*)` and
+  `--allowedTools Bash(git commit:*)` together, `git commit -m x` is refused with `Permission to use Bash with command
+  git commit -m x has been denied.` and recorded in `permission_denials`. This is why `write_in_repo` passes both
+  lists, and why a pattern cannot re-enable a direct `git commit` command string there; a granted program, or code it runs, can still invoke git.
+- The freedom's own entries and the extra patterns work in one comma-separated `--allowedTools` value, and also
+  when split across two `--allowedTools` options. Harflow always writes one value, freedom entries first.
+- Read-only commands (`uname -a`, `git status`, chains of them) and in-cwd filesystem commands (`touch`) are
+  auto-approved by 2.1.310 `acceptEdits` and need no grant, which is one reason git is never grantable.
 
 ### Claude caller approvals and Read/Write/Edit prompts (2.1.310, 2026-10-24)
 

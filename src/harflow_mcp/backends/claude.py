@@ -40,12 +40,21 @@ command requires approval", because `acceptEdits` auto-approves *edits*, not arb
 headless `-p` mode has nobody to give that approval. The lever that actually works is an allow-list:
 `--permission-mode acceptEdits --allowedTools "Bash(git commit:*),Bash(git push:*)"` let both commands
 succeed with an empty `permission_denials`, and the commit landed in a bare remote. So at `publish`
-the deny patterns are dropped and `--allowedTools "Bash(git commit:*),Bash(git push:*)"` is added instead — deny and allow are never combined, since deny beats allow and would be
-self-defeating. Everything else still needs approval, which a headless run cannot give, so it is
+the deny patterns are dropped and `--allowedTools "Bash(git commit:*),Bash(git push:*)"` is added instead — the freedom's own allow-list is never combined with
+its own deny patterns, since deny beats allow and would be self-defeating. Everything else still needs approval, which a headless run cannot give, so it is
 still refused — `publish` is a genuine middle tier here, not a fallback to `bypassPermissions`. Also
 measured: the approval layer refuses a *chained* command citing each part separately (e.g.
 `git commit -am wip, echo "EXIT: $?"`), so an allow-listed command bundled with another is still
 refused.
+
+**`allowed_commands` (measured on 2.1.310, localhost fake API, no paid calls).** Dispatch-time
+patterns join the one comma-separated `--allowedTools` value as `Bash(<pattern>)` entries, after the
+freedom's own entries. At `write_in_repo` this deliberately passes `--allowedTools` *and* the
+unchanged `--disallowedTools`: a deny rule beats a matching allow rule (the same "has been denied"
+text, a recorded denial), so a pattern cannot re-enable a direct `git commit` command string there (a granted program may still run git itself). Both `Bash(p:*)` and
+`Bash(p *)` match the bare command and the command with arguments, and neither matches a longer
+program name (`python3 -m pytestx`). An allowed command inside a chain still needs every other part
+allowed. The grammar is `claude_commands`; the qualification gate is the shared table.
 
 **Compatibility break at `unrestricted`.** The git deny patterns used to apply at every freedom,
 `unrestricted` included, so `git commit`/`git push` were refused even there. They are now dropped at
@@ -195,6 +204,13 @@ _PUBLISH_ALLOWLIST_CAVEAT = (
     "still needs approval, which a headless run cannot give, so it is still refused — this is a "
     "genuine middle tier, not a fallback to bypassPermissions. Inherited user rules can grant additional commands, "
     "and command-prefix approval is not an OS sandbox"
+)
+_COMMAND_GRANT_CAVEATS = (
+    "allowed_commands grants are prefix approvals in Claude's permission layer, not OS enforcement; the grammar is a guard against caller mistakes, not a security boundary",
+    "a granted program can run code from the repository (Makefiles, test configuration, scripts), so a grant does not confine what that program does, and a wildcard lets it take any further arguments",
+    "a chained command needs every part allowed",
+    "the access level's deny patterns still refuse a direct git commit or git push command string even when a pattern covers it, but a granted program, or code it runs, can still invoke git",
+    "user and project settings can add more allowed commands",
 )
 _CHAINED_COMMAND_CAVEAT = (
     "claude's approval layer refuses a chained command citing each part separately (measured: "
@@ -458,6 +474,55 @@ class ClaudeBackend(ExtraPathsUnsupported):
 
     def approval_stream_version(self, acc):
         return acc.stream_state.get("claude_code_version")
+
+    def allowed_commands_support(self):
+        from . import claude_commands as grammar, claude_qualification as q
+        from .. import command_grants
+        return {"supported": True, "versions": [v for v, row in q.MEASURED.items() if row.get("allowed_commands")], "freedoms": list(grammar.FREEDOMS),
+                "max_patterns": command_grants.MAX_PATTERNS, "max_pattern_bytes": command_grants.MAX_PATTERN_BYTES, "max_total_bytes": command_grants.MAX_TOTAL_BYTES,
+                "grammar": grammar.GRAMMAR, "boundary": "a best-effort guard against caller mistakes, not a security boundary",
+                "nested": "a nested dispatch may grant only exact patterns its caller holds, unless the caller is unrestricted; omitting grants does not inherit them"}
+
+    def validate_allowed_commands(self, patterns, freedom, repo):
+        from . import claude_commands as grammar
+        from .. import command_grants
+        patterns = command_grants.check_bounds(list(patterns))
+        if patterns:
+            grammar.validate_all(patterns, freedom, repo)
+
+    def qualify_allowed_commands(self):
+        from . import claude_qualification as q
+        return q.qualify(self, "allowed_commands")
+
+    def configure_allowed_commands(self, invocation, patterns, freedom, repo, version=None):
+        self.validate_allowed_commands(patterns, freedom, repo)
+        if not patterns:
+            return invocation
+        if invocation.allowed_commands:
+            raise ValueError("invocation already carries allowed_commands")
+        argv = list(invocation.argv)
+        # Only the option region: after `--` the prompt is caller text that may equal a flag name.
+        options = argv[:argv.index("--")] if "--" in argv else argv
+        entries = ",".join(f"Bash({pattern})" for pattern in patterns)
+        if "--allowedTools" in options:
+            index = options.index("--allowedTools") + 1
+            argv[index] = f"{argv[index]},{entries}"
+        elif "--disallowedTools" in options:
+            at = options.index("--disallowedTools") + 2
+            argv[at:at] = ["--allowedTools", entries]
+        else:
+            raise UnsafeInvocationError(f"no permission list to extend for freedom {freedom!r}: {argv!r}")
+        return replace(invocation, argv=argv, allowed_commands=tuple(patterns), allowed_commands_version=version)
+
+    def allowed_commands_enforcement(self, enforcement, patterns):
+        if not patterns:
+            return enforcement
+        from . import claude_commands as grammar
+        if enforcement.freedom not in grammar.FREEDOMS:
+            raise UnsupportedCapability(f"allowed_commands is supported only at {' and '.join(grammar.FREEDOMS)}")
+        return replace(enforcement, extra_allowed_commands=tuple(patterns),
+                       mechanism=f"{enforcement.mechanism} + {len(patterns)} dispatch-time Bash allow pattern(s) in the same --allowedTools value",
+                       caveats=enforcement.caveats + _COMMAND_GRANT_CAVEATS)
 
     def approval_enforcement(self, enforcement, version, enabled, write):
         from . import claude_qualification as q
@@ -807,6 +872,7 @@ class ClaudeBackend(ExtraPathsUnsupported):
 
         deny_values = seen.get("--disallowedTools", [])
         allow_values = seen.get("--allowedTools", [])
+        commands = self._checked_commands(invocation, freedom)
 
         # Exact per-freedom validation rejects broader or conflicting allow rules.
         if freedom in DENY_FREEDOMS:
@@ -821,7 +887,7 @@ class ClaudeBackend(ExtraPathsUnsupported):
                 f"commit/push: {argv!r}"
             )
 
-        expected_allowed = ALLOWED_TOOLS.get(freedom)
+        expected_allowed = ",".join([*([ALLOWED_TOOLS[freedom]] if freedom in ALLOWED_TOOLS else []), *(f"Bash({pattern})" for pattern in commands)]) or None
         if expected_allowed is not None:
             allowed = self._exactly_one(seen, "--allowedTools", argv)
             if allowed != expected_allowed:
@@ -872,6 +938,20 @@ class ClaudeBackend(ExtraPathsUnsupported):
             )
         if not session_values[0].strip():
             raise UnsafeInvocationError(f"session flag with no session id: {argv!r}")
+
+    @staticmethod
+    def _checked_commands(invocation: Invocation, freedom: Freedom) -> tuple[str, ...]:
+        """The invocation's grants, re-validated without a repository: bounds, access level and grammar."""
+        commands = invocation.allowed_commands
+        if not commands:
+            return ()
+        from . import claude_commands as grammar
+        from .. import command_grants
+        if not isinstance(commands, tuple) or not invocation.allowed_commands_version:
+            raise UnsafeInvocationError("allowed_commands must be a tuple carrying its qualified version")
+        command_grants.check_bounds(commands)
+        grammar.validate_all(commands, freedom, None)
+        return commands
 
     @staticmethod
     def _check_live_wiring(invocation: Invocation) -> None:

@@ -59,6 +59,8 @@ class Invocation:
     caller_approvals: bool = False
     caller_write_approvals: bool = False
     caller_approval_version: str | None = None
+    allowed_commands: tuple[str, ...] = ()
+    allowed_commands_version: str | None = None
     native_settings: dict[str, Any] | None = None
     env: Mapping[str, str] = field(default_factory=dict)
 
@@ -304,10 +306,13 @@ class Enforcement:
     extra_path_certification: str | None = None
     caller_approval_tools: tuple[str, ...] = ()
     """Tools a caller may be asked to approve for this run; empty (and omitted from `as_dict`) without caller approvals."""
+    extra_allowed_commands: tuple[str, ...] = ()
+    """Dispatch-time command patterns granted to this run; empty (and omitted from `as_dict`) without `allowed_commands`."""
 
     def as_dict(self) -> dict[str, Any]:
         return {
             **({"caller_approval_tools": list(self.caller_approval_tools)} if self.caller_approval_tools else {}),
+            **({"extra_allowed_commands": list(self.extra_allowed_commands)} if self.extra_allowed_commands else {}),
             "extra_writable_paths": list(self.extra_writable_paths),
             "extra_path_certification": self.extra_path_certification,
             "freedom": self.freedom,
@@ -462,6 +467,26 @@ class ExtraPathsUnsupported:
     def approval_stream_version(self, acc):
         return None
 
+    def allowed_commands_support(self) -> dict[str, Any]:
+        return {"supported": False, "reason": f"allowed_commands is not qualified for the {self.name} backend"}
+
+    def validate_allowed_commands(self, patterns, freedom, repo):
+        if patterns:
+            raise UnsupportedCapability(self.allowed_commands_support()["reason"])
+
+    def qualify_allowed_commands(self):
+        raise UnsupportedCapability(self.allowed_commands_support()["reason"])
+
+    def configure_allowed_commands(self, invocation, patterns, freedom, repo, version=None):
+        if patterns:
+            raise UnsupportedCapability(self.allowed_commands_support()["reason"])
+        return invocation
+
+    def allowed_commands_enforcement(self, enforcement, patterns):
+        if patterns:
+            raise UnsupportedCapability(self.allowed_commands_support()["reason"])
+        return enforcement
+
     def approval_enforcement(self, enforcement, version, enabled, write):
         return enforcement
 
@@ -540,6 +565,11 @@ class Backend(Protocol):
     def validate_caller_write_approvals(self, write: bool, enabled: bool, version: str | None = None) -> None: ...
     def configure_caller_approvals(self, invocation: Invocation, freedom: str, max_turns: int | None, version: str | None = None, write: bool = False) -> Invocation: ...
     def approval_stream_version(self, acc: Accumulator) -> str | None: ...
+    def allowed_commands_support(self) -> dict[str, Any]: ...
+    def validate_allowed_commands(self, patterns: tuple[str, ...], freedom: str, repo: Path | None) -> None: ...
+    def qualify_allowed_commands(self) -> str: ...
+    def configure_allowed_commands(self, invocation: Invocation, patterns: tuple[str, ...], freedom: str, repo: Path | None, version: str | None = None) -> Invocation: ...
+    def allowed_commands_enforcement(self, enforcement: Enforcement, patterns: tuple[str, ...]) -> Enforcement: ...
     def approval_enforcement(self, enforcement: Enforcement, version: str | None, enabled: bool, write: bool) -> Enforcement: ...
     def decode_approval_request(self, event: dict[str, Any], qualification: dict[str, Any] | None = None) -> dict[str, Any] | None: ...
     def decode_oversize_approval(self, event: dict[str, Any], qualification: dict[str, Any] | None = None) -> dict[str, Any] | None: ...
@@ -844,7 +874,8 @@ def nested_enforcement_violation(
     Checked in this fixed order — `parent_enforcement_unrecorded`, `os_enforced`,
     `writes_confined`, `commit_push_blocked`, `direct_commit_commands_denied`,
     `publish_attempts_allowed_by_polybridge`, `network_access`, `backend`, `writable_roots`,
-    `repo` — so only ever the first violated rule is reported. `freedom`, `mechanism` and
+    `repo` — so only ever the first violated rule is reported. `extra_allowed_commands` and
+    `caller_approval_tools` are narrowing-only and are checked before these. `freedom`, `mechanism` and
     `caveats` are deliberately never compared: they describe *how* a level is achieved, not how
     strict it is, and two different mechanisms can enforce the same strength.
 
@@ -878,6 +909,11 @@ def nested_enforcement_violation(
     child_writes = {t for t in (_field(child, "caller_approval_tools") or ()) if t in {"Write", "Edit"}}
     if child_writes - set(parent.get("caller_approval_tools") or ()):
         return _violation("caller_approval_tools", list(parent.get("caller_approval_tools") or ()), sorted(child_writes))
+
+    # Command grants are narrowing-only: exact strings the caller holds, unless the caller is unrestricted.
+    child_commands = tuple(_field(child, "extra_allowed_commands") or ())
+    if child_commands and parent.get("freedom") != "unrestricted" and not set(child_commands) <= set(parent.get("extra_allowed_commands") or ()):
+        return _violation("extra_allowed_commands", list(parent.get("extra_allowed_commands") or ()), list(child_commands))
 
     for field_name in _MONOTONIC_TRUE_RESTRICTS:
         parent_value = parent[field_name]

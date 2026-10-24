@@ -241,14 +241,28 @@ async def _stop_refused(registry: Any, task: Any, exc: Exception) -> None:
     """Version or qualification refusal: notice, invalidate pending approvals and stop the run now."""
     if str(exc) not in task.bridge_notices:
         task.bridge_notices.append(str(exc))
-    try:
-        await asyncio.to_thread(approvals.invalidate, registry.log_dir, task.task_id, "invalidated", task.approval_generation)
-    except StateOwnershipError:
-        raise
-    except Exception:
-        pass
+    if task.caller_approvals:
+        try:
+            await asyncio.to_thread(approvals.invalidate, registry.log_dir, task.task_id, "invalidated", task.approval_generation)
+        except StateOwnershipError:
+            raise
+        except Exception:
+            pass
     registry.persist(task)
     registry._stop_native_transport(task)
+
+
+async def _check_version(registry: Any, task: Any, backend: Any, event: dict[str, Any]) -> bool:
+    """The init-version cross-check shared by approvals and command grants: a mismatch, a missing version or a tool or
+    control event before init stops the run, because the qualified grammar and prompts were measured on one exact version."""
+    qualification = {"version": task.caller_approval_version or getattr(task, "allowed_commands_version", None), "observed": getattr(backend, "approval_stream_version", lambda acc: None)(task.acc),
+                     "write": task.caller_write_approvals, "feature": "caller approvals" if task.caller_approvals else "allowed_commands"}
+    try:
+        getattr(backend, "check_approval_event", lambda e, q: None)(event, qualification)
+    except ApprovalRefused as exc:
+        await _stop_refused(registry, task, exc)
+        return False
+    return True
 
 
 @storage_operation
@@ -256,6 +270,8 @@ async def observe(registry: Any, task: Any, backend: Any, event: dict[str, Any])
     """Consume control events separately; never emit raw actions in shared events/tails."""
     if event.get("type") == "control_request":
         if not task.caller_approvals:
+            if getattr(task, "allowed_commands", None):
+                await _check_version(registry, task, backend, event)
             return False
         task.approval_pending = True
         task.approval_receiving = True
@@ -307,13 +323,9 @@ async def observe(registry: Any, task: Any, backend: Any, event: dict[str, Any])
         task.approval_receiving = False
         task.pump_wake.set()
         return True
+    if (task.caller_approvals or getattr(task, "allowed_commands", None)) and not await _check_version(registry, task, backend, event):
+        return False
     if task.caller_approvals:
-        qualification = {"version": task.caller_approval_version, "observed": getattr(backend, "approval_stream_version", lambda acc: None)(task.acc), "write": task.caller_write_approvals}
-        try:
-            getattr(backend, "check_approval_event", lambda e, q: None)(event, qualification)
-        except ApprovalRefused as exc:
-            await _stop_refused(registry, task, exc)
-            return False
         cancelled = backend.decode_approval_cancellation(event)
         if cancelled is not None:
             for row in await asyncio.to_thread(approvals.rows, registry.log_dir, task.task_id):

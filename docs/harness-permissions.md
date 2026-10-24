@@ -78,7 +78,7 @@ or move verification to a suitable node.
 
 | Harness | `read_only` | `write_in_repo` | `publish` | `unrestricted` |
 | --- | --- | --- | --- | --- |
-| Claude Code | `plan`; direct Git commit/push deny patterns | `acceptEdits`; same deny patterns | `acceptEdits`; Git commit/push allow rules only, with bridge deny patterns removed | `bypassPermissions`; bridge allow/deny patterns omitted |
+| Claude Code | `plan`; direct Git commit/push deny patterns | `acceptEdits`; same deny patterns (plus any `allowed_commands`, which cannot override them) | `acceptEdits`; Git commit/push allow rules only, with bridge deny patterns removed | `bypassPermissions`; bridge allow/deny patterns omitted |
 | Codex | `read-only` OS sandbox | `workspace-write`; network off by default | `workspace-write`; network on by default | `danger-full-access` |
 | OpenCode | `plan` agent | `build` agent | `build` agent; same mechanism as local writing | `build` plus `--auto` |
 | Vibe | `plan` profile | `accept-edits` profile | `auto-approve`; same mechanism as unrestricted | `auto-approve` profile |
@@ -139,6 +139,76 @@ inspect that range before using `"Bash(uv run pytest *)"`. Merge additions with 
 retain deny and ask rules. A matching deny or ask takes precedence over an allow, regardless of
 specificity. Compound commands still need approval for their individual operations.
 [Claude permission documentation](https://code.claude.com/docs/en/permissions).
+
+### Dispatch-time command grants (`allowed_commands`)
+
+Prefer `allowed_commands` over `unrestricted` when a task only needs to run specific commands, such as a test
+runner or build, that `write_in_repo` would otherwise refuse with "This command requires approval". It is a bounded
+list of Bash command patterns for one run, supported on Claude Code 2.1.310 (see `capabilities.allowed_commands` in
+`list_backends`) at `write_in_repo` and `publish` only. Every other backend and access level refuses the field.
+
+```sh
+harflow-ctl run --repo . --prompt "Run the unit tests and fix failures" \
+  --allowed-command "python3 -m pytest:*" --allowed-command "make lint"
+```
+
+Patterns become `Bash(<pattern>)` entries in the one comma-separated `--allowedTools` value, after the access level's
+own entries. At `write_in_repo` the unchanged `--disallowedTools` stays next to them and still wins (measured), so the
+deny patterns still refuse a direct `git commit` or `git push` command string. A granted program, or code it runs
+(a Makefile target, a test script), can still invoke git; grants do not prevent commits.
+
+**Limits.** At most 16 patterns, 256 bytes each and 2048 in total; no control characters, outer whitespace or
+duplicates. `None` (omitted) grants nothing; on `resume_task` and `continue_task` it inherits the saved list, and an
+explicit list replaces it after full revalidation (an empty list clears it). Automatic continuation inherits.
+
+**Grammar.** Anything that does not match is refused, and the error names the pattern and the reason.
+
+- Characters: letters, digits, space and `_ . / : = @ % + -`, plus one `*`. A comma is refused because it would split
+  the `--allowedTools` value. Tokens are separated by single spaces.
+- The first token is the program: a lowercase bare name, never a path, quote or environment assignment.
+- `*` appears only as a separate final token (`make test *`) or as the `:*` suffix (`make test:*`), never inside a
+  token (`pytest*` is refused). `:*` is the recommended form; `:*` and ` *` were measured to match the command with
+  and without arguments, and neither matches a longer program name.
+- A wildcard needs a literal non-option token after the program, such as a subcommand or target (`make test:*`,
+  `yarn --cwd /repo tsc:*`). Option values are not parsed, so `arch -arm64:*` is refused by this rule and `nice -n 5:*`
+  by the program list. An exact pattern needs no subcommand, except `make`, which always needs a target.
+- Paths: a token containing `/` must be a plain relative path without `..` or an absolute path, and must resolve inside
+  the repository after `realpath`; `--option=path` is accepted the same way. `-f/etc/x`, `key=/x` and `../x` are
+  refused.
+- `cp mv tee install touch mkdir truncate` and the destructive `rm rmdir dd chmod chown chflags shred unlink ln`
+  accept only exact patterns, and every operand, bare names included, must resolve inside the repository.
+- Refused programs: shells and evaluators (`bash sh env eval command`), `sudo ssh rsync`, wrappers (`nohup nice
+  timeout time xargs arch caffeinate`), code evaluators (`awk sed perl ruby java swift osascript`), system tools
+  (`kill launchctl defaults`), `docker podman kubectl nix`, and `git` at every access level.
+- Interpreters (`python`, `python3`, `pythonX.Y`, `node`, `deno`, `bun`) are accepted only as `python3 -m <module>`
+  or `<interpreter> <script with a script extension>`; `-c`, `-e` and similar forms are refused.
+- Package launchers (`npx uvx bunx pnpx`, `npm exec`, `pnpm exec`, `yarn exec`, `uv run`, `poetry run`, `mise exec` and
+  similar) validate the launched command recursively, at most two deep. Options before the launched command need a
+  `--` separator (`mise exec -C /repo -- tuist install`); `--` is accepted nowhere else.
+- `find` is refused with a wildcard or with `-exec`, `-delete` and similar actions.
+- `gh` is refused below `publish`, where it is limited to `workflow run|view`, `run view|watch|list` and
+  `pr create|view|list|checks|status`. This deviates from allowing `gh workflow run *` at `write_in_repo`.
+- `git` is refused everywhere: `publish` already allows `git commit` and `git push`, read-only git needs no grant on
+  2.1.310, and aliases make a subcommand list incomplete.
+
+**What it is not.** The grammar is a guard against caller mistakes and obvious escalation, not a security boundary.
+A grant is a prefix approval in Claude's permission layer, not OS enforcement; a granted program can run code from the
+repository (Makefiles, test configuration, scripts); a wildcard lets it take any further arguments; a chained command
+needs every part allowed; and user or project settings can add more allowed commands. Path containment is evaluated
+at dispatch time and cannot prevent a later symlink change. The boundaries that do hold are the direct caller who
+writes the grant and the nested rule below; the access level's deny patterns refuse only direct command strings.
+
+**Nested dispatch.** A task dispatched from inside another Harflow task may grant only exact patterns the detected
+caller holds, unless the caller is `unrestricted`. Omitting grants does not inherit them, and an undecidable caller
+refuses the dispatch. Resume and continuation inheritance is subject to the same check.
+
+**Version gating.** The installed Claude Code is re-qualified against the measured table before every launch, resume
+and continuation. A run that carries grants is stopped, with a bridge notice naming both versions, when its init event
+reports a different version or none, or a tool event arrives before init.
+
+**Disclosure.** `enforcement.extra_allowed_commands` lists the patterns, with caveats; the booleans are unchanged
+(`direct_commit_commands_denied` stays true at `write_in_repo`). Task snapshots and `harflow-ctl status` also carry
+`allowed_commands`, and `preview_task_permissions` / `harflow-ctl permission-preview` show the same without launching.
 
 ### Codex
 

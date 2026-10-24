@@ -706,6 +706,8 @@ class Task:
     caller_approvals: bool = False
     caller_write_approvals: bool = False
     caller_approval_version: str | None = None
+    allowed_commands: list[str] = field(default_factory=list)
+    allowed_commands_version: str | None = None
     protected_paths: Any = None
     interaction_owner: str = "caller"
     approval_generation: str = field(default_factory=lambda: str(uuid.uuid4()))
@@ -961,6 +963,7 @@ class Task:
             "resume_command": None if has_extra_path_authority(self) else resume_command(self.backend, self.session_id, self.repo_path),
             "extra_writable_paths": self.extra_writable_paths,
             "extra_path_certification": self.extra_path_certification,
+            "allowed_commands": list(self.allowed_commands),
         }
         # Only meaningful when something went wrong, and usually empty otherwise.
         if self.status == "failed" and self.stderr_tail:
@@ -1114,6 +1117,32 @@ class TaskRegistry:
         root_task_id = caller.record.root_task_id or caller.record.task_id
         return caller.record.task_id, root_task_id, parent_depth + 1, parent_max_depth, caller.method
 
+    @staticmethod
+    def _command_grants(backend: Backend, requested: Any, inherited: Any, freedom: str, repo_path: Path, *, native: bool = False, builder: bool = False) -> tuple[str, ...]:
+        """An explicit list replaces; None inherits the saved list. Bounds and the backend grammar are always re-checked
+        against the current repository, so a stale or tampered saved list is never trusted."""
+        from . import command_grants
+        patterns = command_grants.check_bounds(list(inherited or ())) if requested is None else command_grants.check_bounds(requested)
+        if patterns:
+            if native or builder:
+                raise command_grants.CommandGrantError("allowed_commands is unavailable to native workflows and workflow builders")
+            backend.validate_allowed_commands(patterns, freedom, repo_path)
+        return patterns
+
+    @staticmethod
+    def _with_commands(backend: Backend, enforcement: Enforcement, patterns: tuple[str, ...]) -> Enforcement:
+        return backend.allowed_commands_enforcement(enforcement, patterns) if patterns else enforcement
+
+    @staticmethod
+    async def _configure_commands(backend: Backend, invocation: Invocation, patterns: tuple[str, ...], freedom: str, repo_path: Path, network: bool | None) -> Invocation:
+        """Qualify the installed version, then add the grants to the argv; asserted before it is returned."""
+        if not patterns:
+            return invocation
+        version = await asyncio.to_thread(backend.qualify_allowed_commands)
+        result = backend.configure_allowed_commands(invocation, patterns, freedom, repo_path, version)
+        backend.assert_safe(result, freedom, network)
+        return result
+
     def _saved_extra_paths(self, record: Any, backend: Backend):
         from .extra_paths import restore_paths, revalidate_paths
         grants = restore_paths(record.extra_writable_paths)
@@ -1170,10 +1199,11 @@ class TaskRegistry:
 
     @_with_authority_check_budget
     @layout_operation
-    async def preview_permissions(self, repo_path: Path, *, backend: Backend, freedom: str = "write_in_repo", network: bool | None = None, caller_approvals: bool = False, extra_writable_paths: list[str] | None = None, caller_write_approvals: bool = False) -> dict[str, Any]:
+    async def preview_permissions(self, repo_path: Path, *, backend: Backend, freedom: str = "write_in_repo", network: bool | None = None, caller_approvals: bool = False, extra_writable_paths: list[str] | None = None, caller_write_approvals: bool = False, allowed_commands: list[str] | None = None) -> dict[str, Any]:
         from .extra_paths import serialize_paths
         from . import approval_runtime
         approval_runtime.validate(backend, caller_approvals, freedom, None, write=caller_write_approvals)
+        commands = self._command_grants(backend, allowed_commands, (), freedom, repo_path)
         approval_version = None
         if caller_approvals:
             approval_version = await asyncio.to_thread(backend.qualify_caller_approvals)
@@ -1183,6 +1213,7 @@ class TaskRegistry:
         if grants:
             await _bounded_extra_path_check(self._assert_extra_state, repo_path, grants)
         invocation = backend.build_start_argv("Permission preview", repo=repo_path, freedom=freedom, session_id=str(uuid.uuid4()) if backend.capabilities.chooses_session_id else None, model=None, max_turns=None, reasoning_effort=None, network=network)
+        invocation = await self._configure_commands(backend, invocation, commands, freedom, repo_path, network)
         invocation = await _bounded_extra_path_check(backend.qualify_extra_writable_paths, invocation, grants, freedom, network) if grants else invocation
         if grants:
             # The qualifier asserted the invocation it returned; only the bridge-state check
@@ -1191,7 +1222,7 @@ class TaskRegistry:
         else:
             backend.assert_safe(invocation, freedom, network)
         enforcement = backend.extra_path_enforcement(backend.enforcement(freedom, network), grants, repo_path) if grants else backend.enforcement(freedom, network)
-        enforcement = approval_runtime.with_approval_enforcement(backend, enforcement, approval_version, caller_approvals, caller_write_approvals)
+        enforcement = self._with_commands(backend, approval_runtime.with_approval_enforcement(backend, enforcement, approval_version, caller_approvals, caller_write_approvals), commands)
         self._resolve_lineage(caller, child_enforcement=enforcement, child_backend=backend.name, child_repo=repo_path, caller_write_approvals=caller_write_approvals)
         # A dispatch grants every non-read-only task of a scratch-aware backend a task-owned
         # scratch directory and appends its path to the recorded writable_roots — after the
@@ -1199,7 +1230,7 @@ class TaskRegistry:
         # the future root symbolically and never feeds it to the nested-authority comparison.
         if freedom != "read_only" and getattr(backend, "with_writable_directory", None) is not None:
             enforcement = replace(enforcement, writable_roots=(*enforcement.writable_roots, FUTURE_TASK_SCRATCH_ROOT))
-        return {"backend": backend.name, "caller_approvals": caller_approvals, "caller_write_approvals": caller_write_approvals, "caller_approval_support": backend.caller_approval_support() if getattr(backend.capabilities, "supports_caller_approvals", False) else {"supported": False}, "approval_scope": "exact_action_once" if caller_approvals else None, "approval_transport": "stdio_control" if caller_approvals else None, "approval_limitations": "Exact original action only (Bash, Read" + (", Write and Edit" if caller_write_approvals else "") + " on qualified versions); saved harness rules remain effective. Approving a Read can disclose files outside the repository. Claude has no bridge OS sandbox.", "freedom": freedom, "network": network, "repo_path": str(repo_path), "extra_writable_paths": serialize_paths(grants), "extra_path_certification": backend.extra_path_support().get("certification") if grants else None, "enforcement": enforcement.as_dict(), "limitations": "Existing typed path identities are checked before launch; grants are unavailable to native workflows and interactive takeover."}
+        return {"backend": backend.name, "caller_approvals": caller_approvals, "caller_write_approvals": caller_write_approvals, "caller_approval_support": backend.caller_approval_support() if getattr(backend.capabilities, "supports_caller_approvals", False) else {"supported": False}, "approval_scope": "exact_action_once" if caller_approvals else None, "approval_transport": "stdio_control" if caller_approvals else None, "approval_limitations": "Exact original action only (Bash, Read" + (", Write and Edit" if caller_write_approvals else "") + " on qualified versions); saved harness rules remain effective. Approving a Read can disclose files outside the repository. Claude has no bridge OS sandbox.", "freedom": freedom, "network": network, "repo_path": str(repo_path), "extra_writable_paths": serialize_paths(grants), "extra_path_certification": backend.extra_path_support().get("certification") if grants else None, "allowed_commands": list(commands), "enforcement": enforcement.as_dict(), "limitations": "Existing typed path identities are checked before launch; grants are unavailable to native workflows and interactive takeover."}
 
     @_with_authority_check_budget
     @layout_operation
@@ -1229,6 +1260,7 @@ class TaskRegistry:
         chain_prompt: str | None = None,
         extra_writable_paths: list[str] | None = None,
         message_ids: list[str] | None = None,
+        allowed_commands: list[str] | None = None,
     ) -> Task:
         """Dispatch a fresh session. Returns once the subprocess exists, not once it finishes.
 
@@ -1258,6 +1290,7 @@ class TaskRegistry:
             grants = await self._resolve_extra_paths_async(caller, extra_writable_paths, backend, source)
             if grants and workflow_builder:
                 raise ValueError("Extra writable paths are unavailable to workflow builders")
+            commands = self._command_grants(backend, allowed_commands, source.allowed_commands if source is not None else (), freedom, repo_path, builder=workflow_builder)
             # Only some backends let us name the session up front. Where we can, knowing it immediately
             # means a resume works even if the run dies before saying anything.
             session_id = str(uuid.uuid4()) if backend.capabilities.chooses_session_id else None
@@ -1279,11 +1312,12 @@ class TaskRegistry:
                 network=network,
             )
 
+            invocation = await self._configure_commands(backend, invocation, commands, freedom, repo_path, network)
             invocation = await approval_runtime.configure(backend, invocation, caller_approvals, freedom, max_turns, caller_write_approvals)
 
             spawned_by, root_task_id, depth, max_depth, lineage_detected = self._resolve_lineage(
                 caller,
-                child_enforcement=approval_runtime.with_approval_enforcement(backend, backend.extra_path_enforcement(backend.enforcement(freedom, network), grants, repo_path) if grants else backend.enforcement(freedom, network), invocation.caller_approval_version, caller_approvals, caller_write_approvals),  # type: ignore[arg-type]
+                child_enforcement=self._with_commands(backend, approval_runtime.with_approval_enforcement(backend, backend.extra_path_enforcement(backend.enforcement(freedom, network), grants, repo_path) if grants else backend.enforcement(freedom, network), invocation.caller_approval_version, caller_approvals, caller_write_approvals), commands),  # type: ignore[arg-type]
                 child_backend=backend.name,
                 child_repo=repo_path,
                 caller_write_approvals=caller_write_approvals,
@@ -1316,6 +1350,7 @@ class TaskRegistry:
             network=network,
             caller_approvals=caller_approvals,
             caller_write_approvals=caller_write_approvals,
+            allowed_commands=commands,
             interaction_owner=interaction_owner,
             spawned_by=spawned_by,
             root_task_id=root_task_id,
@@ -1334,7 +1369,7 @@ class TaskRegistry:
 
     @_with_authority_check_budget
     @layout_operation
-    async def continue_task(self, task_id: str, extra_prompt: str | None = None, notes_path: str | None = None, *, automatic: bool = False, consume_followups: bool = False, background_idle_seconds: float | None = None) -> Task:
+    async def continue_task(self, task_id: str, extra_prompt: str | None = None, notes_path: str | None = None, *, automatic: bool = False, consume_followups: bool = False, background_idle_seconds: float | None = None, allowed_commands: list[str] | None = None) -> Task:
         """Start a fresh session from a durably settled task without broadening access.
 
         `consume_followups` is set by the caller-facing paths only; an automatic continuation never
@@ -1342,7 +1377,7 @@ class TaskRegistry:
         from .state_layout import require_dispatch_layout
         require_dispatch_layout(self._log_dir)
         from .task_continuation import continue_task
-        return await continue_task(self, task_id, extra_prompt, notes_path, automatic=automatic, consume_followups=consume_followups, background_idle_seconds=background_idle_seconds)
+        return await continue_task(self, task_id, extra_prompt, notes_path, automatic=automatic, consume_followups=consume_followups, background_idle_seconds=background_idle_seconds, allowed_commands=allowed_commands)
 
     @_with_authority_check_budget
     @layout_operation
@@ -1361,6 +1396,7 @@ class TaskRegistry:
         native_settings: dict[str, Any] | None = None,
         require_unchanged_session: bool = False,
         consume_followups: bool = False,
+        allowed_commands: list[str] | None = None,
     ) -> Task:
         """Continue the session; strict inheritance may require no later writers.
 
@@ -1376,7 +1412,7 @@ class TaskRegistry:
                 network=network, task_id=task_id, display_prompt=display_prompt,
                 workflow_builder=workflow_builder, native_subagent=native_subagent,
                 native_settings=native_settings, require_unchanged_session=require_unchanged_session,
-                consume_followups=consume_followups)
+                consume_followups=consume_followups, allowed_commands=allowed_commands)
         store.read(self._log_dir, parent.task_id, include_prompt=False)
         from .state_layout import require_dispatch_layout
         require_dispatch_layout(self._log_dir)
@@ -1408,9 +1444,10 @@ class TaskRegistry:
             grants = await self._resolve_extra_paths_async(caller, None, backend, parent)
         if grants and (native_subagent or workflow_builder):
             raise ValueError("Extra writable paths are unavailable to native workflows or workflow builders")
+        commands = self._command_grants(backend, allowed_commands, parent.allowed_commands, parent.freedom, Path(parent.repo_path), native=native_subagent, builder=workflow_builder)
         spawned_by, root_task_id, depth, max_depth, lineage_detected = self._resolve_lineage(
             caller,
-            child_enforcement=backend.extra_path_enforcement(backend.enforcement(parent.freedom, effective_network), grants, parent.repo_path) if grants else backend.enforcement(parent.freedom, effective_network),  # type: ignore[arg-type]
+            child_enforcement=self._with_commands(backend, backend.extra_path_enforcement(backend.enforcement(parent.freedom, effective_network), grants, parent.repo_path) if grants else backend.enforcement(parent.freedom, effective_network), commands),  # type: ignore[arg-type]
             child_backend=backend.name,
             child_repo=parent.repo_path,
             caller_write_approvals=parent.caller_write_approvals,
@@ -1467,6 +1504,7 @@ class TaskRegistry:
                     effective_network=effective_network,
                     caller_approvals=parent.caller_approvals,
                     caller_write_approvals=parent.caller_write_approvals,
+                    allowed_commands=commands,
                     interaction_owner=parent.interaction_owner,
                     grants=grants,
                     native_subagent=native_subagent,
@@ -1519,6 +1557,7 @@ class TaskRegistry:
         task_id: str | None,
         consume_followups: bool,
         background_idle_seconds: float | None = None,
+        allowed_commands: tuple[str, ...] = (),
     ) -> Task:
         """Build and spawn a resume, consuming the parent's queued follow-ups when asked to.
 
@@ -1562,6 +1601,7 @@ class TaskRegistry:
                 )
                 from . import approval_runtime
                 approval_runtime.validate(backend, caller_approvals, freedom, max_turns, native_subagent, caller_write_approvals)
+                invocation = await self._configure_commands(backend, invocation, allowed_commands, freedom, repo_path, effective_network)
                 invocation = await approval_runtime.configure(backend, invocation, caller_approvals, freedom, max_turns, caller_write_approvals)
                 if native_subagent:
                     from .backends.native import adapter
@@ -1593,6 +1633,7 @@ class TaskRegistry:
                 network=effective_network,
                 caller_approvals=caller_approvals,
                 caller_write_approvals=caller_write_approvals,
+                allowed_commands=allowed_commands,
                 interaction_owner=interaction_owner,
                 parent_task_id=parent_task_id,
                 spawned_by=spawned_by,
@@ -1654,6 +1695,7 @@ class TaskRegistry:
         chain_root_task_id: str | None = None,
         chain_prompt: str | None = None,
         message_ids: list[str] | None = None,
+        allowed_commands: tuple[str, ...] | list[str] = (),
     ) -> Task:
         # Re-checked at the point of execution, not only where the argv was built, so no future
         # caller of this method can launch an agent without its backend's guarantees — and, now
@@ -1682,6 +1724,18 @@ class TaskRegistry:
                 approval_version = await asyncio.to_thread(backend.qualify_caller_approvals)
                 if approval_version != invocation.caller_approval_version:
                     raise ValueError("Caller approval qualification changed between configuration and launch; retry")
+            allowed_commands = tuple(allowed_commands)
+            if tuple(invocation.allowed_commands) != allowed_commands:
+                raise ValueError("allowed_commands launch policy does not match invocation")
+            command_version = None
+            if allowed_commands:
+                # Re-qualified and re-validated at every launch, resume and continuation; a saved version is never trusted.
+                if workflow_builder or invocation.native_subagent:
+                    raise ValueError("allowed_commands is unavailable to native workflows and workflow builders")
+                backend.validate_allowed_commands(allowed_commands, freedom, repo_path)
+                command_version = await asyncio.to_thread(backend.qualify_allowed_commands)
+                if command_version != invocation.allowed_commands_version:
+                    raise ValueError("allowed_commands qualification changed between configuration and launch; retry")
             if extra_path_grants or invocation.extra_writable_paths:
                 # Version probes can block for seconds. Qualify once per execution off loop,
                 # even for externally supplied invocations, before allocating scratch; the
@@ -1720,6 +1774,7 @@ class TaskRegistry:
             if extra_path_grants:
                 enforcement = backend.extra_path_enforcement(enforcement, extra_path_grants, repo_path)
             enforcement = approval_runtime.with_approval_enforcement(backend, enforcement, approval_version, caller_approvals, caller_write_approvals)
+            enforcement = self._with_commands(backend, enforcement, allowed_commands)
 
             # Before the spawn, deliberately. Between `create_subprocess_exec` and the registration
             # below there must be no await at all: one there could be cancelled — a client
@@ -1871,6 +1926,8 @@ class TaskRegistry:
             caller_approvals=caller_approvals,
             caller_write_approvals=caller_write_approvals,
             caller_approval_version=approval_version,
+            allowed_commands=list(allowed_commands),
+            allowed_commands_version=command_version,
             interaction_owner=interaction_owner,
             extra_writable_paths=serialize_paths(extra_path_grants),
             extra_path_certification=backend.extra_path_support().get("certification") if extra_path_grants else None,
@@ -2660,6 +2717,7 @@ class TaskRegistry:
                 caller_approvals=task.caller_approvals,
                 caller_write_approvals=task.caller_write_approvals,
                 caller_approval_version=task.caller_approval_version,
+                allowed_commands=list(task.allowed_commands),
                 interaction_owner=task.interaction_owner,
                 approval_generation=task.approval_generation,
                 parent_task_id=task.parent_task_id,
@@ -3664,6 +3722,7 @@ class TaskRegistry:
         native_settings: dict[str, Any] | None = None,
         require_unchanged_session: bool = False,
         consume_followups: bool = False,
+        allowed_commands: list[str] | None = None,
     ) -> Task:
         """Continue the session of a task recovered from disk (see `resume` for the flags)."""
         from .state_layout import require_dispatch_layout
@@ -3700,9 +3759,10 @@ class TaskRegistry:
             grants = await self._resolve_extra_paths_async(caller, None, backend, record)
         if grants and (native_subagent or workflow_builder):
             raise ValueError("Extra writable paths are unavailable to native workflows or workflow builders")
+        commands = self._command_grants(backend, allowed_commands, record.allowed_commands, record.freedom, repo_path, native=native_subagent, builder=workflow_builder)
         spawned_by, root_task_id, depth, max_depth, lineage_detected = self._resolve_lineage(
             caller,
-            child_enforcement=backend.extra_path_enforcement(backend.enforcement(record.freedom, effective_network), grants, repo_path) if grants else backend.enforcement(record.freedom, effective_network),  # type: ignore[arg-type]
+            child_enforcement=self._with_commands(backend, backend.extra_path_enforcement(backend.enforcement(record.freedom, effective_network), grants, repo_path) if grants else backend.enforcement(record.freedom, effective_network), commands),  # type: ignore[arg-type]
             child_backend=backend.name,
             child_repo=repo_path,
             caller_write_approvals=record.caller_write_approvals,
@@ -3754,6 +3814,7 @@ class TaskRegistry:
                     effective_network=effective_network,
                     caller_approvals=record.caller_approvals,
                     caller_write_approvals=record.caller_write_approvals,
+                    allowed_commands=commands,
                     interaction_owner=record.interaction_owner,
                     grants=grants,
                     native_subagent=native_subagent,
@@ -4094,7 +4155,7 @@ async def _drain_stdout(task: Task, registry: TaskRegistry) -> None:
                     registry._stop_native_transport(task)
                     log.warning("Native lifecycle observation failed for %s; transport stop requested and draining continues", task.task_id, exc_info=True)
             backend = get_backend(task.backend)
-            if task.caller_approvals:
+            if task.caller_approvals or task.allowed_commands:
                 from . import approval_runtime
                 await approval_runtime.observe(registry, task, backend, event)
             previous_diagnostic = task.acc.failure_diagnostic

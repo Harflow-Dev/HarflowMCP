@@ -42,6 +42,7 @@ async def run(descriptor: int, task_id: str, generation: str):
                 prepared = request['invocation']
                 prepared['initial_input'] = base64.b64decode(prepared['initial_input'], validate=True) if prepared['initial_input'] is not None else None
                 prepared['extra_writable_paths'] = tuple(prepared['extra_writable_paths'])
+                prepared['allowed_commands'] = tuple(prepared['allowed_commands'])
                 invocation = Invocation(**prepared)
                 kwargs = request['kwargs']
                 kwargs['repo_path'] = Path(kwargs['repo_path'])

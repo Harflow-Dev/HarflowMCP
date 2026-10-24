@@ -223,6 +223,8 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     run_p.add_argument("--network", choices=("true", "false"), default=None)
     run_p.add_argument("--extra-writable-path", action="append", default=None,
                        help="Existing absolute file/directory grant; repeat up to 16 times; verified harnesses only")
+    run_p.add_argument("--allowed-command", action="append", default=None,
+                       help="Bash command pattern granted for this run only; repeat up to 16 times. Claude Code at write_in_repo or publish only; see docs/harness-permissions.md")
     run_p.add_argument("--group", default=None)
     run_p.add_argument("--title", default=None)
     run_p.add_argument("--json", action="store_true")
@@ -236,6 +238,8 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     preview_p.add_argument("--network", choices=("true", "false"), default=None)
     preview_p.add_argument("--extra-writable-path", action="append", default=None,
                            help="Existing absolute file/directory grant; repeat up to 16 times")
+    preview_p.add_argument("--allowed-command", action="append", default=None,
+                           help="Bash command pattern granted for this run only; repeat up to 16 times. Claude Code at write_in_repo or publish only; see docs/harness-permissions.md")
     preview_p.add_argument("--json", action="store_true")
 
     resume_p = sub.add_parser(
@@ -248,6 +252,8 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     resume_p.add_argument("--max-turns", type=int, default=None)
     resume_p.add_argument("--background-idle-seconds", type=float)
     resume_p.add_argument("--network", choices=("true", "false"), default=None)
+    resume_p.add_argument("--allowed-command", action="append", default=None,
+                          help="Replace the saved command grants for this run (repeatable); omitted inherits them")
     resume_p.add_argument("--json", action="store_true")
 
     continue_p = sub.add_parser("continue", help="start a fresh session from a positively settled standalone task; follow-ups queued with `send` are consumed by it")
@@ -257,6 +263,8 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     extra.add_argument("--extra-prompt-file", help="UTF-8 caller follow-up file")
     continue_p.add_argument("--background-idle-seconds", type=float)
     continue_p.add_argument("--notes-path", help="Optional UTF-8 notes file")
+    continue_p.add_argument("--allowed-command", action="append", default=None,
+                            help="Replace the saved command grants for the successor (repeatable); omitted inherits them")
     continue_p.add_argument("--json", action="store_true")
 
     allowlist_p = sub.add_parser("mcp-allowlist", help="inspect or explicitly edit harness-global MCP approval rules")
@@ -778,6 +786,7 @@ def _run_action(args: argparse.Namespace):
         server._check_group(args.group)
         title = server._normalize_title(args.title)
         path = await server._validate_repo_path(args.repo)
+        server._check_allowed_commands(chosen, freedom, path, getattr(args, 'allowed_command', None))
         return await registry.start(
             args.prompt,
             path,
@@ -794,6 +803,7 @@ def _run_action(args: argparse.Namespace):
             **({'caller_write_approvals': True} if getattr(args, 'caller_write_approvals', None) else {}),
             interaction_owner="monitor" if args.monitor else "caller",
             **({'extra_writable_paths': args.extra_writable_path} if args.extra_writable_path is not None else {}),
+            **({'allowed_commands': getattr(args, 'allowed_command', None)} if getattr(args, 'allowed_command', None) is not None else {}),
         )
 
     return action
@@ -824,8 +834,11 @@ def _resume_action(args: argparse.Namespace):
         network = _network(args.network)
         server._check_turn_cap(backends.get(record.backend), args.max_turns)
         server._check_network(backends.get(record.backend), record.freedom, network)
+        if getattr(args, 'allowed_command', None) is not None:
+            server._check_allowed_commands(backends.get(record.backend), record.freedom, Path(record.repo_path), args.allowed_command)
         return await registry.resume_record(
-            record, args.text, max_turns=args.max_turns, **({'background_idle_seconds': args.background_idle_seconds} if getattr(args, 'background_idle_seconds', None) is not None else {}), network=network, consume_followups=True
+            record, args.text, max_turns=args.max_turns, **({'background_idle_seconds': args.background_idle_seconds} if getattr(args, 'background_idle_seconds', None) is not None else {}), network=network, consume_followups=True,
+            **({'allowed_commands': getattr(args, 'allowed_command', None)} if getattr(args, 'allowed_command', None) is not None else {}),
         )
 
     return action
@@ -837,7 +850,12 @@ def _ctl_log_path() -> Path:
 
 def _continue_action(args: argparse.Namespace):
     async def action(registry: Any) -> Any:
-        return await registry.continue_task(args.task_id, _workflow_text(args, "extra_prompt"), args.notes_path, consume_followups=True, **({'background_idle_seconds': args.background_idle_seconds} if getattr(args, 'background_idle_seconds', None) is not None else {}))
+        if getattr(args, 'allowed_command', None) is not None:
+            from . import backends, server
+            source = await asyncio.to_thread(store.read, registry.log_dir, args.task_id, include_prompt=False)
+            if source is not None:
+                server._check_allowed_commands(backends.get(source.backend), source.freedom, Path(source.repo_path), args.allowed_command)
+        return await registry.continue_task(args.task_id, _workflow_text(args, "extra_prompt"), args.notes_path, consume_followups=True, **({'background_idle_seconds': args.background_idle_seconds} if getattr(args, 'background_idle_seconds', None) is not None else {}), **({'allowed_commands': getattr(args, 'allowed_command', None)} if getattr(args, 'allowed_command', None) is not None else {}))
     return action
 
 
@@ -1156,6 +1174,7 @@ def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
                 network=_network(args.network), extra_writable_paths=args.extra_writable_path,
                 caller_approvals=args.caller_approvals,
                 **({"caller_write_approvals": True} if args.caller_write_approvals else {}),
+                **({"allowed_commands": getattr(args, 'allowed_command', None)} if getattr(args, 'allowed_command', None) is not None else {}),
             ))
         except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):
             raise
@@ -1232,6 +1251,8 @@ def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
         if args.workflow:
             if args.extra_writable_path is not None:
                 return _fail(args, "invalid_params", "Extra writable paths are unavailable for workflow launches")
+            if getattr(args, 'allowed_command', None) is not None:
+                return _fail(args, "invalid_params", "allowed_commands is unavailable for workflow launches")
             if args.auto_continue:
                 return _fail(args, "invalid_params", "Workflow retries belong to their supervisor; --auto-continue is unavailable")
             if args.group is not None or args.title is not None:

@@ -395,6 +395,19 @@ def _check_network(backend, freedom: str, network: bool | None) -> None:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
 
 
+def _check_allowed_commands(backend, freedom: str, repo: Path | None, patterns: list[str] | None) -> None:
+    """Bounds, then the backend's own grammar; an unsupported backend or access level is refused here as well as in the backend."""
+    if patterns is None:
+        return
+    from . import command_grants
+    try:
+        checked = command_grants.check_bounds(patterns)
+        if checked:
+            backend.validate_allowed_commands(checked, freedom, repo)
+    except ValueError as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+
 def _resolve_repo_path(repo_path: str) -> Path:
     if not repo_path or not repo_path.strip():
         raise MCPError(INVALID_PARAMS, "repo_path must be a non-empty path")
@@ -483,6 +496,7 @@ async def start_task(
     auto_continue: StrictInt = 0,
     notify: str | None = None,
     extra_writable_paths: list[StrictStr] | None = None,
+    allowed_commands: list[StrictStr] | None = None,
 ) -> dict[str, Any]:
     """Dispatch a coding task to a headless agent and return immediately.
 
@@ -573,6 +587,20 @@ async def start_task(
             native adapters do not accept these grants. Use preview_task_permissions before launch.
             Keep qualified startup inputs stable: checks refuse observed changes but do not atomically
             pin configuration or executables against independently authorized concurrent writers.
+        allowed_commands: Optional list of Bash command patterns granted for this run only, so a task can run
+            specific commands (a test runner, a build) without `unrestricted`. At most 16 patterns, 256 bytes
+            each and 2048 in total. Supported on Claude Code at write_in_repo and publish (see list_backends
+            capabilities.allowed_commands); every other backend and access level refuses the request. Each
+            pattern is a lowercase program followed by literal tokens, with at most one `*` as the final
+            token or the `:*` suffix (`pytest` style: `python3 -m pytest:*`), and a wildcard needs a literal
+            subcommand or target (`make test:*`). Shells, wrappers, interpreter evaluation, git (use `publish`
+            for commit and push) and gh below `publish` are refused, and paths must stay inside the repository.
+            The grammar is a guard against mistakes, not a security boundary: grants are prefix approvals in
+            Claude's permission layer, a granted program can run repository code, chained commands need every
+            part allowed, and the access level's git commit and push denies still win. Omitted or null grants
+            nothing. A nested dispatch may grant only exact patterns its caller holds (unless the caller is
+            unrestricted) and never inherits them. resume_task and continue_task inherit the saved list when
+            omitted and replace it when given. See docs/harness-permissions.md.
 
     Returns the new task_id and its starting state. The run continues in the background; poll
     get_task_status or call wait_for_task to follow it.
@@ -614,6 +642,8 @@ async def start_task(
             raise MCPError(INVALID_PARAMS, "Workflow approval policy and ownership belong to saved candidates and root workflow launch")
         if extra_writable_paths is not None:
             raise MCPError(INVALID_PARAMS, "extra_writable_paths is unavailable for workflow launches")
+        if allowed_commands is not None:
+            raise MCPError(INVALID_PARAMS, "allowed_commands is unavailable for workflow launches")
         if auto_continue:
             raise MCPError(INVALID_PARAMS, "Workflow retries belong to their supervisor; auto_continue is unavailable")
         if group is not None or title is not None:
@@ -637,6 +667,7 @@ async def start_task(
     _check_group(group)
     normalized_title = _normalize_title(title)
     path = await _validate_repo_path(repo_path)
+    _check_allowed_commands(chosen, freedom, path, allowed_commands)
 
     notification = None
     reserved_id = None
@@ -678,6 +709,7 @@ async def start_task(
             title=normalized_title,
             auto_continue=auto_continue,
             **({'extra_writable_paths': extra_writable_paths} if extra_writable_paths is not None else {}),
+            **({'allowed_commands': allowed_commands} if allowed_commands is not None else {}),
             **({'task_id': reserved_id} if reserved_id is not None else {}),
         )
     except (Exception, asyncio.CancelledError) as exc:
@@ -775,6 +807,7 @@ async def preview_task_permissions(
     caller_approvals: StrictBool = False,
     extra_writable_paths: list[StrictStr] | None = None,
     caller_write_approvals: StrictBool = False,
+    allowed_commands: list[StrictStr] | None = None,
 ) -> dict[str, Any]:
     """Preview standalone task permissions without launching an agent or allocating scratch.
 
@@ -789,18 +822,23 @@ async def preview_task_permissions(
     authority retains its baseline limits. Grants authorize output writes, not trust in that output
     as a future repository, hook or executable. Startup inputs are checked, not atomically
     pinned against independently authorized concurrent writers; see docs/extra-writable-paths.md.
+
+    allowed_commands is validated exactly as in start_task (grammar, installed Claude Code version,
+    nested-subset cap) and the returned enforcement lists it as extra_allowed_commands.
     """
     chosen = _backend(backend or DEFAULT_BACKEND)
     access = freedom if freedom is not None else DEFAULT_FREEDOM
     _check_freedom(access)
     _check_network(chosen, access, network)
     path = await _validate_repo_path(repo_path)
+    _check_allowed_commands(chosen, access, path, allowed_commands)
     try:
         return await _reg().preview_permissions(
             path, backend=chosen, freedom=access, network=network,
             extra_writable_paths=extra_writable_paths,
             caller_approvals=caller_approvals,
             **({"caller_write_approvals": True} if caller_write_approvals else {}),
+            **({"allowed_commands": allowed_commands} if allowed_commands is not None else {}),
         )
     except (ValueError, backends.UnsupportedCapability) as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
@@ -1276,7 +1314,7 @@ async def wait_for_tasks(
 
 @mcp.tool()
 @_task_document_errors
-async def continue_task(task_id: str, extra_prompt: str | None = None, notes_path: str | None = None, background_idle_seconds: StrictFloat | StrictInt | None = None) -> dict[str, Any]:
+async def continue_task(task_id: str, extra_prompt: str | None = None, notes_path: str | None = None, background_idle_seconds: StrictFloat | StrictInt | None = None, allowed_commands: list[StrictStr] | None = None) -> dict[str, Any]:
     """Start a fresh session from a conclusively settled standalone task.
 
     This differs from resume_task: it reconstructs the original assignment, latest summary and
@@ -1293,14 +1331,22 @@ async def continue_task(task_id: str, extra_prompt: str | None = None, notes_pat
     call behaves exactly as without the feature. Two manual calls with the same extra_prompt and
     notes are the same request whatever is queued: the queue is read once, when the successor is
     reserved, and a retry returns that successor. An automatic continuation never consumes.
+
+    allowed_commands: omitted or null inherits the source task's saved command grants (an automatic
+    continuation always does); a list replaces them after the same validation and nested-subset check
+    as start_task. See start_task for the grammar and limits.
     """
     _check_background_idle(background_idle_seconds)
     _guard_launch_layout()
     from .caller_policy import require_mutation
     await _guard_mutation()
     await _guard_task_read(task_id)
+    if allowed_commands is not None:
+        source = await asyncio.to_thread(store.read, _reg().log_dir, task_id, include_prompt=False)
+        if source is not None:
+            _check_allowed_commands(backends.get(source.backend), source.freedom, Path(source.repo_path), allowed_commands)
     try:
-        task = await _reg().continue_task(task_id, extra_prompt, notes_path, consume_followups=True, **({'background_idle_seconds': background_idle_seconds} if background_idle_seconds is not None else {}))
+        task = await _reg().continue_task(task_id, extra_prompt, notes_path, consume_followups=True, **({'background_idle_seconds': background_idle_seconds} if background_idle_seconds is not None else {}), **({'allowed_commands': allowed_commands} if allowed_commands is not None else {}))
     except (ValueError, OSError, backends.UnsupportedCapability) as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
     return task.brief() | {"enforcement": task.enforcement}
@@ -1314,6 +1360,7 @@ async def resume_task(
     max_turns: int | None = None,
     background_idle_seconds: StrictFloat | StrictInt | None = None,
     network: StrictBool | None = None,
+    allowed_commands: list[StrictStr] | None = None,
 ) -> dict[str, Any]:
     """Continue a finished task's session with follow-up instructions.
 
@@ -1331,6 +1378,9 @@ async def resume_task(
             historical default for a record written before the field existed — True asks for no
             network barrier of harflow_mcp's own, False asks for one, honoured or refused exactly
             as on start_task for the parent's freedom.
+        allowed_commands: None (the default) inherits the parent's saved command grants; a list replaces
+            them for this run after the same validation and nested-subset check as start_task, which
+            documents the grammar and limits.
 
     Follow-ups queued on the task with send_message are consumed by this call, exactly once: the
     prompt is each queued message as a block "Queued caller follow-up N of M (message <id>, queued
@@ -1375,9 +1425,11 @@ async def resume_task(
                 )
             _check_turn_cap(backends.get(parent.backend), max_turns)
             _check_network(backends.get(parent.backend), parent.freedom, network)
+            if allowed_commands is not None:
+                _check_allowed_commands(backends.get(parent.backend), parent.freedom, Path(parent.repo_path), allowed_commands)
             task = await _reg().resume(
                 parent, followup_prompt, max_turns=max_turns, network=network, background_idle_seconds=background_idle_seconds,
-                consume_followups=True,
+                consume_followups=True, **({'allowed_commands': allowed_commands} if allowed_commands is not None else {}),
             )
         else:
             record = _reg().recover(task_id)
@@ -1391,9 +1443,11 @@ async def resume_task(
                 )
             _check_turn_cap(backends.get(record.backend), max_turns)
             _check_network(backends.get(record.backend), record.freedom, network)
+            if allowed_commands is not None:
+                _check_allowed_commands(backends.get(record.backend), record.freedom, Path(record.repo_path), allowed_commands)
             task = await _reg().resume_record(
                 record, followup_prompt, max_turns=max_turns, network=network, background_idle_seconds=background_idle_seconds,
-                consume_followups=True,
+                consume_followups=True, **({'allowed_commands': allowed_commands} if allowed_commands is not None else {}),
             )
     except (SessionBusyError, SessionUnknownError, RepoUnavailableError) as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from None

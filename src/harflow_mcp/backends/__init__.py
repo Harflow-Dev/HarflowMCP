@@ -102,7 +102,7 @@ def capability_metadata(backend: Backend) -> dict[str, Any]:
     Serializes only what the backend itself declares — no subprocess, unlike `version()` — so it is
     safe wherever a `--version` probe is not (harflow-ctl's `backends`).
     """
-    return {**backend.capabilities.as_dict(), "extra_writable_paths": backend.extra_path_support(), "caller_approval_support": backend.caller_approval_support() if backend.capabilities.supports_caller_approvals else {"supported": False}}
+    return {**backend.capabilities.as_dict(), "extra_writable_paths": backend.extra_path_support(), "caller_approval_support": backend.caller_approval_support() if backend.capabilities.supports_caller_approvals else {"supported": False}, "allowed_commands": backend.allowed_commands_support()}
 
 
 def describe(backend: Backend) -> dict[str, Any]:

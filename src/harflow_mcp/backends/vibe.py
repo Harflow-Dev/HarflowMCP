@@ -493,6 +493,8 @@ class VibeBackend(ExtraPathsUnsupported):
     def assert_safe(
         self, invocation: Invocation, freedom: Freedom, network: bool | None = None
     ) -> None:
+        if isinstance(invocation, Invocation) and invocation.allowed_commands:
+            raise UnsupportedCapability(self.allowed_commands_support()["reason"])
         if isinstance(invocation, Invocation) and invocation.extra_writable_paths:
             raise UnsupportedCapability("bounded extra writable paths are not certified for this backend")
         # One-shot stdin is closed after delivery, never a live conversation pipe.

@@ -511,6 +511,8 @@ class AntigravityBackend(ExtraPathsUnsupported):
         self, invocation: Invocation, freedom: Freedom, network: bool | None = None
     ) -> None:
         validate_invocation_env(invocation, {})
+        if isinstance(invocation, Invocation) and invocation.allowed_commands:
+            raise UnsupportedCapability(self.allowed_commands_support()["reason"])
         if isinstance(invocation, Invocation) and invocation.extra_writable_paths:
             raise UnsupportedCapability("bounded extra writable paths are not certified for this backend")
         # Rejects an unknown freedom outright rather than letting MODES[freedom] raise a bare
