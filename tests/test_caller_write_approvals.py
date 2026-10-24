@@ -366,6 +366,28 @@ def test_repo_protected_targets_refuse_write_and_edit(repo, relative):
         assert check(repo, tool, repo.repo / relative) == "protected_path"
 
 
+@pytest.mark.parametrize("name", ["settings.json", "settings.local.json"])
+def test_symlinked_repo_settings_protect_their_outside_target(repo, name):
+    outside = repo.base / "outside" / "real-settings.json"
+    outside.parent.mkdir()
+    outside.write_text("{}")
+    (repo.repo / ".claude").mkdir()
+    (repo.repo / ".claude" / name).symlink_to(outside)
+    for tool in ("Write", "Edit"):
+        assert check(repo, tool, outside) == "protected_path"
+        assert check(repo, tool, repo.repo / ".claude" / name) == "protected_path"
+    assert check(repo, "Write", outside.parent / "other.json") is None
+
+
+def test_symlinked_mcp_json_and_config_settings_protect_their_outside_target(repo):
+    outside = repo.base / "outside"
+    outside.mkdir()
+    (repo.repo / ".mcp.json").symlink_to(outside / "mcp.json")
+    (repo.base / "config" / "settings.json").symlink_to(outside / "user-settings.json")
+    for target in (outside / "mcp.json", outside / "user-settings.json"):
+        assert check(repo, "Write", target) == "protected_path"
+
+
 def test_config_dir_and_home_files_are_protected(repo):
     for path in (repo.base / "config" / "settings.json", repo.base / "config" / "settings.local.json", repo.base / "home" / ".claude.json"):
         assert check(repo, "Write", path) == "protected_path"

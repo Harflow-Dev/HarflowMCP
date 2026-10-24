@@ -82,7 +82,7 @@ def protected_targets(repo: str | Path, log_dir: Path, environ: Any = None) -> d
     config = Path(env.get("CLAUDE_CONFIG_DIR") or home / ".claude")
     repo_path = Path(str(repo))
     state = [resolve(str(p)) for p in state_layout.protected_roots(log_dir=log_dir)]
-    settings = [repo_path / ".claude", repo_path / ".mcp.json",
+    settings = [repo_path / ".claude", repo_path / ".claude" / "settings.json", repo_path / ".claude" / "settings.local.json", repo_path / ".mcp.json",
                 config, config / "settings.json", config / "settings.local.json", home / ".claude.json", *map(Path, MANAGED_SETTINGS)]
     return {"state": [_fold(p) for p in state], "settings": [_fold(resolve(str(p))) for p in settings],
             "git": None if (git := git_protected(repo_path)) is None else [_fold(p) for p in git]}

@@ -534,6 +534,28 @@ blind resend. Restart does not reattach a lost stdin owner. Cancellation and pro
 unanswered requests. Settle and inspect the prior execution before explicit recovery; changing
 configuration or resuming is a separate action and never a permission response.
 
+**Approval timeout.** The request deadline is the earlier of 1800 seconds after receipt and the workflow
+attempt deadline. Expiry means Harflow tries to deliver a rejection (`Harflow refused this action:
+approval_expired`) to the verified live process; it never approves, even when the caller's `approve` was
+reserved but not yet written, and the caller's `decision` stays recorded. Delivery (`sent` or
+`delivery_unknown`) and the observed outcome (`execution_outcome`) are separate facts, and a failed delivery
+is never resent. Answers after the deadline, or with a stale revision, are refused. Expiry does not time
+a node out: a workflow node times out only through its existing attempt timeout.
+
+**Recovery after a denial.** Recovery is always a new `resume_task` or `continue_task` execution of a finished
+task, never an approval, and what to change follows `denial_remedy`. `allowed_commands` covers only Bash
+`approval_required` and `chained_command` parts. A denied or expired Read, Write or Edit approval needs a
+resumed run (with `caller_approvals` and `caller_write_approvals` inherited) so the agent can raise a fresh
+request. `path_safety` and `outside_working_directory` go through caller approvals, not grants, and a
+`deny_rule` cannot be lifted by grants. See
+[task continuation](task-continuation.md#recovery-after-a-permission-denial). A request that was denied or
+expired cannot be approved afterwards.
+
+**Current limits.** Not available yet: retrying a permission-blocked workflow node with a narrow grant
+(a caller-authorized `permission_grant` retry needs its own state machine), approval notifications,
+Monitor presentation of requests and grants (HarflowMac issues 13 and 14), approvals and
+`allowed_commands` on non-Claude backends, and approvals for native workflow children.
+
 Storage is bounded per task: 64 KiB canonical request payload, 16 pending requests, 128 lifetime
 records and a 2 MiB ledger, with 256 KiB reserved for decisions/outcomes. Full or invalid ledgers
 stop owned execution without approving. Ledgers require a compatible Harflow header and matching

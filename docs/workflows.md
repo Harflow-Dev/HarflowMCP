@@ -1782,6 +1782,17 @@ return `stop_reason: "attention"` with bounded metadata/handles. List the root t
 The root's caller/Monitor interaction ownership remains authoritative; no transfer is introduced.
 A decision does not itself establish successful execution or workflow completion.
 
+A request expires after 1800 seconds or at its attempt deadline, whichever is earlier, and Harflow then delivers a
+rejection; expiry never approves and never times the node out, which happens only through the node's
+attempt timeout.
+
+A workflow node that fails after a permission denial or an approval expiry cannot be recovered in place: node
+retry (`retry_eligible`) rejects permission failures and a recovered permission denial blocks fallback.
+Start a new run, or update the saved definition first (for example by giving the candidate `allowed_commands`,
+or enabling `caller_approvals`). A caller-authorized permission-grant retry of the blocked node is a deferred
+follow-up. This is distinct from a standalone task, which is recovered with `resume_task`/`continue_task`
+([recovery](task-continuation.md#recovery-after-a-permission-denial)).
+
 ### Saved definition compatibility
 
 The engine wraps saved definitions in a Harflow product document; author graph payloads through the existing save tools without adding envelope fields. Flat development files and foreign, malformed or incompatible documents are refused rather than adopted. A refused source blocks whole-store listing and dependency indexing, including unrelated saves. Ordinary deletion also refuses unqualified files. See [saved definition contracts](contracts.md#saved-workflow-definition-documents) for error codes, compatibility and manual recovery.

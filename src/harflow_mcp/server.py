@@ -786,7 +786,15 @@ async def respond_approval_request(task_id: str, request_id: str, action_digest:
     self-approve or claim Monitor ownership. Approval preserves exact original input and never
     installs permission suggestions or reusable grants. Reservation, local pipe delivery and
     observed tool outcome are separate states. No ambiguous decision is automatically resent.
-    Use explicit recovery after settled refusal; ordinary messages/resume are not decisions.
+    A request unanswered after 1800 seconds, or at an earlier workflow attempt deadline, is
+    rejected by Harflow (approval_expired) and never approved; a stale or expired answer fails.
+    There is no approve-later path after a denial or expiry. Recovery is always a new resume_task
+    or continue_task execution of the finished task, and what to change follows the denied entry's
+    denial_remedy: allowed_commands covers only Bash approval_required and chained_command parts;
+    a denied or expired Read, Write or Edit needs a resumed run (caller_approvals and
+    caller_write_approvals are inherited) so the agent can raise a fresh request; path_safety and
+    outside_working_directory go through caller approvals, not grants; a deny_rule cannot be lifted
+    by grants. Messages and resume are never decisions.
     """
     from .caller_policy import require_mutation
     await _guard_mutation()
@@ -2006,7 +2014,7 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
                         owner = owner_plan["owners"].get(ident)
                         if owner is not None:
                             configs.extend(({key: value for key, value in contract["candidate"].items() if key != "fallbacks"}, contract["freedom"], contract["network"]) for contract in owner["candidates"].values())
-                        configs.extend((n["agent"], workflows.effective_freedom(n, "unrestricted", permission_policy="saved_node"), False if network is False else n.get("network", network)) for n in definition["nodes"] if n["type"] == "agent")
+                        configs.extend((n["agent"], workflows.effective_freedom(n, "unrestricted", permission_policy="saved_node"), False if network is False else n.get("network", network)) for n in definition["nodes"] + [{**o, "type": "agent"} for o in definition.get("on_demand_nodes", [])] if n["type"] == "agent")
                         for config, freedom, node_network in configs:
                             for candidate in [config, *config.get("fallbacks", [])]:
                                 backend_ = backends.get(candidate["backend"])

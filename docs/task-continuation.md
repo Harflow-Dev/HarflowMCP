@@ -26,6 +26,27 @@ Cancelling the initial task also reaches active successors through continuation 
 
 Retention preserves the original chain assignment while any successor record remains, including settled successors still within retention and records whose cleanup is locked or failed. Fully expired chains are reclaimed once their successor records have been removed.
 
+## Recovery after a permission denial
+
+When a finished Claude task reports `permission_denials`, read each entry's `denial_category` and
+`denial_remedy`. Recovery is always a new `resume_task` or `continue_task` execution of a finished task; a denial or expiry is
+never answered later. What to change follows the entry's `denial_remedy`:
+
+- `approval_required` and `chained_command` (Bash): pass `allowed_commands` covering the command, or each part
+  of the chain. Omitting the list inherits the saved grants; an explicit list replaces them. Grants are
+  validated like `start_task` (grammar, qualified Claude Code version, nested-subset rule).
+- A denied or expired Read, Write or Edit approval: resume the run (`caller_approvals` and
+  `caller_write_approvals` are inherited) so the agent can raise a fresh request for you to answer.
+  `allowed_commands` does not cover file tools.
+- `path_safety` and `outside_working_directory`: these go through caller approvals, not grants.
+- `deny_rule`: grants cannot lift a deny rule; change the access level or the settings that denied it.
+
+`resume_task` continues the same session and `continue_task` starts a fresh one; both require the source to be
+finished and are [documented with the grants](harness-permissions.md#dispatch-time-command-grants-allowed_commands).
+`respond_approval_request` applies only to a request that is still pending. Expiry of an unanswered request is a
+Harflow rejection and is recovered the same way. This is for standalone tasks; workflow nodes are different (see
+[workflows](workflows.md#caller-approval-interaction)).
+
 ## Queued follow-ups
 
 A task that cannot take a message while it runs (a backend without live input, or claude started

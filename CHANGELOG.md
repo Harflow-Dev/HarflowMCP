@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Document caller-approval timeout and recovery semantics: the request deadline is the earlier of 1800 seconds and the attempt deadline, expiry delivers a Harflow rejection and never approves, delivery and outcome are recorded separately, and recovery after a denial or expiry is always a new `resume_task`/`continue_task` execution guided by `denial_remedy`, never an approval (`allowed_commands` covers only Bash parts; workflow nodes blocked by a permission denial need a new run or an updated definition). Correct the `respond_approval_request` docstring and record the remaining limits (workflow permission-grant retry, approval notifications, Monitor presentation, non-Claude backends, native-child approvals). Close a start-time authority gap: an agent caller starting a saved workflow is now also checked against the workflow's on-demand candidates for `allowed_commands` and `caller_write_approvals` beyond its own.
+
 - Accept `allowed_commands` on saved workflow agent candidates (primary, fallbacks and on-demand nodes): validated at save and launch for each candidate's backend and freedom, qualified at dispatch and passed to the node's task, with a fallback using its own grants. Agent callers cannot save or start grants beyond their own, the candidate signature and session compatibility include the field only when non-empty, native execution runs such nodes Headless, and orchestrators, builders and `start_workflow` still refuse the field.
 
 - Re-resolve the protected Write and Edit approval targets at every admission, so a mid-run `core.hooksPath` change is honored, and protect the whole repository `.claude/` directory (hooks, agents, commands and settings) from caller-approved writes.

@@ -193,7 +193,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     approval_list.add_argument("--limit", type=int, default=16)
     approval_list.add_argument("--json", action="store_true")
     for command in ("approval-get", "approval-respond"):
-        approval = sub.add_parser(command, help="Inspect or answer an exact-action permission request")
+        approval = sub.add_parser(command, help="Inspect or answer one pending exact-action permission request (an expired or denied one is recovered by a new resume or continue, not by answering)")
         approval.add_argument("task_id")
         approval.add_argument("request_id")
         approval.add_argument("--monitor", action="store_true", help="Verified human Monitor interaction owner")
