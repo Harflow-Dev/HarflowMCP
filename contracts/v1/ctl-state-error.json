@@ -1,0 +1,1 @@
+{"error":{"code":"state_incompatible","data":{"engine_version":"0.0.2","reason":"unmarked_nonempty","recovery_supported":false,"state_root":"/example/state"},"message":"Unsupported state root: unmarked root is nonempty; inspect state or select a fresh state root"},"format":"harflow.ctl","product":"harflow","product_version":"0.0.2","v":1}

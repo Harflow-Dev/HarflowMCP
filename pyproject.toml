@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "harflow-mcp"
-version = "0.0.1"
+version = "0.0.2"
 description = "Local MCP server that dispatches coding tasks to headless agents (Claude Code, Codex, opencode, vibe, Antigravity)"
 readme = "README.md"
 license = "Apache-2.0"

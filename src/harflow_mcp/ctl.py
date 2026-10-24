@@ -89,6 +89,13 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     info = sub.add_parser("version-info", help="report side-effect-free Harflow v1 compatibility")
     info.add_argument("--json", action="store_true")
 
+    for command in ("state-inspect", "state-recover"):
+        recovery = sub.add_parser(command, help="inspect state without mutation" if command == "state-inspect" else "explicitly back up incompatible state and initialize a fresh store")
+        recovery.add_argument("--json", action="store_true")
+        if command == "state-recover":
+            recovery.add_argument("--operation-id", required=True)
+            recovery.add_argument("--confirmation-token", required=True)
+
     artifact_p = sub.add_parser('register-artifact', help='register an existing artifact metadata reference for the verified calling task', description='Register an artifact reference. Retry catalog-preparation errors to advance bounded caller indexing.')
     artifact_p.add_argument('path')
     artifact_p.add_argument('--kind', required=True, choices=('screenshot', 'log', 'report', 'other'))
@@ -1057,6 +1064,17 @@ def _main(argv: list[str] | None = None) -> int:
     parser, list_p = parsers[0], parsers[1]
 
     args = parser.parse_args(argv)
+    if args.command in {"state-inspect", "state-recover"}:
+        from .state_layout import resolve_layout
+        from .state_recovery import inspect_state, recover_state
+        try:
+            result = (inspect_state(resolve_layout()) if args.command == "state-inspect" else
+                      recover_state(resolve_layout(), operation_id=args.operation_id,
+                                    confirmation_token=args.confirmation_token))
+        except StateOwnershipError as exc:
+            return _fail(args, exc.code, str(exc), exc.as_dict())
+        print(json.dumps(envelope(CTL_FORMAT, {"result": result})) if args.json else json.dumps(result, indent=2))
+        return 0
     # Informational backend/config inspection does not access engine state.
     config_only = args.command == "backends" or (
         args.command == "mcp-allowlist" and args.allow is None and args.remove is None)
@@ -1066,7 +1084,7 @@ def _main(argv: list[str] | None = None) -> int:
         with state_session(task_layout(default_log_dir())):
             return _execute(args, list_p)
     except (StateOwnershipError, store.TaskDocumentError, WorkflowDefinitionDocumentError, WorkflowRunDocumentError, WorkflowReceiptDocumentError) as exc:
-        data = exc.as_dict() if isinstance(exc, (WorkflowDefinitionDocumentError, WorkflowRunDocumentError, WorkflowReceiptDocumentError)) else ({"published": True, "workflow_run_id": exc.workflow_run_id} if getattr(exc, "published", False) else None)
+        data = exc.as_dict() if isinstance(exc, (StateOwnershipError, WorkflowDefinitionDocumentError, WorkflowRunDocumentError, WorkflowReceiptDocumentError)) else ({"published": True, "workflow_run_id": exc.workflow_run_id} if getattr(exc, "published", False) else None)
         return _fail(args, getattr(exc, "code", "state_incompatible"), str(exc), data)
 
 

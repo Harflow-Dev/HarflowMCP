@@ -9,7 +9,8 @@ from pathlib import Path
 
 from .state_access import (OwnedConnection, assert_task_owned, bind_connection,
                            open_descriptor, task_layout)
-from .wire_contracts import PRODUCT, PRODUCT_VERSION, compatible_line
+from .state_compatibility import persisted_compatible
+from .wire_contracts import PRODUCT, PRODUCT_VERSION
 
 IDENTITY_TABLE = 'harflow_notification_identity'
 FORMAT = 'harflow.notifications'
@@ -171,7 +172,7 @@ def qualify(db, tables=None):
             or type(row[3]) is not int or row[3] != SCHEMA_VERSION or row[5] != 'integer'):
         _refuse()
     try:
-        compatible = compatible_line(row[4])
+        compatible = persisted_compatible(row[4], FORMAT, SCHEMA_VERSION)
     except ValueError:
         compatible = False
     if not compatible:
@@ -224,7 +225,7 @@ def create_workflow_tables(db):
 
 
 def _bootstrap(db):
-    if type(SCHEMA_VERSION) is not int or SCHEMA_VERSION != 1 or not compatible_line(PRODUCT_VERSION):
+    if type(SCHEMA_VERSION) is not int or SCHEMA_VERSION != 1 or not persisted_compatible(PRODUCT_VERSION, FORMAT, SCHEMA_VERSION):
         _refuse()
     db.execute('BEGIN IMMEDIATE')
     try:

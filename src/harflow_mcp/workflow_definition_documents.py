@@ -5,7 +5,8 @@ import copy
 import math
 from typing import Any
 
-from .wire_contracts import PRODUCT, PRODUCT_VERSION, compatible_line
+from .state_compatibility import persisted_compatible
+from .wire_contracts import PRODUCT, PRODUCT_VERSION
 
 DEFINITION_FORMAT = "harflow.workflow.definition"
 
@@ -59,7 +60,7 @@ def decode(document: Any, name: str) -> dict[str, Any]:
             raise ValueError("Missing or foreign workflow definition product/format")
         if type(document.get("v")) is not int or document["v"] != 1:
             raise ValueError("Unsupported workflow definition document version")
-        if not compatible_line(document.get("product_version")):
+        if not persisted_compatible(document.get("product_version"), DEFINITION_FORMAT):
             raise ValueError("Incompatible workflow definition product major/minor line")
         value = document.get("definition")
         if not isinstance(value, dict):

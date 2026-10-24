@@ -21,7 +21,8 @@ import time
 from typing import Any, Callable, Coroutine, Iterator, TypeVar
 
 from .state_layout import StateLayout
-from .wire_contracts import PRODUCT, PRODUCT_VERSION, compatible_line
+from .state_compatibility import persisted_compatible
+from .wire_contracts import PRODUCT, PRODUCT_VERSION, parse_version
 
 MARKER_NAME = ".harflow-store.json"
 LOCK_NAME = ".harflow-store.lock"
@@ -33,6 +34,14 @@ DEFAULT_TIMEOUT = 2.0
 class StateOwnershipError(Exception):
     """Ownership failure that must never be suppressed as missing state."""
 
+    def __init__(self, message: str, *, reason: str | None = None, data: dict | None = None):
+        super().__init__(message)
+        self.reason = reason
+        self.data = dict(data or {})
+
+    def as_dict(self) -> dict:
+        return {**self.data, **({"reason": self.reason} if self.reason else {})}
+
 
 class StateIncompatible(StateOwnershipError):
     code = "state_incompatible"
@@ -42,8 +51,12 @@ class StateBusy(StateOwnershipError):
     code = "state_busy"
 
 
-def _incompatible(detail: str) -> StateIncompatible:
-    return StateIncompatible(f"Unsupported state root: {detail}; select a fresh state root")
+def _incompatible(detail: str, *, reason: str | None = None) -> StateIncompatible:
+    if reason is None:
+        reason = ("unmarked_nonempty" if "unmarked root is nonempty" in detail else
+                  "infrastructure_unavailable" if any(word in detail for word in ("unavailable", "lock", "capability")) else
+                  "invalid_marker")
+    return StateIncompatible(f"Unsupported state root: {detail}; inspect state or select a fresh state root", reason=reason)
 
 
 def _identity(info: os.stat_result) -> tuple[int, int]:
@@ -60,11 +73,11 @@ def _regular(path: Path) -> os.stat_result | None:
     return info
 
 
-def _marker(root: Path) -> bool:
+def _read_marker(root: Path) -> dict | None:
     path = root / MARKER_NAME
     info = _regular(path)
     if info is None:
-        return False
+        return None
     if info.st_size > MAX_MARKER_BYTES:
         raise _incompatible("store marker is oversized")
     fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
@@ -76,17 +89,62 @@ def _marker(root: Path) -> bool:
         os.close(fd)
     try:
         value = json.loads(raw)
-        if (len(raw) > MAX_MARKER_BYTES or not isinstance(value, dict)
-                or value.get("product") != PRODUCT
-                or value.get("format") != "harflow.store"
-                or type(value.get("v")) is not int or value["v"] != 1
-                or type(value.get("layout_version")) is not int
-                or value["layout_version"] != 1
-                or not compatible_line(value.get("product_version"), PRODUCT_VERSION)):
-            raise ValueError("incompatible identity or version")
+        if len(raw) > MAX_MARKER_BYTES or not isinstance(value, dict):
+            raise ValueError("invalid marker")
+        return value
     except (ValueError, TypeError, UnicodeError, RecursionError) as exc:
-        raise _incompatible("invalid or incompatible store marker") from exc
+        raise _incompatible("invalid store marker") from exc
+
+
+def _marker(root: Path) -> bool:
+    value = _read_marker(root)
+    journal = root / ".harflow-recovery.json"
+    if journal.exists() or journal.is_symlink():
+        # A committed operation may have lost its response/receipt. Publication is
+        # irreversible, and ordinary same-line writers may proceed after it.
+        from .state_recovery import committed_journal
+        if not committed_journal(root, value):
+            raise _incompatible("explicit state recovery is interrupted", reason="recovery_interrupted")
+    if value is None:
+        return False
+    if value.get("product") != PRODUCT or value.get("format") != "harflow.store":
+        raise _incompatible("foreign store marker", reason="foreign_store")
+    if (type(value.get("v")) is not int or value["v"] != 1
+            or type(value.get("layout_version")) is not int or value["layout_version"] != 1):
+        raise _incompatible("unsupported store layout", reason="unsupported_layout")
+    try:
+        compatible = persisted_compatible(value.get("product_version"), "harflow.store", target_version=PRODUCT_VERSION)
+        newer = parse_version(value.get("product_version"))[:2] > parse_version(PRODUCT_VERSION)[:2]
+    except (ValueError, TypeError):
+        raise _incompatible("invalid store product version") from None
+    if not compatible:
+        raise _incompatible("incompatible store product line", reason="newer_store" if newer else "unsupported_source_line")
     return True
+
+
+def _legacy_empty(root: Path) -> bool:
+    expected = {"workflows", "workflow-runs", "workflow-leases", "workflow-owners"}
+    entries = {entry.name: entry for entry in root.iterdir() if entry.name not in (LOCK_NAME, PENDING_NAME)}
+    if set(entries) != expected:
+        return False
+    for name in (LOCK_NAME, PENDING_NAME):
+        _regular(root / name)
+    return all(stat.S_ISDIR(entry.lstat().st_mode) and not any(entry.iterdir()) for entry in entries.values())
+
+
+def _admissible_empty(root: Path) -> bool:
+    return _empty(root) or _legacy_empty(root)
+
+
+def _promote(root: Path) -> None:
+    value = _read_marker(root)
+    if value is None or parse_version(value["product_version"])[:2] == parse_version(PRODUCT_VERSION)[:2]:
+        return
+    from .state_migration import validate_promotion
+    validate_promotion(root, target_version=PRODUCT_VERSION)
+    value.setdefault("origin_product_version", value["product_version"])
+    value["product_version"] = PRODUCT_VERSION
+    _publish(root, value)
 
 
 def _empty(root: Path) -> bool:
@@ -131,6 +189,7 @@ def _initialize_shared(fd: int, root: Path, deadline: float) -> None:
     compatible starter. Each failed EX attempt instead checks for publication
     under SH, then relinquishes SH again if initialization is still needed.
     """
+    root_id, lock_id = _root_identity(root), _identity(os.fstat(fd))
     fcntl.flock(fd, fcntl.LOCK_UN)
     while True:
         try:
@@ -139,10 +198,13 @@ def _initialize_shared(fd: int, root: Path, deadline: float) -> None:
             if exc.errno not in (errno.EACCES, errno.EAGAIN):
                 raise
         else:
+            if _root_identity(root) != root_id or _identity((root / LOCK_NAME).lstat()) != lock_id:
+                raise _incompatible("root or lock changed before initialization")
             if not _marker(root):
-                if not _empty(root):
+                if not _admissible_empty(root):
                     raise _incompatible("unmarked root is nonempty")
                 _publish(root)
+            _promote(root)
             _wait(fd, fcntl.LOCK_SH, deadline)
             return
         try:
@@ -151,7 +213,7 @@ def _initialize_shared(fd: int, root: Path, deadline: float) -> None:
             if exc.errno not in (errno.EACCES, errno.EAGAIN):
                 raise
         else:
-            if _marker(root):
+            if _marker(root) and parse_version(_read_marker(root)["product_version"])[:2] == parse_version(PRODUCT_VERSION)[:2]:
                 return
             fcntl.flock(fd, fcntl.LOCK_UN)
         remaining = deadline - time.monotonic()
@@ -160,14 +222,14 @@ def _initialize_shared(fd: int, root: Path, deadline: float) -> None:
         time.sleep(min(0.01, remaining))
 
 
-def _publish(root: Path) -> None:
+def _publish(root: Path, value: dict | None = None) -> None:
     pending = root / PENDING_NAME
     # Only the reserved, regular crash artifact may be discarded.
     if _regular(pending) is not None:
         pending.unlink()
     fd = os.open(pending, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
     try:
-        payload = json.dumps({"product": PRODUCT, "format": "harflow.store", "v": 1,
+        payload = json.dumps(value or {"product": PRODUCT, "format": "harflow.store", "v": 1,
                               "product_version": PRODUCT_VERSION, "layout_version": 1}, sort_keys=True).encode() + b"\n"
         with os.fdopen(fd, "wb", closefd=False) as stream:
             stream.write(payload)
@@ -346,7 +408,7 @@ def _acquire(layout: StateLayout, timeout: float, exclusive: bool) -> StateLease
         lock_info = _regular(lock)
         if lock_info is None:
             marked = _marker(root)
-            empty = _empty(root) if not marked else False
+            empty = _admissible_empty(root) if not marked else False
             # A peer may have created the stable lock since the first stat.
             lock_info = _regular(lock)
             if lock_info is None and (marked or not empty):
@@ -369,15 +431,28 @@ def _acquire(layout: StateLayout, timeout: float, exclusive: bool) -> StateLease
             _wait(fd, fcntl.LOCK_SH, deadline)
             _regular(root / PENDING_NAME)
             marked = _marker(root)
+            if _root_identity(root) != root_id or _identity(lock.lstat()) != lock_id:
+                raise _incompatible("root or lock changed before ownership")
             if exclusive:
                 fcntl.flock(fd, fcntl.LOCK_UN)
                 _wait(fd, fcntl.LOCK_EX, deadline)
+                if _root_identity(root) != root_id or _identity(lock.lstat()) != lock_id:
+                    raise _incompatible("root or lock changed before initialization")
                 if not _marker(root):
-                    if not _empty(root):
+                    if not _admissible_empty(root):
                         raise _incompatible("unmarked root is nonempty")
                     _publish(root)
+                _promote(root)
             elif not marked:
                 _initialize_shared(fd, root, deadline)
+            elif parse_version(_read_marker(root)["product_version"])[:2] != parse_version(PRODUCT_VERSION)[:2]:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                _wait(fd, fcntl.LOCK_EX, deadline)
+                if _root_identity(root) != root_id or _identity(lock.lstat()) != lock_id:
+                    raise _incompatible("root or lock changed before migration")
+                _marker(root)
+                _promote(root)
+                _wait(fd, fcntl.LOCK_SH, deadline)
             # Conversion may release the old lock; validate all identities again.
             if not _marker(root):
                 raise _incompatible("store marker disappeared")
@@ -403,7 +478,12 @@ def state_session(layout: StateLayout, *, timeout: float = DEFAULT_TIMEOUT) -> I
     try:
         lease = _acquire(layout, timeout, False)
     except OSError as exc:
-        raise _incompatible("ownership infrastructure is unavailable") from exc
+        error = _incompatible("ownership infrastructure is unavailable")
+        error.data.update(state_root=str(layout.root), engine_version=PRODUCT_VERSION, recovery_supported=False)
+        raise error from exc
+    except StateOwnershipError as exc:
+        exc.data.update(state_root=str(layout.root), engine_version=PRODUCT_VERSION, recovery_supported=False)
+        raise
     with lease:
         yield lease
 
@@ -414,7 +494,12 @@ def exclusive_session(layout: StateLayout, *, timeout: float = DEFAULT_TIMEOUT) 
     try:
         lease = _acquire(layout, timeout, True)
     except OSError as exc:
-        raise _incompatible("ownership infrastructure is unavailable") from exc
+        error = _incompatible("ownership infrastructure is unavailable")
+        error.data.update(state_root=str(layout.root), engine_version=PRODUCT_VERSION, recovery_supported=False)
+        raise error from exc
+    except StateOwnershipError as exc:
+        exc.data.update(state_root=str(layout.root), engine_version=PRODUCT_VERSION, recovery_supported=False)
+        raise
     with lease:
         yield lease
 

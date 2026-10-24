@@ -8,7 +8,8 @@ from pathlib import Path
 from .state_access import task_operation
 from .task_supervision import read_launch, _write
 from . import store
-from .wire_contracts import PRODUCT, PRODUCT_VERSION, compatible_line
+from .state_compatibility import persisted_compatible
+from .wire_contracts import PRODUCT, PRODUCT_VERSION
 
 _CURSORS = {}
 
@@ -16,7 +17,7 @@ def _envelope(task_id, generation, **fields):
     return dict(product=PRODUCT, product_version=PRODUCT_VERSION, format="harflow.task-observations", v=1, task_id=task_id, generation=generation, **fields)
 
 def _qualify(value, task_id, generation):
-    if not isinstance(value, dict) or value.get("product") != PRODUCT or value.get("format") != "harflow.task-observations" or type(value.get("v")) is not int or value["v"] != 1 or not compatible_line(value.get("product_version")) or value.get("task_id") != task_id or value.get("generation") != generation:
+    if not isinstance(value, dict) or value.get("product") != PRODUCT or value.get("format") != "harflow.task-observations" or type(value.get("v")) is not int or value["v"] != 1 or not persisted_compatible(value.get("product_version"), "harflow.task-observations") or value.get("task_id") != task_id or value.get("generation") != generation:
         raise ValueError("Incompatible native observation document")
 
 MAX_LEDGER = 64 * 1024 * 1024

@@ -4,7 +4,8 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-from .wire_contracts import PRODUCT, PRODUCT_VERSION, compatible_line
+from .state_compatibility import persisted_compatible
+from .wire_contracts import PRODUCT, PRODUCT_VERSION
 from .workflow_run_documents import identifier, _json
 
 RECEIPT_FORMAT = "harflow.workflow.receipt"
@@ -55,7 +56,7 @@ def decode(document: Any, task_id: str) -> dict[str, Any]:
             raise ValueError("Missing or foreign receipt product/format")
         if type(document.get("v")) is not int or document["v"] != 1:
             raise ValueError("Unsupported receipt version")
-        if not compatible_line(document.get("product_version")):
+        if not persisted_compatible(document.get("product_version"), RECEIPT_FORMAT):
             raise ValueError("Incompatible receipt product major/minor line")
         if document.get("task_id") != task_id:
             raise ValueError("Receipt task_id does not match its filename")

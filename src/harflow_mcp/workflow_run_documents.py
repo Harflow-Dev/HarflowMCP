@@ -10,7 +10,8 @@ import math
 import re
 from typing import Any
 
-from .wire_contracts import PRODUCT, PRODUCT_VERSION, compatible_line
+from .state_compatibility import persisted_compatible
+from .wire_contracts import PRODUCT, PRODUCT_VERSION
 
 RUN_FORMAT = "harflow.workflow.run"
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}")
@@ -421,7 +422,7 @@ def decode(document: Any, run_id: str) -> dict[str, Any]:
     if type(document.get("v")) is not int or document["v"] != 1:
         raise WorkflowRunDocumentError(run_id, "Unsupported workflow run document version")
     try:
-        compatible = compatible_line(document.get("product_version"))
+        compatible = persisted_compatible(document.get("product_version"), RUN_FORMAT)
     except (TypeError, ValueError) as exc:
         raise WorkflowRunDocumentError(run_id, str(exc)) from exc
     if not compatible:

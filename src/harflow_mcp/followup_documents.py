@@ -5,7 +5,8 @@ import copy
 import re
 from typing import Any
 
-from .wire_contracts import PRODUCT, PRODUCT_VERSION, compatible_line
+from .state_compatibility import persisted_compatible
+from .wire_contracts import PRODUCT, PRODUCT_VERSION
 from .workflow_run_documents import _json
 
 FOLLOWUP_FORMAT = "harflow.task.followups"
@@ -61,7 +62,7 @@ def decode(document: Any, task_id: str) -> dict[str, Any]:
             raise ValueError("Missing or foreign follow-up product/format")
         if type(document.get("v")) is not int or document["v"] != 1:
             raise ValueError("Unsupported follow-up version")
-        if not compatible_line(document.get("product_version")):
+        if not persisted_compatible(document.get("product_version"), FOLLOWUP_FORMAT):
             raise ValueError("Incompatible follow-up product major/minor line")
         if document.get("task_id") != task_id:
             raise ValueError("Follow-up task_id does not match its filename")

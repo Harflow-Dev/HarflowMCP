@@ -6,12 +6,12 @@
     "url": "https://github.com/Harflow-Dev/HarflowMCP",
     "source": "github"
   },
-  "version": "0.0.1",
+  "version": "0.0.2",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "harflow-mcp",
-      "version": "0.0.1",
+      "version": "0.0.2",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"

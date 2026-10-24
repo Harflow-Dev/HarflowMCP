@@ -317,7 +317,7 @@
     },
     "version-info.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.1",
+      "expected_product_version": "0.0.2",
       "format": "harflow.version-info",
       "required_capabilities": [
         "ctl.v1",
@@ -330,6 +330,41 @@
     "ctl-recovery-activity.json": {
       "encoding": "json",
       "expected_product_version": "0.0.1",
+      "format": "harflow.ctl",
+      "required_capabilities": [],
+      "valid": true
+    },
+    "ctl-state-inspect.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.2",
+      "format": "harflow.ctl",
+      "required_capabilities": [],
+      "valid": true
+    },
+    "ctl-state-inspect-ready.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.2",
+      "format": "harflow.ctl",
+      "required_capabilities": [],
+      "valid": true
+    },
+    "ctl-state-recover.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.2",
+      "format": "harflow.ctl",
+      "required_capabilities": [],
+      "valid": true
+    },
+    "ctl-state-recover-error.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.2",
+      "format": "harflow.ctl",
+      "required_capabilities": [],
+      "valid": true
+    },
+    "ctl-state-error.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.2",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
@@ -366,12 +401,17 @@
     "version-info-build-metadata.json": "cd52be9dfd5f8af9f60513ea8601df70321937d5b15374688f8eb296cae45081",
     "version-info-patch-backward.json": "2922c8b2f832988bb411437f5664a4fc0f671660cb0bc4747a4be7ba6030f174",
     "version-info-patch-forward.json": "4c4f1185e7d562dd64a406c0034ba7cbca3a3594f9c76a5abc474d648a5ac8b0",
-    "version-info.json": "c8d997bba5d38fe0af396ac39bee29d4b574d167ecd759156539a907dd15a9aa",
+    "version-info.json": "9ee04a1db2c0a836d283037b1c64e19eb9e3bbbff60611bea42ebe51d3d395c3",
     "workflow-definition-patch.json": "47f50395f2371a652dec8a6a612c1db95dbabffb43ede363e32369620a6c516d",
     "workflow-definition.json": "df51cdc3e2e4d37197e36173bda52cb71ece0e0c19453b947e89c6529b818309",
     "workflow-run.json": "ee491fc8c1f1da76ac4d59c0cd71b22a57416f727afe8defd701fa07c7b1edd7",
     "workflow-run-patch.json": "95ceb423d7e75bdfc2f1e5af5af8b274cbc9455f3b53245bfd145d1cd71f96ef",
     "invalid-workflow-run.json": "0df6a874e1f2d697f2e49b81d4cf1e8dba8f4c1faf554f46bdd56a3ea085166c",
-    "ctl-recovery-activity.json": "8a871a1c8532521baea5fe6ad47d2b0c182518b7e381f357f66f724e7234d78d"
+    "ctl-recovery-activity.json": "8a871a1c8532521baea5fe6ad47d2b0c182518b7e381f357f66f724e7234d78d",
+    "ctl-state-inspect.json": "522530ca16a3c9d92393052d9cb959787136c9fa5f99e718ab9d33ed1b38304d",
+    "ctl-state-inspect-ready.json": "46cf656e2140a6c445abf2e7503c7b54b41e221fbddd6cb9d2b91f4da6359a41",
+    "ctl-state-recover.json": "157a3f45cb6b9f9fe59495e0ec5dc9705762e97cd46b65fb27713aa3b58629d0",
+    "ctl-state-recover-error.json": "57d96046ca33274faebf9d4ecf33d410bb253de1e1fde25ea64ef9c4852bf1f5",
+    "ctl-state-error.json": "30b76ca1c9c9ef708d72698e6ab25d2c12da03f90f7c3358b6c129940f950d31"
   }
 }

@@ -1,0 +1,1 @@
+{"format":"harflow.ctl","product":"harflow","product_version":"0.0.2","result":{"cooperative_ownership_only":true,"engine_version":"0.0.2","message":"State is compatible","reason":"compatible","recovery_supported":false,"state_root":"/example/state","status":"ready"},"v":1}

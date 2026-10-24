@@ -17,24 +17,24 @@ SPEC.loader.exec_module(release)
 
 
 def test_source_accepts_current_identity_and_exact_metadata():
-    assert release.validate_source(ROOT) == "0.0.1"
+    assert release.validate_source(ROOT) == "0.0.2"
 
 
 def test_installed_version_info_requires_exact_engine_envelope():
-    valid = {"product": "harflow", "component": "engine", "format": "harflow.version-info", "v": 1, "product_version": "0.0.1"}
-    release.validate_version_info(valid, "0.0.1")
-    for key, value in (("product", "other"), ("format", "wrong"), ("v", 2), ("product_version", "0.0.2")):
+    valid = {"product": "harflow", "component": "engine", "format": "harflow.version-info", "v": 1, "product_version": "0.0.2"}
+    release.validate_version_info(valid, "0.0.2")
+    for key, value in (("product", "other"), ("format", "wrong"), ("v", 2), ("product_version", "0.0.1")):
         candidate = dict(valid, **{key: value})
         with pytest.raises(ValueError, match="version-info"):
-            release.validate_version_info(candidate, "0.0.1")
+            release.validate_version_info(candidate, "0.0.2")
     with pytest.raises(ValueError, match="version-info"):
-        release.validate_version_info({"product": "harflow"}, "0.0.1")
+        release.validate_version_info({"product": "harflow"}, "0.0.2")
 
 
 def test_source_rejects_tag_mismatch_before_git_lookup():
     with mock.patch.object(release.subprocess, "check_output") as check_output:
         with pytest.raises(ValueError, match="tag/version mismatch"):
-            release.validate_source(ROOT, tag="v0.0.2", sha="0" * 40)
+            release.validate_source(ROOT, tag="v0.0.3", sha="0" * 40)
     check_output.assert_not_called()
 
 

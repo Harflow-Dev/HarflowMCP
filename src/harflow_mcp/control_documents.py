@@ -5,7 +5,8 @@ import copy
 import re
 from typing import Any
 
-from .wire_contracts import PRODUCT, PRODUCT_VERSION, compatible_line
+from .state_compatibility import persisted_compatible
+from .wire_contracts import PRODUCT, PRODUCT_VERSION
 from .workflow_run_documents import _json
 
 CONTROL_FORMAT = "harflow.task.control"
@@ -64,7 +65,7 @@ def decode(document: Any, task_id: str, family: str, attempt: int, phase: str) -
         validate_identity(task_id, family, attempt, phase)
         if type(document) is not dict or document.get("product") != PRODUCT or document.get("format") != CONTROL_FORMAT:
             raise ValueError("Missing or foreign control product/format")
-        if type(document.get("v")) is not int or document["v"] != 1 or not compatible_line(document.get("product_version")):
+        if type(document.get("v")) is not int or document["v"] != 1 or not persisted_compatible(document.get("product_version"), CONTROL_FORMAT):
             raise ValueError("Incompatible control version")
         if (document.get("task_id"), document.get("family"), document.get("attempt"), document.get("phase")) != (task_id, family, attempt, phase) or type(document.get("attempt")) is not int:
             raise ValueError("Control identity mismatch")

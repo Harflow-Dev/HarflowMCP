@@ -19,7 +19,8 @@ from .canonical_paths import canonical
 from .extra_paths import restore_paths, revalidate_paths
 from .catalog import METADATA_BYTES, catalog_lock, current_metadata_budget, metadata_request
 from .bounded_io import ReadLimit
-from .wire_contracts import PRODUCT, PRODUCT_VERSION, compatible_line
+from .state_compatibility import persisted_compatible
+from .wire_contracts import PRODUCT, PRODUCT_VERSION
 from .workflow_run_documents import WorkflowRunDocumentError, _json
 
 MAX_BYTES = 1048576
@@ -289,7 +290,7 @@ def _load(log_dir: Path, task_id: str, directory_fd: int | None = None):
         if (len(raw) > MAX_BYTES or not isinstance(data, dict) or
                 data.get('product') != PRODUCT or data.get('format') != 'harflow.task.artifacts' or
                 type(data.get('v')) is not int or data['v'] != 1 or
-                not compatible_line(data.get('product_version')) or data.get('task_id') != task_id):
+                not persisted_compatible(data.get('product_version'), 'harflow.task.artifacts') or data.get('task_id') != task_id):
             raise ValueError('Artifact manifest is unavailable')
         items = data['items']
         if not isinstance(items, list) or len(items) > 100:

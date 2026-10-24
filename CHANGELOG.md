@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Advance the local engine identity to 0.0.2; add explicit private-format storage compatibility, exclusive writer-line promotion, narrow empty-directory adoption, and inspect/confirmed crash-resumable incompatible-state backup/reset without relaxing live runtime gates.
+
 - Advance clean final workflow branches to their own joins or End, support `always_route` opt-outs and validated child entry assignment pass-through, and persist runner decision/transition provenance atomically with token movement.
 
 - Shape workflow completion offers from the current End, pending-token, join, required-failure, and goal-replanning state; explain blockers in both optimized and legacy orchestrator prompts.

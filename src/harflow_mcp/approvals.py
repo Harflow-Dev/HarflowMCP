@@ -21,7 +21,8 @@ from pathlib import Path
 from typing import Any
 
 from .store import validate_task_id
-from .wire_contracts import PRODUCT, PRODUCT_VERSION, compatible_line
+from .state_compatibility import persisted_compatible
+from .wire_contracts import PRODUCT, PRODUCT_VERSION
 
 MAX_REQUEST_BYTES = 64 * 1024
 MAX_PENDING = 16
@@ -56,7 +57,7 @@ def _qualified(data: Any, task_id: str) -> bytes:
         if (not isinstance(data, dict) or data.get("product") != PRODUCT or
                 data.get("format") != "harflow.task.approvals" or
                 type(data.get("version")) is not int or data["version"] != 1 or
-                not compatible_line(data.get("product_version")) or data.get("task_id") != task_id or
+                not persisted_compatible(data.get("product_version"), "harflow.task.approvals") or data.get("task_id") != task_id or
                 not isinstance(data.get("requests"), list) or len(data["requests"]) > MAX_RECORDS):
             raise ValueError("Invalid approval ledger")
         for row in data["requests"]:

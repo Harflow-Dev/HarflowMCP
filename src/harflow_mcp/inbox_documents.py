@@ -5,7 +5,8 @@ import copy
 import re
 from typing import Any
 
-from .wire_contracts import PRODUCT, PRODUCT_VERSION, compatible_line
+from .state_compatibility import persisted_compatible
+from .wire_contracts import PRODUCT, PRODUCT_VERSION
 from .workflow_run_documents import _json
 
 INBOX_FORMAT = "harflow.task.inbox"
@@ -33,7 +34,7 @@ def decode(document: Any, task_id: str) -> dict[str, Any]:
             raise ValueError("Invalid inbox task identifier")
         if type(document) is not dict or document.get("product") != PRODUCT or document.get("format") != INBOX_FORMAT:
             raise ValueError("Missing or foreign inbox product/format")
-        if type(document.get("v")) is not int or document["v"] != 1 or not compatible_line(document.get("product_version")):
+        if type(document.get("v")) is not int or document["v"] != 1 or not persisted_compatible(document.get("product_version"), INBOX_FORMAT):
             raise ValueError("Incompatible inbox version")
         if document.get("task_id") != task_id:
             raise ValueError("Inbox task mismatch")

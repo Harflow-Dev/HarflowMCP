@@ -8,7 +8,8 @@ import os
 from pathlib import Path
 import unicodedata
 
-from .wire_contracts import PRODUCT, PRODUCT_VERSION, compatible_line
+from .state_compatibility import persisted_compatible
+from .wire_contracts import PRODUCT, PRODUCT_VERSION
 
 TASK_FORMAT = "harflow.task"
 
@@ -103,7 +104,7 @@ def decode(document: Any, task_id: str, record_type: type) -> Any:
             raise ValueError("Missing or foreign task product/format")
         if type(document.get("v")) is not int or document["v"] != 1:
             raise ValueError("Unsupported task document version")
-        if not compatible_line(document.get("product_version")):
+        if not persisted_compatible(document.get("product_version"), TASK_FORMAT):
             raise ValueError("Incompatible task product major/minor line")
         return qualify_payload(document, task_id, record_type)
     except (TypeError, ValueError) as exc:

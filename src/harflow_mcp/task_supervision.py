@@ -21,7 +21,8 @@ import uuid
 from . import identity, store
 from .state_access import task_operation, assert_task_owned
 from .state_layout import child_environment
-from .wire_contracts import PRODUCT, PRODUCT_VERSION, compatible_line
+from .state_compatibility import persisted_compatible
+from .wire_contracts import PRODUCT, PRODUCT_VERSION
 
 FORMAT = 'harflow.task-launch'
 MAX_REQUEST = 4 * 1024 * 1024
@@ -79,7 +80,7 @@ def read_launch(log_dir: Path, task_id: str):
         value = json.loads(raw)
         if (len(raw) > 65536 or not isinstance(value, dict) or value.get('format') != FORMAT
                 or value.get('product') != PRODUCT or type(value.get('v')) is not int or value.get('v') != 1
-                or not compatible_line(value.get('product_version'))
+                or not persisted_compatible(value.get('product_version'), FORMAT)
                 or value.get('task_id') != task_id or value.get('root') != str(log_dir.parent)
                 or value.get('directory_identity') != _root_identity(log_dir)
                 or not isinstance(value.get('generation'), str) or re.fullmatch('[a-f0-9]{32}', value['generation']) is None
