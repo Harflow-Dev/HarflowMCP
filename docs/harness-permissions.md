@@ -471,13 +471,13 @@ still valid is kept as a bounded audit row (ids, tool, `file_path` under 4 KiB, 
 the original action, no content). A full or invalid ledger keeps the stop-the-run behavior.
 
 **Protected paths.** Write and Edit approvals are refused (`protected_path`) for the Harflow state root,
-repository and user Claude settings and policy (`.claude/settings.json` and `settings.local.json`,
-`CLAUDE_CONFIG_DIR` or `~/.claude`, managed settings, `~/.claude.json`, `.mcp.json`) and the effective Git
+repository and user Claude settings and policy (the whole `<repo>/.claude/` directory, including hooks,
+agents, commands and settings, `CLAUDE_CONFIG_DIR` or `~/.claude`, managed settings, `~/.claude.json`, `.mcp.json`) and the effective Git
 hooks and `config` locations (`git rev-parse --git-path hooks`, the common directory and the worktree
 gitdir) plus the `hooks/`, `config` and `config.worktree` of every Git directory above the target: one named `.git`, or holding `HEAD` with `objects/` and `refs/` or a `commondir` (bare repositories, submodule and linked-worktree gitdirs). Read is refused only for the state
 root. Targets are resolved through symlinks (or their nearest existing parent) and compared
-case-insensitively; if the Git locations cannot be resolved, Write and Edit are refused. These checks run
-once at admission and cannot prevent a later symlink swap. A Bash approval is checked only as the exact
+case-insensitively; if the Git locations cannot be resolved, Write and Edit are refused. These checks are re-resolved at every Write and Edit admission (nothing is cached on the task, so a mid-run
+`core.hooksPath` change is honored, and a resolution failure refuses) and cannot prevent a later symlink swap. A Bash approval is checked only as the exact
 command shown to the caller. The 64 KiB request limit covers the whole control-request JSON.
 
 The adapter retains `acceptEdits`, saved Git deny/allow rules and the harness's managed policies.

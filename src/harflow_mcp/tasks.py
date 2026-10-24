@@ -708,7 +708,6 @@ class Task:
     caller_approval_version: str | None = None
     allowed_commands: list[str] = field(default_factory=list)
     allowed_commands_version: str | None = None
-    protected_paths: Any = None
     interaction_owner: str = "caller"
     approval_generation: str = field(default_factory=lambda: str(uuid.uuid4()))
     approval_pending: bool = False

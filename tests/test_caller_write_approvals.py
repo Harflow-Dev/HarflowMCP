@@ -360,7 +360,7 @@ def check(r, tool: str, path: str | Path) -> str | None:
     return approval_paths.protection(targets, tool, str(path), r.repo)
 
 
-@pytest.mark.parametrize("relative", [".claude/settings.json", ".claude/settings.local.json", ".mcp.json", ".git/hooks/pre-commit", ".git/config"])
+@pytest.mark.parametrize("relative", [".claude/settings.json", ".claude/settings.local.json", ".claude/hooks/x.sh", ".claude/agents/a.md", ".claude/commands/c.md", ".mcp.json", ".git/hooks/pre-commit", ".git/config"])
 def test_repo_protected_targets_refuse_write_and_edit(repo, relative):
     for tool in ("Write", "Edit"):
         assert check(repo, tool, repo.repo / relative) == "protected_path"
@@ -500,6 +500,33 @@ async def test_runtime_protected_path_and_inside_repository_facts(runtime, monke
     first, second = approvals.rows(directory, "task-1")
     assert first["system_rejection"] == "protected_path" and first["inside_repository"] is False
     assert second.get("system_rejection") is None and second["inside_repository"] is True and second["decision_reason"] is None
+
+
+@pytest.mark.asyncio
+async def test_runtime_re_resolves_protected_targets_on_every_admission(runtime, tmp_path_factory):
+    directory, registry = runtime
+    repo = tmp_path_factory.mktemp("rehook") / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    hooks = repo.parent / "late-hooks"
+    task = runtime_task(directory)
+    task.repo_path = repo
+    target = {"file_path": str(hooks / "pre-push"), "content": "c"}
+    await approval_runtime.observe(registry, task, get("claude"), event("Write", target, 1))
+    subprocess.run(["git", "-C", str(repo), "config", "core.hooksPath", str(hooks)], check=True)
+    await approval_runtime.observe(registry, task, get("claude"), event("Write", target, 2))
+    first, second = approvals.rows(directory, "task-1")
+    assert first.get("system_rejection") is None and second["system_rejection"] == "protected_path"
+
+
+@pytest.mark.asyncio
+async def test_runtime_resolution_failure_refuses_with_protected_path(runtime, monkeypatch):
+    directory, registry = runtime
+    task = runtime_task(directory)
+    monkeypatch.setattr(approval_paths, "protected_targets", lambda *_a, **_k: (_ for _ in ()).throw(OSError("boom")))
+    await approval_runtime.observe(registry, task, get("claude"), event("Write", {"file_path": str(directory / "a"), "content": "c"}))
+    (row,) = approvals.rows(directory, "task-1")
+    assert row["system_rejection"] == "protected_path"
 
 
 @pytest.mark.asyncio

@@ -222,16 +222,17 @@ async def respond_request(registry: Any, task_id: str, request_id: str, action_d
 
 
 def _path_facts(registry: Any, task: Any, decoded: dict[str, Any]) -> dict[str, Any]:
-    """Repository containment and protected-path refusal, evaluated once at admission."""
+    """Repository containment and protected-path refusal, evaluated at every admission (the protected targets are never cached)."""
     tool = decoded["action"]["tool_name"]
     path = decoded["action"]["input"].get("file_path") or decoded.get("file_path")
     if tool not in {"Read", "Write", "Edit"} or not isinstance(path, str) or decoded.get("system_rejection") == "request_too_large":
         return decoded
     decoded["inside_repository"] = approval_paths.inside_repository(task.repo_path, path)
     if decoded.get("system_rejection") is None:
-        if task.protected_paths is None:
-            task.protected_paths = approval_paths.protected_targets(task.repo_path, registry.log_dir)
-        reason = approval_paths.protection(task.protected_paths, tool, path, task.repo_path)
+        try:
+            reason = approval_paths.protection(approval_paths.protected_targets(task.repo_path, registry.log_dir), tool, path, task.repo_path)
+        except Exception:
+            reason = "protected_path"
         if reason is not None:
             decoded["system_rejection"] = reason
     return decoded
