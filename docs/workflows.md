@@ -858,6 +858,13 @@ warnings alongside the accepted decision; empty assignment-reference fields on s
 are harmless. Invalid identities, continuation selections, required fields, nonempty misplaced
 assignment context, and permission or harness overrides remain errors.
 
+Decision context also lists `valid_actions` and `completion_blockers`. The prompt includes a
+`complete` example only when the current decision is a clean End checkpoint: End is not executing,
+it is the only pending token, no parallel join remains, required failure evidence is resolved, and
+goal replanning is not required. Otherwise it explains each blocker and omits the completion offer.
+This is guidance for the orchestrator; the existing decision validator still enforces completion
+eligibility and goal assessment.
+
 An agent continuation decision looks like this (IDs are issued by HarflowMCP):
 
 ```json

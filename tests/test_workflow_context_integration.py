@@ -185,6 +185,11 @@ async def test_on_demand_catalog_is_slim_but_specialist_receives_verbatim_instru
     assert any(exact in prompt and "Verify API details" in prompt for prompt, _ in registry.all_prompts)
     offered = [item for envelope in registry.deliveries for item in envelope["checkpoint"].get("on_demand_nodes", [])]
     assert offered and all("instructions" not in item for item in offered)
+    first_actions = registry.deliveries[0]["checkpoint"]["valid_actions"]
+    assert "call_on_demand" in first_actions and "inspect" in first_actions
+    exhausted = [envelope["checkpoint"] for envelope in registry.deliveries if envelope["checkpoint"].get("on_demand_calls_remaining") == 0]
+    if exhausted:
+        assert "call_on_demand" not in exhausted[-1]["valid_actions"]
 
 
 def test_deterministic_benchmark_has_every_scenario():
