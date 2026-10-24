@@ -18,7 +18,7 @@ CALL_FIELDS = {"decision_id", "action", "node_id", "assignment", "reason", "sess
 
 
 def validate_nodes(raw: Any, connected_ids: set[str], *, allow_incomplete: bool = False) -> list[dict[str, Any]]:
-    from .workflows import WorkflowError, _candidate, _identifier, FREEDOMS
+    from .workflows import WorkflowError, _candidate, _identifier, FREEDOMS, check_node_grants
     if not isinstance(raw, list):
         raise WorkflowError("on_demand_nodes must be an array")
     result, ids = [], set(connected_ids)
@@ -45,6 +45,8 @@ def validate_nodes(raw: Any, connected_ids: set[str], *, allow_incomplete: bool 
         node.setdefault("execution_mode", "headless")
         if not isinstance(node["freedom"], str) or node["freedom"] not in FREEDOMS or type(node.get("network")) not in {bool, type(None)}:
             raise WorkflowError(f"Invalid on-demand freedom or network: {nid}")
+        if not allow_incomplete:
+            check_node_grants(node, nid)
         if not isinstance(node["session_mode"], str) or node["session_mode"] not in {"agent_decides", "fresh", "resume"}:
             raise WorkflowError(f"Invalid on-demand session_mode: {nid}")
         if not isinstance(node["execution_mode"], str) or node["execution_mode"] not in {"headless", "prefer_subagent"}:

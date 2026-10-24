@@ -1749,6 +1749,20 @@ scope, routing/question origin, checkpoint, status, timing, execution/result ref
 provides lossless paged calls; `on_demand_nodes` and `on_demand_state` are detail views too.
 The CTL JSON contract is version 14. Historical records without these fields remain readable.
 
+### Candidate command grants
+
+Each agent candidate on a node (the primary, every fallback, and on-demand specialist nodes) can save
+`allowed_commands`, the same bounded Bash patterns as [`start_task`](harness-permissions.md#dispatch-time-command-grants-allowed_commands).
+Orchestrators and workflow builders do not accept the field. Each candidate is validated at save and again at launch
+against its own backend and the node's saved freedom (Claude Code at `write_in_repo` or `publish`; any other backend,
+or `read_only`, refuses the save), and qualified again when the node dispatches. A fallback uses its own saved grants
+and never inherits the primary's. The field appears in a candidate's signature only when non-empty, so existing saved
+signatures are unchanged; session reuse requires identical grants, and a node whose grants changed starts Fresh.
+An agent caller may save or start only grants its own task holds, unless it is `unrestricted`
+(see [nested dispatch](harness-permissions.md#dispatch-time-command-grants-allowed_commands)). Native execution cannot
+carry grants: a `prefer_subagent` node with grants runs Headless and the preview says why. The top-level
+`start_workflow` and `harflow-ctl run --workflow` still refuse `allowed_commands`: grants belong to saved candidates.
+
 ### Caller approval interaction
 
 Each agent candidate, including every fallback, can save `caller_approvals: true`; omitted values

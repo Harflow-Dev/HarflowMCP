@@ -168,16 +168,28 @@ def _positive(value: Any, field: str, maximum: int = 10000) -> int:
     return value
 
 
+def check_node_grants(node: dict[str, Any], label: str, freedom: str | None = None, repo: Path | None = None) -> None:
+    """Each candidate's `allowed_commands` against its own backend and the node's saved freedom; `repo` is known only at launch."""
+    freedom = freedom or node.get("freedom", ROLE_FREEDOM_DEFAULTS[node.get("role", "task")])
+    agent = node.get("agent", {})
+    for candidate in [agent, *agent.get("fallbacks", [])]:
+        if candidate.get("allowed_commands"):
+            try:
+                backends.get(candidate["backend"]).validate_allowed_commands(tuple(candidate["allowed_commands"]), freedom, repo)
+            except backends.UnsupportedCapability as exc:
+                raise WorkflowError(f"Node {label} {candidate['backend']} candidate: {exc}") from exc
+
+
 def is_executable(node: dict[str, Any]) -> bool:
     """Executable nodes dispatch work: an agent, or a whole referenced workflow."""
     return node.get("type") in {"agent", "workflow"}
 
 
-def _candidate(raw: Any) -> dict[str, Any]:
+def _candidate(raw: Any, grants: bool = True) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise WorkflowError("Agent must be an object")
     candidate = copy.deepcopy(raw)
-    unknown = set(candidate) - {"backend", "model", "reasoning_effort", "max_turns", "background_idle_seconds", "caller_approvals", "caller_write_approvals", "fallbacks"}
+    unknown = set(candidate) - {"backend", "model", "reasoning_effort", "max_turns", "background_idle_seconds", "caller_approvals", "caller_write_approvals", "allowed_commands", "fallbacks"}
     if unknown:
         raise WorkflowError(f"Unknown agent settings: {sorted(unknown)}")
     if not isinstance(candidate.get("fallbacks", []), list):
@@ -193,6 +205,18 @@ def _candidate(raw: Any) -> dict[str, Any]:
             raise WorkflowError("caller_write_approvals requires caller_approvals")
         if not candidate["caller_write_approvals"]:
             del candidate["caller_write_approvals"]
+    if "allowed_commands" in candidate:
+        if not grants:
+            raise WorkflowError("allowed_commands belongs to workflow agent nodes, not orchestrators or builders")
+        from . import command_grants
+        try:
+            patterns = command_grants.check_bounds(candidate["allowed_commands"])
+        except backends.UnsupportedCapability as exc:
+            raise WorkflowError(str(exc)) from exc
+        if patterns:
+            candidate["allowed_commands"] = list(patterns)
+        else:
+            del candidate["allowed_commands"]
     if candidate["caller_approvals"] and (not backend.capabilities.supports_caller_approvals or candidate.get("max_turns") is not None):
         raise WorkflowError("Caller approvals require a qualified uncapped backend")
     if candidate.get("max_turns") is None and backend.capabilities.supports_turn_cap and not candidate["caller_approvals"]:
@@ -214,7 +238,7 @@ def _candidate(raw: Any) -> dict[str, Any]:
     except backends.UnsupportedCapability as exc:
         if not candidate.get("fallbacks"):
             raise WorkflowError(str(exc)) from exc
-    candidate["fallbacks"] = [_candidate(c) for c in candidate.get("fallbacks", [])]
+    candidate["fallbacks"] = [_candidate(c, grants) for c in candidate.get("fallbacks", [])]
     if any(c.get("fallbacks") for c in candidate["fallbacks"]):
         raise WorkflowError("Fallbacks must be an ordered flat list")
     return candidate
@@ -241,7 +265,7 @@ def validate_definition(raw: dict[str, Any]) -> dict[str, Any]:
     instructions = d["orchestrator"].get("instructions", "") if isinstance(d.get("orchestrator"), dict) else ""
     if not isinstance(instructions, str):
         raise WorkflowError("Orchestrator instructions must be text")
-    d["orchestrator"] = {**_candidate({k: v for k, v in d.get("orchestrator", {"backend": "codex"}).items() if k != "instructions"}), "instructions": instructions}
+    d["orchestrator"] = {**_candidate({k: v for k, v in d.get("orchestrator", {"backend": "codex"}).items() if k != "instructions"}, False), "instructions": instructions}
     d["max_on_demand_calls"] = _positive(d.get("max_on_demand_calls", 5), "max_on_demand_calls", 50)
     d["max_parallel"] = _positive(d.get("max_parallel", 4), "max_parallel", 64)
     d["max_transitions"] = _positive(d.get("max_transitions", 100), "max_transitions")
@@ -334,6 +358,7 @@ def validate_definition(raw: dict[str, Any]) -> dict[str, Any]:
                 raise WorkflowError("Workflow nodes support read_only, write_in_repo, publish or unrestricted")
             if node["role"] == "implementation" and node["freedom"] == "read_only":
                 raise WorkflowError("Implementation nodes cannot use read_only")
+            check_node_grants(node, node_id)
             node.setdefault("execution_mode", "headless")
             if node["execution_mode"] not in {"headless", "prefer_subagent"}:
                 raise WorkflowError(f"Invalid execution mode: {node_id}")
@@ -1884,6 +1909,10 @@ async def start_workflow(name: str, prompt: str, repo_path: Path, *, overrides: 
     for entry in dependency_tree.get("workflows", {}).values():
         entry["definition"]["context_delivery"] = "optimized_v1"
         entry["definition_sha256"] = definition_sha256(entry["definition"])
+    for entry in dependency_tree.get("workflows", {}).values():
+        for node in entry["definition"]["nodes"] + [{**n, "type": "agent"} for n in entry["definition"].get("on_demand_nodes", [])]:
+            if node["type"] == "agent":
+                check_node_grants(node, node["id"], effective_freedom(node, "unrestricted", permission_policy="saved_node"), Path(repo_path))
     from .workflow_native_policy import digest, plan_owner_contracts
     contracts = plan_owner_contracts(definition, dependency_tree, network=network)
     preview_hash = digest({"definition": definition, "dependency_tree": dependency_tree, "repo_path": str(Path(repo_path).resolve()), "network": network, "owner_contracts": contracts})
@@ -2028,7 +2057,7 @@ def validate_builder_preview(value: Any, name: str) -> dict[str, Any]:
         instructions = draft["orchestrator"].get("instructions", "")
         if not isinstance(instructions, str):
             raise WorkflowError("Orchestrator instructions must be text")
-        draft["orchestrator"] = {**_candidate({k: v for k, v in draft["orchestrator"].items() if k != "instructions"}), "instructions": instructions}
+        draft["orchestrator"] = {**_candidate({k: v for k, v in draft["orchestrator"].items() if k != "instructions"}, False), "instructions": instructions}
     from .workflow_on_demand import validate_nodes
     draft["on_demand_nodes"] = validate_nodes(draft.get("on_demand_nodes", []), ids, allow_incomplete=True)
     _positive(draft.get("max_on_demand_calls", 5), "max_on_demand_calls", 50)
@@ -2123,7 +2152,7 @@ async def build_workflow(name: str, prompt: str, repo_path: Path | None = None, 
     if not isinstance(prompt, str) or not prompt.strip():
         raise WorkflowError("Builder prompt must be nonempty")
     storage = WorkflowStore(root)
-    config = _candidate({**agent, "fallbacks": fallbacks or agent.get("fallbacks", [])})
+    config = _candidate({**agent, "fallbacks": fallbacks or agent.get("fallbacks", [])}, False)
     editing = _editing_context(definition, "definition") if definition is not None else None
     if source is not None and editing is None:
         raise WorkflowError("source requires an editing definition")
@@ -2906,7 +2935,7 @@ class WorkflowSupervisor:
                                 context_delivery["total_characters"] = context_delivery["serialized_characters"] = len(dispatch_prompt)
                                 context_delivery["budget_overflow_bytes"] = max(0, len(dispatch_prompt.encode()) - context_delivery["budget_bytes"])
                                 self._task_update(activation["id"], task_id, {"context_delivery": context_delivery})
-                            task = await self.registry.start(dispatch_prompt, Path(run["repo_path"]), backend=backend, freedom=freedom, network=network, caller_approvals=candidate.get("caller_approvals", False), **({"caller_write_approvals": True} if candidate.get("caller_write_approvals") else {}), model=candidate.get("model"), reasoning_effort=candidate.get("reasoning_effort"), max_turns=candidate.get("max_turns"), background_idle_seconds=candidate.get("background_idle_seconds"), task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder", title=f"{run['name']} · {node.get('title', key)}")
+                            task = await self.registry.start(dispatch_prompt, Path(run["repo_path"]), backend=backend, freedom=freedom, network=network, caller_approvals=candidate.get("caller_approvals", False), **({"allowed_commands": list(candidate["allowed_commands"])} if candidate.get("allowed_commands") else {}), **({"caller_write_approvals": True} if candidate.get("caller_write_approvals") else {}), model=candidate.get("model"), reasoning_effort=candidate.get("reasoning_effort"), max_turns=candidate.get("max_turns"), background_idle_seconds=candidate.get("background_idle_seconds"), task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder", title=f"{run['name']} · {node.get('title', key)}")
                         self.update(lambda r: r.pop("checkout_wait", None), "checkout_acquired")
                         self._task_update(activation["id"], task_id, {"status": "running", "dispatch_stage": "spawn_confirmed", **({"timeout_deadline": timeout_deadline} if timeout_deadline is not None else {})})
                     snapshot = await self._observe_attempt(task, node, role, activation, reservation)
@@ -3795,6 +3824,8 @@ def _candidate_key(candidate: dict[str, Any]) -> str:
         signature["caller_approvals"] = True
     if candidate.get("caller_write_approvals", False):
         signature["caller_write_approvals"] = True
+    if candidate.get("allowed_commands"):
+        signature["allowed_commands"] = list(candidate["allowed_commands"])
     return json.dumps(signature, sort_keys=True)
 
 

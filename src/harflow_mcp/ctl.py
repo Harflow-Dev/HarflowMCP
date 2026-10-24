@@ -1252,7 +1252,7 @@ def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
             if args.extra_writable_path is not None:
                 return _fail(args, "invalid_params", "Extra writable paths are unavailable for workflow launches")
             if getattr(args, 'allowed_command', None) is not None:
-                return _fail(args, "invalid_params", "allowed_commands is unavailable for workflow launches")
+                return _fail(args, "invalid_params", "allowed_commands is unavailable for workflow launches; grant commands on saved workflow agent candidates instead")
             if args.auto_continue:
                 return _fail(args, "invalid_params", "Workflow retries belong to their supervisor; --auto-continue is unavailable")
             if args.group is not None or args.title is not None:

@@ -643,7 +643,7 @@ async def start_task(
         if extra_writable_paths is not None:
             raise MCPError(INVALID_PARAMS, "extra_writable_paths is unavailable for workflow launches")
         if allowed_commands is not None:
-            raise MCPError(INVALID_PARAMS, "allowed_commands is unavailable for workflow launches")
+            raise MCPError(INVALID_PARAMS, "allowed_commands is unavailable for workflow launches; grant commands on saved workflow agent candidates instead")
         if auto_continue:
             raise MCPError(INVALID_PARAMS, "Workflow retries belong to their supervisor; auto_continue is unavailable")
         if group is not None or title is not None:
@@ -1988,7 +1988,7 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
             if not kwargs["prompt"] or not kwargs["prompt"].strip():
                 raise ValueError("prompt must be a non-empty string")
             if action == "build":
-                workflows._candidate({**kwargs["agent"], "fallbacks": kwargs.get("fallbacks") or kwargs["agent"].get("fallbacks", [])})
+                workflows._candidate({**kwargs["agent"], "fallbacks": kwargs.get("fallbacks") or kwargs["agent"].get("fallbacks", [])}, False)
             caller = await _verified_workflow_caller()
             if caller is not None:
                 path = await _validate_repo_path(kwargs["repo_path"]) if kwargs.get("repo_path") is not None else workflows.builder_workspace(workflows.WorkflowStore(_reg().log_dir.parent))
@@ -2012,6 +2012,8 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
                                 backend_ = backends.get(candidate["backend"])
                                 try:
                                     enforcement = backend_.enforcement(freedom, node_network)
+                                    if candidate.get("allowed_commands"):
+                                        enforcement = backend_.allowed_commands_enforcement(enforcement, tuple(candidate["allowed_commands"]))
                                 except backends.NestedDispatchRefused:
                                     raise
                                 except backends.UnsupportedCapability:

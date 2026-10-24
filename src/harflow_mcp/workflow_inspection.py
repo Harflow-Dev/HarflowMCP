@@ -555,6 +555,8 @@ def _check_configs(record: Any, configs: list[tuple[dict[str, Any], str, bool | 
                 raise backends.NestedDispatchRefused("Saved workflow cannot grant caller_write_approvals the caller does not hold; this cap is best-effort", rule="caller_write_approvals")
             try:
                 enforcement = backend_.enforcement(freedom, network)
+                if candidate.get("allowed_commands"):
+                    enforcement = backend_.allowed_commands_enforcement(enforcement, tuple(candidate["allowed_commands"]))
             except backends.NestedDispatchRefused:
                 raise
             except backends.UnsupportedCapability:

@@ -206,6 +206,11 @@ refuses the dispatch. Resume and continuation inheritance is subject to the same
 and continuation. A run that carries grants is stopped, with a bridge notice naming both versions, when its init event
 reports a different version or none, or a tool event arrives before init.
 
+**Workflows.** Saved agent candidates (primary, fallbacks, on-demand nodes) carry their own `allowed_commands`; see
+[workflows](workflows.md#candidate-command-grants). They are validated at save and launch for each candidate's backend
+and freedom, an agent caller cannot save or start grants beyond its own, and a fallback never inherits the primary's.
+`start_workflow` itself takes no `allowed_commands`.
+
 **Disclosure.** `enforcement.extra_allowed_commands` lists the patterns, with caveats; the booleans are unchanged
 (`direct_commit_commands_denied` stays true at `write_in_repo`). Task snapshots and `harflow-ctl status` also carry
 `allowed_commands`, and `preview_task_permissions` / `harflow-ctl permission-preview` show the same without launching.
