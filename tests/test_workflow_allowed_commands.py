@@ -247,7 +247,9 @@ async def test_start_refuses_on_demand_and_node_grants_beyond_the_agent_callers(
         await start(holder, "fallback")
 
 
-async def test_start_refuses_on_demand_write_approvals_the_caller_lacks(agent_caller_server):
+async def test_start_refuses_on_demand_write_approvals_the_caller_lacks(agent_caller_server, monkeypatch):
+    import harflow_mcp.backends as backends
+    monkeypatch.setattr(backends, "version", lambda backend: "2.1.310 (Claude Code)")
     holder = agent_caller_server
     saved(holder.store, "writes", on_demand_nodes=on_demand(caller_approvals=True, caller_write_approvals=True))
     with pytest.raises(MCPError) as raised:
