@@ -9,6 +9,8 @@ Each user message's text is a command:
 
     reply <text>       answer with <text>
     slow <secs> <text> work for <secs>, folding in anything that arrives meanwhile, then answer
+    tool <secs> <text> emit a foreground Bash tool call, wait, emit its tool result, then answer
+    cap              emit error_max_turns once, then success on the next invocation
     bg <id> <secs>     start a background task that finishes after <secs>, answer STARTED
     silentbg <id>      start a background task that never finishes, answer STARTED
     error              end the turn with an error result
@@ -41,12 +43,12 @@ def emit(event: dict) -> None:
         sys.stdout.flush()
 
 
-def result(text: str, *, error: bool = False) -> None:
+def result(text: str, *, error: bool = False, subtype: str | None = None) -> None:
     _cost[0] += 0.01
     emit(
         {
             "type": "result",
-            "subtype": "error_during_execution" if error else "success",
+            "subtype": subtype or ("error_during_execution" if error else "success"),
             "is_error": error,
             "result": text,
             "num_turns": 1,
@@ -124,6 +126,44 @@ def turn(text: str, pending_eof: list[bool]) -> None:
             else:
                 _inbox.put((kind, value))
         result(answer + ("" if not folded else " | folded: " + " / ".join(folded)))
+    elif command == "tool":
+        seconds, answer = float(words[1]), " ".join(words[2:])
+        emit({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "toolu_foreground", "name": "Bash", "input": {"command": "sleep"}}]}})
+        folded: list[str] = []
+        deadline = time.monotonic() + seconds
+        while (remaining := deadline - time.monotonic()) > 0:
+            try:
+                kind, value = _inbox.get(timeout=remaining)
+            except queue.Empty:
+                break
+            if kind == "user":
+                folded.append(value)
+            elif kind == "eof":
+                pending_eof[0] = True
+            else:
+                _inbox.put((kind, value))
+        emit({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "toolu_foreground", "content": "done"}]}})
+        result(answer + ("" if not folded else " | folded: " + " / ".join(folded)))
+    elif command == "cap":
+        counter = os.environ.get("FAKE_CLAUDE_CAP_COUNTER")
+        count = 0
+        if counter:
+            try:
+                count = int(open(counter).read())
+            except (FileNotFoundError, ValueError):
+                pass
+            with open(counter, "w") as handle:
+                handle.write(str(count + 1))
+        ready = os.environ.get("FAKE_CLAUDE_CAP_READY")
+        if ready:
+            open(ready, "a").close()
+        time.sleep(float(os.environ.get("FAKE_CLAUDE_CAP_DELAY", "0")))
+        result(
+            "cutoff" if count == 0 else "success",
+            error=count == 0,
+            subtype="error_max_turns" if count == 0 else None,
+        )
+        return
     elif command == "bg":
         start_background(words[1])
         threading.Thread(

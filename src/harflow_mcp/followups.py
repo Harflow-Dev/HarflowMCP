@@ -935,6 +935,12 @@ class Attempt:
 
     @layout_operation
     def _notice(self, registry: Any, task: Any) -> None:
+        from .task_attachment import AttachedTask
+        if isinstance(task, AttachedTask):
+            task._add_observer_notice(
+                f'Queued follow-ups from {self.task_id} were handed to this successor, but the source '
+                'ledger consumption update is pending reconciliation. This observer did not change owner metadata.')
+            return
         try:
             task.bridge_notices.append(
                 f"The queued follow-ups of {self.task_id} were delivered to this task, but marking "

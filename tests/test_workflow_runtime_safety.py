@@ -186,7 +186,7 @@ def test_dead_unobserved_outcome_cannot_recover_as_success(tmp_path,monkeypatch)
     storage=w.WorkflowStore(tmp_path / "state")
     run=storage.create_run(w.validate_definition(definition()),"go",tmp_path)
     storage.update_run(run["workflow_run_id"],lambda r:r.update(status="needs_attention",activations=[make_activation(id="a", tasks=[{"task_id":"dead","status":"running"}])]),"fixture")
-    monkeypatch.setattr(w.task_store,"read",lambda *a:SimpleNamespace(status="running"))
+    monkeypatch.setattr(w.task_store,"read",lambda *a:SimpleNamespace(task_id="dead",status="running"))
     monkeypatch.setattr(w,"task_liveness",lambda *a:{"process_alive":False,"outcome_known":False})
     monkeypatch.setattr(w.task_store,"snapshot",lambda *a:{"status":"completed","summary":"old result"})
     from harflow_mcp import workflow_delegation

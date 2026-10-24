@@ -267,7 +267,7 @@ async def test_pristine_configless_registry_starts_no_notification_worker(monkey
     monkeypatch.setenv("HARFLOW_STATE_ROOT", str(registry.log_dir.parent))
     monkeypatch.delenv('HARFLOW_NOTIFY_DESTINATIONS', raising=False)
     monkeypatch.setattr(server, '_registry', None)
-    monkeypatch.setattr(server, 'TaskRegistry', lambda: registry)
+    monkeypatch.setattr(server, 'TaskRegistry', lambda *args, **kwargs: registry)
     monkeypatch.setattr(registry, 'start_maintenance', lambda: None)
     assert server._reg() is registry
     assert getattr(registry, '_notification_worker', None) is None
@@ -285,7 +285,7 @@ async def test_configured_registry_starts_notification_worker_once(monkeypatch):
         await asyncio.Future()
     monkeypatch.setattr(notifications, 'worker', worker)
     monkeypatch.setattr(server, '_registry', None)
-    monkeypatch.setattr(server, 'TaskRegistry', lambda: registry)
+    monkeypatch.setattr(server, 'TaskRegistry', lambda *args, **kwargs: registry)
     monkeypatch.setattr(registry, 'start_maintenance', lambda: None)
     try:
         server._reg()
@@ -327,7 +327,7 @@ async def test_existing_database_cleanup_resumes_without_configuration(monkeypat
         await asyncio.Future()
     monkeypatch.setattr(notifications, 'tick', tick)
     monkeypatch.setattr(server, '_registry', None)
-    monkeypatch.setattr(server, 'TaskRegistry', lambda: registry)
+    monkeypatch.setattr(server, 'TaskRegistry', lambda *args, **kwargs: registry)
     monkeypatch.setattr(registry, 'start_maintenance', lambda: None)
     try:
         server._reg()
@@ -406,7 +406,7 @@ async def test_unsubscribe_absent_does_not_create_storage_or_future_worker(monke
     assert await server.unsubscribe('absent') == []
     assert not (registry.log_dir.parent / 'notifications.sqlite3').exists()
     monkeypatch.setattr(server, '_registry', None)
-    monkeypatch.setattr(server, 'TaskRegistry', lambda: registry)
+    monkeypatch.setattr(server, 'TaskRegistry', lambda *args, **kwargs: registry)
     monkeypatch.setattr(registry, 'start_maintenance', lambda: None)
     assert server._reg() is registry
     assert getattr(registry, '_notification_worker', None) is None

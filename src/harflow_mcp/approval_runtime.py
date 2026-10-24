@@ -88,7 +88,8 @@ def _reconcile(registry: Any, task_id: str) -> Any:
     record = _record(registry, task_id)
     current = registry.get(task_id)
     # A different still-live server owns its pipe. A restarted server cannot adopt it.
-    if current is None and (not record.owner or identity.identity_check(record.owner) != "alive"):
+    from .task_attachment import AttachedTask
+    if (current is None or isinstance(current, AttachedTask)) and (not record.owner or identity.identity_check(record.owner) != "alive"):
         approvals.invalidate(registry.log_dir, task_id, "invalidated")
     if record.status != "running":
         approvals.invalidate(registry.log_dir, task_id, "cancelled" if record.status == "cancelled" else "invalidated")
@@ -195,7 +196,8 @@ async def respond_request(registry: Any, task_id: str, request_id: str, action_d
         raise ValueError("Approval process ownership is lost or uncertain")
     await asyncio.to_thread(approvals.reserve, registry.log_dir, task_id, request_id, action_digest, owner_revision, decision, raw["generation"])
     current = registry.get(task_id)
-    if current is not None:
+    from .task_attachment import AttachedTask
+    if current is not None and not isinstance(current, AttachedTask):
         current.pump_wake.set()
     return await asyncio.to_thread(approvals.get, registry.log_dir, task_id, request_id)
 

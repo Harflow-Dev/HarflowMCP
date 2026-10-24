@@ -260,6 +260,8 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     workflow_parsers = []
     for action in ("validate", "list", "list-page", "get", "save", "delete", "build", "preview", "start", "list-runs", "status", "detail", "wait", "pause", "resume", "cancel", "revise-goal", "builder-followup", "builder-apply", "inspect", "assigned-input", "artifacts", "recover", "migrate", "abandon-dispatch"):
         wp = sub.add_parser("workflow-" + action, help=action + " workflows")
+        if action == "recover":
+            wp.description = "Explicitly recover a failed settled run or an interrupted root with a confirmed-dead scheduler. Supply a reason; uncertain task ownership blocks recovery. Interrupted recovery preserves existing attempts and decision budgets."
         if action in {"save", "validate"}:
             wp.description = "Workflow nodes accept child_session_policy agent_decides (default), fresh, or resume in Child orchestrator mode. Resume requires the latest completed compatible invocation in the immediate parent run and never silently starts Fresh. Current mode retains its existing session owner."
         if action == "build":
@@ -669,7 +671,7 @@ def _cmd_cancel(args: argparse.Namespace) -> int:
     if store.read(log_dir, task_id) is None:
         return _fail(args, "unknown_task", f"unknown task_id: {task_id}")
 
-    registry = tasks_module.TaskRegistry(log_dir=log_dir, open_monitor=False)
+    registry = tasks_module.TaskRegistry(log_dir=log_dir, open_monitor=False, execution_mode="supervised")
 
     async def cancel_and_settle() -> tuple[dict[str, Any], list[str]]:
         cascade = await registry.cancel_cascade(task_id)
@@ -713,7 +715,7 @@ def _cmd_takeover(args: argparse.Namespace) -> int:
                 log_dir,
                 args.task_id,
                 registry_factory=lambda: tasks_module.TaskRegistry(
-                    log_dir=log_dir, open_monitor=False
+                    log_dir=log_dir, open_monitor=False, execution_mode="supervised"
                 ),
             )
         )
@@ -835,7 +837,7 @@ def _cmd_detached(args: argparse.Namespace, action: Any) -> int:
         log_path=_ctl_log_path(),
         log_dir=log_dir,
         # No retention and no open-app: the app drives these commands itself.
-        registry_factory=lambda: tasks_module.TaskRegistry(log_dir=log_dir, open_monitor=False),
+        registry_factory=lambda: tasks_module.TaskRegistry(log_dir=log_dir, open_monitor=False, execution_mode="supervised"),
     )
     if outcome.kind == "task":
         if args.json:

@@ -493,7 +493,11 @@ def inspect_decision(supervisor: Any, decision: dict[str, Any], checkpoint: dict
         raise w.WorkflowError("Inspection response exceeds 32k; request a smaller page limit")
     def accept(r: dict[str, Any]) -> None:
         a = next(a for a in r["activations"] if a["id"] == activation_id)
-        a.update(status="completed", inspection_requests=copy.deepcopy(requests), protocol_warnings=protocol_warnings or [])
+        if a.get("decision_disposition"):
+            return
+        if not question_id and "decision_goal_revision" in a and (next(t for t in r["pending"] if t["id"] == checkpoint["id"]).get("decision_activation_id") != activation_id or r.get("goal_revision") != a.get("decision_goal_revision") or next(t for t in r["pending"] if t["id"] == checkpoint["id"]).get("decision_id") != a.get("decision_id")):
+            raise w.WorkflowError("Inspection checkpoint or goal changed before acceptance")
+        a.update(status="completed", inspection_requests=copy.deepcopy(requests), protocol_warnings=protocol_warnings or [], decision_disposition="inspect")
         if r["status"] != "running":
             a["decision_ignored"] = "Human control changed run state before inspection acceptance"
             return
@@ -502,6 +506,8 @@ def inspect_decision(supervisor: Any, decision: dict[str, Any], checkpoint: dict
             return
         if question_id:
             target = next(q for aa in r["activations"] if aa["id"] == execution_id for q in aa["questions"] if q["question_id"] == question_id)
+            if "decision_goal_revision" in a and (target.get("decision_activation_id") != activation_id or target.get("decision_id") != a.get("decision_id") or r.get("goal_revision") != a.get("decision_goal_revision")):
+                raise w.WorkflowError("Question inspection checkpoint or goal changed before acceptance")
         else:
             target = next(t for t in r["pending"] if t["id"] == checkpoint["id"])
         target["inspection_count"] = target.get("inspection_count", 0) + len(requests)
@@ -882,6 +888,24 @@ def validate_decision(run: dict[str, Any], node: dict[str, Any], token: dict[str
     return selected, assignments, join
 
 
+def record_retained_control_session(supervisor: Any, activation: dict[str, Any], attempt: dict[str, Any], outcome: dict[str, Any]) -> None:
+    """Persist observed session bookkeeping before accepting a retained control result."""
+    w = _w()
+    run = supervisor.run(refresh_atomic=True)
+    if run.get("inherited_orchestrator_binding") and not run.get("sessions", {}).get("orchestrator"):
+        from .workflow_child_sessions import validate_inherited
+        validate_inherited(supervisor.store, run)
+        raise w.WorkflowError("Retained child control turn lacks a positively recovered session binding")
+    binding = {"candidate": "orchestrator:" + w._candidate_key(attempt["candidate"]), "task_id": attempt["task_id"], "session_id": outcome.get("session_id")}
+    override = getattr(supervisor, "orchestrator_override", None)
+    if override is not None:
+        supervisor.store.update_run(override[0], lambda r: r.setdefault("sessions", {}).__setitem__("orchestrator", binding), "session_recorded", {"child_workflow_run_id": run["workflow_run_id"], "task_id": attempt["task_id"]})
+    else:
+        supervisor.update(lambda r: r.setdefault("sessions", {}).__setitem__("orchestrator", binding), "session_recorded", "orchestrator")
+    if run.get("recovered_inherited_turn"):
+        supervisor.update(lambda r: r.pop("recovered_inherited_turn", None), "inherited_recovery_continued")
+
+
 async def decide(supervisor: Any, node: dict[str, Any], token: dict[str, Any], *, execute: bool = False) -> list[dict[str, Any]] | None:
     w = _w()
     from .workflow_on_demand import decision_lock
@@ -896,7 +920,8 @@ async def decide(supervisor: Any, node: dict[str, Any], token: dict[str, Any], *
             token = next(t for t in run["pending"] if t["id"] == token["id"])
             if not supervisor.tree.tree_running(run):
                 return None
-            if token.get("decision_attempts", 0) >= run["definition"].get("max_decision_attempts", 3):
+            retained = next((a for a in run["activations"] if a["id"] == token.get("decision_activation_id") and not a.get("decision_disposition")), None)
+            if retained is None and token.get("decision_attempts", 0) >= run["definition"].get("max_decision_attempts", 3):
                 supervisor.update(lambda r: exhaust_decision(r, token), "decision_exhausted")
                 return None
             import asyncio
@@ -906,9 +931,28 @@ async def decide(supervisor: Any, node: dict[str, Any], token: dict[str, Any], *
             prompt = decision_prompt(context)
             if token.get("decision_error"):
                 prompt += "\nCorrection: " + token["decision_error"]
-            activation = supervisor._activation(node["id"], "orchestrator", copy.deepcopy(token))
-            supervisor.update(lambda r: (next(t for t in r["pending"] if t["id"] == token["id"]).update(decision_attempts=token.get("decision_attempts", 0) + 1), next(a for a in r["activations"] if a["id"] == activation["id"]).update(decision_id=token["decision_id"])), "decision_attempt_reserved")
-            outcome = await supervisor._dispatch({"id": "orchestrator", "title": "Decision"}, prompt, "orchestrator", {**activation, "_decision_context": {**context, **({"correction": token["decision_error"]} if token.get("decision_error") else {})}})
+            if retained is None:
+                activation = {"id": uuid.uuid4().hex, "node_id": node["id"], "role": "orchestrator", "status": "running", "tasks": [], "created_at": time.time(), "token": copy.deepcopy(token), "decision_id": token["decision_id"], "decision_goal_revision": run.get("goal_revision")}
+                def reserve(r: dict[str, Any]) -> None:
+                    target = next(t for t in r["pending"] if t["id"] == token["id"])
+                    if target.get("decision_id") != token["decision_id"] or target.get("decision_activation_id") != token.get("decision_activation_id"):
+                        raise w.WorkflowError("Decision checkpoint changed before reservation")
+                    r["activations"].append(copy.deepcopy(activation))
+                    target.update(decision_attempts=target.get("decision_attempts", 0) + 1, decision_activation_id=activation["id"])
+                supervisor.update(reserve, "decision_attempt_reserved")
+                outcome = await supervisor._dispatch({"id": "orchestrator", "title": "Decision"}, prompt, "orchestrator", {**activation, "_decision_context": {**context, **({"correction": token["decision_error"]} if token.get("decision_error") else {})}})
+            else:
+                activation = retained
+                attempt = activation["tasks"][-1] if activation["tasks"] else None
+                outcome = attempt.get("result") if attempt and attempt.get("status") in {"completed", "failed", "cancelled"} else None
+                if outcome is None:
+                    outcome = await supervisor._dispatch({"id": "orchestrator", "title": "Decision"}, prompt, "orchestrator", {**activation, "_decision_context": context})
+                elif outcome.get("status") == "completed" and not outcome.get("is_error"):
+                    try:
+                        record_retained_control_session(supervisor, activation, attempt, outcome)
+                    except w.WorkflowError as exc:
+                        supervisor.attention("Child Resume refused: " + str(exc))
+                        return None
             if not outcome:
                 supervisor.update(lambda r: next(a for a in r["activations"] if a["id"] == activation["id"]).update(status="failed"), "decision_interrupted")
                 return None
@@ -938,7 +982,11 @@ async def decide(supervisor: Any, node: dict[str, Any], token: dict[str, Any], *
                 def accept(r: dict[str, Any]) -> None:
                     t = next(t for t in r["pending"] if t["id"] == token["id"])
                     a = next(a for a in r["activations"] if a["id"] == activation["id"])
-                    a.update(status="completed", raw_output=raw, protocol_warnings=protocol_warnings)
+                    if (t.get("decision_id") != activation["decision_id"] or t.get("decision_activation_id") != activation["id"] or r.get("goal_revision") != activation.get("decision_goal_revision")):
+                        raise w.WorkflowError("Decision checkpoint or goal changed before acceptance")
+                    if a.get("decision_disposition"):
+                        return
+                    a.update(status="completed", raw_output=raw, protocol_warnings=protocol_warnings, decision_disposition="accepted")
                     if r["status"] != "running":
                         a["decision_ignored"] = "Human control changed run state before acceptance"
                         return
@@ -1046,7 +1094,7 @@ async def decide(supervisor: Any, node: dict[str, Any], token: dict[str, Any], *
             except (ValueError, TypeError, AttributeError) as exc:
                 def reject(r: dict[str, Any]) -> None:
                     diagnostic = {"decision_id": token["decision_id"], "attempt": token.get("decision_attempts", 0), "category": "harness" if outcome.get("execution_failure") else "validation", "field_path": decision_error_path(str(exc)), "error": str(exc), "valid_continuations": continuations(r, node, token, execute, root=supervisor.store.root)}
-                    next(a for a in r["activations"] if a["id"] == activation["id"]).update(status="failed", raw_output=raw, result_error=str(exc), decision_diagnostic=diagnostic)
+                    next(a for a in r["activations"] if a["id"] == activation["id"]).update(status="failed", raw_output=raw, result_error=str(exc), decision_diagnostic=diagnostic, decision_disposition="rejected")
                     r.setdefault("decision_errors", []).append(diagnostic)
                     if r["status"] != "running" or not supervisor.tree.tree_running(r):
                         return

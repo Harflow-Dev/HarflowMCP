@@ -1250,7 +1250,7 @@ def test_owned_by_live_server_note_and_flag_when_identity_check_reports_alive(
 
     assert status == "running"
     assert "4242" in note
-    assert "owned by a live harflow_mcp server process" in note
+    assert "owned by a live Harflow owner process" in note
 
     snap = store.snapshot(tmp_path, record)
     assert snap["owned_by_live_server"] is True

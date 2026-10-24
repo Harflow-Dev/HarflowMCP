@@ -236,7 +236,7 @@ def _reg() -> TaskRegistry:
     layout = task_layout(_registry.log_dir if _registry is not None else default_log_dir())
     with state_session(layout):
         if _registry is None:
-            _registry = TaskRegistry()
+            _registry = TaskRegistry(execution_mode="supervised")
             _registry.start_maintenance()
             _start_notification_worker(_registry)
         return _registry
@@ -266,7 +266,7 @@ def install_cli_registry(log_dir: Path | None = None) -> TaskRegistry:
     """
     global _registry
     if _registry is None:
-        _registry = TaskRegistry(log_dir=log_dir, open_monitor=False)
+        _registry = TaskRegistry(log_dir=log_dir, open_monitor=False, execution_mode="supervised")
     return _registry
 
 
@@ -546,7 +546,8 @@ async def start_task(
             backend-confirmed recoverable cutoffs and observed process/output settlement.
             Supported cutoff profiles are backend-owned; missing answers alone never qualify.
             Cancellation, permission denial, usage limits and workflow-owned tasks are excluded.
-            Automatic continuation across server death is not promised.
+            Detached task owners preserve automatic continuation across MCP server death.
+            Task-owner death retains uncertain reservations rather than duplicating execution.
 
         notify: Configured destination alias, direct callers only. Intent is durable before spawn.
             Receivers must deduplicate stable IDs; retries resume only while a server is active.
@@ -939,7 +940,9 @@ async def _await_with_progress(task: Task, plan: wait_policy.WaitPlan, ctx: Cont
         if task.caller_approvals:
             from . import approvals
             attention = await asyncio.to_thread(approvals.summary, _reg().log_dir, task.task_id)
-            task.approval_view = attention
+            from .task_attachment import AttachedTask
+            if not isinstance(task, AttachedTask):
+                task.approval_view = attention
             if attention.get("interaction_state"):
                 return wait_policy.STOP_ATTENTION
         if task.done.is_set():
@@ -1131,6 +1134,11 @@ async def wait_for_task(
     clock = plan.begin()
     outcome_observed = True
     task = _reg().get(task_id)
+    from .task_attachment import AttachedTask
+    attached = task if isinstance(task, AttachedTask) else None
+    if attached is not None:
+        task = None
+
     if task is not None:
         stop_reason = await _await_with_progress(task, plan, ctx)
         snapshot = task.snapshot()
@@ -1144,7 +1152,7 @@ async def wait_for_task(
             )
         record, stop_reason, outcome_observed = await _poll_recovered(record, plan, ctx)
         try:
-            snapshot = await asyncio.to_thread(store.snapshot, _reg().log_dir, record)
+            snapshot = await asyncio.to_thread(attached.snapshot) if attached is not None else await asyncio.to_thread(store.snapshot, _reg().log_dir, record)
         except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):
             raise
         except Exception:
@@ -2585,7 +2593,10 @@ async def inspect_workflow_node(workflow_run_id: str, execution_id: str, task_id
 @mcp.tool()
 @_task_document_errors
 async def recover_workflow(workflow_run_id: str, reason: str, additional_attempts: int = 0) -> dict[str, Any]:
-    """Explicitly recover a failed settled run; retain completed work and supply a reason.
+    """Explicitly recover a failed settled run or a root with a confirmed-dead scheduler.
+
+    Supply a reason and retain completed work. Interrupted scheduler recovery preserves
+    existing attempts and decision budgets; uncertain execution ownership blocks recovery.
 
     Preserve spaces and word boundaries in reason rather than compressing natural
     prose; the caller's source text is retained unchanged before workflow input assembly.

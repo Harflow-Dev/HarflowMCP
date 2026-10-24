@@ -471,6 +471,10 @@ async def test_completed_first_resume_crash_reconciles_owned_binding(store, sour
         assert len(registry.resumes) == 1
     else:
         assert final["status"] == "completed", final.get("attention_reason")
-        assert registry.resumes[2 if mutation == "repeat" else 1][0] == own.task_id
-        assert "NEW CHILD WORKFLOW INVOCATION" in registry.resumes[1][1]
+        assert len(registry.resumes) == 2
+        assert registry.resumes[1][0] == own.task_id
+        reset_marker = "NEW CHILD WORKFLOW INVOCATION"
+        assert reset_marker in registry.resumes[0][1]
+        assert reset_marker not in registry.resumes[1][1]
+        assert sum(reset_marker in prompt for _, prompt in registry.resumes) == 1
         assert all(t["session_mode"] == "resume" for a in final["activations"] if a["role"] == "orchestrator" for t in a["tasks"])

@@ -978,7 +978,12 @@ class TaskRegistry:
         open_monitor: bool = False,
         caller_override: lineage.Caller | None = None,
         monitor_launcher: Callable[[str], Awaitable[int]] | None = None,
+        execution_mode: str = "in_process",
     ) -> None:
+        if execution_mode not in {"in_process", "supervised"}:
+            raise ValueError("Unknown task execution mode")
+        self.execution_mode = execution_mode
+        self._attached = {}
         self._tasks: dict[str, Task] = {}
         self._caller_override = caller_override
         # Whether a root task this registry starts opens the Monitor app (A4.3). False for
@@ -1238,6 +1243,13 @@ class TaskRegistry:
             # Only some backends let us name the session up front. Where we can, knowing it immediately
             # means a resume works even if the run dies before saying anything.
             session_id = str(uuid.uuid4()) if backend.capabilities.chooses_session_id else None
+            if task_id and self.execution_mode == "supervised":
+                from .task_supervision import read_launch
+                previous_launch = read_launch(self._log_dir, task_id)
+                if previous_launch and previous_launch['state'] == 'not_started':
+                    # The launcher still requires the entire prepared configuration fingerprint.
+                    # Keep the originally authorized session identity for a proven pre-exec retry.
+                    session_id = previous_launch.get('session_id')
             invocation = backend.build_start_argv(
                 prompt,
                 repo=repo_path,
@@ -1337,6 +1349,14 @@ class TaskRegistry:
         `followup_prompt`, which may be omitted only when something is queued. It is a flag of its
         own, never inferred from `task_id`, which keeps marking supervisor-owned resumes.
         """
+        from .task_attachment import AttachedTask
+        if isinstance(parent, AttachedTask):
+            return await self.resume_record(parent.record(), followup_prompt,
+                max_turns=max_turns, background_idle_seconds=background_idle_seconds,
+                network=network, task_id=task_id, display_prompt=display_prompt,
+                workflow_builder=workflow_builder, native_subagent=native_subagent,
+                native_settings=native_settings, require_unchanged_session=require_unchanged_session,
+                consume_followups=consume_followups)
         store.read(self._log_dir, parent.task_id, include_prompt=False)
         from .state_layout import require_dispatch_layout
         require_dispatch_layout(self._log_dir)
@@ -1570,7 +1590,13 @@ class TaskRegistry:
         return task
 
     @layout_operation
-    async def _spawn(
+    async def _spawn(self, invocation: Invocation, **kwargs) -> Task:
+        if self.execution_mode == "supervised":
+            from .task_supervision import launch
+            return await launch(self, invocation, kwargs)
+        return await self._execute_prepared(invocation, **kwargs)
+
+    async def _execute_prepared(
         self,
         invocation: Invocation,
         *,
@@ -1841,6 +1867,10 @@ class TaskRegistry:
             results_owed=1 if invocation.live_input else 0,
         )
 
+        task.native_observation_generation = getattr(self, '_launch_generations', {}).get(task_id) if invocation.native_subagent else None
+        task.native_observation_sequence = 0
+        task.native_observation_failed = False
+
         # Written before anything can go wrong, so even a task whose server dies immediately is
         # discoverable by whichever process comes next.
         try:
@@ -2049,6 +2079,9 @@ class TaskRegistry:
         Takes the same inbox lock as the close protocol, so a message is either accepted before
         the close (and then forwarded or reported undelivered) or refused after it.
         """
+        from .task_attachment import AttachedTask
+        if isinstance(task, AttachedTask):
+            return await self.send_to_record(task.task_id, text)
         store.read(self._log_dir, task.task_id, include_prompt=False)
         from .workflow_hooks import refuse_direct_message
         await asyncio.to_thread(refuse_direct_message, self._log_dir, task.task_id)
@@ -2571,6 +2604,9 @@ class TaskRegistry:
 
     @layout_operation
     def persist(self, task: Task) -> None:
+        from .task_attachment import AttachedTask
+        if isinstance(task, AttachedTask):
+            raise TypeError("Cannot persist an attached task; only its supervisor owns metadata")
         task.latest_record_landed = False
         task.persistence_error = None
         landed = store.write_landed(
@@ -2639,7 +2675,19 @@ class TaskRegistry:
                 task.bridge_notices.append(notice)
 
     def get(self, task_id: str) -> Task | None:
-        return self._tasks.get(task_id)
+        return self._tasks.get(task_id) or self._attached.get(task_id)
+
+    @layout_operation
+    def attach(self, task_id: str):
+        from .task_attachment import AttachedTask
+        store.validate_task_id(task_id)
+        if task_id in self._tasks:
+            return self._tasks[task_id]
+        if store.read(self._log_dir, task_id) is None:
+            return None
+        task = self._attached.setdefault(task_id, AttachedTask(self._log_dir, task_id, registry=self))
+        self.prune()
+        return task
 
     @layout_operation
     def recover(self, task_id: str) -> store.TaskRecord | None:
@@ -2781,6 +2829,12 @@ class TaskRegistry:
         Safe to call concurrently: the termination sequence is owned by the task, so repeat callers
         join the one already in flight rather than starting a second.
         """
+        from .task_attachment import AttachedTask
+        if isinstance(task, AttachedTask):
+            from .task_continuation import stop_chain
+            await stop_chain(self, task.task_id)
+            await self.cancel_recovered(task.record())
+            return task
         store.read(self._log_dir, task.task_id, include_prompt=False)
         if task.finished:
             return task
@@ -3696,12 +3750,23 @@ class TaskRegistry:
         Synchronous on purpose. Every mutation of `_tasks` happens without an intervening await, so
         the event loop cannot interleave two of them and no lock is needed.
         """
-        overflow = len(self._tasks) - self._max_tasks
+        overflow = len(self._tasks) + len(self._attached) - self._max_tasks
         if overflow <= 0:
             return
-        for task in [t for t in self.list() if t.finished and t.task_id not in getattr(self, "_continuation_sources", set())][:overflow]:
-            del self._tasks[task.task_id]
-            log.debug("evicted finished task %s", task.task_id)
+        candidates = [(task.started_at, task.task_id, self._tasks) for task in self._tasks.values()
+                      if task.finished and task.task_id not in getattr(self, '_continuation_sources', set())]
+        from .task_supervision import read_task_record
+        for identifier in tuple(self._attached):
+            try:
+                record = read_task_record(self._log_dir, identifier)
+            except (store.TaskDocumentError, OSError):
+                continue  # Unknown settlement must never evict a live or uncertain handle.
+            if (record is not None and record.status in store.TERMINAL_RECORD_STATUSES
+                    and record.exit_code is not None and record.finished_at):
+                candidates.append((datetime.fromisoformat(record.started_at), identifier, self._attached))
+        for _started, identifier, collection in sorted(candidates, key=lambda item: (item[0], item[1]))[:overflow]:
+            collection.pop(identifier, None)
+            log.debug('evicted finished task %s', identifier)
 
     @layout_operation
     def start_maintenance(self) -> None:
@@ -3967,6 +4032,18 @@ async def _drain_stdout(task: Task, registry: TaskRegistry) -> None:
             # precedes best-effort normalization. Failure invalidates native
             # settlement and stops the owning transport. Draining continues so
             # termination cannot deadlock against a full stdout pipe.
+            if getattr(task, 'native_observation_generation', None) and not task.native_observation_failed:
+                try:
+                    from .task_observations import append
+                    append(registry.log_dir, task.task_id, task.native_observation_generation,
+                           task.native_observation_sequence + 1, event)
+                    task.native_observation_sequence += 1
+                except StateOwnershipError:
+                    raise
+                except Exception:
+                    task.native_observation_failed = True
+                    registry._stop_native_transport(task)
+                    log.warning('Native durable observation failed for %s', task.task_id, exc_info=True)
             observer = getattr(registry, "_workflow_native_observers", {}).get(task.task_id)
             if observer is not None:
                 try:
@@ -4295,6 +4372,22 @@ async def _monitor(task: Task, registry: TaskRegistry) -> None:
                     task.approval_view = {"pending_count": 0, "delivery_uncertain_count": 0, "interaction_state": None, "requests": [], "uncertainty_requests": []}
                 task.done.set()
                 try:
+                    if getattr(task, 'native_observation_generation', None):
+                        if task.native_observation_failed:
+                            task.output_drained = False
+                        else:
+                            try:
+                                from .task_observations import finish
+                                finish(registry.log_dir, task.task_id, task.native_observation_generation,
+                                       task.native_observation_sequence)
+                            except Exception:
+                                task.output_drained = False
+                                log.warning('Native final observation barrier failed for %s', task.task_id, exc_info=True)
+                    launch_generation = getattr(registry, '_launch_generations', {}).get(task.task_id)
+                    if launch_generation and task.auto_continue and task.output_drained:
+                        from .task_supervision import mark
+                        mark(registry.log_dir, task.task_id, launch_generation,
+                             continuation_scheduling='pending')
                     registry.persist(task)
                     if task.auto_continue and task.output_drained and task.latest_record_landed:
                         from .task_continuation import schedule_automatic

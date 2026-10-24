@@ -184,7 +184,9 @@ def reflect_reservation(run: dict[str, Any], call: dict[str, Any]) -> None:
     orchestration = next((a for a in run["activations"] if a["id"] == call["orchestration_activation_id"]), None)
     if orchestration is None:
         raise WorkflowError("On-demand authorizing orchestration is missing")
-    orchestration.update(status="completed", accepted_on_demand_call_id=call["id"], decision=copy.deepcopy(call["action"]))
+    if "decision_goal_revision" in orchestration and (checkpoint.get("decision_activation_id") != orchestration["id"] or checkpoint.get("decision_id") != orchestration.get("decision_id") or run.get("goal_revision") != orchestration.get("decision_goal_revision")):
+        raise WorkflowError("On-demand decision checkpoint or goal changed before acceptance")
+    orchestration.update(status="completed", accepted_on_demand_call_id=call["id"], decision=copy.deepcopy(call["action"]), decision_disposition="call_on_demand")
 
 
 def reflect_result(run: dict[str, Any], call: dict[str, Any]) -> None:

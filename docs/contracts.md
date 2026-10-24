@@ -98,6 +98,40 @@ Writers qualify the complete candidate before invalidating catalogs or publishin
 
 This unreleased change refuses older unqualified development run files without changing the store layout version. Preserve the old root and select a separate fresh missing or empty root. Journals, inboxes and notification databases are not migrated by this run-document contract.
 
+## Detached task ownership
+
+`tasks/<task_id>.launch.json` is private engine state with `product: "harflow"`,
+`format: "harflow.task-launch"`, exact integer `v: 1`, a compatible stable
+`product_version`, filename-bound `task_id`, selected lexical `root`, task-directory
+device/inode identity and a random launch `generation`. It records request and
+configuration hashes, backend/session/ancestry identity, owner identity and the
+launch state (`reserved`, `claimed`, `spawned`, `settled` or `not_started`).
+The permanent `<task_id>.launch.lock` serializes claiming and execution. Reads
+are bounded to 64 KiB and refuse unqualified or changed sources. Unresolved
+reservations participate in session exclusion, successor history and retention.
+
+The reservation is not executable authority. The owner accepts a prepared request
+only from its private inherited descriptor, checks its hash/generation/root, and
+repeats backend and saved-grant qualification. The private transfer is bounded to
+4 MiB and preserves initial stdin bytes losslessly. An identical proven
+pre-execution retry retains the reserved session; changed settings or uncertain
+execution refuse reuse. No stored launch file is automatically replayed.
+
+Native transport observations use `tasks/<task_id>.observations.jsonl` and
+`<task_id>.observations-final.json`. Each document carries the private
+`harflow.task-observations` format with the same Harflow version qualification,
+task identity and launch generation. Rows have contiguous integer sequences and
+raw correlated events. The final document carries the exact terminal watermark
+and ledger byte count. Readers return bounded pages and must reach that watermark
+before workflow child settlement, fallback, joins or completion. Missing or
+incompatible observations do not establish that no children ran. These records
+do not create public event kinds or replace native adapter qualification.
+
+Task-owner death preserves uncertainty and captured evidence. It does not
+authorize another execution or fabricate observed exit/drain evidence. These
+private formats require no cross-language fixture changes; the application
+continues consuming public ctl projections. See [supervision and recovery](supervision.md).
+
 ## Workflow ownership receipts
 
 `workflow-owners/<task_id>.json` uses `product: "harflow"`, `format: "harflow.workflow.receipt"`, exact integer `v: 1`, a compatible stable major/minor `product_version`, the filename-bound outer `task_id`, and a nested `receipt` object. Public receipt reads return that inner object unchanged. Its required `workflow_run_id` is an identifier; optional root/session-owner run IDs are identifiers or null. Supplied node/execution IDs, role, name, status, execution contract and interaction owner are strings or null; additive finite JSON fields and omitted optional fields are preserved. Native logical tasks may have receipts without standalone task metadata. Receipts do not replace independent run membership, activation, role, root or live-attempt checks.

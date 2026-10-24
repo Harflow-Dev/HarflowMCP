@@ -176,7 +176,7 @@ async def _recover_first_turn(supervisor: Any) -> None:
     """Restore only the proven first inherited turn, never exempt foreign writes."""
     from . import control, store as tasks
     from .workflows import _candidate_key
-    child = supervisor.run()
+    child = supervisor.run(refresh_atomic=True)
     inherited = child.get("inherited_orchestrator_binding")
     if not inherited or (child.get("sessions", {}).get("orchestrator") and not child.get("recovered_inherited_turn")):
         return

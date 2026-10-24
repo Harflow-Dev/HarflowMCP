@@ -137,9 +137,12 @@ async def _dispatch_native_one(supervisor: Any, node: dict[str, Any], assignment
         worker_held = True
         root_id = (run.get("parent_link") or {}).get("root_workflow_run_id", run["workflow_run_id"])
         lease_run = run if root_id == run["workflow_run_id"] else supervisor.store.get_run(root_id)
-        async with CheckoutLease(supervisor.store, run["repo_path"], tree_write_strength(lease_run, record.freedom), continue_running, pool=supervisor.checkout_leases):
+        async with CheckoutLease(supervisor.store, run["repo_path"], tree_write_strength(lease_run, record.freedom), continue_running, pool=supervisor.checkout_leases, owned_run_ids=getattr(supervisor.tree, "recovered_run_ids", set())):
             def reserve(r: dict[str, Any]) -> None:
                 a = next(a for a in r["activations"] if a["id"] == activation["id"])
+                child["native_replay_state"] = copy.deepcopy(state)
+                if node.get("timeout_seconds"):
+                    child["timeout_deadline"] = time.time() + node["timeout_seconds"]
                 a["tasks"].append(copy.deepcopy(child))
                 a.update(presentation(child))
                 a.pop("execution_fallback_reason", None)
@@ -188,7 +191,11 @@ async def _dispatch_native_one(supervisor: Any, node: dict[str, Any], assignment
             def observe(event: dict[str, Any]) -> None:
                 publish(native.observe(event, nonce, state))
 
-            observers[transport_id] = observe
+            supervised = getattr(supervisor.registry, "execution_mode", "in_process") == "supervised"
+            from .workflow_native_observations import Replay, require_transport_owner, require_transport_settled
+            replay = Replay(supervisor, transport_id, observe) if supervised else None
+            if not supervised:
+                observers[transport_id] = observe
             supervisor._task_update(activation["id"], execution_id, {"dispatch_stage": "launch_requested", "launch_requested_at": time.time()})
             supervisor._task_update(transport_id, transport_id, {"dispatch_stage": "spawn_requested"})
             parent = supervisor.registry.get(record.task_id)
@@ -206,6 +213,9 @@ async def _dispatch_native_one(supervisor: Any, node: dict[str, Any], assignment
             deadline = time.monotonic() + node["timeout_seconds"] if node.get("timeout_seconds") else None
             cancel_requested = False
             while not task.done.is_set():
+                require_transport_owner(supervisor, transport_id)
+                if replay is not None:
+                    replay.poll()
                 live_snapshot = task.snapshot()
                 diagnostic = live_snapshot.get("failure_diagnostic") or {}
                 if diagnostic.get("category") == "usage_limit" and diagnostic.get("settlement") == "needs_attention":
@@ -222,6 +232,9 @@ async def _dispatch_native_one(supervisor: Any, node: dict[str, Any], assignment
                     await asyncio.wait_for(task.done.wait(), .25)
                 except TimeoutError:
                     pass
+            require_transport_settled(supervisor, transport_id)
+            if replay is not None:
+                replay.poll(terminal=True)
             snapshot = task.snapshot()
             if snapshot.get("permission_denials") and "result" in state:
                 state["result"]["permission_denials"] = merge_denials(state["result"].get("permission_denials", []), snapshot["permission_denials"])

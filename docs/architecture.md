@@ -92,85 +92,39 @@ work after it is gone. `Inspection.installed is None` means "could not tell", ne
 
 ## When the client restarts the server
 
-The desktop app tears down and respawns the stdio server mid-conversation — `main.log` shows
-`[LocalMcpServerManager] Closing <server>` followed by `Connecting` a second later. Nothing here
-times a run out, so **every "the run died at ~N minutes" report is really this**, and the giveaway is
-two tasks whose `finished_at` match to the second.
+Production MCP and ctl dispatch use detached task owners. Each owner executes the
+prepared invocation, drains stdout/stderr, pumps stdin and publishes observed
+settlement. MCP servers observe durable metadata/events and route input, approval
+and control operations through their existing ledgers. Losing an observer does
+not close the agent's pipes or launch another execution. See
+[supervision and recovery](supervision.md) for the failure boundaries.
 
-The agent survives it (`start_new_session=True`, so it reparents to pid 1 and keeps working), but
-nothing reads its stdout any more, so its output is lost from that point on.
+Caller authorization and lineage are resolved before the launch handoff. The
+exec owner receives the prepared invocation over a private inherited pipe and
+repeats final backend and saved-grant checks without rediscovering its caller.
+A qualified launch reservation protects task/session identity before process
+creation and ordinary metadata publication. An ambiguous launch stays reserved;
+only a proven pre-execution failure permits an identical retry. Attached task
+handles are read-only and cannot publish owner metadata.
 
-Three places conspired to turn that into a permanent lie, and all three now agree on one test —
-`store.outcome_unobserved`: *a terminal status with no exit code was never observed.*
+The detached owner remains responsible through automatic continuation
+reservation and successor acknowledgement. A workflow scheduler is a separate
+detached owner; recovering that scheduler requires an explicit control action,
+not a status or wait read. It reattaches to independently owned tasks and
+reconciles durable decisions, reservations and linked children before scheduling.
 
-- `_monitor`'s `finally` backstop caught its own `CancelledError` and wrote `failed`.
-- `store.write` refuses to move a task backwards, so that `failed` could never be corrected.
-- `resolve_status` and `live_session_ids` only checked liveness for `status == "running"`, so every
-  later server believed the record.
+Task-owner death still loses its pipes. Preserve all recorded output and process
+identity, report capture loss or uncertain ownership, and refuse duplicate
+execution. Do not infer exit zero from a missing exit receipt. Historical tasks
+whose pipes belonged to an earlier in-process MCP server retain their existing
+conservative recovery behavior.
 
-Measured on the single-agent predecessor bridge before the fix: two runs recorded `failed`, still alive ten minutes
-later with live API connections, invisible to every tool — and because `live_session_ids` had written
-them off, the session-busy guard let duplicates start against the same working trees. Do not
-"simplify" the `abandoned` flag away.
-
-One precedence rule falls out of this and is easy to get backwards. An unobserved **`failed`** is the
-only status the run's own output may overrule, because it is the one the backstop *guesses*. Every
-other status records something the bridge *did* — `cancelled` above all — so it stands even with no
-exit code. Reversing those two turns a deliberate cancellation into `completed` (caught in review,
-reproduced, now pinned by a test). For the same reason `cancel_recovered` waits for the SIGKILL to
-land: `resolve_status` rechecks liveness on a `cancelled` record, so returning early would answer a
-cancellation with "running".
-
-A second, quieter overclaim lived in the same code path and is now fixed. `resolve_status`
-reconstructed a status by calling `classify(state, exit_code if exit_code is not None else 0)` —
-**fabricating a clean exit for a process nothing saw exit.** For the backends with no terminal event
-of their own (codex, vibe) that turned "the agent said something" into `completed`, on no evidence at
-all. `classify` now takes `exit_code: int | None`, and what `None` is worth is each backend's own
-business:
-
-- **claude** completes on its `result` event alone — that is a real terminal event — and only an
-  *observed* non-zero exit overrules it. Note the trap: passing `None` through without also changing
-  claude's `exit_code != 0` to `exit_code is not None and exit_code != 0` would have *regressed*
-  claude, turning every recovered success into a failure.
-- **opencode** likewise, on `step_finish(reason="stop")`.
-- **codex** and **vibe** require an *observed* zero exit; with `None` they report `failed`. Their old
-  `exit_code != 0` already rejected `None` by accident of Python comparison — it is now spelled out
-  so the behaviour is intentional rather than incidental.
-
-The recovery note had to change with it: "The run reported this result itself" is false for a codex
-or vibe record whose `failed` is an inference from *missing* evidence rather than a reported failure.
-It is now chosen from the accumulator and the resulting status — never from the backend's name, which
-nothing outside `backends/` may branch on. `record.exit_code` was already nullable on disk, so there
-is no migration; the intended behavioural change is that old unobserved codex/vibe records carrying a
-final message now read `failed` instead of `completed`, which corrects a false claim rather than
-losing data.
-
-Everything that asks "has this settled?" must go through `resolve_status`, never read
-`record.status` directly. `_poll_recovered` did the latter and so ended a 55s wait after one 5s tick
-on a poisoned record — then reported that the full timeout had elapsed. A wait that returns early
-while claiming otherwise is worse than one that blocks.
-
-**What this does not fix.** The orphan's output is gone regardless: its pipes died with the server,
-so the raw log stops at the teardown and no summary can ever arrive for the rest of that run — the
-recovery note says so in as many words. Fixing that properly means durable spooling (spawn stdout
-straight into the append-only log and have servers tail the file, rather than owning the pipe), which
-would also make an orphan finish normally. Until then, judge a recovered-alive run by what it changed
-on disk. Resumes are serialized across processes by `control.session_lock`, held across the
-liveness check and the spawn. Also still open: *signal authorisation* (cancel/takeover,
-`may_signal`) is stricter than status: with a recorded start time it needs that start time to match **and** every
-marker to appear, so a retitled vibe process (`markers_missing`) cannot be signalled cross-process;
-without one, only the legacy pid + markers match (`legacy_markers_seen`) may signal. Status and the
-resume guards use the recorded start time alone and count any non-`dead` verdict as still running.
-
-**A live-input run across a restart.** The server holds the write end of the agent's stdin, so its
-death is EOF to the agent — per the plan's measurement on claude 2.1.281, the process holding the pipe
-dying mid-turn does not kill claude (own session): the in-flight turn finishes and writes its
-`result`, then the agent exits. What is lost: every message queued with `send_message` that the pump
-had not yet written (the in-memory queue dies with the server, and nothing is left to read the
-on-disk inbox), and any background task still open, which claude kills at EOF (measured) so nobody
-ever sees its result. No `.inbox.closed` marker is written on that path, so a later
-`send_message`/`harflow-ctl send` is refused by the owner check instead (the owner is dead), and
-the record settles through `resolve_status` like any other recovered run.
+`store.outcome_unobserved` identifies terminal metadata without an observed exit.
+Only an unobserved `failed` may be overruled by the run's own terminal evidence;
+`cancelled` always stands. Classification receives `exit_code: int | None`, never
+a fabricated zero. Anything asking whether a task has settled uses
+`resolve_status`, rather than the saved status alone. Cross-process signalling
+retains the stricter identity/marker authorization in `identity.may_signal`.
 
 **Live input — the rules that keep a message from being lost silently.** The pump (`task.pump`) is a
 dedicated task, deliberately not in `task.watchers`, so `_finish_draining` neither waits on nor
@@ -194,14 +148,10 @@ appending. A send is also refused once the run's own process is confirmed dead, 
 still says. A message written after a result persists `input_after_result` on the record, so a
 recovered run whose replay shows no later result reads `failed`, not the earlier success.
 
-Two accepted limits, documented rather than fixed. **An owner-local "queued" is in memory only**:
-`send_message` on the owning server appends to `task.inbox_queue`, not to disk, so if that server
-dies abruptly before the pump writes it, the message is lost with no event at all (the plan accepts
-restart loss; the non-owner path, via the on-disk inbox, is always accounted for). **A stalled or
-hostile local process holding the inbox `flock` keeps a live idle task from closing stdin** while
-it holds the lock — correctness over liveness, since closing without it could accept a message
-after the last forward. Nothing blocks the event loop (acquisition is `LOCK_NB` retried on it), so
-only that task waits; cancellation still works.
+Owner-local and cross-process messages both append to the durable inbox before
+answering `queued`. A stalled process holding the inbox flock can still delay
+idle closure; acquisition is nonblocking and cancellation remains available.
+Delivery uncertainty is reported rather than replaying a message blindly.
 
 **Queued follow-ups for tasks without live input (`followups.py`) are a separate ledger that never
 touches the inbox, its `flock` or the close protocol above.** `send_message` on a standalone task

@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Keep task output, live input and automatic continuation with detached task owners across MCP server restarts; reserve launch and session identities before execution.
+- Add explicit interrupted workflow-scheduler recovery with retained decisions, existing task adoption, linked-tree capacity restoration and native observation settlement barriers.
+
 - Select Vibe's Python CLI entrypoint per invocation and validate backend environment contributions at the spawn boundary.
 
 - Add local package validation and gated PyPI/MCP registry release workflows, with a registry-compatible server alias.

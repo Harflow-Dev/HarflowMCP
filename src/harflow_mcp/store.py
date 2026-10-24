@@ -845,9 +845,9 @@ def outcome_unobserved(record: TaskRecord) -> bool:
 
 
 _OWNED_BY_LIVE_SERVER_NOTE = (
-    "Recovered from disk: this task is owned by a live harflow_mcp server process (pid {pid}), "
+    "Recovered from disk: this task is owned by a live Harflow owner process (pid {pid}), "
     "which is reading its output and will record its outcome; this process sees only what that "
-    "server has persisted so far. Status and cancellation work."
+    "owner has persisted so far. Status and cancellation work."
 )
 
 
@@ -873,7 +873,7 @@ def resolve_status(
 
 
 def _resolve(
-    log_dir: Path, record: TaskRecord, *, detail: bool
+    log_dir: Path, record: TaskRecord, *, detail: bool, _replay_provider=None
 ) -> tuple[str, str, Accumulator, list[str], bool]:
     """Same as `resolve_status`, plus whether a live owning server was found — see
     `identity.identity_check`. Kept private so `resolve_status` can keep its existing 4-tuple
@@ -890,7 +890,7 @@ def _resolve(
             False,
         )
 
-    state, tail = replay_log(log_dir, record.task_id, record.backend)
+    state, tail = (_replay_provider or replay_log)(log_dir, record.task_id, record.backend)
     if record.failure_diagnostic is not None:
         state.failure_diagnostic = record.failure_diagnostic
     if record.input_after_result is not None and state.result_count <= record.input_after_result:
@@ -898,7 +898,8 @@ def _resolve(
         # still owed: the replay alone cannot see that (the bridge's writes are not in the agent's
         # stdout), and an earlier success must not be read as the outcome.
         state.turn_open = True
-    alive = unobserved and record_process_alive(record)
+    from .task_supervision import owner_holds_unsettled
+    alive = unobserved and (record_process_alive(record) or owner_holds_unsettled(log_dir, record))
 
     if alive and state.failure_diagnostic is not None and identity.identity_check(record.owner) != "alive":
         state.failure_diagnostic = {**state.failure_diagnostic, "settlement": "needs_attention"}
@@ -1058,7 +1059,7 @@ def _notices(record: TaskRecord, state: Accumulator) -> list[str]:
 
 
 @task_operation
-def snapshot(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
+def snapshot(log_dir: Path, record: TaskRecord, *, _replay_provider=None) -> dict[str, Any]:
     """A recovered task's state, shaped like a live snapshot so callers need no special casing."""
     from . import artifacts, recovery_activity
     qualified = read(log_dir, record.task_id, include_prompt=False)
@@ -1075,7 +1076,7 @@ def snapshot(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
         persisted = read(log_dir, record.task_id)
         if persisted == record:
             captured_source = getattr(persisted, '_source_identity', None)
-    status, note, state, tail, owned = _resolve(log_dir, record, detail=True)
+    status, note, state, tail, owned = _resolve(log_dir, record, detail=True, _replay_provider=_replay_provider)
     from .catalog import Catalog
     header, stamp, _active = listing_header(record)
     header.update(status=status, needs_reconciliation=False, status_reconciled=True)
@@ -1235,11 +1236,12 @@ def _record_holds_session(record: TaskRecord) -> bool:
 def live_session_task_ids(log_dir: Path, session_id: str) -> set[str]:
     """Ids of the records whose run may still hold `session_id` — see `_record_holds_session`.
     Records only: takeover reservations are `control.takeover_reservations`."""
+    from .task_supervision import unresolved
     return {
         record.task_id
         for record in read_all(log_dir)
         if record.session_id == session_id and _record_holds_session(record)
-    }
+    } | {launch["task_id"] for launch in unresolved(log_dir) if launch.get("session_id") == session_id}
 
 
 @task_operation
@@ -1260,6 +1262,8 @@ def live_session_ids(log_dir: Path) -> set[str]:
     """
     # A backend that mints its own id may have died before disclosing one; nothing to exclude.
     live = {record.session_id for record in read_all(log_dir) if _record_holds_session(record)}
+    from .task_supervision import unresolved
+    live.update(launch["session_id"] for launch in unresolved(log_dir) if launch.get("session_id"))
     live.update(
         session_id
         for session_id in control.takeover_reservations(log_dir).values()
@@ -1305,4 +1309,9 @@ def session_successor_task_ids(log_dir: Path, task_id: str, session_id: str) -> 
     for record in records:
         if record.task_id != task_id and record.task_id not in ancestors and record.session_id == session_id:
             descendants.add(record.task_id)
+    from .task_supervision import reservations
+    for launch in reservations(log_dir):
+        if launch["task_id"] != task_id and launch["task_id"] not in ancestors and (launch.get("session_id") == session_id or launch.get("parent_task_id") in lineage | descendants):
+            if launch["state"] != "not_started":
+                descendants.add(launch["task_id"])
     return descendants

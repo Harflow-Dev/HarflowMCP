@@ -65,9 +65,18 @@ class FakeBackend:
         return "completed" if exit_code == 0 else "failed"
 
 
+class InProcessTestRegistry(TaskRegistry):
+    """Keep this driver-only backend registration inside the forked process."""
+
+    def __init__(self, *args, **kwargs):
+        kwargs["execution_mode"] = "in_process"
+        super().__init__(*args, **kwargs)
+
+
 def main() -> int:
     fake = FakeBackend(os.environ.get("HARFLOW_FAKE_SCRIPT", "sleep 0.3"))
     backends.BACKENDS[fake.name] = fake
+    ctl.tasks_module.TaskRegistry = InProcessTestRegistry
     raw_caller = os.environ.get("HARFLOW_FAKE_CALLER")
     caller = lineage.Caller(store.TaskRecord(**json.loads(raw_caller)), "pb_task_id") if raw_caller else None
     lineage.detect_caller = lambda *args, **kwargs: caller

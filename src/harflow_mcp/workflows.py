@@ -1314,6 +1314,12 @@ class WorkflowStore:
             if observed.get("forwarded_delivery_receipt") == _delivery:
                 return observed
 
+        if action == "recover" and observed.get("status") in {"starting", "running", "cancelling"}:
+            if additional_attempts:
+                raise WorkflowError("Scheduler recovery cannot grant additional attempts")
+            from .workflow_recovery import request
+            return request(self, observed, instructions, interaction_owner)
+
         def qualifying_skips(r: dict[str, Any]) -> list[tuple[dict[str, Any], dict[str, Any]]]:
             if r.get("status") != "needs_input":
                 raise WorkflowError("Optional review skip consent requires a qualifying needs_input checkpoint")
@@ -1676,13 +1682,25 @@ class WorkflowStore:
         def reconcile(r: dict[str, Any]) -> None:
             for activation in r["activations"]:
                 for task in activation["tasks"]:
+                    if task.get("execution_kind") == "native_subagent" and task.get("status") in {"completed", "failed"}:
+                        transport = next((t for a in r["activations"] for t in a["tasks"] if t["task_id"] == task.get("transport_task_id")), {})
+                        from .task_supervision import read_launch
+                        if "native_observation_watermark" not in transport and read_launch(self.root / "tasks", task["transport_task_id"]) is not None:
+                            task["status"] = "uncertain"
                     if task["status"] not in {"reserved", "running", "uncertain"}:
                         continue
                     if task.get("execution_kind") == "native_subagent":
-                        update_task_state(activation, task, {"status": "not_started" if task.get("dispatch_stage") == "preparing" else "uncertain"})
+                        from .workflow_native_observations import recoverable
+                        status = "running" if recoverable(self.root / "tasks", task) else "not_started" if task.get("dispatch_stage") == "preparing" else "uncertain"
+                        update_task_state(activation, task, {"status": status})
                         continue
                     record = task_store.read(self.root / "tasks", task["task_id"])
-                    if record and task_liveness(self.root / "tasks", record)["process_alive"] is False:
+                    from .task_supervision import owner_holds_unsettled, read_launch
+                    if record is not None and owner_holds_unsettled(self.root / "tasks", record):
+                        update_task_state(activation, task, {"status": "running", "dispatch_stage": "spawn_confirmed"})
+                    elif record is not None and record.status in task_store.TERMINAL_RECORD_STATUSES and not record.output_drained and read_launch(self.root / "tasks", task["task_id"]) is not None:
+                        update_task_state(activation, task, {"status": "uncertain", "error": "Detached task output drain was not confirmed"})
+                    elif record and task_liveness(self.root / "tasks", record)["process_alive"] is False:
                         snapshot = task_store.snapshot(self.root / "tasks", record)
                         liveness = task_liveness(self.root / "tasks", record)
                         if not liveness["outcome_known"]:
@@ -1691,6 +1709,8 @@ class WorkflowStore:
                             node = activation.get("on_demand_node") or next(n for n in r["definition"]["nodes"] if n["id"] == activation["node_id"])
                             snapshot.update(status="failed", timed_out=True, failure_kind="timeout", timeout_seconds=node.get("timeout_seconds"), summary="Node timed out; cancellation settled after supervisor interruption")
                         update_task_state(activation, task, {"status": snapshot["status"], "result": snapshot, "liveness": liveness})
+                    elif record is not None and _attachable_task(self.root / "tasks", task["task_id"]):
+                        update_task_state(activation, task, {"status": "running", "dispatch_stage": "spawn_confirmed"})
                     elif record is None and task.get("dispatch_stage") == "preparing":
                         update_task_state(activation, task, {"status": "not_started", "recovery_reason": "Supervisor stopped before requesting spawn"})
                     else:
@@ -1726,6 +1746,11 @@ class WorkflowStore:
             from .workflow_delegation import reconcile_delegation
             return self.update_run(run_id, reconcile_delegation, "delegation_reconciled")
         return result
+
+
+def _attachable_task(log_dir: Path, task_id: str) -> bool:
+    from .task_supervision import attachable
+    return attachable(log_dir, task_id)
 
 
 def update_task_state(activation: dict[str, Any], task: dict[str, Any], values: dict[str, Any]) -> None:
@@ -2238,7 +2263,9 @@ def observed_harness_metadata(snapshot: dict[str, Any], metadata: dict[str, Any]
 
 class CheckoutLease:
     """OS leases shared across supervisors; process death releases the descriptor."""
-    def __init__(self, storage: WorkflowStore, repo: str, write: bool, should_continue: Any = None, *, wait_seconds: float = 30.0, on_wait: Any = None, pool: dict[str, Any] | None = None):
+    def __init__(self, storage: WorkflowStore, repo: str, write: bool, should_continue: Any = None, *, wait_seconds: float = 30.0, on_wait: Any = None, pool: dict[str, Any] | None = None, owned_run_ids: set[str] | None = None, adopted_native_tasks: set[tuple[str, str]] | None = None):
+        self.owned_run_ids = owned_run_ids or set()
+        self.adopted_native_tasks = frozenset(adopted_native_tasks or ())
         self.repo = str(Path(repo).resolve())
         self.store = storage
         self.state_layout = storage.state_layout
@@ -2314,11 +2341,15 @@ class CheckoutLease:
             if not self.write and task.get('freedom') == 'read_only':
                 continue
             if task.get("execution_kind") == "native_subagent":
+                if (task["workflow_run_id"], task["task_id"]) in self.adopted_native_tasks:
+                    continue
                 # The receipt remains authoritative even while its supervisor
                 # lives: uncertainty can release the OS descriptor before that
                 # supervisor exits. Existing pooled holders do not re-probe.
                 return {"workflow_run_id": task["workflow_run_id"], "task_id": task["task_id"]}
             if _supervisor_present(task):
+                continue
+            if task["workflow_run_id"] in self.owned_run_ids:
                 continue
             try:
                 record = task_store.read(self.store.root / 'tasks', task['task_id'], include_prompt=False, metadata_byte_limit=4 * 1024 * 1024, metadata_budget=budget)
@@ -2527,6 +2558,9 @@ class WorkflowSupervisor:
         require_dispatch_layout(self.registry.log_dir)
         from .tasks import SessionUnknownError, SessionBusyError, RepoUnavailableError
         decision_context = activation.get("_decision_context")
+        if any(t.get("execution_kind") == "native_subagent" and t.get("status") in {"reserved", "running", "uncertain"} for t in activation.get("tasks", [])):
+            from .workflow_native_observations import recover
+            return await recover(self, activation)
         run = self.run(refresh_atomic=True)
         config = node.get("agent", run["definition"]["orchestrator"])
         candidates = [config] + config.get("fallbacks", [])
@@ -2637,6 +2671,10 @@ class WorkflowSupervisor:
             if outage:
                 self.update(lambda r: require_fresh_checkpoint(r, activation["id"], *outage), "recovered_resume_requires_fresh")
                 return None
+        existing_attempt = next((t for t in reversed(activation.get("tasks", [])) if t.get("status") in {"reserved", "running", "uncertain"} and t.get("dispatch_stage") != "preparing"), None)
+        if existing_attempt:
+            position = next((i for i, candidate in enumerate(candidates) if _candidate_key(candidate) == _candidate_key(existing_attempt["candidate"])), None)
+            candidates = candidates[position:] if position is not None else [copy.deepcopy(existing_attempt["candidate"])]
         capability_refused = False
         candidate_position = 0
         while candidate_position < len(candidates):
@@ -2675,14 +2713,14 @@ class WorkflowSupervisor:
                 candidate_position += 1
                 continue
             backend = backends.get(candidate["backend"])
-            if not backends.is_installed(backend):
+            if not existing_attempt and not backends.is_installed(backend):
                 if strict_child_resume:
                     child_resume_refused("Child Resume refused: selected source CLI is unavailable")
                     return None
                 self.update(lambda r: r["suppressed_candidates"].append(identity), "candidate_unavailable", {"candidate": candidate, "reason": "binary missing"})
                 candidate_position += 1
                 continue
-            if role == "node" and node.get("execution_mode") == "prefer_subagent":
+            if not existing_attempt and role == "node" and node.get("execution_mode") == "prefer_subagent":
                 from .workflow_native import dispatch_native
                 existing_task_ids = {task["task_id"] for a in self.run()["activations"] if a["id"] == activation["id"] for task in a["tasks"]}
                 handled, outcome = await dispatch_native(self, {**node, "agent": candidate}, prompt, activation)
@@ -2716,7 +2754,7 @@ class WorkflowSupervisor:
             network = False if run["network"] is False else node.get("network", run["network"])
             if role == "orchestrator":
                 network = owner_contract["network"]
-            task_id = uuid.uuid4().hex
+            task_id = existing_attempt["task_id"] if existing_attempt else uuid.uuid4().hex
             display_prompt = run.get("builder_turn_prompt", run["prompt"]) if role == "builder" else activation.get("turn_prompt", activation.get("assignment_prompt", run["prompt"]))
             if role == "orchestrator" and run.get("runner_policy") == "guided" and any(t.get("status") != "not_started" for a in run["activations"] if a["role"] == "orchestrator" for t in a["tasks"]):
                 stage = next((n for n in run["definition"]["nodes"] if n["id"] == activation["node_id"]), {})
@@ -2764,12 +2802,18 @@ class WorkflowSupervisor:
             # An uncertain attempt keeps its slot until reconciliation.
             slot_uncertain = False
             try:
-                await self.tree.acquire_slot(lambda: self.tree.tree_running(self.run(refresh_atomic=True), refresh_atomic=True), control=role != "node")
+                held_key = (self.run_id, task_id)
+                if existing_attempt and held_key in self.tree.held:
+                    self.tree.held.pop(held_key)
+                else:
+                    await self.tree.acquire_slot(lambda: self.tree.tree_running(self.run(refresh_atomic=True), refresh_atomic=True), control=role != "node")
             except DispatchNotStarted:
                 return None
             reservation = {"task_id": task_id, "candidate": candidate, "status": "reserved", "dispatch_stage": "preparing", "reserved_at": time.time(), "freedom": freedom, "assignment_prompt": display_prompt, "repo_path": run["repo_path"], "network": network, "session_mode": "resume" if use_resume else "fresh", "resume_task_id": previous.get("task_id") if use_resume else None, "execution_kind": "headless", "execution_fallback_reason": activation.get("execution_fallback_reason")}
             reservation["context_delivery"] = context_delivery
             reservation["harness_metadata"] = {"requested": copy.deepcopy(candidate), "effective": {"backend": candidate["backend"], "model": candidate.get("model"), "reasoning_effort": candidate.get("reasoning_effort"), "freedom": freedom, "settings_source": "explicit_launch_arguments", "default_model": "unknown" if not candidate.get("model") else None, "provider_identity": "unknown"}, "observed": None, "provenance": "validated_launch_configuration", "verification_status": "configured_not_observed"}
+            if existing_attempt:
+                reservation = copy.deepcopy(existing_attempt)
             def reserve(r: dict[str, Any]) -> None:
                 a = next(a for a in r["activations"] if a["id"] == activation["id"])
                 a["tasks"].append(reservation)
@@ -2782,127 +2826,70 @@ class WorkflowSupervisor:
                     q.update(reply_task_id=task_id, answer_delivery_state="reserved")
                     reservation["question_id"] = q["question_id"]
             try:
-                self.update(reserve, "dispatch_reserved", reservation)
+                if not existing_attempt:
+                    self.update(reserve, "dispatch_reserved", reservation)
             except BaseException:
                 # No spawn was requested; failed persistence must not strand a permit.
                 self.tree.release_slot(control=role != "node")
                 raise
             capability_stage = "settings"
             try:
-                backends.reject_model(backend, candidate.get("model"))
-                backends.reject_turn_cap(backend, candidate.get("max_turns"))
-                backends.check_reasoning_effort(backend, candidate.get("reasoning_effort"))
-                capability_stage = "enforcement"
-                backend.enforcement(freedom, network)
+                if not existing_attempt:
+                    backends.reject_model(backend, candidate.get("model"))
+                    backends.reject_turn_cap(backend, candidate.get("max_turns"))
+                    backends.check_reasoning_effort(backend, candidate.get("reasoning_effort"))
+                    capability_stage = "enforcement"
+                    backend.enforcement(freedom, network)
                 from .workflow_invocation import tree_write_strength
                 root_id = (run.get('parent_link') or {}).get('root_workflow_run_id', run['workflow_run_id'])
                 lease_run = run if root_id == run['workflow_run_id'] else self.store.get_run(root_id)
-                async with CheckoutLease(self.store, run["repo_path"], tree_write_strength(lease_run, freedom), lambda: self.tree.tree_running(self.run(refresh_atomic=True), refresh_atomic=True), on_wait=lambda detail: self.update(lambda r: r.update(checkout_wait=detail), "checkout_wait", detail), pool=self.checkout_leases):
+                async with CheckoutLease(self.store, run["repo_path"], tree_write_strength(lease_run, freedom), lambda: self.tree.tree_running(self.run(refresh_atomic=True), refresh_atomic=True), on_wait=lambda detail: self.update(lambda r: r.update(checkout_wait=detail), "checkout_wait", detail), pool=self.checkout_leases, owned_run_ids=getattr(self.tree, "recovered_run_ids", set())):
                     if not self.tree.tree_running(self.run(refresh_atomic=True), refresh_atomic=True):
                         self._task_update(activation["id"], task_id, {"status": "not_started"})
                         return None
-                    capability_stage = "spawn"
-                    timeout_deadline = time.time() + node["timeout_seconds"] if role == "node" and node.get("timeout_seconds") else None
-                    self._task_update(activation["id"], task_id, {"dispatch_stage": "spawn_requested", **({"timeout_deadline": timeout_deadline} if timeout_deadline is not None else {})})
-                    if role == "node" and freedom != "read_only":
-                        from . import scratch
-                        dispatch_prompt += "\nTask scratch directory (absolute): " + str(scratch.directory(self.registry._log_dir, task_id).resolve()) + "\nUse this directory for temporary artifacts outside the repository; artifacts are retained with task records."
-                        extra = len(dispatch_prompt.encode()) - context_delivery["total_bytes"]
-                        context_delivery["total_bytes"] = context_delivery["serialized_bytes"] = len(dispatch_prompt.encode())
-                        context_delivery["total_characters"] = context_delivery["serialized_characters"] = len(dispatch_prompt)
-                        context_delivery["budget_overflow_bytes"] = max(0, len(dispatch_prompt.encode()) - context_delivery["budget_bytes"])
-                        context_delivery["sections"]["scratch_guidance"] = {"bytes": extra, "characters": len(dispatch_prompt) - accounting["serialized_characters"]}
-                        self._task_update(activation["id"], task_id, {"context_delivery": context_delivery})
-                    if use_resume:
-                        parent = self.registry.get(previous["task_id"])
-                        if parent:
-                            task = await self.registry.resume(parent, dispatch_prompt, max_turns=candidate.get("max_turns"), background_idle_seconds=candidate.get("background_idle_seconds"), network=network, task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder", **({"require_unchanged_session": True} if strict_child_resume else {}))
-                        else:
-                            record = task_store.read(self.registry._log_dir, previous["task_id"])
-                            if record is None:
-                                raise SessionUnknownError("Previous resume session is unavailable")
-                            task = await self.registry.resume_record(record, dispatch_prompt, max_turns=candidate.get("max_turns"), background_idle_seconds=candidate.get("background_idle_seconds"), network=network, task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder", **({"require_unchanged_session": True} if strict_child_resume else {}))
+                    if existing_attempt:
+                        task = self.registry.attach(task_id)
                     else:
-                        if role == "builder":
-                            latest = self.run(refresh_atomic=True)
-                            dispatch_prompt += "\nLatest authoritative builder preview, revision " + str(latest.get("draft_revision", 0)) + ":\n" + json.dumps(latest.get("builder_draft", {}))
+                        capability_stage = "spawn"
+                        timeout_deadline = time.time() + node["timeout_seconds"] if role == "node" and node.get("timeout_seconds") else None
+                        reservation["timeout_deadline"] = timeout_deadline
+                        self._task_update(activation["id"], task_id, {"dispatch_stage": "spawn_requested", **({"timeout_deadline": timeout_deadline} if timeout_deadline is not None else {})})
+                        if role == "node" and freedom != "read_only":
+                            from . import scratch
+                            dispatch_prompt += "\nTask scratch directory (absolute): " + str(scratch.directory(self.registry._log_dir, task_id).resolve()) + "\nUse this directory for temporary artifacts outside the repository; artifacts are retained with task records."
                             extra = len(dispatch_prompt.encode()) - context_delivery["total_bytes"]
-                            context_delivery["sections"]["builder_preview"] = {"bytes": extra, "characters": len(dispatch_prompt) - context_delivery["total_characters"]}
                             context_delivery["total_bytes"] = context_delivery["serialized_bytes"] = len(dispatch_prompt.encode())
                             context_delivery["total_characters"] = context_delivery["serialized_characters"] = len(dispatch_prompt)
                             context_delivery["budget_overflow_bytes"] = max(0, len(dispatch_prompt.encode()) - context_delivery["budget_bytes"])
+                            context_delivery["sections"]["scratch_guidance"] = {"bytes": extra, "characters": len(dispatch_prompt) - accounting["serialized_characters"]}
                             self._task_update(activation["id"], task_id, {"context_delivery": context_delivery})
-                        task = await self.registry.start(dispatch_prompt, Path(run["repo_path"]), backend=backend, freedom=freedom, network=network, caller_approvals=candidate.get("caller_approvals", False), model=candidate.get("model"), reasoning_effort=candidate.get("reasoning_effort"), max_turns=candidate.get("max_turns"), background_idle_seconds=candidate.get("background_idle_seconds"), task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder", title=f"{run['name']} · {node.get('title', key)}")
-                    self.update(lambda r: r.pop("checkout_wait", None), "checkout_acquired")
-                    self._task_update(activation["id"], task_id, {"status": "running", "dispatch_stage": "spawn_confirmed", **({"timeout_deadline": timeout_deadline} if timeout_deadline is not None else {})})
-                    timeout_at = time.monotonic() + max(0, timeout_deadline - time.time()) if timeout_deadline is not None else None
-                    timed_out = False
-                    while not task.done.is_set():
-                        live_snapshot = task.snapshot()
-                        live_limit = usage_limit(live_snapshot)
-                        if live_limit and live_limit.get("settlement") == "needs_attention":
-                            slot_uncertain = True
-                            self._task_update(activation["id"], task_id, {"status": "uncertain", "result": live_snapshot, "error": "Usage-limited process identity or settlement remains uncertain"})
-                            self.attention("Usage-limited process requires reconciliation; no replacement dispatched")
-                            return None
-                        if timeout_at is not None and time.monotonic() >= timeout_at:
-                            self._task_update(activation["id"], task_id, {"timeout_requested_at": time.time()})
-                            try:
-                                cancellation = await asyncio.wait_for(self.registry.cancel_cascade(task.task_id, workflow_control=True), timeout=20)
-                                if not isinstance(cancellation, dict) or any(cancellation.get(key) for key in ("sigkill_survivors", "survivors", "not_signalled", "owner_still_settling", "cascade_incomplete", "unconverged", "not_recorded")):
-                                    raise RuntimeError("Task cancellation cascade has unsettled or unverifiable descendants")
-                                await asyncio.wait_for(task.done.wait(), timeout=10)
-                            except (StateOwnershipError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):
-                                raise
-                            except Exception as exc:
-                                if getattr(exc, "_receipt_refusal_run_ids", ()):
-                                    raise
-                                slot_uncertain = True
-                                self._task_update(activation["id"], task_id, {"status": "uncertain", "error": "Timeout cancellation requires reconciliation: " + str(exc)})
-                                self.attention("Timed out node could not be confirmed settled; no fallback dispatched")
-                                return None
-                            timed_out = True
-                            break
-                        if role == "builder" and getattr(task, "live_input", False) and any(m.get("status") == "pending" for m in self.run(refresh_atomic=True).get("builder_messages", [])):
-                            messages: list[dict[str, Any]] = []
-                            def claim_live(r: dict[str, Any]) -> None:
-                                for m in r.get("builder_messages", []):
-                                    if m["status"] == "pending":
-                                        m["status"] = "forwarding"
-                                        messages.append(copy.deepcopy(m))
-                            self.update(claim_live, "builder_feedback_forwarding")
-                            for message in messages:
-                                try:
-                                    response = await self.registry.send_message(task, message["prompt"])
-                                    delivery_id = response.get("message_id") if isinstance(response, dict) else None
-                                    status = "queued_to_agent"
-                                except (StateOwnershipError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):
-                                    raise
-                                except Exception as exc:
-                                    if getattr(exc, "_receipt_refusal_run_ids", ()):
-                                        raise
-                                    from . import inbox
-                                    # SendRefused guarantees that no message entered the inbox.
-                                    delivery_id = None
-                                    status = "deferred" if isinstance(exc, inbox.SendRefused) else "forwarding_uncertain"
-                                self.update(lambda r, mid=message["id"], state=status, did=delivery_id: next(m for m in r["builder_messages"] if m["id"] == mid).update(status=state, inbox_message_id=did, task_id=task.task_id), "builder_feedback_forwarded", {"message_id": message["id"], "status": status})
-                        if self.run(refresh_atomic=True)["status"] == "cancelling":
-                            await self.registry.cancel_cascade(task.task_id, workflow_control=True)
-                        try:
-                            await asyncio.wait_for(task.done.wait(), timeout=0.25)
-                        except TimeoutError:
-                            pass
-                    snapshot = task.snapshot()
-                    if timed_out and snapshot.get("status") not in {"completed", "failed", "cancelled"}:
+                        if use_resume:
+                            parent = self.registry.get(previous["task_id"])
+                            if parent:
+                                task = await self.registry.resume(parent, dispatch_prompt, max_turns=candidate.get("max_turns"), background_idle_seconds=candidate.get("background_idle_seconds"), network=network, task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder", **({"require_unchanged_session": True} if strict_child_resume else {}))
+                            else:
+                                record = task_store.read(self.registry._log_dir, previous["task_id"])
+                                if record is None:
+                                    raise SessionUnknownError("Previous resume session is unavailable")
+                                task = await self.registry.resume_record(record, dispatch_prompt, max_turns=candidate.get("max_turns"), background_idle_seconds=candidate.get("background_idle_seconds"), network=network, task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder", **({"require_unchanged_session": True} if strict_child_resume else {}))
+                        else:
+                            if role == "builder":
+                                latest = self.run(refresh_atomic=True)
+                                dispatch_prompt += "\nLatest authoritative builder preview, revision " + str(latest.get("draft_revision", 0)) + ":\n" + json.dumps(latest.get("builder_draft", {}))
+                                extra = len(dispatch_prompt.encode()) - context_delivery["total_bytes"]
+                                context_delivery["sections"]["builder_preview"] = {"bytes": extra, "characters": len(dispatch_prompt) - context_delivery["total_characters"]}
+                                context_delivery["total_bytes"] = context_delivery["serialized_bytes"] = len(dispatch_prompt.encode())
+                                context_delivery["total_characters"] = context_delivery["serialized_characters"] = len(dispatch_prompt)
+                                context_delivery["budget_overflow_bytes"] = max(0, len(dispatch_prompt.encode()) - context_delivery["budget_bytes"])
+                                self._task_update(activation["id"], task_id, {"context_delivery": context_delivery})
+                            task = await self.registry.start(dispatch_prompt, Path(run["repo_path"]), backend=backend, freedom=freedom, network=network, caller_approvals=candidate.get("caller_approvals", False), model=candidate.get("model"), reasoning_effort=candidate.get("reasoning_effort"), max_turns=candidate.get("max_turns"), background_idle_seconds=candidate.get("background_idle_seconds"), task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder", title=f"{run['name']} · {node.get('title', key)}")
+                        self.update(lambda r: r.pop("checkout_wait", None), "checkout_acquired")
+                        self._task_update(activation["id"], task_id, {"status": "running", "dispatch_stage": "spawn_confirmed", **({"timeout_deadline": timeout_deadline} if timeout_deadline is not None else {})})
+                    snapshot = await self._observe_attempt(task, node, role, activation, reservation)
+                    if snapshot is None:
                         slot_uncertain = True
-                        self._task_update(activation["id"], task_id, {"status": "uncertain", "error": "Timeout cancellation did not produce a settled task snapshot"})
-                        self.attention("Timed out task requires reconciliation before fallback")
                         return None
-                    if timed_out and snapshot.get("status") != "completed":
-                        notice = getattr(self.registry, "workflow_notice", None)
-                        if callable(notice):
-                            notice(task.task_id, "Node timed out after " + str(node["timeout_seconds"]) + " seconds; attempt stopped before fallback")
-                        snapshot = {**snapshot, "status": "failed", "failure_kind": "timeout", "timeout_seconds": node["timeout_seconds"], "summary": "Node timed out after " + str(node["timeout_seconds"]) + " seconds", "timed_out": True}
+                    existing_attempt = None
                 self._task_update(activation["id"], task_id, {"status": snapshot["status"], "result": snapshot, "finished_at": time.time(), "harness_metadata": observed_harness_metadata(snapshot, reservation["harness_metadata"]), "prompt_usage": {"usage": snapshot.get("usage"), "cost_usd": snapshot.get("total_cost_usd")}})
                 if strict_child_resume and snapshot.get("session_id") != inherited["source_session_id"]:
                     child_resume_refused("Child Resume did not confirm the selected conversation identity; explicit Fresh selection required")
@@ -3053,6 +3040,87 @@ class WorkflowSupervisor:
             return {"optional_failure": reason, "failure_evidence": {"candidates": _bounded(candidates)}}
         self.attention(reason)
         return None
+
+    async def _observe_attempt(self, task: Any, node: dict[str, Any], role: str, activation: dict[str, Any], reservation: dict[str, Any]) -> dict[str, Any] | None:
+        """Observe owner settlement with the original persisted deadline and cancel intent."""
+        task_id = task.task_id
+        timeout_deadline = reservation.get("timeout_deadline")
+        timeout_at = time.monotonic() + max(0, timeout_deadline - time.time()) if timeout_deadline is not None else None
+        timed_out = bool(reservation.get("timeout_requested_at"))
+        while not task.done.is_set():
+            live_snapshot = task.snapshot()
+            from .task_attachment import AttachedTask
+            if isinstance(task, AttachedTask) and not _attachable_task(self.registry._log_dir, task_id):
+                self._task_update(activation["id"], task_id, {"status": "uncertain", "error": "Detached task owner is lost or uncertain"})
+                self.attention("Task owner lost during observation; no replacement dispatched")
+                return None
+            live_limit = usage_limit(live_snapshot)
+            if live_limit and live_limit.get("settlement") == "needs_attention":
+                self._task_update(activation["id"], task_id, {"status": "uncertain", "result": live_snapshot, "error": "Usage-limited process identity or settlement remains uncertain"})
+                self.attention("Usage-limited process requires reconciliation; no replacement dispatched")
+                return None
+            if timeout_at is not None and time.monotonic() >= timeout_at:
+                self._task_update(activation["id"], task_id, {"timeout_requested_at": time.time()})
+                try:
+                    cancellation = await asyncio.wait_for(self.registry.cancel_cascade(task.task_id, workflow_control=True), timeout=20)
+                    if not isinstance(cancellation, dict) or any(cancellation.get(key) for key in ("sigkill_survivors", "survivors", "not_signalled", "owner_still_settling", "cascade_incomplete", "unconverged", "not_recorded")):
+                        raise RuntimeError("Task cancellation cascade has unsettled or unverifiable descendants")
+                    await asyncio.wait_for(task.done.wait(), timeout=10)
+                except (StateOwnershipError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):
+                    raise
+                except Exception as exc:
+                    if getattr(exc, "_receipt_refusal_run_ids", ()):
+                        raise
+                    self._task_update(activation["id"], task_id, {"status": "uncertain", "error": "Timeout cancellation requires reconciliation: " + str(exc)})
+                    self.attention("Timed out node could not be confirmed settled; no fallback dispatched")
+                    return None
+                timed_out = True
+                break
+            if role == "builder" and getattr(task, "live_input", False) and any(m.get("status") == "pending" for m in self.run(refresh_atomic=True).get("builder_messages", [])):
+                messages: list[dict[str, Any]] = []
+                def claim_live(r: dict[str, Any]) -> None:
+                    for m in r.get("builder_messages", []):
+                        if m["status"] == "pending":
+                            m["status"] = "forwarding"
+                            messages.append(copy.deepcopy(m))
+                self.update(claim_live, "builder_feedback_forwarding")
+                for message in messages:
+                    try:
+                        response = await self.registry.send_message(task, message["prompt"])
+                        delivery_id = response.get("message_id") if isinstance(response, dict) else None
+                        status = "queued_to_agent"
+                    except (StateOwnershipError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):
+                        raise
+                    except Exception as exc:
+                        if getattr(exc, "_receipt_refusal_run_ids", ()):
+                            raise
+                        from . import inbox
+                        # SendRefused guarantees that no message entered the inbox.
+                        delivery_id = None
+                        status = "deferred" if isinstance(exc, inbox.SendRefused) else "forwarding_uncertain"
+                    self.update(lambda r, mid=message["id"], state=status, did=delivery_id: next(m for m in r["builder_messages"] if m["id"] == mid).update(status=state, inbox_message_id=did, task_id=task.task_id), "builder_feedback_forwarded", {"message_id": message["id"], "status": status})
+            if self.run(refresh_atomic=True)["status"] == "cancelling":
+                await self.registry.cancel_cascade(task.task_id, workflow_control=True)
+            try:
+                await asyncio.wait_for(task.done.wait(), timeout=0.25)
+            except TimeoutError:
+                pass
+        snapshot = task.snapshot()
+        from .task_attachment import AttachedTask
+        if isinstance(task, AttachedTask) and not task.record().output_drained:
+            self._task_update(activation["id"], task_id, {"status": "uncertain", "error": "Detached task output drain was not confirmed"})
+            self.attention("Task output settlement requires reconciliation; no replacement dispatched")
+            return None
+        if timed_out and snapshot.get("status") not in {"completed", "failed", "cancelled"}:
+            self._task_update(activation["id"], task_id, {"status": "uncertain", "error": "Timeout cancellation did not produce a settled task snapshot"})
+            self.attention("Timed out task requires reconciliation before fallback")
+            return None
+        if timed_out and snapshot.get("status") != "completed":
+            notice = getattr(self.registry, "workflow_notice", None)
+            if callable(notice):
+                notice(task.task_id, "Node timed out after " + str(node["timeout_seconds"]) + " seconds; attempt stopped before fallback")
+            snapshot = {**snapshot, "status": "failed", "failure_kind": "timeout", "timeout_seconds": node["timeout_seconds"], "summary": "Node timed out after " + str(node["timeout_seconds"]) + " seconds", "timed_out": True}
+        return snapshot
 
     def _task_update(self, aid: str, tid: str, values: dict[str, Any]) -> None:
         def update(r: dict[str, Any]) -> None:
@@ -3396,14 +3464,22 @@ class WorkflowSupervisor:
 
     @layout_operation
     async def reconcile(self) -> bool:
-        """A new supervisor may inspect records but cannot adopt missing pipe owners."""
+        """Reconcile owner evidence; detached owners retain their pipes."""
         self.store.reconcile_run(self.run_id)
         from .workflow_on_demand import reconcile as reconcile_on_demand
         reconcile_on_demand(self.store, self.run(refresh_atomic=True))
-        self.tree.release_held(self.run_id)
+        if self.tree.slots is None:
+            self.tree.release_held(self.run_id)
+        for key in list(self.tree.held):
+            if key[0] != self.run_id:
+                continue
+            task = next((t for a in self.run()["activations"] for t in a["tasks"] if t["task_id"] == key[1]), None)
+            if task is None or task["status"] not in {"running", "reserved", "uncertain"}:
+                self.tree.release_slot(control=self.tree.held.pop(key))
         if any(a.get("invocation") and a.get("status") == "uncertain" for a in self.run(refresh_atomic=True)["activations"]):
             # An unreadable or mismatched child puts the tree in needs_attention.
             self.attention(next(a.get("result_error", "Child invocation is uncertain") for a in self.run(refresh_atomic=True)["activations"] if a.get("invocation") and a.get("status") == "uncertain"))
+            return False
         if any(t["status"] == "uncertain" for a in self.run(refresh_atomic=True)["activations"] for t in a["tasks"]):
             timed = any(t.get("status") == "uncertain" and t.get("timeout_deadline") is not None for a in self.run(refresh_atomic=True)["activations"] for t in a["tasks"])
             self.attention("Supervisor interrupted during a timed node: persisted timeout deadline requires process reconciliation; no worker or timer replayed" if timed else "Supervisor interrupted: reconcile observed task results before continuing; dispatches were not replayed")
@@ -3417,16 +3493,23 @@ class WorkflowSupervisor:
         from .state_layout import require_dispatch_layout
         require_dispatch_layout(self.registry.log_dir)
         self.run_id = run_id
-        if not await self.reconcile() and self.run(refresh_atomic=True)["status"] != "cancelling":
-            return
         run = self.run(refresh_atomic=True)
         from . import identity
-        if self.tree.slots is None and run.get("kind") != "builder" and not run.get("parent_link"):
-            # The root owns the tree budget; children share this object.
+        restoring_tree = self.tree.slots is None and run.get("kind") != "builder" and not run.get("parent_link")
+        if not await self.reconcile() and self.run(refresh_atomic=True)["status"] != "cancelling":
+            return
+        if restoring_tree:
             from .workflow_invocation import WorkflowTree
             self.tree = WorkflowTree(self.store, run_id, permits=run["definition"].get("max_parallel", 4), scheduling_policy=run.get("scheduling_policy", "legacy"))
             self.checkout_leases = self.tree.leases
             self.tree.supervisors[run_id] = self
+            from .workflow_recovery import restore_permits
+            try:
+                restore_permits(self)
+            except WorkflowError as exc:
+                if self.run(refresh_atomic=True)["status"] != "cancelling":
+                    self.attention(str(exc))
+                    return
         def initialize(r: dict[str, Any]) -> None:
             # Seed Start even if a caller paused before this process acquired ownership.
             if r.get("kind") != "builder" and r["status"] not in TERMINAL and not r.get("execution_initialized") and not r["pending"] and not r["activations"]:
@@ -3492,7 +3575,8 @@ class WorkflowSupervisor:
                 if self.tree.tree_running(run, refresh_atomic=True):
                     # Tokens awaiting a child never occupy a scheduling slot budget.
                     busy = len([tid for tid in active if tid not in self.tree.executing_children])
-                    for token in run["pending"]:
+                    recovering_tokens = {(a.get("token") or {}).get("id") for a in run["activations"] if a.get("invocation") or any(t.get("status") in {"reserved", "running", "uncertain"} for t in a["tasks"])}
+                    for token in sorted(run["pending"], key=lambda t: t["id"] not in recovering_tokens):
                         if token["id"] in active or busy >= run["definition"]["max_parallel"]:
                             continue
                         if not self._arrive_join(token):
@@ -3680,7 +3764,7 @@ async def _main(args: Any) -> None:
         from . import lineage
         from .task_documents import qualify_payload
         caller = lineage.Caller(qualify_payload(run["caller_record"], run["caller_record"]["task_id"], task_store.TaskRecord), run.get("caller_method", "ancestry")) if run.get("caller_record") else None
-        supervisor = WorkflowSupervisor(TaskRegistry(log_dir=storage.root / "tasks", open_monitor=False, caller_override=caller), storage)
+        supervisor = WorkflowSupervisor(TaskRegistry(log_dir=storage.root / "tasks", open_monitor=False, caller_override=caller, execution_mode="supervised"), storage)
         receipt_refused = False
         try:
             try:

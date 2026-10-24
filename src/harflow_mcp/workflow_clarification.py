@@ -80,7 +80,8 @@ async def answer_question(supervisor: Any, node: dict[str, Any], token: dict[str
                 return False
             if question["status"] == "answered" and question["answer_delivery_state"] not in {"not_started", "requires_fresh"}:
                 return True
-            if question.get("decision_attempts", 0) >= run["definition"].get("max_decision_attempts", 3):
+            retained = next((a for a in run["activations"] if a["id"] == question.get("decision_activation_id") and not a.get("decision_disposition")), None)
+            if retained is None and question.get("decision_attempts", 0) >= run["definition"].get("max_decision_attempts", 3):
                 supervisor.update(lambda r: d.exhaust_decision(r, question, clarification=True), "question_decision_exhausted")
                 return False
             context_token = {**token, "decision_id": question["decision_id"], "input_result_refs": activation.get("input_result_refs", []), "inspection_count": question.get("inspection_count", 0), "inspection_results": question.get("inspection_results", []), "on_demand_count": question.get("on_demand_count", 0), "on_demand_results": question.get("on_demand_results", [])}
@@ -108,9 +109,28 @@ async def answer_question(supervisor: Any, node: dict[str, Any], token: dict[str
             prompt = ("You are the workflow orchestrator. A worker needs clarification. Answer from the workflow objective, node instructions and evidence, or ask the caller. HarflowMCP owns state and dispatch; ordinary tools remain available under your access. Return ONLY one JSON object using the action-specific examples; omit fields belonging to other actions. Answer resumes the confirmed asking session when answer_sessions is nonempty; otherwise explicitly choose fresh. Fresh reconstructs only the assignment and observed progress. Inspect one settled execution page through final JSON requests. Examples:\n" + json.dumps(examples) + "\nContext:\n" + json.dumps(context))
             if question.get("decision_error"):
                 prompt += "\nCorrection: " + question["decision_error"]
-            orchestration = supervisor._activation(node["id"], "orchestrator", copy.deepcopy(token))
-            supervisor.update(lambda r: (question_record(r, activation_id, question_id).update(decision_attempts=question.get("decision_attempts", 0) + 1), next(a for a in r["activations"] if a["id"] == orchestration["id"]).update(decision_id=question["decision_id"], question_id=question_id)), "question_decision_reserved")
-            outcome = await supervisor._dispatch({"id": "orchestrator", "title": "Clarification"}, prompt, "orchestrator", orchestration)
+            if retained is None:
+                orchestration = {"id": uuid.uuid4().hex, "node_id": node["id"], "role": "orchestrator", "status": "running", "tasks": [], "created_at": time.time(), "token": copy.deepcopy(token), "decision_id": question["decision_id"], "question_id": question_id, "decision_goal_revision": run.get("goal_revision")}
+                def reserve(r: dict[str, Any]) -> None:
+                    q = question_record(r, activation_id, question_id)
+                    if q.get("decision_id") != question["decision_id"] or q.get("decision_activation_id") != question.get("decision_activation_id"):
+                        raise w.WorkflowError("Question checkpoint changed before reservation")
+                    r["activations"].append(copy.deepcopy(orchestration))
+                    q.update(decision_attempts=q.get("decision_attempts", 0) + 1, decision_activation_id=orchestration["id"])
+                supervisor.update(reserve, "question_decision_reserved")
+                outcome = await supervisor._dispatch({"id": "orchestrator", "title": "Clarification"}, prompt, "orchestrator", orchestration)
+            else:
+                orchestration = retained
+                attempt = orchestration["tasks"][-1] if orchestration["tasks"] else None
+                outcome = attempt.get("result") if attempt and attempt.get("status") in {"completed", "failed", "cancelled"} else None
+                if outcome is None:
+                    outcome = await supervisor._dispatch({"id": "orchestrator", "title": "Clarification"}, prompt, "orchestrator", orchestration)
+                elif outcome.get("status") == "completed" and not outcome.get("is_error"):
+                    try:
+                        d.record_retained_control_session(supervisor, orchestration, attempt, outcome)
+                    except w.WorkflowError as exc:
+                        supervisor.attention("Child Resume refused: " + str(exc))
+                        return False
             if not outcome:
                 supervisor.update(lambda r: next(a for a in r["activations"] if a["id"] == orchestration["id"]).update(status="failed"), "question_decision_interrupted")
                 return False
@@ -145,7 +165,12 @@ async def answer_question(supervisor: Any, node: dict[str, Any], token: dict[str
                     raise w.WorkflowError("needs_input requires a nonempty question")
                 def accept(r: dict[str, Any]) -> None:
                     a = next(a for a in r["activations"] if a["id"] == orchestration["id"])
-                    a.update(status="completed", raw_output=raw, protocol_warnings=protocol_warnings)
+                    q = question_record(r, activation_id, question_id)
+                    if q.get("decision_activation_id") != orchestration["id"] or q.get("decision_id") != orchestration["decision_id"] or r.get("goal_revision") != orchestration.get("decision_goal_revision"):
+                        raise w.WorkflowError("Question checkpoint or goal changed before acceptance")
+                    if a.get("decision_disposition"):
+                        return
+                    a.update(status="completed", raw_output=raw, protocol_warnings=protocol_warnings, decision_disposition="accepted")
                     if r["status"] != "running":
                         a["decision_ignored"] = "Human control changed run state before answer acceptance"
                         return
@@ -170,7 +195,7 @@ async def answer_question(supervisor: Any, node: dict[str, Any], token: dict[str
             except (ValueError, TypeError, AttributeError) as exc:
                 def reject(r: dict[str, Any]) -> None:
                     diagnostic = {"decision_id": question["decision_id"], "question_id": question_id, "attempt": question.get("decision_attempts", 0), "category": "clarification_validation", "error": str(exc)}
-                    next(a for a in r["activations"] if a["id"] == orchestration["id"]).update(status="failed", raw_output=raw, result_error=str(exc), decision_diagnostic=diagnostic)
+                    next(a for a in r["activations"] if a["id"] == orchestration["id"]).update(status="failed", raw_output=raw, result_error=str(exc), decision_diagnostic=diagnostic, decision_disposition="rejected")
                     r.setdefault("decision_errors", []).append(diagnostic)
                     if r["status"] == "running" and supervisor.tree.tree_running(r):
                         question_record(r, activation_id, question_id)["decision_error"] = str(exc)
@@ -185,8 +210,10 @@ async def continue_worker(supervisor: Any, node: dict[str, Any], token: dict[str
     activation = next(a for a in run["activations"] if a["id"] == activation_id)
     question = question_record(run, activation_id, question_id)
     if question.get("answer_delivery_state") in {"reserved", "running", "uncertain"}:
-        supervisor.attention("Answer delivery requires reconciliation; it was not replayed")
-        return None
+        from .workflows import _attachable_task
+        if not question.get("reply_task_id") or not _attachable_task(supervisor.registry._log_dir, question["reply_task_id"]):
+            supervisor.attention("Answer delivery requires reconciliation; it was not replayed")
+            return None
     mode = question.get("session_mode", "resume")
     source = compatible_origin(run, node, activation, question, root=supervisor.store.root) if mode == "resume" else None
     def prepare(r: dict[str, Any]) -> None:

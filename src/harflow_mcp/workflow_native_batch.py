@@ -133,10 +133,13 @@ async def _execute(requests: list[dict[str, Any]]) -> list[tuple[bool, dict[str,
             children.append({"index": index, "request": request, "child": child, "state": state, "nonce": nonce})
         root_id = (run.get("parent_link") or {}).get("root_workflow_run_id", run["workflow_run_id"])
         lease_run = run if root_id == run["workflow_run_id"] else supervisor.store.get_run(root_id)
-        async with CheckoutLease(supervisor.store, run["repo_path"], tree_write_strength(lease_run, record.freedom), continue_running, pool=supervisor.checkout_leases):
+        async with CheckoutLease(supervisor.store, run["repo_path"], tree_write_strength(lease_run, record.freedom), continue_running, pool=supervisor.checkout_leases, owned_run_ids=getattr(supervisor.tree, "recovered_run_ids", set())):
             def reserve(r: dict[str, Any]) -> None:
                 for item in children:
                     a = next(a for a in r["activations"] if a["id"] == item["request"]["activation"]["id"])
+                    item["child"]["native_replay_state"] = {**copy.deepcopy(item["state"]), "batch_entries": copy.deepcopy(entries)}
+                    if item["request"]["node"].get("timeout_seconds"):
+                        item["child"]["timeout_deadline"] = time.time() + item["request"]["node"]["timeout_seconds"]
                     a["tasks"].append(copy.deepcopy(item["child"]))
                     a.update(presentation(item["child"]))
                     a.pop("execution_fallback_reason", None)
@@ -190,7 +193,11 @@ async def _execute(requests: list[dict[str, Any]]) -> list[tuple[bool, dict[str,
                 for item in children:
                     publish(item, native.observe(event, item["nonce"], item["state"]))
 
-            observers[transport_id] = observe
+            supervised = getattr(supervisor.registry, "execution_mode", "in_process") == "supervised"
+            from .workflow_native_observations import Replay, require_transport_owner, require_transport_settled
+            replay = Replay(supervisor, transport_id, observe) if supervised else None
+            if not supervised:
+                observers[transport_id] = observe
             for item in children:
                 supervisor._task_update(item["request"]["activation"]["id"], item["child"]["task_id"], {"dispatch_stage": "launch_requested", "launch_requested_at": time.time()})
             supervisor._task_update(transport_id, transport_id, {"dispatch_stage": "spawn_requested"})
@@ -207,6 +214,9 @@ async def _execute(requests: list[dict[str, Any]]) -> list[tuple[bool, dict[str,
             deadline = min(deadlines, default=None)
             cancelled = False
             while not task.done.is_set():
+                require_transport_owner(supervisor, transport_id)
+                if replay is not None:
+                    replay.poll()
                 live_snapshot = task.snapshot()
                 diagnostic = live_snapshot.get("failure_diagnostic") or {}
                 if diagnostic.get("category") == "usage_limit" and diagnostic.get("settlement") == "needs_attention":
@@ -219,6 +229,9 @@ async def _execute(requests: list[dict[str, Any]]) -> list[tuple[bool, dict[str,
                     await asyncio.wait_for(task.done.wait(), .25)
                 except TimeoutError:
                     pass
+            require_transport_settled(supervisor, transport_id)
+            if replay is not None:
+                replay.poll(terminal=True)
             snapshot = task.snapshot()
             supervisor._task_update(transport_id, transport_id, {"status": snapshot["status"], "result": snapshot, "finished_at": time.time()})
             supervisor.update(lambda r: next(a for a in r["activations"] if a["id"] == transport_id).update(status=snapshot["status"]), "native_control_settled")

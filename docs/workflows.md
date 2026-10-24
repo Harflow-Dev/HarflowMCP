@@ -689,8 +689,10 @@ attention instead of starting overlapping work. The cancellation allowance inclu
 escalation and drain time. A recovered positively settled timeout still permits an unused fallback
 in the same activation. Deadlines are persisted on each candidate reservation. Ordinary MCP
 server restart does not stop the detached workflow supervisor; if that supervisor itself is lost,
-surviving tasks require reconciliation and are not silently adopted or redispatched. A persisted
-deadline provides diagnostics, not a watchdog that survives loss of the supervisor.
+surviving tasks retain their independent task owners. Explicit recovery reattaches to qualified
+existing attempts and retains their original deadlines; unknown ownership blocks dispatch.
+No workflow watchdog runs while its scheduler is dead. On recovery, an expired deadline follows
+the existing cancellation and settlement path rather than receiving a new timeout window.
 
 Planning nodes publish the latest complete technical-plan revision. Earlier versions remain in
 immutable execution results for orchestrator inspection; a planning adjudicator that revises the
@@ -1029,8 +1031,12 @@ settle its active dispatches, then records `needs_attention` with the cancellati
 not repeatedly relaunch the failed cancellation supervisor. Existing task records remain
 available for reconciliation; uncertain dispatches cannot be resumed or repeated.
 
-Explicit `recover_workflow` requires a nonempty reason and a failed, settled run. It returns the
+Explicit `recover_workflow` requires a nonempty reason. For a failed, settled run it returns the
 failed decision to the orchestrator with a fresh decision allowance and preserves completed work.
+It also recovers an interrupted nonterminal root whose scheduler is confirmed dead and whose
+linked task ownership is qualified. That recovery preserves existing decision budgets, attempts,
+child invocation IDs and cancellation intent; it does not reissue completed control turns.
+Status and wait calls never relaunch a lost scheduler. See [supervision and recovery](supervision.md).
 
 For a settled permission refusal in an optional review node, answer the current question with
 `resume_workflow`, its exact `decision_id`, and nonempty `instructions`. To authorize proceeding

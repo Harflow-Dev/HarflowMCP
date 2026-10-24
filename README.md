@@ -8,6 +8,8 @@ Vibe runs use its Python CLI entrypoint for headless dispatch; interactive takeo
 
 Version 0.0.1 is under development and unreleased. [Harflow](https://github.com/Harflow-Dev/HarflowMac), the companion macOS application, is maintained separately and prepares its own exact paired engine runtime. Its managed runtime and MCP registrations work independently of the app process; see the [managed runtime guide](https://github.com/Harflow-Dev/HarflowMac/blob/main/docs/managed-runtime.md).
 
+Detached task owners preserve output capture and live input across MCP server restarts.
+Workflow scheduler recovery is explicit; see [supervision and recovery](docs/supervision.md).
 Recovered tasks disclose owner/process uncertainty and capture continuity. Qualified Claude
 transcripts can supply bounded display-only recovery activity; see [public contracts](docs/contracts.md#supervision-and-recovery-activity).
 Live background wait bounds are persisted and configurable; see [task continuation](docs/task-continuation.md#live-background-wait-bound).
