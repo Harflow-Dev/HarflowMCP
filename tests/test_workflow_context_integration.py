@@ -147,7 +147,7 @@ async def test_protocol_repair_receives_bootstrap(storage, tmp_path):
 
 async def test_on_demand_catalog_is_slim_but_specialist_receives_verbatim_instructions(storage, tmp_path):
     definition = graph()
-    exact = "Return exact evidence 🙂\n\tPreserve whitespace and symbols: {raw}."
+    exact = "Return exact evidence 𐍈\n\tPreserve whitespace and symbols: {raw}."
     definition.update({"context_delivery": "optimized_v1", "on_demand_nodes": [{
         "id": "research", "title": "API researcher", "instructions": exact,
         "call_condition": "Call when API behaviour needs verification.",

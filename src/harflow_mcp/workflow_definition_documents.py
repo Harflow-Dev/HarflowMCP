@@ -77,7 +77,7 @@ def decode(document: Any, name: str) -> dict[str, Any]:
             if not isinstance(node, dict):
                 raise ValueError("Malformed definition node")
             fields = {key: str for key in ("id", "type", "title", "purpose", "instructions", "prompt", "role", "freedom", "session_mode", "execution_mode", "branch_mode", "branch_selection", "selection_guidance", "parallel_group_id", "join_id", "workflow_name", "orchestrator_mode", "child_session_policy", "call_condition")}
-            fields.update({key: bool for key in ("optional", "require_technical_plan", "require_tasks")})
+            fields.update({key: bool for key in ("optional", "require_technical_plan", "require_tasks", "always_route")})
             fields.update({key: int for key in ("max_attempts", "max_context_questions")})
             fields.update(network=(bool, type(None)), timeout_seconds=(int, type(None)), agent=dict, position=dict, workflow_ref=dict)
             _shape(node, fields, "node")
@@ -100,9 +100,9 @@ def decode(document: Any, name: str) -> dict[str, Any]:
 
 def definition_warnings(definition: dict[str, Any]) -> list[str]:
     """Advisories do not reject or rewrite existing workflow definitions."""
-    return ["Agent " + node["id"] + " has no purpose; context uses a bounded instructions excerpt"
+    return [("Agent " if node["type"] == "agent" else "Workflow ") + node["id"] + " has no purpose; context uses a bounded instructions excerpt"
             for node in definition.get("nodes", [])
-            if node.get("type") == "agent" and not node.get("purpose")]
+            if node.get("type") in {"agent", "workflow"} and not node.get("purpose")]
 
 
 def encode(definition: dict[str, Any]) -> dict[str, Any]:

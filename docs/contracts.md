@@ -294,3 +294,21 @@ No checkpoint prose is duplicated in this state. Older internal receipts cannot 
 version 2 references. The workflow-run patch fixture covers these additive fields.
 Instruction inspection is an internal orchestrator action over the current run's pinned
 definition; it adds no ctl or MCP command and retains the existing inspection limits.
+
+### Runner-owned structural transitions
+
+Optional connected-node `always_route` is a boolean in workflow definition v1. The
+patch definition fixture covers it alongside `purpose`. Guided run decision records
+may have `actor: "harflow"`, `token_id`, `selected_connections` and
+`transition_sequence` with a stable `decision_id` and reason, without `activation_id`.
+Runner reasons begin with "Harflow advanced" or "Harflow passed" so consumers displaying
+only reason text retain attribution. Optional `connections` is a string-array compatibility
+alias of `selected_connections` for existing canvas consumers. These are runner decisions
+rather than harness turns. Tokens may carry
+`structural_completion_refs` contributed by skipped successful exits, merged at their own
+join and retained only along structural edges; these references preserve existing
+checkpoint-owned checklist evidence without completing tasks implicitly. Run history transition entries
+retain their existing `detail` list of connection IDs and may add top-level `actor`,
+`decision_id`, `reason` and `token_id` matched to the committed transition sequence.
+The public wire versions remain 1; these fields are additive. The run patch fixture
+covers the runner decision provenance.

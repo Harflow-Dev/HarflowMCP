@@ -1334,7 +1334,8 @@ async def test_guided_harmless_decision_fields_persist_warnings(storage, tmp_pat
         return result
     run, _ = await run_flow(storage, tmp_path, registry=Registry(storage.root, policy), guided=True)
     assert run['status'] == 'completed'
-    assert all(decision['protocol_warnings'] for decision in run['decisions'])
+    harness_decisions = [decision for decision in run['decisions'] if decision.get('actor') != 'harflow']
+    assert harness_decisions and all(decision['protocol_warnings'] for decision in harness_decisions)
     assert all('display_note' not in decision for decision in run['decisions'])
 
 

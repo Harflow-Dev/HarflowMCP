@@ -54,7 +54,7 @@ def acknowledged_receipt(receipt: dict[str, Any], ack: Any) -> dict[str, Any] | 
 
 def compact_recent_decisions(decisions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Retain judgments and continuation identities, never old assignments."""
-    retained = ("decision_id", "action", "reason", "node_id", "activation_id", "selected_join_id", "task_updates", "question", "question_id", "answer", "protocol_warnings", "outcome", "status")
+    retained = ("decision_id", "action", "reason", "node_id", "activation_id", "selected_join_id", "task_updates", "question", "question_id", "answer", "protocol_warnings", "outcome", "status", "actor", "selected_connections", "connections", "token_id", "transition_sequence")
     entry_keys = ("continuation_id", "session_mode", "resume_task_id", "assigned_task_ids", "additional_result_refs", "artifact_refs", "selection_reason", "reason", "child_session_mode", "child_session_ref", "child_session_reason")
     def entry(value: dict[str, Any]) -> dict[str, Any]:
         result = {key: copy.deepcopy(value[key]) for key in entry_keys if key in value}

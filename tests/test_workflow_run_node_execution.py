@@ -17,7 +17,7 @@ def agent_node(node_id: str, instructions: str = "Do the work") -> dict:
     return {"id": node_id, "type": "agent", "role": "task", "instructions": instructions, "agent": {"backend": "codex"}}
 
 
-def child_graph(name: str = "child", *, parallel: bool = False, work_count: int = 1) -> dict:
+def child_graph(name: str = "child", *, parallel: bool = False, work_count: int = 1, execution_mode: str | None = None) -> dict:
     nodes = [{"id": "start", "type": "start"}]
     connections = []
     if parallel:
@@ -30,7 +30,10 @@ def child_graph(name: str = "child", *, parallel: bool = False, work_count: int 
         connections.append({"id": "begin", "source": "start", "target": "split"})
         connections.append({"id": "done", "source": "join", "target": "end"})
     else:
-        nodes.append(agent_node("work"))
+        work = agent_node("work")
+        if execution_mode is not None:
+            work["execution_mode"] = execution_mode
+        nodes.append(work)
         connections = [{"id": "begin", "source": "start", "target": "work"}, {"id": "finish", "source": "work", "target": "end"}]
     nodes.append({"id": "end", "type": "end"})
     return {"name": name, "routing_mode": "explicit", "orchestrator": {"backend": "codex"}, "nodes": nodes, "connections": connections}
@@ -231,6 +234,38 @@ async def test_child_mode_prompt_assignment_and_isolation(two_level, tmp_path):
     assert outcome["child_workflow_run_id"] == child["workflow_run_id"]
     assert outcome["final_result_refs"]
     assert all(ref["workflow_run_id"] == child["workflow_run_id"] for ref in outcome["final_result_refs"])
+
+
+@pytest.mark.parametrize("mode", ["current", "child"])
+async def test_linked_child_sole_start_passes_exact_assignment_without_start_decision(tmp_path, monkeypatch, mode):
+    monkeypatch.setattr(w.backends, "is_installed", lambda backend: True)
+    monkeypatch.setattr(w, "_launch", lambda *args: None)
+    store = w.WorkflowStore(tmp_path / "state")
+    saved_child = store.save("child", child_graph("child", execution_mode="headless"))
+    store.save("parent", parent_graph(saved_child["workflow_id"], mode=mode))
+    assignment = "  Részearch résumé\t— preserve spacing\nsecond line  "
+
+    def policy(context, registry):
+        decision = workflow_policy(context, registry)
+        for entry in decision.get("next", []):
+            if entry["continuation_id"] == "to-call":
+                entry["prompt"] = assignment
+        return decision
+
+    registry = TreeRegistry(store.root, policy=policy)
+    run, _ = await run_tree(store, tmp_path, "parent", registry)
+    assert run["status"] == "completed", run.get("attention_reason")
+    child = child_runs(store, run)[0]
+    assert child["prompt"] == assignment
+    assert child["parent_link"]["workflow_run_id"] == run["workflow_run_id"]
+    assert child["orchestrator_mode"] == mode
+    child_contexts = [context for context in registry.contexts if context.get("workflow_run_id") == child["workflow_run_id"]]
+    assert child_contexts
+    assert all(context["current_stage"]["node_id"] != "start" for context in child_contexts)
+    runner_records = [record for record in child["decisions"] if record.get("actor") == "harflow"]
+    assert runner_records and all(record.get("token_id") and record.get("reason") for record in runner_records)
+    worker = next(dispatch for dispatch in registry.dispatches if dispatch["run"] == "child" and dispatch["label"] == "work")
+    assert assignment in worker["prompt"]
 
 
 async def test_child_execution_propagates_explicit_state_root_when_ambient_root_is_foreign(two_level, tmp_path, monkeypatch):
@@ -510,9 +545,9 @@ async def test_n4_pause_mid_flight_settles_worker_and_ignores_spanned_decision(t
     c2 = store.save("c2", child_graph("c2"))
     store.save("parent", parent_multi([c1["workflow_id"], c2["workflow_id"]], max_parallel=4))
     registry = TreeRegistry(store.root)
-    # Hold c1's worker mid-flight, and hold c2's second orchestrator decision.
+    # Hold c1's worker mid-flight, and hold c2's first remaining orchestrator decision.
     registry.hold_when["c1 · work"] = 1
-    registry.hold_when["c2 · Decision"] = 2
+    registry.hold_when["c2 · Decision"] = 1
     run, registry, task, supervisor = await _start_tree(store, tmp_path, "parent", registry)
     assert await _wait_until(lambda: registry.reached.get("c1 · work") and registry.reached.get("c2 · Decision"))
     starts_before_pause = dict(registry.occurrences)

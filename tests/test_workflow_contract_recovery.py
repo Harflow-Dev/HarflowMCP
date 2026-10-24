@@ -53,7 +53,10 @@ def test_missing_retained_session_is_not_advertised(monkeypatch):
 
 
 def test_action_examples_do_not_leak_fields():
-    prompt = d.decision_prompt({'decision_id': 'decision'})
+    prompt = d.decision_prompt({'decision_id': 'decision', 'valid_actions': ['inspect', 'continue'], 'valid_continuations': [
+        {'continuation_id': 'structural', 'requires_prompt': False},
+        {'continuation_id': 'agent', 'requires_prompt': True},
+    ]})
     examples = json.loads(prompt.split('Examples:\n', 1)[1].split('\nContext:', 1)[0])
     assert set(examples['inspect']) == {'decision_id', 'reason', 'action', 'requests'}
     assert set(examples['structural_continue']['next'][0]) == {'continuation_id'}

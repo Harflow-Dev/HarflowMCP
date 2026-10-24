@@ -36,7 +36,7 @@ acknowledge a baseline.
 
 The orchestrator graph contains node identities, purposes, execution constraints and every
 connection and condition. Optional node `purpose` is a nonempty single line of at most 500
-characters. Missing agent purposes produce advisory `warnings` in `workflow-validate`, a context warning,
+characters. Missing executable agent or workflow node purposes produce advisory `warnings` in `workflow-validate`, a context warning,
 and a 240-character instructions excerpt. Existing definitions remain valid. Full verbatim instructions accompany every newly offered executable node, including
 nested parallel entries and retries; only acknowledged same-session instructions can become
 digest references. The orchestrator must transfer relevant requirements, constraints and
@@ -85,6 +85,46 @@ describe actual delivery and observed usage; they do not establish model token s
 
 Reproduce the deterministic fixtures and complete fake-harness workflow comparison using the
 [context benchmark guide](workflow-context-benchmarks.md). No model calls are made.
+
+## Deterministic structural traversal
+
+Guided runs advance clean succeeded agent results and settled completed child workflows
+along a sole unconditional forward edge into End or their own active parallel join.
+A clean branch can arrive and wait while siblings run; it cannot cross a pending join.
+Nested and selected groups retain their frozen membership. Intermediate executable nodes,
+multiple outgoing arrows, conditions and backward arrows still require routing judgment.
+Failed, optional-failure, uncertain, unanswered-question, repair, review-changes-needed and
+replanning evidence retain the existing decision/recovery path. Planning proposals that
+no checklist is needed also require an orchestrator judgment.
+
+Any connected node may set optional boolean `always_route: true` to retain its outgoing
+orchestrator decision. This includes the last agent or workflow in a branch, the merged
+parallel join, and a child Start. The setting does not bypass join arrival or authorize
+routing beyond an unsettled group. End continues to require the completion decision.
+
+A fresh linked Child or Current invocation with one unconditional Start-to-agent entry can
+pass its invocation assignment verbatim to that worker. The normal continuation validator
+still selects a compatible session policy and enforces attempts and assignment authority;
+worker dispatch retains permissions, constraints and invocation evidence. Root Start,
+parallel/multiple/conditional entries, planning targets, goals, existing checklist tasks,
+invocation task descriptors, artifact selection, retained-session ambiguity and
+`always_route` on Start or its entry agent retain the orchestrator assignment decision.
+Inherited Child Resume always verifies its first orchestrator turn before worker dispatch.
+A fresh Child whose entry prefers native subagent execution also retains its first owner
+decision to establish the required session; Current uses its initialized parent owner.
+
+Runner-owned decisions record `actor: "harflow"`, a reason beginning with "Harflow advanced"
+or "Harflow passed", token identity, selected connection IDs and the transition sequence
+without creating a harness activation. The `connections` compatibility alias preserves
+existing canvas edge highlighting. Decision provenance,
+transition count and token advancement are persisted together and respect `max_transitions`.
+Only skipped successful exits contribute checkpoint-owned completion references; joins merge
+these references and structural edges carry them to the next join or End. The orchestrator
+still explicitly updates checklist tasks there, using the original assigned-task and
+implementation-completion evidence checks. Arbitrary historical executions gain no authority.
+A stale or consumed token cannot advance again. The corresponding transition log keeps its
+edge-ID detail list and adds matching actor/decision/reason/token provenance. Recovered
+runs use the persisted pending tokens and existing execution reconciliation.
 
 ## Native subagent execution
 

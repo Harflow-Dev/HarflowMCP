@@ -9,6 +9,7 @@ from harflow_mcp.workflow_context import (
 )
 from harflow_mcp.workflow_inspection import instruction_page
 from harflow_mcp.workflow_prompt_delivery import project_orchestrator_context
+from harflow_mcp.workflow_definition_documents import definition_warnings
 from harflow_mcp import ctl
 
 
@@ -62,6 +63,27 @@ def test_unchanged_sections_become_references_and_reconstruct_exactly():
     assert payload["checkpoint"]["checklist"]["mode"] == "reference"
     assert payload["checkpoint"]["node_instructions"]["worker"]["mode"] == "reference"
     assert resumed.receipt["section_state"]["technical_plan"]["digest"] == first.receipt["section_state"]["technical_plan"]["digest"]
+
+
+def test_jit_instructions_survive_absent_offer_then_retry_as_reference():
+    source = _context()
+    source["node_instructions"] = {"worker": "Worker A exact 𐍈 constraints\nwith spacing"}
+    source["valid_continuations"] = [{"continuation_id": "worker-a", "node_id": "worker", "requires_prompt": True}]
+    first = render_decision_context(source, session_owner="candidate:session", scope="run")
+    baseline = _acknowledge(first)
+    digest = first.receipt["section_state"]["node_instructions:worker"]["digest"]
+    source.update(decision_id="d2", valid_continuations=[{"continuation_id": "other", "node_id": "other", "requires_prompt": True}])
+    source["node_instructions"] = {}
+    intermediate = render_decision_context(source, session_owner="candidate:session", scope="run", baseline=baseline)
+    assert intermediate.receipt["section_state"]["node_instructions:worker"]["mode"] == "reference"
+    assert _payload(intermediate)["checkpoint"].get("node_instructions") == {}
+    source.update(decision_id="d3", valid_continuations=[{"continuation_id": "retry-a", "node_id": "worker", "kind": "retry_execution", "requires_prompt": True}])
+    source["node_instructions"] = {"worker": "Worker A exact 𐍈 constraints\nwith spacing"}
+    retry = render_decision_context(source, session_owner="candidate:session", scope="run", baseline=baseline)
+    payload = _payload(retry)
+    assert retry.receipt["section_state"]["node_instructions:worker"]["mode"] == "reference"
+    assert payload["checkpoint"]["node_instructions"]["worker"]["mode"] == "reference"
+    assert retry.receipt["section_state"]["node_instructions:worker"]["digest"] == digest
 
 
 def test_changed_section_is_full_while_unrelated_section_stays_reference():
@@ -127,7 +149,7 @@ def test_acknowledgement_is_exact_and_preserves_section_receipt():
 
 
 def test_instruction_inspection_pages_verbatim_current_run_text():
-    text = "constraint 🙂 " * 80
+    text = "constraint 𐍈 " * 80
     run = {"workflow_run_id": "run", "definition": {"nodes": [{"id": "worker", "instructions": text}]}}
     first = instruction_page(run, {"node_id": "worker", "view": "instructions", "limit": 31})
     chunks = [first["chunk"]]
@@ -149,6 +171,40 @@ def test_orchestrator_projection_warns_on_missing_purpose_and_keeps_worker_text(
     assert projected["workflow_graph"]["nodes"][0]["purpose"] == "Exact specialist constraints"
     assert projected["context_warnings"]
     assert projected["node_instructions"]["worker"] == "Exact specialist constraints"
+
+
+def test_workflow_node_projection_warns_and_keeps_full_jit_instructions():
+    instructions = "Workflow handoff constraints 𐍈 " * 30
+    definition = {
+        "nodes": [
+            {"id": "start", "type": "start"},
+            {"id": "invoke", "type": "workflow", "instructions": instructions, "workflow_ref": {"workflow_id": "child"}},
+            {"id": "end", "type": "end"},
+        ],
+        "connections": [],
+    }
+    run = {"definition": definition}
+    context = {
+        "workflow_graph": {"nodes": [
+            {"id": "start", "type": "start"},
+            {"id": "invoke", "type": "workflow", "instructions": instructions},
+            {"id": "end", "type": "end"},
+        ]},
+        "valid_continuations": [{"node_id": "invoke", "requires_prompt": True}],
+    }
+    projected = project_orchestrator_context(run, context)
+    invoke = next(node for node in projected["workflow_graph"]["nodes"] if node["id"] == "invoke")
+    assert "instructions" not in invoke
+    assert invoke["purpose"] == instructions[:240]
+    assert projected["node_instructions"]["invoke"] == instructions
+    assert any(warning.startswith("Workflow ") and "purpose" in warning for warning in projected["context_warnings"])
+    assert not any("Start" in warning or "End" in warning for warning in definition_warnings(definition))
+
+    definition["nodes"][1]["purpose"] = "Run the linked child workflow"
+    authored = project_orchestrator_context({"definition": definition}, context)
+    invoke = next(node for node in authored["workflow_graph"]["nodes"] if node["id"] == "invoke")
+    assert invoke["purpose"] == "Run the linked child workflow"
+    assert not any(warning.startswith("Workflow ") and "purpose" in warning for warning in authored["context_warnings"])
 
 
 def test_dynamic_authority_stays_inline_after_stable_sections_are_acknowledged():
@@ -197,7 +253,7 @@ def test_reference_accounting_distinguishes_source_and_delivered_bytes():
 def test_parallel_candidate_projection_keeps_both_entry_instructions_across_resume():
     definition = {
         "nodes": [
-            {"id": "left", "type": "agent", "instructions": "LEFT exact 🙂 constraints", "agent": {"backend": "codex"}},
+            {"id": "left", "type": "agent", "instructions": "LEFT exact 𐍈 constraints", "agent": {"backend": "codex"}},
             {"id": "right", "type": "agent", "instructions": "RIGHT exact\nconstraints", "agent": {"backend": "codex"}},
         ]
     }
@@ -209,7 +265,7 @@ def test_parallel_candidate_projection_keeps_both_entry_instructions_across_resu
         ]}],
     }
     projected = project_orchestrator_context(run, context)
-    assert projected["node_instructions"] == {"left": "LEFT exact 🙂 constraints", "right": "RIGHT exact\nconstraints"}
+    assert projected["node_instructions"] == {"left": "LEFT exact 𐍈 constraints", "right": "RIGHT exact\nconstraints"}
 
 
 def test_ctl_validation_reports_missing_purpose_warning(tmp_path, capsys, monkeypatch, request):

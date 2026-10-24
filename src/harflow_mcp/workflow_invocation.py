@@ -842,6 +842,7 @@ async def run_child(supervisor: Any, node: dict[str, Any], token: dict[str, Any]
         current = next(t for t in r["pending"] if t["id"] == token["id"])
         if activation is None:
             fresh = {"id": uuid.uuid4().hex, "node_id": node["id"], "role": "node", "status": "running", "tasks": [], "created_at": time.time(), "token": copy.deepcopy(token), "visit_id": visit_id(r, token), "invocation": {"child_workflow_run_id": uuid.uuid4().hex, "stage": "preparing", "workflow_id": node["workflow_ref"]["workflow_id"], "workflow_name": node.get("workflow_name", ""), "orchestrator_mode": node.get("orchestrator_mode", "child"), "timeout_seconds": node.get("timeout_seconds"), "timeout_elapsed_seconds": 0}}
+            fresh["assigned_task_ids"] = copy.deepcopy(token.get("assigned_task_ids", []))
             if token.get("authorized_artifact_refs"):
                 fresh["authorized_artifact_refs"] = copy.deepcopy(token["authorized_artifact_refs"])
             r["activations"].append(fresh)

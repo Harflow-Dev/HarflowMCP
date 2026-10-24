@@ -263,6 +263,8 @@ def validate_definition(raw: dict[str, Any]) -> dict[str, Any]:
             node.setdefault("selection_guidance", "")
             if not isinstance(node["selection_guidance"], str):
                 raise WorkflowError("Parallel selection_guidance must be a string")
+        if "always_route" in node and type(node["always_route"]) is not bool:
+            raise WorkflowError("Node always_route must be a boolean")
         if "purpose" in node:
             purpose = node["purpose"]
             if not isinstance(purpose, str) or not purpose.strip() or len(purpose) > 500 or any(c in purpose for c in "\r\n"):
@@ -1226,7 +1228,12 @@ class WorkflowStore:
                     _write(path, receipt_document, layout=self.state_layout,
                            before_replace=lambda path=path, expected=receipt_source: check_source(path, expected))
                 with (self.runs / f"{run_id}.jsonl").open("a", encoding="utf-8") as f:
-                    f.write(json.dumps({"sequence": run["sequence"], "time": run["updated_at"], "event": event, "detail": detail}) + "\n")
+                    entry = {"sequence": run["sequence"], "time": run["updated_at"], "event": event, "detail": detail}
+                    if event == "transition":
+                        runner = next((decision for decision in reversed(run["decisions"]) if decision.get("actor") == "harflow" and decision.get("transition_sequence") == run["sequence"]), None)
+                        if runner is not None:
+                            entry.update({key: runner[key] for key in ("actor", "decision_id", "reason", "token_id")})
+                    f.write(json.dumps(entry) + "\n")
                     f.flush()
                     os.fsync(f.fileno())
                 self._index_run(run, previous_directory_mtime=previous_directory_mtime, written_source=written_source)
@@ -1969,6 +1976,8 @@ def validate_builder_preview(value: Any, name: str) -> dict[str, Any]:
                 raise WorkflowError(f"timeout_seconds must be a nonnegative integer: {nid}")
             if "max_attempts" in node:
                 _positive(node["max_attempts"], "max_attempts")
+        if "always_route" in node and type(node["always_route"]) is not bool:
+            raise WorkflowError("Node always_route must be a boolean")
         if "purpose" in node:
             purpose = node["purpose"]
             if not isinstance(purpose, str) or not purpose.strip() or len(purpose) > 500 or any(c in purpose for c in "\r\n"):
@@ -3243,6 +3252,10 @@ class WorkflowSupervisor:
 
     async def _legacy_node(self, token: dict[str, Any]) -> None:
         r = self.run()
+        current_token = next((current for current in r["pending"] if current["id"] == token["id"]), None)
+        if current_token is None or current_token.get("node_id") != token.get("node_id"):
+            return
+        token = current_token
         node = next(n for n in r["definition"]["nodes"] if n["id"] == token["node_id"])
         result: dict[str, Any] = {}
         if is_executable(node):
@@ -3278,21 +3291,41 @@ class WorkflowSupervisor:
         if node["type"] == "end":
             self.update(lambda rr: rr["pending"].remove(token), "end_reached", node["id"])
             return
+        r = self.run()
+        live_token = next((t for t in r["pending"] if t["id"] == token["id"]), None)
+        if live_token is None or live_token.get("node_id") != node["id"]:
+            return
+        token = live_token
+        automatic = None
         if token.get("selected_connections"):
             selected = [e for e in r["definition"]["connections"] if e["id"] in token["selected_connections"]]
         else:
-            from .workflow_traversal import automatic_edges
-            selected = automatic_edges(r, node, token, root=self.store.root) if r.get("execution_contract") == "delegation" else None
+            from .workflow_traversal import automatic_transition
+            automatic = automatic_transition(r, node, token, root=self.store.root) if r.get("execution_contract") == "delegation" else None
+            selected = automatic["connections"] if automatic is not None else None
             if selected is None:
                 selected = await self._decision(node, result or token.get("context", {}), token)
         if selected is None:
             return
         current = self.run()
-        token = next((t for t in current["pending"] if t["id"] == token["id"]), token)
+        token = next((t for t in current["pending"] if t["id"] == token["id"]), None)
+        if token is None or token.get("node_id") != node["id"]:
+            return
         selected_join = validate_selection(current["definition"], node, selected, token, current["joins"])
         def advance(rr: dict[str, Any]) -> None:
-            if rr["status"] != "running":
+            nonlocal token, selected_join
+            current_token = next((t for t in rr["pending"] if t["id"] == token["id"]), None)
+            if rr["status"] != "running" or current_token is None or current_token.get("node_id") != node["id"]:
                 return
+            if any(current_token.get(key) != token.get(key) for key in ("execution_activation_id", "accepted_decision_id", "selected_connections", "decision_id")):
+                return
+            token = copy.deepcopy(current_token)
+            if automatic is not None:
+                fresh = automatic_transition(rr, node, token, root=self.store.root)
+                if fresh != automatic:
+                    return
+                token["assignments"] = copy.deepcopy(automatic["assignments"])
+            selected_join = validate_selection(rr["definition"], node, selected, token, rr["joins"])
             if rr["transitions"] + len(selected) > rr["definition"]["max_transitions"] + rr.get("transition_grant", 0):
                 rr["status"] = "needs_attention"
                 rr["attention_reason"] = "Transition limit reached"
@@ -3306,6 +3339,15 @@ class WorkflowSupervisor:
                 if edge.get("backward"):
                     counts = rr.setdefault("retry_counts", {})
                     counts[edge["id"]] = counts.get(edge["id"], 0) + 1
+            if automatic is not None:
+                if is_executable(node) and token.get("execution_activation_id"):
+                    token["structural_completion_refs"] = list(dict.fromkeys(token.get("structural_completion_refs", []) + [token["execution_activation_id"]]))
+                rr["decisions"].append({"decision_id": "runner:" + token["id"], "node_id": node["id"],
+                                        "action": "continue", "actor": "harflow", "reason": automatic["reason"],
+                                        "selected_connections": [edge["id"] for edge in selected],
+                                        "connections": [edge["id"] for edge in selected],
+                                        "selected_join_id": selected_join, "token_id": token["id"],
+                                        "transition_sequence": rr.get("sequence", 0) + 1})
             rr["transitions"] += len(selected)
             rr["pending"] = [t for t in rr["pending"] if t["id"] != token["id"]]
             stack = copy.deepcopy(token.get("stack", []))
@@ -3331,6 +3373,8 @@ class WorkflowSupervisor:
                     refs = ([token["execution_activation_id"]] if token.get("execution_activation_id") else token.get("input_result_refs", []))
                     child["input_result_refs"] = refs
                     target_node = next(n for n in rr["definition"]["nodes"] if n["id"] == edge["target"])
+                    if not is_executable(target_node) and token.get("structural_completion_refs"):
+                        child["structural_completion_refs"] = copy.deepcopy(token["structural_completion_refs"])
                     if rr.get("runner_policy") == "guided" and target_node["type"] == "end" and token.get("execution_activation_id"):
                         child["execution_activation_id"] = token["execution_activation_id"]
                         child["completion_source_node_id"] = node["id"]
@@ -3464,6 +3508,7 @@ class WorkflowSupervisor:
                 if rr.get("execution_contract") == "delegation":
                     merged["input_result_refs"] = list(dict.fromkeys(ref for t in group["arrived"] for ref in t.get("input_result_refs", [])))
                     merged["failed_execution_refs"] = list(dict.fromkeys(ref for t in group["arrived"] for ref in t.get("failed_execution_refs", [])))
+                    merged["structural_completion_refs"] = list(dict.fromkeys(ref for t in group["arrived"] for ref in t.get("structural_completion_refs", [])))
                 rr["pending"].append(merged)
                 rr.setdefault("released_parallel_groups", {})[stack[-1]] = {"join_id": node["id"], "split_id": group.get("split_id"), "expected": group["expected"], "branch_states": group.get("branch_states", {}), "branch_ids": group.get("arrival_ids", []), "merged_token_id": merged["id"], **{key: copy.deepcopy(group[key]) for key in ("selected_connection_ids", "excluded_connection_ids", "selection_reason", "selection_decision_id", "selection_sequence", "stack", "parent_branch_ids", "branch_assignments") if key in group}}
                 del rr["joins"][stack[-1]]
@@ -3688,7 +3733,7 @@ class WorkflowSupervisor:
         self.update(lambda r: r.update(status="running", supervisor_pid=os.getpid(), supervisor_identity=identity.own_identity()), "builder_started")
         a = self._activation("builder", "builder")
         self.update(lambda r: next(x for x in r["activations"] if x["id"] == a["id"]).update(feedback_ids=r.get("builder_turn_feedback_ids", [])), "builder_feedback_associated")
-        prompt = "Create a HarflowMCP workflow definition. Do not write files or dispatch agents. Return ONLY a JSON object. Schema: " + json.dumps({"name": self.run()["name"], "routing_mode": "explicit", "orchestrator": {"backend": "codex", "fallbacks": [], "instructions": "Optional workflow purpose"}, "on_demand_nodes": [], "max_on_demand_calls": 5, "nodes": [{"id": "start", "type": "start", "position": {"x": 80, "y": 80}, "branch_mode": "auto"}, {"id": "work", "type": "agent", "position": {"x": 220, "y": 80}, "purpose": "Concise step purpose", "instructions": "...", "agent": {"backend": "codex"}, "session_mode": "agent_decides", "execution_mode": "prefer_subagent", "branch_mode": "auto", "max_attempts": 3, "max_context_questions": 10}, {"id": "end", "type": "end", "position": {"x": 480, "y": 80}, "branch_mode": "auto"}], "connections": [{"id": "begin", "source": "start", "target": "work"}, {"id": "finish", "source": "work", "target": "end"}], "max_parallel": 4, "max_transitions": 100}) + "\nOrchestrator instructions describe the workflow purpose; Start and End are structural and have no settings. Optional on_demand_nodes are standalone workers with no connections or position: {id,title,instructions,call_condition,agent,freedom,network,session_mode,execution_mode}. Required nonempty instructions guide the worker; optional call_condition is separate When to call guidance for the orchestrator, never an automatic trigger. Add, edit and remove these in the separate list with IDs unique across both node lists. session_mode is agent_decides (default), fresh or resume; execution_mode is headless or prefer_subagent. max_on_demand_calls defaults to 5 (1–50) per routing or clarification checkpoint; no per-node or per-run call cap exists. Do not invent connected orchestration steps for specialist calls. Set routing_mode to explicit. Ordinary nodes choose exactly one outgoing path. For parallel execution use structural parallel_start and parallel_end nodes sharing parallel_group_id. Parallel start defaults to branch_selection all. Set branch_selection orchestrator and optional selection_guidance when applicability should be chosen for each group invocation. Selection chooses one or more branch entries and records a reason explaining selections and exclusions; every configured branch must reach its matching end. Branches may contain multiple steps and properly nested parallel groups. Do not create Join nodes. Conditions for choosing a group belong on incoming alternatives; split outgoing instructions describe branch purpose. Applicability selection is available only on Orchestrator selects groups; an empty selection is forbidden, so skipping a whole group uses an incoming alternative. Retry arrows return to an earlier ancestor step; HarflowMCP infers loops from topology, so do not set a backward flag. For task revision loops and task branches, put explicit task-specific rework and continue conditions on arrows. A retry connection may set max_retries to a nonnegative integer: this caps actual traversals of that arrow across the entire run; 0 disables retry, and an absent value adds no edge cap. Node max_attempts and max_transitions still apply and may stop earlier. A retry is selected exclusively and must stay inside its parallel region. Agent nodes may set optional:true only inside a safe parallel branch with an actually selected required sibling and no required successor before convergence. Optional steps still execute; only definitive failures or exhausted available candidates bypass to that convergence with failure evidence. Do not make sequential steps or all branches optional. Agent roles are planning, implementation, review and task; supply a nonempty single-line purpose of at most 500 characters and custom step instructions, while HarflowMCP adds the role guidance and result protocol. Request: " + self.run().get("builder_turn_prompt", self.run()["prompt"])
+        prompt = "Create a HarflowMCP workflow definition. Do not write files or dispatch agents. Return ONLY a JSON object. Schema: " + json.dumps({"name": self.run()["name"], "routing_mode": "explicit", "orchestrator": {"backend": "codex", "fallbacks": [], "instructions": "Optional workflow purpose"}, "on_demand_nodes": [], "max_on_demand_calls": 5, "nodes": [{"id": "start", "type": "start", "position": {"x": 80, "y": 80}, "branch_mode": "auto"}, {"id": "work", "type": "agent", "position": {"x": 220, "y": 80}, "purpose": "Concise step purpose", "instructions": "...", "agent": {"backend": "codex"}, "session_mode": "agent_decides", "execution_mode": "prefer_subagent", "branch_mode": "auto", "max_attempts": 3, "max_context_questions": 10}, {"id": "end", "type": "end", "position": {"x": 480, "y": 80}, "branch_mode": "auto"}], "connections": [{"id": "begin", "source": "start", "target": "work"}, {"id": "finish", "source": "work", "target": "end"}], "max_parallel": 4, "max_transitions": 100}) + "\nOrchestrator instructions describe the workflow purpose; Start and End are structural. Any connected node may set always_route:true to retain an orchestrator decision even for deterministic structural paths. Optional on_demand_nodes are standalone workers with no connections or position: {id,title,instructions,call_condition,agent,freedom,network,session_mode,execution_mode}. Required nonempty instructions guide the worker; optional call_condition is separate When to call guidance for the orchestrator, never an automatic trigger. Add, edit and remove these in the separate list with IDs unique across both node lists. session_mode is agent_decides (default), fresh or resume; execution_mode is headless or prefer_subagent. max_on_demand_calls defaults to 5 (1–50) per routing or clarification checkpoint; no per-node or per-run call cap exists. Do not invent connected orchestration steps for specialist calls. Set routing_mode to explicit. Ordinary nodes choose exactly one outgoing path. For parallel execution use structural parallel_start and parallel_end nodes sharing parallel_group_id. Parallel start defaults to branch_selection all. Set branch_selection orchestrator and optional selection_guidance when applicability should be chosen for each group invocation. Selection chooses one or more branch entries and records a reason explaining selections and exclusions; every configured branch must reach its matching end. Branches may contain multiple steps and properly nested parallel groups. Do not create Join nodes. Conditions for choosing a group belong on incoming alternatives; split outgoing instructions describe branch purpose. Applicability selection is available only on Orchestrator selects groups; an empty selection is forbidden, so skipping a whole group uses an incoming alternative. Retry arrows return to an earlier ancestor step; HarflowMCP infers loops from topology, so do not set a backward flag. For task revision loops and task branches, put explicit task-specific rework and continue conditions on arrows. A retry connection may set max_retries to a nonnegative integer: this caps actual traversals of that arrow across the entire run; 0 disables retry, and an absent value adds no edge cap. Node max_attempts and max_transitions still apply and may stop earlier. A retry is selected exclusively and must stay inside its parallel region. Agent nodes may set optional:true only inside a safe parallel branch with an actually selected required sibling and no required successor before convergence. Optional steps still execute; only definitive failures or exhausted available candidates bypass to that convergence with failure evidence. Do not make sequential steps or all branches optional. Agent roles are planning, implementation, review and task; supply a nonempty single-line purpose of at most 500 characters and custom step instructions, while HarflowMCP adds the role guidance and result protocol. Request: " + self.run().get("builder_turn_prompt", self.run()["prompt"])
         prompt += "\n" + BUILDER_AUTHORING_GUIDANCE
         prompt += "\n" + BUILDER_LAYOUT_GUIDANCE
         prompt += "\nRun workflow nodes (type workflow) reference a saved workflow by workflow_ref.workflow_id. Preserve any existing Run workflow nodes exactly as supplied: keep their workflow_ref, orchestrator_mode, child_session_policy, max_attempts, timeout_seconds, optional flag and instructions unchanged. Never author new Run workflow nodes, change their references, or convert them to agent nodes."

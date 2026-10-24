@@ -68,9 +68,10 @@ the complete workflow comparison.
 uv run pytest tests/test_workflow_context_integration.py tests/test_workflow_assigned_inputs.py -q
 ```
 
-## Internal prompt version 2 comparison
+## Integrated implementation prompt comparison
 
-A no-model renderer comparison against commit `4654bba` uses the same
+A no-model renderer comparison of the integrated context, completion-offer and structural
+implementation against commit `4654bba` uses the same
 `acknowledged-sections` scenario and exact predecessor/next context in both
 implementations: a repeated technical plan, 20 checklist items, a repeated
 verbatim node instruction body, then one appended checklist item at `d2`.
@@ -78,19 +79,20 @@ Both implementations receive and acknowledge the predecessor before rendering
 the next context. This measures section reconstruction only; it does not claim
 savings from dispatch-time graph projection or different routing behavior.
 
-| Injected UTF-8 bytes | Version 1 baseline | Version 2 |
+| Injected UTF-8 bytes | Version 1 baseline | Integrated version 2 |
 | --- | ---: | ---: |
-| First prompt | 43,067 | 45,059 |
-| Acknowledged next prompt | 42,809 | 5,543 |
-| Both prompts | 85,876 | 50,602 |
+| First prompt | 43,067 | 45,254 |
+| Acknowledged next prompt | 42,809 | 5,738 |
+| Both prompts | 85,876 | 50,992 |
 
-The next prompt saves 37,266 bytes; the pair saves 35,274 bytes. The unchanged
+The next prompt saves 37,071 bytes; the pair saves 34,884 bytes. The unchanged
 plan and instructions use references, and the checklist uses an exact-prefix
 append. These are prompt byte measurements, with model calls zero and token,
 cache and cost counts unavailable.
 
 The seven earlier isolated fixtures lack these large reusable sections.
-Compared with their saved version 1 report, version 2 adds 1,740 bytes to each
+At the context-delivery stage (`2687a49`), comparison with their saved version 1 report
+showed 1,740 additional bytes in each
 bootstrap scenario and 1,142 bytes to the resumed scenario for explicit section
 metadata and reconstruction/handoff guidance. This fixed overhead is a
 regression for those small contexts; legacy-versus-optimized savings must not
@@ -98,9 +100,39 @@ be presented as savings introduced by version 2.
 
 The complete fake workflow comparison also preserves five dispatched tasks,
 three orchestrator decisions, two worker executions, and a completed outcome.
-Its optimized delivery increases from 65,222 bytes at `4654bba` to 73,421 bytes
-with version 2 (8,199 bytes more), while the legacy run remains 136,361 bytes.
+Its optimized delivery increases from 65,222 bytes at `4654bba` to 74,736 bytes
+with the integrated changes (9,514 bytes more). The current legacy run injects
+135,683 bytes; its guidance also changed, so that comparison does not isolate
+the effect of section delivery.
 This short graph's small instruction bodies and checkpoint sections do not
 amortize the added protocol guidance and metadata. Absolute totals may vary
 with temporary scratch paths. No routing/decision-count reduction is attributed
 to this context-only change.
+
+## Structural runtime comparison
+
+Run the same fake parallel graph through the real guided supervisor:
+
+```bash
+uv run pytest tests/test_workflow_traversal.py::test_guided_split_has_one_briefing_and_structural_end_skips_routing -q -s
+```
+
+The graph is Start → Parallel start → left/right agents → Parallel end → End,
+with the same distinct branch assignments and clean succeeded worker results.
+The pre-change runtime requests harness decisions at Start, left, right and End.
+The deterministic runtime requests them at Start and End. Both complete with
+six transitions and two worker executions; the serial Start → worker → End
+case already skipped its final worker routing and is not a new reduction.
+
+| Observation | Pre-change runtime | Deterministic runtime |
+| --- | ---: | ---: |
+| Harness decisions | 4 | 2 |
+| Worker executions | 2 | 2 |
+| Transitions | 6 | 6 |
+
+The runtime emits three runner-owned decisions for the two clean branch
+arrivals and joined exit. These records are separate from model/harness turns.
+The fixture makes zero model calls; token, cache and dollar measurements are
+unavailable. Conditions, optional/failure evidence, explicit routing opt-outs
+and executable successors require separate safety tests and are not counted
+as automatically traversable paths in this comparison.

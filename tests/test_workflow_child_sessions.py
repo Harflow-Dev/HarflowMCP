@@ -217,6 +217,27 @@ async def test_resume_refusal_or_ambiguity_never_starts_fresh(store, source, fai
     assert final["sessions"] == {}
 
 
+async def test_nonempty_resume_assignment_refusal_precedes_any_child_worker(store, source):
+    source[4]["invocation"]["assignment"] = "Run the new assignment with exact inherited context."
+    registry = ReuseRegistry(store.root, source[-1], failure=w.backends.UnsupportedCapability("resume unsupported"))
+    final = await execute_new_child(store, source, registry)
+    assert final["status"] == "needs_attention"
+    assert len(registry.resumes) == 1
+    assert registry.dispatches == []
+    assert not any(activation.get("role") == "node" for activation in final["activations"])
+
+
+async def test_nonempty_resume_assignment_reuses_owner_before_child_worker(store, source):
+    source[4]["invocation"]["assignment"] = "Run the new assignment with exact inherited context."
+    registry = ReuseRegistry(store.root, source[-1])
+    final = await execute_new_child(store, source, registry)
+    assert final["status"] == "completed", final.get("attention_reason")
+    assert registry.resumes
+    workers = [activation for activation in final["activations"] if activation.get("role") == "node"]
+    assert workers
+    assert registry.resumes[0][1].find("NEW CHILD WORKFLOW INVOCATION") >= 0
+
+
 def test_actual_source_fallback_is_pinned(store, source):
     parent, node, _, child, current, record = source
     workflow_id = node["workflow_ref"]["workflow_id"]

@@ -324,9 +324,17 @@ async def test_recovery_restart_after_settlement_normalizes_the_outcome(store, t
 
 def _recover_policy(pick: str):
     """The child fails its first End decision; the parent recovers or retries it."""
+    failed_child_runs = set()
+    first_child_run = None
     def policy(context, registry):
+        nonlocal first_child_run
         if context["current_stage"]["node_id"] == "end" and context["original_request"] == "Focused assignment for call":
-            if registry.occurrences.get("child · Decision", 0) <= 3:
+            child_run_id = context["workflow_run_id"]
+            if first_child_run is None:
+                first_child_run = child_run_id
+            should_fail = child_run_id == first_child_run
+            if should_fail and child_run_id not in failed_child_runs:
+                failed_child_runs.add(child_run_id)
                 return {"decision_id": context["decision_id"], "action": "failed", "reason": "Child objective failed"}
             return {"decision_id": context["decision_id"], "action": "complete", "reason": "Objective met on retry"}
         if context["original_request"] == "ORIGINAL PARENT REQUEST" and not [c for c in context["valid_continuations"] if c["kind"] != "retry_execution"]:
@@ -548,6 +556,9 @@ async def test_invocation_timeout_before_child_work_launch_settles_reservation(s
     definition = store.get('parent')
     definition['nodes'][1]['timeout_seconds'] = 1
     store.save('parent', definition, definition['revision'])
+    child_definition = store.get('child')
+    next(node for node in child_definition['nodes'] if node['id'] == 'start')['always_route'] = True
+    store.save('child', child_definition, child_definition['revision'])
 
     checkout_reached = asyncio.Event()
     release_checkout = asyncio.Event()

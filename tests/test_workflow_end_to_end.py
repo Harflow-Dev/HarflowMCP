@@ -32,7 +32,23 @@ if "workflow orchestrator" in prompt:
         retained = Path(os.environ['HOME']) / ('fake-context-' + session + '.json')
         if 'bootstrap' in envelope:
             retained.write_text(json.dumps(envelope['bootstrap']['context']))
-        context = {**json.loads(retained.read_text()), **envelope['checkpoint']}
+        context = json.loads(retained.read_text())
+        checkpoint = envelope['checkpoint']
+        for key, value in checkpoint.items():
+            if key == 'node_instructions' and isinstance(value, dict):
+                instructions = context.setdefault('node_instructions', {})
+                for node_id, item in value.items():
+                    if isinstance(item, dict) and item.get('mode') == 'reference':
+                        continue
+                    instructions[node_id] = item
+                continue
+            if isinstance(value, dict) and value.get('mode') == 'reference':
+                continue
+            if isinstance(value, dict) and value.get('mode') == 'append':
+                context[key] = list(context.get(key, [])) + value.get('items', [])
+                continue
+            context[key] = value
+        retained.write_text(json.dumps(context))
     else:
         context = json.JSONDecoder().raw_decode(prompt.split("Context:\n", 1)[1])[0]
     choices = context["valid_continuations"]

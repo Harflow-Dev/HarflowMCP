@@ -23,12 +23,12 @@ def project_orchestrator_context(run: dict[str, Any], context: dict[str, Any]) -
     for node in value["workflow_graph"]["nodes"]:
         instructions = node.pop("instructions", "")
         source = definitions[node["id"]]
-        for key in ("execution_mode", "branch_mode", "branch_selection", "selection_guidance"):
+        for key in ("execution_mode", "branch_mode", "branch_selection", "selection_guidance", "always_route"):
             if key in source:
                 node[key] = copy.deepcopy(source[key])
         if source.get("purpose"):
             node["purpose"] = source["purpose"]
-        elif node["type"] == "agent":
+        elif node["type"] in {"agent", "workflow"}:
             node["purpose"] = instructions[:240]
     value["context_warnings"] = warnings
     offered = set()

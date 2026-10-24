@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Advance clean final workflow branches to their own joins or End, support `always_route` opt-outs and validated child entry assignment pass-through, and persist runner decision/transition provenance atomically with token movement.
+
 - Shape workflow completion offers from the current End, pending-token, join, required-failure, and goal-replanning state; explain blockers in both optimized and legacy orchestrator prompts.
 - Add acknowledged workflow section references and exact-prefix append delivery, purpose-based orchestrator graph projection, and bounded current-run instruction inspection while preserving complete worker instructions and v1 public contracts.
 

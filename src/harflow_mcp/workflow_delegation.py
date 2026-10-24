@@ -719,6 +719,11 @@ def completion_evidence(run: dict[str, Any], node: dict[str, Any], token: dict[s
     if current and ((node.get("role") == "implementation" or node["type"] == "workflow") and current["node_id"] == node["id"] or run.get("runner_policy") == "guided" and node["type"] == "end" and token.get("completion_source_node_id") == current["node_id"]):
         candidates.append(current)
     if run.get("runner_policy") == "guided":
+        if node["type"] in {"end", "parallel_end", "join"}:
+            for ref in token.get("structural_completion_refs", []):
+                source = activations.get(ref)
+                if source is not None:
+                    candidates.append(source)
         for ref in token.get("recovered_execution_refs", []):
             recovered = activations.get(ref)
             if not recovered or ref not in token.get("input_result_refs", []):
@@ -728,7 +733,7 @@ def completion_evidence(run: dict[str, Any], node: dict[str, Any], token: dict[s
                 candidates.append(recovered)
     for activation in candidates:
         result = activation.get("node_result", {})
-        if activation.get("role") != "node" or activation.get("resolved_by_execution_id") or not settled(activation) or result.get("status") != "succeeded" or task_id not in activation.get("assigned_task_ids", []):
+        if activation.get("role") != "node" or activation.get("optional_failure") or activation.get("resolved_by_execution_id") or not settled(activation) or result.get("status") != "succeeded" or task_id not in activation.get("assigned_task_ids", []):
             continue
         source_node = nodes.get(activation["node_id"], {})
         outcome = result.get("result", {}).get("child_outcome", {})
@@ -1463,7 +1468,9 @@ async def execute_node(supervisor: Any, node: dict[str, Any], token: dict[str, A
 async def process_node(supervisor: Any, token: dict[str, Any]) -> None:
     from .workflow_goals import refresh_parent
     refreshed = refresh_parent(supervisor.store, supervisor.run())
-    token = next(t for t in refreshed["pending"] if t["id"] == token["id"])
+    token = next((current for current in refreshed["pending"] if current["id"] == token["id"]), None)
+    if token is None:
+        return
     node = next(n for n in supervisor.run()["definition"]["nodes"] if n["id"] == token["node_id"])
     if node["type"] == "end":
         await decide(supervisor, node, token)

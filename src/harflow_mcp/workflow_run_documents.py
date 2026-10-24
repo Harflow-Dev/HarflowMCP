@@ -192,7 +192,7 @@ def _dispatch(value, path):
 
 def _token(value, path):
     _shape(value, {**_fields("id node_id via assignment_prompt decision_id decision_error accepted_decision_id execution_activation_id completion_source_node_id retry_of_execution_id reopen_child_execution_id resume_task_id resume_source_execution_id execution_session_mode session_reason child_session_mode child_session_ref child_session_reason recovery_execution_id recovery_node_id", counters="decision_attempts inspection_count on_demand_count", booleans="requires_assignment execution_complete continue_previous joined", arrays="inspection_results"),
-                   **{key: _array(str) for key in "stack failed_execution_refs input_result_refs additional_result_refs assigned_task_ids completed_task_ids selected_connections recovered_execution_refs".split()},
+                   **{key: _array(str) for key in "stack failed_execution_refs input_result_refs additional_result_refs assigned_task_ids completed_task_ids selected_connections recovered_execution_refs structural_completion_refs".split()},
                    "optional_failure_join": str, "result": _pending_result, "selected_join_id": NULL_STRING, "branch_ids": _map(str), "assignments": _map(_dispatch), "structural_dispatch": _dispatch, "recovery_return_checkpoint": _token, "context": dict, "inspection_results": _array(_inspection_result), "recovered_result": _result, "recovered_failed_result": _result, "authorized_artifact_refs": _array(_artifact), "authorized_input_refs": _array(_input_ref)}, path)
 
 
@@ -320,7 +320,7 @@ def _activation(value, path):
 
 
 def _decision(value, path):
-    _shape(value, {**_fields("node_id activation_id action decision_id reason question execution_id question_id answer session_mode", arrays="requests protocol_warnings", nullable_strings="selected_join_id"), "next": _array(_dispatch), "task_updates": _array(_object(_fields("task_id status reason")))}, path)
+    _shape(value, {**_fields("node_id activation_id action decision_id reason question execution_id question_id answer session_mode actor token_id", arrays="requests protocol_warnings selected_connections", counters="transition_sequence", nullable_strings="selected_join_id"), "connections": _array(str), "next": _array(_dispatch), "task_updates": _array(_object(_fields("task_id status reason")))}, path)
 
 
 def _point(value, path):

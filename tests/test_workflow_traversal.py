@@ -1,4 +1,5 @@
 """Guided structural traversal keeps individual assignments authoritative."""
+import json
 from harflow_mcp import workflows as w
 from harflow_mcp.workflow_traversal import automatic_edges
 from test_workflow_delegation import Registry, default_decision, run_flow, storage  # noqa: F401
@@ -19,11 +20,26 @@ def policy(context, registry):
 async def test_guided_split_has_one_briefing_and_structural_end_skips_routing(storage, tmp_path):
     run, registry = await run_flow(storage, tmp_path, definition(), Registry(storage.root, policy=policy), guided=True)
     assert run["status"] == "completed"
-    assert [c["current_stage"]["node_id"] for c in registry.contexts] == ["start", "left", "right", "end"]
+    assert [c["current_stage"]["node_id"] for c in registry.contexts] == ["start", "end"]
     workers = [a for a in run["activations"] if a["role"] == "node"]
     assert {a["assignment_prompt"] for a in workers} == {"Distinct briefing left", "Distinct briefing right"}
     assert run["transitions"] == 6
     assert len(run["released_parallel_groups"]) == 1
+    assert len([a for a in run["activations"] if a["role"] == "node"]) == 2
+    runner_records = [decision for decision in run["decisions"] if decision.get("actor") == "harflow"]
+    assert len(runner_records) >= 2
+    assert all(record.get("reason") for record in runner_records)
+    assert all(record.get("reason", "").startswith("Harflow ") for record in runner_records)
+    assert all(record.get("connections") == record.get("selected_connections") for record in runner_records)
+    assert len({record.get("token_id") for record in runner_records}) == len(runner_records)
+    print("WORKFLOW_TRAVERSAL_BENCHMARK", json.dumps({
+        "model_calls": 0,
+        "harness_decisions": len(registry.contexts),
+        "worker_executions": len([a for a in run["activations"] if a["role"] == "node"]),
+        "deterministic_decisions": len(runner_records),
+        "transitions": run["transitions"],
+        "outcome": run["status"],
+    }, sort_keys=True))
 
 
 async def test_missing_branch_assignment_dispatches_no_worker(storage, tmp_path):
