@@ -5,8 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import shutil
-import subprocess
 import time
 from pathlib import Path
 
@@ -16,6 +14,7 @@ from harflow_mcp import approval_runtime, approvals
 from harflow_mcp.backends import get
 from harflow_mcp.tasks import TaskRegistry
 
+from claude_cli_support import isolate, require_claude
 from fake_anthropic_api import fake_anthropic_api
 
 
@@ -38,25 +37,13 @@ async def _wait_for_request(registry: TaskRegistry, task_id: str) -> dict:
 @pytest.mark.parametrize("decision,marker_expected,outcome", [("approve", True, "succeeded"), ("reject", False, "failed")])
 @pytest.mark.asyncio
 async def test_real_claude_taskregistry_caller_approval_roundtrip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, decision: str, marker_expected: bool, outcome: str) -> None:
-    executable = shutil.which("claude")
-    if not executable:
-        pytest.skip("Claude CLI not installed")
-    version = subprocess.run([executable, "--version"], capture_output=True, text=True, check=True).stdout.strip()
-    if not version.startswith("2.1.302"):
-        pytest.skip(f"Caller approval certification is pinned to Claude 2.1.302; found {version}")
+    require_claude("caller_approval_tools", monkeypatch)
     repo = tmp_path / "repo"
     repo.mkdir()
     marker = repo / "approval-marker.txt"
     command = "python3 -c \"open('approval-marker.txt','a').write('APPROVED')\""
     with fake_anthropic_api(command) as (base_url, requests):
-        for key in tuple(os.environ):
-            if key.startswith(("ANTHROPIC_", "CLAUDE_", "AWS_", "GOOGLE_")) or key == "CLAUDECODE":
-                monkeypatch.delenv(key, raising=False)
-        monkeypatch.setenv("HOME", str(tmp_path / "home"))
-        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "config"))
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "local-fake-key")
-        monkeypatch.setenv("ANTHROPIC_BASE_URL", base_url)
-        monkeypatch.setenv("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
+        isolate(monkeypatch, tmp_path, base_url)
         registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks", open_monitor=False)
         task = await registry.start("run one exact Bash action", repo, backend=get("claude"), freedom="write_in_repo", caller_approvals=True)
         try:

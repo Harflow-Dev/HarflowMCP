@@ -204,7 +204,8 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
             approval.add_argument("--decision", choices=("approve", "reject"), required=True)
 
     run_p = sub.add_parser("run", help="start a task, owned by a detached process until it settles")
-    run_p.add_argument("--caller-approvals", action="store_true", default=None, help="Opt in to qualified exact-action caller Bash decisions")
+    run_p.add_argument("--caller-approvals", action="store_true", default=None, help="Opt in to qualified exact-action caller decisions (Bash, and Read on measured versions)")
+    run_p.add_argument("--caller-write-approvals", action="store_true", default=None, help="Also allow Write and Edit requests to be approved one exact action at a time")
     run_p.add_argument("--backend", default=None)
     run_p.add_argument("--workflow", default=None)
     run_goal = run_p.add_mutually_exclusive_group()
@@ -228,6 +229,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
 
     preview_p = sub.add_parser("permission-preview", help="validate and preview standalone permissions without launching")
     preview_p.add_argument("--caller-approvals", action="store_true")
+    preview_p.add_argument("--caller-write-approvals", action="store_true")
     preview_p.add_argument("--repo", required=True)
     preview_p.add_argument("--backend", required=True)
     preview_p.add_argument("--freedom", default=None)
@@ -360,6 +362,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
             prompt_group.add_argument("--prompt-file", help="UTF-8 prompt file")
             wp.add_argument("--backend", required=action == "build")
             wp.add_argument("--caller-approvals", action="store_true", default=None)
+            wp.add_argument("--caller-write-approvals", action="store_true", default=None)
             wp.add_argument("--model")
             wp.add_argument("--reasoning-effort")
             wp.add_argument("--max-turns", type=int)
@@ -788,6 +791,7 @@ def _run_action(args: argparse.Namespace):
             title=title,
             auto_continue=args.auto_continue,
             caller_approvals=bool(args.caller_approvals),
+            **({'caller_write_approvals': True} if getattr(args, 'caller_write_approvals', None) else {}),
             interaction_owner="monitor" if args.monitor else "caller",
             **({'extra_writable_paths': args.extra_writable_path} if args.extra_writable_path is not None else {}),
         )
@@ -986,7 +990,7 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
         if action in {"start", "build", "preview"}:
             prompt = _workflow_prompt(args) if action != "preview" else ""
             candidate = {k: v for k, v in {"backend": args.backend, "model": args.model,
-                         "reasoning_effort": args.reasoning_effort, "max_turns": args.max_turns, "background_idle_seconds": getattr(args, "background_idle_seconds", None), "caller_approvals": args.caller_approvals}.items() if v is not None}
+                         "reasoning_effort": args.reasoning_effort, "max_turns": args.max_turns, "background_idle_seconds": getattr(args, "background_idle_seconds", None), "caller_approvals": args.caller_approvals, "caller_write_approvals": getattr(args, "caller_write_approvals", None)}.items() if v is not None}
             if action == "preview":
                 return await server._workflow_call("preview", name=args.name, repo_path=args.repo, overrides=candidate or None, network=_network(args.network))
             if action == "build":
@@ -1151,6 +1155,7 @@ def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
                 repo_path=args.repo, backend=args.backend, freedom=args.freedom,
                 network=_network(args.network), extra_writable_paths=args.extra_writable_path,
                 caller_approvals=args.caller_approvals,
+                **({"caller_write_approvals": True} if args.caller_write_approvals else {}),
             ))
         except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):
             raise

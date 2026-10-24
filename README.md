@@ -2,7 +2,7 @@
 
 <!-- mcp-name: io.github.Harflow-Dev/harflow-mcp -->
 
-HarflowMCP is a local MCP server that dispatches coding tasks to Claude Code, Codex, opencode, Vibe, and Antigravity. It provides persistent task history, bounded reads, cancellation, continuation, and reusable workflows.
+HarflowMCP is a local MCP server that dispatches coding tasks to Claude Code, Codex, opencode, Vibe, and Antigravity. It provides persistent task history, bounded reads, cancellation, continuation, and reusable workflows. On measured Claude Code versions, callers can opt in to approving individual Bash, Read, Write and Edit requests one exact action at a time (see [harness permissions](docs/harness-permissions.md#exact-action-caller-approvals)).
 
 Vibe runs use its Python CLI entrypoint for headless dispatch; interactive takeover continues with the user's inherited environment.
 

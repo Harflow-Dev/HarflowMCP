@@ -66,13 +66,13 @@ spanned several versions), `no_refusal_text`, `unrecognized_text` and, for other
 | `approval_required` | No matching allow rule: a matching allow rule, `allowed_commands` or caller approvals are the ways forward. |
 | `chained_command` | One part of a multi-operation command needs approval (`part`); run each part separately. |
 | `unverifiable_command` | Command substitution that cannot be checked before it runs; avoid it. |
-| `path_safety` | A built-in path check allow rules cannot satisfy. |
-| `outside_working_directory` | A write outside the repository that was not granted. |
+| `path_safety` | A built-in path check allow rules cannot satisfy; caller approvals can approve it on qualified versions. |
+| `outside_working_directory` | A write outside the repository that was not granted. On a qualified version a caller can approve an out-of-repo Write or Edit one exact action at a time when the task has `caller_write_approvals`. |
 | `caller_rejected` | The caller rejected the exact action. |
-| `harflow_policy_rejected` | Harflow's own policy refused it (`policy_reason`); never a caller decision. |
+| `harflow_policy_rejected` | Harflow's own policy refused it (`policy_reason`: `write_approvals_not_enabled`, `protected_path`, `request_too_large` or `approval_expired`); never a caller decision. |
 | `unclassified` | Inspect the refusal text. |
 
 The `tool_result` event for the refused call carries no category, because the result event that
 authorizes it has not arrived yet. The `task_finished` event adds `denial_categories` and the
-classified `permission_denials` when there are any. Retry and continuation gating still looks only at
+bounded projection of the classified `permission_denials` when there are any (at most 32 entries within a small byte budget, without tool input, plus `denials_omitted`); snapshots and workflow evidence keep the full list. Retry and continuation gating still looks only at
 whether denials exist.

@@ -45,7 +45,7 @@ def _json(value: Any) -> None:
 
 
 def _candidate(value: dict) -> None:
-    _shape(value, {"backend": str, "model": (str, type(None)), "reasoning_effort": (str, type(None)), "max_turns": (int, type(None)), "background_idle_seconds": (int, float, type(None)), "caller_approvals": bool, "fallbacks": list, "instructions": str}, "agent")
+    _shape(value, {"backend": str, "model": (str, type(None)), "reasoning_effort": (str, type(None)), "max_turns": (int, type(None)), "background_idle_seconds": (int, float, type(None)), "caller_approvals": bool, "caller_write_approvals": bool, "fallbacks": list, "instructions": str}, "agent")
     for item in value.get("fallbacks", []):
         if not isinstance(item, dict):
             raise ValueError("Malformed agent fallback")

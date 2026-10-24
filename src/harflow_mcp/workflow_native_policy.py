@@ -47,15 +47,18 @@ def plan_owner_contracts(definition: dict[str, Any], tree: dict[str, Any] | None
     owners: dict[str, Any] = {}
     versions: dict[str, str | None] = {}
     approvals_qualified: set[str] = set()
+    approval_versions: dict[str, Any] = {}
 
     def approval_contract(candidate, access):
         from .approval_runtime import validate
         backend = backends.get(candidate["backend"])
         enabled = candidate.get("caller_approvals", False)
-        validate(backend, enabled, access, candidate.get("max_turns"))
+        validate(backend, enabled, access, candidate.get("max_turns"), write=candidate.get("caller_write_approvals", False))
         if enabled and backend.name not in approvals_qualified:
-            backend.qualify_caller_approvals()
+            approval_versions[backend.name] = backend.qualify_caller_approvals()
             approvals_qualified.add(backend.name)
+        if enabled and candidate.get("caller_write_approvals", False):
+            backend.validate_caller_write_approvals(True, enabled, approval_versions.get(backend.name))
         return {"caller_approvals": enabled, "approval_scope": "exact_action_once" if enabled else None, "approval_transport": "stdio_control" if enabled else None}
 
     def compatible(native: Any, parent: Any, item: dict[str, Any]) -> str | None:

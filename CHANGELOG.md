@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Qualify Claude Code 2.1.310 for caller approvals from the single measured table and cross-check the version reported by the run's init event against the version qualified before launch, stopping the run and invalidating pending approvals on a mismatch. Read requests, including path-safety and out-of-repository Reads, are now approvable; **behavior change:** existing `caller_approvals` users on 2.1.310 will be asked about out-of-repository Reads where the run previously stopped. Add the separate `caller_write_approvals` opt-in (`start_task`, `preview_task_permissions`, `harflow-ctl run`/`permission-preview --caller-write-approvals`, workflow candidates) for exact-action Write and Edit approvals, with strict schemas, protected paths, Harflow system rejections (`write_approvals_not_enabled`, `protected_path`, `request_too_large`) delivered through the existing ledger, `enforcement.caller_approval_tools`, and `caller_approved_writes` disclosure. 2.1.302 stays Bash-only.
+
 - Classify Claude permission denials from the exact refusal texts measured on 2.1.310: `permission_denials` entries gain `denial_category`, `denial_remedy` and `classification_basis`, tasks gain `denial_categories`, and the `task_finished` event and workflow result evidence carry them. Only denials confirmed by a result event are classified; stream-only matches, unmeasured versions and other backends stay `unclassified`. All fields are additive and retry gating is unchanged.
 
 - Advance the local engine identity to 0.0.2; add explicit private-format storage compatibility, exclusive writer-line promotion, narrow empty-directory adoption, and inspect/confirmed crash-resumable incompatible-state backup/reset without relaxing live runtime gates.

@@ -10,7 +10,8 @@ from .base import UnsupportedCapability
 # re-measured. 2.1.303 is never added because it was not measured.
 MEASURED: dict[str, dict[str, Any]] = {
     "2.1.302": {"caller_approval_tools": ("Bash",)},
-    "2.1.310": {"caller_approval_tools": ("Bash", "Read"), "denial_texts": True, "allowed_commands": True},
+    "2.1.310": {"caller_approval_tools": ("Bash", "Read", "Write", "Edit"), "caller_write_tools": ("Write", "Edit"),
+                "path_safety_prompts": True, "denial_texts": True, "allowed_commands": True},
 }
 
 _VERSION = re.compile(r"(\d+\.\d+\.\d+)(?: \(Claude Code\))?")
@@ -27,6 +28,13 @@ def measured(version: Any) -> dict[str, Any] | None:
 
 def supports(version: Any, feature: str) -> bool:
     return bool((measured(version) or {}).get(feature))
+
+
+def approval_tools(version: Any, write: bool = False) -> tuple[str, ...]:
+    """Tools a caller may be asked about on `version`; Write and Edit additionally need the write opt-in."""
+    row = measured(version) or {}
+    writes = row.get("caller_write_tools", ())
+    return tuple(tool for tool in row.get("caller_approval_tools", ()) if write or tool not in writes)
 
 
 def qualify(backend: Any, feature: str) -> str:

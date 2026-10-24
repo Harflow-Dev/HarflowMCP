@@ -32,7 +32,7 @@ REMEDIES = {
     "chained_command": "Run each part as a separate command. Each part needs its own permission.",
     "unverifiable_command": "Avoid command substitution, or run the inner command separately.",
     "path_safety": "A built-in path check. Allow rules cannot satisfy it. Use caller approvals (Read, on qualified versions) or rename the path.",
-    "outside_working_directory": "Work inside the repository. Out-of-repo writes are not approvable through Harflow yet.",
+    "outside_working_directory": "Work inside the repository, or on a qualified version start the task with caller_approvals and caller_write_approvals so a caller can approve an out-of-repo Write or Edit one exact action at a time.",
     "caller_rejected": "The caller rejected this action.",
     "harflow_policy_rejected": "Harflow's own policy refused this action; the stated reason names the policy.",
     "unclassified": "Inspect the refusal text. No remedy is inferred.",

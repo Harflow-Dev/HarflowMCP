@@ -161,7 +161,8 @@ def rows(directory: Path, task_id: str) -> list[dict[str, Any]]:
 def summary(directory: Path, task_id: str) -> dict[str, Any]:
     try:
         records = rows(directory, task_id)
-        pending = [r for r in records if r["disposition"] == "pending" and r["delivery"] in ACTIVE]
+        # A Harflow system rejection is answered at admission: nothing for a caller to decide.
+        pending = [r for r in records if r["disposition"] == "pending" and r["delivery"] in ACTIVE and not r.get("system_rejection")]
         uncertain = [r for r in records if r["delivery"] in {"sending", "delivery_unknown"} and r["execution_outcome"] == "unknown"]
         result = {"pending_count": 0, "delivery_uncertain_count": 0, "interaction_state": None, "requests": [], "uncertainty_requests": []}
         if not pending and not uncertain:
@@ -200,6 +201,8 @@ def admit(directory: Path, task: Any, decoded: dict[str, Any], context: dict[str
     if not task.start_time or not task.owner:
         raise ValueError("Approval process identity is not verified")
     row = {"request_id": uuid.uuid4().hex, "task_id": task.task_id, **copy.deepcopy(decoded), "tool_name": decoded["action"]["tool_name"], "action_digest": digest(decoded["action"]), "owner_revision": 1, "generation": task.approval_generation, "session_id": task.session_id, "bridge_owner": copy.deepcopy(task.owner), "process_identity": identity, "created_at": now, "deadline": min(now + REQUEST_SECONDS, context.get("hard_deadline") or getattr(task, "approval_hard_deadline", None) or now + REQUEST_SECONDS), "cwd": str(task.repo_path), "freedom": task.freedom, "scope": "exact_action_once", "disposition": "pending", "decision": None, "effective_decision": None, "delivered_decision": None, "expiry_rejection": False, "delivery": "pending", "execution_outcome": "unknown", **context}
+    if decoded.get("system_rejection"):
+        system_reject(row, decoded["system_rejection"])
     with _locked(directory, task.task_id) as data:
         records = data["requests"]
         if any(r["native_request_id"] == row["native_request_id"] or (row["tool_use_id"] != "unsupported" and r["tool_use_id"] == row["tool_use_id"]) for r in records):
@@ -210,6 +213,11 @@ def admit(directory: Path, task: Any, decoded: dict[str, Any], context: dict[str
             raise ValueError("Approval admission storage bound exceeded")
         records.append(row)
     return copy.deepcopy(row)
+
+
+def system_reject(row: dict[str, Any], reason: str) -> None:
+    """Answer a row with Harflow's own rejection: no caller decision exists, and none can be recorded."""
+    row.update(system_rejection=reason, decided_by="harflow", decision=None, effective_decision="reject", delivery="reserved")
 
 
 @task_operation
@@ -232,7 +240,7 @@ def reserve(directory: Path, task_id: str, request_id: str, action_digest: str, 
             raise ValueError("Stale approval action, revision or owner generation")
         if row["deadline"] <= time.time() or row["disposition"] != "pending" or row["delivery"] != "pending":
             raise ValueError("Approval request is expired, settled or already answered")
-        row.update(decision=decision, delivery="reserved", owner_revision=owner_revision + 1)
+        row.update(decision=decision, decided_by="caller", delivery="reserved", owner_revision=owner_revision + 1)
         result = copy.deepcopy(row)
     return result
 
@@ -271,7 +279,9 @@ def observe_outcome(directory: Path, task_id: str, request_id: str, generation: 
         if row is None or row["generation"] != generation:
             raise ValueError("Stale approval outcome")
         row["execution_outcome"] = outcome
-        if row.get("expiry_rejection"):
+        if row.get("system_rejection") and row["disposition"] in {"pending", "expired", "system_rejected"}:
+            row["disposition"] = "system_rejected"
+        elif row.get("expiry_rejection"):
             row["disposition"] = "expired"
         elif row["disposition"] == "pending":
             row["disposition"] = "decided" if row.get("decision") else "invalidated"
@@ -296,7 +306,9 @@ def finish_delivery(directory: Path, task_id: str, request_id: str, generation: 
         row["effective_decision"] = effective_decision
         row["delivered_decision"] = effective_decision if written else None
         row["expiry_rejection"] = row.get("expiry_rejection", False) or expiry_rejection
-        if row["expiry_rejection"]:
+        if row.get("system_rejection") and row["disposition"] in {"pending", "expired", "system_rejected"}:
+            row["disposition"] = "system_rejected"
+        elif row["expiry_rejection"]:
             row["disposition"] = "expired"
         elif row["disposition"] == "pending":
             row["disposition"] = "decided"
@@ -313,3 +325,25 @@ def observe_cancellation(directory: Path, task_id: str, request_id: str, generat
         row["disposition"] = "invalidated"
         row["delivery"] = "delivery_unknown" if row["delivery"] in {"sending", "sent", "delivery_unknown"} else "failed"
         row["owner_revision"] += 1
+
+
+@task_operation
+def approved_writes(directory: Path, task_id: str) -> list[dict[str, Any]]:
+    """Write and Edit rows the caller approved, as metadata only: never content or edit strings.
+
+    `write_possible` is false only when the effective decision was a rejection or the bytes provably never reached the pipe."""
+    try:
+        records = rows(directory, task_id)
+    except (OSError, ValueError):
+        return []
+    result = []
+    for row in records:
+        if row.get("tool_name") not in {"Write", "Edit"} or row.get("decision") != "approve":
+            continue
+        path = (row.get("action", {}).get("input") or {}).get("file_path")
+        result.append({"request_id": row["request_id"], "tool_name": row["tool_name"], "file_path": path if isinstance(path, str) else None,
+                       "inside_repository": row.get("inside_repository"), "decision": row["decision"], "effective_decision": row.get("effective_decision"),
+                       "delivered_decision": row.get("delivered_decision"), "expiry_rejection": row.get("expiry_rejection", False),
+                       "delivery": row["delivery"], "execution_outcome": row["execution_outcome"],
+                       "write_possible": row.get("effective_decision") == "approve" and row["delivery"] in {"sending", "sent", "delivery_unknown"}})
+    return result

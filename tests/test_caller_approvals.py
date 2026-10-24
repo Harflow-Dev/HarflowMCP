@@ -30,6 +30,9 @@ def tmp_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
         yield tasks
 
 
+QUALIFIED = {"version": "2.1.310", "observed": "2.1.310", "write": False}
+
+
 def _task(tmp_path: Path) -> SimpleNamespace:
     return SimpleNamespace(
         task_id="task-1",
@@ -41,6 +44,9 @@ def _task(tmp_path: Path) -> SimpleNamespace:
         session_id="session-1",
         repo_path=tmp_path,
         freedom="write_in_repo",
+        caller_approval_version="2.1.310",
+        caller_write_approvals=False,
+        protected_paths=None,
     )
 
 
@@ -106,10 +112,10 @@ def test_claude_caller_approval_contract_is_strict() -> None:
 )
 def test_only_exact_root_bash_control_request_is_decodable(event: dict) -> None:
     if event.get("type") != "control_request":
-        assert decode(event) is None
+        assert decode(event, QUALIFIED) is None
     else:
         with pytest.raises(ValueError):
-            decode(event)
+            decode(event, QUALIFIED)
 
 
 def test_claude_decode_and_encode_preserve_exact_action() -> None:
@@ -123,8 +129,8 @@ def test_claude_decode_and_encode_preserve_exact_action() -> None:
             "input": {"command": "printf 'a  b\\n'", "timeout": 17},
         },
     }
-    decoded = decode(event)
-    assert decoded == {"native_request_id": "native-1", "tool_use_id": "tool-1", "action": {"tool_name": "Bash", "input": {"command": "printf 'a  b\\n'", "timeout": 17}}}
+    decoded = decode(event, QUALIFIED)
+    assert decoded == {"native_request_id": "native-1", "tool_use_id": "tool-1", "action": {"tool_name": "Bash", "input": {"command": "printf 'a  b\\n'", "timeout": 17}}, "decision_reason": None, "decision_reason_type": None}
     import json
     payload = json.loads(encode(decoded, "approve"))
     assert payload["response"]["request_id"] == "native-1"
@@ -413,6 +419,7 @@ async def test_runtime_admits_only_a_real_control_request_and_keeps_prose_out_of
     task.caller_approvals = True
     task.interaction_owner = "caller"
     task.acc = Accumulator()
+    task.acc.stream_state["claude_code_version"] = "2.1.310"
     task.approval_pending = False
     task.approval_receiving = False
     task.approval_view = {"pending_count": 0, "interaction_state": None, "requests": []}

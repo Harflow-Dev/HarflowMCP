@@ -150,7 +150,7 @@ does not make a blocked headless command approvable.
 Use `write_in_repo` for edits/tests and set the saved network option when dependencies require it.
 The bridge uses `sandbox_workspace_write.network_access` explicitly where applicable. Check reported
 writable roots before assuming repository-only writes. Prepare credentials and approved tools for
-publishing separately. The bridge mappings are documented in the [Codex adapter](../src/harflow/backends/codex.py).
+publishing separately. The bridge mappings are documented in the [Codex adapter](../src/harflow_mcp/backends/codex.py).
 
 ### OpenCode
 
@@ -225,7 +225,7 @@ For instance, verify the project's test command is allowed before choosing agy f
 
 See [command and tool permissions](https://antigravity.google/docs/permissions/),
 [headless operation](https://antigravity.google/docs/cli/headless/), and the
-[Antigravity adapter](../src/harflow/backends/antigravity.py) for measured permission caveats.
+[Antigravity adapter](../src/harflow_mcp/backends/antigravity.py) for measured permission caveats.
 The bridge deliberately does not use agy's command sandbox, which did not establish usable,
 consistent repository confinement in its recorded measurements.
 
@@ -248,7 +248,7 @@ existing content, and applies to future sessions; `--remove jira/get_issue` remo
 It does not change Bash permissions, register the server, authenticate it, or enable network.
 Project overrides and deny policies can still win. Claude/agy/Codex support `server/*`; Vibe requires
 individual tools. Codex, Vibe, and OpenCode require an existing global server entry; OpenCode editing
-also depends on its supported schema. See [approval adapters](../src/harflow/backends/mcp_approval.py).
+also depends on its supported schema. See [approval adapters](../src/harflow_mcp/backends/mcp_approval.py).
 
 ## Candidate compatibility and verification
 
@@ -341,18 +341,74 @@ Changing harness settings does not raise a saved node's access or automatically 
 execution retryable. Follow [workflow control and recovery](workflows.md#control-and-recovery) for
 the current run state; a fresh task or workflow can verify the corrected setup.
 
-Bridge mapping sources: [Claude](../src/harflow/backends/claude.py), [Codex](../src/harflow/backends/codex.py),
-[OpenCode](../src/harflow/backends/opencode.py),
-[Vibe](../src/harflow/backends/vibe.py), [Antigravity](../src/harflow/backends/antigravity.py).
+Bridge mapping sources: [Claude](../src/harflow_mcp/backends/claude.py), [Codex](../src/harflow_mcp/backends/codex.py),
+[OpenCode](../src/harflow_mcp/backends/opencode.py),
+[Vibe](../src/harflow_mcp/backends/vibe.py), [Antigravity](../src/harflow_mcp/backends/antigravity.py).
 
 ## Exact-action caller approvals
 
-`caller_approvals` is a strict boolean, defaulting to `false`. The initial adapter is limited to
-Claude Code **2.1.302**, non-native uncapped stream JSON, `write_in_repo` or `publish`, and
-foreground-owned Bash permission requests. Other backends, native children, explicit turn caps,
+`caller_approvals` is a strict boolean, defaulting to `false`. The adapter is limited to
+non-native uncapped Claude Code stream JSON on a measured version, `write_in_repo` or `publish`, and
+foreground-owned permission requests. Other backends, native children, explicit turn caps,
 read-only and unrestricted launches reject the opt-in before spawning. The capability catalog
-reports `supports_caller_approvals` and `caller_approval_support`; installed-version qualification
-is checked again at launch. No alternative transport or permission mode is selected implicitly.
+reports `supports_caller_approvals` and `caller_approval_support` (`versions` as a list, `tools_by_version`
+and `path_safety_prompt_versions`); the installed version is qualified again at every launch, resume
+and continuation, and a persisted version is never trusted for authority. The Claude qualification
+table (`backends/claude_qualification.py`) is the single source:
+
+| Claude Code | Caller-approvable tools |
+| --- | --- |
+| 2.1.302 | Bash only; `caller_write_approvals` is refused |
+| 2.1.310 | Bash, Read (including path-safety and out-of-repository Reads), and Write and Edit with `caller_write_approvals` |
+
+No alternative transport or permission mode is selected implicitly. If Claude's `init` event reports a
+version other than the one qualified before launch, or a permission request arrives before any version
+was reported, the run is stopped, pending approvals are invalidated and a bridge notice names both
+versions.
+
+**Opt-ins.** `caller_approvals` covers Bash and, on 2.1.310, Read. Approving a Read can disclose files
+outside the repository. `caller_write_approvals` (strict boolean, default `false`, requires
+`caller_approvals`, available on `start_task`, `preview_task_permissions`, `harflow-ctl run` and
+`permission-preview` as `--caller-write-approvals`, and as a saved workflow candidate field) additionally
+lets a caller approve individual Write and Edit requests, including outside the repository. Resume and
+continuation inherit it and cannot override it. A nested task may enable it only if its detected caller
+has it, and the nested enforcement comparison treats `enforcement.caller_approval_tools` as narrowing-only.
+Without the opt-in a Write or Edit request is answered with a delivered refusal (see below) and the run
+continues.
+
+**What a Write or Edit approval means.** Each approval covers one exact action: Harflow echoes the exact
+input and applies no session grant, directory grant or `permission_suggestions`. A second write to the
+same directory asks again. Approving a write outside the repository widens `write_in_repo` for that one
+action, so `enforcement` lists `caller_approval_tools` and a caveat when it is on, and the task snapshot
+and `harflow-ctl status` carry `caller_approved_writes`: request id, tool, `file_path`,
+`inside_repository`, `decision`, `effective_decision`, `delivered_decision`, `expiry_rejection`,
+`delivery`, `execution_outcome` and `write_possible`. That list never contains file content or edit
+strings; those stay in the private ledger and in `get_approval_request`.
+
+**Strict input schemas.** Read accepts an absolute, NUL-free `file_path` plus optional integer `offset` and `limit` and string
+`pages`. Write accepts exactly `file_path` and `content`, Edit exactly `file_path`, `old_string`,
+`new_string` and optional boolean `replace_all`; Write and Edit paths must be absolute. Unknown keys stop
+the run as an unsupported request. Ledger rows keep Claude's `decision_reason` (at most 1 KiB) and
+`decision_reason_type`.
+
+**Harflow system rejections.** Some requests are answered by Harflow itself, never offered to the caller:
+the row is admitted with `decided_by: "harflow"`, an effective rejection and delivery reserved, and the
+existing pump sends `Harflow refused this action: <reason>`. Reasons are `write_approvals_not_enabled`,
+`protected_path`, `request_too_large` and `approval_expired` (an expired request, including a caller approval that expired before delivery; the caller's `decision` stays recorded with `expiry_rejection: true`). These are not caller decisions: callers cannot answer them,
+`encode` never produces an approval for them, and task classification reports them as
+`harflow_policy_rejected`, not `caller_rejected`. An over-budget Read, Write or Edit request whose ids are
+still valid is kept as a bounded audit row (ids, tool, `file_path` under 4 KiB, size and the SHA-256 of
+the original action, no content). A full or invalid ledger keeps the stop-the-run behavior.
+
+**Protected paths.** Write and Edit approvals are refused (`protected_path`) for the Harflow state root,
+repository and user Claude settings and policy (`.claude/settings.json` and `settings.local.json`,
+`CLAUDE_CONFIG_DIR` or `~/.claude`, managed settings, `~/.claude.json`, `.mcp.json`) and the effective Git
+hooks and `config` locations (`git rev-parse --git-path hooks`, the common directory and the worktree
+gitdir) plus the `hooks/`, `config` and `config.worktree` of every Git directory above the target: one named `.git`, or holding `HEAD` with `objects/` and `refs/` or a `commondir` (bare repositories, submodule and linked-worktree gitdirs). Read is refused only for the state
+root. Targets are resolved through symlinks (or their nearest existing parent) and compared
+case-insensitively; if the Git locations cannot be resolved, Write and Edit are refused. These checks run
+once at admission and cannot prevent a later symlink swap. A Bash approval is checked only as the exact
+command shown to the caller. The 64 KiB request limit covers the whole control-request JSON.
 
 The adapter retains `acceptEdits`, saved Git deny/allow rules and the harness's managed policies.
 It cannot override an explicit deny, plan mode or a sandbox restriction. Bash requests that ask to
@@ -382,7 +438,7 @@ execution. Duplicate, stale, mismatched and expired answers fail rather than bei
 The equivalent CLI commands are:
 
 ```bash
-harflow-ctl run --backend claude --repo /path/to/repo --prompt 'Run the check' --caller-approvals --json
+harflow-ctl run --backend claude --repo /path/to/repo --prompt 'Run the check' --caller-approvals [--caller-write-approvals] --json
 harflow-ctl approval-list --task-id TASK_ID --json
 harflow-ctl approval-get TASK_ID REQUEST_ID --json
 harflow-ctl approval-respond TASK_ID REQUEST_ID --action-digest DIGEST --owner-revision REVISION --decision reject --json

@@ -551,6 +551,8 @@ def _check_configs(record: Any, configs: list[tuple[dict[str, Any], str, bool | 
             raise ValueError("Saved workflow network cannot exceed the caller's network restriction")
         for candidate in [config, *config.get("fallbacks", [])]:
             backend_ = backends.get(candidate["backend"])
+            if candidate.get("caller_write_approvals") and not getattr(record, "caller_write_approvals", False):
+                raise backends.NestedDispatchRefused("Saved workflow cannot grant caller_write_approvals the caller does not hold; this cap is best-effort", rule="caller_write_approvals")
             try:
                 enforcement = backend_.enforcement(freedom, network)
             except backends.NestedDispatchRefused:

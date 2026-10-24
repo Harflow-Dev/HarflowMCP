@@ -7,14 +7,32 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import approvals, identity, store
+from . import approval_paths, approvals, identity, store
+from .backends.base import ApprovalRefused
 from .state_access import storage_operation, task_operation
 from .state_ownership import StateOwnershipError, run_owned_worker
 
 
-def validate(backend: Any, enabled: bool, freedom: str, max_turns: int | None, native: bool = False) -> None:
+def _write_validator(backend: Any):
+    validator = getattr(backend, "validate_caller_write_approvals", None)
+    if validator is None:
+        from .backends.base import UnsupportedCapability
+        def validator(write, enabled, version=None):
+            if write:
+                raise UnsupportedCapability(f"{backend.name} has no qualified caller write approvals")
+    return validator
+
+
+def with_approval_enforcement(backend: Any, enforcement: Any, version: str | None, enabled: bool, write: bool) -> Any:
+    shaper = getattr(backend, "approval_enforcement", None)
+    return shaper(enforcement, version, enabled, write) if shaper is not None and enabled else enforcement
+
+
+def validate(backend: Any, enabled: bool, freedom: str, max_turns: int | None, native: bool = False, write: bool = False) -> None:
     if type(enabled) is not bool:
         raise ValueError("caller_approvals must be a boolean")
+    if write or hasattr(backend, "validate_caller_write_approvals"):
+        _write_validator(backend)(write, enabled)
     if enabled:
         if not backend.capabilities.supports_caller_approvals:
             from .backends.base import UnsupportedCapability
@@ -22,12 +40,13 @@ def validate(backend: Any, enabled: bool, freedom: str, max_turns: int | None, n
         backend.validate_caller_approvals(enabled, freedom, max_turns, native)
 
 
-async def configure(backend: Any, invocation: Any, enabled: bool, freedom: str, max_turns: int | None):
-    validate(backend, enabled, freedom, max_turns, invocation.native_subagent)
+async def configure(backend: Any, invocation: Any, enabled: bool, freedom: str, max_turns: int | None, write: bool = False):
+    validate(backend, enabled, freedom, max_turns, invocation.native_subagent, write)
     if not enabled:
         return invocation
-    await asyncio.to_thread(backend.qualify_caller_approvals)
-    result = backend.configure_caller_approvals(invocation, freedom, max_turns)
+    version = await asyncio.to_thread(backend.qualify_caller_approvals)
+    _write_validator(backend)(write, enabled, version)
+    result = backend.configure_caller_approvals(invocation, freedom, max_turns, version, write)
     backend.assert_safe(result, freedom)
     return result
 
@@ -202,6 +221,36 @@ async def respond_request(registry: Any, task_id: str, request_id: str, action_d
     return await asyncio.to_thread(approvals.get, registry.log_dir, task_id, request_id)
 
 
+def _path_facts(registry: Any, task: Any, decoded: dict[str, Any]) -> dict[str, Any]:
+    """Repository containment and protected-path refusal, evaluated once at admission."""
+    tool = decoded["action"]["tool_name"]
+    path = decoded["action"]["input"].get("file_path") or decoded.get("file_path")
+    if tool not in {"Read", "Write", "Edit"} or not isinstance(path, str) or decoded.get("system_rejection") == "request_too_large":
+        return decoded
+    decoded["inside_repository"] = approval_paths.inside_repository(task.repo_path, path)
+    if decoded.get("system_rejection") is None:
+        if task.protected_paths is None:
+            task.protected_paths = approval_paths.protected_targets(task.repo_path, registry.log_dir)
+        reason = approval_paths.protection(task.protected_paths, tool, path, task.repo_path)
+        if reason is not None:
+            decoded["system_rejection"] = reason
+    return decoded
+
+
+async def _stop_refused(registry: Any, task: Any, exc: Exception) -> None:
+    """Version or qualification refusal: notice, invalidate pending approvals and stop the run now."""
+    if str(exc) not in task.bridge_notices:
+        task.bridge_notices.append(str(exc))
+    try:
+        await asyncio.to_thread(approvals.invalidate, registry.log_dir, task.task_id, "invalidated", task.approval_generation)
+    except StateOwnershipError:
+        raise
+    except Exception:
+        pass
+    registry.persist(task)
+    registry._stop_native_transport(task)
+
+
 @storage_operation
 async def observe(registry: Any, task: Any, backend: Any, event: dict[str, Any]) -> bool:
     """Consume control events separately; never emit raw actions in shared events/tails."""
@@ -213,9 +262,11 @@ async def observe(registry: Any, task: Any, backend: Any, event: dict[str, Any])
         task.acc.awaiting_input = False
         task.acc.turn_open = True
         try:
-            if len(approvals.canonical(event)) > approvals.MAX_REQUEST_BYTES:
+            qualification = {"version": task.caller_approval_version, "observed": getattr(backend, "approval_stream_version", lambda acc: None)(task.acc), "write": task.caller_write_approvals}
+            decoded = backend.decode_approval_request(event, qualification) if len(approvals.canonical(event)) <= approvals.MAX_REQUEST_BYTES else getattr(backend, "decode_oversize_approval", lambda e, q: None)(event, qualification)
+            if decoded is None:
                 raise ValueError("Approval request exceeds 64 KiB")
-            decoded = backend.decode_approval_request(event)
+            decoded = await asyncio.to_thread(_path_facts, registry, task, decoded)
             if task.start_time is None:
                 captured = await asyncio.wait_for(asyncio.to_thread(identity.capture, task.proc.pid, task.markers), timeout=2.0)
                 if captured is None:
@@ -226,7 +277,8 @@ async def observe(registry: Any, task: Any, backend: Any, event: dict[str, Any])
             await asyncio.to_thread(approvals.admit, registry.log_dir, task, decoded, ctx)
         except StateOwnershipError:
             raise
-        except Exception:
+        except Exception as exc:
+            refused = isinstance(exc, ApprovalRefused)
             # Preserve bounded audit evidence even when the action cannot be exposed.
             # Full/invalid ledgers may prevent this final record; cancellation remains mandatory.
             try:
@@ -241,7 +293,14 @@ async def observe(registry: Any, task: Any, backend: Any, event: dict[str, Any])
                 raise
             except Exception:
                 pass
-            task.bridge_notices.append("Unsupported, invalid or over-budget permission request; stopping execution without approval")
+            task.bridge_notices.append(str(exc) if refused else "Unsupported, invalid or over-budget permission request; stopping execution without approval")
+            if refused:
+                try:
+                    await asyncio.to_thread(approvals.invalidate, registry.log_dir, task.task_id, "invalidated", task.approval_generation)
+                except StateOwnershipError:
+                    raise
+                except Exception:
+                    pass
             registry.persist(task)
             registry._stop_native_transport(task)
         task.approval_view = await asyncio.to_thread(approvals.summary, registry.log_dir, task.task_id)
@@ -249,6 +308,12 @@ async def observe(registry: Any, task: Any, backend: Any, event: dict[str, Any])
         task.pump_wake.set()
         return True
     if task.caller_approvals:
+        qualification = {"version": task.caller_approval_version, "observed": getattr(backend, "approval_stream_version", lambda acc: None)(task.acc), "write": task.caller_write_approvals}
+        try:
+            getattr(backend, "check_approval_event", lambda e, q: None)(event, qualification)
+        except ApprovalRefused as exc:
+            await _stop_refused(registry, task, exc)
+            return False
         cancelled = backend.decode_approval_cancellation(event)
         if cancelled is not None:
             for row in await asyncio.to_thread(approvals.rows, registry.log_dir, task.task_id):
@@ -307,7 +372,7 @@ async def pump(registry: Any, task: Any) -> bool:
         expiry_rejection = row.get("expiry_rejection", False) or row["deadline"] <= time.time()
         if expiry_rejection:
             effective = "reject"
-            wire = get(task.backend).encode_approval_response(row, effective)
+            wire = get(task.backend).encode_approval_response({**row, "expiry_rejection": True}, effective)
         written = _write_stdin(task, wire)
         await asyncio.to_thread(approvals.finish_delivery, registry.log_dir, task.task_id, row["request_id"], row["generation"], written, effective, expiry_rejection)
         # A successful local write is not a harness acknowledgement. Observed tool

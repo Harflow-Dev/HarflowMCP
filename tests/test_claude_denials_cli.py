@@ -5,14 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import shutil
-import subprocess
 from pathlib import Path
 
 import pytest
 
+from claude_cli_support import isolate, require_claude
 from fake_anthropic_api import fake_anthropic_api
-from harflow_mcp.backends import claude_denials, claude_qualification, get
+from harflow_mcp.backends import claude_denials, get
 from harflow_mcp.backends.claude_approvals import encode
 from harflow_mcp.tasks import TaskRegistry
 
@@ -32,22 +31,10 @@ CASES = {
 }
 
 
-def _installed_version() -> str:
-    executable = shutil.which("claude")
-    if not executable:
-        pytest.skip("Claude CLI not installed")
-    observed = subprocess.run([executable, "--version"], capture_output=True, text=True, check=True).stdout.strip()
-    version = claude_qualification.parse_version(observed)
-    candidate = os.environ.get("HARFLOW_QUALIFY_CLAUDE_VERSION")
-    if version is None or not (claude_qualification.supports(version, "denial_texts") or candidate == version):
-        pytest.skip(f"Installed Claude {observed!r} is not in the measured set; set HARFLOW_QUALIFY_CLAUDE_VERSION to measure it")
-    return version
-
-
 @pytest.mark.parametrize("category", list(CASES))
 @pytest.mark.asyncio
 async def test_real_claude_refusal_text_is_classified(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, category: str) -> None:
-    version = _installed_version()
+    version = require_claude("denial_texts", monkeypatch)
     tool, build, detail = CASES[category]
     repo = tmp_path / "repo"
     (repo / "trailing ").mkdir(parents=True)
@@ -55,14 +42,7 @@ async def test_real_claude_refusal_text_is_classified(tmp_path: Path, monkeypatc
     outside = tmp_path / "outside"
     outside.mkdir()
     with fake_anthropic_api(steps=[{"name": tool, "input": build(repo, outside), "id": "denial_1"}]) as (base_url, requests):
-        for key in tuple(os.environ):
-            if key.startswith(("ANTHROPIC_", "CLAUDE_", "AWS_", "GOOGLE_")) or key == "CLAUDECODE":
-                monkeypatch.delenv(key, raising=False)
-        monkeypatch.setenv("HOME", str(tmp_path / "home"))
-        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "config"))
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "local-fake-key")
-        monkeypatch.setenv("ANTHROPIC_BASE_URL", base_url)
-        monkeypatch.setenv("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
+        isolate(monkeypatch, tmp_path, base_url)
         registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks", open_monitor=False)
         task = await registry.start("run the scripted action", repo, backend=get("claude"), freedom="write_in_repo")
         try:

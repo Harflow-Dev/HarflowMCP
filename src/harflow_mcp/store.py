@@ -82,6 +82,8 @@ class TaskRecord:
     extra_writable_paths: list[dict[str, Any]] = field(default_factory=list)
     extra_path_certification: str | None = None
     caller_approvals: bool = False
+    caller_write_approvals: bool = False
+    caller_approval_version: str | None = None
     interaction_owner: str = "caller"
     approval_generation: str | None = None
     network: bool | None = None
@@ -1099,6 +1101,8 @@ def snapshot(log_dir: Path, record: TaskRecord, *, _replay_provider=None) -> dic
     denials, denial_categories = classified_denials(get_backend(record.backend), state, record.freedom)
     return {
         "caller_approvals": record.caller_approvals,
+        "caller_write_approvals": record.caller_write_approvals,
+        **({"caller_approved_writes": approvals.approved_writes(log_dir, record.task_id)} if record.caller_write_approvals else {}),
         "interaction_owner": record.interaction_owner,
         "approval_summary": approvals.summary(log_dir, record.task_id),
         "pending_messages": pending,
@@ -1184,6 +1188,7 @@ def brief(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
     status, _, state, _, owned = _resolve(log_dir, record, detail=False)
     return {
         "caller_approvals": record.caller_approvals,
+        "caller_write_approvals": record.caller_write_approvals,
         "interaction_owner": record.interaction_owner,
         "approval_summary": approvals.summary(log_dir, record.task_id),
         "task_id": record.task_id,

@@ -565,3 +565,31 @@ Harflow classifies only these texts, matched in full. "Contains brace with quote
 not re-measured, so it is detected as a refusal but stays unclassified. Re-capture with
 `HARFLOW_CLI_INTEGRATION=1 uv run pytest -m cli_integration tests/test_claude_denials_cli.py`; on an install that is not in
 the measured set the test skips unless `HARFLOW_QUALIFY_CLAUDE_VERSION` names the exact installed version.
+
+### Claude caller approvals and Read/Write/Edit prompts (2.1.310, 2026-10-24)
+
+Measured with `--input-format stream-json --permission-prompt-tool stdio --permission-prompts host` and
+`--permission-mode acceptEdits`, against a localhost fake Anthropic API with an isolated `HOME` and
+`CLAUDE_CONFIG_DIR`; no model calls. Re-run with
+`tests/test_claude_caller_approvals_cli.py`, `tests/test_claude_approval_resume_cli.py` and
+`tests/test_claude_write_approvals_cli.py`.
+
+- A `can_use_tool` `control_request` carries `subtype`, `tool_name`, `input`, `tool_use_id`, `description`,
+  `display_name`, `decision_reason`, `decision_reason_type` and `permission_suggestions`.
+- Bash approve runs the command; reject records the denial with `Caller rejected this exact action`. A chained
+  command produces one request for the whole command (`decision_reason_type: subcommandResults`); command
+  substitution produces a request whose reason is the nested-command text. Deny-rule commands are never offered.
+- A Read under a directory name ending in a space is emitted as a request (`tool_name: Read`,
+  `decision_reason_type: other`, reason "Path contains suspicious Windows-specific patterns ... require manual
+  verification", no suggestions); approve performs the read, reject records a denial.
+- A Read, Write or Edit outside the working directory is emitted with `decision_reason_type: workingDir` and
+  reason "Path is outside allowed working directories". A Write or Edit under a path-safety directory is emitted
+  with `decision_reason_type: safetyCheck` and reason "Claude requested permissions to write to <dir>".
+- Edit input keys are `file_path`, `old_string`, `new_string` and `replace_all`. Claude requires a prior Read, and
+  that Read prompts too when the file is outside the working directory.
+- Approving a Write or Edit performs exactly that write or edit; rejecting records a denial. Approving one Write
+  does not grant the directory: a second Write to the same outside directory prompted again. Harflow returns no
+  `updatedPermissions`, so the `addDirectories` and `addRules` suggestions are ignored.
+- A Write or Edit answered with `Harflow refused this action: <reason>` is a denial like any other: the run
+  continues and nothing is written.
+- The `system`/`init` event's `claude_code_version` equals `claude --version`; Harflow cross-checks the two.

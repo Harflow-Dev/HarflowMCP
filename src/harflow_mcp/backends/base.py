@@ -57,6 +57,8 @@ class Invocation:
     scratch_directory: str | None = None
     native_subagent: bool = False
     caller_approvals: bool = False
+    caller_write_approvals: bool = False
+    caller_approval_version: str | None = None
     native_settings: dict[str, Any] | None = None
     env: Mapping[str, str] = field(default_factory=dict)
 
@@ -300,9 +302,12 @@ class Enforcement:
     caveats: tuple[str, ...] = ()
     extra_writable_paths: tuple[dict[str, Any], ...] = ()
     extra_path_certification: str | None = None
+    caller_approval_tools: tuple[str, ...] = ()
+    """Tools a caller may be asked to approve for this run; empty (and omitted from `as_dict`) without caller approvals."""
 
     def as_dict(self) -> dict[str, Any]:
         return {
+            **({"caller_approval_tools": list(self.caller_approval_tools)} if self.caller_approval_tools else {}),
             "extra_writable_paths": list(self.extra_writable_paths),
             "extra_path_certification": self.extra_path_certification,
             "freedom": self.freedom,
@@ -393,6 +398,10 @@ def classified_denials(backend: Any, acc: Accumulator, freedom: str | None) -> t
     return denials, list(dict.fromkeys(d["denial_category"] for d in denials if isinstance(d, dict) and isinstance(d.get("denial_category"), str)))
 
 
+class ApprovalRefused(ValueError):
+    """A refusal whose message is safe and useful to show the caller as a bridge notice."""
+
+
 class UnsupportedCapability(ValueError):
     """A request a backend cannot honour, which must fail rather than be silently dropped."""
 
@@ -441,10 +450,28 @@ class ExtraPathsUnsupported:
     def qualify_caller_approvals(self):
         raise UnsupportedCapability("This backend has no qualified caller approval transport")
 
-    def configure_caller_approvals(self, invocation, freedom, max_turns):
+    def validate_caller_write_approvals(self, write, enabled, version=None):
+        if type(write) is not bool:
+            raise ValueError("caller_write_approvals must be a boolean")
+        if write:
+            raise UnsupportedCapability("This backend has no qualified caller write approvals")
+
+    def configure_caller_approvals(self, invocation, freedom, max_turns, version=None, write=False):
         raise UnsupportedCapability("This backend has no qualified caller approval transport")
 
-    def decode_approval_request(self, event):
+    def approval_stream_version(self, acc):
+        return None
+
+    def approval_enforcement(self, enforcement, version, enabled, write):
+        return enforcement
+
+    def decode_approval_request(self, event, qualification=None):
+        return None
+
+    def decode_oversize_approval(self, event, qualification=None):
+        return None
+
+    def check_approval_event(self, event, qualification=None):
         return None
 
     def encode_approval_response(self, request, decision):
@@ -510,8 +537,13 @@ class Backend(Protocol):
     def caller_approval_support(self) -> dict[str, Any]: ...
     def validate_caller_approvals(self, enabled: bool, freedom: str, max_turns: int | None, native: bool = False) -> None: ...
     def qualify_caller_approvals(self) -> None: ...
-    def configure_caller_approvals(self, invocation: Invocation, freedom: str, max_turns: int | None) -> Invocation: ...
-    def decode_approval_request(self, event: dict[str, Any]) -> dict[str, Any] | None: ...
+    def validate_caller_write_approvals(self, write: bool, enabled: bool, version: str | None = None) -> None: ...
+    def configure_caller_approvals(self, invocation: Invocation, freedom: str, max_turns: int | None, version: str | None = None, write: bool = False) -> Invocation: ...
+    def approval_stream_version(self, acc: Accumulator) -> str | None: ...
+    def approval_enforcement(self, enforcement: Enforcement, version: str | None, enabled: bool, write: bool) -> Enforcement: ...
+    def decode_approval_request(self, event: dict[str, Any], qualification: dict[str, Any] | None = None) -> dict[str, Any] | None: ...
+    def decode_oversize_approval(self, event: dict[str, Any], qualification: dict[str, Any] | None = None) -> dict[str, Any] | None: ...
+    def check_approval_event(self, event: dict[str, Any], qualification: dict[str, Any] | None = None) -> None: ...
     def encode_approval_response(self, request: dict[str, Any], decision: str) -> bytes: ...
     def decode_approval_cancellation(self, event: dict[str, Any]) -> str | None: ...
     def approval_outcomes(self, event: dict[str, Any]) -> list[tuple[str, str]]: ...
@@ -841,6 +873,11 @@ def nested_enforcement_violation(
                    (owner.kind == "file" and grant.kind == "file" and grant.path == owner.path)
                    for owner in parent_extra):
             return _violation("extra_writable_paths", "owner scope", grant.path)
+
+    # Write and Edit approvals are narrowing-only: a child may offer them only if its parent did.
+    child_writes = {t for t in (_field(child, "caller_approval_tools") or ()) if t in {"Write", "Edit"}}
+    if child_writes - set(parent.get("caller_approval_tools") or ()):
+        return _violation("caller_approval_tools", list(parent.get("caller_approval_tools") or ()), sorted(child_writes))
 
     for field_name in _MONOTONIC_TRUE_RESTRICTS:
         parent_value = parent[field_name]

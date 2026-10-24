@@ -476,6 +476,7 @@ async def start_task(
     network: StrictBool | None = None,
     caller_approvals: StrictBool = False,
     interaction_owner: str = "caller",
+    caller_write_approvals: StrictBool = False,
     group: str | None = None,
     title: str | None = None,
     workflow: str | None = None,
@@ -518,10 +519,16 @@ async def start_task(
             silently ignores an unsupported level rather than erroring, and on antigravity a model
             id that encodes its own level makes the CLI refuse --effort at startup. See
             list_backends' per-backend reasoning_effort caveats for what is and is not known there.
-        caller_approvals: Opt in to version-qualified exact-action Bash caller decisions. Only
-            uncapped non-native Claude Code 2.1.302 write_in_repo/publish is supported. Defaults off;
+        caller_approvals: Opt in to version-qualified exact-action caller decisions: Bash, plus Read
+            on Claude Code 2.1.310 (approving a Read can disclose files outside the repository).
+            Only uncapped non-native Claude Code write_in_repo/publish on a measured version is
+            supported (see list_backends caller_approval_support). Defaults off;
             worker self-approval is prohibited. Decisions do not override saved policy or grant
             reusable access. Inspect list_approval_requests and get_approval_request before responding.
+        caller_write_approvals: Additionally allow Write and Edit requests (including outside the
+            repository) to be approved one exact action at a time. Requires caller_approvals and a
+            version that qualifies it; defaults off, in which case Write and Edit requests are answered
+            with a delivered Harflow refusal. Harflow-protected paths are always refused.
         interaction_owner: caller by default; monitor requires the verified human Monitor path.
         network: Optional boolean asking for network access independently of `freedom`: True
             asks harflow_mcp to impose no network barrier of its own, False asks it to impose one,
@@ -603,7 +610,7 @@ async def start_task(
         raise MCPError(INVALID_PARAMS, str(exc)) from None
 
     if workflow is not None:
-        if caller_approvals or interaction_owner != "caller":
+        if caller_approvals or caller_write_approvals or interaction_owner != "caller":
             raise MCPError(INVALID_PARAMS, "Workflow approval policy and ownership belong to saved candidates and root workflow launch")
         if extra_writable_paths is not None:
             raise MCPError(INVALID_PARAMS, "extra_writable_paths is unavailable for workflow launches")
@@ -666,6 +673,7 @@ async def start_task(
             network=network,
             caller_approvals=caller_approvals,
             interaction_owner=interaction_owner,
+            **({"caller_write_approvals": True} if caller_write_approvals else {}),
             group=group,
             title=normalized_title,
             auto_continue=auto_continue,
@@ -766,6 +774,7 @@ async def preview_task_permissions(
     network: StrictBool | None = None,
     caller_approvals: StrictBool = False,
     extra_writable_paths: list[StrictStr] | None = None,
+    caller_write_approvals: StrictBool = False,
 ) -> dict[str, Any]:
     """Preview standalone task permissions without launching an agent or allocating scratch.
 
@@ -791,6 +800,7 @@ async def preview_task_permissions(
             path, backend=chosen, freedom=access, network=network,
             extra_writable_paths=extra_writable_paths,
             caller_approvals=caller_approvals,
+            **({"caller_write_approvals": True} if caller_write_approvals else {}),
         )
     except (ValueError, backends.UnsupportedCapability) as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
@@ -1953,7 +1963,7 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
                                 except backends.UnsupportedCapability:
                                     # The supervisor journals this candidate refusal and tries its fallback.
                                     continue
-                                _reg()._resolve_lineage(caller, child_enforcement=enforcement, child_backend=backend_.name, child_repo=path)
+                                _reg()._resolve_lineage(caller, child_enforcement=enforcement, child_backend=backend_.name, child_repo=path, caller_write_approvals=bool(candidate.get("caller_write_approvals", False)))
                 else:
                     configs = [({**kwargs["agent"], "fallbacks": kwargs.get("fallbacks") or []}, "read_only", None)]
                     for config, freedom, network in configs:
@@ -1965,7 +1975,7 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
                                 raise
                             except backends.UnsupportedCapability:
                                 continue
-                            _reg()._resolve_lineage(caller, child_enforcement=enforcement, child_backend=backend_.name, child_repo=path)
+                            _reg()._resolve_lineage(caller, child_enforcement=enforcement, child_backend=backend_.name, child_repo=path, caller_write_approvals=bool(candidate.get("caller_write_approvals", False)))
         if action == "start":
             kwargs["repo_path"] = await _validate_repo_path(kwargs["repo_path"])
             return await workflows.start_workflow(root=_reg().log_dir.parent, **kwargs, _verified_caller=caller)

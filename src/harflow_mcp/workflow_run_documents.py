@@ -145,7 +145,7 @@ def _fields(strings="", counters="", numbers="", booleans="", objects="", arrays
 
 
 def _candidate(value, path):
-    _shape(value, {**_fields("backend instructions", booleans="caller_approvals", nullable_strings="model reasoning_effort"),
+    _shape(value, {**_fields("backend instructions", booleans="caller_approvals caller_write_approvals", nullable_strings="model reasoning_effort"),
                    "max_turns": _nullable(_positive), "background_idle_seconds": NULL_NUMBER, "fallbacks": _array(_candidate)}, path)
 
 

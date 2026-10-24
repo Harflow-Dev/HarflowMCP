@@ -159,7 +159,7 @@ async def launch(registry, invocation, kwargs):
     grants = serialize_paths(kwargs.pop('extra_path_grants', ()))
     kwargs['repo_path'] = str(kwargs['repo_path'])
     request_invocation = {name: getattr(invocation, name) for name in (
-        'argv', 'stdin_mode', 'extra_writable_paths', 'native_subagent', 'caller_approvals', 'native_settings')}
+        'argv', 'stdin_mode', 'extra_writable_paths', 'native_subagent', 'caller_approvals', 'caller_write_approvals', 'caller_approval_version', 'native_settings')}
     request_invocation['env'] = dict(invocation.env)
     request_invocation['initial_input'] = base64.b64encode(invocation.initial_input).decode('ascii') if invocation.initial_input is not None else None
     generation = uuid.uuid4().hex

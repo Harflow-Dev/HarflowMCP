@@ -181,6 +181,8 @@ _NO_SANDBOX_CAVEAT = (
     "no OS sandbox: the agent can read and write outside repo_path, which is only its working "
     "directory"
 )
+_READ_APPROVAL_CAVEAT = "a caller approving a Read can disclose files outside the repository; each approval covers one exact action"
+_WRITE_APPROVAL_CAVEAT = "a caller can approve individual writes outside the repository; each approval covers one exact action"
 _DENY_PATTERN_CAVEAT = (
     "the commit/push deny patterns are evaded by `git -C <path> commit` and `bash -c 'git commit'` "
     "(measured), so they stop ordinary work, not deliberate circumvention"
@@ -444,15 +446,38 @@ class ClaudeBackend(ExtraPathsUnsupported):
 
     def qualify_caller_approvals(self):
         from .claude_approvals import qualify
-        qualify(self)
+        return qualify(self)
 
-    def configure_caller_approvals(self, invocation, freedom, max_turns):
+    def validate_caller_write_approvals(self, write, enabled, version=None):
+        from .claude_approvals import validate_write
+        validate_write(write, enabled, version)
+
+    def configure_caller_approvals(self, invocation, freedom, max_turns, version=None, write=False):
         from .claude_approvals import configure
-        return configure(invocation, freedom, max_turns)
+        return configure(invocation, freedom, max_turns, version, write)
 
-    def decode_approval_request(self, event):
+    def approval_stream_version(self, acc):
+        return acc.stream_state.get("claude_code_version")
+
+    def approval_enforcement(self, enforcement, version, enabled, write):
+        from . import claude_qualification as q
+        if not enabled or version is None:
+            return enforcement
+        tools = q.approval_tools(version, write=write)
+        caveats = enforcement.caveats + ((_READ_APPROVAL_CAVEAT,) if "Read" in tools else ()) + ((_WRITE_APPROVAL_CAVEAT,) if write else ())
+        return replace(enforcement, caller_approval_tools=tools, caveats=caveats)
+
+    def decode_approval_request(self, event, qualification=None):
         from .claude_approvals import decode
-        return decode(event)
+        return decode(event, qualification)
+
+    def check_approval_event(self, event, qualification=None):
+        from .claude_approvals import check_event
+        check_event(event, qualification)
+
+    def decode_oversize_approval(self, event, qualification=None):
+        from .claude_approvals import decode_oversize
+        return decode_oversize(event, qualification)
 
     def encode_approval_response(self, request, decision):
         from .claude_approvals import encode

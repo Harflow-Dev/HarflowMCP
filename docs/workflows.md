@@ -1752,7 +1752,8 @@ The CTL JSON contract is version 14. Historical records without these fields rem
 ### Caller approval interaction
 
 Each agent candidate, including every fallback, can save `caller_approvals: true`; omitted values
-remain false. The qualified scope is [exact-action Claude caller approvals](harness-permissions.md#exact-action-caller-approvals).
+remain false. `caller_write_approvals: true` (which requires `caller_approvals`) additionally allows Write and Edit approvals;
+it appears in a candidate's signature only when true, so existing saved signatures are unchanged. The qualified scope is [exact-action Claude caller approvals](harness-permissions.md#exact-action-caller-approvals).
 For opted-in candidates the implicit 100-turn default is omitted. An explicit turn cap is
 incompatible and rejected. Resume and continuation inherit the saved policy; candidate/session
 compatibility includes this setting. Native execution cannot carry this policy and its preview
