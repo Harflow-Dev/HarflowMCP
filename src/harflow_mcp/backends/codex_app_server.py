@@ -66,7 +66,9 @@ TRIPWIRE_PREFIXES = ("hook/", "item/autoApprovalReview/")
 TRIPWIRE_METHODS = frozenset({"guardianWarning", "autoApprovalReview/strictReviewRequired"})
 
 SYSTEM_REASONS = ("not_active_turn", "unsupported_kind", "missing_command", "additional_permissions", "network_context",
-                  "unsupported_request", "file_change_unsupported", "request_too_large", "approval_expired", "protected_path")
+                  "unsupported_request", "file_change_unsupported", "grant_root", "file_change_not_started", "file_change_ambiguous", "invalid_path",
+                  "request_too_large", "approval_expired", "protected_path")
+MAX_FROZEN_BYTES = 32 * 1024
 
 _PLAIN_STRING = re.compile(r"""\A(?:"[^"\\\n]*"|'[^'\\\n]*')\Z""")
 RULE_KEYWORDS = frozenset({"pattern", "decision", "justification", "match", "not_match"})
@@ -127,10 +129,23 @@ def argv(ctx: dict[str, Any]) -> list[str]:
     return [*result, "--listen", "stdio://"]
 
 
-def config_map(ctx: dict[str, Any]) -> dict[str, Any]:
-    """The `thread/start` `config` map: the same pins, nested, plus the untrusted-project override (R6-2).
+def trust_directories(cwd: str, git_root: str, linked: Any = ()) -> list[str]:
+    """Every directory from the canonical cwd up to the filesystem root, plus the Git root, each of which gets an
+    explicit untrusted override: whichever of them Codex keys project trust on, a trusted entry for it cannot apply."""
+    found: list[str] = []
+    for start in (cwd, *linked):
+        found.append(start)
+        parent = os.path.dirname(start)
+        while parent != found[-1]:
+            found.append(parent)
+            parent = os.path.dirname(parent)
+    return list(dict.fromkeys([*found, git_root]))
 
-    The override ignores project config, rules and hooks and, unlike the argv form, writes nothing to CODEX_HOME."""
+
+def config_map(ctx: dict[str, Any]) -> dict[str, Any]:
+    """The `thread/start` `config` map: the same pins, nested, plus the untrusted-project overrides (R6-2).
+
+    The overrides ignore project config, rules and hooks and, unlike the argv form, write nothing to CODEX_HOME."""
     nested: dict[str, Any] = {}
     for key, value in _pins(ctx):
         node = nested
@@ -138,7 +153,7 @@ def config_map(ctx: dict[str, Any]) -> dict[str, Any]:
         for part in parents:
             node = node.setdefault(part, {})
         node[leaf] = value
-    nested["projects"] = {ctx["git_root"]: {"trust_level": "untrusted"}}
+    nested["projects"] = {directory: {"trust_level": "untrusted"} for directory in trust_directories(ctx["cwd"], ctx["git_root"], ctx.get("linked_roots", ()))}
     return nested
 
 
@@ -154,7 +169,12 @@ def validate_context(ctx: Any) -> dict[str, Any]:
     for key in ("model", "effort", "thread_id"):
         if ctx.get(key) is not None and (not isinstance(ctx[key], str) or not ctx[key]):
             raise ValueError(f"Invalid app-server control context field {key}")
-    if set(ctx) - {"transport", "model", "effort", "thread_id", *expected}:
+    linked = ctx.get("linked_roots", [])
+    if not isinstance(linked, list) or not all(isinstance(r, str) and os.path.isabs(r) for r in linked):
+        raise ValueError("Invalid app-server control context field linked_roots")
+    if type(ctx.get("write", False)) is not bool:
+        raise ValueError("Invalid app-server control context field write")
+    if set(ctx) - {"transport", "model", "effort", "thread_id", "write", "linked_roots", *expected}:
         raise ValueError("Unknown app-server control context field")
     return ctx
 
@@ -168,7 +188,7 @@ def assert_safe(invocation: Invocation, freedom: str) -> str | None:
     if invocation.argv != argv(ctx):
         return "app-server argv is not the exact qualified shape"
     if (not invocation.control_pipe or invocation.stdin_mode != "devnull" or invocation.initial_input is not None or not invocation.caller_approvals
-            or invocation.caller_write_approvals or invocation.native_subagent or invocation.allowed_commands or invocation.extra_writable_paths
+            or invocation.caller_write_approvals is not ctx.get("write", False) or invocation.native_subagent or invocation.allowed_commands or invocation.extra_writable_paths
             or invocation.caller_approval_version != ctx["version"] or invocation.identity_markers != IDENTITY_MARKERS):
         return "app-server invocation carries an unexpected control field"
     if ctx["freedom"] != freedom:
@@ -217,6 +237,17 @@ class State:
         self.failed: str | None = None
         self.seen_items: set[str] = set()
         self.duplicates: set[str] = set()
+        # fileChange items seen in `item/started` for the active thread and turn (itemId -> normalized changes),
+        # the ones whose started item was ambiguous, the ones frozen at admission, and the ones whose completion
+        # contradicted what was approved.
+        self.file_started: dict[str, list[str]] = {}
+        self.file_ambiguous: set[str] = set()
+        self.file_frozen: dict[str, list[str]] = {}
+        self.file_mismatched: set[str] = set()
+        # What Harflow answered per ledger identity, for denial classification.
+        self.answers: dict[str, dict[str, Any]] = {}
+        self.mcp_errors: list[dict[str, Any]] = []
+        self.mcp_calls: dict[str, str] = {}   # mcpToolCall item id -> canonical (server, tool, arguments), started or completed in the active turn
 
     @property
     def admissible(self) -> bool:
@@ -375,10 +406,87 @@ def _step(state: State, event: dict[str, Any]) -> None:
     params = event.get("params") if isinstance(event.get("params"), dict) else {}
     if (method.startswith("item/") or method.startswith("turn/")) and not state.verified:
         raise ApprovalRefused(f"Codex sent {method} before the version, thread and policy checks passed; stopping execution without approval")
+    if method in {"item/started", "item/completed"}:
+        _track_file_change(state, method, params)
     if method == "turn/completed":
         turn = params.get("turn") if isinstance(params.get("turn"), dict) else {}
         if params.get("threadId") == state.thread_id and turn.get("id") == state.turn_id and state.terminal is None:
             state.terminal = {"status": turn.get("status"), "error": turn.get("error")}
+
+
+# --- file changes ---------------------------------------------------------------------------------------
+
+def _norm_changes(changes: Any) -> list[str] | None:
+    """Order-insensitive canonical form of an item's complete change objects (any extra field counts as a difference),
+    or None when malformed."""
+    if not isinstance(changes, list) or not all(isinstance(change, dict) for change in changes):
+        return None
+    return sorted(json.dumps(change, sort_keys=True, ensure_ascii=False) for change in changes)
+
+
+def _track_file_change(state: State, method: str, params: dict[str, Any]) -> None:
+    """Remember fileChange items of the active thread and turn as they start, and compare a completion with what was approved."""
+    item = params.get("item")
+    if not isinstance(item, dict) or item.get("type") != "fileChange" or params.get("threadId") != state.thread_id or params.get("turnId") != state.turn_id:
+        return
+    item_id = item.get("id")
+    if not isinstance(item_id, str) or not item_id:
+        return
+    if method == "item/started":
+        if item_id in state.file_started:
+            state.file_ambiguous.add(item_id)
+        elif _norm_changes(item.get("changes")) is None:
+            state.file_ambiguous.add(item_id)
+        else:
+            state.file_started[item_id] = copy.deepcopy(item["changes"])
+        return
+    frozen = state.file_frozen.get(item_id)
+    if frozen is not None and _norm_changes(item.get("changes")) != frozen:
+        state.file_mismatched.add(item_id)
+        raise ApprovalRefused(f"Codex completed file change {item_id} with changes that differ from the ones approved; stopping execution",
+                              audit="file change mismatch", outcomes=((f"fileChange:{item_id}", "mismatch"),))
+
+
+def change_paths(action: dict[str, Any]) -> list[str]:
+    """Every source and destination path of a frozen fileChange action, in first-seen order."""
+    found: list[str] = []
+    changes = (action.get("input") or {}).get("changes") if action.get("tool_name") == "fileChange" else None
+    for change in changes if isinstance(changes, list) else []:
+        kind = change.get("kind") if isinstance(change, dict) else None
+        for path in (change.get("path") if isinstance(change, dict) else None, kind.get("move_path") if isinstance(kind, dict) else None):
+            if isinstance(path, str) and path not in found:
+                found.append(path)
+    return found
+
+
+def _decode_file_change(state: State, params: dict[str, Any], base: dict[str, Any], digest_input: dict[str, Any], key: str) -> dict[str, Any]:
+    item_id = params.get("itemId")
+    valid = isinstance(item_id, str) and 0 < len(item_id) <= MAX_KEY
+    identity = f"fileChange:{item_id}" if valid else f"{FILE_CHANGE_REQUEST}:{key}"
+    decoded = {**base, "tool_use_id": identity[:MAX_KEY], "action": {"tool_name": "fileChange", "input": digest_input}}
+    if not state.ctx.get("write", False):
+        return _rejection(decoded, "file_change_unsupported")
+    if not valid:
+        raise ValueError("Missing file change item identity")
+    if params.get("threadId") != state.thread_id or params.get("turnId") != state.turn_id:
+        return _rejection(decoded, "not_active_turn")
+    if params.get("grantRoot") is not None:
+        return _rejection(decoded, "grant_root")
+    changes = state.file_started.get(item_id)
+    if item_id in state.file_ambiguous:
+        return _rejection(decoded, "file_change_ambiguous")
+    if changes is None:
+        return _rejection(decoded, "file_change_not_started")
+    frozen_bytes = json.dumps(changes, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    if len(frozen_bytes) > MAX_FROZEN_BYTES:
+        import hashlib
+        decoded["action"] = {"tool_name": "fileChange", "input": {"itemId": item_id, "change_count": len(changes), "changes_sha256": hashlib.sha256(frozen_bytes).hexdigest()}}
+        return _rejection(decoded, "request_too_large")
+    decoded["action"] = {"tool_name": "fileChange", "input": {**digest_input, "changes": copy.deepcopy(changes)}}
+    if not all(isinstance(p, str) and os.path.isabs(p) and "\x00" not in p for p in change_paths(decoded["action"])) or not change_paths(decoded["action"]):
+        return _rejection(decoded, "invalid_path")
+    state.file_frozen[item_id] = _norm_changes(changes) or []
+    return decoded
 
 
 # --- server requests --------------------------------------------------------------------------------------
@@ -420,6 +528,8 @@ def decode(event: dict[str, Any], qualified: dict[str, Any] | None) -> dict[str,
     digest_input = {k: copy.deepcopy(v) for k, v in params.items() if k != "startedAtMs"}
     item_id = params.get("itemId")
     base = {"native_request_id": key, "native_method": method}
+    if method == FILE_CHANGE_REQUEST:
+        return _decode_file_change(state, params, base, digest_input, key)
     if method != COMMAND_REQUEST:
         label = NATIVE_TOOL.get(method, method)
         identity = f"{label}:{item_id}" if isinstance(item_id, str) and item_id and len(item_id) <= MAX_KEY and method == FILE_CHANGE_REQUEST else f"{method}:{key}"
@@ -478,9 +588,7 @@ def encode(request: dict[str, Any], decision: str) -> bytes:
     if method == COMMAND_REQUEST:
         return _line({"id": wire_id, "result": {"decision": "accept" if decision == "approve" else "decline"}})
     if method == FILE_CHANGE_REQUEST:
-        if decision == "approve":
-            raise ValueError("File-change approvals are not available")
-        return _line({"id": wire_id, "result": {"decision": "decline"}})
+        return _line({"id": wire_id, "result": {"decision": "accept" if decision == "approve" else "decline"}})
     # Permissions, elicitation, user-input and every unmeasured method: a JSON-RPC error grants nothing (measured).
     return _line({"id": wire_id, "error": {"code": -32000, "message": f"Harflow refused this request: {system or 'unsupported_request'}"}})
 
@@ -492,6 +600,11 @@ def outcomes(event: dict[str, Any], state: State | None) -> list[tuple[str, str]
         return []
     params = event["params"]
     item = params.get("item")
+    if isinstance(item, dict) and item.get("type") == "fileChange" and params.get("threadId") == state.thread_id and params.get("turnId") == state.turn_id:
+        file_id = item.get("id")
+        if isinstance(file_id, str) and file_id in state.file_frozen and file_id not in state.file_mismatched:
+            return [(f"fileChange:{file_id}", "succeeded" if item.get("status") == "completed" else "failed")]
+        return []
     if not isinstance(item, dict) or item.get("type") != "commandExecution" or params.get("threadId") != state.thread_id or params.get("turnId") != state.turn_id:
         return []
     item_id = item.get("id")
@@ -570,15 +683,62 @@ def translate(event: dict[str, Any]) -> list[dict[str, Any]]:
 # --- dispatch-time preparation ------------------------------------------------------------------------------
 
 def git_root(directory: Path) -> str:
+    """The Git root Codex keys project trust on, resolved with repository-controlled configuration neutralised.
+
+    Repository config (`core.worktree`), replace refs and `GIT_*` environment could make `git` report a different
+    root than the filesystem shows, so they are switched off, and the answer must be a real ancestor-or-self of the
+    canonical directory that holds `.git` and is the nearest such ancestor; anything else refuses."""
+    canonical = os.path.realpath(directory)
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null", GIT_OPTIONAL_LOCKS="0")
     try:
-        result = subprocess.run(["git", "-C", str(directory), "rev-parse", "--show-toplevel"], capture_output=True, text=True, timeout=5, env=env, check=False)
-    except (OSError, subprocess.SubprocessError) as exc:
+        # Git still honours `core.worktree` from the repository's own config, so the ancestor check below, not a flag,
+        # is the protection against a redirected root.
+        result = subprocess.run(["git", "--no-replace-objects", "-c", "core.fsmonitor=false", "-C", canonical, "rev-parse", "--show-toplevel"],
+                                capture_output=True, text=True, timeout=5, env=env, check=False)
+    except (OSError, subprocess.SubprocessError, UnicodeError) as exc:
         raise UnsupportedCapability("Codex caller approvals need a Git repository, and its root could not be resolved") from exc
-    root = result.stdout.strip()
-    if result.returncode != 0 or not root:
+    reported = result.stdout.strip()
+    if result.returncode != 0 or not reported:
         raise UnsupportedCapability("Codex caller approvals need a Git repository: the project trust override is keyed by the Git root, and none was found")
-    return os.path.realpath(root)
+    root = os.path.realpath(reported)
+    nearest = None
+    probe = Path(canonical)
+    for candidate in (probe, *probe.parents):
+        if (candidate / ".git").exists():
+            nearest = str(candidate)
+            break
+    if nearest is None or root != nearest or not _inside(Path(canonical), Path(root)):
+        raise UnsupportedCapability("Codex caller approvals refuse a repository whose Git root cannot be confirmed from the filesystem (a redirected worktree, or a root that is not the nearest ancestor holding .git)")
+    return root
+
+
+def linked_roots(root: str) -> list[str]:
+    """Extra roots Codex may key project trust on when `root` is a linked worktree (measured: a trusted main checkout
+    applies to its linked worktrees unless the worktree itself has an explicit entry).
+
+    `<root>/.git` is then a file naming `<common>/worktrees/<name>`; that line is repository content, so it is
+    verified against Git's own back-link and layout, and anything else (a submodule's `modules/` gitdir, a gitdir
+    outside a `worktrees` directory, a missing or mismatching back-link) refuses. A normal checkout has none."""
+    git = Path(root) / ".git"
+    if git.is_dir():
+        return []
+    bad = UnsupportedCapability("Codex caller approvals refuse a linked worktree or submodule whose .git file does not point into a verifiable <common>/worktrees/<name> layout")
+    try:
+        text = git.read_text(encoding="utf-8") if git.is_file() and git.stat().st_size < 4096 else ""
+        found = re.fullmatch(r"gitdir: (.+)\n?", text)
+        if found is None:
+            raise bad
+        gitdir = Path(os.path.realpath(found.group(1) if os.path.isabs(found.group(1)) else os.path.join(root, found.group(1))))
+        common_line = (gitdir / "commondir").read_text(encoding="utf-8").strip()
+        common = Path(os.path.realpath(common_line if os.path.isabs(common_line) else os.path.join(gitdir, common_line)))
+        back = Path(os.path.realpath((gitdir / "gitdir").read_text(encoding="utf-8").strip()))
+    except (OSError, UnicodeError) as exc:
+        raise bad from exc
+    if gitdir.parent.name != "worktrees" or gitdir.parent.parent != common or back != Path(os.path.realpath(git)):
+        raise bad
+    roots = [str(common.parent)] if common.name == ".git" else [str(common)]
+    return list(dict.fromkeys([*roots, str(common)]))
 
 
 def codex_home(environ: Any = None) -> Path:
@@ -633,37 +793,55 @@ def rules_problem(source: str) -> str | None:
     return None
 
 
-def check_rules(home: Path) -> None:
-    """Every rules file Codex loads must conform to the restricted grammar; symlinks refuse.
+def check_rules_dir(rules: Path, label: str) -> None:
+    """Every rules file Codex loads from `rules` must conform to the restricted grammar; symlinks refuse.
 
     Measured on 0.163.0: regular files directly in `rules/` named `*.rules` (hidden ones too) load; other
     extensions, subdirectories, an upper-case extension and symlinked files or directories do not."""
-    rules = home / "rules"
     try:
         if not rules.exists() and not rules.is_symlink():
             return
         if rules.is_symlink():
-            raise UnsupportedCapability("Codex caller approvals refuse a symlinked CODEX_HOME rules directory")
+            raise UnsupportedCapability(f"Codex caller approvals refuse a symlinked {label} rules directory")
         entries = sorted(rules.iterdir())
         for path in entries:
             if path.is_symlink():
-                raise UnsupportedCapability(f"Codex caller approvals refuse a symlink in CODEX_HOME rules ({path.name})")
+                raise UnsupportedCapability(f"Codex caller approvals refuse a symlink in {label} rules ({path.name})")
         for path in (p for p in rules.rglob("*") if p.is_symlink()):
-            raise UnsupportedCapability(f"Codex caller approvals refuse a symlink in CODEX_HOME rules ({path.name})")
+            raise UnsupportedCapability(f"Codex caller approvals refuse a symlink in {label} rules ({path.name})")
         candidates = [p for p in entries if p.is_file() and p.name.lower().endswith(".rules")]
         if len(candidates) > MAX_RULE_FILES:
-            raise UnsupportedCapability("Codex caller approvals refuse a CODEX_HOME rules directory with too many rule files")
+            raise UnsupportedCapability(f"Codex caller approvals refuse a {label} rules directory with too many rule files")
         for path in candidates:
             data = path.read_bytes()
             if len(data) > MAX_RULE_BYTES:
                 raise UnsupportedCapability(f"Codex caller approvals refuse an oversized rules file ({path.name})")
             problem = rules_problem(data.decode("utf-8"))
             if problem is not None:
-                raise UnsupportedCapability(f"Codex caller approvals refuse a CODEX_HOME rules file that does not conform ({path.name} {problem}): only prefix_rule calls with a literal prompt or forbidden decision are accepted, because allow rules run commands without approval and outside the sandbox")
+                raise UnsupportedCapability(f"Codex caller approvals refuse a {label} rules file that does not conform ({path.name} {problem}): only prefix_rule calls with a literal prompt or forbidden decision are accepted, because allow rules run commands without approval and outside the sandbox")
     except UnsupportedCapability:
         raise
     except (OSError, UnicodeError) as exc:
-        raise UnsupportedCapability("Codex caller approvals refuse an unreadable or unparseable CODEX_HOME rules directory") from exc
+        raise UnsupportedCapability(f"Codex caller approvals refuse an unreadable or unparseable {label} rules directory") from exc
+
+
+def check_rules(home: Path) -> None:
+    check_rules_dir(home / "rules", "CODEX_HOME")
+
+
+def project_directories(cwd: str, root: str) -> list[Path]:
+    """Directories from the Git root down to the working directory, inclusive."""
+    chain = [Path(cwd)]
+    while str(chain[-1]) != root and chain[-1] != chain[-1].parent:
+        chain.append(chain[-1].parent)
+    return list(reversed(chain))
+
+
+def check_project_rules(cwd: str, root: str, linked: Any = ()) -> None:
+    """Belt and braces: the untrusted override ignores project rules, but any `.codex/rules` from the Git root down to
+    the working directory must conform as well, so a failed override can never turn into a silent allow."""
+    for directory in [*project_directories(cwd, root), *(Path(r) for r in linked)]:
+        check_rules_dir(directory / ".codex" / "rules", "project")
 
 
 def check_home(home: Path, cwd: str, root: str, environ: Any = None) -> None:
@@ -701,8 +879,8 @@ def ambient(environ: Any = None) -> dict[str, list[str]]:
 def prepare(invocation: Invocation, parts: dict[str, Any], freedom: str, version: str | None, write: bool, environ: Any = None) -> Invocation:
     """The app-server invocation for an exec-shaped one, after every pre-spawn refusal."""
     validate(True, freedom, None, invocation.native_subagent)
-    if write:
-        raise UnsupportedCapability("caller_write_approvals is not qualified on Codex: file-change requests are declined")
+    if write and not qualification.supports(version, "caller_write_tools"):
+        raise UnsupportedCapability("caller_write_approvals is not qualified on this Codex version")
     if version is None or not qualification.platform_supported(version):
         raise UnsupportedCapability("Codex caller approvals are qualified only on a measured version and platform")
     if invocation.extra_writable_paths or invocation.allowed_commands:
@@ -710,11 +888,13 @@ def prepare(invocation: Invocation, parts: dict[str, Any], freedom: str, version
     cwd = os.path.realpath(parts["repo"])
     root = git_root(Path(cwd))
     check_home(codex_home(environ), cwd, root, environ)
+    linked = linked_roots(root)
+    check_project_rules(cwd, root, linked)
     ctx = {"transport": TRANSPORT, "version": version, "cwd": cwd, "git_root": root, "freedom": freedom, "network": parts["network"],
-           "model": parts.get("model"), "effort": parts.get("effort"), "prompt": parts["prompt"], "thread_id": parts.get("thread_id")}
+           "model": parts.get("model"), "effort": parts.get("effort"), "prompt": parts["prompt"], "thread_id": parts.get("thread_id"), "write": write, **({"linked_roots": linked} if linked else {})}
     validate_context(ctx)
     return replace(invocation, argv=argv(ctx), stdin_mode="devnull", initial_input=None, control_pipe=True, control_context=ctx, identity_markers=IDENTITY_MARKERS,
-                   caller_approvals=True, caller_approval_version=version, caller_write_approvals=False)
+                   caller_approvals=True, caller_approval_version=version, caller_write_approvals=write)
 
 
 def validate(enabled: bool, freedom: str, max_turns: int | None, native: bool = False) -> None:
@@ -726,15 +906,31 @@ def validate(enabled: bool, freedom: str, max_turns: int | None, native: bool = 
 
 def support() -> dict[str, Any]:
     return {"supported": True, "transport": "codex app-server", "versions": qualification.versions(), "platforms": ["darwin"], "tools": ["commandExecution"],
-            "freedoms": list(FREEDOM_SANDBOX), "scope": "exact_action_once", "native": False, "turn_caps": False, "write_approvals": False, "workflows": False}
+            "freedoms": list(FREEDOM_SANDBOX), "scope": "exact_action_once", "native": False, "turn_caps": False, "write_approvals": True, "write_tools": ["fileChange"], "workflows": False}
 
 
-def enforcement_caveats(environ: Any = None) -> tuple[str, ...]:
+def protected_paths(repo: Any, environ: Any = None) -> list[Path]:
+    """Locations a caller may never approve a file change into: the resolved CODEX_HOME and every `.codex` from the
+    Git root down to the working directory. (`.git` hooks and config are covered by the generic protected targets.)"""
+    found = [codex_home(environ)]
+    try:
+        cwd = os.path.realpath(repo)
+        root = git_root(Path(cwd))
+        found += [directory / ".codex" for directory in project_directories(cwd, root)]
+        found += [Path(r) / ".codex" for r in linked_roots(root)]
+    except UnsupportedCapability:
+        found += [Path(os.path.realpath(repo)) / ".codex"]
+    return found
+
+
+def enforcement_caveats(environ: Any = None, write: bool = False) -> tuple[str, ...]:
     notes = ambient(environ)
     caveats = [
         "Caller approvals run Codex through `codex app-server` with approval policy on-request, the approvals reviewer pinned to the caller and project trust forced to untrusted: this repository's own .codex config, rules and hooks do not apply to the task.",
         "An approved command may run outside the OS sandbox (Codex does not say which approvals leave it), and command approvals are not path-checked: an approved command can modify the repository's Git config and hooks, CODEX_HOME and Harflow's own state. Each approval covers one exact command shown to the caller.",
-        "File changes outside the workspace are not approvable in this release: those requests are declined. MCP tool calls that need approval are always rejected.",
+        ("File changes Codex asks about (patches outside the workspace) can be approved one exact patch at a time; the paths and diff are frozen at approval, a completion that differs stops the run, and writes to CODEX_HOME, Git config and hooks and every .codex from the Git root to the working directory are refused. "
+         if write else "File changes outside the workspace are not approvable without caller_write_approvals: those requests are declined. ")
+        + "MCP tool calls that need approval are always rejected.",
     ]
     if notes["mcp_servers"]:
         caveats.append("User MCP servers in CODEX_HOME/config.toml stay in effect: " + ", ".join(notes["mcp_servers"]) + ".")
@@ -743,10 +939,19 @@ def enforcement_caveats(environ: Any = None) -> tuple[str, ...]:
     return tuple(caveats)
 
 
-LIMITATIONS = ("Exact original command only, through `codex app-server`; an approved command may run outside the OS sandbox and can modify Git config and hooks, CODEX_HOME and Harflow state. "
-               "This repository's .codex config is ignored. File-change and MCP approvals are declined. macOS only. "
-               "Dispatch can still refuse: no Git root, a CODEX_HOME rules file that is not only prompt or forbidden prefix_rule calls, a profile in CODEX_HOME/config.toml, "
-               "or a CODEX_HOME inside a sandbox-writable location (the workspace, $TMPDIR or /tmp).")
+_LIMITS_HEAD = ("Exact original command only, through `codex app-server`; an approved command may run outside the OS sandbox and can modify Git config and hooks, CODEX_HOME and Harflow state. "
+                "This repository's .codex config is ignored. ")
+_LIMITS_TAIL = (" macOS only. Dispatch can still refuse: no confirmable Git root, a CODEX_HOME or project rules file that is not only prompt or forbidden prefix_rule calls, "
+                "a profile in CODEX_HOME/config.toml, or a CODEX_HOME inside a sandbox-writable location (the workspace, $TMPDIR or /tmp).")
+
+
+def limitations(write: bool) -> str:
+    middle = ("File changes are approvable one exact patch at a time (caller_write_approvals); MCP approvals are declined."
+              if write else "File-change (without caller_write_approvals) and MCP approvals are declined.")
+    return _LIMITS_HEAD + middle + _LIMITS_TAIL
+
+
+LIMITATIONS = limitations(False)
 
 
 def mechanism_suffix() -> str:

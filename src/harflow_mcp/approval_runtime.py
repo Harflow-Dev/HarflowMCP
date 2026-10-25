@@ -291,6 +291,15 @@ async def _stop_refused(registry: Any, task: Any, exc: Exception) -> None:
                 raise
             except Exception:
                 pass
+        for tool_id, outcome in getattr(exc, "outcomes", ()):
+            try:
+                for row in await asyncio.to_thread(approvals.rows, registry.log_dir, task.task_id):
+                    if row["tool_use_id"] == tool_id and row["generation"] == task.approval_generation:
+                        await asyncio.to_thread(approvals.observe_outcome, registry.log_dir, task.task_id, row["request_id"], row["generation"], outcome)
+            except StateOwnershipError:
+                raise
+            except Exception:
+                pass
         try:
             await asyncio.to_thread(approvals.invalidate, registry.log_dir, task.task_id, "invalidated", task.approval_generation)
         except StateOwnershipError:
@@ -440,6 +449,11 @@ async def pump(registry: Any, task: Any) -> bool:
             effective = "reject"
             wire = get(task.backend).encode_approval_response({**row, "expiry_rejection": True}, effective)
         written = _write_stdin(task, wire)
+        try:
+            # Bookkeeping for denial classification must never change an outcome.
+            getattr(get(task.backend), "note_approval_answer", lambda *_a: None)(task.acc, {**row, "expiry_rejection": expiry_rejection}, effective, written)
+        except Exception:
+            pass
         await asyncio.to_thread(approvals.finish_delivery, registry.log_dir, task.task_id, row["request_id"], row["generation"], written, effective, expiry_rejection)
         # A successful local write is not a harness acknowledgement. Observed tool
         # outcomes are updated only by the stdout request/tool identity correlation.

@@ -226,6 +226,7 @@ Use `write_in_repo` for edits/tests and set the saved network option when depend
 The bridge uses `sandbox_workspace_write.network_access` explicitly where applicable. Check reported
 writable roots before assuming repository-only writes. Prepare credentials and approved tools for
 publishing separately. The bridge mappings are documented in the [Codex adapter](../src/harflow_mcp/backends/codex.py).
+For per-command and per-patch caller approvals on macOS see [Codex caller approvals](#codex-caller-approvals-codex-app-server).
 
 ### OpenCode
 
@@ -423,7 +424,8 @@ Bridge mapping sources: [Claude](../src/harflow_mcp/backends/claude.py), [Codex]
 ## Exact-action caller approvals
 
 `caller_approvals` is a strict boolean, defaulting to `false`. The adapter is limited to
-non-native uncapped Claude Code stream JSON on a measured version, `write_in_repo` or `publish`, and
+non-native uncapped Claude Code stream JSON on a measured version, or Codex through `codex app-server` (see
+[Codex caller approvals](#codex-caller-approvals-codex-app-server)), at `write_in_repo` or `publish`, with
 foreground-owned permission requests. Other backends, native children, explicit turn caps,
 read-only and unrestricted launches reject the opt-in before spawning. The capability catalog
 reports `supports_caller_approvals` and `caller_approval_support` (`versions` as a list, `tools_by_version`
@@ -575,3 +577,58 @@ silently omitting unverified pending work.
 Harflow native app integration and automatic opening are currently unavailable.
 Setting `HARFLOW_OPEN_MONITOR=1` does not enable opening until the companion
 runtime is integrated; the setting remains reserved for that integration.
+
+### Codex caller approvals (`codex app-server`)
+
+`caller_approvals` on Codex runs that one task through `codex app-server` instead of `codex exec`; without the opt-in the exec path is
+unchanged. It is qualified for codex-cli 0.163.0 on macOS only (`backends/codex_qualification.py`), at `write_in_repo` and `publish`,
+for non-native uncapped tasks, and not for saved workflow candidates. Any other version, platform or freedom refuses at dispatch.
+`caller_write_approvals` additionally lets a caller approve file changes.
+
+**What an approval means.** Each approval covers one exact command shown to the caller. Accepting it may run the command outside the
+OS sandbox (Codex does not say which approvals leave it), and a command approval is not path-checked: an approved command can modify the
+repository's Git config and hooks, `CODEX_HOME` and Harflow's own state, so `enforcement` and `preview_task_permissions` say so. Harflow
+sends only `accept` (caller approval) and `decline` (caller rejection, Harflow rejection, expiry); it never sends `acceptForSession`
+or an exec-policy amendment, which would persist a grant. The request shows `kind`, `command`, `cwd`, `reason` and the proposed amendment (never acted on).
+
+**File changes.** With `caller_write_approvals`, an `item/fileChange/requestApproval` is joined with the preceding `item/started` item
+of the same thread and turn; the paths, kinds and diff are frozen into the digest (at most 32 KiB). Every source and destination path,
+including a rename's destination, is checked against the protected targets: the Harflow state root, Git hooks and config, the resolved
+`CODEX_HOME` and every `.codex` from the Git root to the working directory. A request with `grantRoot`, without a started item, with an
+ambiguous one, with relative paths or over the size bound is declined by Harflow. If the completed item's changes differ from the approved
+ones (compared as complete change objects) the row records `execution_outcome: "mismatch"` and the run stops. A multi-path action reports `file_paths` with a containment fact per path.
+Paths are checked once, at admission, after symlink resolution; a later symlink swap is not prevented. Without the opt-in these requests are declined.
+
+**Pins and verification.** The server starts with `approval_policy="on-request"`, `approvals_reviewer="user"`, the freedom's sandbox mode,
+`sandbox_workspace_write.writable_roots=[]`, the resolved network setting, `features.hooks=false`,
+`features.request_permissions_tool=false`, `features.exec_permission_approvals=false` and `shell_environment_policy.inherit="core"` on `-c`, in
+the `thread/start` or `thread/resume` `config` map and as explicit parameters. Before the turn starts Harflow checks the reported version,
+policy, reviewer, sandbox type, empty writable roots, network, workspace roots and that `hooks/list` is empty; any mismatch stops the task. `turn/start`
+carries only the thread id and the prompt. A hook, auto-review or guardian notification stops the run and is recorded as an audit entry.
+
+**Repository configuration is ignored.** Project trust is overridden to `untrusted` in the config map for the working directory, every
+ancestor up to `/` and the Git root, so the repository's own `.codex` config, rules, hooks and MCP servers do not apply, and nothing is written to
+`CODEX_HOME/config.toml`. The Git root is resolved with repository configuration neutralised and must be the nearest ancestor holding `.git`;
+a repository without one is refused. For a linked worktree the main checkout and the common directory (and their ancestors) are overridden and scanned too, and the worktree's `.git` file must verify as
+`<common>/worktrees/<name>` with Git's own back-link; a submodule-style or unverifiable `.git` file is refused. As a backstop, every `.codex/rules` from the Git root down to the working directory must also pass the rules check below.
+
+**Dispatch refusals (every start and resume).** The task is refused when `CODEX_HOME` lies inside a sandbox-writable location (the workspace,
+`$TMPDIR` or `/tmp`); when `CODEX_HOME/config.toml` sets `profile` or cannot be parsed; or when a rules file Codex loads (`*.rules` directly in
+`CODEX_HOME/rules` or a project `.codex/rules`) is not only `prefix_rule(pattern=[...], decision="prompt"|"forbidden")` calls, because an allow rule (including
+the default decision, which is allow) runs commands without approval and outside the sandbox. To make a refused `CODEX_HOME` work, change those
+rules to `prompt` or `forbidden`, remove them, or use a separate `CODEX_HOME` for Harflow tasks. User MCP servers and
+`shell_environment_policy.set` entries stay in effect and are listed in `enforcement.caveats`; MCP tool calls that need approval are always rejected, and so are
+permission, user-input and every unmeasured server request.
+
+**Limits.** One approval per `itemId`: a second request for the same item (for example `write_stdin` to a running approved command) stops the task,
+keeps the first row's state and attributes no completion to it. A request after the turn ended, outside the active turn, or without `accept` and `cancel`
+decisions stops or is declined as above. Process identity uses the process start time at one-second resolution plus the binary and `app-server` markers.
+Stop order: after the turn completes stdin is closed and the server gets a bounded time to exit; a server that does not is sent SIGTERM to its process group, then swept
+with its tool process groups (their identities are recorded beforehand and a group is only signalled while a member still matches its recorded start time) with the observed
+turn outcome preserved. A cancel signals the group with SIGTERM at once instead of waiting for EOF. Remaining risk: tool groups of a server that dies or is killed before
+terminal evidence, or when Harflow itself is killed, can be left running, as with the exec path.
+
+**Denials.** `permission_denials` entries are classified from Harflow's own evidence: `caller_rejected` and `harflow_policy_rejected` from the answer written for that
+exact ledger identity, `policy_denied` from the exact stderr router line for an exec-policy `forbidden` rule while a turn is active, and, on the exec path only,
+`approval_policy_never` from its stderr router line. Everything else, including sandbox denials, is `unclassified` (see [task outcomes](task-outcomes.md#permission-denial-classification)).
+

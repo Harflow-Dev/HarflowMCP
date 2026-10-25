@@ -619,13 +619,21 @@ Measured with `--input-format stream-json --permission-prompt-tool stdio --permi
 
 ### Codex app-server (codex-cli 0.163.0, 2026-10-25)
 
+Summary: Codex caller approvals are implemented through `codex app-server` and qualified only for codex-cli 0.163.0
+on macOS (`backends/codex_qualification.py`, the single table); [harness permissions](harness-permissions.md#codex-caller-approvals-codex-app-server)
+describes the behavior. The measurements below are what the design depends on; a version bump must re-measure each
+fact recorded in the table row.
+
 Measured with `codex app-server --listen stdio://` over JSON-RPC, against a localhost fake Responses API
-(`tests/fake_responses_api.py`), an isolated `HOME` and `CODEX_HOME`, and no model calls. Recorded frames are in
-`tests/fixtures/codex_app_server/transcripts/` (indexed by `index.json`); the trimmed protocol schema is
-`tests/fixtures/codex_app_server/schema-0.163.0.json` (generated with `--experimental`). The driver and
-scenario scripts are kept outside this repository. This is evidence for the caller-approval design, not shipped
-behavior. Unless a row says otherwise, thread settings were `approvalPolicy: on-request`, `approvalsReviewer: user`
-and `sandbox: workspace-write`.
+(`tests/fake_responses_api.py`), an isolated `HOME` and `CODEX_HOME`, and no model calls. The trimmed protocol schema is
+`tests/fixtures/codex_app_server/schema-0.163.0.json` (generated with `--experimental`; an opt-in test compares it with
+the installed Codex). The driver and scenario scripts are kept outside this repository. Recorded frames: only the
+transcripts the tests use are in `tests/fixtures/codex_app_server/transcripts/` (`index.json`, `in_repo: true`:
+`a1-basic`, `a2-on-request-workspace-write-cancel`, `f1-response-failed`, `f1-http-400`, `p0c-r6-a-start`,
+`p0c-r6-b-resume`). Every other transcript cited below is **archived** outside the repository and listed in
+`index.json` under `archived` with `in_repo: false`; the rows they back are measurements, not reproducible from the
+repository alone. Unless a row says otherwise, thread settings were `approvalPolicy: on-request`,
+`approvalsReviewer: user` and `sandbox: workspace-write`.
 
 **Lifecycle**
 - `initialize` (params `clientInfo`, optional `capabilities.experimentalApi`) answers `userAgent`
@@ -770,7 +778,7 @@ and `sandbox: workspace-write`.
 - `thread/resume` of a thread created by `codex exec`, and `codex exec resume` of a thread created by app-server, both
   worked and carried the earlier history. `thread.started.thread_id` from exec equals the app-server thread id.
 
-**Follow-up measurements (same setup; transcripts `h2-*`, `s3-*`, `cfg-w4-*`, `cfg-fp-*`, `x6-*`, `t8*`)**
+**Follow-up measurements (same setup; archived transcripts `h2-*`, `s3-*`, `cfg-w4-*`, `cfg-fp-*`, `x6-*`, `t8*`)**
 - Hooks under pins: with `-c features.hooks=false`, `hooks/list` returns **no hooks** (there is no `enabled: false`
   entry) and nothing fires. With only the `thread/start` `config` map `{"features":{"hooks":false}}`, `hooks/list` (which
   takes no config map) still reports the hook as `enabled: true, trustStatus: trusted`, but the hook does not fire on
@@ -820,7 +828,7 @@ and `sandbox: workspace-write`.
   still writes the file. The current-shape `codex exec --json -s workspace-write -c approval_policy="never" -C <untrusted repo>`
   also writes the trust entry; `-s read-only` does not.
 
-**Trusted hostile project under R6 pins (transcripts `p0c-*`, index ids `0c-*`)**
+**Trusted hostile project under R6 pins (transcripts `p0c-r6-a-start` and `p0c-r6-b-resume` in the repository; the control runs `p0c-control-*` are archived; index ids `0c-*`)**
 - Setup: `CODEX_HOME/config.toml` marks the throwaway git root `trust_level = "trusted"` and trusts a project
   `PermissionRequest` hook; the repo's `.codex/rules` allows `touch`, `printenv`, `curl`, `sh`, `zsh`, `/bin/zsh` and `echo`;
   its `.codex/config.toml` sets `approval_policy = "never"`, `danger-full-access`, `approvals_reviewer = "auto_review"`,
@@ -839,3 +847,34 @@ and `sandbox: workspace-write`.
   responses reported `on-request`, `user`, `workspaceWrite` with `writableRoots: []`, `networkAccess: false` and
   `runtimeWorkspaceRoots` equal to the repo only. The SHA-256 of `CODEX_HOME/config.toml` and the absence of `CODEX_HOME/rules`
   were identical before and after both runs.
+
+**Caller approvals, file changes, rules and denial evidence (Stage 3; archived transcripts `tr-*`, `wt-*`, `cfg-rl1`, `ex1-exec-approval-policy-never.txt`)**
+- Rules files: Codex loads regular files directly in `rules/` named `*.rules`, hidden ones included. A `.txt` or extensionless
+  file, a subdirectory's file, an upper-case `.RULES`, a symlinked file and a symlinked directory were not loaded
+  (an allow rule in each ran the command as a request). The default `decision` of `prefix_rule` is `allow`, and
+  `"al" + "low"` and `"\x61llow"` evaluate to it (`codex execpolicy check`), so Harflow accepts a rules file only if it consists of
+  literal `prefix_rule` calls with an explicit `"prompt"` or `"forbidden"` decision (an opt-in test checks the grammar against
+  `codex execpolicy check`).
+- Project trust overrides: a `thread/start` `config.projects` map with an `untrusted` entry for the working directory, every
+  ancestor up to `/` and the Git root (12 to 13 entries) was accepted and wrote nothing to `CODEX_HOME/config.toml`. With a hostile
+  project allow rule, the repository trusted, only its parent trusted, or only a subdirectory used as the working directory trusted, the
+  map made the escalated command ask the client in every case; without the map the rule applied and the command ran silently. A
+  workspace-write start without the map added a trust entry to `config.toml` in the parent-trusted control.
+- Linked worktrees (`git worktree add`): Codex applies the **main checkout's** trust to a linked worktree unless the worktree has an
+  explicit entry (a trusted main checkout made the worktree's project allow rule apply; so did a trusted worktree). Untrusted overrides for
+  the worktree's directory chain alone, and with the main root added, both made the rule ignored; both trusted plus the main root added was ignored too.
+  Harflow still adds the main checkout and the common directory, with their ancestors, and scans the main checkout's `.codex/rules`, because the `gitdir:`
+  line of the worktree's `.git` file is repository content: it is accepted only as `<common>/worktrees/<name>` with Git's own back-link and `commondir`,
+  and a submodule-style or otherwise unverifiable `.git` file refuses.
+- `git rev-parse --show-toplevel` still honours `core.worktree` from the repository's own config (`-c core.worktree=` does not
+  override it) and reports a root outside the tree, so the Git root is accepted only when it is the nearest ancestor of the canonical
+  directory that holds `.git`.
+- Exec path denial evidence: an escalation refused under `approval_policy="never"` produces **no JSON event**; the only trace is
+  the stderr line `ERROR codex_core::tools::router: error=approval policy is Never; reject command — you cannot ask for escalated
+  permissions if the approval policy is Never` (also the text the model sees).
+- App-server denial evidence: an exec-policy `forbidden` command produces no item; the stderr router line
+  `exec_command failed: CreateProcess { message: "Rejected(\"`<command>` rejected: <justification>\")" }` is the only server-side
+  trace. A declined item (`status: declined`) is Harflow's or the caller's decision, which only the approval ledger can tell apart.
+  Tool processes hold pipes to the native process, not the server's stderr (opt-in test).
+- File-change approvals: a patch is joined by `itemId` with the earlier `item/started` of the same thread and turn; the completed item's
+  `changes` equal the started ones; `grantRoot` was always null and an accept did not grant the root.

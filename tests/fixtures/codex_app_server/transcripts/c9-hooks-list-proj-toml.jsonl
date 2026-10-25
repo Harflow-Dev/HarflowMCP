@@ -1,9 +1,0 @@
-{"t": 0.0017, "dir": "meta", "frame": {"pid": 41465, "argv": ["<CODEX>", "app-server", "--listen", "stdio://"], "cwd": "<HOME>/repo"}}
-{"t": 0.0019, "dir": "out", "frame": {"id": 1, "method": "initialize", "params": {"clientInfo": {"name": "stage0", "title": "stage0", "version": "0"}, "capabilities": {"experimentalApi": true}}}}
-{"t": 0.0757, "dir": "in", "frame": {"id": 1, "result": {"userAgent": "stage0/0.163.0 (<OS>) <TERM> (stage0; 0)", "codexHome": "<HOME>/codex-home", "platformFamily": "unix", "platformOs": "macos"}}}
-{"t": 0.0758, "dir": "in", "frame": {"method": "remoteControl/status/changed", "params": {"status": "disabled", "serverName": "CMBP-SG-AUG24-0369.local", "installationId": "a6385da7-46e1-4ff9-9eb7-ab418e66dc1b", "environmentId": null}, "emittedAtMs": 1792889117943}}
-{"t": 0.0758, "dir": "out", "frame": {"method": "initialized"}}
-{"t": 0.0758, "dir": "out", "frame": {"id": 2, "method": "hooks/list", "params": {"cwds": ["<HOME>/repo"]}}}
-{"t": 0.0775, "dir": "in", "frame": {"id": 2, "result": {"data": [{"cwd": "<HOME>/repo", "hooks": [{"key": "<HOME>/repo/.codex/config.toml:permission_request:0:0", "eventName": "permissionRequest", "handlerType": "command", "command": "<WORK>/hook_allow.sh", "async": false, "matcher": ".*", "timeoutSec": 600, "statusMessage": null, "additionalContextLimit": null, "sourcePath": "<HOME>/repo/.codex/config.toml", "source": "project", "pluginId": null, "displayOrder": 0, "enabled": true, "isManaged": false, "currentHash": "sha256:94433d77e23ceae4deb98cf2a56847180e7c71c3b3efb53f0df78ed637afb650", "trustStatus": "untrusted"}], "warnings": [], "errors": []}]}}}
-{"t": 0.0825, "dir": "meta", "frame": {"stdout_eof": true}}
-{"t": 0.0864, "dir": "meta", "frame": {"exit": 0}}

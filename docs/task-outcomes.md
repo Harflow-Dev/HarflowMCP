@@ -51,8 +51,8 @@ distinct categories in first-seen order), say why a harness refused an action. E
 carries `denial_category`, `denial_remedy` and `classification_basis`. All three are additive and
 optional: records written earlier simply lack them, and non-dict entries are returned untouched.
 
-Only Claude Code classifies, and only for versions measured in the shared qualification table
-(2.1.310). An entry is classified only when its `tool_use_id` appears in a result event's
+Claude Code classifies for versions measured in the shared qualification table (2.1.310); Codex classifies only
+from evidence Harflow holds (below); other backends are `unclassified` with `classification_basis.reason: "backend_unmeasured"`. An entry is classified only when its `tool_use_id` appears in a result event's
 `permission_denials` and the matching error `tool_result` text equals a measured text exactly.
 An entry seen only in the stream is `unclassified` with `classification_basis.reason: "stream_only"`,
 because an agent's own command output can print a refusal sentence. Other reasons are
@@ -70,7 +70,15 @@ spanned several versions), `no_refusal_text`, `unrecognized_text` and, for other
 | `outside_working_directory` | A write outside the repository that was not granted. On a qualified version a caller can approve an out-of-repo Write or Edit one exact action at a time when the task has `caller_write_approvals`. |
 | `caller_rejected` | The caller rejected the exact action. |
 | `harflow_policy_rejected` | Harflow's own policy refused it (`policy_reason`: `write_approvals_not_enabled`, `protected_path`, `request_too_large` or `approval_expired`); never a caller decision. |
+| `policy_denied` | Codex: an exec-policy rule with a `forbidden` decision refused the command (`justification` is the rule's). Seen on the app-server's stderr only while a turn is active, in the one measured format; approvals cannot override it. |
+| `approval_policy_never` | Codex exec path: the run could not ask for an escalation (approval policy never). Start the task with `caller_approvals` (macOS, write_in_repo or publish) or use a freedom that needs none. |
 | `unclassified` | Inspect the refusal text. |
+
+Codex with `caller_approvals` classifies a declined command or file change from the answer Harflow wrote for its exact ledger identity (`caller_rejected`,
+or `harflow_policy_rejected` with the `policy_reason` of the system rejection or expiry); a decline Harflow did not write, and a replayed log, are `unclassified`
+(`no_harflow_answer`, `no_ledger_evidence`). An MCP tool call rejected with `user rejected MCP tool call` is `harflow_policy_rejected` (`mcp_approval_unsupported`) only when
+exactly one elicitation Harflow answered with an error in the same thread and turn matches its server, tool and (non-null) arguments; otherwise `no_matching_elicitation` or `mcp_association_unclear`. Sandbox
+denials (`Operation not permitted`) and anything seen only in command output are never classified.
 
 The `tool_result` event for the refused call carries no category, because the result event that
 authorizes it has not arrived yet. The `task_finished` event adds `denial_categories` and the

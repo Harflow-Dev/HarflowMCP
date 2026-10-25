@@ -27,7 +27,13 @@ HARFLOW_QUALIFY_CLAUDE_VERSION=<exact version> HARFLOW_CLI_INTEGRATION=1 uv run 
 
 `allowed_commands` is qualified only on the table's measured versions (currently 2.1.310) and is re-qualified at every launch, resume and continuation; a run that carries grants is also stopped, with a bridge notice, when its init event reports a different version, no version, or a tool event arrives before init. The grammar in `backends/claude_commands.py` is a guard against mistakes, not a security boundary, and path resolution happens at dispatch time only. Other backends refuse the field.
 
-Current limits of the qualification: caller approvals and `allowed_commands` exist only for Claude Code (2.1.310; 2.1.302 Bash-only for approvals). Not implemented: approvals or grants on Codex, Vibe, opencode and Antigravity, approvals for native workflow children, a caller-authorized `permission_grant` retry of a permission-blocked workflow node, approval notifications, and Monitor presentation of approvals and grants (HarflowMac issues 13 and 14).
+Current limits of the qualification: caller approvals exist for Claude Code (2.1.310; 2.1.302 Bash-only) and for Codex through `codex app-server` (0.163.0, macOS only; commands, and file changes with `caller_write_approvals`); `allowed_commands` only for Claude Code. Not implemented: `allowed_commands` on Codex, caller approvals or grants on Vibe, opencode and Antigravity, approvals for native workflow children, a caller-authorized `permission_grant` retry of a permission-blocked workflow node, approval notifications, and Monitor presentation of approvals and grants (HarflowMac issues 13 and 14).
+
+The Codex counterpart runs real `codex app-server` sessions against the localhost fake Responses API with an isolated `HOME` and `CODEX_HOME` (no model calls, skipped unless codex-cli 0.163.0 on macOS), and checks the recorded protocol schema for drift:
+
+```sh
+HARFLOW_CLI_INTEGRATION=1 uv run pytest -m cli_integration tests/test_codex_app_server_cli.py tests/test_codex_app_server.py -k 'cli or execpolicy or schema'
+```
 
 Without the variable these tests skip unless the installed version is already in the table. A passing candidate run is evidence for a new table row, recorded in [backend CLI facts](backend-cli-facts.md); it does not itself qualify the version.
 

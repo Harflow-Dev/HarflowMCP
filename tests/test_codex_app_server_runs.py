@@ -718,3 +718,154 @@ async def test_a_cancel_during_the_post_terminal_grace_window_does_not_force_suc
     await world.settled(task)
     assert task.status == "cancelled" and "shutdown_after_terminal" not in task.acc.stream_state
     assert get("codex").classify(task.acc, task.exit_code) == "failed", "the stop was a cancel, so exit code 0 is not forced"
+
+
+# --- stage 3: file changes and denial classification -------------------------------------------------------------------
+
+def file_item(item_id="p1", changes=None, status="inProgress"):
+    changes = changes if changes is not None else [{"path": "/out/new.txt", "kind": {"type": "add"}, "diff": "hello\n"}]
+    return item("fileChange", item_id, changes=changes, status=status)
+
+
+def file_request(item_id="p1", rid=0, **over):
+    params = {"threadId": "$thread", "turnId": "$turn", "itemId": item_id, "startedAtMs": 5, "reason": None, "grantRoot": None}
+    params.update(over)
+    return {"id": rid, "method": app.FILE_CHANGE_REQUEST, "params": params}
+
+
+def file_steps(changes=None, completed=None, decide="await"):
+    return [{"notify": {"method": "item/started", "params": file_item(changes=changes)}}, {"request": file_request(), "await": "a"}, resolved(),
+            {"notify": {"method": "item/completed", "params": file_item(changes=completed if completed is not None else changes, status="completed")}}, agent("patched"), {"complete": "completed"}]
+
+
+@pytest.mark.asyncio
+async def test_an_approved_patch_round_trip_with_write_approvals(world):
+    world.scenario(turn=file_steps())
+    task = await world.start(caller_write_approvals=True)
+    (row,) = await world.pending(task)
+    assert row["tool_use_id"] == "fileChange:p1" and row["action"]["input"]["changes"][0]["path"] == "/out/new.txt"
+    assert row["inside_repository"] is False
+    world.decide(task, row, "approve")
+    await world.settled(task)
+    assert next(f for f in world.client() if "method" not in f) == {"id": 0, "result": {"decision": "accept"}}
+    (final,) = world.rows(task)
+    assert (final["disposition"], final["delivered_decision"], final["execution_outcome"]) == ("decided", "approve", "succeeded") and task.status == "completed"
+    writes = task.snapshot()["caller_approved_writes"]
+    assert [(w["tool_name"], w["file_path"], w["inside_repository"], w["write_possible"]) for w in writes] == [("fileChange", "/out/new.txt", False, True)]
+    assert task.enforcement["caller_approval_tools"] == ["commandExecution", "fileChange"]
+
+
+@pytest.mark.asyncio
+async def test_a_declined_patch_and_the_snapshot_classification(world):
+    world.scenario(turn=[{"notify": {"method": "item/started", "params": file_item()}}, {"request": file_request(), "await": "a"}, resolved(),
+                         {"notify": {"method": "item/completed", "params": file_item(status="declined")}}, agent("not applied"), {"complete": "completed"}])
+    task = await world.start(caller_write_approvals=True)
+    (row,) = await world.pending(task)
+    world.decide(task, row, "reject")
+    await world.settled(task)
+    assert next(f for f in world.client() if "method" not in f) == {"id": 0, "result": {"decision": "decline"}}
+    denials = task.snapshot()["permission_denials"]
+    assert [(d["denial_category"], d["tool_name"]) for d in denials] == [("caller_rejected", "fileChange")] and task.snapshot()["denial_categories"] == ["caller_rejected"]
+
+
+@pytest.mark.asyncio
+async def test_without_write_approvals_a_patch_request_is_declined(world):
+    world.scenario(turn=file_steps())
+    task = await world.start()
+    await world.settled(task)
+    (row,) = world.rows(task)
+    assert row["system_rejection"] == "file_change_unsupported" and next(f for f in world.client() if "method" not in f)["result"] == {"decision": "decline"}
+    assert [d["denial_category"] for d in task.snapshot().get("permission_denials", [])] in ([], ["harflow_policy_rejected"])
+
+
+@pytest.mark.asyncio
+async def test_a_completion_that_differs_from_the_approved_patch_records_a_mismatch_and_stops(world):
+    other = [{"path": "/out/other.txt", "kind": {"type": "add"}, "diff": "different\n"}]
+    world.scenario(turn=file_steps(completed=other) + [{"hold": True}])
+    task = await world.start(caller_write_approvals=True)
+    (row,) = await world.pending(task)
+    world.decide(task, row, "approve")
+    await world.settled(task)
+    rows = world.rows(task)
+    answered = next(r for r in rows if r["tool_use_id"] == "fileChange:p1")
+    assert answered["execution_outcome"] == "mismatch" and answered["delivered_decision"] == "approve"
+    assert any(r["action"]["input"].get("reason") == "file change mismatch" for r in rows if r["tool_use_id"] == "unsupported")
+    assert task.status != "completed" and any("differ from the ones approved" in n for n in task.bridge_notices)
+
+
+@pytest.mark.asyncio
+async def test_a_patch_into_codex_home_or_a_project_codex_directory_is_declined_never_shown(world):
+    protected = [{"path": str(world.base / "codex-home" / "config.toml"), "kind": {"type": "add"}, "diff": "x\n"}]
+    nested = [{"path": str(world.repo / "src" / "a.txt"), "kind": {"type": "update", "move_path": str(world.repo / ".codex" / "rules" / "x.rules")}, "diff": "x\n"}]
+    world.scenario(turn=[{"notify": {"method": "item/started", "params": file_item("p1", protected)}}, {"request": file_request("p1", 0), "await": "a"},
+                         {"notify": {"method": "item/started", "params": file_item("p2", nested)}}, {"request": file_request("p2", 1), "await": "b"}, agent(), {"complete": "completed"}])
+    task = await world.start(caller_write_approvals=True)
+    await world.settled(task)
+    assert [r["system_rejection"] for r in world.rows(task)] == ["protected_path", "protected_path"]
+    assert [a["result"]["decision"] for a in world.client() if "method" not in a] == ["decline", "decline"]
+
+
+@pytest.mark.asyncio
+async def test_a_grant_root_request_and_an_unannounced_patch_are_declined(world):
+    world.scenario(turn=[{"notify": {"method": "item/started", "params": file_item("p1")}}, {"request": file_request("p1", 0, grantRoot="/out"), "await": "a"},
+                         {"request": file_request("never-started", 1), "await": "b"}, agent(), {"complete": "completed"}])
+    task = await world.start(caller_write_approvals=True)
+    await world.settled(task)
+    assert [r["system_rejection"] for r in world.rows(task)] == ["grant_root", "file_change_not_started"]
+
+
+@pytest.mark.asyncio
+async def test_write_approvals_without_caller_approvals_are_refused(world):
+    with pytest.raises(ValueError, match="requires caller_approvals"):
+        await world.registry.start("x", world.repo, backend=get("codex"), caller_write_approvals=True)
+
+
+@pytest.mark.asyncio
+async def test_caller_and_harflow_rejections_are_classified_in_the_snapshot(world):
+    steps = [{"request": request("c1", 0), "await": "a"}, command_done("c1", "declined", None),
+             {"request": request("c2", 1, kind="writeStdin", approvalId="w"), "await": "b"}, command_done("c2", "declined", None), agent(), {"complete": "completed"}]
+    world.scenario(turn=steps)
+    task = await world.start()
+    (row,) = [r for r in await world.pending(task)]
+    world.decide(task, row, "reject")
+    await world.settled(task)
+    snapshot = task.snapshot()
+    categories = {d["tool_use_id"]: (d["denial_category"], d.get("policy_reason")) for d in snapshot["permission_denials"]}
+    assert categories == {"c1": ("caller_rejected", None), "c2": ("harflow_policy_rejected", "unsupported_kind")}
+    assert snapshot["denial_categories"] == ["caller_rejected", "harflow_policy_rejected"]
+
+
+FORBIDDEN_STDERR = "ERROR codex_core::tools::router: error=exec_command failed: CreateProcess { message: \"Rejected(\\\"`/bin/zsh -lc 'touch /x'` rejected: no touching\\\")\" }"
+
+
+@pytest.mark.asyncio
+async def test_the_forbidden_router_line_on_the_servers_stderr_is_a_policy_denial_only_during_the_turn(world):
+    world.scenario(turn=[{"stderr": "tool said: " + FORBIDDEN_STDERR}, {"stderr": FORBIDDEN_STDERR}, {"sleep": 0.3}, agent(), {"complete": "completed"}, {"stderr": FORBIDDEN_STDERR}])
+    task = await world.start()
+    await world.settled(task)
+    denials = task.snapshot()["permission_denials"]
+    assert [(d["denial_category"], d["justification"]) for d in denials] == [("policy_denied", "no touching")] and task.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_exec_stderr_classifies_only_the_approval_policy_never_line(world):
+    world.scenario(turn=[])
+    task = await world.registry.start("plain", world.repo, backend=get("codex"))
+    await world.settled(task)
+    assert task.snapshot()["permission_denials"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_failing_stderr_observer_cannot_end_the_drain(world, monkeypatch):
+    from harflow_mcp.backends.codex import CodexBackend
+    calls = []
+
+    def boom(self, acc, line):
+        calls.append(line)
+        raise RuntimeError("observer bug")
+
+    monkeypatch.setattr(CodexBackend, "observe_stderr", boom)
+    world.scenario(turn=[{"stderr": "first line"}, {"stderr": "second line"}, agent(), {"complete": "completed"}])
+    task = await world.start()
+    await world.settled(task)
+    assert task.status == "completed" and calls[:2] == ["first line", "second line"] and not task.drain_failed

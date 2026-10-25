@@ -4511,6 +4511,11 @@ async def _drain_stderr(task: Task, registry: TaskRegistry | None = None) -> Non
             line = raw.decode("utf-8", errors="replace").rstrip("\n")
             if line.strip():
                 task.stderr_tail.append(line[:TAIL_LINE_CHARS])
+                try:
+                    getattr(get_backend(task.backend), "observe_stderr", lambda _acc, _line: None)(task.acc, line)
+                except Exception:
+                    # Stderr evidence is bookkeeping: it must never end the drain, which an unread pipe would turn into a hang.
+                    log.debug("task %s: stderr observer failed", task.task_id, exc_info=True)
                 parser = getattr(get_backend(task.backend), "stderr_usage_limit_diagnostic", None)
                 diagnostic = parser(line) if parser is not None else None
                 if diagnostic is not None and task.acc.failure_diagnostic is None:

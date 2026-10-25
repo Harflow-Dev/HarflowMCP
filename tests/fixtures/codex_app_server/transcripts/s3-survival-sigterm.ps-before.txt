@@ -1,8 +1,0 @@
-  PID  PPID  PGID   SESS STAT COMMAND
-87683 87677 87465      0 S    node <CODEX> app-server --listen stdio:/
-87684 87683 87465      0 S    <NODE> 87684 87827      0 Ss   sh -c sleep 512 & sleep 412
-87828 87827 87827      0 S    sleep 512
-87829 87827 87827      0 S    sleep 412
-87830 87684 87830      0 Ss   sh -c sleep 612 & sleep 712
-87831 87830 87830      0 S    sleep 612
-87832 87830 87830      0 S    sleep 712

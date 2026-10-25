@@ -424,11 +424,13 @@ def classified_denials(backend: Any, acc: Accumulator, freedom: str | None) -> t
 class ApprovalRefused(ValueError):
     """A refusal whose message is safe and useful to show the caller as a bridge notice.
 
-    `audit`, when given, is a short bounded reason the runtime also records as a system audit entry in the approval ledger."""
+    `audit`, when given, is a short bounded reason the runtime also records as a system audit entry in the approval ledger;
+    `outcomes` are `(tool_use_id, outcome)` pairs the runtime records on the matching rows before it stops the run."""
 
-    def __init__(self, message: str, audit: str | None = None) -> None:
+    def __init__(self, message: str, audit: str | None = None, outcomes: tuple[tuple[str, str], ...] = ()) -> None:
         super().__init__(message)
         self.audit = audit
+        self.outcomes = tuple(outcomes)
 
 
 class UnsupportedCapability(ValueError):
@@ -588,6 +590,14 @@ class ExtraPathsUnsupported:
         """Whether a saved workflow candidate may carry `caller_approvals` on this backend."""
         return False
 
+    def note_approval_answer(self, acc, row, effective, written):
+        """Called after the pump wrote (or failed to write) a ledger row's answer, with the run's accumulator."""
+        return None
+
+    def observe_stderr(self, acc, line):
+        """Called with every non-empty stderr line of a run, for stderr evidence a backend measured."""
+        return None
+
     def approval_scratch(self):
         """Whether a task with caller approvals still gets a task-owned scratch directory."""
         return True
@@ -683,6 +693,8 @@ class Backend(Protocol):
     def approval_context(self, acc: Accumulator) -> dict[str, Any]: ...
     def observed_approval_outcomes(self, event: dict[str, Any], acc: Accumulator) -> list[tuple[str, str]]: ...
     def workflow_caller_approvals_supported(self) -> bool: ...
+    def note_approval_answer(self, acc: Accumulator, row: dict[str, Any], effective: str, written: bool) -> None: ...
+    def observe_stderr(self, acc: Accumulator, line: str) -> None: ...
     def approval_scratch(self) -> bool: ...
     def approval_notice(self, write: bool) -> str: ...
     def control_pipe_finished(self, acc: Accumulator) -> bool: ...

@@ -16,7 +16,7 @@ Scenario keys (all optional):
   turn                                       steps run after the turn/start response
 
 Steps: {"notify": {...}}, {"request": {...}, "await": name}, {"complete": status, "error": ...},
-{"sleep": seconds}, {"exit": code}, {"hold": true} (block until stdin EOF, then exit 0), {"raw": text}, {"spawn": true} (a tool process in a group of its own), {"linger": true|"ignore_term"} (ignore stdin EOF, optionally SIGTERM too),
+{"sleep": seconds}, {"exit": code}, {"hold": true} (block until stdin EOF, then exit 0), {"raw": text}, {"stderr": text}, {"spawn": true} (a tool process in a group of its own), {"linger": true|"ignore_term"} (ignore stdin EOF, optionally SIGTERM too),
 {"replay": "<transcript.jsonl>", "home": "<replaces <HOME>>"} (recorded server-to-client frames after the
 turn/start response, ids rewritten to this run's thread and turn). Strings "$thread", "$turn" and "$cwd"
 inside step values are replaced.
@@ -113,6 +113,9 @@ def main() -> int:
                     pass
                 log({"eof": True})
                 sys.exit(0)
+            elif "stderr" in step:
+                sys.stderr.write(step["stderr"] + "\n")
+                sys.stderr.flush()
             elif "linger" in step:
                 import signal
                 if step["linger"] == "ignore_term":

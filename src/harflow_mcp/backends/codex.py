@@ -1105,6 +1105,12 @@ class CodexBackend(ExtraPathsUnsupported):
         turn = params.get("turn") if isinstance(params.get("turn"), dict) else {}
         if state is not None and not app_server.item_correlated(event, state):
             return
+        if event.get("method") in {"item/started", "item/completed"} and isinstance(params, dict) and state is not None and isinstance(params.get("item"), dict):
+            from . import codex_denials
+            codex_denials.record_call(state, params["item"])
+        if event.get("method") == "item/completed" and isinstance(params, dict):
+            from . import codex_denials
+            codex_denials.observe_item(acc, params)
         for translated in app_server.translate(event):
             kind = translated.get("type")
             if state is not None:
@@ -1336,8 +1342,13 @@ class CodexBackend(ExtraPathsUnsupported):
     def validate_caller_write_approvals(self, write, enabled, version=None):
         if type(write) is not bool:
             raise ValueError("caller_write_approvals must be a boolean")
-        if write:
-            raise UnsupportedCapability("caller_write_approvals is not qualified on Codex: file-change requests are declined")
+        if not write:
+            return
+        if not enabled:
+            raise ValueError("caller_write_approvals requires caller_approvals")
+        from . import codex_qualification
+        if version is not None and not codex_qualification.supports(version, "caller_write_tools"):
+            raise UnsupportedCapability(f"caller_write_approvals is not qualified on Codex {version}")
 
     def workflow_caller_approvals_supported(self):
         return False
@@ -1384,8 +1395,8 @@ class CodexBackend(ExtraPathsUnsupported):
         if not enabled or version is None:
             return enforcement
         from . import codex_app_server as app_server
-        return replace(enforcement, caller_approval_tools=("commandExecution",), mechanism=enforcement.mechanism + app_server.mechanism_suffix(),
-                       caveats=enforcement.caveats + app_server.enforcement_caveats())
+        return replace(enforcement, caller_approval_tools=("commandExecution", "fileChange") if write else ("commandExecution",), mechanism=enforcement.mechanism + app_server.mechanism_suffix(),
+                       caveats=enforcement.caveats + app_server.enforcement_caveats(write=write))
 
     def approval_transport(self):
         return "codex_app_server"
@@ -1396,7 +1407,7 @@ class CodexBackend(ExtraPathsUnsupported):
 
     def approval_limitations(self, write):
         from . import codex_app_server as app_server
-        return app_server.LIMITATIONS
+        return app_server.limitations(write)
 
     def approval_notice(self, write):
         return ("Caller approvals use `codex app-server` with approval policy on-request for one exact command. An approved command may run outside the OS sandbox. "
@@ -1446,14 +1457,30 @@ class CodexBackend(ExtraPathsUnsupported):
         return app_server.outcomes(event, app_server.state_for(acc))
 
     def approval_paths(self, decoded):
-        return []
+        from . import codex_app_server as app_server
+        return app_server.change_paths(decoded.get("action") or {})
 
     def approval_write_tools(self):
-        return frozenset()
+        return frozenset({"fileChange"})
 
     def protected_config_paths(self, repo):
         from . import codex_app_server as app_server
-        return [app_server.codex_home()]
+        return app_server.protected_paths(repo)
+
+    def note_approval_answer(self, acc, row, effective, written):
+        from . import codex_app_server as app_server
+        from . import codex_denials
+        state = app_server.state_for(acc)
+        if state is not None:
+            codex_denials.note_answer(state, row, effective, written)
+
+    def observe_stderr(self, acc, line):
+        from . import codex_denials
+        codex_denials.observe_stderr(acc, line)
+
+    def classify_denials(self, denials, acc, freedom=None):
+        from . import codex_denials
+        return codex_denials.classify(denials, acc)
 
     def control_pipe_finished(self, acc):
         from . import codex_app_server as app_server

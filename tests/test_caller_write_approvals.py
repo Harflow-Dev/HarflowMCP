@@ -74,7 +74,7 @@ def test_write_opt_in_validation():
     with pytest.raises(ValueError):
         validate_write("yes", True)  # type: ignore[arg-type]
     with pytest.raises(UnsupportedCapability):
-        get("codex").validate_caller_write_approvals(True, True)
+        get("opencode").validate_caller_write_approvals(True, True)
     get("codex").validate_caller_write_approvals(False, False)
 
 

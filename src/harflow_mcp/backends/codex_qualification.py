@@ -15,7 +15,8 @@ from .base import UnsupportedCapability
 
 MEASURED: dict[str, dict[str, Any]] = {
     "0.163.0": {
-        "caller_approval_tools": ("commandExecution",),
+        "caller_approval_tools": ("commandExecution", "fileChange"),
+        "caller_write_tools": ("fileChange",),
         "platforms": ("darwin",),
         "freedoms": ("write_in_repo", "publish"),
         "facts": {
@@ -37,6 +38,10 @@ MEASURED: dict[str, dict[str, Any]] = {
             "turn_start_overrides_replace_pins": True,
             "resume_of_loaded_thread_ignores_pins": True,
             "tool_processes_do_not_hold_app_server_pipes": True,
+            # fileChange requests carry only ids: the paths come from the preceding `item/started`, whose changes equal the completion's.
+            "file_change_request_joins_started_item": True,
+            "file_change_accept_does_not_grant_root": True,
+            "denial_stderr_router_lines": True,
         },
     },
 }

@@ -1,336 +1,16 @@
 {
  "codex_cli_version": "0.163.0",
- "format": "one JSON object per line: {t: seconds since spawn, dir: in|out|stderr|meta, frame}; in = app-server to client, out = client to app-server; noise notifications account/rateLimits/updated and thread/tokenUsage/updated removed; temp paths replaced by <HOME>/<SCRATCH>/<WORK>",
+ "format": "one JSON object per line: {t: seconds since spawn, dir: in|out|stderr|meta, frame}; in = app-server to client, out = client to app-server; noise notifications account/rateLimits/updated and thread/tokenUsage/updated removed; temp paths replaced by <HOME>/<SCRATCH>/<WORK>; only transcripts referenced by tests are in the repository, the rest are listed under 'archived' with in_repo false",
  "items_refer_to": "Stage 0 items in the codex-approvals plan, docs/backend-cli-facts.md section 'Codex app-server (codex-cli 0.163.0)'",
  "transcripts": {
-  "00-probe-lifecycle.jsonl": {
-   "items": "1",
-   "description": "initialize, initialized, thread/start (pinned), turn/start, turn/completed (completed)",
-   "in_repo": true
-  },
   "a1-basic.jsonl": {
    "items": "2,3",
    "description": "sandboxed command (no request), escalated accept, escalated decline, in-workspace patch (no request), outside-workspace patch",
    "in_repo": true
   },
-  "a2-on-request-workspace-write-accept.jsonl": {
-   "items": "3",
-   "description": "fileChange: item/started -> requestApproval -> serverRequest/resolved -> item/completed(completed)",
-   "in_repo": true
-  },
-  "a2-on-request-workspace-write-decline.jsonl": {
-   "items": "3,9",
-   "description": "fileChange declined: item/completed status declined; model text 'patch rejected by user'",
-   "in_repo": true
-  },
   "a2-on-request-workspace-write-cancel.jsonl": {
    "items": "3,8",
    "description": "fileChange cancel: turn interrupted, started fileChange item never completed",
-   "in_repo": true
-  },
-  "a3-untrusted.jsonl": {
-   "items": "2",
-   "description": "approvalPolicy untrusted: plain sandbox-eligible commands ask; accept runs unsandboxed",
-   "in_repo": true
-  },
-  "a3-noexp.jsonl": {
-   "items": "2",
-   "description": "no experimentalApi capability: availableDecisions still present; sandbox-denied command emits no item",
-   "in_repo": true
-  },
-  "a4-decl.jsonl": {
-   "items": "2,9",
-   "description": "command decline x3: item status declined, model text Rejected(\"rejected by user\")",
-   "in_repo": true
-  },
-  "a4-cancel.jsonl": {
-   "items": "2,8",
-   "description": "command cancel: item declined and turn interrupted",
-   "in_repo": true
-  },
-  "a4-sess.jsonl": {
-   "items": "2",
-   "description": "acceptForSession (never sent by Harflow): identical later command auto-approved",
-   "in_repo": true
-  },
-  "a4-err.jsonl": {
-   "items": "4,9",
-   "description": "JSON-RPC error answer to command request: item failed, model text Rejected(\"approval request failed\")",
-   "in_repo": true
-  },
-  "a5-codemode.jsonl": {
-   "items": "2",
-   "description": "code-mode exec tool with nested exec_command: itemId is exec-<uuid>; decline throws a script error",
-   "in_repo": true
-  },
-  "a6-on-request.jsonl": {
-   "items": "2",
-   "description": "writeStdin approval re-uses the itemId of the earlier command and carries approvalId; availableDecisions [accept, cancel]",
-   "in_repo": true
-  },
-  "a7-plan.jsonl": {
-   "items": "4",
-   "description": "item/tool/requestUserInput only in plan collaboration mode",
-   "in_repo": true
-  },
-  "a7-plan-error.jsonl": {
-   "items": "4",
-   "description": "JSON-RPC error to requestUserInput -> empty answers",
-   "in_repo": true
-  },
-  "a7-default.jsonl": {
-   "items": "4",
-   "description": "request_user_input unavailable in Default mode; no server request",
-   "in_repo": true
-  },
-  "a8-grant.jsonl": {
-   "items": "4",
-   "description": "item/permissions/requestApproval granted: later commands run with widened sandbox without asking",
-   "in_repo": true
-  },
-  "a8-empty.jsonl": {
-   "items": "4",
-   "description": "permissions request answered with empty grant; with_additional_permissions command then asks with additionalPermissions",
-   "in_repo": true
-  },
-  "a8-error.jsonl": {
-   "items": "4",
-   "description": "permissions request answered with JSON-RPC error: nothing granted",
-   "in_repo": true
-  },
-  "a8-badshape.jsonl": {
-   "items": "4",
-   "description": "permissions request answered with a wrong-shape response: deserialization failure, nothing granted",
-   "in_repo": true
-  },
-  "a9-mcp-accept.jsonl": {
-   "items": "4",
-   "description": "mcpServer/elicitation/request approves an MCP tool call; no itemId in params, arrives before item/started",
-   "in_repo": true
-  },
-  "a9-mcp-decline.jsonl": {
-   "items": "4,9",
-   "description": "elicitation decline: mcpToolCall failed 'user rejected MCP tool call'",
-   "in_repo": true
-  },
-  "a9-mcp-error.jsonl": {
-   "items": "4",
-   "description": "elicitation JSON-RPC error: treated as rejection",
-   "in_repo": true
-  },
-  "a10-interrupt_held.jsonl": {
-   "items": "8",
-   "description": "turn/interrupt while a request is held; resolved arrives after turn/completed; late accept has no effect",
-   "in_repo": true
-  },
-  "a10-eof_held.jsonl": {
-   "items": "1,8",
-   "description": "stdin EOF while a request is held: exit 0, command never runs",
-   "in_repo": true
-  },
-  "a10-eof_idle.jsonl": {
-   "items": "1",
-   "description": "stdin EOF while idle: exit 0",
-   "in_repo": true
-  },
-  "a10-kill_held.jsonl": {
-   "items": "8",
-   "description": "SIGKILL while held: command never runs",
-   "in_repo": true
-  },
-  "a10-sigterm_held.jsonl": {
-   "items": "8",
-   "description": "SIGTERM while held: exit 0, command never runs",
-   "in_repo": true
-  },
-  "pd-parent-death.jsonl": {
-   "items": "1,8",
-   "description": "driver SIGKILLed while a request is held: app-server and native child exit",
-   "in_repo": true
-  },
-  "cfg-c1a-user-hostile-pinned.jsonl": {
-   "items": "5",
-   "description": "hostile user config.toml, explicit thread/start pins win",
-   "in_repo": true
-  },
-  "cfg-c1b-user-hostile-nopins.jsonl": {
-   "items": "5",
-   "description": "hostile user config.toml, no pins: effective values reported in thread/start response",
-   "in_repo": true
-  },
-  "cfg-c2a-proj-hostile-trusted-pinned.jsonl": {
-   "items": "5",
-   "description": "hostile trusted project .codex/config.toml, pins win",
-   "in_repo": true
-  },
-  "cfg-c2b-proj-hostile-trusted-nopins.jsonl": {
-   "items": "5",
-   "description": "hostile trusted project config without pins is applied",
-   "in_repo": true
-  },
-  "cfg-c2c-proj-hostile-untrusted-nopins.jsonl": {
-   "items": "5",
-   "description": "untrusted project config ignored without pins (read-only default)",
-   "in_repo": true
-  },
-  "cfg-c2d2-trustwrite.jsonl": {
-   "items": "5",
-   "description": "thread/start with workspace-write on an untrusted git repo writes a trust entry to CODEX_HOME/config.toml",
-   "in_repo": true
-  },
-  "cfg-c3c.jsonl": {
-   "items": "5",
-   "description": "argv -c hostile values lose to thread/start pins",
-   "in_repo": true
-  },
-  "cfg-c3d.jsonl": {
-   "items": "5",
-   "description": "thread/start config map hostile values lose to explicit pins",
-   "in_repo": true
-  },
-  "cfg-c3e.jsonl": {
-   "items": "5",
-   "description": "turn/start approvalPolicy/sandboxPolicy overrides replace the pinned behaviour for the turn",
-   "in_repo": true
-  },
-  "cfg-c3b.jsonl": {
-   "items": "5",
-   "description": "ambient legacy profile key makes thread/start fail with -32600",
-   "in_repo": true
-  },
-  "cfg-c5-fresh.jsonl": {
-   "items": "5",
-   "description": "sandboxed write attempts at .codex, .git, .agents and CODEX_HOME (CODEX_HOME outside TMPDIR)",
-   "in_repo": true
-  },
-  "cfg-c7-subcwd-write.jsonl": {
-   "items": "5",
-   "description": ".codex protected at git root and cwd, writable in deeper subdirectories",
-   "in_repo": true
-  },
-  "cfg-t1-root-cfg-cwd-sub.jsonl": {
-   "items": "5",
-   "description": "ancestor project .codex/config.toml (git root) loaded for cwd below it",
-   "in_repo": true
-  },
-  "cfg-t3-parent-of-repo-cfg.jsonl": {
-   "items": "5",
-   "description": ".codex above the git root is not loaded",
-   "in_repo": true
-  },
-  "cfg-r-a.jsonl": {
-   "items": "5",
-   "description": "CODEX_HOME/rules allow rule: escalated and plain commands run without asking, unsandboxed",
-   "in_repo": true
-  },
-  "cfg-r-b.jsonl": {
-   "items": "5",
-   "description": "project .codex/rules allow rule (project trusted by thread/start) applies",
-   "in_repo": true
-  },
-  "cfg-r-d.jsonl": {
-   "items": "5",
-   "description": "$HOME/.codex/rules is not loaded",
-   "in_repo": true
-  },
-  "cfg-r-e.jsonl": {
-   "items": "5,9",
-   "description": "project forbidden rule: no item, model text Rejected(...rejected: <justification>), stderr only",
-   "in_repo": true
-  },
-  "cfg-r-f.jsonl": {
-   "items": "5,2",
-   "description": "project prompt rule: request carries reason 'requires approval: host asks', availableDecisions [accept, cancel]",
-   "in_repo": true
-  },
-  "cfg-h-a.jsonl": {
-   "items": "5",
-   "description": "untrusted user hook is inert",
-   "in_repo": true
-  },
-  "c9-hooks-list-proj-toml.jsonl": {
-   "items": "5",
-   "description": "hooks/list shows project hook, trustStatus untrusted",
-   "in_repo": true
-  },
-  "cfg-h-trusted-user-toml.jsonl": {
-   "items": "5",
-   "description": "trusted PermissionRequest hook answers approvals; client receives no request; hook/started and hook/completed only",
-   "in_repo": true
-  },
-  "cfg-h-trusted-proj-hooksjson.jsonl": {
-   "items": "5",
-   "description": "trusted project hooks.json PermissionRequest hook",
-   "in_repo": true
-  },
-  "cfg-h-disabled-argv.jsonl": {
-   "items": "5",
-   "description": "-c features.hooks=false disables a trusted hook",
-   "in_repo": true
-  },
-  "cfg-h-disabled-threadcfg.jsonl": {
-   "items": "5",
-   "description": "thread/start config {features:{hooks:false}} disables a trusted hook",
-   "in_repo": true
-  },
-  "cfg-g-a.jsonl": {
-   "items": "5",
-   "description": "approvals_reviewer auto_review (unpinned reviewer): guardian answers, extra model requests, no client request",
-   "in_repo": true
-  },
-  "cfg-g-b.jsonl": {
-   "items": "5",
-   "description": "reviewer pinned to user overrides auto_review in config",
-   "in_repo": true
-  },
-  "m1-reload.jsonl": {
-   "items": "6a",
-   "description": "rule written mid-turn by approved command is not applied mid-turn nor on the next turn in the same process",
-   "in_repo": true
-  },
-  "m1-reload-resumed.jsonl": {
-   "items": "6a,7",
-   "description": "rule written earlier applies after a new process resumes the thread",
-   "in_repo": true
-  },
-  "m2-config-reload.jsonl": {
-   "items": "6a",
-   "description": "project and user config rewritten mid-turn: no reload in the same process",
-   "in_repo": true
-  },
-  "m2-config-reload-resumed.jsonl": {
-   "items": "6a,7",
-   "description": "resume in a new process after config rewrite",
-   "in_repo": true
-  },
-  "e6-pipe-isolation.jsonl": {
-   "items": "6",
-   "description": "sandboxed and escalated live sessions probe fds and try to inject frames while a request is held",
-   "in_repo": true
-  },
-  "r1-resume-a.jsonl": {
-   "items": "7",
-   "description": "resume of an already loaded thread ignores new pins",
-   "in_repo": true
-  },
-  "r1-resume-unpinned.jsonl": {
-   "items": "7",
-   "description": "unpinned new-process resume: approvalPolicy kept from thread, sandbox follows current (hostile) config",
-   "in_repo": true
-  },
-  "r1-resume-pinned.jsonl": {
-   "items": "7",
-   "description": "pinned new-process resume: pins applied",
-   "in_repo": true
-  },
-  "i1-appserver-resumes-exec-thread.jsonl": {
-   "items": "7",
-   "description": "thread/resume of a thread created by codex exec",
-   "in_repo": true
-  },
-  "i1-appserver-start.jsonl": {
-   "items": "7",
-   "description": "thread created by app-server later resumed by codex exec",
    "in_repo": true
   },
   "f1-response-failed.jsonl": {
@@ -343,136 +23,6 @@
    "description": "HTTP 400 from the model endpoint: turn/completed failed with error",
    "in_repo": true
   },
-  "cfg-a11-ws-onreq.jsonl": {
-   "items": "3",
-   "description": "patch moves/renames/deletes: kind update with move_path; started and completed changes identical",
-   "in_repo": true
-  },
-  "l1-init-errors.jsonl": {
-   "items": "1",
-   "description": "requests before initialize and double initialize are JSON-RPC errors",
-   "in_repo": true
-  },
-  "h2-perm-hooks-off-argv.jsonl": {
-   "items": "0b-1",
-   "description": "trusted PermissionRequest hook with -c features.hooks=false: hooks/list returns no hooks, no hook runs, client gets the request",
-   "in_repo": true
-  },
-  "h2-perm-hooks-off-map.jsonl": {
-   "items": "0b-1",
-   "description": "trusted hook with config map features.hooks=false: hooks/list still lists it (enabled, trusted) but it does not fire",
-   "in_repo": true
-  },
-  "h2-pre-allow-on.jsonl": {
-   "items": "0b-1",
-   "description": "trusted PreToolUse hook returning permissionDecision allow: hook/completed failed (unsupported), request still reaches the client",
-   "in_repo": true
-  },
-  "h2-pre-deny-on.jsonl": {
-   "items": "0b-1",
-   "description": "trusted PreToolUse hook deny: hook/completed blocked, no client request, no item, model text 'Command blocked by PreToolUse hook'",
-   "in_repo": true
-  },
-  "h2-pre-deny-off.jsonl": {
-   "items": "0b-1",
-   "description": "PreToolUse deny hook with features.hooks=false: never fires",
-   "in_repo": true
-  },
-  "s3-survival-eof.jsonl": {
-   "items": "0b-3",
-   "description": "stdin EOF while an escalated and a sandboxed live session run: all processes exit",
-   "in_repo": true
-  },
-  "s3-survival-sigterm.jsonl": {
-   "items": "0b-3",
-   "description": "SIGTERM of the wrapper: native process and sessions exit",
-   "in_repo": true
-  },
-  "s3-survival-sigkill.jsonl": {
-   "items": "0b-3",
-   "description": "SIGKILL of the wrapper only: native codex and both sessions survive, orphaned",
-   "in_repo": true
-  },
-  "s3-survival-killpg-term.jsonl": {
-   "items": "0b-3",
-   "description": "killpg SIGTERM of the app-server group: everything exits",
-   "in_repo": true
-  },
-  "s3-survival-killpg-kill.jsonl": {
-   "items": "0b-3",
-   "description": "killpg SIGKILL of the app-server group: native dies, tool process groups survive as orphans",
-   "in_repo": true
-  },
-  "cfg-w4-e-no-project-baseline.jsonl": {
-   "items": "0b-4",
-   "description": "baseline: sandbox blocks outside write and localhost network",
-   "in_repo": true
-  },
-  "cfg-w4-a-ambient-explicit-pins-only.jsonl": {
-   "items": "0b-4",
-   "description": "trusted project config widens writable_roots, network, shell env and adds an MCP server; explicit sandbox/policy pins do not stop it; thread/start reports the widened writableRoots, networkAccess and runtimeWorkspaceRoots",
-   "in_repo": true
-  },
-  "cfg-w4-d-both.jsonl": {
-   "items": "0b-4",
-   "description": "config map plus argv -c pin writable_roots=[] and network_access=false (effective), but shell_environment_policy.set and mcp_servers merge and survive",
-   "in_repo": true
-  },
-  "cfg-w4-f-disable-by-name.jsonl": {
-   "items": "0b-4",
-   "description": "config map mcp_servers.<name>.enabled=false and shell_environment_policy.set.<VAR> override named entries",
-   "in_repo": true
-  },
-  "cfg-fp-argv-off.jsonl": {
-   "items": "0b-5",
-   "description": "-c features.request_permissions_tool=false and exec_permission_approvals=false remove the tool and the with_additional_permissions option",
-   "in_repo": true
-  },
-  "cfg-fp-map-off.jsonl": {
-   "items": "0b-5",
-   "description": "config map features pins do the same",
-   "in_repo": true
-  },
-  "x6-exec-thread-resumed-pinned.jsonl": {
-   "items": "0b-6",
-   "description": "thread created by codex exec (never, danger-full-access) resumed by app-server with pins: pins applied and reported",
-   "in_repo": true
-  },
-  "x6-exec-thread-resumed-unpinned.jsonl": {
-   "items": "0b-6",
-   "description": "same thread resumed unpinned: reports config defaults",
-   "in_repo": true
-  },
-  "t8-A-config-read-and-start.jsonl": {
-   "items": "0b-8",
-   "description": "config/read exposes config.projects; thread/start on an untrusted git repo writes [projects.<git root>] trust_level trusted",
-   "in_repo": true
-  },
-  "t8-B-trust-via-config-map.jsonl": {
-   "items": "0b-8",
-   "description": "projects trust through the thread/start config map: no config.toml write",
-   "in_repo": true
-  },
-  "t8-C-trust-via-argv.jsonl": {
-   "items": "0b-8",
-   "description": "projects trust through argv -c still writes config.toml",
-   "in_repo": true
-  },
-  "t8-D-explicit-untrusted.jsonl": {
-   "items": "0b-8",
-   "description": "explicit untrusted entry is kept; workspace-write pin still honoured",
-   "in_repo": true
-  },
-  "t8c-map-trusted.jsonl": {
-   "items": "0b-8",
-   "description": "config-map trust makes project config effective without a file write",
-   "in_repo": true
-  },
-  "t8c-map-untrusted.jsonl": {
-   "items": "0b-8",
-   "description": "config-map untrusted ignores project config without a file write",
-   "in_repo": true
-  },
   "p0c-r6-a-start.jsonl": {
    "items": "0c-1",
    "description": "trusted hostile project under the complete R6 pin set: fresh thread/start; escalated touch asks the client (project allow rule not applied), outside write and connect fail, no HOSTILE_VAR, no MCP, no hook/auto-review notifications",
@@ -482,16 +32,545 @@
    "items": "0c-2",
    "description": "same, fresh-process thread/resume with the same pins",
    "in_repo": true
-  },
-  "p0c-control-a-start.jsonl": {
-   "items": "0c-3",
-   "description": "control: same hostile project with only explicit params: allow rule, hook, widened roots, network, env leak and MCP all live",
-   "in_repo": true
-  },
-  "p0c-control-b-resume.jsonl": {
-   "items": "0c-3",
-   "description": "control: resume",
-   "in_repo": true
   }
+ },
+ "archived": {
+  "location": "kept outside the repository (the Stage 0 working directory); not referenced by any test",
+  "transcripts": {
+   "00-probe-lifecycle.jsonl": {
+    "items": "1",
+    "description": "initialize, initialized, thread/start (pinned), turn/start, turn/completed (completed)",
+    "in_repo": false
+   },
+   "a2-on-request-workspace-write-accept.jsonl": {
+    "items": "3",
+    "description": "fileChange: item/started -> requestApproval -> serverRequest/resolved -> item/completed(completed)",
+    "in_repo": false
+   },
+   "a2-on-request-workspace-write-decline.jsonl": {
+    "items": "3,9",
+    "description": "fileChange declined: item/completed status declined; model text 'patch rejected by user'",
+    "in_repo": false
+   },
+   "a3-untrusted.jsonl": {
+    "items": "2",
+    "description": "approvalPolicy untrusted: plain sandbox-eligible commands ask; accept runs unsandboxed",
+    "in_repo": false
+   },
+   "a3-noexp.jsonl": {
+    "items": "2",
+    "description": "no experimentalApi capability: availableDecisions still present; sandbox-denied command emits no item",
+    "in_repo": false
+   },
+   "a4-decl.jsonl": {
+    "items": "2,9",
+    "description": "command decline x3: item status declined, model text Rejected(\"rejected by user\")",
+    "in_repo": false
+   },
+   "a4-cancel.jsonl": {
+    "items": "2,8",
+    "description": "command cancel: item declined and turn interrupted",
+    "in_repo": false
+   },
+   "a4-sess.jsonl": {
+    "items": "2",
+    "description": "acceptForSession (never sent by Harflow): identical later command auto-approved",
+    "in_repo": false
+   },
+   "a4-err.jsonl": {
+    "items": "4,9",
+    "description": "JSON-RPC error answer to command request: item failed, model text Rejected(\"approval request failed\")",
+    "in_repo": false
+   },
+   "a5-codemode.jsonl": {
+    "items": "2",
+    "description": "code-mode exec tool with nested exec_command: itemId is exec-<uuid>; decline throws a script error",
+    "in_repo": false
+   },
+   "a6-on-request.jsonl": {
+    "items": "2",
+    "description": "writeStdin approval re-uses the itemId of the earlier command and carries approvalId; availableDecisions [accept, cancel]",
+    "in_repo": false
+   },
+   "a7-plan.jsonl": {
+    "items": "4",
+    "description": "item/tool/requestUserInput only in plan collaboration mode",
+    "in_repo": false
+   },
+   "a7-plan-error.jsonl": {
+    "items": "4",
+    "description": "JSON-RPC error to requestUserInput -> empty answers",
+    "in_repo": false
+   },
+   "a7-default.jsonl": {
+    "items": "4",
+    "description": "request_user_input unavailable in Default mode; no server request",
+    "in_repo": false
+   },
+   "a8-grant.jsonl": {
+    "items": "4",
+    "description": "item/permissions/requestApproval granted: later commands run with widened sandbox without asking",
+    "in_repo": false
+   },
+   "a8-empty.jsonl": {
+    "items": "4",
+    "description": "permissions request answered with empty grant; with_additional_permissions command then asks with additionalPermissions",
+    "in_repo": false
+   },
+   "a8-error.jsonl": {
+    "items": "4",
+    "description": "permissions request answered with JSON-RPC error: nothing granted",
+    "in_repo": false
+   },
+   "a8-badshape.jsonl": {
+    "items": "4",
+    "description": "permissions request answered with a wrong-shape response: deserialization failure, nothing granted",
+    "in_repo": false
+   },
+   "a9-mcp-accept.jsonl": {
+    "items": "4",
+    "description": "mcpServer/elicitation/request approves an MCP tool call; no itemId in params, arrives before item/started",
+    "in_repo": false
+   },
+   "a9-mcp-decline.jsonl": {
+    "items": "4,9",
+    "description": "elicitation decline: mcpToolCall failed 'user rejected MCP tool call'",
+    "in_repo": false
+   },
+   "a9-mcp-error.jsonl": {
+    "items": "4",
+    "description": "elicitation JSON-RPC error: treated as rejection",
+    "in_repo": false
+   },
+   "a10-interrupt_held.jsonl": {
+    "items": "8",
+    "description": "turn/interrupt while a request is held; resolved arrives after turn/completed; late accept has no effect",
+    "in_repo": false
+   },
+   "a10-eof_held.jsonl": {
+    "items": "1,8",
+    "description": "stdin EOF while a request is held: exit 0, command never runs",
+    "in_repo": false
+   },
+   "a10-eof_idle.jsonl": {
+    "items": "1",
+    "description": "stdin EOF while idle: exit 0",
+    "in_repo": false
+   },
+   "a10-kill_held.jsonl": {
+    "items": "8",
+    "description": "SIGKILL while held: command never runs",
+    "in_repo": false
+   },
+   "a10-sigterm_held.jsonl": {
+    "items": "8",
+    "description": "SIGTERM while held: exit 0, command never runs",
+    "in_repo": false
+   },
+   "pd-parent-death.jsonl": {
+    "items": "1,8",
+    "description": "driver SIGKILLed while a request is held: app-server and native child exit",
+    "in_repo": false
+   },
+   "cfg-c1a-user-hostile-pinned.jsonl": {
+    "items": "5",
+    "description": "hostile user config.toml, explicit thread/start pins win",
+    "in_repo": false
+   },
+   "cfg-c1b-user-hostile-nopins.jsonl": {
+    "items": "5",
+    "description": "hostile user config.toml, no pins: effective values reported in thread/start response",
+    "in_repo": false
+   },
+   "cfg-c2a-proj-hostile-trusted-pinned.jsonl": {
+    "items": "5",
+    "description": "hostile trusted project .codex/config.toml, pins win",
+    "in_repo": false
+   },
+   "cfg-c2b-proj-hostile-trusted-nopins.jsonl": {
+    "items": "5",
+    "description": "hostile trusted project config without pins is applied",
+    "in_repo": false
+   },
+   "cfg-c2c-proj-hostile-untrusted-nopins.jsonl": {
+    "items": "5",
+    "description": "untrusted project config ignored without pins (read-only default)",
+    "in_repo": false
+   },
+   "cfg-c2d2-trustwrite.jsonl": {
+    "items": "5",
+    "description": "thread/start with workspace-write on an untrusted git repo writes a trust entry to CODEX_HOME/config.toml",
+    "in_repo": false
+   },
+   "cfg-c3c.jsonl": {
+    "items": "5",
+    "description": "argv -c hostile values lose to thread/start pins",
+    "in_repo": false
+   },
+   "cfg-c3d.jsonl": {
+    "items": "5",
+    "description": "thread/start config map hostile values lose to explicit pins",
+    "in_repo": false
+   },
+   "cfg-c3e.jsonl": {
+    "items": "5",
+    "description": "turn/start approvalPolicy/sandboxPolicy overrides replace the pinned behaviour for the turn",
+    "in_repo": false
+   },
+   "cfg-c3b.jsonl": {
+    "items": "5",
+    "description": "ambient legacy profile key makes thread/start fail with -32600",
+    "in_repo": false
+   },
+   "cfg-c5-fresh.jsonl": {
+    "items": "5",
+    "description": "sandboxed write attempts at .codex, .git, .agents and CODEX_HOME (CODEX_HOME outside TMPDIR)",
+    "in_repo": false
+   },
+   "cfg-c7-subcwd-write.jsonl": {
+    "items": "5",
+    "description": ".codex protected at git root and cwd, writable in deeper subdirectories",
+    "in_repo": false
+   },
+   "cfg-t1-root-cfg-cwd-sub.jsonl": {
+    "items": "5",
+    "description": "ancestor project .codex/config.toml (git root) loaded for cwd below it",
+    "in_repo": false
+   },
+   "cfg-t3-parent-of-repo-cfg.jsonl": {
+    "items": "5",
+    "description": ".codex above the git root is not loaded",
+    "in_repo": false
+   },
+   "cfg-r-a.jsonl": {
+    "items": "5",
+    "description": "CODEX_HOME/rules allow rule: escalated and plain commands run without asking, unsandboxed",
+    "in_repo": false
+   },
+   "cfg-r-b.jsonl": {
+    "items": "5",
+    "description": "project .codex/rules allow rule (project trusted by thread/start) applies",
+    "in_repo": false
+   },
+   "cfg-r-d.jsonl": {
+    "items": "5",
+    "description": "$HOME/.codex/rules is not loaded",
+    "in_repo": false
+   },
+   "cfg-r-e.jsonl": {
+    "items": "5,9",
+    "description": "project forbidden rule: no item, model text Rejected(...rejected: <justification>), stderr only",
+    "in_repo": false
+   },
+   "cfg-r-f.jsonl": {
+    "items": "5,2",
+    "description": "project prompt rule: request carries reason 'requires approval: host asks', availableDecisions [accept, cancel]",
+    "in_repo": false
+   },
+   "cfg-h-a.jsonl": {
+    "items": "5",
+    "description": "untrusted user hook is inert",
+    "in_repo": false
+   },
+   "c9-hooks-list-proj-toml.jsonl": {
+    "items": "5",
+    "description": "hooks/list shows project hook, trustStatus untrusted",
+    "in_repo": false
+   },
+   "cfg-h-trusted-user-toml.jsonl": {
+    "items": "5",
+    "description": "trusted PermissionRequest hook answers approvals; client receives no request; hook/started and hook/completed only",
+    "in_repo": false
+   },
+   "cfg-h-trusted-proj-hooksjson.jsonl": {
+    "items": "5",
+    "description": "trusted project hooks.json PermissionRequest hook",
+    "in_repo": false
+   },
+   "cfg-h-disabled-argv.jsonl": {
+    "items": "5",
+    "description": "-c features.hooks=false disables a trusted hook",
+    "in_repo": false
+   },
+   "cfg-h-disabled-threadcfg.jsonl": {
+    "items": "5",
+    "description": "thread/start config {features:{hooks:false}} disables a trusted hook",
+    "in_repo": false
+   },
+   "cfg-g-a.jsonl": {
+    "items": "5",
+    "description": "approvals_reviewer auto_review (unpinned reviewer): guardian answers, extra model requests, no client request",
+    "in_repo": false
+   },
+   "cfg-g-b.jsonl": {
+    "items": "5",
+    "description": "reviewer pinned to user overrides auto_review in config",
+    "in_repo": false
+   },
+   "m1-reload.jsonl": {
+    "items": "6a",
+    "description": "rule written mid-turn by approved command is not applied mid-turn nor on the next turn in the same process",
+    "in_repo": false
+   },
+   "m1-reload-resumed.jsonl": {
+    "items": "6a,7",
+    "description": "rule written earlier applies after a new process resumes the thread",
+    "in_repo": false
+   },
+   "m2-config-reload.jsonl": {
+    "items": "6a",
+    "description": "project and user config rewritten mid-turn: no reload in the same process",
+    "in_repo": false
+   },
+   "m2-config-reload-resumed.jsonl": {
+    "items": "6a,7",
+    "description": "resume in a new process after config rewrite",
+    "in_repo": false
+   },
+   "e6-pipe-isolation.jsonl": {
+    "items": "6",
+    "description": "sandboxed and escalated live sessions probe fds and try to inject frames while a request is held",
+    "in_repo": false
+   },
+   "r1-resume-a.jsonl": {
+    "items": "7",
+    "description": "resume of an already loaded thread ignores new pins",
+    "in_repo": false
+   },
+   "r1-resume-unpinned.jsonl": {
+    "items": "7",
+    "description": "unpinned new-process resume: approvalPolicy kept from thread, sandbox follows current (hostile) config",
+    "in_repo": false
+   },
+   "r1-resume-pinned.jsonl": {
+    "items": "7",
+    "description": "pinned new-process resume: pins applied",
+    "in_repo": false
+   },
+   "i1-appserver-resumes-exec-thread.jsonl": {
+    "items": "7",
+    "description": "thread/resume of a thread created by codex exec",
+    "in_repo": false
+   },
+   "i1-appserver-start.jsonl": {
+    "items": "7",
+    "description": "thread created by app-server later resumed by codex exec",
+    "in_repo": false
+   },
+   "cfg-a11-ws-onreq.jsonl": {
+    "items": "3",
+    "description": "patch moves/renames/deletes: kind update with move_path; started and completed changes identical",
+    "in_repo": false
+   },
+   "l1-init-errors.jsonl": {
+    "items": "1",
+    "description": "requests before initialize and double initialize are JSON-RPC errors",
+    "in_repo": false
+   },
+   "h2-perm-hooks-off-argv.jsonl": {
+    "items": "0b-1",
+    "description": "trusted PermissionRequest hook with -c features.hooks=false: hooks/list returns no hooks, no hook runs, client gets the request",
+    "in_repo": false
+   },
+   "h2-perm-hooks-off-map.jsonl": {
+    "items": "0b-1",
+    "description": "trusted hook with config map features.hooks=false: hooks/list still lists it (enabled, trusted) but it does not fire",
+    "in_repo": false
+   },
+   "h2-pre-allow-on.jsonl": {
+    "items": "0b-1",
+    "description": "trusted PreToolUse hook returning permissionDecision allow: hook/completed failed (unsupported), request still reaches the client",
+    "in_repo": false
+   },
+   "h2-pre-deny-on.jsonl": {
+    "items": "0b-1",
+    "description": "trusted PreToolUse hook deny: hook/completed blocked, no client request, no item, model text 'Command blocked by PreToolUse hook'",
+    "in_repo": false
+   },
+   "h2-pre-deny-off.jsonl": {
+    "items": "0b-1",
+    "description": "PreToolUse deny hook with features.hooks=false: never fires",
+    "in_repo": false
+   },
+   "s3-survival-eof.jsonl": {
+    "items": "0b-3",
+    "description": "stdin EOF while an escalated and a sandboxed live session run: all processes exit",
+    "in_repo": false
+   },
+   "s3-survival-sigterm.jsonl": {
+    "items": "0b-3",
+    "description": "SIGTERM of the wrapper: native process and sessions exit",
+    "in_repo": false
+   },
+   "s3-survival-sigkill.jsonl": {
+    "items": "0b-3",
+    "description": "SIGKILL of the wrapper only: native codex and both sessions survive, orphaned",
+    "in_repo": false
+   },
+   "s3-survival-killpg-term.jsonl": {
+    "items": "0b-3",
+    "description": "killpg SIGTERM of the app-server group: everything exits",
+    "in_repo": false
+   },
+   "s3-survival-killpg-kill.jsonl": {
+    "items": "0b-3",
+    "description": "killpg SIGKILL of the app-server group: native dies, tool process groups survive as orphans",
+    "in_repo": false
+   },
+   "cfg-w4-e-no-project-baseline.jsonl": {
+    "items": "0b-4",
+    "description": "baseline: sandbox blocks outside write and localhost network",
+    "in_repo": false
+   },
+   "cfg-w4-a-ambient-explicit-pins-only.jsonl": {
+    "items": "0b-4",
+    "description": "trusted project config widens writable_roots, network, shell env and adds an MCP server; explicit sandbox/policy pins do not stop it; thread/start reports the widened writableRoots, networkAccess and runtimeWorkspaceRoots",
+    "in_repo": false
+   },
+   "cfg-w4-d-both.jsonl": {
+    "items": "0b-4",
+    "description": "config map plus argv -c pin writable_roots=[] and network_access=false (effective), but shell_environment_policy.set and mcp_servers merge and survive",
+    "in_repo": false
+   },
+   "cfg-w4-f-disable-by-name.jsonl": {
+    "items": "0b-4",
+    "description": "config map mcp_servers.<name>.enabled=false and shell_environment_policy.set.<VAR> override named entries",
+    "in_repo": false
+   },
+   "cfg-fp-argv-off.jsonl": {
+    "items": "0b-5",
+    "description": "-c features.request_permissions_tool=false and exec_permission_approvals=false remove the tool and the with_additional_permissions option",
+    "in_repo": false
+   },
+   "cfg-fp-map-off.jsonl": {
+    "items": "0b-5",
+    "description": "config map features pins do the same",
+    "in_repo": false
+   },
+   "x6-exec-thread-resumed-pinned.jsonl": {
+    "items": "0b-6",
+    "description": "thread created by codex exec (never, danger-full-access) resumed by app-server with pins: pins applied and reported",
+    "in_repo": false
+   },
+   "x6-exec-thread-resumed-unpinned.jsonl": {
+    "items": "0b-6",
+    "description": "same thread resumed unpinned: reports config defaults",
+    "in_repo": false
+   },
+   "t8-A-config-read-and-start.jsonl": {
+    "items": "0b-8",
+    "description": "config/read exposes config.projects; thread/start on an untrusted git repo writes [projects.<git root>] trust_level trusted",
+    "in_repo": false
+   },
+   "t8-B-trust-via-config-map.jsonl": {
+    "items": "0b-8",
+    "description": "projects trust through the thread/start config map: no config.toml write",
+    "in_repo": false
+   },
+   "t8-C-trust-via-argv.jsonl": {
+    "items": "0b-8",
+    "description": "projects trust through argv -c still writes config.toml",
+    "in_repo": false
+   },
+   "t8-D-explicit-untrusted.jsonl": {
+    "items": "0b-8",
+    "description": "explicit untrusted entry is kept; workspace-write pin still honoured",
+    "in_repo": false
+   },
+   "t8c-map-trusted.jsonl": {
+    "items": "0b-8",
+    "description": "config-map trust makes project config effective without a file write",
+    "in_repo": false
+   },
+   "t8c-map-untrusted.jsonl": {
+    "items": "0b-8",
+    "description": "config-map untrusted ignores project config without a file write",
+    "in_repo": false
+   },
+   "p0c-control-a-start.jsonl": {
+    "items": "0c-3",
+    "description": "control: same hostile project with only explicit params: allow rule, hook, widened roots, network, env leak and MCP all live",
+    "in_repo": false
+   },
+   "p0c-control-b-resume.jsonl": {
+    "items": "0c-3",
+    "description": "control: resume",
+    "in_repo": false
+   },
+   "tr-control-repo-trusted-nomap.jsonl": {
+    "items": "stage3",
+    "description": "trusted repo, project allow rule, no untrusted map: rule applied",
+    "in_repo": false
+   },
+   "tr-repo-trusted-map.jsonl": {
+    "items": "stage3",
+    "description": "trusted repo with the untrusted ancestor map: rule ignored",
+    "in_repo": false
+   },
+   "tr-parent-trusted-map.jsonl": {
+    "items": "stage3",
+    "description": "trusted parent with the map: rule ignored",
+    "in_repo": false
+   },
+   "tr-parent-trusted-nomap.jsonl": {
+    "items": "stage3",
+    "description": "trusted parent without the map: rule applied, trust entry written",
+    "in_repo": false
+   },
+   "tr-sub-cwd-trusted-map.jsonl": {
+    "items": "stage3",
+    "description": "trusted subdirectory cwd with the map: rule ignored",
+    "in_repo": false
+   },
+   "tr-sub-cwd-trusted-nomap.jsonl": {
+    "items": "stage3",
+    "description": "trusted subdirectory cwd without the map: rule applied",
+    "in_repo": false
+   },
+   "cfg-rl1.jsonl": {
+    "items": "stage3",
+    "description": "which files in CODEX_HOME/rules Codex loads",
+    "in_repo": false
+   },
+   "wt-w1-main-trusted-nomap.jsonl": {
+    "items": "stage3",
+    "description": "linked worktree, main checkout trusted, no map: project rule applied",
+    "in_repo": false
+   },
+   "wt-w2-wt-trusted-nomap.jsonl": {
+    "items": "stage3",
+    "description": "linked worktree trusted, no map: rule applied",
+    "in_repo": false
+   },
+   "wt-w3-main-trusted-current-map.jsonl": {
+    "items": "stage3",
+    "description": "main trusted, map of the worktree chain: rule ignored",
+    "in_repo": false
+   },
+   "wt-w4-main-trusted-map-with-main.jsonl": {
+    "items": "stage3",
+    "description": "main trusted, map including the main root: rule ignored",
+    "in_repo": false
+   },
+   "wt-w5-both-trusted-map-with-main.jsonl": {
+    "items": "stage3",
+    "description": "both trusted, map including the main root: rule ignored",
+    "in_repo": false
+   }
+  },
+  "other_files": [
+   "e6-held-window-lsof.txt",
+   "s3-survival-eof.ps-after.txt",
+   "s3-survival-eof.ps-before.txt",
+   "s3-survival-killpg-kill.ps-after.txt",
+   "s3-survival-killpg-kill.ps-before.txt",
+   "s3-survival-killpg-term.ps-after.txt",
+   "s3-survival-killpg-term.ps-before.txt",
+   "s3-survival-sigkill.ps-after.txt",
+   "s3-survival-sigkill.ps-before.txt",
+   "s3-survival-sigterm.ps-after.txt",
+   "s3-survival-sigterm.ps-before.txt",
+   "ex1-exec-approval-policy-never.txt: codex exec stdout, stderr and model-visible text for an escalation under approval_policy never (no JSON event; the stderr router line is the only trace)"
+  ]
  }
 }
