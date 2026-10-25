@@ -1,0 +1,4078 @@
+{
+ "client_request_methods": [
+  "account/bedrock/checkGovCloudRequirements",
+  "account/bedrock/discover",
+  "account/bedrock/setup",
+  "account/gatewayOAuth/cancel",
+  "account/gatewayOAuth/login",
+  "account/gatewayOAuth/read",
+  "account/login/cancel",
+  "account/login/start",
+  "account/logout",
+  "account/rateLimitResetCredit/consume",
+  "account/rateLimits/read",
+  "account/read",
+  "account/sendAddCreditsNudgeEmail",
+  "account/usage/read",
+  "account/workspaceMessages/read",
+  "app/installed",
+  "app/list",
+  "app/read",
+  "collaborationMode/list",
+  "command/exec",
+  "command/exec/resize",
+  "command/exec/terminate",
+  "command/exec/write",
+  "config/batchWrite",
+  "config/mcpServer/reload",
+  "config/read",
+  "config/value/write",
+  "configRequirements/read",
+  "environment/add",
+  "environment/info",
+  "environment/status",
+  "experimentalFeature/enablement/set",
+  "experimentalFeature/list",
+  "externalAgentConfig/detect",
+  "externalAgentConfig/import",
+  "externalAgentConfig/import/readHistories",
+  "externalAgentConfig/import/recordHistory",
+  "feedback/upload",
+  "fs/copy",
+  "fs/createDirectory",
+  "fs/getMetadata",
+  "fs/readDirectory",
+  "fs/readFile",
+  "fs/remove",
+  "fs/unwatch",
+  "fs/watch",
+  "fs/writeFile",
+  "fuzzyFileSearch",
+  "fuzzyFileSearch/sessionStart",
+  "fuzzyFileSearch/sessionStop",
+  "fuzzyFileSearch/sessionUpdate",
+  "hooks/list",
+  "initialize",
+  "marketplace/add",
+  "marketplace/remove",
+  "marketplace/upgrade",
+  "mcpServer/event/stream/start",
+  "mcpServer/event/stream/stop",
+  "mcpServer/oauth/login",
+  "mcpServer/resource/read",
+  "mcpServer/tool/call",
+  "mcpServerStatus/list",
+  "memory/reset",
+  "memory/status",
+  "mock/experimentalMethod",
+  "model/list",
+  "modelProvider/capabilities/read",
+  "permissionProfile/list",
+  "plugin/install",
+  "plugin/installed",
+  "plugin/list",
+  "plugin/read",
+  "plugin/reconcile",
+  "plugin/search",
+  "plugin/share/checkout",
+  "plugin/share/delete",
+  "plugin/share/list",
+  "plugin/share/save",
+  "plugin/share/updateTargets",
+  "plugin/skill/read",
+  "plugin/uninstall",
+  "process/kill",
+  "process/resizePty",
+  "process/spawn",
+  "process/writeStdin",
+  "project/create",
+  "project/delete",
+  "project/import",
+  "project/list",
+  "project/move",
+  "project/read",
+  "project/update",
+  "remoteControl/client/list",
+  "remoteControl/client/revoke",
+  "remoteControl/disable",
+  "remoteControl/enable",
+  "remoteControl/pairing/start",
+  "remoteControl/pairing/status",
+  "remoteControl/status/read",
+  "review/start",
+  "rollout/compress",
+  "server/diagnostics",
+  "skills/config/write",
+  "skills/extraRoots/set",
+  "skills/list",
+  "thread/approveGuardianDeniedAction",
+  "thread/archive",
+  "thread/attachment/add",
+  "thread/attachment/list",
+  "thread/attachment/remove",
+  "thread/attachmentOwner/list",
+  "thread/backgroundTerminals/clean",
+  "thread/backgroundTerminals/list",
+  "thread/backgroundTerminals/terminate",
+  "thread/compact/start",
+  "thread/decrement_elicitation",
+  "thread/delete",
+  "thread/fork",
+  "thread/goal/clear",
+  "thread/goal/get",
+  "thread/goal/set",
+  "thread/increment_elicitation",
+  "thread/inject_items",
+  "thread/items/list",
+  "thread/items/read",
+  "thread/list",
+  "thread/loaded/list",
+  "thread/memoryMode/set",
+  "thread/metadata/update",
+  "thread/name/set",
+  "thread/prediction/request",
+  "thread/queue/add",
+  "thread/queue/delete",
+  "thread/queue/list",
+  "thread/queue/reorder",
+  "thread/queue/start",
+  "thread/queue/update",
+  "thread/read",
+  "thread/readState/update",
+  "thread/realtime/appendAudio",
+  "thread/realtime/appendSpeech",
+  "thread/realtime/appendText",
+  "thread/realtime/listVoices",
+  "thread/realtime/start",
+  "thread/realtime/stop",
+  "thread/resume",
+  "thread/revert",
+  "thread/search",
+  "thread/searchOccurrences",
+  "thread/section/move",
+  "thread/settings/update",
+  "thread/shellCommand",
+  "thread/start",
+  "thread/timeline/list",
+  "thread/turns/list",
+  "thread/unarchive",
+  "thread/unsubscribe",
+  "threadSection/create",
+  "threadSection/delete",
+  "threadSection/list",
+  "threadSection/update",
+  "turn/interrupt",
+  "turn/settings/update",
+  "turn/start",
+  "turn/steer",
+  "userVerification/cancel",
+  "userVerification/delete",
+  "userVerification/enroll",
+  "userVerification/status",
+  "userVerification/verify",
+  "windowsSandbox/readiness",
+  "windowsSandbox/setupStart"
+ ],
+ "codex_cli_version": "0.163.0",
+ "definitions": {
+  "AbsolutePathBuf": {
+   "description": "A path that is guaranteed to be absolute and normalized (though it is not guaranteed to be canonicalized or exist on the filesystem).\n\nIMPORTANT: When deserializing an `AbsolutePathBuf`, a base path must be set using [AbsolutePathBufGuard::new]. If no base path is set, the deserialization will fail unless the path being deserialized is already absolute.",
+   "type": "string"
+  },
+  "ActivePermissionProfile": {
+   "properties": {
+    "extends": {
+     "default": null,
+     "description": "Parent profile identifier from the selected permissions profile's `extends` setting, when present.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "id": {
+     "description": "Identifier from `default_permissions` or the implicit built-in default, such as `:workspace` or a user-defined `[permissions.<id>]` profile.",
+     "type": "string"
+    }
+   },
+   "required": [
+    "id"
+   ],
+   "type": "object"
+  },
+  "AdditionalContextEntry": {
+   "properties": {
+    "kind": {
+     "$ref": "#/definitions/v2/AdditionalContextKind"
+    },
+    "value": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "kind",
+    "value"
+   ],
+   "type": "object"
+  },
+  "AdditionalPermissionProfile": {
+   "properties": {
+    "fileSystem": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/v2/AdditionalFileSystemPermissions"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    },
+    "network": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/v2/AdditionalNetworkPermissions"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "Partial overlay used for per-command permission requests."
+    }
+   },
+   "type": "object"
+  },
+  "ApplyPatchApprovalParams": {
+   "$schema": "http://json-schema.org/draft-07/schema#",
+   "properties": {
+    "callId": {
+     "description": "Use to correlate this with [codex_protocol::protocol::PatchApplyBeginEvent] and [codex_protocol::protocol::PatchApplyEndEvent].",
+     "type": "string"
+    },
+    "conversationId": {
+     "$ref": "#/definitions/v2/ThreadId"
+    },
+    "fileChanges": {
+     "additionalProperties": {
+      "$ref": "#/definitions/FileChange"
+     },
+     "type": "object"
+    },
+    "grantRoot": {
+     "description": "When set, the agent is asking the user to allow writes under this root for the remainder of the session (unclear if this is honored today).",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "reason": {
+     "description": "Optional explanatory reason (e.g. request for extra write access).",
+     "type": [
+      "string",
+      "null"
+     ]
+    }
+   },
+   "required": [
+    "callId",
+    "conversationId",
+    "fileChanges"
+   ],
+   "title": "ApplyPatchApprovalParams",
+   "type": "object"
+  },
+  "ApprovalsReviewer": {
+   "description": "Configures who approval requests are routed to for review. Examples include sandbox escapes, blocked network access, MCP approval prompts, and ARC escalations. Defaults to `user`. `auto_review` uses a carefully prompted subagent to gather relevant context and apply a risk-based decision framework before approving or denying the request. The legacy value `guardian_subagent` is accepted for compatibility.",
+   "enum": [
+    "user",
+    "auto_review",
+    "guardian_subagent"
+   ],
+   "type": "string"
+  },
+  "AskForApproval": {
+   "oneOf": [
+    {
+     "enum": [
+      "untrusted",
+      "on-request",
+      "never"
+     ],
+     "type": "string"
+    },
+    {
+     "additionalProperties": false,
+     "properties": {
+      "granular": {
+       "properties": {
+        "mcp_elicitations": {
+         "type": "boolean"
+        },
+        "request_permissions": {
+         "default": false,
+         "type": "boolean"
+        },
+        "rules": {
+         "type": "boolean"
+        },
+        "sandbox_approval": {
+         "type": "boolean"
+        },
+        "skill_approval": {
+         "default": false,
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "mcp_elicitations",
+        "rules",
+        "sandbox_approval"
+       ],
+       "type": "object"
+      }
+     },
+     "required": [
+      "granular"
+     ],
+     "title": "GranularAskForApproval",
+     "type": "object"
+    }
+   ]
+  },
+  "AttestationGenerateParams": {
+   "$schema": "http://json-schema.org/draft-07/schema#",
+   "title": "AttestationGenerateParams",
+   "type": "object"
+  },
+  "ChatgptAuthTokensRefreshParams": {
+   "$schema": "http://json-schema.org/draft-07/schema#",
+   "properties": {
+    "previousAccountId": {
+     "description": "Workspace/account identifier that Codex was previously using.\n\nClients that manage multiple accounts/workspaces can use this as a hint to refresh the token for the correct workspace.\n\nThis may be `null` when the prior auth state did not include a workspace identifier (`chatgpt_account_id`).",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "reason": {
+     "$ref": "#/definitions/ChatgptAuthTokensRefreshReason"
+    }
+   },
+   "required": [
+    "reason"
+   ],
+   "title": "ChatgptAuthTokensRefreshParams",
+   "type": "object"
+  },
+  "ClientInfo": {
+   "properties": {
+    "name": {
+     "type": "string"
+    },
+    "title": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "version": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "name",
+    "version"
+   ],
+   "type": "object"
+  },
+  "CollaborationMode": {
+   "description": "Collaboration mode for a Codex session.",
+   "properties": {
+    "mode": {
+     "$ref": "#/definitions/v2/ModeKind"
+    },
+    "settings": {
+     "$ref": "#/definitions/v2/Settings"
+    }
+   },
+   "required": [
+    "mode",
+    "settings"
+   ],
+   "type": "object"
+  },
+  "CommandAction": {
+   "oneOf": [
+    {
+     "properties": {
+      "command": {
+       "type": "string"
+      },
+      "name": {
+       "type": "string"
+      },
+      "path": {
+       "$ref": "#/definitions/v2/LegacyAppPathString"
+      },
+      "type": {
+       "enum": [
+        "read"
+       ],
+       "title": "ReadCommandActionType",
+       "type": "string"
+      }
+     },
+     "required": [
+      "command",
+      "name",
+      "path",
+      "type"
+     ],
+     "title": "ReadCommandAction",
+     "type": "object"
+    },
+    {
+     "properties": {
+      "command": {
+       "type": "string"
+      },
+      "path": {
+       "type": [
+        "string",
+        "null"
+       ]
+      },
+      "type": {
+       "enum": [
+        "listFiles"
+       ],
+       "title": "ListFilesCommandActionType",
+       "type": "string"
+      }
+     },
+     "required": [
+      "command",
+      "type"
+     ],
+     "title": "ListFilesCommandAction",
+     "type": "object"
+    },
+    {
+     "properties": {
+      "command": {
+       "type": "string"
+      },
+      "path": {
+       "type": [
+        "string",
+        "null"
+       ]
+      },
+      "query": {
+       "type": [
+        "string",
+        "null"
+       ]
+      },
+      "type": {
+       "enum": [
+        "search"
+       ],
+       "title": "SearchCommandActionType",
+       "type": "string"
+      }
+     },
+     "required": [
+      "command",
+      "type"
+     ],
+     "title": "SearchCommandAction",
+     "type": "object"
+    },
+    {
+     "properties": {
+      "command": {
+       "type": "string"
+      },
+      "type": {
+       "enum": [
+        "unknown"
+       ],
+       "title": "UnknownCommandActionType",
+       "type": "string"
+      }
+     },
+     "required": [
+      "command",
+      "type"
+     ],
+     "title": "UnknownCommandAction",
+     "type": "object"
+    }
+   ]
+  },
+  "CommandExecutionApprovalDecision": {
+   "oneOf": [
+    {
+     "description": "User approved the command.",
+     "enum": [
+      "accept"
+     ],
+     "type": "string"
+    },
+    {
+     "description": "User approved the command and future prompts in the same session-scoped approval cache should run without prompting.",
+     "enum": [
+      "acceptForSession"
+     ],
+     "type": "string"
+    },
+    {
+     "additionalProperties": false,
+     "description": "User approved the command, and wants to apply the proposed execpolicy amendment so future matching commands can run without prompting.",
+     "properties": {
+      "acceptWithExecpolicyAmendment": {
+       "properties": {
+        "execpolicy_amendment": {
+         "items": {
+          "type": "string"
+         },
+         "type": "array"
+        }
+       },
+       "required": [
+        "execpolicy_amendment"
+       ],
+       "type": "object"
+      }
+     },
+     "required": [
+      "acceptWithExecpolicyAmendment"
+     ],
+     "title": "AcceptWithExecpolicyAmendmentCommandExecutionApprovalDecision",
+     "type": "object"
+    },
+    {
+     "additionalProperties": false,
+     "description": "User chose a persistent network policy rule (allow/deny) for this host.",
+     "properties": {
+      "applyNetworkPolicyAmendment": {
+       "properties": {
+        "network_policy_amendment": {
+         "$ref": "#/definitions/NetworkPolicyAmendment"
+        }
+       },
+       "required": [
+        "network_policy_amendment"
+       ],
+       "type": "object"
+      }
+     },
+     "required": [
+      "applyNetworkPolicyAmendment"
+     ],
+     "title": "ApplyNetworkPolicyAmendmentCommandExecutionApprovalDecision",
+     "type": "object"
+    },
+    {
+     "description": "User denied the command. The agent will continue the turn.",
+     "enum": [
+      "decline"
+     ],
+     "type": "string"
+    },
+    {
+     "description": "User denied the command. The turn will also be immediately interrupted.",
+     "enum": [
+      "cancel"
+     ],
+     "type": "string"
+    }
+   ]
+  },
+  "CommandExecutionApprovalKind": {
+   "description": "Distinguishes a command approval from input sent to an existing terminal.",
+   "enum": [
+    "command",
+    "writeStdin"
+   ],
+   "type": "string"
+  },
+  "CommandExecutionRequestApprovalParams": {
+   "$schema": "http://json-schema.org/draft-07/schema#",
+   "properties": {
+    "additionalPermissions": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/AdditionalPermissionProfile"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "Optional additional permissions requested for this command."
+    },
+    "approvalId": {
+     "description": "Unique identifier for this specific approval callback.\n\nFor regular shell/unified_exec approvals, this is null.\n\nFor zsh-exec-bridge subcommand approvals, multiple callbacks can belong to one parent `itemId`, so `approvalId` is a distinct opaque callback id (a UUID) used to disambiguate routing. Stdin approvals also use a distinct callback id; inspect `kind` to distinguish them.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "availableDecisions": {
+     "description": "Ordered list of decisions the client may present for this prompt.",
+     "items": {
+      "$ref": "#/definitions/CommandExecutionApprovalDecision"
+     },
+     "type": [
+      "array",
+      "null"
+     ]
+    },
+    "command": {
+     "description": "The command to be executed.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "commandActions": {
+     "description": "Best-effort parsed command actions for friendly display.",
+     "items": {
+      "$ref": "#/definitions/v2/CommandAction"
+     },
+     "type": [
+      "array",
+      "null"
+     ]
+    },
+    "cwd": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/v2/LegacyAppPathString"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "The command's working directory."
+    },
+    "environmentId": {
+     "default": null,
+     "description": "Environment in which the command will run.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "itemId": {
+     "type": "string"
+    },
+    "kind": {
+     "allOf": [
+      {
+       "$ref": "#/definitions/CommandExecutionApprovalKind"
+      }
+     ],
+     "default": "command",
+     "description": "Kind of action under review. Defaults to `command` for older servers."
+    },
+    "networkApprovalContext": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/NetworkApprovalContext"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "Optional context for a managed-network approval prompt."
+    },
+    "proposedExecpolicyAmendment": {
+     "description": "Optional proposed execpolicy amendment to allow similar commands without prompting.",
+     "items": {
+      "type": "string"
+     },
+     "type": [
+      "array",
+      "null"
+     ]
+    },
+    "proposedNetworkPolicyAmendments": {
+     "description": "Optional proposed network policy amendments (allow/deny host) for future requests.",
+     "items": {
+      "$ref": "#/definitions/NetworkPolicyAmendment"
+     },
+     "type": [
+      "array",
+      "null"
+     ]
+    },
+    "reason": {
+     "description": "Optional explanatory reason (e.g. request for network access).",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "startedAtMs": {
+     "description": "Unix timestamp (in milliseconds) when this approval request started.",
+     "format": "int64",
+     "type": "integer"
+    },
+    "threadId": {
+     "type": "string"
+    },
+    "turnId": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "itemId",
+    "startedAtMs",
+    "threadId",
+    "turnId"
+   ],
+   "title": "CommandExecutionRequestApprovalParams",
+   "type": "object"
+  },
+  "CommandExecutionRequestApprovalResponse": {
+   "$schema": "http://json-schema.org/draft-07/schema#",
+   "properties": {
+    "decision": {
+     "$ref": "#/definitions/CommandExecutionApprovalDecision"
+    }
+   },
+   "required": [
+    "decision"
+   ],
+   "title": "CommandExecutionRequestApprovalResponse",
+   "type": "object"
+  },
+  "CommandExecutionStatus": {
+   "enum": [
+    "inProgress",
+    "completed",
+    "failed",
+    "declined"
+   ],
+   "type": "string"
+  },
+  "CurrentTimeReadParams": {
+   "$schema": "http://json-schema.org/draft-07/schema#",
+   "properties": {
+    "threadId": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "threadId"
+   ],
+   "title": "CurrentTimeReadParams",
+   "type": "object"
+  },
+  "CyberAccessProgram": {
+   "description": "Requested cyber treatment for an OpenAI model turn. Authorization and model-tier restrictions remain server-owned.",
+   "enum": [
+    "standard",
+    "daybreakBlue",
+    "daybreakRed"
+   ],
+   "type": "string"
+  },
+  "DynamicToolCallParams": {
+   "$schema": "http://json-schema.org/draft-07/schema#",
+   "properties": {
+    "arguments": true,
+    "callId": {
+     "type": "string"
+    },
+    "namespace": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "threadId": {
+     "type": "string"
+    },
+    "tool": {
+     "type": "string"
+    },
+    "turnId": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "arguments",
+    "callId",
+    "threadId",
+    "tool",
+    "turnId"
+   ],
+   "title": "DynamicToolCallParams",
+   "type": "object"
+  },
+  "DynamicToolSpec": {
+   "oneOf": [
+    {
+     "properties": {
+      "deferLoading": {
+       "type": "boolean"
+      },
+      "description": {
+       "type": "string"
+      },
+      "inputSchema": true,
+      "name": {
+       "type": "string"
+      },
+      "type": {
+       "enum": [
+        "function"
+       ],
+       "title": "FunctionDynamicToolSpecType",
+       "type": "string"
+      }
+     },
+     "required": [
+      "description",
+      "inputSchema",
+      "name",
+      "type"
+     ],
+     "title": "FunctionDynamicToolSpec",
+     "type": "object"
+    },
+    {
+     "properties": {
+      "description": {
+       "type": "string"
+      },
+      "name": {
+       "type": "string"
+      },
+      "tools": {
+       "items": {
+        "$ref": "#/definitions/v2/DynamicToolNamespaceTool"
+       },
+       "type": "array"
+      },
+      "type": {
+       "enum": [
+        "namespace"
+       ],
+       "title": "NamespaceDynamicToolSpecType",
+       "type": "string"
+      }
+     },
+     "required": [
+      "description",
+      "name",
+      "tools",
+      "type"
+     ],
+     "title": "NamespaceDynamicToolSpec",
+     "type": "object"
+    }
+   ]
+  },
+  "ErrorNotification": {
+   "$schema": "http://json-schema.org/draft-07/schema#",
+   "properties": {
+    "error": {
+     "$ref": "#/definitions/v2/TurnError"
+    },
+    "threadId": {
+     "type": "string"
+    },
+    "turnId": {
+     "type": "string"
+    },
+    "willRetry": {
+     "type": "boolean"
+    }
+   },
+   "required": [
+    "error",
+    "threadId",
+    "turnId",
+    "willRetry"
+   ],
+   "title": "ErrorNotification",
+   "type": "object"
+  },
+  "ExecCommandApprovalParams": {
+   "$schema": "http://json-schema.org/draft-07/schema#",
+   "properties": {
+    "approvalId": {
+     "description": "Identifier for this specific approval callback.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "callId": {
+     "description": "Use to correlate this with [codex_protocol::protocol::ExecCommandBeginEvent] and [codex_protocol::protocol::ExecCommandEndEvent].",
+     "type": "string"
+    },
+    "command": {
+     "items": {
+      "type": "string"
+     },
+     "type": "array"
+    },
+    "conversationId": {
+     "$ref": "#/definitions/v2/ThreadId"
+    },
+    "cwd": {
+     "type": "string"
+    },
+    "parsedCmd": {
+     "items": {
+      "$ref": "#/definitions/ParsedCommand"
+     },
+     "type": "array"
+    },
+    "reason": {
+     "type": [
+      "string",
+      "null"
+     ]
+    }
+   },
+   "required": [
+    "callId",
+    "command",
+    "conversationId",
+    "cwd",
+    "parsedCmd"
+   ],
+   "title": "ExecCommandApprovalParams",
+   "type": "object"
+  },
+  "FileChangeApprovalDecision": {
+   "oneOf": [
+    {
+     "description": "User approved the file changes.",
+     "enum": [
+      "accept"
+     ],
+     "type": "string"
+    },
+    {
+     "description": "User approved the file changes and future changes to the same files should run without prompting.",
+     "enum": [
+      "acceptForSession"
+     ],
+     "type": "string"
+    },
+    {
+     "description": "User denied the file changes. The agent will continue the turn.",
+     "enum": [
+      "decline"
+     ],
+     "type": "string"
+    },
+    {
+     "description": "User denied the file changes. The turn will also be immediately interrupted.",
+     "enum": [
+      "cancel"
+     ],
+     "type": "string"
+    }
+   ]
+  },
+  "FileChangeRequestApprovalParams": {
+   "$schema": "http://json-schema.org/draft-07/schema#",
+   "properties": {
+    "grantRoot": {
+     "description": "[UNSTABLE] When set, the agent is asking the user to allow writes under this root for the remainder of the session (unclear if this is honored today).",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "itemId": {
+     "type": "string"
+    },
+    "reason": {
+     "description": "Optional explanatory reason (e.g. request for extra write access).",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "startedAtMs": {
+     "description": "Unix timestamp (in milliseconds) when this approval request started.",
+     "format": "int64",
+     "type": "integer"
+    },
+    "threadId": {
+     "type": "string"
+    },
+    "turnId": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "itemId",
+    "startedAtMs",
+    "threadId",
+    "turnId"
+   ],
+   "title": "FileChangeRequestApprovalParams",
+   "type": "object"
+  },
+  "FileChangeRequestApprovalResponse": {
+   "$schema": "http://json-schema.org/draft-07/schema#",
+   "properties": {
+    "decision": {
+     "$ref": "#/definitions/FileChangeApprovalDecision"
+    }
+   },
+   "required": [
+    "decision"
+   ],
+   "title": "FileChangeRequestApprovalResponse",
+   "type": "object"
+  },
+  "FileUpdateChange": {
+   "properties": {
+    "diff": {
+     "type": "string"
+    },
+    "kind": {
+     "$ref": "#/definitions/v2/PatchChangeKind"
+    },
+    "path": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "diff",
+    "kind",
+    "path"
+   ],
+   "type": "object"
+  },
+  "GrantedPermissionProfile": {
+   "properties": {
+    "fileSystem": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/v2/AdditionalFileSystemPermissions"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    },
+    "network": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/v2/AdditionalNetworkPermissions"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    }
+   },
+   "type": "object"
+  },
+  "HookCompletedNotification": {
+   "$schema": "http://json-schema.org/draft-07/schema#",
+   "properties": {
+    "run": {
+     "$ref": "#/definitions/v2/HookRunSummary"
+    },
+    "threadId": {
+     "type": "string"
+    },
+    "turnId": {
+     "type": [
+      "string",
+      "null"
+     ]
+    }
+   },
+   "required": [
+    "run",
+    "threadId"
+   ],
+   "title": "HookCompletedNotification",
+   "type": "object"
+  },
+  "HookEventName": {
+   "enum": [
+    "preToolUse",
+    "permissionRequest",
+    "postToolUse",
+    "preCompact",
+    "postCompact",
+    "sessionStart",
+    "sessionEnd",
+    "userPromptSubmit",
+    "subagentStart",
+    "subagentStop",
+    "stop",
+    "interrupt"
+   ],
+   "type": "string"
+  },
+  "HookExecutionMode": {
+   "enum": [
+    "sync",
+    "async"
+   ],
+   "type": "string"
+  },
+  "HookHandlerType": {
+   "enum": [
+    "command",
+    "mcpTool",
+    "prompt",
+    "agent"
+   ],
+   "type": "string"
+  },
+  "HookOutputEntry": {
+   "properties": {
+    "kind": {
+     "$ref": "#/definitions/v2/HookOutputEntryKind"
+    },
+    "text": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "kind",
+    "text"
+   ],
+   "type": "object"
+  },
+  "HookRunStatus": {
+   "enum": [
+    "running",
+    "completed",
+    "failed",
+    "blocked",
+    "stopped"
+   ],
+   "type": "string"
+  },
+  "HookRunSummary": {
+   "properties": {
+    "completedAt": {
+     "format": "int64",
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "displayOrder": {
+     "format": "int64",
+     "type": "integer"
+    },
+    "durationMs": {
+     "format": "int64",
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "entries": {
+     "items": {
+      "$ref": "#/definitions/v2/HookOutputEntry"
+     },
+     "type": "array"
+    },
+    "eventName": {
+     "$ref": "#/definitions/v2/HookEventName"
+    },
+    "executionMode": {
+     "$ref": "#/definitions/v2/HookExecutionMode"
+    },
+    "handlerType": {
+     "$ref": "#/definitions/v2/HookHandlerType"
+    },
+    "id": {
+     "type": "string"
+    },
+    "scope": {
+     "$ref": "#/definitions/v2/HookScope"
+    },
+    "source": {
+     "allOf": [
+      {
+       "$ref": "#/definitions/v2/HookSource"
+      }
+     ],
+     "default": "unknown"
+    },
+    "sourcePath": {
+     "$ref": "#/definitions/v2/AbsolutePathBuf"
+    },
+    "startedAt": {
+     "format": "int64",
+     "type": "integer"
+    },
+    "status": {
+     "$ref": "#/definitions/v2/HookRunStatus"
+    },
+    "statusMessage": {
+     "type": [
+      "string",
+      "null"
+     ]
+    }
+   },
+   "required": [
+    "displayOrder",
+    "entries",
+    "eventName",
+    "executionMode",
+    "handlerType",
+    "id",
+    "scope",
+    "sourcePath",
+    "startedAt",
+    "status"
+   ],
+   "type": "object"
+  },
+  "HookScope": {
+   "enum": [
+    "thread",
+    "turn"
+   ],
+   "type": "string"
+  },
+  "HookSource": {
+   "enum": [
+    "system",
+    "user",
+    "project",
+    "mdm",
+    "sessionFlags",
+    "plugin",
+    "cloudRequirements",
+    "cloudManagedConfig",
+    "legacyManagedConfigFile",
+    "legacyManagedConfigMdm",
+    "unknown"
+   ],
+   "type": "string"
+  },
+  "HookStartedNotification": {
+   "$schema": "http://json-schema.org/draft-07/schema#",
+   "properties": {
+    "run": {
+     "$ref": "#/definitions/v2/HookRunSummary"
+    },
+    "threadId": {
+     "type": "string"
+    },
+    "turnId": {
+     "type": [
+      "string",
+      "null"
+     ]
+    }
+   },
+   "required": [
+    "run",
+    "threadId"
+   ],
+   "title": "HookStartedNotification",
+   "type": "object"
+  },
+  "HookTrustStatus": {
+   "enum": [
+    "managed",
+    "untrusted",
+    "trusted",
+    "modified"
+   ],
+   "type": "string"
+  },
+  "HooksListEntry": {
+   "properties": {
+    "cwd": {
+     "type": "string"
+    },
+    "errors": {
+     "items": {
+      "$ref": "#/definitions/v2/HookErrorInfo"
+     },
+     "type": "array"
+    },
+    "hooks": {
+     "items": {
+      "$ref": "#/definitions/v2/HookMetadata"
+     },
+     "type": "array"
+    },
+    "warnings": {
+     "items": {
+      "type": "string"
+     },
+     "type": "array"
+    }
+   },
+   "required": [
+    "cwd",
+    "errors",
+    "hooks",
+    "warnings"
+   ],
+   "type": "object"
+  },
+  "HooksListParams": {
+   "$schema": "http://json-schema.org/draft-07/schema#",
+   "properties": {
+    "cwds": {
+     "description": "When empty, defaults to the current session working directory.",
+     "items": {
+      "type": "string"
+     },
+     "type": "array"
+    }
+   },
+   "title": "HooksListParams",
+   "type": "object"
+  },
+  "HooksListResponse": {
+   "$schema": "http://json-schema.org/draft-07/schema#",
+   "properties": {
+    "data": {
+     "items": {
+      "$ref": "#/definitions/v2/HooksListEntry"
+     },
+     "type": "array"
+    }
+   },
+   "required": [
+    "data"
+   ],
+   "title": "HooksListResponse",
+   "type": "object"
+  },
+  "InitializeCapabilities": {
+   "description": "Client-declared capabilities negotiated during initialize.",
+   "properties": {
+    "experimentalApi": {
+     "default": false,
+     "description": "Opt into receiving experimental API methods and fields.",
+     "type": "boolean"
+    },
+    "explicitGatewayOauth": {
+     "description": "Use explicit gateway OAuth login instead of automatic browser authorization. Applies to this app-server's gateway runtime; later connections cannot undo it.",
+     "type": "boolean"
+    },
+    "extensions": {
+     "additionalProperties": true,
+     "description": "MCP extension settings declared by the app-server client.",
+     "type": [
+      "object",
+      "null"
+     ]
+    },
+    "mcpServerOpenaiFormElicitation": {
+     "description": "Legacy opt-in for the `openai/form` MCP extension.\n\nNew clients should declare `openai/form` in [`Self::extensions`].",
+     "type": "boolean"
+    },
+    "optOutNotificationMethods": {
+     "description": "Exact notification method names that should be suppressed for this connection (for example `thread/started`).",
+     "items": {
+      "type": "string"
+     },
+     "type": [
+      "array",
+      "null"
+     ]
+    },
+    "requestAttestation": {
+     "default": false,
+     "description": "Opt into `attestation/generate` requests for upstream `x-oai-attestation`.",
+     "type": "boolean"
+    }
+   },
+   "type": "object"
+  },
+  "InitializeParams": {
+   "$schema": "http://json-schema.org/draft-07/schema#",
+   "properties": {
+    "capabilities": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/InitializeCapabilities"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    },
+    "clientInfo": {
+     "$ref": "#/definitions/ClientInfo"
+    }
+   },
+   "required": [
+    "clientInfo"
+   ],
+   "title": "InitializeParams",
+   "type": "object"
+  },
+  "InitializeResponse": {
+   "$schema": "http://json-schema.org/draft-07/schema#",
+   "properties": {
+    "codexHome": {
+     "allOf": [
+      {
+       "$ref": "#/definitions/v2/AbsolutePathBuf"
+      }
+     ],
+     "description": "Absolute path to the server's $CODEX_HOME directory."
+    },
+    "platformFamily": {
+     "description": "Platform family for the running app-server target, for example `\"unix\"` or `\"windows\"`.",
+     "type": "string"
+    },
+    "platformOs": {
+     "description": "Operating system for the running app-server target, for example `\"macos\"`, `\"linux\"`, or `\"windows\"`.",
+     "type": "string"
+    },
+    "userAgent": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "codexHome",
+    "platformFamily",
+    "platformOs",
+    "userAgent"
+   ],
+   "title": "InitializeResponse",
+   "type": "object"
+  },
+  "ItemCompletedNotification": {
+   "$schema": "http://json-schema.org/draft-07/schema#",
+   "properties": {
+    "completedAtMs": {
+     "description": "Unix timestamp (in milliseconds) when this item lifecycle completed.",
+     "format": "int64",
+     "type": "integer"
+    },
+    "item": {
+     "$ref": "#/definitions/v2/ThreadItem"
+    },
+    "threadId": {
+     "type": "string"
+    },
+    "turnId": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "completedAtMs",
+    "item",
+    "threadId",
+    "turnId"
+   ],
+   "title": "ItemCompletedNotification",
+   "type": "object"
+  },
+  "ItemStartedNotification": {
+   "$schema": "http://json-schema.org/draft-07/schema#",
+   "properties": {
+    "item": {
+     "$ref": "#/definitions/v2/ThreadItem"
+    },
+    "startedAtMs": {
+     "description": "Unix timestamp (in milliseconds) when this item lifecycle started.",
+     "format": "int64",
+     "type": "integer"
+    },
+    "threadId": {
+     "type": "string"
+    },
+    "turnId": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "item",
+    "startedAtMs",
+    "threadId",
+    "turnId"
+   ],
+   "title": "ItemStartedNotification",
+   "type": "object"
+  },
+  "LegacyAppPathString": {
+   "type": "string"
+  },
+  "McpElicitationSchema": {
+   "additionalProperties": false,
+   "description": "Typed form schema for MCP `elicitation/create` requests.\n\nThis matches the `requestedSchema` shape from the MCP 2025-11-25 `ElicitRequestFormParams` schema.",
+   "properties": {
+    "$schema": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "properties": {
+     "additionalProperties": {
+      "$ref": "#/definitions/McpElicitationPrimitiveSchema"
+     },
+     "type": "object"
+    },
+    "required": {
+     "items": {
+      "type": "string"
+     },
+     "type": [
+      "array",
+      "null"
+     ]
+    },
+    "type": {
+     "$ref": "#/definitions/McpElicitationObjectType"
+    }
+   },
+   "required": [
+    "properties",
+    "type"
+   ],
+   "type": "object"
+  },
+  "McpServerElicitationAction": {
+   "enum": [
+    "accept",
+    "decline",
+    "cancel"
+   ],
+   "type": "string"
+  },
+  "McpServerElicitationRequestParams": {
+   "$schema": "http://json-schema.org/draft-07/schema#",
+   "oneOf": [
+    {
+     "description": "A device-authenticated approval; accepted responses contain the proof in `content`.",
+     "properties": {
+      "_meta": true,
+      "challenge": {
+       "type": "string"
+      },
+      "description": {
+       "type": "string"
+      },
+      "mode": {
+       "enum": [
+        "openai/userVerification"
+       ],
+       "type": "string"
+      },
+      "title": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "challenge",
+      "description",
+      "mode",
+      "title"
+     ],
+     "type": "object"
+    },
+    {
+     "properties": {
+      "_meta": true,
+      "message": {
+       "type": "string"
+      },
+      "mode": {
+       "enum": [
+        "form"
+       ],
+       "type": "string"
+      },
+      "requestedSchema": {
+       "$ref": "#/definitions/McpElicitationSchema"
+      }
+     },
+     "required": [
+      "message",
+      "mode",
+      "requestedSchema"
+     ],
+     "type": "object"
+    },
+    {
+     "properties": {
+      "_meta": true,
+      "message": {
+       "type": "string"
+      },
+      "mode": {
+       "enum": [
+        "openai/form"
+       ],
+       "type": "string"
+      },
+      "requestedSchema": true
+     },
+     "required": [
+      "message",
+      "mode",
+      "requestedSchema"
+     ],
+     "type": "object"
+    },
+    {
+     "properties": {
+      "_meta": true,
+      "message": {
+       "type": "string"
+      },
+      "mode": {
+       "enum": [
+        "openaiForm"
+       ],
+       "type": "string"
+      },
+      "requestedSchema": true
+     },
+     "required": [
+      "message",
+      "mode",
+      "requestedSchema"
+     ],
+     "type": "object"
+    },
+    {
+     "properties": {
+      "_meta": true,
+      "elicitationId": {
+       "type": "string"
+      },
+      "message": {
+       "type": "string"
+      },
+      "mode": {
+       "enum": [
+        "url"
+       ],
+       "type": "string"
+      },
+      "url": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "elicitationId",
+      "message",
+      "mode",
+      "url"
+     ],
+     "type": "object"
+    }
+   ],
+   "properties": {
+    "serverName": {
+     "type": "string"
+    },
+    "threadId": {
+     "type": "string"
+    },
+    "turnId": {
+     "description": "Active Codex turn when this elicitation was observed, if app-server could correlate one.\n\nThis is nullable because MCP models elicitation as a standalone server-to-client request identified by the MCP server request id. It may be triggered during a turn, but turn context is app-server correlation rather than part of the protocol identity of the elicitation itself.",
+     "type": [
+      "string",
+      "null"
+     ]
+    }
+   },
+   "required": [
+    "serverName",
+    "threadId"
+   ],
+   "title": "McpServerElicitationRequestParams",
+   "type": "object"
+  },
+  "McpServerElicitationRequestResponse": {
+   "$schema": "http://json-schema.org/draft-07/schema#",
+   "properties": {
+    "_meta": {
+     "description": "Optional client metadata for form-mode action handling."
+    },
+    "action": {
+     "$ref": "#/definitions/McpServerElicitationAction"
+    },
+    "content": {
+     "description": "Structured user input for accepted elicitations, mirroring RMCP `CreateElicitationResult`.\n\nThis is nullable because decline/cancel responses have no content."
+    }
+   },
+   "required": [
+    "action"
+   ],
+   "title": "McpServerElicitationRequestResponse",
+   "type": "object"
+  },
+  "MisalignmentErrorDetails": {
+   "properties": {
+    "detailedExplanation": {
+     "description": "A substantive localized explanation is required before offering continuation.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "errorType": {
+     "description": "Open-ended classification; clients must accept categories added by Responses.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "reviewTarget": {
+     "description": "Opaque server-issued block target. Presence alone does not enable target-based continuation.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "steer": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/v2/MisalignmentSteer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "Instruction to submit as the next turn's user input if continuation is confirmed."
+    }
+   },
+   "type": "object"
+  },
+  "MultiAgentMode": {
+   "description": "Controls the effective multi-agent delegation instructions for a turn. `custom` means the configured mode hint defines the policy instead of a built-in policy.",
+   "oneOf": [
+    {
+     "enum": [
+      "explicitRequestOnly",
+      "proactive"
+     ],
+     "type": "string"
+    },
+    {
+     "additionalProperties": false,
+     "properties": {
+      "custom": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "custom"
+     ],
+     "title": "CustomMultiAgentMode",
+     "type": "object"
+    }
+   ]
+  },
+  "NetworkAccess": {
+   "enum": [
+    "restricted",
+    "enabled"
+   ],
+   "type": "string"
+  },
+  "NetworkApprovalContext": {
+   "properties": {
+    "host": {
+     "type": "string"
+    },
+    "protocol": {
+     "$ref": "#/definitions/v2/NetworkApprovalProtocol"
+    }
+   },
+   "required": [
+    "host",
+    "protocol"
+   ],
+   "type": "object"
+  },
+  "NetworkApprovalProtocol": {
+   "enum": [
+    "http",
+    "https",
+    "socks5Tcp",
+    "socks5Udp"
+   ],
+   "type": "string"
+  },
+  "NetworkPolicyAmendment": {
+   "properties": {
+    "action": {
+     "$ref": "#/definitions/NetworkPolicyRuleAction"
+    },
+    "host": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "action",
+    "host"
+   ],
+   "type": "object"
+  },
+  "NetworkPolicyRuleAction": {
+   "enum": [
+    "allow",
+    "deny"
+   ],
+   "type": "string"
+  },
+  "PatchApplyStatus": {
+   "enum": [
+    "inProgress",
+    "completed",
+    "failed",
+    "declined"
+   ],
+   "type": "string"
+  },
+  "PatchChangeKind": {
+   "oneOf": [
+    {
+     "properties": {
+      "type": {
+       "enum": [
+        "add"
+       ],
+       "title": "AddPatchChangeKindType",
+       "type": "string"
+      }
+     },
+     "required": [
+      "type"
+     ],
+     "title": "AddPatchChangeKind",
+     "type": "object"
+    },
+    {
+     "properties": {
+      "type": {
+       "enum": [
+        "delete"
+       ],
+       "title": "DeletePatchChangeKindType",
+       "type": "string"
+      }
+     },
+     "required": [
+      "type"
+     ],
+     "title": "DeletePatchChangeKind",
+     "type": "object"
+    },
+    {
+     "properties": {
+      "move_path": {
+       "type": [
+        "string",
+        "null"
+       ]
+      },
+      "type": {
+       "enum": [
+        "update"
+       ],
+       "title": "UpdatePatchChangeKindType",
+       "type": "string"
+      }
+     },
+     "required": [
+      "type"
+     ],
+     "title": "UpdatePatchChangeKind",
+     "type": "object"
+    }
+   ]
+  },
+  "PermissionGrantScope": {
+   "enum": [
+    "turn",
+    "session"
+   ],
+   "type": "string"
+  },
+  "PermissionsRequestApprovalParams": {
+   "$schema": "http://json-schema.org/draft-07/schema#",
+   "properties": {
+    "cwd": {
+     "$ref": "#/definitions/v2/LegacyAppPathString"
+    },
+    "environmentId": {
+     "default": null,
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "itemId": {
+     "type": "string"
+    },
+    "permissions": {
+     "$ref": "#/definitions/v2/RequestPermissionProfile"
+    },
+    "reason": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "startedAtMs": {
+     "description": "Unix timestamp (in milliseconds) when this approval request started.",
+     "format": "int64",
+     "type": "integer"
+    },
+    "threadId": {
+     "type": "string"
+    },
+    "turnId": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "cwd",
+    "itemId",
+    "permissions",
+    "startedAtMs",
+    "threadId",
+    "turnId"
+   ],
+   "title": "PermissionsRequestApprovalParams",
+   "type": "object"
+  },
+  "PermissionsRequestApprovalResponse": {
+   "$schema": "http://json-schema.org/draft-07/schema#",
+   "properties": {
+    "permissions": {
+     "$ref": "#/definitions/GrantedPermissionProfile"
+    },
+    "scope": {
+     "allOf": [
+      {
+       "$ref": "#/definitions/PermissionGrantScope"
+      }
+     ],
+     "default": "turn"
+    },
+    "strictAutoReview": {
+     "description": "Review every subsequent command in this turn before normal sandboxed execution.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    }
+   },
+   "required": [
+    "permissions"
+   ],
+   "title": "PermissionsRequestApprovalResponse",
+   "type": "object"
+  },
+  "Personality": {
+   "description": "Deprecated: `friendly` and `pragmatic` no longer select a style.",
+   "enum": [
+    "none",
+    "friendly",
+    "pragmatic"
+   ],
+   "type": "string"
+  },
+  "ReasoningEffort": {
+   "description": "A non-empty reasoning effort value advertised by the model.",
+   "minLength": 1,
+   "type": "string"
+  },
+  "ReasoningSummary": {
+   "description": "A summary of the reasoning performed by the model. This can be useful for debugging and understanding the model's reasoning process. See https://platform.openai.com/docs/guides/reasoning?api-mode=responses#reasoning-summaries",
+   "oneOf": [
+    {
+     "enum": [
+      "auto",
+      "concise",
+      "detailed"
+     ],
+     "type": "string"
+    },
+    {
+     "description": "Option to disable reasoning summaries.",
+     "enum": [
+      "none"
+     ],
+     "type": "string"
+    }
+   ]
+  },
+  "RequestId": {
+   "$schema": "http://json-schema.org/draft-07/schema#",
+   "anyOf": [
+    {
+     "type": "string"
+    },
+    {
+     "format": "int64",
+     "type": "integer"
+    }
+   ],
+   "title": "RequestId"
+  },
+  "RequestPermissionProfile": {
+   "additionalProperties": false,
+   "properties": {
+    "fileSystem": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/v2/AdditionalFileSystemPermissions"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    },
+    "network": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/v2/AdditionalNetworkPermissions"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    }
+   },
+   "type": "object"
+  },
+  "SandboxMode": {
+   "enum": [
+    "read-only",
+    "workspace-write",
+    "danger-full-access"
+   ],
+   "type": "string"
+  },
+  "SandboxPolicy": {
+   "oneOf": [
+    {
+     "properties": {
+      "type": {
+       "enum": [
+        "dangerFullAccess"
+       ],
+       "title": "DangerFullAccessSandboxPolicyType",
+       "type": "string"
+      }
+     },
+     "required": [
+      "type"
+     ],
+     "title": "DangerFullAccessSandboxPolicy",
+     "type": "object"
+    },
+    {
+     "properties": {
+      "networkAccess": {
+       "default": false,
+       "type": "boolean"
+      },
+      "type": {
+       "enum": [
+        "readOnly"
+       ],
+       "title": "ReadOnlySandboxPolicyType",
+       "type": "string"
+      }
+     },
+     "required": [
+      "type"
+     ],
+     "title": "ReadOnlySandboxPolicy",
+     "type": "object"
+    },
+    {
+     "properties": {
+      "networkAccess": {
+       "allOf": [
+        {
+         "$ref": "#/definitions/v2/NetworkAccess"
+        }
+       ],
+       "default": "restricted"
+      },
+      "type": {
+       "enum": [
+        "externalSandbox"
+       ],
+       "title": "ExternalSandboxSandboxPolicyType",
+       "type": "string"
+      }
+     },
+     "required": [
+      "type"
+     ],
+     "title": "ExternalSandboxSandboxPolicy",
+     "type": "object"
+    },
+    {
+     "properties": {
+      "excludeSlashTmp": {
+       "default": false,
+       "type": "boolean"
+      },
+      "excludeTmpdirEnvVar": {
+       "default": false,
+       "type": "boolean"
+      },
+      "networkAccess": {
+       "default": false,
+       "type": "boolean"
+      },
+      "type": {
+       "enum": [
+        "workspaceWrite"
+       ],
+       "title": "WorkspaceWriteSandboxPolicyType",
+       "type": "string"
+      },
+      "writableRoots": {
+       "default": [],
+       "items": {
+        "$ref": "#/definitions/v2/AbsolutePathBuf"
+       },
+       "type": "array"
+      }
+     },
+     "required": [
+      "type"
+     ],
+     "title": "WorkspaceWriteSandboxPolicy",
+     "type": "object"
+    }
+   ]
+  },
+  "SelectedCapabilityRoot": {
+   "description": "A user-selected root that can expose one or more runtime capabilities.",
+   "properties": {
+    "id": {
+     "description": "Stable identifier supplied by the capability selection platform.",
+     "type": "string"
+    },
+    "location": {
+     "allOf": [
+      {
+       "$ref": "#/definitions/v2/CapabilityRootLocation"
+      }
+     ],
+     "description": "Where the selected root can be resolved."
+    }
+   },
+   "required": [
+    "id",
+    "location"
+   ],
+   "type": "object"
+  },
+  "ServerRequest": {
+   "$schema": "http://json-schema.org/draft-07/schema#",
+   "description": "Request initiated from the server and sent to the client.",
+   "oneOf": [
+    {
+     "description": "NEW APIs Sent when approval is requested for a specific command execution. This request is used for Turns started via turn/start.",
+     "properties": {
+      "id": {
+       "$ref": "#/definitions/v2/RequestId"
+      },
+      "method": {
+       "enum": [
+        "item/commandExecution/requestApproval"
+       ],
+       "title": "Item/commandExecution/requestApprovalRequestMethod",
+       "type": "string"
+      },
+      "params": {
+       "$ref": "#/definitions/CommandExecutionRequestApprovalParams"
+      }
+     },
+     "required": [
+      "id",
+      "method",
+      "params"
+     ],
+     "title": "Item/commandExecution/requestApprovalRequest",
+     "type": "object"
+    },
+    {
+     "description": "Sent when approval is requested for a specific file change. This request is used for Turns started via turn/start.",
+     "properties": {
+      "id": {
+       "$ref": "#/definitions/v2/RequestId"
+      },
+      "method": {
+       "enum": [
+        "item/fileChange/requestApproval"
+       ],
+       "title": "Item/fileChange/requestApprovalRequestMethod",
+       "type": "string"
+      },
+      "params": {
+       "$ref": "#/definitions/FileChangeRequestApprovalParams"
+      }
+     },
+     "required": [
+      "id",
+      "method",
+      "params"
+     ],
+     "title": "Item/fileChange/requestApprovalRequest",
+     "type": "object"
+    },
+    {
+     "description": "EXPERIMENTAL - Request input from the user for a tool call.",
+     "properties": {
+      "id": {
+       "$ref": "#/definitions/v2/RequestId"
+      },
+      "method": {
+       "enum": [
+        "item/tool/requestUserInput"
+       ],
+       "title": "Item/tool/requestUserInputRequestMethod",
+       "type": "string"
+      },
+      "params": {
+       "$ref": "#/definitions/ToolRequestUserInputParams"
+      }
+     },
+     "required": [
+      "id",
+      "method",
+      "params"
+     ],
+     "title": "Item/tool/requestUserInputRequest",
+     "type": "object"
+    },
+    {
+     "description": "Request input for an MCP server elicitation.",
+     "properties": {
+      "id": {
+       "$ref": "#/definitions/v2/RequestId"
+      },
+      "method": {
+       "enum": [
+        "mcpServer/elicitation/request"
+       ],
+       "title": "McpServer/elicitation/requestRequestMethod",
+       "type": "string"
+      },
+      "params": {
+       "$ref": "#/definitions/McpServerElicitationRequestParams"
+      }
+     },
+     "required": [
+      "id",
+      "method",
+      "params"
+     ],
+     "title": "McpServer/elicitation/requestRequest",
+     "type": "object"
+    },
+    {
+     "description": "Request approval for additional permissions from the user.",
+     "properties": {
+      "id": {
+       "$ref": "#/definitions/v2/RequestId"
+      },
+      "method": {
+       "enum": [
+        "item/permissions/requestApproval"
+       ],
+       "title": "Item/permissions/requestApprovalRequestMethod",
+       "type": "string"
+      },
+      "params": {
+       "$ref": "#/definitions/PermissionsRequestApprovalParams"
+      }
+     },
+     "required": [
+      "id",
+      "method",
+      "params"
+     ],
+     "title": "Item/permissions/requestApprovalRequest",
+     "type": "object"
+    },
+    {
+     "description": "Execute a dynamic tool call on the client.",
+     "properties": {
+      "id": {
+       "$ref": "#/definitions/v2/RequestId"
+      },
+      "method": {
+       "enum": [
+        "item/tool/call"
+       ],
+       "title": "Item/tool/callRequestMethod",
+       "type": "string"
+      },
+      "params": {
+       "$ref": "#/definitions/DynamicToolCallParams"
+      }
+     },
+     "required": [
+      "id",
+      "method",
+      "params"
+     ],
+     "title": "Item/tool/callRequest",
+     "type": "object"
+    },
+    {
+     "properties": {
+      "id": {
+       "$ref": "#/definitions/v2/RequestId"
+      },
+      "method": {
+       "enum": [
+        "account/chatgptAuthTokens/refresh"
+       ],
+       "title": "Account/chatgptAuthTokens/refreshRequestMethod",
+       "type": "string"
+      },
+      "params": {
+       "$ref": "#/definitions/ChatgptAuthTokensRefreshParams"
+      }
+     },
+     "required": [
+      "id",
+      "method",
+      "params"
+     ],
+     "title": "Account/chatgptAuthTokens/refreshRequest",
+     "type": "object"
+    },
+    {
+     "description": "Generate a fresh upstream attestation result on demand.",
+     "properties": {
+      "id": {
+       "$ref": "#/definitions/v2/RequestId"
+      },
+      "method": {
+       "enum": [
+        "attestation/generate"
+       ],
+       "title": "Attestation/generateRequestMethod",
+       "type": "string"
+      },
+      "params": {
+       "$ref": "#/definitions/AttestationGenerateParams"
+      }
+     },
+     "required": [
+      "id",
+      "method",
+      "params"
+     ],
+     "title": "Attestation/generateRequest",
+     "type": "object"
+    },
+    {
+     "description": "Read the current time from an external clock owned by the client.",
+     "properties": {
+      "id": {
+       "$ref": "#/definitions/v2/RequestId"
+      },
+      "method": {
+       "enum": [
+        "currentTime/read"
+       ],
+       "title": "CurrentTime/readRequestMethod",
+       "type": "string"
+      },
+      "params": {
+       "$ref": "#/definitions/CurrentTimeReadParams"
+      }
+     },
+     "required": [
+      "id",
+      "method",
+      "params"
+     ],
+     "title": "CurrentTime/readRequest",
+     "type": "object"
+    },
+    {
+     "description": "DEPRECATED APIs below Request to approve a patch. This request is used for Turns started via the legacy APIs (i.e. SendUserTurn, SendUserMessage).",
+     "properties": {
+      "id": {
+       "$ref": "#/definitions/v2/RequestId"
+      },
+      "method": {
+       "enum": [
+        "applyPatchApproval"
+       ],
+       "title": "ApplyPatchApprovalRequestMethod",
+       "type": "string"
+      },
+      "params": {
+       "$ref": "#/definitions/ApplyPatchApprovalParams"
+      }
+     },
+     "required": [
+      "id",
+      "method",
+      "params"
+     ],
+     "title": "ApplyPatchApprovalRequest",
+     "type": "object"
+    },
+    {
+     "description": "Request to exec a command. This request is used for Turns started via the legacy APIs (i.e. SendUserTurn, SendUserMessage).",
+     "properties": {
+      "id": {
+       "$ref": "#/definitions/v2/RequestId"
+      },
+      "method": {
+       "enum": [
+        "execCommandApproval"
+       ],
+       "title": "ExecCommandApprovalRequestMethod",
+       "type": "string"
+      },
+      "params": {
+       "$ref": "#/definitions/ExecCommandApprovalParams"
+      }
+     },
+     "required": [
+      "id",
+      "method",
+      "params"
+     ],
+     "title": "ExecCommandApprovalRequest",
+     "type": "object"
+    }
+   ],
+   "title": "ServerRequest"
+  },
+  "ServerRequestResolvedNotification": {
+   "$schema": "http://json-schema.org/draft-07/schema#",
+   "properties": {
+    "requestId": {
+     "$ref": "#/definitions/v2/RequestId"
+    },
+    "threadId": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "requestId",
+    "threadId"
+   ],
+   "title": "ServerRequestResolvedNotification",
+   "type": "object"
+  },
+  "ThreadActiveFlag": {
+   "enum": [
+    "waitingOnApproval",
+    "waitingOnUserInput"
+   ],
+   "type": "string"
+  },
+  "ThreadHistoryMode": {
+   "enum": [
+    "legacy",
+    "paginated"
+   ],
+   "type": "string"
+  },
+  "ThreadResumeInitialTurnsPageParams": {
+   "properties": {
+    "itemsView": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/v2/TurnItemsView"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "How much item detail to include for each returned turn; defaults to summary."
+    },
+    "limit": {
+     "description": "Optional turn page size.",
+     "format": "uint32",
+     "minimum": 0.0,
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "sortDirection": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/v2/SortDirection"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "Optional turn pagination direction; defaults to descending."
+    }
+   },
+   "type": "object"
+  },
+  "ThreadResumeParams": {
+   "$schema": "http://json-schema.org/draft-07/schema#",
+   "description": "There are three ways to resume a thread: 1. By thread_id: load the thread from disk by thread_id and resume it. 2. By history: instantiate the thread from memory and resume it. 3. By path: load the thread from disk by path and resume it.\n\nFor non-running threads, the precedence is: history > non-empty path > thread_id. If using history or a non-empty path for a non-running thread, the thread_id param will be ignored.\n\nIf thread_id identifies a running thread, app-server rejoins that thread and treats a non-empty path as a consistency check against the active rollout path. Empty string path values are treated as absent.\n\nPrefer using thread_id whenever possible.",
+   "properties": {
+    "approvalPolicy": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/v2/AskForApproval"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    },
+    "approvalsReviewer": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/v2/ApprovalsReviewer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "Override where approval requests are routed for review on this thread and subsequent turns."
+    },
+    "baseInstructions": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "config": {
+     "additionalProperties": true,
+     "type": [
+      "object",
+      "null"
+     ]
+    },
+    "cwd": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "developerInstructions": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "excludeTurns": {
+     "description": "When true, return only thread metadata and live-resume state without populating `thread.turns`. This is useful when the client plans to call `thread/turns/list` immediately after resuming. Full-history hydration is deprecated for paginated threads; use this with `thread/turns/list` and `thread/items/list` instead.",
+     "type": "boolean"
+    },
+    "history": {
+     "description": "[UNSTABLE] FOR CODEX CLOUD - DO NOT USE. If specified, the thread will be resumed with the provided history instead of loaded from disk.",
+     "items": {
+      "$ref": "#/definitions/v2/ResponseItem"
+     },
+     "type": [
+      "array",
+      "null"
+     ]
+    },
+    "initialTurnsPage": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/v2/ThreadResumeInitialTurnsPageParams"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "When present, include a `thread/turns/list` page in the resume response so clients can bootstrap recent turns without a second request."
+    },
+    "model": {
+     "description": "Configuration overrides for the resumed thread, if any.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "modelProvider": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "path": {
+     "default": null,
+     "description": "[UNSTABLE] Specify the rollout path to resume from. If specified for a non-running thread, the thread_id param will be ignored. If thread_id identifies a running thread, the path must match the active rollout path.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "permissions": {
+     "description": "Named profile id for the resumed thread. Cannot be combined with `sandbox`.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "personality": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/v2/Personality"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "@deprecated `friendly` and `pragmatic` no longer select a style. Changing this does not rewrite the thread's existing instructions."
+    },
+    "runtimeWorkspaceRoots": {
+     "description": "Replace the thread's runtime workspace roots. Paths must be absolute.",
+     "items": {
+      "$ref": "#/definitions/v2/AbsolutePathBuf"
+     },
+     "type": [
+      "array",
+      "null"
+     ]
+    },
+    "sandbox": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/v2/SandboxMode"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    },
+    "serviceTier": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "threadId": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "threadId"
+   ],
+   "title": "ThreadResumeParams",
+   "type": "object"
+  },
+  "ThreadResumeResponse": {
+   "$schema": "http://json-schema.org/draft-07/schema#",
+   "properties": {
+    "activePermissionProfile": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/v2/ActivePermissionProfile"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Named or implicit built-in profile that produced the active permissions, when known."
+    },
+    "approvalPolicy": {
+     "$ref": "#/definitions/v2/AskForApproval"
+    },
+    "approvalsReviewer": {
+     "allOf": [
+      {
+       "$ref": "#/definitions/v2/ApprovalsReviewer"
+      }
+     ],
+     "description": "Reviewer currently used for approval requests on this thread."
+    },
+    "collaborationMode": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/v2/CollaborationMode"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "Effective collaboration mode. Absent when resuming from an older server."
+    },
+    "cwd": {
+     "$ref": "#/definitions/v2/AbsolutePathBuf"
+    },
+    "disabledPluginIds": {
+     "default": [],
+     "description": "Saved list of disabled plugin IDs. Does not yet filter plugin capabilities.",
+     "items": {
+      "type": "string"
+     },
+     "type": "array"
+    },
+    "initialTurnsPage": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/v2/TurnsPage"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "`thread/turns/list` page returned when requested by `initialTurnsPage`."
+    },
+    "instructionSources": {
+     "default": [],
+     "description": "Environment-native paths to instruction source files currently loaded for this thread.",
+     "items": {
+      "$ref": "#/definitions/v2/LegacyAppPathString"
+     },
+     "type": "array"
+    },
+    "itemsBackwardsCursor": {
+     "default": null,
+     "description": "Opaque cursor for hydrating paginated items backwards.\n\nPass this as `cursor` to `thread/items/list` with `sortDirection: \"desc\"`. The first page includes the item identified by the cursor.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "model": {
+     "type": "string"
+    },
+    "modelProvider": {
+     "type": "string"
+    },
+    "multiAgentMode": {
+     "allOf": [
+      {
+       "$ref": "#/definitions/v2/MultiAgentMode"
+      }
+     ],
+     "default": "explicitRequestOnly",
+     "description": "@deprecated Always `explicitRequestOnly`. Use `reasoningEffort` for Ultra behavior."
+    },
+    "reasoningEffort": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/v2/ReasoningEffort"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    },
+    "runtimeWorkspaceRoots": {
+     "default": [],
+     "description": "Thread-scoped runtime workspace roots used to materialize `:workspace_roots`.",
+     "items": {
+      "$ref": "#/definitions/v2/AbsolutePathBuf"
+     },
+     "type": "array"
+    },
+    "sandbox": {
+     "allOf": [
+      {
+       "$ref": "#/definitions/v2/SandboxPolicy"
+      }
+     ],
+     "description": "Legacy sandbox policy retained for compatibility. Experimental clients should prefer `activePermissionProfile` for profile provenance."
+    },
+    "serviceTier": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "thread": {
+     "$ref": "#/definitions/v2/Thread"
+    },
+    "turnsBackwardsCursor": {
+     "default": null,
+     "description": "Opaque cursor for hydrating paginated turns backwards.\n\nPass this as `cursor` to `thread/turns/list` with `sortDirection: \"desc\"`. The first page includes the turn identified by the cursor.",
+     "type": [
+      "string",
+      "null"
+     ]
+    }
+   },
+   "required": [
+    "approvalPolicy",
+    "approvalsReviewer",
+    "cwd",
+    "model",
+    "modelProvider",
+    "sandbox",
+    "thread"
+   ],
+   "title": "ThreadResumeResponse",
+   "type": "object"
+  },
+  "ThreadSource": {
+   "type": "string"
+  },
+  "ThreadStartParams": {
+   "$schema": "http://json-schema.org/draft-07/schema#",
+   "properties": {
+    "allowProviderModelFallback": {
+     "description": "Allow a provider with an authoritative static model catalog to replace an unavailable requested model with its default.",
+     "type": "boolean"
+    },
+    "approvalPolicy": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/v2/AskForApproval"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    },
+    "approvalsReviewer": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/v2/ApprovalsReviewer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "Override where approval requests are routed for review on this thread and subsequent turns."
+    },
+    "baseInstructions": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "config": {
+     "additionalProperties": true,
+     "type": [
+      "object",
+      "null"
+     ]
+    },
+    "cwd": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "daybreakEnabled": {
+     "description": "Initial Daybreak choice for this persistent thread. Omitted or null leaves it unset. This does not select a turn's `cyberAccessProgram` or grant access. Not supported for ephemeral threads.",
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
+    "developerInstructions": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "dynamicTools": {
+     "default": null,
+     "items": {
+      "$ref": "#/definitions/v2/DynamicToolSpec"
+     },
+     "type": [
+      "array",
+      "null"
+     ]
+    },
+    "environments": {
+     "description": "Optional sticky environments for this thread.\n\nOmitted selects the default environment when environment access is enabled. Empty disables environment access for turns that do not provide a turn override. Non-empty selects the first environment as the current turn environment.",
+     "items": {
+      "$ref": "#/definitions/v2/TurnEnvironmentParams"
+     },
+     "type": [
+      "array",
+      "null"
+     ]
+    },
+    "ephemeral": {
+     "type": [
+      "boolean",
+      "null"
+     ]
+    },
+    "experimentalRawEvents": {
+     "description": "If true, opt into emitting raw Responses API items on the event stream. This is for internal use only (e.g. Codex Cloud).",
+     "type": "boolean"
+    },
+    "historyMode": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/v2/ThreadHistoryMode"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "Persisted thread history contract to use for this new thread."
+    },
+    "mockExperimentalField": {
+     "description": "Test-only experimental field used to validate experimental gating and schema filtering behavior in a stable way.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "model": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "modelProvider": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "multiAgentMode": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/v2/MultiAgentMode"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "@deprecated Ignored. Use Ultra reasoning effort for proactive multi-agent behavior."
+    },
+    "permissions": {
+     "description": "Named profile id for this thread. Cannot be combined with `sandbox`.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "personality": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/v2/Personality"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "@deprecated `friendly` and `pragmatic` no longer select a style."
+    },
+    "projectId": {
+     "description": "Optional project identity for this new thread. Durable threads persist the assignment; ephemeral threads expose it only in live responses.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "runtimeWorkspaceRoots": {
+     "description": "Replace the thread's runtime workspace roots. Paths must be absolute.",
+     "items": {
+      "$ref": "#/definitions/v2/AbsolutePathBuf"
+     },
+     "type": [
+      "array",
+      "null"
+     ]
+    },
+    "sandbox": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/v2/SandboxMode"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    },
+    "selectedCapabilityRoots": {
+     "description": "Capability roots selected for this thread by the hosting platform.",
+     "items": {
+      "$ref": "#/definitions/v2/SelectedCapabilityRoot"
+     },
+     "type": [
+      "array",
+      "null"
+     ]
+    },
+    "serviceName": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "serviceTier": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "sessionStartSource": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/v2/ThreadStartSource"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    },
+    "threadSource": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/v2/ThreadSource"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "Optional client-supplied analytics source classification for this thread."
+    }
+   },
+   "title": "ThreadStartParams",
+   "type": "object"
+  },
+  "ThreadStartResponse": {
+   "$schema": "http://json-schema.org/draft-07/schema#",
+   "properties": {
+    "activePermissionProfile": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/v2/ActivePermissionProfile"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Named or implicit built-in profile that produced the active permissions, when known."
+    },
+    "approvalPolicy": {
+     "$ref": "#/definitions/v2/AskForApproval"
+    },
+    "approvalsReviewer": {
+     "allOf": [
+      {
+       "$ref": "#/definitions/v2/ApprovalsReviewer"
+      }
+     ],
+     "description": "Reviewer currently used for approval requests on this thread."
+    },
+    "cwd": {
+     "$ref": "#/definitions/v2/AbsolutePathBuf"
+    },
+    "disabledPluginIds": {
+     "default": [],
+     "description": "Saved list of disabled plugin IDs. Does not yet filter plugin capabilities.",
+     "items": {
+      "type": "string"
+     },
+     "type": "array"
+    },
+    "instructionSources": {
+     "default": [],
+     "description": "Environment-native paths to instruction source files currently loaded for this thread.",
+     "items": {
+      "$ref": "#/definitions/v2/LegacyAppPathString"
+     },
+     "type": "array"
+    },
+    "model": {
+     "type": "string"
+    },
+    "modelProvider": {
+     "type": "string"
+    },
+    "multiAgentMode": {
+     "allOf": [
+      {
+       "$ref": "#/definitions/v2/MultiAgentMode"
+      }
+     ],
+     "default": "explicitRequestOnly",
+     "description": "@deprecated Always `explicitRequestOnly`. Use `reasoningEffort` for Ultra behavior."
+    },
+    "reasoningEffort": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/v2/ReasoningEffort"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    },
+    "runtimeWorkspaceRoots": {
+     "default": [],
+     "description": "Thread-scoped runtime workspace roots used to materialize `:workspace_roots`.",
+     "items": {
+      "$ref": "#/definitions/v2/AbsolutePathBuf"
+     },
+     "type": "array"
+    },
+    "sandbox": {
+     "allOf": [
+      {
+       "$ref": "#/definitions/v2/SandboxPolicy"
+      }
+     ],
+     "description": "Legacy sandbox policy retained for compatibility. Experimental clients should prefer `activePermissionProfile` for profile provenance."
+    },
+    "serviceTier": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "thread": {
+     "$ref": "#/definitions/v2/Thread"
+    }
+   },
+   "required": [
+    "approvalPolicy",
+    "approvalsReviewer",
+    "cwd",
+    "model",
+    "modelProvider",
+    "sandbox",
+    "thread"
+   ],
+   "title": "ThreadStartResponse",
+   "type": "object"
+  },
+  "ThreadStartSource": {
+   "enum": [
+    "startup",
+    "clear"
+   ],
+   "type": "string"
+  },
+  "ThreadStatus": {
+   "oneOf": [
+    {
+     "properties": {
+      "type": {
+       "enum": [
+        "notLoaded"
+       ],
+       "title": "NotLoadedThreadStatusType",
+       "type": "string"
+      }
+     },
+     "required": [
+      "type"
+     ],
+     "title": "NotLoadedThreadStatus",
+     "type": "object"
+    },
+    {
+     "properties": {
+      "type": {
+       "enum": [
+        "idle"
+       ],
+       "title": "IdleThreadStatusType",
+       "type": "string"
+      }
+     },
+     "required": [
+      "type"
+     ],
+     "title": "IdleThreadStatus",
+     "type": "object"
+    },
+    {
+     "properties": {
+      "type": {
+       "enum": [
+        "systemError"
+       ],
+       "title": "SystemErrorThreadStatusType",
+       "type": "string"
+      }
+     },
+     "required": [
+      "type"
+     ],
+     "title": "SystemErrorThreadStatus",
+     "type": "object"
+    },
+    {
+     "properties": {
+      "activeFlags": {
+       "items": {
+        "$ref": "#/definitions/v2/ThreadActiveFlag"
+       },
+       "type": "array"
+      },
+      "type": {
+       "enum": [
+        "active"
+       ],
+       "title": "ActiveThreadStatusType",
+       "type": "string"
+      }
+     },
+     "required": [
+      "activeFlags",
+      "type"
+     ],
+     "title": "ActiveThreadStatus",
+     "type": "object"
+    }
+   ]
+  },
+  "ThreadStatusChangedNotification": {
+   "$schema": "http://json-schema.org/draft-07/schema#",
+   "properties": {
+    "status": {
+     "$ref": "#/definitions/v2/ThreadStatus"
+    },
+    "threadId": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "status",
+    "threadId"
+   ],
+   "title": "ThreadStatusChangedNotification",
+   "type": "object"
+  },
+  "ToolRequestUserInputAnswer": {
+   "description": "EXPERIMENTAL. Captures a user's answer to a request_user_input question.",
+   "properties": {
+    "answers": {
+     "items": {
+      "type": "string"
+     },
+     "type": "array"
+    }
+   },
+   "required": [
+    "answers"
+   ],
+   "type": "object"
+  },
+  "ToolRequestUserInputParams": {
+   "$schema": "http://json-schema.org/draft-07/schema#",
+   "description": "EXPERIMENTAL. Params sent with a request_user_input event.",
+   "properties": {
+    "autoResolutionMs": {
+     "default": null,
+     "description": "@deprecated Use `isBlocking` to decide whether the request should block.",
+     "format": "uint64",
+     "minimum": 0.0,
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "isBlocking": {
+     "type": "boolean"
+    },
+    "itemId": {
+     "type": "string"
+    },
+    "questions": {
+     "items": {
+      "$ref": "#/definitions/ToolRequestUserInputQuestion"
+     },
+     "type": "array"
+    },
+    "threadId": {
+     "type": "string"
+    },
+    "turnId": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "isBlocking",
+    "itemId",
+    "questions",
+    "threadId",
+    "turnId"
+   ],
+   "title": "ToolRequestUserInputParams",
+   "type": "object"
+  },
+  "ToolRequestUserInputQuestion": {
+   "description": "EXPERIMENTAL. Represents one request_user_input question and its required options.",
+   "properties": {
+    "header": {
+     "type": "string"
+    },
+    "id": {
+     "type": "string"
+    },
+    "isOther": {
+     "default": false,
+     "type": "boolean"
+    },
+    "isSecret": {
+     "default": false,
+     "type": "boolean"
+    },
+    "options": {
+     "items": {
+      "$ref": "#/definitions/ToolRequestUserInputOption"
+     },
+     "type": [
+      "array",
+      "null"
+     ]
+    },
+    "question": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "header",
+    "id",
+    "question"
+   ],
+   "type": "object"
+  },
+  "ToolRequestUserInputResponse": {
+   "$schema": "http://json-schema.org/draft-07/schema#",
+   "description": "EXPERIMENTAL. Response payload mapping question ids to answers.",
+   "properties": {
+    "answers": {
+     "additionalProperties": {
+      "$ref": "#/definitions/ToolRequestUserInputAnswer"
+     },
+     "type": "object"
+    }
+   },
+   "required": [
+    "answers"
+   ],
+   "title": "ToolRequestUserInputResponse",
+   "type": "object"
+  },
+  "Turn": {
+   "properties": {
+    "completedAt": {
+     "description": "Unix timestamp (in seconds) when the turn completed.",
+     "format": "int64",
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "durationMs": {
+     "description": "Duration between turn start and completion in milliseconds, if known.",
+     "format": "int64",
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "error": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/v2/TurnError"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "Error associated with a failed or interrupted turn."
+    },
+    "id": {
+     "description": "Identifier for this turn. Codex-generated turn IDs are UUIDv7.",
+     "type": "string"
+    },
+    "items": {
+     "description": "Thread items currently included in this turn payload.",
+     "items": {
+      "$ref": "#/definitions/v2/ThreadItem"
+     },
+     "type": "array"
+    },
+    "itemsView": {
+     "allOf": [
+      {
+       "$ref": "#/definitions/v2/TurnItemsView"
+      }
+     ],
+     "default": "full",
+     "description": "Describes how much of `items` has been loaded for this turn."
+    },
+    "rootTurnId": {
+     "description": "ID of the first turn in the chain of work that led to this turn. Pass this as `rootTurnId` when starting work on behalf of this turn. May be null in older history or a `review/start` response.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "startedAt": {
+     "description": "Unix timestamp (in seconds) when the turn started.",
+     "format": "int64",
+     "type": [
+      "integer",
+      "null"
+     ]
+    },
+    "status": {
+     "$ref": "#/definitions/v2/TurnStatus"
+    }
+   },
+   "required": [
+    "id",
+    "items",
+    "status"
+   ],
+   "type": "object"
+  },
+  "TurnCompletedNotification": {
+   "$schema": "http://json-schema.org/draft-07/schema#",
+   "properties": {
+    "threadId": {
+     "type": "string"
+    },
+    "turn": {
+     "$ref": "#/definitions/v2/Turn"
+    }
+   },
+   "required": [
+    "threadId",
+    "turn"
+   ],
+   "title": "TurnCompletedNotification",
+   "type": "object"
+  },
+  "TurnEnvironmentParams": {
+   "properties": {
+    "cwd": {
+     "$ref": "#/definitions/v2/LegacyAppPathString"
+    },
+    "environmentId": {
+     "type": "string"
+    },
+    "runtimeWorkspaceRoots": {
+     "description": "Environment-native runtime workspace roots. Omitted defaults to `cwd`.",
+     "items": {
+      "$ref": "#/definitions/v2/LegacyAppPathString"
+     },
+     "type": [
+      "array",
+      "null"
+     ]
+    }
+   },
+   "required": [
+    "cwd",
+    "environmentId"
+   ],
+   "type": "object"
+  },
+  "TurnError": {
+   "properties": {
+    "additionalDetails": {
+     "default": null,
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "codexErrorInfo": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/v2/CodexErrorInfo"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    },
+    "message": {
+     "type": "string"
+    },
+    "misalignment": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/v2/MisalignmentErrorDetails"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "description": "Optional public explanation and continuation instruction for a misalignment block."
+    }
+   },
+   "required": [
+    "message"
+   ],
+   "type": "object"
+  },
+  "TurnInterruptParams": {
+   "$schema": "http://json-schema.org/draft-07/schema#",
+   "properties": {
+    "threadId": {
+     "type": "string"
+    },
+    "turnId": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "threadId",
+    "turnId"
+   ],
+   "title": "TurnInterruptParams",
+   "type": "object"
+  },
+  "TurnInterruptResponse": {
+   "$schema": "http://json-schema.org/draft-07/schema#",
+   "title": "TurnInterruptResponse",
+   "type": "object"
+  },
+  "TurnStartParams": {
+   "$schema": "http://json-schema.org/draft-07/schema#",
+   "properties": {
+    "additionalContext": {
+     "additionalProperties": {
+      "$ref": "#/definitions/v2/AdditionalContextEntry"
+     },
+     "description": "Optional client-provided context fragments keyed by an opaque source identifier.",
+     "type": [
+      "object",
+      "null"
+     ]
+    },
+    "approvalPolicy": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/v2/AskForApproval"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "Override the approval policy for this turn and subsequent turns."
+    },
+    "approvalsReviewer": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/v2/ApprovalsReviewer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "Override where approval requests are routed for review on this turn and subsequent turns."
+    },
+    "clientUserMessageId": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "collaborationMode": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/v2/CollaborationMode"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "EXPERIMENTAL - Set a pre-set collaboration mode. Takes precedence over model, reasoning_effort, and developer instructions if set.\n\nFor `collaboration_mode.settings.developer_instructions`, `null` means \"use the built-in instructions for the selected mode\"."
+    },
+    "cwd": {
+     "description": "Override the working directory for this turn and subsequent turns.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "cyberAccessProgram": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/v2/CyberAccessProgram"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "EXPERIMENTAL - Request an authorized cyber program for this turn. Omission preserves automatic behavior. This does not grant access."
+    },
+    "disabledPluginIds": {
+     "description": "Replace this thread's disabled plugin IDs. Omitted/null preserves the list; [] clears it.",
+     "items": {
+      "type": "string"
+     },
+     "type": [
+      "array",
+      "null"
+     ]
+    },
+    "effort": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/v2/ReasoningEffort"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "Override the reasoning effort for this turn and subsequent turns."
+    },
+    "environments": {
+     "description": "Optional environments for this turn and subsequent turns.\n\nOmitted uses the thread sticky environments. Empty disables environment access for this turn. Non-empty selects the first environment as the current turn environment for this turn.",
+     "items": {
+      "$ref": "#/definitions/v2/TurnEnvironmentParams"
+     },
+     "type": [
+      "array",
+      "null"
+     ]
+    },
+    "input": {
+     "items": {
+      "$ref": "#/definitions/v2/UserInput"
+     },
+     "type": "array"
+    },
+    "model": {
+     "description": "Override the model for this turn and subsequent turns.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "multiAgentMode": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/v2/MultiAgentMode"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "@deprecated Ignored. Use `effort: \"ultra\"` for proactive multi-agent behavior."
+    },
+    "outputSchema": {
+     "description": "Optional JSON Schema used to constrain the final assistant message for this turn."
+    },
+    "parentTurnId": {
+     "description": "ID of the turn that caused this new turn to start.\n\nSet this when starting work on behalf of another turn, such as delegated work in a different thread. Leave unset for work started directly by the user. Ignored when this request adds input to an active turn.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "permissions": {
+     "description": "Select a named permissions profile id for this turn and subsequent turns. Cannot be combined with `sandboxPolicy`.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "personality": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/v2/Personality"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "@deprecated `friendly` and `pragmatic` no longer select a style. Changing this does not rewrite the thread's existing instructions."
+    },
+    "responsesapiClientMetadata": {
+     "additionalProperties": {
+      "type": "string"
+     },
+     "description": "Optional metadata to enrich Codex's ResponsesAPI turn metadata.\n\nEntries are flattened into the JSON string sent as `client_metadata[\"x-codex-turn-metadata\"]` on ResponsesAPI HTTP and websocket requests.\n\nThey are not sent as top-level ResponsesAPI `client_metadata` keys, and reserved keys such as `session_id`, `thread_id`, `turn_id`, and `window_id` cannot be overridden.",
+     "type": [
+      "object",
+      "null"
+     ]
+    },
+    "rootTurnId": {
+     "description": "ID of the first turn in the chain of work that led to this new turn.\n\nWhen setting `parentTurnId`, set this to the parent turn's `rootTurnId` when known. This keeps descendant work attributed to the original turn. If omitted, the new turn becomes its own root. Ignored when this request adds input to an active turn.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "runtimeWorkspaceRoots": {
+     "description": "Replace the thread's runtime workspace roots for this turn and subsequent turns. Paths must be absolute.",
+     "items": {
+      "$ref": "#/definitions/v2/AbsolutePathBuf"
+     },
+     "type": [
+      "array",
+      "null"
+     ]
+    },
+    "sandboxPolicy": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/v2/SandboxPolicy"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "Override the sandbox policy for this turn and subsequent turns."
+    },
+    "serviceTier": {
+     "description": "Override the service tier for this turn and subsequent turns.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "serviceTierForTurn": {
+     "description": "Override the service tier only when this request starts a new turn. Use \"default\" for standard speed. Omitted or null inherits the thread's tier. Does not change the thread's tier or a turn being steered.",
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "summary": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/v2/ReasoningSummary"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "description": "Override the reasoning summary for this turn and subsequent turns."
+    },
+    "threadId": {
+     "type": "string"
+    },
+    "toolOutput": {
+     "anyOf": [
+      {
+       "$ref": "#/definitions/v2/TurnToolOutput"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    },
+    "turnTrigger": {
+     "description": "Optional source classification for the caller that starts this turn. Ignored when this request steers an already-active turn.",
+     "type": [
+      "string",
+      "null"
+     ]
+    }
+   },
+   "required": [
+    "input",
+    "threadId"
+   ],
+   "title": "TurnStartParams",
+   "type": "object"
+  },
+  "TurnStartResponse": {
+   "$schema": "http://json-schema.org/draft-07/schema#",
+   "properties": {
+    "turn": {
+     "$ref": "#/definitions/v2/Turn"
+    }
+   },
+   "required": [
+    "turn"
+   ],
+   "title": "TurnStartResponse",
+   "type": "object"
+  },
+  "TurnStartedNotification": {
+   "$schema": "http://json-schema.org/draft-07/schema#",
+   "properties": {
+    "threadId": {
+     "type": "string"
+    },
+    "turn": {
+     "$ref": "#/definitions/v2/Turn"
+    }
+   },
+   "required": [
+    "threadId",
+    "turn"
+   ],
+   "title": "TurnStartedNotification",
+   "type": "object"
+  },
+  "TurnStatus": {
+   "enum": [
+    "completed",
+    "interrupted",
+    "failed",
+    "inProgress"
+   ],
+   "type": "string"
+  },
+  "TurnToolOutput": {
+   "properties": {
+    "name": {
+     "type": "string"
+    },
+    "namespace": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "output": {
+     "$ref": "#/definitions/v2/FunctionCallOutputBody"
+    },
+    "retain": {
+     "description": "Requests retention of this output in the thread's model history.",
+     "type": "boolean"
+    }
+   },
+   "required": [
+    "name",
+    "output"
+   ],
+   "type": "object"
+  },
+  "TurnsPage": {
+   "properties": {
+    "backwardsCursor": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "data": {
+     "items": {
+      "$ref": "#/definitions/v2/Turn"
+     },
+     "type": "array"
+    },
+    "nextCursor": {
+     "type": [
+      "string",
+      "null"
+     ]
+    }
+   },
+   "required": [
+    "data"
+   ],
+   "type": "object"
+  }
+ },
+ "generated_with": "codex app-server generate-json-schema --experimental (isolated CODEX_HOME)",
+ "note": "Only the definitions the Codex caller-approval design uses: the named roots plus their directly referenced definitions under 1.5 KB. '#/definitions/v2/X' and '#/definitions/X' refs are both flattened to definitions.X. References listed in unresolved_refs point at definitions deliberately left out.",
+ "roots": [
+  "ServerRequest",
+  "InitializeParams",
+  "InitializeResponse",
+  "ThreadStartParams",
+  "ThreadStartResponse",
+  "ThreadResumeParams",
+  "ThreadResumeResponse",
+  "TurnStartParams",
+  "TurnStartResponse",
+  "TurnInterruptParams",
+  "TurnInterruptResponse",
+  "CommandExecutionRequestApprovalParams",
+  "CommandExecutionRequestApprovalResponse",
+  "FileChangeRequestApprovalParams",
+  "FileChangeRequestApprovalResponse",
+  "PermissionsRequestApprovalParams",
+  "PermissionsRequestApprovalResponse",
+  "ToolRequestUserInputParams",
+  "ToolRequestUserInputResponse",
+  "McpServerElicitationRequestParams",
+  "McpServerElicitationRequestResponse",
+  "ServerRequestResolvedNotification",
+  "ItemStartedNotification",
+  "ItemCompletedNotification",
+  "TurnStartedNotification",
+  "TurnCompletedNotification",
+  "ThreadStatusChangedNotification",
+  "ErrorNotification",
+  "HookStartedNotification",
+  "HookCompletedNotification",
+  "HooksListParams",
+  "HooksListResponse",
+  "CommandExecutionApprovalDecision",
+  "FileChangeApprovalDecision",
+  "CommandExecutionApprovalKind",
+  "AskForApproval",
+  "ApprovalsReviewer",
+  "SandboxMode",
+  "SandboxPolicy",
+  "FileUpdateChange",
+  "PatchChangeKind",
+  "CommandExecutionStatus",
+  "PatchApplyStatus",
+  "HookRunSummary",
+  "HookEventName",
+  "HookTrustStatus",
+  "HookSource",
+  "NetworkApprovalContext",
+  "NetworkPolicyAmendment",
+  "CommandAction",
+  "ThreadStatus",
+  "TurnStatus",
+  "TurnError"
+ ],
+ "server_notification_methods": [
+  "account/gatewayOAuth/changed",
+  "account/login/completed",
+  "account/rateLimits/updated",
+  "account/updated",
+  "app/list/updated",
+  "autoApprovalReview/strictReviewRequired",
+  "command/exec/outputDelta",
+  "configWarning",
+  "deprecationNotice",
+  "error",
+  "externalAgentConfig/import/completed",
+  "externalAgentConfig/import/progress",
+  "fs/changed",
+  "fuzzyFileSearch/sessionCompleted",
+  "fuzzyFileSearch/sessionUpdated",
+  "guardianWarning",
+  "hook/completed",
+  "hook/started",
+  "item/agentMessage/delta",
+  "item/autoApprovalReview/completed",
+  "item/autoApprovalReview/started",
+  "item/commandExecution/outputDelta",
+  "item/commandExecution/terminalInteraction",
+  "item/completed",
+  "item/fileChange/outputDelta",
+  "item/fileChange/patchUpdated",
+  "item/mcpToolCall/progress",
+  "item/plan/delta",
+  "item/reasoning/summaryPartAdded",
+  "item/reasoning/summaryTextDelta",
+  "item/reasoning/textDelta",
+  "item/started",
+  "mcpServer/event/stream/notification",
+  "mcpServer/oauthLogin/completed",
+  "mcpServer/startupStatus/updated",
+  "model/rerouted",
+  "model/safetyBuffering/updated",
+  "model/verification",
+  "modelProvider/authRecoveryCompleted",
+  "modelProvider/authRecoveryStarted",
+  "process/exited",
+  "process/outputDelta",
+  "project/changed",
+  "remoteControl/status/changed",
+  "serverRequest/resolved",
+  "skills/changed",
+  "thread/archived",
+  "thread/attachment/updated",
+  "thread/closed",
+  "thread/compacted",
+  "thread/deleted",
+  "thread/environment/connected",
+  "thread/environment/disconnected",
+  "thread/goal/cleared",
+  "thread/goal/updated",
+  "thread/name/updated",
+  "thread/prediction/updated",
+  "thread/project/updated",
+  "thread/queue/changed",
+  "thread/readState/changed",
+  "thread/realtime/closed",
+  "thread/realtime/error",
+  "thread/realtime/item/completed",
+  "thread/realtime/item/started",
+  "thread/realtime/item/transcript/delta",
+  "thread/realtime/itemAdded",
+  "thread/realtime/outputAudio/delta",
+  "thread/realtime/sdp",
+  "thread/realtime/started",
+  "thread/realtime/transcript/delta",
+  "thread/realtime/transcript/done",
+  "thread/reverted",
+  "thread/settings/updated",
+  "thread/started",
+  "thread/status/changed",
+  "thread/tokenUsage/updated",
+  "thread/unarchived",
+  "turn/completed",
+  "turn/diff/updated",
+  "turn/moderationMetadata",
+  "turn/plan/updated",
+  "turn/started",
+  "warning",
+  "windows/worldWritableWarning",
+  "windowsSandbox/setupCompleted"
+ ],
+ "server_request_methods": [
+  "account/chatgptAuthTokens/refresh",
+  "applyPatchApproval",
+  "attestation/generate",
+  "currentTime/read",
+  "execCommandApproval",
+  "item/commandExecution/requestApproval",
+  "item/fileChange/requestApproval",
+  "item/permissions/requestApproval",
+  "item/tool/call",
+  "item/tool/requestUserInput",
+  "mcpServer/elicitation/request"
+ ],
+ "unresolved_refs": [
+  "AdditionalContextKind",
+  "AdditionalFileSystemPermissions",
+  "AdditionalNetworkPermissions",
+  "CapabilityRootLocation",
+  "ChatgptAuthTokensRefreshReason",
+  "CodexErrorInfo",
+  "DynamicToolNamespaceTool",
+  "FileChange",
+  "FunctionCallOutputBody",
+  "HookErrorInfo",
+  "HookMetadata",
+  "HookOutputEntryKind",
+  "McpElicitationObjectType",
+  "McpElicitationPrimitiveSchema",
+  "MisalignmentSteer",
+  "ModeKind",
+  "ParsedCommand",
+  "ResponseItem",
+  "Settings",
+  "SortDirection",
+  "Thread",
+  "ThreadId",
+  "ThreadItem",
+  "ToolRequestUserInputOption",
+  "TurnItemsView",
+  "UserInput"
+ ]
+}

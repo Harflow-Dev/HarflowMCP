@@ -4,8 +4,6 @@ The pin is intentional: other CLI versions must be certified before widening it.
 Temporary roots are excluded by the production decorator, so scratch placement
 cannot accidentally establish a false positive. Diagnostics stay in pytest tmp.
 """
-from contextlib import contextmanager
-import http.server
 import json
 import os
 from pathlib import Path
@@ -13,7 +11,6 @@ import shlex
 import shutil
 import subprocess
 import sys
-import threading
 from types import SimpleNamespace
 from unittest.mock import patch
 import uuid
@@ -22,128 +19,11 @@ import pytest
 
 from harflow_mcp.backends.codex import CodexBackend
 from harflow_mcp.extra_paths import normalize_paths, restore_paths, serialize_paths
+from fake_responses_api import LocalResponses
 
 VERSION = "codex-cli 0.162.0-alpha.17.2"
 pytestmark = [pytest.mark.cli_integration, pytest.mark.skipif(
     not os.environ.get("HARFLOW_CLI_INTEGRATION"), reason="opt in with HARFLOW_CLI_INTEGRATION=1")]
-
-
-class LocalResponses:
-    """Emit one nonce-correlated tool probe per actor and terminate deterministically."""
-
-    def __init__(self, directory):
-        self.directory = directory
-        self.requests = []
-        self.finished = threading.Event()
-        self.nonce = ""
-        self.fork = None
-        self.commands = []
-
-    @contextmanager
-    def serve(self):
-        fixture = self
-
-        class Handler(http.server.BaseHTTPRequestHandler):
-            def log_message(self, *args):
-                pass
-
-            def do_GET(self):
-                self.send_response(200)
-                self.end_headers()
-                self.wfile.write(b"local fixture")
-
-            def do_POST(self):
-                if self.path != "/v1/responses":
-                    self.send_error(404)
-                    return
-                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-                fixture.requests.append(body)
-                if len(fixture.requests) > 64:
-                    self.send_error(400, "fixture request bound exceeded")
-                    return
-                inputs = body["input"]
-                child = any(item.get("type") == "agent_message" and
-                            item.get("recipient", "").startswith("/root/" + fixture.nonce)
-                            for item in inputs)
-                actor = "child" if child else "parent"
-                call_id = fixture.nonce + "_" + actor
-                calls = [item for item in inputs if item.get("type") in
-                         ("function_call", "custom_tool_call")]
-
-                def function(name, arguments):
-                    return dict(id="fc_" + str(len(fixture.requests)), type="function_call",
-                                namespace="collaboration", name=name,
-                                call_id=call_id + "_" + name + str(len(fixture.requests)),
-                                arguments=json.dumps(arguments), status="completed")
-
-                if fixture.fork and not child:
-                    spawned = any(item.get("name") == "spawn_agent" and
-                                  fixture.nonce in item.get("arguments", "") for item in calls)
-                    if not spawned:
-                        item = function("spawn_agent", {"task_name": fixture.nonce,
-                            "message": fixture.nonce, "fork_turns": fixture.fork})
-                    elif not fixture.finished.is_set():
-                        item = function("wait_agent", {"timeout_ms": 10000})
-                    else:
-                        item = None
-                elif not any(item.get("call_id") == call_id for item in calls):
-                    source = "\n".join(
-                        "text({label:" + json.dumps(label) + ",result:await tools.exec_command(" +
-                        json.dumps({"cmd": command, "yield_time_ms": 1000}) + ")});"
-                        for label, command in fixture.commands)
-                    item = dict(id="fc_" + call_id, type="custom_tool_call", namespace="functions",
-                                name="exec", call_id=call_id, input=source, status="completed")
-                else:
-                    if child:
-                        fixture.finished.set()
-                    item = None
-                if item is None:
-                    item = dict(id="msg_" + str(len(fixture.requests)), type="message",
-                                role="assistant", status="completed", content=[dict(
-                                    type="output_text", text=fixture.nonce + " complete", annotations=[])])
-                rid = "response_" + str(len(fixture.requests))
-                response = dict(id=rid, object="response", status="completed", output=[item],
-                                usage=dict(input_tokens=1, output_tokens=1, total_tokens=2))
-                events = [dict(type="response.created", response=dict(response, status="in_progress", output=[])),
-                          dict(type="response.output_item.added", output_index=0, item=dict(item, status="in_progress")),
-                          dict(type="response.output_item.done", output_index=0, item=item),
-                          dict(type="response.completed", response=response)]
-                self.send_response(200)
-                self.send_header("Content-Type", "text/event-stream")
-                self.end_headers()
-                for event in events:
-                    self.wfile.write(("data: " + json.dumps(event) + "\n\n").encode())
-                    self.wfile.flush()
-
-        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        self.url = f"http://127.0.0.1:{server.server_port}"
-        try:
-            yield self
-        finally:
-            server.shutdown()
-            server.server_close()
-            thread.join(2)
-            diagnostic = json.dumps(self.requests)
-            if len(diagnostic) > 2_000_000:
-                diagnostic = json.dumps({"truncated": True, "tail": diagnostic[-1_000_000:]})
-            (self.directory / "requests.json").write_text(diagnostic)
-
-    def results(self):
-        results = {}
-        for body in self.requests:
-            for item in body["input"]:
-                if item.get("type") != "custom_tool_call_output" or not item.get("call_id", "").startswith(self.nonce):
-                    continue
-                for block in item.get("output", []):
-                    try:
-                        value = json.loads(block.get("text", ""))
-                    except (ValueError, AttributeError):
-                        continue
-                    if "label" in value:
-                        results[value["label"]] = value["result"]
-        return results
 
 
 @pytest.fixture

@@ -616,3 +616,226 @@ Measured with `--input-format stream-json --permission-prompt-tool stdio --permi
 - A Write or Edit answered with `Harflow refused this action: <reason>` is a denial like any other: the run
   continues and nothing is written.
 - The `system`/`init` event's `claude_code_version` equals `claude --version`; Harflow cross-checks the two.
+
+### Codex app-server (codex-cli 0.163.0, 2026-10-25)
+
+Measured with `codex app-server --listen stdio://` over JSON-RPC, against a localhost fake Responses API
+(`tests/fake_responses_api.py`), an isolated `HOME` and `CODEX_HOME`, and no model calls. Recorded frames are in
+`tests/fixtures/codex_app_server/transcripts/` (indexed by `index.json`); the trimmed protocol schema is
+`tests/fixtures/codex_app_server/schema-0.163.0.json` (generated with `--experimental`). The driver and
+scenario scripts are kept outside this repository. This is evidence for the caller-approval design, not shipped
+behavior. Unless a row says otherwise, thread settings were `approvalPolicy: on-request`, `approvalsReviewer: user`
+and `sandbox: workspace-write`.
+
+**Lifecycle**
+- `initialize` (params `clientInfo`, optional `capabilities.experimentalApi`) answers `userAgent`
+  (`<clientInfo.name>/0.163.0 (<os>) <terminal> (<name>; <version>)`), `codexHome`, `platformFamily`, `platformOs`.
+  `thread.cliVersion` in the `thread/start` response is also `0.163.0`. A request before `initialize` is
+  JSON-RPC error -32600 "Not initialized"; a second `initialize` is "Already initialized".
+- Unknown params fields are ignored; experimental fields need `experimentalApi` (`experimentalRawEvents` without it is
+  -32600). `availableDecisions` is **not** gated: it is present on command requests without `experimentalApi`, but
+  absent from the stable-schema bundle.
+- `thread/start` answers `approvalPolicy`, `approvalsReviewer`, `sandbox` (`workspaceWrite`, `readOnly`,
+  `dangerFullAccess`), `activePermissionProfile`, `cwd`, `model`. `turn/start` answers `turn.status: inProgress`;
+  `turn/completed` carries `status` `completed`, `interrupted` or `failed` (with `error`). A model-endpoint failure
+  produces `error` notifications (`willRetry: true`, "Reconnecting... n/5") and, after the retries, `turn/completed`
+  `failed`; an HTTP 400 fails at once with `willRetry: false`.
+- Stdin EOF, idle or with a request held: exit 0 within about 50 ms, the held command never runs. SIGTERM while held: exit 0.
+  SIGKILL of the driver while held: the wrapper and the native child both exited within 2.5 s. `codex app-server` is a
+  node wrapper whose native child shares the wrapper's stdin/stdout/stderr pipes; tool processes are children of the
+  native process.
+- Approval requests are preceded by `thread/status/changed` with `activeFlags: ["waitingOnApproval"]`. After the answer,
+  `serverRequest/resolved` (`threadId`, `requestId` as the original JSON-RPC id type) arrives, then the status returns to
+  empty flags. `turn/interrupt` while a request is held answers `{}`, then emits `thread/status/changed idle`,
+  `turn/completed interrupted` and only then `serverRequest/resolved`; a late `accept` is ignored, nothing runs, and the
+  thread accepts a new `turn/start`.
+
+**Command approvals (`item/commandExecution/requestApproval`)**
+- Params seen: `kind`, `threadId`, `turnId`, `itemId`, `startedAtMs`, `environmentId`, `command`, `cwd`, `commandActions`,
+  and when applicable `reason`, `proposedExecpolicyAmendment`, `availableDecisions`, `additionalPermissions`, `approvalId`.
+  Optional keys are **absent**, not null. `networkApprovalContext` and `proposedNetworkPolicyAmendments` never appeared.
+  `command` is the shell wrapper (`/bin/zsh -lc '<cmd>'`); `reason` is the model's justification, or for a
+  `prompt` rule `` `<command>` requires approval: <justification> ``.
+- `itemId` is the model call id, or `exec-<uuid>` for the nested `exec_command` of the code-mode `exec` tool. The
+  `item/started` commandExecution item precedes the request, with the same `command`.
+- `availableDecisions` is `["accept", {"acceptWithExecpolicyAmendment": {...}}, "cancel"]` when a proposed amendment
+  exists, else `["accept", "cancel"]` (prompt rules, `with_additional_permissions`, `writeStdin`). **It never contains
+  `decline`**, yet `decline` is accepted and means "deny, continue the turn".
+- `accept`: the item completes with the command's output. `decline`: item `status: declined`, the model sees
+  `exec_command failed: CreateProcess { message: "Rejected(\"rejected by user\")" }`, the turn continues. `cancel`: the
+  item is `declined` and the turn ends `interrupted`. A JSON-RPC error answer: item `status: failed`, model text
+  `Rejected("approval request failed")`, the turn continues. A malformed decision (`{}`, unknown string, wrong variant)
+  fails deserialization (stderr), item `failed`; for a file change it is a decline.
+- `acceptForSession` auto-approved an identical later command without a request (session cache).
+  `acceptWithExecpolicyAmendment` wrote `rules/default.rules` in `CODEX_HOME` and later matching commands then ran
+  with no request. Neither may be sent.
+- **A command request does not say whether accepting it leaves the sandbox.** Accepting a model `require_escalated`
+  request ran the command unsandboxed (wrote outside the workspace), including when a `prompt` rule also matched.
+  Under `approvalPolicy: untrusted`, accepting an ordinary command also ran unsandboxed. Accepting a request raised only
+  by a `prompt` rule (no escalation requested) ran the command inside the sandbox (the outside write failed). The params
+  of these cases are the same shape (`kind: command`, `availableDecisions [accept, cancel]` for the prompt cases).
+- With `on-request`, a plain command that fails in the sandbox (`Operation not permitted`) neither asks nor retries;
+  the model sees the shell error and **no item is emitted** on the app-server stream. A command denied by an exec-policy
+  `forbidden` rule emits no item either: the model sees `Rejected("`<command>` rejected: <justification>")` and the same
+  text is on stderr. `approvalPolicy: never` with a `require_escalated` call: model text `approval policy is Never;
+  reject command — you cannot ask for escalated permissions if the approval policy is Never`.
+- Multiple approvals per `itemId` occur: a `write_stdin` to a still-running escalated terminal raised a second request
+  with the same `itemId`, `kind: "writeStdin"`, `approvalId` (the `write_stdin` call id), `command`
+  `write_stdin --session-id <n> '<chars>'`, `availableDecisions ["accept", "cancel"]`. Under `untrusted` the same
+  write did not ask. A compound command (`a && b`) is one request; `proposedExecpolicyAmendment` covers only the first
+  program. The zsh-fork feature is removed in this version.
+- The `exec` code-mode tool is used by the `gpt-6.1-sol` model slug; `gpt-5` and unknown slugs get direct
+  `exec_command`, `gpt-5.5` also a freeform `apply_patch`. A declined nested call raises a script error in the `exec`
+  program.
+
+**File changes (`item/fileChange/requestApproval`)**
+- Params: `threadId`, `turnId`, `itemId`, `startedAtMs`, `reason` (null), `grantRoot` (always null in every case
+  measured). No `availableDecisions`, no paths: join with the preceding `item/started` fileChange item by `itemId`
+  (`changes[]` of `path`, `kind`, `diff`). Order: `item/started`, `thread/status/changed`, request, answer,
+  `serverRequest/resolved`, `item/completed`. `changes` in started and completed were identical in every case.
+- A move is `kind: {"type": "update", "move_path": <destination>}` with `path` as the source; the diff text ends with
+  `Moved to: <destination>`. Delete is `{"type": "delete"}`. One patch with several files is one request.
+- Requests appear for patches that write outside the workspace root (`workspace-write`), for any patch under
+  `read-only`, and for any patch under `untrusted`; in-workspace patches under `workspace-write` do not ask.
+  `accept` does not grant the root (a later outside patch asked again). `decline`: `item/completed` `status: declined`,
+  model text `patch rejected by user`. `cancel`: the turn is `interrupted` and the started item is never completed.
+
+**Other server requests**
+- `item/tool/requestUserInput` only in plan collaboration mode (set by `turn/start`); in default mode the tool answers
+  "request_user_input is unavailable in Default mode" and no request is sent. A JSON-RPC error yields `{"answers":{}}`.
+- `item/permissions/requestApproval` only with `features.request_permissions_tool` (and `exec_permission_approvals` for
+  `with_additional_permissions` commands), both off by default but enableable from config. Its response has no decision
+  field: `{permissions, scope}`. Granting `permissions` let later commands write the granted path without asking; `{}`
+  grants nothing; a JSON-RPC error or a wrong-shape response (`{"decision":"decline"}`) also grants nothing. A command
+  using `with_additional_permissions` raises a command request carrying `additionalPermissions` and
+  `availableDecisions ["accept", "cancel"]`.
+- MCP tool calls ask through `mcpServer/elicitation/request` (`_meta.codex_approval_kind: mcp_tool_call`, `serverName`,
+  `message`, `_meta.tool_params`); it has **no `itemId`** and arrives before the `mcpToolCall` item starts. Response
+  `{"action": "accept"|"decline"|"cancel", "content": null}`; a JSON-RPC error is a rejection ("user rejected MCP tool
+  call"). MCP tools are namespaced `mcp__<server>` in the model tool list.
+- `applyPatchApproval`, `execCommandApproval`, `item/tool/call`, `account/chatgptAuthTokens/refresh` and
+  `attestation/generate` were never emitted by the v2 flows exercised.
+
+**Configuration precedence and mid-run reload**
+- Precedence for the thread's approval policy, reviewer and sandbox: explicit `thread/start`/`thread/resume` params win
+  over the `thread/start` `config` map, which wins over argv `-c`, which wins over a project `.codex/config.toml`
+  (trusted projects only), which wins over user `config.toml`. All of project config, user config, argv `-c` and the `config`
+  map lost to explicit params in every adversarial case (`never`, `danger-full-access`, `auto_review`). The thread
+  response reports the effective values for each field, including for unpinned threads.
+- `turn/start` accepts `approvalPolicy`, `approvalsReviewer`, `sandboxPolicy` and `permissions`; hostile values there
+  override the thread pins for the turn without being visible in the `thread/start` response.
+- Unpinned `thread/resume` in a new process keeps the thread's stored `approvalPolicy` and reviewer but takes the
+  **sandbox from current config**. Pinned resume applies the pins. Resuming a thread already loaded in the same
+  process ignores new pins.
+- `thread/start` with `workspace-write` on an untrusted git repository adds `[projects."<repo>"] trust_level =
+  "trusted"` to `CODEX_HOME/config.toml`, after which project config, rules and hooks of that repository are live. An
+  untrusted project is otherwise ignored (unpinned default is `on-request` with `read-only`).
+- Project `.codex/config.toml` is read from the git root down to `cwd`; `.codex` above the git root and `$HOME/.codex`
+  are not read. A legacy `profile = "<name>"` key in user config makes `thread/start` fail (-32600); `--profile` exists
+  on `codex`, not on `codex app-server`.
+- Exec-policy rules load from `CODEX_HOME/rules` and a trusted project's `.codex/rules`. `allow` rules run matching
+  commands without a request and **unsandboxed**, for model-requested escalation and for plain commands alike;
+  `forbidden` rules deny; `prompt` rules raise a request. None of this is visible in the thread response.
+- Hooks (`[[hooks.PermissionRequest]]` in a config.toml, or `hooks.json`, at user or project level) are discovered but
+  `untrusted` until `[hooks.state."<key>"] trusted_hash` is present in user config (`hooks/list` returns `source`, `key`,
+  `currentHash`, `trustStatus`). A trusted `PermissionRequest` hook returning `allow` resolved both command and file-change
+  approvals: the client got **no request**, the commands ran, and the only signals were `hook/started` and
+  `hook/completed` notifications and `hooks/list`. `-c features.hooks=false` (argv) and the `config` map
+  `{"features": {"hooks": false}}` disabled even a trusted hook.
+- `approvals_reviewer = "auto_review"` in config, with the reviewer not pinned, is reported in the thread response; the
+  reviewer then answers escalations itself (`item/autoApprovalReview/*`, `guardianWarning`) with extra model requests
+  and no client request. Pinning `approvalsReviewer: user` overrode it; `features.guardian_approval` did not change a
+  pinned thread.
+- Sandbox write protection under `workspace-write`: `.git`, `.codex` and `.agents` are not writable at the git root and at
+  `cwd`; `.codex` in a deeper subdirectory is writable (and is read when a thread later starts with that `cwd`).
+  `CODEX_HOME` is writable only when it lies under a writable root (`$TMPDIR`, `/tmp`, the workspace); with a
+  `CODEX_HOME` outside those, writes to `config.toml`, `rules/` and new files failed.
+- No reload: after an approved command rewrote `.codex/rules`, `.codex/config.toml` and `CODEX_HOME/config.toml`, the next
+  command in the same turn, the next turn in the same process and an in-process resume behaved as before. A resume in a
+  **new process** applied the rewritten rules (the rule-allowed commands ran without asking). A syntactically broken
+  user config makes `thread/resume` fail with a load error.
+
+**Pipe isolation (macOS)**
+- Tool processes (sandboxed and approved-escalated, including a live session running while another request was held) have
+  fd 0 on `/dev/null` and fds 1/2 on pipes whose peer ends belong to the native codex process, none of which are the
+  wrapper's or native process's fds 0/1/2. `lsof -p <app-server pid>` works from inside the sandbox and lists the
+  app-server's pipe objects, but macOS has no path to open another process's descriptors. Writes by a tool to its own
+  fds appeared only as `item/commandExecution/outputDelta` text; injected response and request frames were never answered
+  or applied, and the held request was unaffected. `ps` is denied in the sandbox.
+- Background processes (`&`, `nohup`, `setsid`, double fork) were all killed when the `exec_command` call ended, sandboxed
+  or escalated; only a command that yields a session id (long-running) stays alive between calls.
+- Not exercised: debugger attachment or `task_for_pid` by an approved unsandboxed command against the codex process.
+
+**Interop**
+- `thread/resume` of a thread created by `codex exec`, and `codex exec resume` of a thread created by app-server, both
+  worked and carried the earlier history. `thread.started.thread_id` from exec equals the app-server thread id.
+
+**Follow-up measurements (same setup; transcripts `h2-*`, `s3-*`, `cfg-w4-*`, `cfg-fp-*`, `x6-*`, `t8*`)**
+- Hooks under pins: with `-c features.hooks=false`, `hooks/list` returns **no hooks** (there is no `enabled: false`
+  entry) and nothing fires. With only the `thread/start` `config` map `{"features":{"hooks":false}}`, `hooks/list` (which
+  takes no config map) still reports the hook as `enabled: true, trustStatus: trusted`, but the hook does not fire on
+  that thread. So `hooks/list` proves the argv pin, not the map pin; both should be sent and the absence of `hook/*`
+  notifications checked.
+- A trusted `PreToolUse` hook can only **block**: `permissionDecision: deny` blocks the command (no client request, no
+  item, model text `Command blocked by PreToolUse hook: <reason>`, `hook/completed` status `blocked`); `allow` is
+  rejected (`hook/completed` status `failed`, entry "PreToolUse hook returned unsupported permissionDecision:allow") and the
+  request still reaches the client. Only `PermissionRequest` hooks approved on their own. With `features.hooks=false` neither fires.
+- Notification methods that signal a resolution not made by the client: `hook/started` and `hook/completed`
+  (`run.eventName`, `run.source` user/project, `run.status` completed/failed/blocked), `item/autoApprovalReview/started` and
+  `item/autoApprovalReview/completed` (`targetItemId`, `decisionSource`, `review.status`), `autoApprovalReview/strictReviewRequired`
+  (never observed) and `guardianWarning`. `serverRequest/resolved` is emitted for client answers and is not such a signal.
+  An exec-policy `allow` rule produces **no notification at all**. `warning`, `configWarning` and `error` are unrelated.
+- Live session survival: a long-running command that yields a session id (escalated or sandboxed) runs in its **own
+  process group** (pgid equals its shell pid; `ps` `sess` prints 0 on macOS), a child of the native codex process, while the
+  wrapper and native share the driver's group (or the new group when spawned with `start_new_session`). Stdin EOF, SIGTERM
+  of the wrapper and `killpg(SIGTERM)` of the app-server group all end the native process and every session. **SIGKILL of
+  the wrapper alone leaves the native process (ppid 1) running with its pending request and all sessions; `killpg(SIGKILL)`
+  of the app-server group kills the wrapper and native but leaves every tool process group running (ppid 1).**
+  A terminate-then-wait with SIGTERM to the group is the clean path; after SIGKILL, tool descendants must be found separately.
+- Ambient sandbox widening: a trusted project config with `[sandbox_workspace_write] writable_roots=[<dir>]`,
+  `network_access=true`, `[shell_environment_policy] inherit="all", set={...}` and an extra `[mcp_servers.x]` took effect
+  in full under explicit `approvalPolicy`/`approvalsReviewer`/`sandbox: workspace-write` pins (outside write succeeded,
+  localhost connect succeeded, MCP server started). The `thread/start` response **does** expose it:
+  `sandbox.writableRoots`, `sandbox.networkAccess`, `runtimeWorkspaceRoots` (and `activePermissionProfile`). Pinning
+  `sandbox_workspace_write.writable_roots=[]` and `.network_access=false` through the `config` map or through argv `-c`
+  overrode the project values (confirmed by sandboxed write and connect failures and by the response). Maps merge,
+  though: `shell_environment_policy.inherit="core"` took effect, but `set={}` did not remove a project `set` entry, and
+  `mcp_servers={}` did not remove a project MCP server; a named entry is overridable
+  (`mcp_servers.<name>.enabled=false`, `shell_environment_policy.set.<VAR>="..."`). Neither is shown in the thread
+  response; MCP servers appear as `mcpServer/startupStatus/updated` notifications.
+- Feature pins: `-c features.request_permissions_tool=false` / `features.exec_permission_approvals=false` and the same keys in
+  the `config` map override a config that enables them (the `request_permissions` tool and `exec_command`'s
+  `additional_permissions`/`with_additional_permissions` disappear from the model tool list). An unknown `features.*` key is
+  silently ignored.
+- Cross-transport resume with pins: a thread started by `codex exec` with `never` and `danger-full-access`, resumed by app-server
+  with explicit pins, reports the pinned `on-request`/`workspaceWrite`/`user`; an unpinned resume reports
+  config defaults rather than the exec thread's original values.
+- Same-process resume of an already loaded thread ignores new pins and returns the existing settings (`r1-resume-a`).
+- Trust: stored in `CODEX_HOME/config.toml` as `[projects."<git root realpath>"] trust_level = "trusted"`, keyed by the git
+  root even when `cwd` is a nested directory. `config/read` returns it under `config.projects` without mutating anything
+  (absent before the first workspace-write start). `thread/start` with workspace-write on an untrusted repo writes the entry;
+  read-only does not. An explicit `untrusted` entry is kept (workspace-write pin still honoured, project config ignored).
+  Passing `{"projects": {"<root>": {"trust_level": "trusted"}}}` in the `thread/start` `config` map makes project config
+  effective **without writing config.toml**, and `"untrusted"` there ignores it; argv `-c projects."<root>".trust_level=...`
+  still writes the file. The current-shape `codex exec --json -s workspace-write -c approval_policy="never" -C <untrusted repo>`
+  also writes the trust entry; `-s read-only` does not.
+
+**Trusted hostile project under R6 pins (transcripts `p0c-*`, index ids `0c-*`)**
+- Setup: `CODEX_HOME/config.toml` marks the throwaway git root `trust_level = "trusted"` and trusts a project
+  `PermissionRequest` hook; the repo's `.codex/rules` allows `touch`, `printenv`, `curl`, `sh`, `zsh`, `/bin/zsh` and `echo`;
+  its `.codex/config.toml` sets `approval_policy = "never"`, `danger-full-access`, `approvals_reviewer = "auto_review"`,
+  `writable_roots = [<outside dir>]`, `network_access = true`, `shell_environment_policy.set = {HOSTILE_VAR}` and an MCP
+  server that creates a marker file when launched.
+- Control (explicit approvalPolicy/reviewer/sandbox params only): the escalated `touch` ran with no client request, the
+  outside write and the localhost connect succeeded, `HOSTILE_VAR` printed, the MCP server launched
+  (`mcpServer/startupStatus/updated`, marker created), and `thread/start` reported the widened `writableRoots`,
+  `networkAccess: true` and `runtimeWorkspaceRoots`.
+- Complete pin set on argv `-c`, in the `config` map (including `projects."<root>".trust_level = "untrusted"`, which overrides
+  the user-config `trusted` entry) and as explicit params, for a fresh `thread/start` and then a fresh-process
+  `thread/resume`, both turns: the escalated `touch` raised a client approval request (the project allow rule did not
+  apply); the outside write failed (`Operation not permitted`); the connect failed (`curl` exit 7); `HOSTILE_VAR` was absent;
+  no MCP startup notification and no marker; no `hook/*`, `item/autoApprovalReview/*` or `guardianWarning`
+  notification; `hooks/list` under the argv pin returned no hooks (the control listed the project hook as trusted). Both
+  responses reported `on-request`, `user`, `workspaceWrite` with `writableRoots: []`, `networkAccess: false` and
+  `runtimeWorkspaceRoots` equal to the repo only. The SHA-256 of `CODEX_HOME/config.toml` and the absence of `CODEX_HOME/rules`
+  were identical before and after both runs.
