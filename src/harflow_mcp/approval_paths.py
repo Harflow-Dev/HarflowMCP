@@ -75,8 +75,11 @@ def git_protected(repo: Path) -> list[Path] | None:
         return None
 
 
-def protected_targets(repo: str | Path, log_dir: Path, environ: Any = None) -> dict[str, Any]:
-    """Resolved protected locations for one task; `git` is None when its resolution failed."""
+def protected_targets(repo: str | Path, log_dir: Path, environ: Any = None, extra: Any = ()) -> dict[str, Any]:
+    """Resolved protected locations for one task; `git` is None when its resolution failed.
+
+    `extra` is the backend's own list (`protected_config_paths`), resolved and folded like the rest;
+    it is empty for Claude."""
     env = os.environ if environ is None else environ
     home = Path(env.get("HOME") or Path.home())
     config = Path(env.get("CLAUDE_CONFIG_DIR") or home / ".claude")
@@ -85,7 +88,8 @@ def protected_targets(repo: str | Path, log_dir: Path, environ: Any = None) -> d
     settings = [repo_path / ".claude", repo_path / ".claude" / "settings.json", repo_path / ".claude" / "settings.local.json", repo_path / ".mcp.json",
                 config, config / "settings.json", config / "settings.local.json", home / ".claude.json", *map(Path, MANAGED_SETTINGS)]
     return {"state": [_fold(p) for p in state], "settings": [_fold(resolve(str(p))) for p in settings],
-            "git": None if (git := git_protected(repo_path)) is None else [_fold(p) for p in git]}
+            "git": None if (git := git_protected(repo_path)) is None else [_fold(p) for p in git],
+            "backend": [_fold(resolve(str(p))) for p in extra]}
 
 
 def _git_dirs(target: Path) -> list[Path]:
@@ -111,19 +115,19 @@ def _in_git_dir(target: Path) -> bool:
     return False
 
 
-def protection(targets: dict[str, Any], tool: str, file_path: str, base: str | Path | None = None) -> str | None:
+def protection(targets: dict[str, Any], tool: str, file_path: str, base: str | Path | None = None, write_tools: Any = frozenset({"Write", "Edit"})) -> str | None:
     """`protected_path` when a caller must not approve this action, else None.
 
-    Write and Edit are checked against every protected location; Read only against the state root.
-    Unresolvable git locations refuse writes."""
+    Tools in `write_tools` (the backend's own set; Write and Edit by default) are checked against every
+    protected location; any other tool only against the state root. Unresolvable git locations refuse writes."""
     real = resolve(file_path, base)
     # Also walk the lexical path: a symlinked hooks directory or config file in another repository resolves outside any Git ancestor.
     lexical = Path(os.path.normpath(os.path.join(str(base), file_path) if base is not None else file_path))
     target = _fold(real)
     if any(inside(target, root) for root in targets["state"]):
         return "protected_path"
-    if tool not in {"Write", "Edit"}:
+    if tool not in write_tools:
         return None
-    if targets["git"] is None or any(inside(target, root) for root in targets["settings"] + targets["git"]) or _in_git_dir(real) or _in_git_dir(lexical):
+    if targets["git"] is None or any(inside(target, root) for root in targets["settings"] + targets["git"] + targets.get("backend", [])) or _in_git_dir(real) or _in_git_dir(lexical):
         return "protected_path"
     return None

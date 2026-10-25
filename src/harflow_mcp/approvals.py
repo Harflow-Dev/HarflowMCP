@@ -327,23 +327,57 @@ def observe_cancellation(directory: Path, task_id: str, request_id: str, generat
         row["owner_revision"] += 1
 
 
+DEFAULT_WRITE_TOOLS = frozenset({"Write", "Edit"})
+
+
+def _input_path(row: dict[str, Any]) -> list[str]:
+    path = (row.get("action", {}).get("input") or {}).get("file_path")
+    return [path] if isinstance(path, str) else []
+
+
 @task_operation
-def approved_writes(directory: Path, task_id: str) -> list[dict[str, Any]]:
-    """Write and Edit rows the caller approved, as metadata only: never content or edit strings.
+def approved_writes(directory: Path, task_id: str, write_tools: Any = None, paths: Any = None) -> list[dict[str, Any]]:
+    """Rows the caller approved for write tools, as metadata only: never content or edit strings.
+
+    `write_tools` and `paths` (row -> list of paths) come from the backend; without them the neutral
+    default is a `Write` or `Edit` row with one `input.file_path`. One path is disclosed as `file_path`
+    exactly as before; an action with several paths has `file_path` null and adds `file_paths`,
+    each with its own containment fact.
 
     `write_possible` is false only when the effective decision was a rejection or the bytes provably never reached the pipe."""
+    write_tools = DEFAULT_WRITE_TOOLS if write_tools is None else write_tools
+    paths = _input_path if paths is None else paths
     try:
         records = rows(directory, task_id)
     except (OSError, ValueError):
         return []
     result = []
     for row in records:
-        if row.get("tool_name") not in {"Write", "Edit"} or row.get("decision") != "approve":
+        if row.get("tool_name") not in write_tools or row.get("decision") != "approve":
             continue
-        path = (row.get("action", {}).get("input") or {}).get("file_path")
-        result.append({"request_id": row["request_id"], "tool_name": row["tool_name"], "file_path": path if isinstance(path, str) else None,
-                       "inside_repository": row.get("inside_repository"), "decision": row["decision"], "effective_decision": row.get("effective_decision"),
-                       "delivered_decision": row.get("delivered_decision"), "expiry_rejection": row.get("expiry_rejection", False),
-                       "delivery": row["delivery"], "execution_outcome": row["execution_outcome"],
-                       "write_possible": row.get("effective_decision") == "approve" and row["delivery"] in {"sending", "sent", "delivery_unknown"}})
+        found = paths(row)
+        single = len(found) == 1
+        entry = {"request_id": row["request_id"], "tool_name": row["tool_name"], "file_path": found[0] if single else None,
+                 "inside_repository": row.get("inside_repository"), "decision": row["decision"], "effective_decision": row.get("effective_decision"),
+                 "delivered_decision": row.get("delivered_decision"), "expiry_rejection": row.get("expiry_rejection", False),
+                 "delivery": row["delivery"], "execution_outcome": row["execution_outcome"],
+                 "write_possible": row.get("effective_decision") == "approve" and row["delivery"] in {"sending", "sent", "delivery_unknown"}}
+        if len(found) > 1:
+            entry["file_paths"] = copy.deepcopy(row.get("path_facts")) if isinstance(row.get("path_facts"), list) else [{"file_path": p, "inside_repository": None} for p in found]
+        result.append(entry)
     return result
+
+
+APPROVED_WRITES_UNAVAILABLE = "Approved writes cannot be listed: this backend does not declare its approval write tools or paths"
+
+
+def backend_approved_writes(directory: Path, task_id: str, backend: Any) -> tuple[list[dict[str, Any]], str | None]:
+    """`approved_writes` with the backend's own tool set and path extraction.
+
+    A backend that declares neither (`UnsupportedCapability`) degrades to no entries plus a notice, so a status
+    read never fails on a misconfigured record."""
+    from .backends.base import UnsupportedCapability
+    try:
+        return approved_writes(directory, task_id, backend.approval_write_tools(), backend.approval_paths), None
+    except UnsupportedCapability:
+        return [], APPROVED_WRITES_UNAVAILABLE

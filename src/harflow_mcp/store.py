@@ -1099,11 +1099,12 @@ def snapshot(log_dir: Path, record: TaskRecord, *, _replay_provider=None) -> dic
     queued_followups = followups.view(log_dir, record.task_id)
     from . import approvals
     supervision_fields = supervision.fields(record, log_path(log_dir, record.task_id), observed_terminal=record.status in TERMINAL_RECORD_STATUSES and not outcome_unobserved(record))
+    approved_writes, write_notice = approvals.backend_approved_writes(log_dir, record.task_id, get_backend(record.backend)) if record.caller_write_approvals else ([], None)
     denials, denial_categories = classified_denials(get_backend(record.backend), state, record.freedom)
     return {
         "caller_approvals": record.caller_approvals,
         "caller_write_approvals": record.caller_write_approvals,
-        **({"caller_approved_writes": approvals.approved_writes(log_dir, record.task_id)} if record.caller_write_approvals else {}),
+        **({"caller_approved_writes": approved_writes} if record.caller_write_approvals else {}),
         "interaction_owner": record.interaction_owner,
         "approval_summary": approvals.summary(log_dir, record.task_id),
         "pending_messages": pending,
@@ -1153,7 +1154,7 @@ def snapshot(log_dir: Path, record: TaskRecord, *, _replay_provider=None) -> dic
         "mcp_servers": state.mcp_servers,
         "available_tool_count": state.available_tool_count,
         "usage": state.usage,
-        "notices": _notices(record, state),
+        "notices": [*_notices(record, state), *([write_notice] if write_notice else [])],
         # The enforcement actually captured at spawn, not re-derived from today's code — see
         # `_enforcement`.
         "enforcement": _enforcement(record),

@@ -750,6 +750,10 @@ class Task:
     """Whether this run was spawned with a stdin pipe that takes further messages — taken from the
     run's own `Invocation`, never inferred from the backend. `send_message`, `harflow-ctl send`
     and the snapshot all read this field."""
+    control_pipe: bool = False
+    """Whether this run was spawned with a stdin pipe owned by the bridge for protocol frames only
+    (approval answers, Harflow-originated frames) — taken from the run's own `Invocation`. It is
+    independent of `live_input`: no inbox forwarding and no user-message delivery."""
 
     status: Status = "running"
     exit_code: int | None = None
@@ -968,7 +972,9 @@ class Task:
         if self.status == "failed" and self.stderr_tail:
             snap["stderr_tail"] = list(self.stderr_tail)
         if self.caller_write_approvals:
-            snap["caller_approved_writes"] = approvals.approved_writes(self.log_path.parent, self.task_id)
+            snap["caller_approved_writes"], write_notice = approvals.backend_approved_writes(self.log_path.parent, self.task_id, get_backend(self.backend))
+            if write_notice:
+                snap["notices"] = [*snap["notices"], write_notice]
         snap["pending_messages"] = inbox.pending_messages(self.log_path.parent, self.task_id)
         if self.workflow_builder:
             from .workflows import builder_pending_messages
@@ -1229,7 +1235,7 @@ class TaskRegistry:
         # the future root symbolically and never feeds it to the nested-authority comparison.
         if freedom != "read_only" and getattr(backend, "with_writable_directory", None) is not None:
             enforcement = replace(enforcement, writable_roots=(*enforcement.writable_roots, FUTURE_TASK_SCRATCH_ROOT))
-        return {"backend": backend.name, "caller_approvals": caller_approvals, "caller_write_approvals": caller_write_approvals, "caller_approval_support": backend.caller_approval_support() if getattr(backend.capabilities, "supports_caller_approvals", False) else {"supported": False}, "approval_scope": "exact_action_once" if caller_approvals else None, "approval_transport": "stdio_control" if caller_approvals else None, "approval_limitations": "Exact original action only (Bash, Read" + (", Write and Edit" if caller_write_approvals else "") + " on qualified versions); saved harness rules remain effective. Approving a Read can disclose files outside the repository. Claude has no bridge OS sandbox.", "freedom": freedom, "network": network, "repo_path": str(repo_path), "extra_writable_paths": serialize_paths(grants), "extra_path_certification": backend.extra_path_support().get("certification") if grants else None, "allowed_commands": list(commands), "enforcement": enforcement.as_dict(), "limitations": "Existing typed path identities are checked before launch; grants are unavailable to native workflows and interactive takeover."}
+        return {"backend": backend.name, "caller_approvals": caller_approvals, "caller_write_approvals": caller_write_approvals, "caller_approval_support": backend.caller_approval_support() if getattr(backend.capabilities, "supports_caller_approvals", False) else {"supported": False}, "approval_scope": "exact_action_once" if caller_approvals else None, "approval_transport": approval_runtime.transport(backend) if caller_approvals else None, "approval_limitations": approval_runtime.limitations(backend, caller_write_approvals), "freedom": freedom, "network": network, "repo_path": str(repo_path), "extra_writable_paths": serialize_paths(grants), "extra_path_certification": backend.extra_path_support().get("certification") if grants else None, "allowed_commands": list(commands), "enforcement": enforcement.as_dict(), "limitations": "Existing typed path identities are checked before launch; grants are unavailable to native workflows and interactive takeover."}
 
     @_with_authority_check_budget
     @layout_operation
@@ -1749,6 +1755,11 @@ class TaskRegistry:
                 backend.assert_safe(invocation, freedom, network)
             if extra_path_grants and workflow_builder:
                 raise ValueError("Extra writable paths are unavailable to workflow builders")
+            if invocation.control_pipe:
+                from .backends.base import control_pipe_problem
+                problem = control_pipe_problem(backend)
+                if problem is not None:
+                    raise ValueError(problem)
 
             task_id = store.validate_task_id(task_id) if task_id else str(uuid.uuid4())
             if caller_approvals:
@@ -1882,7 +1893,7 @@ class TaskRegistry:
             proc = await asyncio.create_subprocess_exec(
                 *invocation.argv,
                 cwd=str(repo_path),
-                stdin=asyncio.subprocess.PIPE if invocation.stdin_mode in ("pipe", "pipe_once") else asyncio.subprocess.DEVNULL,
+                stdin=asyncio.subprocess.PIPE if invocation.stdin_mode in ("pipe", "pipe_once") or invocation.control_pipe else asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 limit=STREAM_LINE_LIMIT,
@@ -1947,6 +1958,7 @@ class TaskRegistry:
             title=title,
             lineage_detected=lineage_detected,
             live_input=invocation.live_input,
+            control_pipe=invocation.control_pipe,
             background_idle_seconds=background_idle_seconds,
             # A live run owes one result for its initial prompt — plus, on a backend where each
             # written line is its own turn, one more per message the pump writes (see
@@ -2028,6 +2040,9 @@ class TaskRegistry:
             elif invocation.live_input:
                 self._write_initial_input(task, invocation.initial_input or b"")
                 task.pump = owned_job(self.state_layout, self._pump(task), name=f"harflow-pump-{task_id}")
+                await self._flush_stdin(task)
+            elif invocation.control_pipe:
+                task.pump = owned_job(self.state_layout, self._control_pump(task), name=f"harflow-control-pump-{task_id}")
                 await self._flush_stdin(task)
         except StateOwnershipError:
             _stop_failed_drainer(task)
@@ -2615,6 +2630,63 @@ class TaskRegistry:
                 self._stop_native_transport(task)
             # Bookkeeping must never change an outcome — but an open stdin would keep the run
             # from ever settling, so the input is closed regardless.
+            _close_stdin(task)
+
+    def _write_outgoing_frames(self, task: Task, phase: str) -> None:
+        """Write the backend's Harflow-originated frames for `phase` through the single ordered stdin writer.
+
+        A frame must be newline-terminated bytes; anything else, or a closed pipe, raises so the control
+        pump's failure path stops the run rather than leaving a child waiting on a frame that never came."""
+        for frame in get_backend(task.backend).outgoing_frames(phase, task.acc):
+            if type(frame) is not bytes or not frame.endswith(b"\n"):
+                raise ValueError(f"malformed {phase} frame from backend {task.backend}")
+            if not _write_stdin(task, frame):
+                raise BrokenPipeError(f"control pipe closed before the {phase} frame was written")
+
+    async def _control_pump(self, task: Task) -> None:
+        """Own a control-pipe-only run's stdin: answer approvals and write backend frames, never user messages.
+
+        There is no inbox, no forwarding and no idle close. The initial frames are written first, inside this
+        protected lifecycle. The pipe closes when the backend says its control exchange is finished and no
+        reserved answer still needs it, when the run must stop (exit, error result, closed stdin,
+        cancellation), or on any failure; the approval pump always gets one last pass first so pending rows
+        are invalidated promptly. Woken by the stdout drainer after every event, otherwise every
+        `PUMP_POLL_SECONDS`."""
+        from . import approval_runtime
+        backend = get_backend(task.backend)
+        try:
+            self._write_outgoing_frames(task, "initial")
+            await self._flush_stdin(task)
+            while True:
+                task.pump_wake.clear()
+                stopping = task.cancel_requested or self._stop_reason(task) is not None
+                pending = await approval_runtime.pump(self, task)
+                if stopping:
+                    break
+                self._write_outgoing_frames(task, "turn")
+                if not pending and backend.control_pipe_finished(task.acc):
+                    break
+                try:
+                    await asyncio.wait_for(task.pump_wake.wait(), timeout=PUMP_POLL_SECONDS)
+                except (asyncio.TimeoutError, TimeoutError):
+                    pass
+        except asyncio.CancelledError:
+            raise
+        except StateOwnershipError:
+            raise
+        except Exception:
+            log.exception("task %s: control pump failed", task.task_id)
+            # Non-deliverable first, synchronously: the approval pump refuses to write once stdin is marked closed,
+            # so the pass below can only invalidate (sent stays delivery_unknown, reserved/pending are invalidated).
+            _close_stdin(task)
+            try:
+                await approval_runtime.pump(self, task)
+            except StateOwnershipError:
+                raise
+            except Exception:
+                log.debug("task %s: final approval pass failed", task.task_id, exc_info=True)
+            self._stop_native_transport(task)
+        finally:
             _close_stdin(task)
 
     async def _finish_pump(self, task: Task) -> None:
@@ -4096,7 +4168,7 @@ async def _drain_stdout(task: Task, registry: TaskRegistry) -> None:
 
             text = raw.decode("utf-8", errors="replace")
             control_event = parse_line(text.rstrip("\n"))
-            if isinstance(control_event, dict) and control_event.get("type") == "control_request" and task.caller_approvals:
+            if task.caller_approvals and isinstance(control_event, dict) and get_backend(task.backend).approval_frame_kind(control_event) == "request":
                 from . import approval_runtime
                 await approval_runtime.observe(registry, task, get_backend(task.backend), control_event)
                 task.last_output_at = time.monotonic()

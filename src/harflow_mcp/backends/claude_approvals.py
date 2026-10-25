@@ -190,6 +190,33 @@ def encode(request: dict[str, Any], decision: str) -> bytes:
     return (json.dumps({"type": "control_response", "response": {"subtype": "success", "request_id": request["native_request_id"], "response": response}}, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
 
 
+WRITE_TOOLS = frozenset({"Write", "Edit"})
+PATH_TOOLS = frozenset({"Read", "Write", "Edit"})
+
+
+def frame_kind(event: dict[str, Any]) -> str | None:
+    """`control_request` is a permission request; `control_cancel_request` with a string id closes one."""
+    kind = event.get("type")
+    if kind == "control_request":
+        return "request"
+    if kind == "control_cancel_request" and isinstance(event.get("request_id"), str):
+        return "cancellation"
+    return None
+
+
+def request_key(event: dict[str, Any]) -> str | None:
+    """The harness request id as sent (a string), the key stored as `native_request_id`."""
+    native_id = event.get("request_id")
+    return native_id if isinstance(native_id, str) else None
+
+
+def paths(decoded: dict[str, Any]) -> list[str]:
+    """The single `file_path` of a Read, Write or Edit (also the audit path of an oversize row)."""
+    action = decoded.get("action") or {}
+    path = (action.get("input") or {}).get("file_path") or decoded.get("file_path")
+    return [path] if action.get("tool_name") in PATH_TOOLS and isinstance(path, str) else []
+
+
 def outcome(event: dict[str, Any]) -> list[tuple[str, str]]:
     results = []
     if event.get("type") == "user":

@@ -548,14 +548,31 @@ class ClaudeBackend(ExtraPathsUnsupported):
         from .claude_approvals import encode
         return encode(request, decision)
 
-    def decode_approval_cancellation(self, event):
-        if event.get("type") == "control_cancel_request" and isinstance(event.get("request_id"), str):
-            return event["request_id"]
-        return None
-
     def approval_outcomes(self, event):
         from .claude_approvals import outcome
         return outcome(event)
+
+    def approval_frame_kind(self, event):
+        from .claude_approvals import frame_kind
+        return frame_kind(event)
+
+    def approval_request_key(self, event):
+        from .claude_approvals import request_key
+        return request_key(event)
+
+    def approval_paths(self, decoded):
+        from .claude_approvals import paths
+        return paths(decoded)
+
+    def approval_write_tools(self):
+        from .claude_approvals import WRITE_TOOLS
+        return WRITE_TOOLS
+
+    def approval_transport(self):
+        return "stdio_control"
+
+    def approval_limitations(self, write):
+        return "Exact original action only (Bash, Read" + (", Write and Edit" if write else "") + " on qualified versions); saved harness rules remain effective. Approving a Read can disclose files outside the repository. Claude has no bridge OS sandbox."
 
     @property
     def native_subagent_adapter(self):
@@ -732,6 +749,8 @@ class ClaudeBackend(ExtraPathsUnsupported):
         self, invocation: Invocation, freedom: Freedom, network: bool | None = None
     ) -> None:
         validate_invocation_env(invocation, {})
+        if isinstance(invocation, Invocation) and invocation.control_pipe:
+            raise UnsafeInvocationError("claude has no control pipe: caller approvals use live stream input")
         if isinstance(invocation, Invocation) and invocation.extra_writable_paths:
             raise UnsupportedCapability("bounded extra writable paths are not certified for this backend")
         # Rejects an unknown freedom outright rather than letting PERMISSION_MODES[freedom] raise a

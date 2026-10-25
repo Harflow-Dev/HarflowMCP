@@ -145,6 +145,18 @@ async def _transfer_authorization(descriptor: int, raw: bytes, deadline: float, 
         os.close(descriptor)
 
 
+def invocation_request(invocation):
+    """The JSON-safe invocation mapping a supervised launch transfers; `control_pipe` is carried only when set,
+    so every other launch request is byte-identical to what it was before the flag existed."""
+    request_invocation = {name: getattr(invocation, name) for name in (
+        'argv', 'stdin_mode', 'extra_writable_paths', 'native_subagent', 'caller_approvals', 'caller_write_approvals', 'caller_approval_version', 'allowed_commands', 'allowed_commands_version', 'native_settings')}
+    if invocation.control_pipe:
+        request_invocation['control_pipe'] = True
+    request_invocation['env'] = dict(invocation.env)
+    request_invocation['initial_input'] = base64.b64encode(invocation.initial_input).decode('ascii') if invocation.initial_input is not None else None
+    return request_invocation
+
+
 async def launch(registry, invocation, kwargs):
     from .extra_paths import serialize_paths
     from .task_attachment import AttachedTask
@@ -156,12 +168,14 @@ async def launch(registry, invocation, kwargs):
     if type(get(backend.name)) is not type(backend):
         raise ValueError('Supervised launches require a registered backend')
     backend.assert_safe(invocation, kwargs['freedom'], kwargs.get('network'))
+    if invocation.control_pipe:
+        from .backends.base import control_pipe_problem
+        problem = control_pipe_problem(backend)
+        if problem is not None:
+            raise ValueError(problem)
     grants = serialize_paths(kwargs.pop('extra_path_grants', ()))
     kwargs['repo_path'] = str(kwargs['repo_path'])
-    request_invocation = {name: getattr(invocation, name) for name in (
-        'argv', 'stdin_mode', 'extra_writable_paths', 'native_subagent', 'caller_approvals', 'caller_write_approvals', 'caller_approval_version', 'allowed_commands', 'allowed_commands_version', 'native_settings')}
-    request_invocation['env'] = dict(invocation.env)
-    request_invocation['initial_input'] = base64.b64encode(invocation.initial_input).decode('ascii') if invocation.initial_input is not None else None
+    request_invocation = invocation_request(invocation)
     generation = uuid.uuid4().hex
     request = {'task_id': task_id, 'generation': generation, 'root': str(registry.state_layout.root),
                'backend': backend.name, 'invocation': request_invocation, 'grants': grants, 'kwargs': kwargs}

@@ -28,6 +28,16 @@ def with_approval_enforcement(backend: Any, enforcement: Any, version: str | Non
     return shaper(enforcement, version, enabled, write) if shaper is not None and enabled else enforcement
 
 
+def transport(backend: Any) -> str | None:
+    """The backend's approval transport name; a backend without the seam has none."""
+    return getattr(backend, "approval_transport", lambda: None)()
+
+
+def limitations(backend: Any, write: bool) -> str:
+    """The backend's approval limitation text; a backend without the seam claims none."""
+    return getattr(backend, "approval_limitations", lambda _write: "Caller approvals are not available for this backend.")(write)
+
+
 def validate(backend: Any, enabled: bool, freedom: str, max_turns: int | None, native: bool = False, write: bool = False) -> None:
     if type(enabled) is not bool:
         raise ValueError("caller_approvals must be a boolean")
@@ -221,16 +231,23 @@ async def respond_request(registry: Any, task_id: str, request_id: str, action_d
     return await asyncio.to_thread(approvals.get, registry.log_dir, task_id, request_id)
 
 
-def _path_facts(registry: Any, task: Any, decoded: dict[str, Any]) -> dict[str, Any]:
-    """Repository containment and protected-path refusal, evaluated at every admission (the protected targets are never cached)."""
-    tool = decoded["action"]["tool_name"]
-    path = decoded["action"]["input"].get("file_path") or decoded.get("file_path")
-    if tool not in {"Read", "Write", "Edit"} or not isinstance(path, str) or decoded.get("system_rejection") == "request_too_large":
+def _path_facts(registry: Any, task: Any, decoded: dict[str, Any], backend: Any) -> dict[str, Any]:
+    """Repository containment and protected-path refusal, evaluated at every admission (the protected targets are never cached).
+
+    The backend names the paths an action touches and which tools write; one path keeps the established
+    `inside_repository` fact, several add `path_facts` (one entry per path) and refuse if any is protected."""
+    found = backend.approval_paths(decoded)
+    if not found or decoded.get("system_rejection") == "request_too_large":
         return decoded
-    decoded["inside_repository"] = approval_paths.inside_repository(task.repo_path, path)
+    tool = decoded["action"]["tool_name"]
+    facts = [{"file_path": path, "inside_repository": approval_paths.inside_repository(task.repo_path, path)} for path in found]
+    decoded["inside_repository"] = all(f["inside_repository"] for f in facts)
+    if len(found) > 1:
+        decoded["path_facts"] = facts
     if decoded.get("system_rejection") is None:
         try:
-            reason = approval_paths.protection(approval_paths.protected_targets(task.repo_path, registry.log_dir), tool, path, task.repo_path)
+            targets = approval_paths.protected_targets(task.repo_path, registry.log_dir, extra=backend.protected_config_paths(task.repo_path))
+            reason = next((r for path in found if (r := approval_paths.protection(targets, tool, path, task.repo_path, backend.approval_write_tools())) is not None), None)
         except Exception:
             reason = "protected_path"
         if reason is not None:
@@ -269,7 +286,8 @@ async def _check_version(registry: Any, task: Any, backend: Any, event: dict[str
 @storage_operation
 async def observe(registry: Any, task: Any, backend: Any, event: dict[str, Any]) -> bool:
     """Consume control events separately; never emit raw actions in shared events/tails."""
-    if event.get("type") == "control_request":
+    kind = backend.approval_frame_kind(event)
+    if kind == "request":
         if not task.caller_approvals:
             if getattr(task, "allowed_commands", None):
                 await _check_version(registry, task, backend, event)
@@ -283,7 +301,7 @@ async def observe(registry: Any, task: Any, backend: Any, event: dict[str, Any])
             decoded = backend.decode_approval_request(event, qualification) if len(approvals.canonical(event)) <= approvals.MAX_REQUEST_BYTES else getattr(backend, "decode_oversize_approval", lambda e, q: None)(event, qualification)
             if decoded is None:
                 raise ValueError("Approval request exceeds 64 KiB")
-            decoded = await asyncio.to_thread(_path_facts, registry, task, decoded)
+            decoded = await asyncio.to_thread(_path_facts, registry, task, decoded, backend)
             if task.start_time is None:
                 captured = await asyncio.wait_for(asyncio.to_thread(identity.capture, task.proc.pid, task.markers), timeout=2.0)
                 if captured is None:
@@ -299,7 +317,7 @@ async def observe(registry: Any, task: Any, backend: Any, event: dict[str, Any])
             # Preserve bounded audit evidence even when the action cannot be exposed.
             # Full/invalid ledgers may prevent this final record; cancellation remains mandatory.
             try:
-                native_id = event.get("request_id")
+                native_id = backend.approval_request_key(event)
                 if not isinstance(native_id, str) or not native_id or len(native_id) > 256:
                     native_id = "uncorrelated-" + task.approval_generation
                 audit = {"native_request_id": native_id, "tool_use_id": "unsupported", "action": {"tool_name": "unsupported", "input": {}}}
@@ -327,7 +345,7 @@ async def observe(registry: Any, task: Any, backend: Any, event: dict[str, Any])
     if (task.caller_approvals or getattr(task, "allowed_commands", None)) and not await _check_version(registry, task, backend, event):
         return False
     if task.caller_approvals:
-        cancelled = backend.decode_approval_cancellation(event)
+        cancelled = backend.approval_request_key(event) if kind in {"cancellation", "resolved"} else None
         if cancelled is not None:
             for row in await asyncio.to_thread(approvals.rows, registry.log_dir, task.task_id):
                 if row["native_request_id"] == cancelled and row["generation"] == task.approval_generation and row["disposition"] == "pending":

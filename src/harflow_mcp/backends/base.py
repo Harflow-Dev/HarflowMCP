@@ -59,10 +59,18 @@ class Invocation:
     caller_approvals: bool = False
     caller_write_approvals: bool = False
     caller_approval_version: str | None = None
+    # A stdin pipe the bridge owns for protocol frames (approval answers, Harflow-originated
+    # frames), independent of user-message live input. `live_input` stays false for it: no inbox
+    # forwarding, no `send_message` delivery. Claude's live-input runs never set it.
+    control_pipe: bool = False
     allowed_commands: tuple[str, ...] = ()
     allowed_commands_version: str | None = None
     native_settings: dict[str, Any] | None = None
     env: Mapping[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.control_pipe and (self.stdin_mode != STDIN_DEVNULL or self.initial_input is not None):
+            raise ValueError("control_pipe requires stdin_mode 'devnull' and no initial input: it is a bridge-owned frame pipe, not live input")
 
     @property
     def live_input(self) -> bool:
@@ -92,6 +100,8 @@ def classic_invocation_problem(invocation: Any) -> str | None:
     said how the process's stdin is wired."""
     if not isinstance(invocation, Invocation):
         return f"expected an Invocation, got {type(invocation).__name__}: {invocation!r}"
+    if invocation.control_pipe:
+        return "control_pipe is set, but this backend has no control pipe"
     if invocation.stdin_mode != STDIN_DEVNULL:
         return f"stdin_mode is {invocation.stdin_mode!r}, but this backend has no live input"
     if invocation.initial_input is not None:
@@ -427,6 +437,15 @@ class NestedDispatchRefused(UnsupportedCapability):
         self.rule = rule
 
 
+def control_pipe_problem(backend: Any) -> str | None:
+    """Why `backend` may not run a control-pipe invocation, or None: it must override
+    `control_pipe_finished`, because a pipe with no lifetime rule would never close."""
+    method = getattr(type(backend), "control_pipe_finished", None)
+    if method is None or method is ExtraPathsUnsupported.control_pipe_finished:
+        return f"{getattr(backend, 'name', 'this backend')} declares no control pipe lifetime (control_pipe_finished)"
+    return None
+
+
 class ExtraPathsUnsupported:
     """Default fail-closed seams for uncertified optional execution capabilities."""
 
@@ -502,10 +521,54 @@ class ExtraPathsUnsupported:
     def encode_approval_response(self, request, decision):
         raise UnsupportedCapability("This backend has no qualified caller approval transport")
 
-    def decode_approval_cancellation(self, event):
+    def approval_outcomes(self, event):
+        return []
+
+    # Generic approval seams. Every default is fail-closed: a backend that declares none of them
+    # routes no frame as an approval, extracts no paths, claims no transport and writes nothing.
+    def approval_frame_kind(self, event):
+        """Classify one parsed stdout event: "request" (a permission request to decide),
+        "cancellation" or "resolved" (the harness closed or answered a request itself), else None."""
         return None
 
-    def approval_outcomes(self, event):
+    def approval_request_key(self, event):
+        """The string stored as a ledger row's `native_request_id` for a request, cancellation or
+        resolved event, or None. Typed by the backend so that, for example, an integer and a string
+        id can never collide."""
+        return None
+
+    def approval_paths(self, decoded):
+        """Absolute paths a decoded request would touch (a list, so one action may touch several).
+
+        There is no safe default: a backend that routes approval requests must say which paths they touch
+        (an empty list for an action that touches none). Raising here makes `observe` cancel and audit."""
+        raise UnsupportedCapability(f"{self.name} does not declare the paths its approval requests touch")
+
+    def approval_write_tools(self):
+        """Tool names whose approval can write, which are checked against the protected targets.
+
+        No safe default either: an undeclared set would skip the protected-target checks."""
+        raise UnsupportedCapability(f"{self.name} does not declare which approval tools can write")
+
+    def protected_config_paths(self, repo):
+        """Extra locations a caller may never approve writes to, beyond Harflow's own and Git's."""
+        return []
+
+    def approval_transport(self):
+        """The name of the approval transport reported by `preview_permissions`, or None."""
+        return None
+
+    def approval_limitations(self, write):
+        """Backend-specific limitation text reported by `preview_permissions`."""
+        return "Caller approvals are not available for this backend."
+
+    def control_pipe_finished(self, acc):
+        """Whether a control-pipe-only run (no live input) should now have its stdin closed."""
+        return False
+
+    def outgoing_frames(self, phase, acc):
+        """Harflow-originated frames for `phase` ("initial" after spawn, "turn" on each pump pass),
+        written in order through the bridge's single stdin writer. Interface only; none by default."""
         return []
 
     def execution_configuration_namespaces(self, repo):
@@ -575,8 +638,16 @@ class Backend(Protocol):
     def decode_oversize_approval(self, event: dict[str, Any], qualification: dict[str, Any] | None = None) -> dict[str, Any] | None: ...
     def check_approval_event(self, event: dict[str, Any], qualification: dict[str, Any] | None = None) -> None: ...
     def encode_approval_response(self, request: dict[str, Any], decision: str) -> bytes: ...
-    def decode_approval_cancellation(self, event: dict[str, Any]) -> str | None: ...
     def approval_outcomes(self, event: dict[str, Any]) -> list[tuple[str, str]]: ...
+    def approval_frame_kind(self, event: dict[str, Any]) -> str | None: ...
+    def approval_request_key(self, event: dict[str, Any]) -> str | None: ...
+    def approval_paths(self, decoded: dict[str, Any]) -> list[str]: ...
+    def approval_write_tools(self) -> frozenset[str]: ...
+    def protected_config_paths(self, repo: Path) -> list[Path]: ...
+    def approval_transport(self) -> str | None: ...
+    def approval_limitations(self, write: bool) -> str: ...
+    def control_pipe_finished(self, acc: Accumulator) -> bool: ...
+    def outgoing_frames(self, phase: str, acc: Accumulator | None) -> list[bytes]: ...
 
     def usage_limit_diagnostic(self, event: dict[str, Any]) -> dict[str, Any] | None: ...
 
