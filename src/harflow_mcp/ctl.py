@@ -196,7 +196,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
         approval = sub.add_parser(command, help="Inspect or answer one pending exact-action permission request (an expired or denied one is recovered by a new resume or continue, not by answering)")
         approval.add_argument("task_id")
         approval.add_argument("request_id")
-        approval.add_argument("--monitor", action="store_true", help="Verified human Monitor interaction owner")
+        approval.add_argument("--monitor", action="store_true", help="Use Harflow as the interaction channel")
         approval.add_argument("--json", action="store_true")
         if command == "approval-respond":
             approval.add_argument("--action-digest", required=True)
@@ -211,7 +211,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     run_goal = run_p.add_mutually_exclusive_group()
     run_goal.add_argument("--goal", help="Optional goal when --workflow is selected")
     run_goal.add_argument("--goal-file", help="UTF-8 goal file when --workflow is selected")
-    run_p.add_argument("--monitor", action="store_true", help="Verified human Monitor workflow interaction")
+    run_p.add_argument("--monitor", action="store_true", help="Use Harflow as the workflow interaction channel")
     run_p.add_argument("--repo", required=True)
     run_p.add_argument("--freedom", default=None)
     run_p.add_argument("--prompt", required=True)
@@ -341,7 +341,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
             reason_group.add_argument("--reason-file", help="UTF-8 recovery reason file")
             wp.add_argument("--additional-attempts", type=int, default=0)
         if action in {"start", "pause", "resume", "recover", "cancel", "revise-goal"}:
-            wp.add_argument("--monitor", action="store_true", help="Verified human Monitor workflow interaction")
+            wp.add_argument("--monitor", action="store_true", help="Use Harflow as the workflow interaction channel")
         if action in {"start", "revise-goal"}:
             goal_group = wp.add_mutually_exclusive_group(required=action == "revise-goal")
             goal_group.add_argument("--goal", help="Verbatim nonblank run goal, up to 64 KiB UTF-8")

@@ -507,7 +507,7 @@ async def start_task(
             submitted, so compressed text reaches the agent exactly as garbled. Blank or
             all-whitespace prompts are rejected rather than trimmed into shape.
         repo_path: Absolute path to a git repository; the agent's working directory.
-        backend: Which agent to use — "claude", "codex", "opencode", "vibe" or "antigravity". See
+        backend: Which harness to use — "claude", "codex", "opencode", "vibe" or "antigravity". See
             list_backends.
         freedom: "read_only", "write_in_repo" (default), "publish", or "unrestricted". "publish"
             sits between "write_in_repo" and "unrestricted": it authorizes an attempt to
@@ -1483,7 +1483,7 @@ async def list_tasks(
 
     Args:
         status: Optional filter — running, completed, failed, timed_out or cancelled.
-        backend: Optional filter by agent, e.g. "codex".
+        backend: Optional filter by harness, e.g. "codex".
 
     Includes tasks from earlier harflow_mcp server processes, marked `recovered: true`.
     Supplying group/title_contains/repo/since/limit/fields/cursor selects a bounded newest-first
