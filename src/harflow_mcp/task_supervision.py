@@ -152,6 +152,10 @@ def invocation_request(invocation):
         'argv', 'stdin_mode', 'extra_writable_paths', 'native_subagent', 'caller_approvals', 'caller_write_approvals', 'caller_approval_version', 'allowed_commands', 'allowed_commands_version', 'native_settings')}
     if invocation.control_pipe:
         request_invocation['control_pipe'] = True
+    if invocation.control_context is not None:
+        request_invocation['control_context'] = invocation.control_context
+    if invocation.identity_markers is not None:
+        request_invocation['identity_markers'] = list(invocation.identity_markers)
     request_invocation['env'] = dict(invocation.env)
     request_invocation['initial_input'] = base64.b64encode(invocation.initial_input).decode('ascii') if invocation.initial_input is not None else None
     return request_invocation

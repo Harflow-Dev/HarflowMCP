@@ -217,7 +217,7 @@ def _candidate(raw: Any, grants: bool = True) -> dict[str, Any]:
             candidate["allowed_commands"] = list(patterns)
         else:
             del candidate["allowed_commands"]
-    if candidate["caller_approvals"] and (not backend.capabilities.supports_caller_approvals or candidate.get("max_turns") is not None):
+    if candidate["caller_approvals"] and (not backend.capabilities.supports_caller_approvals or not getattr(backend, "workflow_caller_approvals_supported", lambda: True)() or candidate.get("max_turns") is not None):
         raise WorkflowError("Caller approvals require a qualified uncapped backend")
     if candidate.get("max_turns") is None and backend.capabilities.supports_turn_cap and not candidate["caller_approvals"]:
         candidate["max_turns"] = 100

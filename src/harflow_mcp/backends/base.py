@@ -63,12 +63,20 @@ class Invocation:
     # frames), independent of user-message live input. `live_input` stays false for it: no inbox
     # forwarding, no `send_message` delivery. Claude's live-input runs never set it.
     control_pipe: bool = False
+    # Backend-private, JSON-safe settings for the frames a control-pipe run's backend originates (seeded into
+    # the run's accumulator before the first frame is written). Meaningful only with `control_pipe`.
+    control_context: dict[str, Any] | None = None
+    # Strings that must appear on the process's command line for its identity to match; None keeps the
+    # dispatcher's default (binary plus session id or repository path).
+    identity_markers: tuple[str, ...] | None = None
     allowed_commands: tuple[str, ...] = ()
     allowed_commands_version: str | None = None
     native_settings: dict[str, Any] | None = None
     env: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        if self.control_context is not None and not self.control_pipe:
+            raise ValueError("control_context requires control_pipe")
         if self.control_pipe and (self.stdin_mode != STDIN_DEVNULL or self.initial_input is not None):
             raise ValueError("control_pipe requires stdin_mode 'devnull' and no initial input: it is a bridge-owned frame pipe, not live input")
 
@@ -414,7 +422,13 @@ def classified_denials(backend: Any, acc: Accumulator, freedom: str | None) -> t
 
 
 class ApprovalRefused(ValueError):
-    """A refusal whose message is safe and useful to show the caller as a bridge notice."""
+    """A refusal whose message is safe and useful to show the caller as a bridge notice.
+
+    `audit`, when given, is a short bounded reason the runtime also records as a system audit entry in the approval ledger."""
+
+    def __init__(self, message: str, audit: str | None = None) -> None:
+        super().__init__(message)
+        self.audit = audit
 
 
 class UnsupportedCapability(ValueError):
@@ -562,6 +576,26 @@ class ExtraPathsUnsupported:
         """Backend-specific limitation text reported by `preview_permissions`."""
         return "Caller approvals are not available for this backend."
 
+    def approval_context(self, acc):
+        """Backend state handed to `decode_approval_request` and `check_approval_event` as `qualification` entries."""
+        return {}
+
+    def observed_approval_outcomes(self, event, acc):
+        """`approval_outcomes` for a backend whose outcome correlation needs the run's state."""
+        return self.approval_outcomes(event)
+
+    def workflow_caller_approvals_supported(self):
+        """Whether a saved workflow candidate may carry `caller_approvals` on this backend."""
+        return False
+
+    def approval_scratch(self):
+        """Whether a task with caller approvals still gets a task-owned scratch directory."""
+        return True
+
+    def approval_notice(self, write):
+        """The bridge notice a task with caller approvals carries."""
+        return "Caller approvals use a version-qualified control transport for one exact action. Existing harness permissions remain authoritative. No reusable permission grant is installed."
+
     def control_pipe_finished(self, acc):
         """Whether a control-pipe-only run (no live input) should now have its stdin closed."""
         return False
@@ -646,6 +680,11 @@ class Backend(Protocol):
     def protected_config_paths(self, repo: Path) -> list[Path]: ...
     def approval_transport(self) -> str | None: ...
     def approval_limitations(self, write: bool) -> str: ...
+    def approval_context(self, acc: Accumulator) -> dict[str, Any]: ...
+    def observed_approval_outcomes(self, event: dict[str, Any], acc: Accumulator) -> list[tuple[str, str]]: ...
+    def workflow_caller_approvals_supported(self) -> bool: ...
+    def approval_scratch(self) -> bool: ...
+    def approval_notice(self, write: bool) -> str: ...
     def control_pipe_finished(self, acc: Accumulator) -> bool: ...
     def outgoing_frames(self, phase: str, acc: Accumulator | None) -> list[bytes]: ...
 

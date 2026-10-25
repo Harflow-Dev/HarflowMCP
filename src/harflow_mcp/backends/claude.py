@@ -571,6 +571,12 @@ class ClaudeBackend(ExtraPathsUnsupported):
     def approval_transport(self):
         return "stdio_control"
 
+    def workflow_caller_approvals_supported(self):
+        return True
+
+    def approval_notice(self, write):
+        return "Caller approvals use version-qualified stdio control for one exact action. Existing harness permissions remain authoritative; Claude has no bridge OS sandbox. No reusable permission grant is installed."
+
     def approval_limitations(self, write):
         return "Exact original action only (Bash, Read" + (", Write and Edit" if write else "") + " on qualified versions); saved harness rules remain effective. Approving a Read can disclose files outside the repository. Claude has no bridge OS sandbox."
 

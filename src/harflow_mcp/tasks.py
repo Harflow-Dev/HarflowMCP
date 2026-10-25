@@ -29,6 +29,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 import logging
 import os
+import copy
 import signal
 import time
 import subprocess
@@ -225,6 +226,8 @@ STDERR_TAIL_LINES = 50
 TAIL_LINES_RETURNED = 20
 
 SIGKILL_GRACE_SECONDS = 5.0
+CONTROL_EXIT_GRACE_SECONDS = 5.0
+"""How long a control-pipe server may take to exit after its stdin closed at terminal evidence."""
 
 # How often the monitor re-checks `control.cancel_verdict` while an attempt is pending, and how
 # often a cascade polls a non-local target's record for a terminal status. No deadline of its own
@@ -750,6 +753,9 @@ class Task:
     """Whether this run was spawned with a stdin pipe that takes further messages — taken from the
     run's own `Invocation`, never inferred from the backend. `send_message`, `harflow-ctl send`
     and the snapshot all read this field."""
+    tool_procs: dict[int, tuple[int, str]] = field(default_factory=dict)
+    """Tool commands of a control-pipe run as pid -> (process group, start time), recorded when a stop begins so the
+    SIGKILL sweep reaches their groups after the parents are gone; the start time guards against pid reuse."""
     control_pipe: bool = False
     """Whether this run was spawned with a stdin pipe owned by the bridge for protocol frames only
     (approval answers, Harflow-originated frames) — taken from the run's own `Invocation`. It is
@@ -1233,7 +1239,7 @@ class TaskRegistry:
         # scratch directory and appends its path to the recorded writable_roots — after the
         # lineage check above, exactly like here. The preview allocates nothing, so it discloses
         # the future root symbolically and never feeds it to the nested-authority comparison.
-        if freedom != "read_only" and getattr(backend, "with_writable_directory", None) is not None:
+        if freedom != "read_only" and getattr(backend, "with_writable_directory", None) is not None and not (caller_approvals and not getattr(backend, "approval_scratch", lambda: True)()):
             enforcement = replace(enforcement, writable_roots=(*enforcement.writable_roots, FUTURE_TASK_SCRATCH_ROOT))
         return {"backend": backend.name, "caller_approvals": caller_approvals, "caller_write_approvals": caller_write_approvals, "caller_approval_support": backend.caller_approval_support() if getattr(backend.capabilities, "supports_caller_approvals", False) else {"supported": False}, "approval_scope": "exact_action_once" if caller_approvals else None, "approval_transport": approval_runtime.transport(backend) if caller_approvals else None, "approval_limitations": approval_runtime.limitations(backend, caller_write_approvals), "freedom": freedom, "network": network, "repo_path": str(repo_path), "extra_writable_paths": serialize_paths(grants), "extra_path_certification": backend.extra_path_support().get("certification") if grants else None, "allowed_commands": list(commands), "enforcement": enforcement.as_dict(), "limitations": "Existing typed path identities are checked before launch; grants are unavailable to native workflows and interactive takeover."}
 
@@ -1819,7 +1825,7 @@ class TaskRegistry:
             # is untouched.
             bridge_notices: list[str] = [publish_notice] if publish_notice else []
             if caller_approvals:
-                bridge_notices.append("Caller approvals use version-qualified stdio control for one exact action. Existing harness permissions remain authoritative; Claude has no bridge OS sandbox. No reusable permission grant is installed.")
+                bridge_notices.append(approval_runtime.notice(backend, caller_write_approvals))
             if network is True and enforcement.network_access == "not_controlled":
                 bridge_notices.append(_UNCONTROLLED_NETWORK_NOTICE)
 
@@ -1846,7 +1852,7 @@ class TaskRegistry:
             # cleanup boundary removes scratch on timeout, refusal or cancellation.
             task_scratch = None
             try:
-                if freedom != "read_only":
+                if freedom != "read_only" and not (caller_approvals and not getattr(backend, "approval_scratch", lambda: True)()):
                     from . import scratch
                     from dataclasses import replace
                     task_scratch = scratch.create(self._log_dir, task_id)
@@ -1942,7 +1948,7 @@ class TaskRegistry:
             extra_writable_paths=serialize_paths(extra_path_grants),
             extra_path_certification=backend.extra_path_support().get("certification") if extra_path_grants else None,
             enforcement=enforcement.as_dict(),
-            markers=_identity_markers(backend, session_id, repo_path),
+            markers=invocation.identity_markers if invocation.identity_markers is not None else _identity_markers(backend, session_id, repo_path),
             proc=proc,
             pgid=proc.pid,
             bridge_notices=bridge_notices,
@@ -1966,6 +1972,9 @@ class TaskRegistry:
             results_owed=1 if invocation.live_input else 0,
         )
 
+        if invocation.control_context is not None:
+            # Backend-private settings for the frames its `outgoing_frames` originates.
+            task.acc.stream_state["control_context"] = copy.deepcopy(invocation.control_context)
         task.native_observation_generation = getattr(self, '_launch_generations', {}).get(task_id) if invocation.native_subagent else None
         task.native_observation_sequence = 0
         task.native_observation_failed = False
@@ -2654,6 +2663,7 @@ class TaskRegistry:
         `PUMP_POLL_SECONDS`."""
         from . import approval_runtime
         backend = get_backend(task.backend)
+        finished = False
         try:
             self._write_outgoing_frames(task, "initial")
             await self._flush_stdin(task)
@@ -2665,6 +2675,10 @@ class TaskRegistry:
                     break
                 self._write_outgoing_frames(task, "turn")
                 if not pending and backend.control_pipe_finished(task.acc):
+                    # Tool identities are captured while the server is alive, so a survivor can still be swept
+                    # after it exits by itself.
+                    task.tool_procs.update(await asyncio.to_thread(_tool_procs, task))
+                    finished = True
                     break
                 try:
                     await asyncio.wait_for(task.pump_wake.wait(), timeout=PUMP_POLL_SECONDS)
@@ -2688,6 +2702,33 @@ class TaskRegistry:
             self._stop_native_transport(task)
         finally:
             _close_stdin(task)
+        if finished and not task.cancel_requested:
+            await self._control_shutdown(task)
+
+    async def _control_shutdown(self, task: Task) -> None:
+        """After terminal evidence stdin is closed: give the server a bounded time to exit by itself, then SIGTERM its
+        process group, then sweep the tree. The observed turn outcome stands (`shutdown_after_terminal`), because the
+        run was ended by Harflow only after it had finished. Tool commands that survive a server which did exit are
+        swept from the identities captured just before stdin closed (verified by pid, group and start time).
+
+        Deviation from R6-8's stop order, recorded here until the docs: a *cancel* signals the group with SIGTERM at
+        once (stdin is closed in the same step by the pump), it does not wait on EOF first. Remaining risk: a tool
+        group of a server that crashes or is killed before terminal evidence is swept only from the identities
+        recorded when a stop began, so commands started after that record, or by a server that died on its own
+        first, can outlive it."""
+        proc = task.proc
+        if proc is None:
+            return
+        if not await _process_exited(proc, CONTROL_EXIT_GRACE_SECONDS):
+            if task.cancel_requested:
+                return
+            task.acc.stream_state["shutdown_after_terminal"] = True
+            task.tool_procs.update(await asyncio.to_thread(_tool_procs, task))
+            log.warning("task %s: the app-server outlived its completed turn; terminating it", task.task_id)
+            _signal_group(task, signal.SIGTERM)
+            await _process_exited(proc, SIGKILL_GRACE_SECONDS)
+        if task.tool_procs or proc.returncode is None:
+            await asyncio.to_thread(_kill_control_tree, task)
 
     async def _finish_pump(self, task: Task) -> None:
         """Let the pump run its exit-path close, so undelivered messages are reported before
@@ -2907,6 +2948,10 @@ class TaskRegistry:
         store.read(self._log_dir, task.task_id, include_prompt=False)
         attempt = control.begin_attempt(self._log_dir, task.task_id, control.CANCEL, self._owner)
         task.cancel_requested = True
+        if task.control_pipe:
+            # Tool commands run in process groups of their own, and a clean shutdown orphans them: record the
+            # groups while their parents are still alive, so the SIGKILL sweep can reach them afterwards.
+            task.tool_procs.update(_tool_procs(task, timeout=1.0))
         delivered = _signal_group(task, signal.SIGTERM)
         if attempt.owned and delivered:
             # One in-line attempt only: this runs on the event loop, so any retry is the background
@@ -4097,6 +4142,114 @@ def _signal_group(task: Task, sig: int) -> bool:
             return False
 
 
+def _process_table(timeout: float = 5.0) -> dict[int, tuple[int, int, str]]:
+    """pid -> (ppid, pgid, start time) for every process; empty when `ps` cannot say within `timeout`."""
+    try:
+        out = subprocess.run(["ps", "-axo", "pid=,ppid=,pgid=,lstart="], capture_output=True, text=True, timeout=timeout, check=False, env={**os.environ, "LC_ALL": "C"}).stdout
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    table = {}
+    for line in out.splitlines():
+        parts = line.split(None, 3)
+        if len(parts) == 4 and all(part.isdigit() for part in parts[:3]):
+            table[int(parts[0])] = (int(parts[1]), int(parts[2]), " ".join(parts[3].split()))
+    return table
+
+
+def _descendants(root: int, table: dict[int, tuple[int, int, str]]) -> set[int]:
+    found: set[int] = set()
+    frontier = {root}
+    while frontier:
+        frontier = {pid for pid, (ppid, _pgid, _start) in table.items() if ppid in frontier and pid not in found and pid != root}
+        found |= frontier
+    return found
+
+
+def _tool_procs(task: Task, timeout: float = 5.0) -> dict[int, tuple[int, str]]:
+    """Identities (pid -> (group, start time)) of every descendant of a live control-pipe run outside the run's own group."""
+    if task.proc is None or task.proc.returncode is not None:
+        return {}
+    table = _process_table(timeout)
+    return {pid: (table[pid][1], table[pid][2]) for pid in _descendants(task.proc.pid, table) if pid in table and table[pid][1] != task.pgid}
+
+
+def _kill_pid(pid: int, sig: int) -> None:
+    try:
+        os.kill(pid, sig)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def _kill_group(pgid: int, sig: int = signal.SIGKILL) -> None:
+    try:
+        os.killpg(pgid, sig)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+async def _process_exited(proc: asyncio.subprocess.Process, timeout: float) -> bool:
+    """Whether the process itself exited within `timeout`. Polls `returncode`: `Process.wait()` also waits for the
+    pipes to close, which a surviving tool process that inherited stdout would hold open indefinitely."""
+    deadline = time.monotonic() + timeout
+    while proc.returncode is None:
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(0.05)
+    return True
+
+
+def _verified_groups(recorded: dict[int, tuple[int, str]], table: dict[int, tuple[int, int, str]], exclude: int | None) -> set[int]:
+    """Recorded groups that still have a member whose pid, group and start time match what was recorded.
+
+    A pid or group id the system has since reused belongs to an unrelated process and never matches, so a group is
+    only ever signalled while at least one member proves it is still the group that was recorded."""
+    return {group for pid, (group, start) in recorded.items()
+            if group != exclude and pid in table and table[pid][1] == group and table[pid][2] == start}
+
+
+def _kill_control_tree(task: Task) -> None:
+    """SIGKILL a control-pipe run and every tool process group beneath it.
+
+    Tool commands run in process groups of their own, so killing only the run's group would orphan them
+    (measured). While the leader is alive: SIGSTOP it and its direct children (the native process is the run's
+    root or the wrapper's child), then enumerate descendants and kill their groups, re-enumerating so a group
+    created meanwhile is caught, then kill the run's group and sweep once more. Recorded groups are signalled only
+    while a recorded member still matches its pid, group and start time (in both the live and the reaped case, and
+    in the final sweep), so a reused pid or process group is never signalled. Once the leader has been reaped its
+    descendants cannot be walked and only that verified, recorded set is swept."""
+    recorded = dict(task.tool_procs)
+    alive = task.proc is not None and task.proc.returncode is None
+    if alive:
+        root = task.proc.pid
+        table = _process_table()
+        for pid in [root, *sorted(p for p in _descendants(root, table) if table[p][0] == root)]:
+            _kill_pid(pid, signal.SIGSTOP)
+        groups = _verified_groups(recorded, table, task.pgid)
+        killed: set[int] = set()
+        for _round in range(3):
+            table = _process_table() or table
+            tree = _descendants(root, table)
+            for pid in tree:
+                if pid in table and table[pid][1] != task.pgid:
+                    recorded[pid] = (table[pid][1], table[pid][2])   # a live descendant: identity established by ancestry
+            groups |= {table[pid][1] for pid in tree if pid in table and table[pid][1] != task.pgid}
+            fresh = groups - killed
+            if not fresh and _round:
+                break
+            for group in sorted(fresh):
+                _kill_group(group)
+            killed |= fresh
+            for pid in sorted(tree):
+                _kill_pid(pid, signal.SIGKILL)
+        _signal_group(task, signal.SIGKILL)
+        for group in sorted(_verified_groups(recorded, _process_table(), task.pgid) & groups):
+            _kill_group(group)
+        return
+    for group in sorted(_verified_groups(recorded, _process_table(), task.pgid)):
+        _kill_group(group)
+    _signal_group(task, signal.SIGKILL)
+
+
 async def _escalate(task: Task) -> None:
     """Wait for the run to exit after its SIGTERM (already sent synchronously by
     `TaskRegistry._deliver_local_cancel`), escalating to SIGKILL if it does not go quietly.
@@ -4113,7 +4266,10 @@ async def _escalate(task: Task) -> None:
     except asyncio.TimeoutError:
         log.warning("task %s ignored SIGTERM, sending SIGKILL", task.task_id)
     # Unconditional: the leader may be gone while a child still holds the pipes.
-    _signal_group(task, signal.SIGKILL)
+    if task.control_pipe:
+        await asyncio.to_thread(_kill_control_tree, task)
+    else:
+        _signal_group(task, signal.SIGKILL)
 
 
 def _stop_failed_drainer(task: Task) -> None:
@@ -4122,7 +4278,10 @@ def _stop_failed_drainer(task: Task) -> None:
     process = task.proc
     if (task._process_owner_pid == os.getpid() and process is not None
             and process.returncode is None and task.pgid == process.pid):
-        _signal_group(task, signal.SIGKILL)
+        if task.control_pipe:
+            _kill_control_tree(task)
+        else:
+            _signal_group(task, signal.SIGKILL)
 
 
 async def _drain_stdout(task: Task, registry: TaskRegistry) -> None:

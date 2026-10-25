@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +39,15 @@ def limitations(backend: Any, write: bool) -> str:
     return getattr(backend, "approval_limitations", lambda _write: "Caller approvals are not available for this backend.")(write)
 
 
+def notice(backend: Any, write: bool) -> str:
+    """The bridge notice for a task with caller approvals, from the backend."""
+    return getattr(backend, "approval_notice", lambda _write: "Caller approvals use a version-qualified control transport for one exact action.")(write)
+
+
+def _context(backend: Any, acc: Any) -> dict[str, Any]:
+    return getattr(backend, "approval_context", lambda _acc: {})(acc)
+
+
 def validate(backend: Any, enabled: bool, freedom: str, max_turns: int | None, native: bool = False, write: bool = False) -> None:
     if type(enabled) is not bool:
         raise ValueError("caller_approvals must be a boolean")
@@ -56,7 +66,8 @@ async def configure(backend: Any, invocation: Any, enabled: bool, freedom: str, 
         return invocation
     version = await asyncio.to_thread(backend.qualify_caller_approvals)
     _write_validator(backend)(write, enabled, version)
-    result = backend.configure_caller_approvals(invocation, freedom, max_turns, version, write)
+    # File reads and Git lookups for a backend's pre-spawn checks must not block the event loop.
+    result = await asyncio.to_thread(backend.configure_caller_approvals, invocation, freedom, max_turns, version, write)
     backend.assert_safe(result, freedom)
     return result
 
@@ -255,11 +266,31 @@ def _path_facts(registry: Any, task: Any, decoded: dict[str, Any], backend: Any)
     return decoded
 
 
+async def _record_audit(registry: Any, task: Any, native_id: str, note: str) -> None:
+    """A bounded system audit row (never exposed as a decision) for a stop whose evidence is not a request."""
+    audit = {"native_request_id": native_id, "tool_use_id": "unsupported", "action": {"tool_name": "unsupported", "input": {"reason": note[:200]}}}
+    ctx = await asyncio.to_thread(context, registry.log_dir, task.task_id, task.interaction_owner)
+    row = await asyncio.to_thread(approvals.admit, registry.log_dir, task, audit, ctx)
+    await asyncio.to_thread(approvals.update, registry.log_dir, task.task_id, row["request_id"], row["generation"], disposition="unsupported", delivery="failed")
+
+
 async def _stop_refused(registry: Any, task: Any, exc: Exception) -> None:
     """Version or qualification refusal: notice, invalidate pending approvals and stop the run now."""
     if str(exc) not in task.bridge_notices:
         task.bridge_notices.append(str(exc))
     if task.caller_approvals:
+        audit = getattr(exc, "audit", None)
+        if audit:
+            try:
+                if task.start_time is None:
+                    captured = await asyncio.wait_for(asyncio.to_thread(identity.capture, task.proc.pid, task.markers), timeout=2.0)
+                    if captured is not None:
+                        task.start_time = captured["start_time"]
+                await _record_audit(registry, task, "audit-" + uuid.uuid4().hex, audit)
+            except StateOwnershipError:
+                raise
+            except Exception:
+                pass
         try:
             await asyncio.to_thread(approvals.invalidate, registry.log_dir, task.task_id, "invalidated", task.approval_generation)
         except StateOwnershipError:
@@ -274,7 +305,7 @@ async def _check_version(registry: Any, task: Any, backend: Any, event: dict[str
     """The init-version cross-check shared by approvals and command grants: a mismatch, a missing version or a tool or
     control event before init stops the run, because the qualified grammar and prompts were measured on one exact version."""
     qualification = {"version": task.caller_approval_version or getattr(task, "allowed_commands_version", None), "observed": getattr(backend, "approval_stream_version", lambda acc: None)(task.acc),
-                     "write": task.caller_write_approvals, "feature": "caller approvals" if task.caller_approvals else "allowed_commands"}
+                     "write": task.caller_write_approvals, "feature": "caller approvals" if task.caller_approvals else "allowed_commands", **_context(backend, task.acc)}
     try:
         getattr(backend, "check_approval_event", lambda e, q: None)(event, qualification)
     except ApprovalRefused as exc:
@@ -297,7 +328,7 @@ async def observe(registry: Any, task: Any, backend: Any, event: dict[str, Any])
         task.acc.awaiting_input = False
         task.acc.turn_open = True
         try:
-            qualification = {"version": task.caller_approval_version, "observed": getattr(backend, "approval_stream_version", lambda acc: None)(task.acc), "write": task.caller_write_approvals}
+            qualification = {"version": task.caller_approval_version, "observed": getattr(backend, "approval_stream_version", lambda acc: None)(task.acc), "write": task.caller_write_approvals, **_context(backend, task.acc)}
             decoded = backend.decode_approval_request(event, qualification) if len(approvals.canonical(event)) <= approvals.MAX_REQUEST_BYTES else getattr(backend, "decode_oversize_approval", lambda e, q: None)(event, qualification)
             if decoded is None:
                 raise ValueError("Approval request exceeds 64 KiB")
@@ -348,9 +379,13 @@ async def observe(registry: Any, task: Any, backend: Any, event: dict[str, Any])
         cancelled = backend.approval_request_key(event) if kind in {"cancellation", "resolved"} else None
         if cancelled is not None:
             for row in await asyncio.to_thread(approvals.rows, registry.log_dir, task.task_id):
+                # A "resolved" frame is the harness acknowledging an answer Harflow is writing or has written:
+                # only a request that is still unanswered loses its eligibility. A cancellation closes any pending row.
+                if kind == "resolved" and row["delivery"] not in {"pending", "reserved"}:
+                    continue
                 if row["native_request_id"] == cancelled and row["generation"] == task.approval_generation and row["disposition"] == "pending":
                     await asyncio.to_thread(approvals.observe_cancellation, registry.log_dir, task.task_id, row["request_id"], row["generation"])
-        for tool_id, outcome in backend.approval_outcomes(event):
+        for tool_id, outcome in getattr(backend, "observed_approval_outcomes", lambda e, _acc: backend.approval_outcomes(e))(event, task.acc):
             for row in await asyncio.to_thread(approvals.rows, registry.log_dir, task.task_id):
                 if row["tool_use_id"] == tool_id and row["generation"] == task.approval_generation:
                     await asyncio.to_thread(approvals.observe_outcome, registry.log_dir, task.task_id, row["request_id"], row["generation"], outcome)

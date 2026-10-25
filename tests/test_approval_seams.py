@@ -65,7 +65,7 @@ def test_claude_preview_transport_and_limitations_text_is_unchanged():
 
 # --- fail-closed defaults -------------------------------------------------------------------------
 
-@pytest.mark.parametrize("name", ["codex", "opencode", "vibe", "antigravity"])
+@pytest.mark.parametrize("name", ["opencode", "vibe", "antigravity"])
 def test_backends_without_the_seams_default_closed(name):
     backend = get(name)
     assert backend.approval_frame_kind({"type": "control_request", "request_id": "x"}) is None
@@ -700,3 +700,13 @@ async def test_a_supervised_launch_of_a_control_pipe_without_a_lifetime_is_refus
     with pytest.raises(ValueError, match="control_pipe_finished"):
         await task_supervision.launch(registry, Invocation(["/bin/sh"], control_pipe=True), {"backend": backend, "freedom": "write_in_repo", "repo_path": state_workspace})
     assert started == []
+
+
+def test_control_context_and_identity_markers_round_trip_through_a_supervised_launch_only_when_set():
+    from harflow_mcp import task_supervision
+    plain = task_supervision.invocation_request(Invocation(["x"], control_pipe=True))
+    assert "control_context" not in plain and "identity_markers" not in plain
+    request = task_supervision.invocation_request(Invocation(["x"], control_pipe=True, control_context={"a": 1}, identity_markers=("codex", "app-server")))
+    assert request["control_context"] == {"a": 1} and request["identity_markers"] == ["codex", "app-server"]
+    with pytest.raises(ValueError, match="control_context requires control_pipe"):
+        Invocation(["x"], control_context={"a": 1})

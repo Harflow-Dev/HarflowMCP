@@ -353,6 +353,7 @@ class CodexBackend(ExtraPathsUnsupported):
             ),
         ),
         supports_live_input=False,
+        supports_caller_approvals=True,
     )
 
     @property
@@ -713,6 +714,18 @@ class CodexBackend(ExtraPathsUnsupported):
         self, invocation: Invocation, freedom: Freedom, network: bool | None = None
     ) -> None:
         validate_invocation_env(invocation, {})
+        if isinstance(invocation, Invocation) and (invocation.control_pipe or invocation.control_context is not None):
+            # The one other exact shape: `codex app-server` for caller approvals (see codex_app_server).
+            from . import codex_app_server as app_server
+            check_freedom(freedom)
+            problem = app_server.assert_safe(invocation, freedom)
+            if problem is None and network is not None and invocation.control_context["network"] is not self._resolve_network(freedom, network):
+                problem = "app-server network setting does not match the requested network"
+            if problem is not None:
+                raise UnsafeInvocationError(problem)
+            return
+        if isinstance(invocation, Invocation) and invocation.caller_approvals:
+            raise UnsafeInvocationError("caller approvals run through the app-server shape, never an exec argv")
         if isinstance(invocation, Invocation) and invocation.allowed_commands:
             raise UnsupportedCapability(self.allowed_commands_support()["reason"])
         if isinstance(invocation, Invocation) and invocation.native_subagent and invocation.extra_writable_paths:
@@ -1029,6 +1042,10 @@ class CodexBackend(ExtraPathsUnsupported):
         )
 
     def ingest(self, event: dict[str, Any], acc: Accumulator) -> None:
+        from . import codex_app_server as app_server
+        if app_server.is_frame(event):
+            self._ingest_frame(event, acc)
+            return
         diagnostic = self.usage_limit_diagnostic(event)
         if diagnostic is not None and acc.failure_diagnostic is None:
             acc.failure_diagnostic = diagnostic
@@ -1074,10 +1091,43 @@ class CodexBackend(ExtraPathsUnsupported):
             if isinstance(message, str):
                 acc.notices.append(message)
 
+    def _ingest_frame(self, event: dict[str, Any], acc: Accumulator) -> None:
+        """An app-server JSON-RPC frame: translated to the exec shapes `ingest` already understands.
+
+        With live run state, only correlated evidence counts: a thread response discloses the session id once the
+        thread verified and only for the verified thread, and a `turn/completed` is a terminal only for the active
+        thread and turn (the state decides success at `classify`, never a translated flag). Without state (a replayed
+        log) the frames are translated as read."""
+        from . import codex_app_server as app_server
+        acc.stream_state["app_server_seen"] = True
+        state = acc.stream_state.get("app_server")
+        params = event.get("params") if isinstance(event.get("params"), dict) else {}
+        turn = params.get("turn") if isinstance(params.get("turn"), dict) else {}
+        if state is not None and not app_server.item_correlated(event, state):
+            return
+        for translated in app_server.translate(event):
+            kind = translated.get("type")
+            if state is not None:
+                if kind == "thread.started" and not (state.thread_verified and translated.get("thread_id") == state.thread_id):
+                    continue
+                if kind in {"turn.completed", "turn.failed"} and not (params.get("threadId") == state.thread_id and turn.get("id") == state.turn_id):
+                    continue
+            elif kind == "turn.completed":
+                acc.stream_state["app_server_turn_status"] = "completed"
+            elif kind == "turn.failed":
+                acc.stream_state["app_server_turn_status"] = "failed"
+            self.ingest(translated, acc)
+
     def normalize(self, event: dict[str, Any], acc: Accumulator) -> list[dict[str, Any]]:
         # Codex has no timestamps in its stream at all: no source_ts is ever attached here.
         if not isinstance(event, dict):
             return []
+        from . import codex_app_server as app_server
+        if app_server.is_frame(event):
+            state = acc.stream_state.get("app_server")
+            if state is not None and not app_server.item_correlated(event, state):
+                return []
+            return [normalized for translated in app_server.translate(event) if translated.get("type") != "thread.started" for normalized in self.normalize(translated, acc)]
         event_type = event.get("type")
 
         if event_type == "item.started":
@@ -1269,6 +1319,152 @@ class CodexBackend(ExtraPathsUnsupported):
         started = acc.stream_state.get("normalize_started_calls")
         return isinstance(started, set) and call_id in started
 
+    # --- caller approvals through `codex app-server` (see codex_app_server) -------------------------------------
+
+    def caller_approval_support(self) -> dict[str, Any]:
+        from . import codex_app_server as app_server
+        return app_server.support()
+
+    def validate_caller_approvals(self, enabled, freedom, max_turns, native=False):
+        from . import codex_app_server as app_server
+        app_server.validate(enabled, freedom, max_turns, native)
+
+    def qualify_caller_approvals(self):
+        from . import codex_qualification
+        return codex_qualification.qualify(self)
+
+    def validate_caller_write_approvals(self, write, enabled, version=None):
+        if type(write) is not bool:
+            raise ValueError("caller_write_approvals must be a boolean")
+        if write:
+            raise UnsupportedCapability("caller_write_approvals is not qualified on Codex: file-change requests are declined")
+
+    def workflow_caller_approvals_supported(self):
+        return False
+
+    def _exec_parts(self, invocation: Invocation) -> dict[str, Any]:
+        """Model, effort, network, repository, thread and prompt of an exec-shaped invocation this backend built."""
+        argv = invocation.argv
+        if not isinstance(invocation, Invocation) or invocation.control_pipe or argv[:2] != [BINARY, "exec"] or "--" not in argv:
+            raise UnsupportedCapability("caller approvals need an invocation this backend built")
+        parts: dict[str, Any] = {"repo": None, "model": None, "effort": None, "network": None, "thread_id": None, "prompt": None}
+        resumed, index, separator = False, 2, argv.index("--")
+        while index < separator:
+            token = argv[index]
+            if token == "resume":
+                resumed = True
+            elif token in {"-C", "-m", "-s", "-c"} and index + 1 < separator:
+                value = argv[index + 1]
+                index += 1
+                if token == "-C":
+                    parts["repo"] = value
+                elif token == "-m":
+                    parts["model"] = value
+                elif token == "-c" and value.startswith(f"{EFFORT_KEY}="):
+                    parts["effort"] = value.split("=", 1)[1].strip('"')
+                elif token == "-c" and value in {NETWORK_ENABLE_PAIR, NETWORK_DISABLE_PAIR}:
+                    parts["network"] = value == NETWORK_ENABLE_PAIR
+            index += 1
+        rest = argv[separator + 1:]
+        prompt = rest[-1] if rest else None
+        if prompt == "-" and isinstance(invocation.initial_input, bytes):
+            prompt = invocation.initial_input.decode("utf-8")
+        if resumed:
+            parts["thread_id"] = rest[0] if len(rest) == 2 else None
+        if parts["repo"] is None or parts["network"] is None or not isinstance(prompt, str) or (resumed and not parts["thread_id"]):
+            raise UnsupportedCapability("caller approvals could not read the repository, network setting or prompt from the invocation")
+        parts["prompt"] = prompt
+        return parts
+
+    def configure_caller_approvals(self, invocation, freedom, max_turns, version=None, write=False):
+        from . import codex_app_server as app_server
+        return app_server.prepare(invocation, self._exec_parts(invocation), freedom, version, write)
+
+    def approval_enforcement(self, enforcement, version, enabled, write):
+        if not enabled or version is None:
+            return enforcement
+        from . import codex_app_server as app_server
+        return replace(enforcement, caller_approval_tools=("commandExecution",), mechanism=enforcement.mechanism + app_server.mechanism_suffix(),
+                       caveats=enforcement.caveats + app_server.enforcement_caveats())
+
+    def approval_transport(self):
+        return "codex_app_server"
+
+    def approval_scratch(self):
+        # The pinned sandbox has no extra writable roots (verified exactly), so no scratch directory is granted.
+        return False
+
+    def approval_limitations(self, write):
+        from . import codex_app_server as app_server
+        return app_server.LIMITATIONS
+
+    def approval_notice(self, write):
+        return ("Caller approvals use `codex app-server` with approval policy on-request for one exact command. An approved command may run outside the OS sandbox. "
+                "This repository's .codex configuration is ignored, and no task scratch directory is provided (HARFLOW_TASK_SCRATCH is not set). No reusable permission grant is installed.")
+
+    def approval_frame_kind(self, event):
+        from . import codex_app_server as app_server
+        return app_server.frame_kind(event)
+
+    def approval_request_key(self, event):
+        from . import codex_app_server as app_server
+        return app_server.request_key(event)
+
+    def approval_context(self, acc):
+        from . import codex_app_server as app_server
+        state = app_server.state_for(acc)
+        return {"state": state} if state is not None else {}
+
+    def approval_stream_version(self, acc):
+        from . import codex_app_server as app_server
+        state = app_server.state_for(acc)
+        return state.observed_version if state is not None else None
+
+    def check_approval_event(self, event, qualification=None):
+        state = (qualification or {}).get("state")
+        if state is not None:
+            from . import codex_app_server as app_server
+            app_server.step(state, event)
+
+    def decode_approval_request(self, event, qualification=None):
+        from . import codex_app_server as app_server
+        return app_server.decode(event, qualification)
+
+    def decode_oversize_approval(self, event, qualification=None):
+        from . import codex_app_server as app_server
+        return app_server.decode_oversize(event, qualification)
+
+    def encode_approval_response(self, request, decision):
+        from . import codex_app_server as app_server
+        return app_server.encode(request, decision)
+
+    def approval_outcomes(self, event):
+        return []
+
+    def observed_approval_outcomes(self, event, acc):
+        from . import codex_app_server as app_server
+        return app_server.outcomes(event, app_server.state_for(acc))
+
+    def approval_paths(self, decoded):
+        return []
+
+    def approval_write_tools(self):
+        return frozenset()
+
+    def protected_config_paths(self, repo):
+        from . import codex_app_server as app_server
+        return [app_server.codex_home()]
+
+    def control_pipe_finished(self, acc):
+        from . import codex_app_server as app_server
+        return app_server.finished(acc)
+
+    def outgoing_frames(self, phase, acc):
+        from . import codex_app_server as app_server
+        if acc is None:
+            return []
+        return app_server.initial_frames(acc) if phase == "initial" else app_server.turn_frames(acc) if phase == "turn" else []
+
     def encode_live_message(self, text: str) -> bytes:
         raise UnsupportedCapability(
             f"the {self.name} backend has no live input, so a message cannot be added to a running "
@@ -1291,6 +1487,17 @@ class CodexBackend(ExtraPathsUnsupported):
 
     def classify(self, acc: Accumulator, exit_code: int | None) -> Status:
         if acc.failure_diagnostic is not None:
+            return "failed"
+        # An app-server run succeeds only on correlated terminal-turn evidence: a failed or interrupted turn,
+        # or a clean exit with no `turn/completed` at all, is never a success.
+        state = acc.stream_state.get("app_server")
+        if state is not None:
+            completed = state.failed is None and state.terminal is not None and state.terminal.get("status") == "completed"
+            if not completed:
+                return "failed"
+            if acc.stream_state.get("shutdown_after_terminal"):
+                exit_code = 0  # Harflow ended a server that outlived its completed turn; the observed outcome stands
+        elif acc.stream_state.get("app_server_seen") and acc.stream_state.get("app_server_turn_status") != "completed":
             return "failed"
         # No terminal success/failure event exists, so the exit code is the authority and the closing
         # message is only corroboration. That makes an *observed* zero exit mandatory here: with
