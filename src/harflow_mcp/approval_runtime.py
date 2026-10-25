@@ -242,11 +242,38 @@ async def respond_request(registry: Any, task_id: str, request_id: str, action_d
     return await asyncio.to_thread(approvals.get, registry.log_dir, task_id, request_id)
 
 
+PATH_CHANGED = "path_changed_since_admission"
+
+
+def _protection_reason(registry: Any, task: Any, backend: Any, tool: str, found: list[str]) -> str | None:
+    """The first protected-path refusal over every path, against the protected targets as they are now (never cached)."""
+    targets = approval_paths.protected_targets(task.repo_path, registry.log_dir, extra=backend.protected_config_paths(task.repo_path))
+    return next((r for path in found if (r := approval_paths.protection(targets, tool, path, task.repo_path, backend.approval_write_tools())) is not None), None)
+
+
+def _path_snapshot(task: Any, found: list[str]) -> list[dict[str, str]]:
+    """Each path as the backend named it and as `approval_paths.protection` resolves it."""
+    return [{"literal": path, "resolved": str(approval_paths.resolve(path, task.repo_path))} for path in found]
+
+
+def _bounded_rejection(decoded: dict[str, Any], tool: str, found: list[str]) -> dict[str, Any]:
+    """A rejection-only audit row for a request whose snapshot would not fit the request budget: ids, tool, size and the
+    SHA-256 of the original action, no action input (the existing oversized-request representation), so it is admitted and delivered."""
+    import hashlib
+    raw = approvals.canonical(decoded["action"])
+    bounded = {k: decoded[k] for k in ("native_request_id", "native_method", "tool_use_id") if k in decoded}
+    bounded.update(action={"tool_name": tool, "input": {}}, system_rejection="request_too_large", oversize_bytes=len(raw), oversize_action_digest=hashlib.sha256(raw).hexdigest())
+    if len(found) == 1 and len(found[0].encode("utf-8")) < 4096:
+        bounded["file_path"] = found[0]
+    return bounded
+
+
 def _path_facts(registry: Any, task: Any, decoded: dict[str, Any], backend: Any) -> dict[str, Any]:
     """Repository containment and protected-path refusal, evaluated at every admission (the protected targets are never cached).
 
     The backend names the paths an action touches and which tools write; one path keeps the established
-    `inside_repository` fact, several add `path_facts` (one entry per path) and refuse if any is protected."""
+    `inside_repository` fact, several add `path_facts` (one entry per path) and refuse if any is protected.
+    A request that is not already refused also records `path_snapshot`, the resolved paths the pump compares at delivery."""
     found = backend.approval_paths(decoded)
     if not found or decoded.get("system_rejection") == "request_too_large":
         return decoded
@@ -257,13 +284,41 @@ def _path_facts(registry: Any, task: Any, decoded: dict[str, Any], backend: Any)
         decoded["path_facts"] = facts
     if decoded.get("system_rejection") is None:
         try:
-            targets = approval_paths.protected_targets(task.repo_path, registry.log_dir, extra=backend.protected_config_paths(task.repo_path))
-            reason = next((r for path in found if (r := approval_paths.protection(targets, tool, path, task.repo_path, backend.approval_write_tools())) is not None), None)
+            reason = _protection_reason(registry, task, backend, tool, found)
         except Exception:
             reason = "protected_path"
         if reason is not None:
             decoded["system_rejection"] = reason
+    if decoded.get("system_rejection") is None:
+        try:
+            snapshot = _path_snapshot(task, found)
+        except Exception:
+            decoded["system_rejection"] = "protected_path"
+        else:
+            if len(approvals.canonical({**decoded, "path_snapshot": snapshot})) > approvals.MAX_REQUEST_BYTES:
+                return _bounded_rejection(decoded, tool, found)
+            decoded["path_snapshot"] = snapshot
     return decoded
+
+
+def _delivery_path_reason(registry: Any, task: Any, backend: Any, row: dict[str, Any]) -> str | None:
+    """Re-check an approved action's paths immediately before the approve is written; None when nothing changed.
+
+    Runs off the event loop (protected targets shell out to Git). A changed resolution, a changed path set or a missing or
+    malformed snapshot is `path_changed_since_admission`; a path that is now protected, or that cannot be resolved, is `protected_path`.
+    A row that names no paths (a command) has nothing to re-check."""
+    try:
+        found = backend.approval_paths(row)
+        if not found:
+            return None
+        snapshot = row.get("path_snapshot")
+        if not isinstance(snapshot, list) or any(not isinstance(e, dict) or not isinstance(e.get("literal"), str) or not isinstance(e.get("resolved"), str) for e in snapshot):
+            return PATH_CHANGED
+        if _path_snapshot(task, found) != [{"literal": e["literal"], "resolved": e["resolved"]} for e in snapshot]:
+            return PATH_CHANGED
+        return _protection_reason(registry, task, backend, row["action"]["tool_name"], found)
+    except Exception:
+        return "protected_path"
 
 
 async def _record_audit(registry: Any, task: Any, native_id: str, note: str) -> None:
@@ -427,6 +482,18 @@ async def pump(registry: Any, task: Any) -> bool:
             await asyncio.to_thread(approvals.invalidate, registry.log_dir, task.task_id, "invalidated", task.approval_generation)
             registry._stop_native_transport(task)
             return False
+        # Delivery-time path re-check: an approve is written only for paths that still resolve as admitted and are not protected now.
+        # The conversion is its own CAS, before the send reservation, so a crash between the two can never leave an approve to write.
+        if (row.get("effective_decision") or row["decision"]) == "approve" and not row.get("system_rejection"):
+            reason = await asyncio.to_thread(_delivery_path_reason, registry, task, get(task.backend), row)
+            if reason is not None:
+                try:
+                    row = await asyncio.to_thread(approvals.update, registry.log_dir, task.task_id, row["request_id"], row["generation"], "reserved", system_rejection=reason, effective_decision="reject")
+                except ValueError:
+                    current = next((r for r in await asyncio.to_thread(approvals.rows, registry.log_dir, task.task_id) if r["request_id"] == row["request_id"]), None)
+                    if current is not None and current["generation"] == task.approval_generation and (current["execution_outcome"] != "unknown" or current["disposition"] != "pending"):
+                        continue
+                    raise
         # Durable send reservation precedes the only write. A crash in this window is
         # ambiguous and recovery never retries it. The lock is released before awaiting.
         # Cancellation is checked again after the off-loop CAS and before the synchronous write.

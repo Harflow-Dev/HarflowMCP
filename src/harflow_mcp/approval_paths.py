@@ -1,6 +1,8 @@
 """Path facts for caller approvals: repository containment and the targets a caller may never approve.
 
-Evaluated at every admission, after symlink resolution. They cannot prevent a later symlink swap.
+Evaluated at every admission after symlink resolution, and again by the approval pump immediately before an
+approve is written (`approval_runtime`), which refuses a path that resolves differently or is now protected. They cannot
+prevent a swap after that point, or detect a hard link to a protected file.
 """
 from __future__ import annotations
 

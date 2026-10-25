@@ -174,7 +174,7 @@ def decode(event: dict[str, Any], qualified: dict[str, Any] | None = None) -> di
     return decoded
 
 
-SYSTEM_REASONS = ("write_approvals_not_enabled", "protected_path", "request_too_large", "approval_expired")
+SYSTEM_REASONS = ("write_approvals_not_enabled", "protected_path", "request_too_large", "approval_expired", "path_changed_since_admission")
 
 
 def encode(request: dict[str, Any], decision: str) -> bytes:

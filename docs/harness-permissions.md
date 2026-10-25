@@ -469,9 +469,9 @@ the run as an unsupported request. Ledger rows keep Claude's `decision_reason` (
 `decision_reason_type`.
 
 **Harflow system rejections.** Some requests are answered by Harflow itself, never offered to the caller:
-the row is admitted with `decided_by: "harflow"`, an effective rejection and delivery reserved, and the
+the row is admitted with `decided_by: "harflow"`, an effective rejection and delivery reserved (rejections decided at admission; an expired request keeps the caller's recorded `decision` with `expiry_rejection: true`, and the delivery-time path conversion below keeps `decision` and `decided_by: "caller"` with `system_rejection` set; either refusal is still Harflow's), and the
 existing pump sends `Harflow refused this action: <reason>`. Reasons are `write_approvals_not_enabled`,
-`protected_path`, `request_too_large` and `approval_expired` (an expired request, including a caller approval that expired before delivery; the caller's `decision` stays recorded with `expiry_rejection: true`). These are not caller decisions: callers cannot answer them,
+`protected_path`, `request_too_large`, `approval_expired` (an expired request, including a caller approval that expired before delivery; the caller's `decision` stays recorded with `expiry_rejection: true`) and `path_changed_since_admission` (the delivery-time path re-check below; the caller's `decision` stays `approve` and `decided_by` stays `caller`, while `system_rejection` carries the reason, `effective_decision` is `reject` and the row ends `system_rejected`). Apart from the delivery-time conversion, these are not caller decisions: callers cannot answer them,
 `encode` never produces an approval for them, and task classification reports them as
 `harflow_policy_rejected`, not `caller_rejected`. An over-budget Read, Write or Edit request whose ids are
 still valid is kept as a bounded audit row (ids, tool, `file_path` under 4 KiB, size and the SHA-256 of
@@ -484,8 +484,17 @@ hooks and `config` locations (`git rev-parse --git-path hooks`, the common direc
 gitdir) plus the `hooks/`, `config` and `config.worktree` of every Git directory above the target: one named `.git`, or holding `HEAD` with `objects/` and `refs/` or a `commondir` (bare repositories, submodule and linked-worktree gitdirs). Read is refused only for the state
 root. Targets are resolved through symlinks (or their nearest existing parent) and compared
 case-insensitively; if the Git locations cannot be resolved, Write and Edit are refused. These checks are re-resolved at every Write and Edit admission (nothing is cached on the task, so a mid-run
-`core.hooksPath` change is honored, and a resolution failure refuses) and cannot prevent a later symlink swap. A Bash approval is checked only as the exact
+`core.hooksPath` change is honored, and a resolution failure refuses). A Bash approval is checked only as the exact
 command shown to the caller. The 64 KiB request limit covers the whole control-request JSON.
+
+**Delivery-time path re-check.** Admission records, per row, a private `path_snapshot` (each path as the backend named it and as resolved through symlinks; it is not
+exposed by `get_approval_request` or `list_approval_requests`). Immediately before the pump writes an approve for an action that names paths (Read, Write, Edit, Codex file changes), it
+re-resolves every path through the backend, compares them with the snapshot and re-runs the protected-target checks against the targets as they are now (off the event loop). A
+changed resolution, a changed path set, or a missing or malformed snapshot is refused as `path_changed_since_admission`; a path that became protected
+without moving (for example a changed `core.hooksPath`), or that cannot be resolved, is refused as `protected_path`. The refusal is a Harflow system rejection recorded in its own step before the send reservation, so a crash between the two can never leave an approve to write,
+and nothing is resent after `sending`. A request that fits the request budget only without its snapshot is refused at admission as `request_too_large`, kept as a bounded audit row (ids, tool, size and the SHA-256 of the action, no input), and the run continues; there is no separate snapshot cap. A failure to resolve the paths, at admission or at delivery, is refused as `protected_path`. Rejections the caller chose are delivered unchanged, and commands (no paths) are unaffected. Residual windows remain: the awaits between the re-check and the write,
+and the agent's own write after the approve is delivered. A hard link created to a protected file is not detected, because path resolution cannot see it. Admission does not
+refuse symlinked ancestors inside the workspace, since legitimate repositories use symlinked directories; the delivery re-check covers a swap instead.
 
 The adapter retains `acceptEdits`, saved Git deny/allow rules and the harness's managed policies.
 It cannot override an explicit deny, plan mode or a sandbox restriction. Bash requests that ask to
@@ -594,10 +603,10 @@ or an exec-policy amendment, which would persist a grant. The request shows `kin
 **File changes.** With `caller_write_approvals`, an `item/fileChange/requestApproval` is joined with the preceding `item/started` item
 of the same thread and turn; the paths, kinds and diff are frozen into the digest (at most 32 KiB). Every source and destination path,
 including a rename's destination, is checked against the protected targets: the Harflow state root, Git hooks and config, the resolved
-`CODEX_HOME` and every `.codex` from the Git root to the working directory. A request with `grantRoot`, without a started item, with an
+`CODEX_HOME`, and `.codex` and `.agents` in every directory from the Git root to the working directory and in each linked-worktree root. The Codex sandbox itself protects `.git`, `.codex` and `.agents` at the Git root and the working directory (measured on 0.163.0); the intermediate directories and linked roots are a conservative extension. A request with `grantRoot`, without a started item, with an
 ambiguous one, with relative paths or over the size bound is declined by Harflow. If the completed item's changes differ from the approved
 ones (compared as complete change objects) the row records `execution_outcome: "mismatch"` and the run stops. A multi-path action reports `file_paths` with a containment fact per path.
-Paths are checked once, at admission, after symlink resolution; a later symlink swap is not prevented. Without the opt-in these requests are declined.
+Paths are checked at admission after symlink resolution and again, with the same checks, just before an approval is written (see the delivery-time path re-check above); a swap after that point is not prevented. Without the opt-in these requests are declined.
 
 **Pins and verification.** The server starts with `approval_policy="on-request"`, `approvals_reviewer="user"`, the freedom's sandbox mode,
 `sandbox_workspace_write.writable_roots=[]`, the resolved network setting, `features.hooks=false`,

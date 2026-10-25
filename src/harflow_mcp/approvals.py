@@ -148,7 +148,7 @@ def _locked(directory: Path, task_id: str):
 
 
 def metadata(row: dict[str, Any]) -> dict[str, Any]:
-    return {k: copy.deepcopy(v) for k, v in row.items() if k not in {"action", "bridge_owner", "process_identity"}}
+    return {k: copy.deepcopy(v) for k, v in row.items() if k not in {"action", "bridge_owner", "process_identity", "path_snapshot"}}
 
 
 @task_operation
@@ -255,7 +255,8 @@ def update(directory: Path, task_id: str, request_id: str, generation: str, expe
             if row["disposition"] != "pending" or row.get("execution_outcome") != "unknown":
                 raise ValueError("Approval action already has an observed outcome")
             expired = row["deadline"] <= time.time()
-            changes["effective_decision"] = "reject" if expired else row.get("effective_decision") or row["decision"]
+            # A Harflow system rejection (admission-time or the delivery-time path re-check) is never restored to the caller's approve.
+            changes["effective_decision"] = "reject" if expired or row.get("system_rejection") else row.get("effective_decision") or row["decision"]
             changes["expiry_rejection"] = row.get("expiry_rejection", False) or expired
         row.update(changes)
         row["owner_revision"] += 1

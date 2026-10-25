@@ -69,7 +69,7 @@ spanned several versions), `no_refusal_text`, `unrecognized_text` and, for other
 | `path_safety` | A built-in path check allow rules cannot satisfy; caller approvals can approve it on qualified versions. |
 | `outside_working_directory` | A write outside the repository that was not granted. On a qualified version a caller can approve an out-of-repo Write or Edit one exact action at a time when the task has `caller_write_approvals`. |
 | `caller_rejected` | The caller rejected the exact action. |
-| `harflow_policy_rejected` | Harflow's own policy refused it (`policy_reason`: `write_approvals_not_enabled`, `protected_path`, `request_too_large` or `approval_expired`); never a caller decision. |
+| `harflow_policy_rejected` | Harflow's own policy refused it (`policy_reason`: `write_approvals_not_enabled`, `protected_path`, `request_too_large`, `approval_expired` or `path_changed_since_admission`, where the approved action's paths changed or became protected before delivery and the caller's recorded `approve` was converted to a Harflow rejection); never a caller decision. |
 | `policy_denied` | Codex: an exec-policy rule with a `forbidden` decision refused the command (`justification` is the rule's). Seen on the app-server's stderr only while a turn is active, in the one measured format; approvals cannot override it. |
 | `approval_policy_never` | Codex exec path: the run could not ask for an escalation (approval policy never). Start the task with `caller_approvals` (macOS, write_in_repo or publish) or use a freedom that needs none. |
 | `unclassified` | Inspect the refusal text. |

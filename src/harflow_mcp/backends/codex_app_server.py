@@ -67,7 +67,7 @@ TRIPWIRE_METHODS = frozenset({"guardianWarning", "autoApprovalReview/strictRevie
 
 SYSTEM_REASONS = ("not_active_turn", "unsupported_kind", "missing_command", "additional_permissions", "network_context",
                   "unsupported_request", "file_change_unsupported", "grant_root", "file_change_not_started", "file_change_ambiguous", "invalid_path",
-                  "request_too_large", "approval_expired", "protected_path")
+                  "request_too_large", "approval_expired", "protected_path", "path_changed_since_admission")
 MAX_FROZEN_BYTES = 32 * 1024
 
 _PLAIN_STRING = re.compile(r"""\A(?:"[^"\\\n]*"|'[^'\\\n]*')\Z""")
@@ -910,16 +910,19 @@ def support() -> dict[str, Any]:
 
 
 def protected_paths(repo: Any, environ: Any = None) -> list[Path]:
-    """Locations a caller may never approve a file change into: the resolved CODEX_HOME and every `.codex` from the
-    Git root down to the working directory. (`.git` hooks and config are covered by the generic protected targets.)"""
+    """Locations a caller may never approve a file change into: the resolved CODEX_HOME, and `.codex` and `.agents` in
+    every directory from the Git root down to the working directory and in each linked-worktree root. (`.git` hooks and
+    config are covered by the generic protected targets.) The Codex sandbox itself protects `.git`, `.codex` and `.agents`
+    at the Git root and the working directory (measured); the intermediate directories and linked roots are a conservative extension."""
     found = [codex_home(environ)]
     try:
         cwd = os.path.realpath(repo)
         root = git_root(Path(cwd))
-        found += [directory / ".codex" for directory in project_directories(cwd, root)]
-        found += [Path(r) / ".codex" for r in linked_roots(root)]
+        directories = [*project_directories(cwd, root), *(Path(r) for r in linked_roots(root))]
     except UnsupportedCapability:
-        found += [Path(os.path.realpath(repo)) / ".codex"]
+        directories = [Path(os.path.realpath(repo))]
+    for directory in directories:
+        found += [directory / ".codex", directory / ".agents"]
     return found
 
 
@@ -928,7 +931,7 @@ def enforcement_caveats(environ: Any = None, write: bool = False) -> tuple[str, 
     caveats = [
         "Caller approvals run Codex through `codex app-server` with approval policy on-request, the approvals reviewer pinned to the caller and project trust forced to untrusted: this repository's own .codex config, rules and hooks do not apply to the task.",
         "An approved command may run outside the OS sandbox (Codex does not say which approvals leave it), and command approvals are not path-checked: an approved command can modify the repository's Git config and hooks, CODEX_HOME and Harflow's own state. Each approval covers one exact command shown to the caller.",
-        ("File changes Codex asks about (patches outside the workspace) can be approved one exact patch at a time; the paths and diff are frozen at approval, a completion that differs stops the run, and writes to CODEX_HOME, Git config and hooks and every .codex from the Git root to the working directory are refused. "
+        ("File changes Codex asks about (patches outside the workspace) can be approved one exact patch at a time; the paths and diff are frozen at approval, a completion that differs stops the run, and writes to CODEX_HOME, Git config and hooks and every .codex and .agents from the Git root to the working directory are refused; the paths are re-checked just before the approval is written, and a changed or newly protected path is refused instead. "
          if write else "File changes outside the workspace are not approvable without caller_write_approvals: those requests are declined. ")
         + "MCP tool calls that need approval are always rejected.",
     ]

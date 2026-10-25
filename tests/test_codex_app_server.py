@@ -808,7 +808,7 @@ def test_enforcement_and_preview_text_state_the_real_limits(prepared):
         assert phrase in text or phrase.replace("Git config", "Git config") in text, phrase
     assert backend.approval_enforcement(backend.enforcement("write_in_repo"), None, True, False) == backend.enforcement("write_in_repo")
     assert backend.approval_transport() == "codex_app_server" and "macOS only" in backend.approval_limitations(False)
-    assert backend.protected_config_paths(prepared.repo) == [Path(os.path.realpath(prepared.home)), Path(os.path.realpath(prepared.repo)) / ".codex"]
+    assert backend.protected_config_paths(prepared.repo) == [Path(os.path.realpath(prepared.home)), Path(os.path.realpath(prepared.repo)) / ".codex", Path(os.path.realpath(prepared.repo)) / ".agents"]
     assert backend.approval_paths({"action": {"tool_name": "commandExecution", "input": {}}}) == [] and backend.approval_write_tools() == frozenset({"fileChange"})
     writes = backend.approval_enforcement(backend.enforcement("write_in_repo"), "0.163.0", True, True)
     assert writes.caller_approval_tools == ("commandExecution", "fileChange") and "frozen at approval" in " ".join(writes.caveats)
