@@ -530,12 +530,18 @@ harflow-ctl approval-get TASK_ID REQUEST_ID --json
 harflow-ctl approval-respond TASK_ID REQUEST_ID --action-digest DIGEST --owner-revision REVISION --decision reject --json
 ```
 
-Only direct callers may inspect full actions or answer. Workers, orchestrators and their children
-cannot approve their own work. Standalone requests default to caller ownership. Monitor launches
-explicitly select Monitor ownership through the existing verified-human path; `--monitor` alone
-cannot bypass caller/ancestry checks. Workflow requests inherit their authoritative root owner;
-Monitor presents caller-owned requests read-only. This uses the existing same-OS-user metadata
-trust boundary and does not defend against malicious same-user filesystem/process tampering.
+Workers, orchestrators and their children cannot approve their own work. Standalone requests
+default to caller ownership. Monitor launches explicitly select Monitor ownership through the
+existing verified-human path; `--monitor` alone cannot bypass caller/ancestry checks. Workflow
+requests inherit their authoritative root owner. On an engine advertising
+`caller-approvals.monitor-respond.v1`, the Monitor ctl channel may answer caller-owned requests as
+the local human; Monitor-owned requests remain Monitor-only, and a caller cannot answer a
+Monitor-owned request. The response channel is derived from ctl authorization, not supplied as a
+free role. `decided_by` continues to mean caller versus Harflow; optional `responder` records
+`caller` or `monitor`. This uses inferred, cooperative authority under the existing same-OS-user
+metadata boundary. It does not authenticate the Mac app or human and does not prevent a malicious
+same-user process from evading inference. Authenticated Monitor identity is tracked separately in
+[issue #43](https://github.com/Harflow-Dev/HarflowMCP/issues/43), outside this capability.
 
 Requests expire 1800 seconds after receipt, or at an earlier workflow node execution deadline.
 Pending requests keep stdin open and pause bridge inactivity expiry, while hard deadlines and
@@ -562,10 +568,9 @@ request. `path_safety` and `outside_working_directory` go through caller approva
 [task continuation](task-continuation.md#recovery-after-a-permission-denial). A request that was denied or
 expired cannot be approved afterwards.
 
-**Current limits.** Not available yet: retrying a permission-blocked workflow node with a narrow grant
+**Current limits.** Not available: retrying a permission-blocked workflow node with a narrow grant
 (a caller-authorized `permission_grant` retry needs its own state machine), approval notifications,
-Monitor presentation of requests and grants (HarflowMac issues 13 and 14), approvals and
-`allowed_commands` on non-Claude backends, and approvals for native workflow children.
+`allowed_commands` on non-Claude backends, approvals outside qualified Claude and Codex app-server transports, and approvals for native workflow children.
 
 Storage is bounded per task: 64 KiB canonical request payload, 16 pending requests, 128 lifetime
 records and a 2 MiB ledger, with 256 KiB reserved for decisions/outcomes. Full or invalid ledgers

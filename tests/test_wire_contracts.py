@@ -18,6 +18,7 @@ from harflow_mcp import workflow_definition_documents
 from harflow_mcp import workflow_run_documents
 from harflow_mcp.state_layout import resolve_layout
 from harflow_mcp.wire_contracts import (
+    CAPABILITIES,
     EVENT_FORMAT,
     MAX_VERSION_COMPONENT,
     compatible_line,
@@ -70,6 +71,12 @@ def test_canonical_fixture_manifest_digest_matches_bytes():
 def test_project_release_declaration_matches_wire_contract_version():
     project = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())
     assert project["project"]["version"] == PRODUCT_VERSION
+
+
+def test_version_info_advertises_additive_monitor_approval_capability():
+    assert "caller-approvals.monitor-respond.v1" in CAPABILITIES
+    document = json.loads((Path(__file__).parents[1] / "contracts" / "v1" / "version-info.json").read_text())
+    assert "caller-approvals.monitor-respond.v1" in document["capabilities"]
 
 
 def test_manifest_cases_reach_the_wire_validator():

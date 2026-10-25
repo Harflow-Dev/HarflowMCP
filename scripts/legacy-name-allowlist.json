@@ -376,5 +376,17 @@
     "literal": "PB_DEPTH",
     "reason": "Exercise preserved legacy caller depth in the child environment contract.",
     "count": 3
+  },
+  {
+    "file": "scripts/generate-approval-fixtures.py",
+    "literal": "PB_TASK_ID",
+    "reason": "Clear inherited legacy caller signals for isolated fixture generation and redact their diagnostic names with explicit provenance.",
+    "count": 1
+  },
+  {
+    "file": "scripts/generate-approval-fixtures.py",
+    "literal": "PB_DEPTH",
+    "reason": "Clear inherited legacy caller signals for isolated fixture generation and redact their diagnostic names with explicit provenance.",
+    "count": 1
   }
 ]
