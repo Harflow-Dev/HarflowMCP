@@ -348,8 +348,9 @@ async def test_a_server_side_resolution_before_the_decision_closes_eligibility(w
         await asyncio.sleep(0.05)
     (row,) = world.rows(task)
     assert row["disposition"] == "invalidated"
-    with pytest.raises(ValueError, match="expired, settled or already answered"):
+    with pytest.raises(approvals.ApprovalError) as raised:
         approvals.reserve(world.registry.log_dir, task.task_id, row["request_id"], row["action_digest"], row["owner_revision"], "approve", row["generation"])
+    assert raised.value.reason == "settled"
     await world.settled(task)
     assert [f for f in world.client() if "method" not in f] == [] and (world.rows(task)[0]["execution_outcome"] == "unknown")
 
