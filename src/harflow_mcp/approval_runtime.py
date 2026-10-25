@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from . import approval_paths, approvals, identity, store
+from .approvals import ApprovalError
 from .backends.base import ApprovalRefused
 from .state_access import storage_operation, task_operation
 from .state_ownership import StateOwnershipError, run_owned_worker
@@ -102,38 +103,62 @@ def context(directory: Path, task_id: str, standalone_owner: str) -> dict[str, A
 
 @storage_operation
 async def authorize(registry: Any, *, interaction_owner: str | None = None) -> None:
+    """Authorize the channel role (`caller` or `monitor`); refusals are typed `unauthorized`, `caller_undecidable` or `unsupported`."""
     if os.environ.get("HARFLOW_TASK_ID"):
-        raise ValueError("Managed tasks cannot inspect or decide caller permission requests")
-    if await registry._mutation_caller() is not None:
-        raise ValueError("Workers and orchestrators cannot inspect or decide caller permission requests")
+        raise ApprovalError("unauthorized", "Managed tasks cannot inspect or decide caller permission requests")
+    try:
+        mutation_caller = await registry._mutation_caller()
+    except Exception as exc:
+        if getattr(exc, "rule", None) == "caller_undecidable":
+            raise ApprovalError("caller_undecidable", str(exc)) from None
+        if isinstance(exc, ValueError):
+            raise ApprovalError("unauthorized", str(exc)) from None
+        raise
+    if mutation_caller is not None:
+        raise ApprovalError("unauthorized", "Workers and orchestrators cannot inspect or decide caller permission requests")
     if interaction_owner not in {None, "caller", "monitor"}:
-        raise ValueError("interaction_owner must be caller or monitor")
+        raise ApprovalError("unsupported", "interaction_owner must be caller or monitor")
     if interaction_owner == "monitor":
         from .takeover import caller_refusal
         refusal = await asyncio.to_thread(caller_refusal, registry.log_dir)
         if refusal is not None:
-            raise ValueError("Only a verified human Monitor caller can claim monitor ownership: " + refusal[1])
+            raise ApprovalError("caller_undecidable" if refusal[0] == "caller_undecidable" else "unauthorized", "The monitor channel is refused for this caller: " + refusal[1])
+
+
+def _authorize_owner(role: str, owner: str) -> None:
+    """A row's owner answers its own rows; the Monitor may also answer caller-owned rows, never the reverse."""
+    if role != owner and not (role == "monitor" and owner == "caller"):
+        raise ApprovalError("unauthorized", "Approval belongs to the root interaction owner")
 
 
 @storage_operation
 def _record(registry: Any, task_id: str):
     record = store.read(registry.log_dir, task_id, include_prompt=False, metadata_byte_limit=256 * 1024)
     if record is None:
-        raise ValueError("Task not found")
+        raise ApprovalError("not_current", "Task not found")
     return record
 
 
 @storage_operation
-def _reconcile(registry: Any, task_id: str) -> Any:
+def _reconcile_state(registry: Any, task_id: str) -> tuple[Any, bool]:
+    """Reconcile pending rows with the task's liveness; also say whether any invalidation was attempted (rows may have changed)."""
     record = _record(registry, task_id)
     current = registry.get(task_id)
+    invalidated = False
     # A different still-live server owns its pipe. A restarted server cannot adopt it.
     from .task_attachment import AttachedTask
     if (current is None or isinstance(current, AttachedTask)) and (not record.owner or identity.identity_check(record.owner) != "alive"):
         approvals.invalidate(registry.log_dir, task_id, "invalidated")
+        invalidated = True
     if record.status != "running":
         approvals.invalidate(registry.log_dir, task_id, "cancelled" if record.status == "cancelled" else "invalidated")
-    return record
+        invalidated = True
+    return record, invalidated
+
+
+@storage_operation
+def _reconcile(registry: Any, task_id: str) -> Any:
+    return _reconcile_state(registry, task_id)[0]
 
 
 @storage_operation
@@ -221,25 +246,52 @@ def workflow_task_ids(directory: Path, workflow_run_id: str) -> list[str]:
 
 @storage_operation
 async def respond_request(registry: Any, task_id: str, request_id: str, action_digest: str, owner_revision: int, decision: str, interaction_owner: str = "caller") -> dict[str, Any]:
+    """Reserve one decision. `interaction_owner` is the responder's authorizing channel (`caller` or `monitor`), recorded as `responder`.
+
+    Refusals are `ApprovalError`s, raised in a fixed precedence: authorization (`unauthorized`, `caller_undecidable`,
+    `unsupported`, then the row owner against the channel), request identity (`not_current`: task, request, digest, owner
+    revision, workflow ownership), then state (`settled`, `expired`, `already_answered`), all before any write or
+    reconciliation, so they leave the ledger unchanged. Only then is the task reconciled (which may invalidate rows) and
+    ownership checked (`ownership_lost`: no new decision is applied, rows may be invalidated). `reserve` repeats the
+    identity and state checks under the ledger lock, the compare-and-swap that decides between concurrent responders."""
+    if interaction_owner not in approvals.RESPONDERS:
+        # A parameter check, evaluated after worker/caller authorization like every other refusal.
+        await authorize(registry)
+        raise ApprovalError("unsupported", "interaction_owner must be caller or monitor")
     await authorize(registry, interaction_owner=interaction_owner)
-    record = await asyncio.to_thread(_reconcile, registry, task_id)
+    # Parameter validation before any reconciliation; `reserve` repeats it (bool is not an integer revision here).
+    if decision not in {"approve", "reject"} or type(owner_revision) is not int:
+        raise ApprovalError("unsupported", "A decision must be approve or reject with an integer owner revision")
+    record = await asyncio.to_thread(_record, registry, task_id)
     ctx = await asyncio.to_thread(context, registry.log_dir, task_id, record.interaction_owner)
-    if ctx["interaction_owner"] != interaction_owner:
-        raise ValueError("Approval belongs to the root interaction owner")
-    row = await asyncio.to_thread(approvals.get, registry.log_dir, task_id, request_id)
-    # Inspect the live identities outside the ledger lock; pump rechecks before write.
-    raw = next(r for r in await asyncio.to_thread(approvals.rows, registry.log_dir, task_id) if r["request_id"] == request_id)
+    _authorize_owner(interaction_owner, ctx["interaction_owner"])
+    raw = next((r for r in await asyncio.to_thread(approvals.rows, registry.log_dir, task_id) if r["request_id"] == request_id), None)
+    if raw is None:
+        raise ApprovalError("not_current", "Approval request not found")
     if raw["interaction_owner"] != ctx["interaction_owner"] or raw["root_workflow_run_id"] != ctx["root_workflow_run_id"]:
-        raise ValueError("Approval workflow ownership has changed")
+        raise ApprovalError("not_current", "Approval workflow ownership has changed")
+    if raw["action_digest"] != action_digest or raw["owner_revision"] != owner_revision:
+        raise ApprovalError("not_current", "Stale approval action, revision or owner generation")
+    refusal = approvals.state_refusal(raw, time.time())
+    if refusal is not None:
+        raise refusal
+    record, invalidated = await asyncio.to_thread(_reconcile_state, registry, task_id)
+    # Once reconciliation has invalidated anything, the request's own refusal could be its result: report ownership, never a state reason.
+    if invalidated:
+        raise ApprovalError("ownership_lost", "Approval process ownership is lost or uncertain; the request was reconciled and no decision was applied")
+    # Inspect the live identities outside the ledger lock; pump rechecks before write.
+    raw = next((r for r in await asyncio.to_thread(approvals.rows, registry.log_dir, task_id) if r["request_id"] == request_id), raw)
     alive = await asyncio.to_thread(lambda: identity.identity_check(raw["bridge_owner"]) == "alive" and identity.identity_check(raw["process_identity"]) == "alive")
     if not alive or record.status != "running" or record.approval_generation != raw["generation"]:
-        raise ValueError("Approval process ownership is lost or uncertain")
-    await asyncio.to_thread(approvals.reserve, registry.log_dir, task_id, request_id, action_digest, owner_revision, decision, raw["generation"])
+        raise ApprovalError("ownership_lost", "Approval process ownership is lost or uncertain; no decision was applied")
+    reserved = await asyncio.to_thread(approvals.reserve, registry.log_dir, task_id, request_id, action_digest, owner_revision, decision, raw["generation"], interaction_owner)
     current = registry.get(task_id)
     from .task_attachment import AttachedTask
     if current is not None and not isinstance(current, AttachedTask):
         current.pump_wake.set()
-    return await asyncio.to_thread(approvals.get, registry.log_dir, task_id, request_id)
+    # The decision has landed. Answer with the reservation's own snapshot (the shape `approvals.get` returns, private fields
+    # removed) instead of re-reading the ledger, so no read after the write can raise a pre-reservation reason.
+    return {**approvals.metadata(reserved), "action": reserved["action"], "complete": True}
 
 
 PATH_CHANGED = "path_changed_since_admission"
@@ -548,6 +600,6 @@ def workflow_summary(directory: Path, run_id: str) -> dict[str, Any]:
             records.extend(view["requests"])
             uncertainty_records.extend(view.get("uncertainty_requests", []))
         records.sort(key=lambda row: (row["created_at"], row["request_id"]))
-        return {"pending_count": len(records), "delivery_uncertain_count": len(uncertainty_records), "uncertainty_requests": uncertainty_records[:32], "interaction_state": "approval_state_uncertain" if uncertain else "waiting_for_approval" if records else None, "requests": records[:32], "has_more": len(records) > 32}
+        return {"pending_count": len(records), "awaiting_decision_count": approvals.awaiting_count(records), "delivery_uncertain_count": len(uncertainty_records), "uncertainty_requests": uncertainty_records[:32], "interaction_state": "approval_state_uncertain" if uncertain else "waiting_for_approval" if records else None, "requests": records[:32], "has_more": len(records) > 32}
     except (OSError, ValueError, KeyError, TypeError):
-        return {"pending_count": 0, "interaction_state": "approval_state_uncertain", "requests": [], "error": "Workflow approval ownership is unavailable"}
+        return {"pending_count": 0, "awaiting_decision_count": 0, "interaction_state": "approval_state_uncertain", "requests": [], "error": "Workflow approval ownership is unavailable"}

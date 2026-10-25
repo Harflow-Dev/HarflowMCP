@@ -89,6 +89,12 @@ async def test_monitor_spoof_and_mismatched_root_owner_are_refused(
 ) -> None:
     directory = _state(tmp_path)
     row = _admit(directory, root_workflow_run_id="root-1")
+    store.write(directory, store.TaskRecord(
+        task_id="task-1", backend="claude", session_id="session-1", repo_path=str(directory),
+        started_at="now", status="running", approval_generation="generation-1",
+        start_time="task-start", owner={"pid": 5678, "start_time": "bridge-start", "markers": []},
+        interaction_owner="caller",
+    ))
     registry = _Registry(directory)
     monkeypatch.setattr(approval_runtime, "context", lambda *_: {
         "interaction_owner": "caller",
@@ -102,10 +108,11 @@ async def test_monitor_spoof_and_mismatched_root_owner_are_refused(
     ))
     monkeypatch.setattr(identity, "identity_check", lambda _value: "alive")
 
-    with pytest.raises(ValueError, match="root interaction owner"):
+    with pytest.raises(approvals.ApprovalError) as raised:
         await approval_runtime.respond_request(
             registry, "task-1", row["request_id"], row["action_digest"], 1, "approve", "monitor"
         )
+    assert raised.value.reason == "not_current"
 
 
 def test_delivery_unknown_stays_uncertain_until_observed_exit_and_output_drain(

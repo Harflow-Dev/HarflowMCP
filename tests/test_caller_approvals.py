@@ -150,8 +150,9 @@ def test_ledger_hides_action_from_metadata_and_requires_exact_cas(tmp_path: Path
     with pytest.raises(ValueError, match="Stale"):
         approvals.reserve(directory, "task-1", row["request_id"], "wrong", row["owner_revision"], "approve", row["generation"])
     reserved = approvals.reserve(directory, "task-1", row["request_id"], row["action_digest"], row["owner_revision"], "approve", row["generation"])
-    with pytest.raises(ValueError, match="expired, settled"):
+    with pytest.raises(approvals.ApprovalError) as raised:
         approvals.reserve(directory, "task-1", row["request_id"], row["action_digest"], reserved["owner_revision"], "reject", row["generation"])
+    assert raised.value.reason == "already_answered"
 
 
 def test_ledger_rejects_duplicate_native_identity_and_bounds_pending(tmp_path: Path) -> None:
@@ -176,7 +177,7 @@ def test_cross_process_reservation_has_one_winner(tmp_path: Path) -> None:
     for process in processes:
         process.join(timeout=10)
         assert process.exitcode == 0
-    assert sorted(output.get(timeout=2) for _ in processes) == ["ValueError", "won"]
+    assert sorted(output.get(timeout=2) for _ in processes) == ["ApprovalError", "won"]
 
 
 def test_approval_answer_crossing_deadline_is_transmitted_as_deny(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

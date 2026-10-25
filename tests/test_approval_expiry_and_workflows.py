@@ -138,9 +138,9 @@ async def until(predicate, timeout=10.0):
     await asyncio.wait_for(poll(), timeout)
 
 
-def respond(registry, node, decision):
+def respond(registry, node, decision, *, monitor=False):
     row = registry.rows[node]
-    return approval_runtime.respond_request(registry, row["task_id"], row["request_id"], row["action_digest"], row["owner_revision"], decision)
+    return approval_runtime.respond_request(registry, row["task_id"], row["request_id"], row["action_digest"], row["owner_revision"], decision, "monitor" if monitor else "caller")
 
 
 @pytest.mark.asyncio
@@ -153,12 +153,12 @@ async def test_workflow_node_waits_for_approval_then_continues(storage, tmp_path
     try:
         await until(lambda: "left" in registry.rows)
         summary = approval_runtime.workflow_summary(registry.log_dir, run_id)
-        assert summary["interaction_state"] == "waiting_for_approval" and summary["pending_count"] == 1
+        assert summary["interaction_state"] == "waiting_for_approval" and summary["pending_count"] == 1 and summary["awaiting_decision_count"] == 1
         assert not flow.done() and storage.get_run(run_id)["status"] != "completed"
         listed = await approval_runtime.list_requests(registry, workflow_run_id=run_id)
         assert [r["request_id"] for r in listed["requests"]] == [registry.rows["left"]["request_id"]]
-        answered = await respond(registry, "left", "approve")
-        assert answered["decision"] == "approve" and answered["delivery"] == "reserved"
+        answered = await respond(registry, "left", "approve", monitor=True)
+        assert answered["decision"] == "approve" and answered["delivery"] == "reserved" and answered["responder"] == "monitor"
         await asyncio.wait_for(flow, 20)
     finally:
         if not flow.done():

@@ -158,8 +158,9 @@ def test_encode_delivers_only_the_harflow_refusal_for_system_rows(reason):
 def test_system_rejection_row_is_answered_at_admission_and_unanswerable(tmp_path):
     row = admit(tmp_path, {**decode(event("Write", {"file_path": "/x", "content": "c"}), Q310_NO_WRITE)})
     assert (row["decided_by"], row["decision"], row["effective_decision"], row["delivery"], row["disposition"]) == ("harflow", None, "reject", "reserved", "pending")
-    with pytest.raises(ValueError, match="already answered"):
+    with pytest.raises(approvals.ApprovalError) as raised:
         approvals.reserve(tmp_path, "task-1", row["request_id"], row["action_digest"], row["owner_revision"], "approve", row["generation"])
+    assert raised.value.reason == "settled"
     assert approvals.summary(tmp_path, "task-1")["requests"] == []
     sending = approvals.update(tmp_path, "task-1", row["request_id"], row["generation"], "reserved", delivery="sending")
     assert sending["effective_decision"] == "reject"

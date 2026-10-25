@@ -783,7 +783,8 @@ async def respond_approval_request(task_id: str, request_id: str, action_digest:
     """Reserve approve/reject for one exact action, with stale/duplicate answer protection.
 
     Only the authoritative root interaction owner can answer; workers/orchestrators cannot
-    self-approve or claim Monitor ownership. Approval preserves exact original input and never
+    self-approve. interaction_owner="monitor" is refused on this MCP caller channel: the Monitor
+    answers through harflow-ctl, and every MCP decision is recorded as a caller decision. Approval preserves exact original input and never
     installs permission suggestions or reusable grants. Reservation, local pipe delivery and
     observed tool outcome are separate states. No ambiguous decision is automatically resent.
     A request unanswered after 1800 seconds, or at an earlier workflow attempt deadline, is
@@ -797,6 +798,8 @@ async def respond_approval_request(task_id: str, request_id: str, action_digest:
     by grants. Messages and resume are never decisions.
     """
     from .caller_policy import require_mutation
+    if interaction_owner == "monitor":
+        raise MCPError(INVALID_PARAMS, "The Monitor channel answers through harflow-ctl, not MCP; MCP decisions are always caller decisions")
     await _guard_mutation()
     from .approval_runtime import respond_request
     try:

@@ -715,7 +715,7 @@ class Task:
     approval_generation: str = field(default_factory=lambda: str(uuid.uuid4()))
     approval_pending: bool = False
     approval_receiving: bool = False
-    approval_view: dict[str, Any] = field(default_factory=lambda: {"pending_count": 0, "interaction_state": None, "requests": []})
+    approval_view: dict[str, Any] = field(default_factory=lambda: {"pending_count": 0, "awaiting_decision_count": 0, "interaction_state": None, "requests": []})
     network: bool | None = None
     """The network request this task was dispatched under: True/False explicit, None the
     freedom's historical default. Kept raw rather than resolved so a resume inherits exactly
@@ -4700,7 +4700,7 @@ async def _monitor(task: Task, registry: TaskRegistry) -> None:
                     except Exception:
                         log.warning("task %s: outcome inspection unavailable", task.task_id, exc_info=True)
                 if task.caller_approvals and task.exit_code is not None and task.output_drained:
-                    task.approval_view = {"pending_count": 0, "delivery_uncertain_count": 0, "interaction_state": None, "requests": [], "uncertainty_requests": []}
+                    task.approval_view = {"pending_count": 0, "awaiting_decision_count": 0, "delivery_uncertain_count": 0, "interaction_state": None, "requests": [], "uncertainty_requests": []}
                 task.done.set()
                 try:
                     if getattr(task, 'native_observation_generation', None):

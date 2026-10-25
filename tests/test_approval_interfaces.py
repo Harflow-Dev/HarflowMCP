@@ -63,7 +63,7 @@ async def test_public_list_get_respond_roundtrip_and_strict_revision(tmp_path: P
     answered = await server.respond_approval_request(
         "task-1", row["request_id"], full["action_digest"], full["owner_revision"], "reject"
     )
-    assert answered["decision"] == "reject"
+    assert answered["decision"] == "reject" and answered["responder"] == "caller"
     with pytest.raises(MCPError, match="integer"):
         await server.respond_approval_request(
             "task-1", row["request_id"], full["action_digest"], True, "approve"

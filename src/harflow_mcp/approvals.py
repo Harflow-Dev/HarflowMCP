@@ -31,6 +31,36 @@ MAX_LEDGER_BYTES = 2 * 1024 * 1024
 ADMISSION_BYTES = MAX_LEDGER_BYTES - 256 * 1024
 REQUEST_SECONDS = 1800
 ACTIVE = {"pending", "reserved"}
+RESPONDERS = ("caller", "monitor")
+
+
+class ApprovalError(ValueError):
+    """A refused approval read or decision with a machine-readable `reason`.
+
+    `incomplete` is reserved: no production path raises it yet."""
+
+    REASONS = frozenset({"not_current", "already_answered", "settled", "expired", "ownership_lost", "unauthorized", "unsupported", "caller_undecidable", "incomplete"})
+
+    def __init__(self, reason: str, message: str) -> None:
+        super().__init__(message)
+        if reason not in self.REASONS:
+            raise ValueError("Unknown approval error reason")
+        self.reason = reason
+
+
+def state_refusal(row: dict[str, Any], now: float) -> ApprovalError | None:
+    """Why a decision on `row` can no longer be taken, by fixed precedence: a settled disposition (`expired` when the
+    system expired it, else `settled`), a Harflow system rejection (`settled`), a passed deadline (`expired`), then a
+    recorded decision or delivery already under way (`already_answered`). None when the row still awaits a decision."""
+    if row["disposition"] != "pending":
+        return ApprovalError("expired" if row["disposition"] == "expired" else "settled", "Approval request is already settled")
+    if row.get("system_rejection"):
+        return ApprovalError("settled", "Approval request was rejected by Harflow and cannot be decided")
+    if row["deadline"] <= now:
+        return ApprovalError("expired", "Approval request is expired")
+    if row["delivery"] != "pending":
+        return ApprovalError("already_answered", "Approval request is already answered")
+    return None
 
 
 def canonical(value: Any) -> bytes:
@@ -157,6 +187,11 @@ def rows(directory: Path, task_id: str) -> list[dict[str, Any]]:
     return copy.deepcopy(_read(directory, _path(directory, task_id), task_id)["requests"])
 
 
+def awaiting_count(requests: list[dict[str, Any]]) -> int:
+    """Requests still waiting for a decision: disposition and delivery pending, no decision recorded and no system rejection."""
+    return sum(1 for r in requests if r["disposition"] == "pending" and r["delivery"] == "pending" and r.get("decision") is None and not r.get("system_rejection"))
+
+
 @task_operation
 def summary(directory: Path, task_id: str) -> dict[str, Any]:
     try:
@@ -164,7 +199,7 @@ def summary(directory: Path, task_id: str) -> dict[str, Any]:
         # A Harflow system rejection is answered at admission: nothing for a caller to decide.
         pending = [r for r in records if r["disposition"] == "pending" and r["delivery"] in ACTIVE and not r.get("system_rejection")]
         uncertain = [r for r in records if r["delivery"] in {"sending", "delivery_unknown"} and r["execution_outcome"] == "unknown"]
-        result = {"pending_count": 0, "delivery_uncertain_count": 0, "interaction_state": None, "requests": [], "uncertainty_requests": []}
+        result = {"pending_count": 0, "awaiting_decision_count": 0, "delivery_uncertain_count": 0, "interaction_state": None, "requests": [], "uncertainty_requests": []}
         if not pending and not uncertain:
             return result
         from . import identity, store
@@ -184,12 +219,12 @@ def summary(directory: Path, task_id: str) -> dict[str, Any]:
             if record.status != "running" or process_state != "alive" or owner_state != "alive":
                 result.update(interaction_state="approval_state_uncertain", error="Approval pipe ownership is lost or uncertain; prior decisions cannot be replayed")
             else:
-                result.update(pending_count=len(pending), requests=[metadata(r) for r in pending])
+                result.update(pending_count=len(pending), awaiting_decision_count=awaiting_count(pending), requests=[metadata(r) for r in pending])
                 if not uncertain:
                     result["interaction_state"] = "waiting_for_approval"
         return result
     except (OSError, ValueError, KeyError):
-        return {"pending_count": 0, "delivery_uncertain_count": 0, "interaction_state": "approval_state_uncertain", "requests": [], "uncertainty_requests": [], "error": "Approval ledger unavailable; execution must be reconciled"}
+        return {"pending_count": 0, "awaiting_decision_count": 0, "delivery_uncertain_count": 0, "interaction_state": "approval_state_uncertain", "requests": [], "uncertainty_requests": [], "error": "Approval ledger unavailable; execution must be reconciled"}
 
 
 @task_operation
@@ -225,22 +260,26 @@ def get(directory: Path, task_id: str, request_id: str) -> dict[str, Any]:
     for row in rows(directory, task_id):
         if row["request_id"] == request_id:
             return {**metadata(row), "action": row["action"], "complete": True}
-    raise ValueError("Approval request not found")
+    raise ApprovalError("not_current", "Approval request not found")
 
 
 @task_operation
-def reserve(directory: Path, task_id: str, request_id: str, action_digest: str, owner_revision: int, decision: str, generation: str) -> dict[str, Any]:
+def reserve(directory: Path, task_id: str, request_id: str, action_digest: str, owner_revision: int, decision: str, generation: str, responder: str = "caller") -> dict[str, Any]:
     if decision not in {"approve", "reject"} or type(owner_revision) is not int:
-        raise ValueError("A decision must be approve or reject with an integer owner revision")
+        raise ApprovalError("unsupported", "A decision must be approve or reject with an integer owner revision")
+    if responder not in RESPONDERS:
+        raise ApprovalError("unsupported", "responder must be caller or monitor")
     with _locked(directory, task_id) as data:
         row = next((r for r in data["requests"] if r["request_id"] == request_id), None)
         if row is None:
-            raise ValueError("Approval request not found")
+            raise ApprovalError("not_current", "Approval request not found")
         if row["action_digest"] != action_digest or row["owner_revision"] != owner_revision or row["generation"] != generation:
-            raise ValueError("Stale approval action, revision or owner generation")
-        if row["deadline"] <= time.time() or row["disposition"] != "pending" or row["delivery"] != "pending":
-            raise ValueError("Approval request is expired, settled or already answered")
-        row.update(decision=decision, decided_by="caller", delivery="reserved", owner_revision=owner_revision + 1)
+            raise ApprovalError("not_current", "Stale approval action, revision or owner generation")
+        refusal = state_refusal(row, time.time())
+        if refusal is not None:
+            raise refusal
+        # `decided_by` keeps its meaning (any human decision is "caller"); `responder` is the authorizing channel.
+        row.update(decision=decision, decided_by="caller", responder=responder, delivery="reserved", owner_revision=owner_revision + 1)
         result = copy.deepcopy(row)
     return result
 

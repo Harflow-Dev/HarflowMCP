@@ -1121,7 +1121,7 @@ def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
             return _fail(args, "caller_undecidable", str(exc))
 
     if args.command in {"approval-list", "approval-get", "approval-respond"}:
-        from . import approval_runtime, server
+        from . import approval_runtime, approvals, server
         registry = server.install_cli_registry()
         async def approval_action():
             reg = server._reg()
@@ -1135,6 +1135,8 @@ def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
             result = asyncio.run(approval_action())
         except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):
             raise
+        except approvals.ApprovalError as exc:
+            return _fail(args, "approval_error", str(exc), {"reason": exc.reason})
         except Exception as exc:
             return _fail(args, "approval_error", str(exc))
         print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": result})) if args.json else json.dumps(result, indent=2))
