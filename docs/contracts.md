@@ -16,6 +16,16 @@ Live ctl, setup and version-info documents require matching major and minor comp
 
 `--json` emits one JSON document. ctl command-specific payloads and error objects retain their existing meanings, including batch `tasks`/`errors`. ctl usage errors contain `error.code: "usage"` and exit 2.
 
+Additive resource reservation commands (no existing document changes shape; an older engine answers them with a usage error, which a consumer treats as unsupported):
+
+```bash
+harflow-ctl resources --json
+harflow-ctl resources-release --reservation-id ID --confirm-uncertain [--also-release-session] --json
+harflow-ctl resources-repair --json
+```
+
+`resources` is read-only and creates nothing. Inside the ctl envelope it adds `resources`, one row per name that any reservation mentions, sorted by name: `{"name", "capacity", "holders": [...], "queue": [...]}`. Each row has `reservation_id`, `owner` (`kind` plus the owner's ids), `enqueued_at` and `generation`; holders add `granted_at`, and `borrows_from` or `release_requested` when they apply; queue rows add `deadline_at` when a wait has one. `resources-release` and `resources-repair` are for a verified person: they use the takeover gate and fail closed with `agent_caller` or `caller_undecidable`. `resources-release` answers `result: {reservation_id, outcome, also_release_session, session_released}` where `outcome` is `released` or `release_requested` (borrowers are still unresolved), or `unknown_reservation`; `--also-release-session` is accepted and currently a no-op. `resources-repair` answers `result: {moved_to, rebuilt, note}` and refuses a healthy ledger with `ledger_not_corrupt`. Every resource command reports a corrupt ledger as `resource_ledger_corrupt`. The ledger itself is a private format, `harflow.resource-ledger` v1, and adds nothing to the fixture bundle.
+
 Setup results retain `server_path` and per-client `clients` rows. Client failures stay in those rows. With `--json`, process-level setup failures contain `error: {code: "setup_error", message: ...}` and exit 1; usage failures use `code: "usage"` and exit 2. Plain-text mode retains stderr and exit behavior. A nonzero process without a valid JSON envelope is a transport failure, not an empty successful result.
 
 ## Version-info and operation handshake

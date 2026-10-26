@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Add a persisted resource reservation ledger (`resources.py`): named exclusive locks with strict per-name FIFO, all-or-nothing grants, borrowing from an enclosing scope, a settle-only reaper and loud refusal of a corrupt ledger, plus the additive ctl commands `resources`, `resources-release` and `resources-repair` (the last two for a verified person only). Nothing dispatches against it yet; the task and workflow integration follows (#10, #3).
+
 ## 0.0.3
 
 - Retry verified task metadata replacements during attached cancellation and recovered cancellation delivery, settlement and handoff, retaining bounded retries and refusal before effects on malformed or persistently changing metadata.

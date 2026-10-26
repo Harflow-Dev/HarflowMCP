@@ -183,6 +183,48 @@ deleting its state file and unlinking the record.
 `<id>.followups.lock`, never the reverse; the reaper takes its catalog locks and then the follow-up
 lock, and never a session lock while holding it.
 
+## Resource reservations (`resources.py`)
+
+Named, exclusive, cross-process locks for dispatched work. The state is one private ledger,
+`<state_root>/resources/ledger.json` (`harflow.resource-ledger` v1), so every server and `harflow-ctl`
+process on the machine sees the same holders and queue. This module knows nothing about tasks or
+workflows: an entry carries an owner (`task`, `workflow_run` or `workflow_attempt`, referenced by id
+only; liveness is never stored) and each owner kind supplies its own "is it finished?" resolver.
+
+- **The ledger lock is a leaf.** `flock(<state_root>/resources/.ledger.lock)` guards one bounded
+  read, edit and atomic replace (temp file, fsync, `os.replace`, directory fsync). It is never held
+  across an `await`, a subprocess (including the `ps` behind identity checks), Git, or the
+  acquisition of another lock. Taking it while a session, chain or store lock is held is allowed;
+  the reverse never happens, so it is last in the lock order: session or chain lock, then
+  `<id>.lock` and `<id>.followups.lock`, then workflow store locks, then the ledger lock. It is
+  taken with a non-blocking retry and a timeout (`ResourceLedgerUnavailable`), so a stopped holder
+  cannot freeze an event loop.
+- **Generations.** Every entry has a `generation` bumped on each change. The reaper relies on it.
+- **Grant rule.** A queued entry gets all its names at once or none, and only when every name has a
+  free slot (`capacity(name)`, 1 today) and no earlier entry sharing a name is still queued: strict
+  per-name FIFO, so a large request cannot starve and nothing is ever partially held.
+- **Root declaration.** A requester running under a holding scope may only ask for names that scope
+  declared; they are granted immediately as a borrow (no capacity, no queue). Anything else is
+  `resource_not_declared_by_scope`, and a holding scope with no named reservation refuses every name.
+  A waiter therefore never owns anything another waiter needs, which is what keeps wait-for cycles
+  out. The caller resolves the scope; this module only enforces it. A parent released while
+  borrowers are unresolved is kept, flagged `release_requested`, and removed with its last borrower.
+- **Reaper.** `ResourceLedger.reap(resolvers)` reads under the lock, releases it, asks the resolver for
+  each entry's owner kind (which may run `ps`), then re-takes the lock and removes only entries whose
+  generation is unchanged and whose verdict was `settled` or `never_started`. A `keep` verdict, an
+  unknown verdict, a raising resolver and an owner kind with no resolver all keep the entry:
+  uncertainty never frees a resource. No resolver is registered until the owners that need one
+  exist. Pollers write nothing when nothing changed.
+- **Corruption.** A ledger that cannot be parsed or qualified makes every operation raise
+  `ResourceLedgerCorrupt`; it is never silently reset. `harflow-ctl resources-repair` (humans only,
+  the takeover gate) moves it to `ledger.corrupt-<timestamp>.json` and starts an empty ledger; it
+  refuses a healthy ledger. Later stages extend it to rebuild holders from durable launch and run
+  state; until then the person running it decides what was lost.
+- **Recovery commands** are ctl-only and use `lineage.detect_caller_detail` and fail closed like
+  takeover: `resources-release` removes one reservation after `--confirm-uncertain` (a reservation
+  with borrowers is flagged and goes with its last borrower), and `resources` is the ungated read the
+  Monitor uses.
+
 ## Takeover, ctl control commands, open-app (A4)
 
 - **Takeover is humans-only and ctl-only.** Never expose it over MCP. `ctl takeover` and

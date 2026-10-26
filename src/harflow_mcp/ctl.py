@@ -12,7 +12,9 @@ inbox's lock (see `inbox.py`) for the owning server to deliver, or queues it in 
 ledger (`followups.py`) of a task without live input, for its next continuation.
 
 The control commands act (A4.2): `cancel` runs the same cascade as `cancel_task` from a registry
-this process owns; `takeover` / `takeover-attach` are the human-only takeover (`takeover.py`); `run`
+this process owns; `takeover` / `takeover-attach` are the human-only takeover (`takeover.py`);
+`resources` reads the resource reservation ledger and `resources-release` / `resources-repair` are its
+human-only recovery commands (`resources.py`); `run`
 and `resume` fork a process that owns the new task until it settles (`detached.py`). `backends`
 reports the registered backends, whether each binary is on PATH (`backends.is_installed`) and each
 backend's declared capabilities (`backends.capability_metadata`, the same serialization as MCP
@@ -184,6 +186,40 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     attach_p.add_argument("task_id")
     attach_p.add_argument("--pid", type=int, required=True)
     attach_p.add_argument("--json", action="store_true")
+
+    resources_p = sub.add_parser(
+        "resources",
+        help="show each resource name's capacity, holders and queue from the reservation ledger",
+    )
+    resources_p.add_argument("--json", action="store_true")
+
+    release_p = sub.add_parser(
+        "resources-release",
+        help="release one reservation whose owner cannot be settled automatically "
+        "(for a person, never an agent)",
+        description="Remove one resource reservation by id after a person has decided its owner is gone. "
+        "A reservation that still has borrowers is flagged release_requested and goes with its last borrower.",
+    )
+    release_p.add_argument("--reservation-id", required=True)
+    release_p.add_argument(
+        "--confirm-uncertain", action="store_true", required=True,
+        help="required: you have checked that the owner is finished or never started",
+    )
+    release_p.add_argument(
+        "--also-release-session", action="store_true",
+        help="also free the session claim of a granted launch; accepted now and a no-op until task "
+        "resources can hold one",
+    )
+    release_p.add_argument("--json", action="store_true")
+
+    repair_p = sub.add_parser(
+        "resources-repair",
+        help="move a corrupt resource ledger aside and start an empty one (for a person, never an agent)",
+        description="Refuses a healthy ledger. The corrupt file is kept as ledger.corrupt-<timestamp>.json "
+        "in the resources directory. Holders are not rebuilt yet: check what is running before you "
+        "start work that needs a named resource.",
+    )
+    repair_p.add_argument("--json", action="store_true")
 
     approval_list = sub.add_parser("approval-list", help="List permission request metadata")
     approval_target = approval_list.add_mutually_exclusive_group(required=True)
@@ -411,6 +447,9 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
         cancel_p,
         takeover_p,
         attach_p,
+        resources_p,
+        release_p,
+        repair_p,
         run_p,
         resume_p,
         allowlist_p,
@@ -757,6 +796,90 @@ def _cmd_takeover_attach(args: argparse.Namespace) -> int:
         print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": result})))
     else:
         print(f"attached pid {result['pid']} to the takeover of {result['task_id']}")
+    return 0
+
+
+def _cmd_resources(args: argparse.Namespace) -> int:
+    from . import resources
+
+    try:
+        entries = resources.ResourceLedger(default_log_dir().parent).snapshot()
+    except resources.ResourceError as exc:
+        return _fail(args, exc.code, str(exc))
+    if args.json:
+        print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "resources": entries})))
+        return 0
+    if not entries:
+        print("no resources reserved")
+    for entry in entries:
+        print(f"{entry['name']} (capacity {entry['capacity']}): {len(entry['holders'])} held, {len(entry['queue'])} queued")
+        for kind in ("holders", "queue"):
+            for row in entry[kind]:
+                print(f"  {kind[:-1]:6} {row['reservation_id']}  {json.dumps(row['owner'], sort_keys=True)}")
+    return 0
+
+
+def _human_only_refusal(args: argparse.Namespace, what: str) -> int | None:
+    """The takeover gate for the recovery commands: an agent, or detection that cannot rule one out,
+    must not free a resource another run may still be using."""
+    refusal = takeover.caller_refusal(default_log_dir())
+    if refusal is None:
+        return None
+    code, reason = refusal
+    return _fail(args, code, f"Only a verified human may {what}: {reason}")
+
+
+def _cmd_resources_release(args: argparse.Namespace) -> int:
+    from . import resources
+
+    refused = _human_only_refusal(args, "release a resource reservation")
+    if refused is not None:
+        return refused
+    try:
+        reservation_id = resources.validate_reservation_id(args.reservation_id)
+        ledger = resources.ResourceLedger(default_log_dir().parent)
+        outcome = ledger.release(reservation_id)
+    except resources.ResourceError as exc:
+        return _fail(args, exc.code, str(exc))
+    if outcome == "absent":
+        return _fail(args, "unknown_reservation", f"unknown reservation {reservation_id}")
+    result = {
+        "reservation_id": reservation_id,
+        "outcome": outcome,
+        # Accepted for forward compatibility; nothing holds a session claim before task resources.
+        "also_release_session": bool(args.also_release_session),
+        "session_released": False,
+    }
+    if args.json:
+        print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": result})))
+    elif outcome == "release_requested":
+        print(f"{reservation_id}: release requested; it goes when its last borrower is released")
+    else:
+        print(f"{reservation_id}: released")
+    return 0
+
+
+def _cmd_resources_repair(args: argparse.Namespace) -> int:
+    from . import resources
+
+    refused = _human_only_refusal(args, "repair the resource ledger")
+    if refused is not None:
+        return refused
+    try:
+        moved_to = resources.ResourceLedger(default_log_dir().parent).repair()
+    except resources.ResourceError as exc:
+        return _fail(args, exc.code, str(exc))
+    result = {
+        "moved_to": str(moved_to),
+        "rebuilt": False,
+        "note": "The ledger was started empty. Holders are not rebuilt from durable state yet; verify what is "
+        "running before starting work that needs a named resource.",
+    }
+    if args.json:
+        print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": result})))
+    else:
+        print(f"moved the corrupt ledger to {moved_to}")
+        print(result["note"], file=sys.stderr)
     return 0
 
 
@@ -1243,6 +1366,12 @@ def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
         return _cmd_backends(args)
     if args.command == "send":
         return _cmd_send(args)
+    if args.command == "resources":
+        return _cmd_resources(args)
+    if args.command == "resources-release":
+        return _cmd_resources_release(args)
+    if args.command == "resources-repair":
+        return _cmd_resources_repair(args)
     if args.command == "cancel":
         return _cmd_cancel(args)
     if args.command == "takeover":
