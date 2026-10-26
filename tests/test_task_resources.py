@@ -260,16 +260,17 @@ async def test_nested_child_borrows_and_uncovered_names_are_refused(tmp_path, mo
     from harflow_mcp import lineage
     install_fake_claude(tmp_path, monkeypatch)
     log_dir = tasks_dir(tmp_path)
+    read = task_supervision.read_task_record  # retries a record replaced mid-read
     reg = registry(tmp_path)
     parent = await reg.start("slow 6 one", tmp_path, backend=get("claude"), freedom="read_only", resources=["sim", "lab"], task_id="a" * 32)
-    await wait_for(lambda: store.read(log_dir, parent.task_id) is not None and store.read(log_dir, parent.task_id).resources)
-    record = store.read(log_dir, parent.task_id)
+    await wait_for(lambda: read(log_dir, parent.task_id) is not None and read(log_dir, parent.task_id).resources)
+    record = read(log_dir, parent.task_id)
     caller = lineage.Caller(record, "session")
     monkeypatch.setattr(lineage, "detect_caller_detail", lambda *a, **k: lineage.Detection(caller))
     monkeypatch.setattr(lineage, "detect_caller", lambda *a, **k: caller)
     child = await reg.start("reply child", tmp_path, backend=get("claude"), freedom="read_only", resources=["sim"], task_id="b" * 32)
-    await wait_for(lambda: store.read(log_dir, child.task_id) is not None and store.read(log_dir, child.task_id).resources)
-    assert store.read(log_dir, child.task_id).resources["borrowed_from"] == record.resources["reservation_id"]
+    await wait_for(lambda: read(log_dir, child.task_id) is not None and read(log_dir, child.task_id).resources)
+    assert read(log_dir, child.task_id).resources["borrowed_from"] == record.resources["reservation_id"]
     with pytest.raises(resources.ResourceNotDeclaredByScope) as refused:
         await reg.start("reply other", tmp_path, backend=get("claude"), freedom="read_only", resources=["elsewhere"], task_id="c" * 32)
     assert "outermost" in str(refused.value)

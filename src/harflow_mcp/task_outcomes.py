@@ -125,7 +125,8 @@ class GitProbe:
         finally:
             entry["elapsed_ms"] = round((time.monotonic() - started) * 1000)
 
-    def status(self, worktree: str | None = None, *, git_dir: str | None = None, common: str | None = None) -> str | None:
+    def status(self, worktree: str | None = None, *, git_dir: str | None = None, common: str | None = None,
+               ignore_submodules: str = "all") -> str | None:
         # Read the original index and object database through a disposable Git directory with
         # no repository/global/system config. Enumerating filter names then overriding them is
         # unsafe: another process could add a new driver between enumeration and status.
@@ -169,7 +170,7 @@ class GitProbe:
                            "GIT_CONFIG_PARAMETERS": "", "GIT_COMMON_DIR": directory,
                            "GIT_INDEX_FILE": str(Path(git_dir) / "index")}
             return self.read("--git-dir=" + directory, "--work-tree=" + worktree, "status",
-                             "--porcelain=v1", "--untracked-files=normal", "--ignore-submodules=all",
+                             "--porcelain=v1", "--untracked-files=normal", "--ignore-submodules=" + ignore_submodules,
                              environment=environment)
 
 

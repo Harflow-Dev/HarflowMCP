@@ -16,7 +16,8 @@ Safety rules, each enforced here rather than hoped for:
   during creation, and a repository that configures clean/smudge/process filter drivers (Git LFS
   included) is refused, because checking out or inspecting such a tree would run them.
 * **Nothing is forced.** Never `--force`, never a reset, never a branch deletion. The caller's
-  checkout and index are untouched; Git's own refusal to check a branch out in two places stands.
+  checkout and index are untouched; Git's own refusal to check a branch out in two places stands, and
+  so does its refusal to remove a locked or dirty worktree.
 * **Removal is explicit.** Only a person (ctl, humans-only gate) removes a worktree, and only when
   no unsettled or uncertain task uses it and the tree is clean, under the per-worktree usage lock
   that every launch into the path also takes.
@@ -27,7 +28,8 @@ Safety rules, each enforced here rather than hoped for:
   `commondir` and `gitdir` back-links agree; the cleanliness check then pins `--git-dir` and
   `--work-tree` and runs in the disposable, configuration-free Git directory that outcome capture uses
   (`task_outcomes.GitProbe.status`), after the effective configuration (the source's and the
-  worktree's own) has been checked for filter drivers.
+  worktree's own) has been checked for filter drivers. The whole proof is repeated immediately before
+  `git worktree remove` (without `--force`), under the usage lock; initialized submodules are refused.
 """
 from __future__ import annotations
 
@@ -300,6 +302,50 @@ def check_filters_pinned(path: Path, git_dir: Path) -> None:
             "while its status is read; remove them before removing the worktree", code="worktree_filters_unsupported")
 
 
+def check_no_submodules(path: Path, git_dir: Path) -> None:
+    """Refuse a worktree with a populated or initialized submodule: its changes cannot be inspected
+    without running Git inside a directory the agent controls, and removal would discard them."""
+    modules = git_dir / "modules"
+    if modules.is_dir() and any(modules.iterdir()):
+        raise WorktreeError("the worktree has initialized submodules, which are not inspected or removed",
+                            code="worktree_has_submodules")
+    result = subprocess.run(
+        ["git", *GIT_SAFE_ARGS, f"--git-dir={git_dir}", f"--work-tree={path}", "ls-files", "--stage", "-z"],
+        env={**os.environ, **GIT_SAFE_ENV, **HARDENED_ENV}, capture_output=True, text=True, timeout=GIT_TIMEOUT_SECONDS,
+        check=False, cwd=str(path))
+    if result.returncode != 0:
+        raise WorktreeError("the worktree's index could not be read, so it is not removed", code="worktree_status_unavailable")
+    for entry in result.stdout.split("\0"):
+        mode, _, rest = entry.partition(" ")
+        relative = rest.partition("\t")[2]
+        if mode == "160000" and relative:
+            target = Path(path) / relative
+            if target.is_dir() and any(target.iterdir()):
+                raise WorktreeError(f"the worktree has a populated submodule ({relative}), which is not inspected or removed",
+                                    code="worktree_has_submodules")
+
+
+def prove_removable(path: Path, source: Path) -> None:
+    """Raise `WorktreeError` unless the worktree is a verified, configuration-safe, entirely clean tree.
+
+    The caller holds the usage lock and removes right after, so nothing here is stale by then.
+    """
+    git_dir, common = verify_link(path, source)
+    check_filters(source)
+    check_filters_pinned(path, git_dir)
+    check_config_pinned(path, git_dir)
+    check_no_submodules(path, git_dir)
+    from .task_outcomes import GitProbe
+    observed = GitProbe(path, budget=STATUS_BUDGET_SECONDS).status(
+        str(path), git_dir=str(git_dir), common=str(common), ignore_submodules="none")
+    if observed is None:
+        raise WorktreeError("the worktree's state could not be observed within its budget, so it is not removed",
+                            code="worktree_status_unavailable")
+    if observed.strip():
+        raise WorktreeError("the worktree has uncommitted or untracked changes; commit, stash or delete them first",
+                            code="worktree_dirty")
+
+
 # ---- usage lock --------------------------------------------------------------------------------
 
 
@@ -337,12 +383,16 @@ def usage_lock(path: Path, *, timeout: float = 10.0) -> Iterator[None]:
 # ---- listing and removal -----------------------------------------------------------------------
 
 
-def _same(a: str | None, b: Path) -> bool:
-    return a is not None and _canonical(Path(a)) == _canonical(b)
+def _inside(a: str | None, b: Path) -> bool:
+    """Whether `a` is `b` or lies inside it, canonically: the predicate `containing_worktree` uses."""
+    if a is None:
+        return False
+    target, root = _canonical(Path(a)), _canonical(b)
+    return target == root or target.is_relative_to(root)
 
 
 def users(log_dir: Path, path: Path) -> list[dict[str, Any]]:
-    """Every task or pending launch that uses `path` and is not provably finished.
+    """Every task or pending launch that uses `path` (or a directory inside it) and is not provably finished.
 
     Unsettled and uncertain both count: removal is a control decision, so only a conclusively
     settled run, or a launch that provably never started, stops being a user.
@@ -352,14 +402,14 @@ def users(log_dir: Path, path: Path) -> list[dict[str, Any]]:
     found: list[dict[str, Any]] = []
     seen: set[str] = set()
     for record in store.read_all(log_dir):
-        if not _same(record.repo_path, path):
+        if not _inside(record.repo_path, path):
             continue
         status = store.resolve_status(log_dir, record, detail=False)[0]
         seen.add(record.task_id)
         if not retention._conclusively_settled(record, status):
             found.append({"task_id": record.task_id, "kind": "task", "status": status})
     for receipt in reservations(log_dir):
-        if receipt["task_id"] in seen or not _same(receipt.get("repo_path"), path):
+        if receipt["task_id"] in seen or not _inside(receipt.get("repo_path"), path):
             continue
         if receipt["state"] not in ("settled", "not_started"):
             found.append({"task_id": receipt["task_id"], "kind": "launch", "status": receipt["state"]})
@@ -413,7 +463,8 @@ def remove(log_dir: Path, task_id: str) -> dict[str, Any]:
     """Remove the worktree created for `task_id`, or refuse with the reason. Blocking; humans only.
 
     Refuses while any user is unsettled or uncertain and while the tree has any tracked or
-    untracked change. `git worktree remove` runs without `--force`; the branch stays.
+    untracked change (submodules included) and refuses initialized submodules. `git worktree remove`
+    runs without `--force`, so a locked worktree stays; the branch stays.
     """
     entry = next((e for e in inventory(log_dir) if e.get("task_id") == task_id), None)
     if entry is None:
@@ -429,31 +480,18 @@ def remove(log_dir: Path, task_id: str) -> dict[str, Any]:
             raise WorktreeError(f"{path} no longer exists; run `git worktree prune` in {source} if Git still lists it", code="worktree_missing")
         if not source.is_dir():
             raise WorktreeError(f"the source repository {source} is unavailable", code="worktree_source_missing")
-        # Nothing below runs Git inside the tree until its link to the repository is proven, and the
-        # configuration it would run under (the source's and the worktree's own) is free of filters.
-        git_dir, common = verify_link(path, source)
-        check_filters(source)
-        check_filters_pinned(path, git_dir)
-        check_config_pinned(path, git_dir)
-        from .task_outcomes import GitProbe
-        observed = GitProbe(path, budget=STATUS_BUDGET_SECONDS).status(str(path), git_dir=str(git_dir), common=str(common))
-        if observed is None:
-            raise WorktreeError("the worktree's state could not be observed within its budget, so it is not removed",
-                                code="worktree_status_unavailable")
-        if observed.strip():
-            raise WorktreeError("the worktree has uncommitted or untracked changes; commit, stash or delete them first",
-                                code="worktree_dirty")
-        # Git's own dirty check would run status under the tree's configuration, so it is skipped
-        # (--force) after the hardened probe above decided; everything that could have changed since
-        # is verified again immediately before, under the usage lock.
-        git_dir, _common = verify_link(path, source)
-        check_filters(source)
-        check_filters_pinned(path, git_dir)
-        check_config_pinned(path, git_dir)
-        subprocess.run(["git", *GIT_SAFE_ARGS, "-C", str(source), "worktree", "remove", "--force", str(path)],
-                       env={**os.environ, **GIT_SAFE_ENV, **HARDENED_ENV}, capture_output=True, text=True,
-                       timeout=GIT_TIMEOUT_SECONDS, check=False)
+        # Everything is decided immediately before the removal, under the usage lock: nothing runs Git
+        # inside the tree until its link to the repository is proven, the configuration it would run
+        # under is free of anything executable, and the hardened probe found no change at all.
+        prove_removable(path, source)
+        # Git's own dirty, submodule and lock checks stay as the last word (no --force), under the
+        # same hardening and the configuration just verified.
+        result = subprocess.run(["git", *GIT_SAFE_ARGS, "-C", str(source), "worktree", "remove", str(path)],
+                                env={**os.environ, **GIT_SAFE_ENV, **HARDENED_ENV}, capture_output=True, text=True,
+                                timeout=GIT_TIMEOUT_SECONDS, check=False)
         if path.exists():
-            raise WorktreeError(f"git could not remove {path}", code="worktree_git_failed")
+            detail = (result.stderr or result.stdout).strip()[:300]
+            raise WorktreeError(f"git did not remove {path}: {detail}",
+                                code="worktree_locked" if "locked" in detail else "worktree_git_failed")
     return {"task_id": task_id, "path": str(path), "removed": True, "branch": entry.get("branch"),
             "note": "The branch, if any, was kept."}

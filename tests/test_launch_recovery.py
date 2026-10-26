@@ -421,6 +421,6 @@ async def test_followups_are_consumed_when_the_launch_spawns_after_the_caller_di
     await reg.start("slow 4 hold", tmp_path, backend=get("claude"), freedom="read_only", resources=["sim"], task_id="b" * 32)
     info = await abandoned_resume(tmp_path, source.task_id, identities)
     assert item_statuses(log_dir, source.task_id) == ["reserved"]
-    await wait_for(lambda: store.read(log_dir, info["task_id"]) is not None, 60)
+    await wait_for(lambda: task_supervision.read_task_record(log_dir, info["task_id"]) is not None, 60)
     path = log_dir / f"{source.task_id}{followups.STATE_SUFFIX}"
     await wait_for(lambda: [i["status"] for i in json.loads(path.read_text())["ledger"]["items"]] == ["consumed"])

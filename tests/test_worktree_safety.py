@@ -190,3 +190,80 @@ def test_worktree_config_that_would_execute_is_refused_and_never_run(source, tmp
     git(path, "config", "--worktree", "core.fsmonitor", str(script))
     assert remove_code(owned.tasks_directory, "a" * 32) == "worktree_filters_unsupported"
     assert not ran.exists() and path.exists()
+
+
+# ---- round 2: containment, no --force, submodules and locks ---------------------------------------
+
+
+def test_a_task_running_in_a_subdirectory_of_the_worktree_blocks_removal(source, tmp_path, owned, identities) -> None:
+    made = seed_created(source, tmp_path, owned)
+    path = Path(made["path"])
+    (path / "pkg").mkdir()
+    live = record_for("b" * 32, str(path / "pkg"), status="running", exit_code=None, finished_at=None, output_drained=False,
+                      pid=4242, start_time="Mon Jan  1 00:00:00 2001", markers=["x"], owner=OWNER)
+    store.write(owned.tasks_directory, live)
+    assert remove_code(owned.tasks_directory, "a" * 32) == "worktree_in_use"
+    store.write(owned.tasks_directory, record_for("b" * 32, str(path / "pkg")))
+    write_receipt(tmp_path, "c" * 32, "granted", owner=OWNER, repo_path=str(path / "pkg"))
+    assert remove_code(owned.tasks_directory, "a" * 32) == "worktree_in_use"
+    assert path.exists()
+
+
+def with_submodule(source: Path, tmp_path: Path, path: Path) -> Path:
+    """Add and commit an initialized submodule inside the worktree; returns the submodule directory."""
+    inner = tmp_path / "inner"
+    inner.mkdir()
+    git(inner, "init", "-q")
+    (inner / "lib.txt").write_text("lib")
+    git(inner, "add", ".")
+    git(inner, "-c", "user.email=t@example.com", "-c", "user.name=T", "commit", "-q", "-m", "lib")
+    git(path, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(inner), "sub")
+    git(path, "-c", "user.email=t@example.com", "-c", "user.name=T", "commit", "-q", "-m", "add submodule")
+    return path / "sub"
+
+
+def test_a_worktree_with_an_initialized_submodule_is_refused_and_keeps_its_changes(source, tmp_path, owned, identities) -> None:
+    made = seed_created(source, tmp_path, owned)
+    path = Path(made["path"])
+    sub = with_submodule(source, tmp_path, path)
+    assert remove_code(owned.tasks_directory, "a" * 32) == "worktree_has_submodules"
+    (sub / "lib.txt").write_text("dirty change only inside the submodule")
+    assert remove_code(owned.tasks_directory, "a" * 32) == "worktree_has_submodules"
+    assert (sub / "lib.txt").read_text() == "dirty change only inside the submodule" and path.exists()
+
+
+def test_the_removal_probe_sees_dirty_submodules(source, tmp_path, owned, identities) -> None:
+    from harflow_mcp.task_outcomes import GitProbe
+    made = seed_created(source, tmp_path, owned)
+    path = Path(made["path"])
+    sub = with_submodule(source, tmp_path, path)
+    (sub / "lib.txt").write_text("dirty")
+    git_dir, common = worktrees.verify_link(path, source)
+    probe = GitProbe(path, budget=30.0)
+    assert probe.status(str(path), git_dir=str(git_dir), common=str(common)).strip() == ""
+    assert "sub" in probe.status(str(path), git_dir=str(git_dir), common=str(common), ignore_submodules="none")
+
+
+def test_a_locked_worktree_is_not_removed(source, tmp_path, owned, identities) -> None:
+    made = seed_created(source, tmp_path, owned)
+    path = Path(made["path"])
+    git(source, "worktree", "lock", str(path))
+    assert remove_code(owned.tasks_directory, "a" * 32) == "worktree_locked"
+    assert path.exists()
+    git(source, "worktree", "unlock", str(path))
+    assert worktrees.remove(owned.tasks_directory, "a" * 32)["removed"] is True
+
+
+def test_removal_does_not_pass_force_to_git(source, tmp_path, owned, identities, monkeypatch) -> None:
+    seen = []
+    real = worktrees.subprocess.run
+
+    def spy(argv, *args, **kwargs):
+        seen.append(list(argv))
+        return real(argv, *args, **kwargs)
+
+    seed_created(source, tmp_path, owned)
+    monkeypatch.setattr(worktrees.subprocess, "run", spy)
+    worktrees.remove(owned.tasks_directory, "a" * 32)
+    removals = [argv for argv in seen if "remove" in argv]
+    assert removals and all("--force" not in argv and "-f" not in argv for argv in removals)
