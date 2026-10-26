@@ -26,7 +26,9 @@ async def test_blocked_artifact_write_does_not_block_stdout_or_change_outcome(tm
     call, response = events(plan)
     terminal = {'type': 'result', 'subtype': 'success', 'is_error': False, 'result': 'drained terminal'}
     rows = [call, response, *({'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': 'x' * 4096}]}} for _ in range(40)), terminal]
-    script = f"from pathlib import Path; Path({str(plan)!r}).write_text('plan'); import sys; sys.stdout.write({''.join(json.dumps(row) + chr(10) for row in rows)!r}); sys.stdout.flush()"
+    payload = "".join(json.dumps(row) + "\n" for row in rows)
+    assert len(payload.encode("utf-8")) >= 160 * 1024
+    script = f"from pathlib import Path; Path({str(plan)!r}).write_text('plan'); import sys; sys.stdout.write({payload!r}); sys.stdout.flush()"
     class Backend(_RecordingBackend):
         name = 'plan-contention-double'
         def ingest(self, event, acc):
@@ -37,7 +39,10 @@ async def test_blocked_artifact_write_does_not_block_stdout_or_change_outcome(tm
             return backends.get('claude').observe_plan_candidates(frames, state, repo)
         def builtin_plan_path(self, path, repo):
             return backends.get('claude').builtin_plan_path(path, repo)
-    backend = Backend(shlex.join([sys.executable, '-c', script]))
+    # Keep the pipe-drain pressure without exceeding Linux's per-argument limit.
+    script_path = tmp_path / 'emit_plan_events.py'
+    script_path.write_text(script, encoding='utf-8')
+    backend = Backend(shlex.join([sys.executable, str(script_path)]))
     monkeypatch.setitem(backends.BACKENDS, backend.name, backend)
     entered, release, returned = threading.Event(), threading.Event(), threading.Event()
     original = artifacts.record_backend_plan

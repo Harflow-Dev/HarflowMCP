@@ -308,22 +308,24 @@ def test_live_and_recovered_listings_hold_the_same_keys(
     record = make_record(status="failed", exit_code=None)
     store.write(tmp_path, record)
     write_log(tmp_path, record.task_id, RESULT_EVENT)
-    recovered = set(store.brief(tmp_path, record)) - {"recovered"}
+    recovered = store.brief(tmp_path, record)
 
-    live = set(
-        Task(
-            task_id="t",
-            backend="claude",
-            session_id=SESSION,
-            repo_path=tmp_path,
-            prompt="x",
-            max_turns=5,
-            log_path=tmp_path / "t.jsonl",
-            started_at=datetime.now(timezone.utc),
-        ).brief()
-    )
+    live = Task(
+        task_id="t",
+        backend="claude",
+        session_id=SESSION,
+        repo_path=tmp_path,
+        prompt="x",
+        max_turns=5,
+        log_path=tmp_path / "t.jsonl",
+        started_at=datetime.now(timezone.utc),
+    ).brief()
 
-    assert recovered == live
+    assert set(recovered) == set(live)
+    # These fixtures have no dispatch identity, so continuity is explicitly unknown.
+    assert live["observation_mode"] == recovered["observation_mode"] == "unknown"
+    assert live["recovered"] is True
+    assert recovered["recovered"] is True
 
 
 def test_live_notices_merge_bridge_first_without_mutating_either_source(tmp_path: Path) -> None:
@@ -492,7 +494,10 @@ def test_recovered_snapshot_matches_the_live_snapshot_shape(tmp_path: Path) -> N
     assert set(live) - set(recovered) == set()
     # Recovery adds provenance the live path has no need for, and the follow-up ledger, which a live
     # snapshot leaves to the (threaded) status payload so it is never read on the event loop.
-    assert set(recovered) - set(live) == {"recovered", "note", "queued_followups", "recovery_activity"}
+    assert set(recovered) - set(live) == {"note", "queued_followups", "recovery_activity"}
+    assert live["observation_mode"] == recovered["observation_mode"] == "unknown"
+    assert live["recovered"] is True
+    assert recovered["recovered"] is True
 
 
 def test_both_snapshot_builders_carry_the_resume_command(tmp_path: Path) -> None:
