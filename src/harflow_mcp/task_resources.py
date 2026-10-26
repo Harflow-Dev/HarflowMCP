@@ -156,13 +156,20 @@ def settle_cancelled(log_dir: Path, receipt: dict[str, Any]) -> None:
     clear_cancel(log_dir, receipt["task_id"])
 
 
-def cancel_launch(log_dir: Path, task_id: str) -> dict[str, Any]:
+def cancel_launch(log_dir: Path, task_id: str, *, authorized: bool = False) -> dict[str, Any]:
     """Ask a launch, and every pending descendant, to stop before it spawns. Blocking.
+
+    Internal: it performs no caller authorization. Every entry point must come through
+    `TaskRegistry.cancel_pending` (or the cascade, which has already authorized its caller), which
+    applies the checks `cancel_cascade` applies to recorded tasks; `authorized=True` is that
+    caller's statement, and a call without it is refused so a new entry point cannot skip them.
 
     A launch whose waiting owner is confirmed dead is settled here, since nothing else will.
     `spawned` is true when a record appeared in the meantime: the caller then runs the normal cancel.
     """
     from .task_supervision import read_launch, read_task_record
+    if authorized is not True:
+        raise PermissionError("cancel_launch requires an authorized caller; use TaskRegistry.cancel_pending")
     targets = [task_id, *pending_descendants(log_dir, task_id)]
     requested, settled = [], []
     for target in targets:

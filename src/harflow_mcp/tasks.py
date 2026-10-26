@@ -3715,7 +3715,28 @@ class TaskRegistry:
 
     def _cancel_pending_launches(self, task_ids: list[str]) -> list[str]:
         from . import task_resources
-        return [target for task_id in task_ids for target in task_resources.cancel_launch(self._log_dir, task_id)["cascade"]["pending_cancel_requested"]]
+        return [target for task_id in task_ids for target in task_resources.cancel_launch(self._log_dir, task_id, authorized=True)["cascade"]["pending_cancel_requested"]]
+
+    async def cancel_pending(self, task_id: str) -> dict[str, Any] | None:
+        """Cancel a launch that has no record yet, under the authorization `cancel_cascade` applies.
+
+        None when `task_id` is not a pending launch. The checks are the cascade's: native transports
+        are controlled through their workflow, the caller must be established (an undecidable or
+        unverifiable one is refused, never read as "no caller"), a managed workflow worker is
+        refused, and a workflow-associated target pauses its run. Pending descendants are covered by
+        the same authorization.
+        """
+        from . import task_resources
+        pending = await asyncio.to_thread(task_resources.pending_receipt, self._log_dir, task_id)
+        if pending is None or not isinstance(pending.get("resources"), dict):
+            return None
+        from .workflow_hooks import pause_for_task, refuse_managed, refuse_native_control
+        refuse_native_control(self._log_dir, task_id)
+        caller = await self._mutation_caller()
+        if caller is not None:
+            refuse_managed(self._log_dir, caller.record.task_id)
+        pause_for_task(self._log_dir, task_id, "Task cancelled outside the workflow supervisor")
+        return await asyncio.to_thread(task_resources.cancel_launch, self._log_dir, task_id, authorized=True)
 
     async def _shielded(self, coro: Any, name: str) -> Any:
         self._loop = asyncio.get_running_loop()

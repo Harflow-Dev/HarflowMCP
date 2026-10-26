@@ -1743,11 +1743,9 @@ async def _cancel_pending(task_id: str) -> dict[str, Any] | None:
     pending = await asyncio.to_thread(task_resources.pending_view, log_dir, task_id)
     if pending is None:
         return None
-    from .workflow_hooks import refuse_managed
-    caller = await _reg()._mutation_caller()
-    if caller is not None:
-        refuse_managed(log_dir, caller.record.task_id)
-    result = await asyncio.to_thread(task_resources.cancel_launch, log_dir, task_id)
+    result = await _reg().cancel_pending(task_id)
+    if result is None:
+        return None
     if result.get("spawned"):
         cascade = await _reg().cancel_cascade(task_id)
         record = _reg().recover(task_id)
@@ -1787,7 +1785,10 @@ async def cancel_task(task_id: str) -> dict[str, Any]:
     from .caller_policy import require_mutation
     await _guard_mutation()
     if _reg().get(task_id) is None and _reg().recover(task_id) is None:
-        cancelled = await _cancel_pending(task_id)
+        try:
+            cancelled = await _cancel_pending(task_id)
+        except backends.UnsupportedCapability as exc:
+            raise MCPError(INVALID_PARAMS, str(exc)) from None
         if cancelled is not None:
             return cancelled
         raise MCPError(INVALID_PARAMS, f"unknown task_id: {task_id}")

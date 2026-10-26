@@ -785,7 +785,13 @@ def _cmd_cancel(args: argparse.Namespace) -> int:
 def _cancel_pending(args: argparse.Namespace, log_dir: Path, task_id: str) -> int:
     """`cancel` for a launch with no record: ask its owner to stop waiting, in the existing result shape."""
     from . import task_resources
-    outcome = task_resources.cancel_launch(log_dir, task_id)
+    registry = tasks_module.TaskRegistry(log_dir=log_dir, open_monitor=False, execution_mode="supervised")
+    try:
+        outcome = asyncio.run(registry.cancel_pending(task_id))
+    except (backends.UnsupportedCapability, ValueError) as exc:
+        return _fail(args, "invalid_params", str(exc))
+    if outcome is None:
+        return _fail(args, "unknown_task", f"unknown task_id: {task_id}")
     if outcome["spawned"]:
         return _cmd_cancel(args)  # it spawned while we asked: the ordinary cancel takes over
     view = task_resources.pending_view(log_dir, task_id)

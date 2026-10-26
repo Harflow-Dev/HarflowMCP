@@ -593,3 +593,87 @@ async def test_automatic_continuation_requeues_and_is_acknowledged_while_blocked
     assert store.read(log_dir, successor).continuation_of_task_id == first.task_id
     assert store.read(log_dir, successor).resources["names"] == ["sim"]
     assert competitor.task_id != successor
+
+
+# ---- authorization of pending cancels ------------------------------------------------------------
+
+
+async def pending_pair(tmp_path, monkeypatch):
+    install_fake_claude(tmp_path, monkeypatch)
+    reg = registry(tmp_path)
+    await reg.start("slow 8 hold", tmp_path, backend=get("claude"), freedom="read_only", resources=["sim"], task_id="a" * 32)
+    waiter = await reg.start("reply two", tmp_path, backend=get("claude"), freedom="read_only", resources=["sim"], task_id="b" * 32)
+    return reg, waiter
+
+
+def caller_for(record_id: str):
+    from harflow_mcp import lineage
+    record = store.TaskRecord(task_id=record_id, backend="claude", session_id=None, repo_path="/x", started_at="2026-01-01T00:00:00+00:00")
+    return lineage.Caller(record, "session")
+
+
+@pytest.mark.asyncio
+async def test_managed_workflow_worker_cannot_cancel_a_pending_launch(tmp_path, monkeypatch, identities):
+    from harflow_mcp import lineage, workflow_hooks
+    from harflow_mcp.backends.base import NestedDispatchRefused
+    from mcp import MCPError
+    reg, waiter = await pending_pair(tmp_path, monkeypatch)
+    worker = caller_for("c" * 32)
+    monkeypatch.setattr(lineage, "detect_caller_detail", lambda *a, **k: lineage.Detection(worker))
+    monkeypatch.setattr(lineage, "detect_caller", lambda *a, **k: worker)
+    monkeypatch.setattr(workflow_hooks, "owner", lambda log_dir, task_id, strict=False: {"role": "node"} if task_id == worker.record.task_id else None)
+    server = use_server(monkeypatch, reg)
+    with pytest.raises((NestedDispatchRefused, MCPError)):
+        await server.cancel_task(waiter.task_id)
+    assert not task_resources.cancel_path(tasks_dir(tmp_path), waiter.task_id).exists()
+    with pytest.raises(NestedDispatchRefused):
+        await reg.cancel_pending(waiter.task_id)
+    # And through ctl.
+    from harflow_mcp import ctl
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("HARFLOW_STATE_ROOT", str(tmp_path / "state"))
+    code = await asyncio.to_thread(ctl.main, ["cancel", waiter.task_id, "--json"])
+    assert code != 0
+    assert not task_resources.cancel_path(tasks_dir(tmp_path), waiter.task_id).exists()
+
+
+@pytest.mark.asyncio
+async def test_undecidable_and_unverifiable_callers_cannot_cancel_a_pending_launch(tmp_path, monkeypatch, identities):
+    from harflow_mcp import ctl, lineage
+    from harflow_mcp.backends.base import NestedDispatchRefused
+    reg, waiter = await pending_pair(tmp_path, monkeypatch)
+    log_dir = tasks_dir(tmp_path)
+    monkeypatch.setattr(lineage, "detect_caller_detail", lambda *a, **k: lineage.Detection(None, "ps is not readable"))
+    with pytest.raises(NestedDispatchRefused):
+        await reg.cancel_pending(waiter.task_id)
+    assert not task_resources.cancel_path(log_dir, waiter.task_id).exists()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("HARFLOW_STATE_ROOT", str(tmp_path / "state"))
+    assert await asyncio.to_thread(ctl.main, ["cancel", waiter.task_id, "--json"]) != 0
+    assert not task_resources.cancel_path(log_dir, waiter.task_id).exists()
+    # A worker variable that no live caller confirms is refused as well.
+    monkeypatch.setattr(lineage, "detect_caller_detail", lambda *a, **k: lineage.Detection(None))
+    monkeypatch.setenv("HARFLOW_TASK_ID", "d" * 32)
+    with pytest.raises(ValueError):
+        await reg.cancel_pending(waiter.task_id)
+    assert await asyncio.to_thread(ctl.main, ["cancel", waiter.task_id, "--json"]) != 0
+    assert not task_resources.cancel_path(log_dir, waiter.task_id).exists()
+    with pytest.raises(PermissionError):
+        task_resources.cancel_launch(log_dir, waiter.task_id)
+
+
+@pytest.mark.asyncio
+async def test_root_caller_cancels_a_pending_launch_and_its_pending_descendants(tmp_path, monkeypatch, identities):
+    install_fake_claude(tmp_path, monkeypatch)
+    log_dir = tasks_dir(tmp_path)
+    reg = registry(tmp_path)
+    await reg.start("slow 8 hold", tmp_path, backend=get("claude"), freedom="read_only", resources=["sim"], task_id="a" * 32)
+    parent = await reg.start("reply parent", tmp_path, backend=get("claude"), freedom="read_only", resources=["sim"], task_id="b" * 32)
+    child = await reg.start("reply child", tmp_path, backend=get("claude"), freedom="read_only", resources=["sim"], task_id="c" * 32)
+    # Make the second launch a descendant of the first by lineage, as a nested dispatch would record.
+    receipt = task_supervision.read_launch(log_dir, child.task_id)
+    task_supervision.mark(log_dir, child.task_id, receipt["generation"], spawned_by=parent.task_id, root_task_id=parent.task_id)
+    result = await reg.cancel_pending(parent.task_id)
+    assert sorted(result["cascade"]["pending_cancel_requested"]) == [parent.task_id, child.task_id]
+    await wait_for(lambda: launch_state(tmp_path, parent.task_id) == "not_started" and launch_state(tmp_path, child.task_id) == "not_started")
+    assert await reg.cancel_pending("e" * 32) is None
