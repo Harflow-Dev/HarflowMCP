@@ -103,8 +103,17 @@ its defaults are unchanged.
 
 ## Guidance for agents
 
-Agents learn the folders from the variables and from this guidance. Paste this into `CLAUDE.md` or
-`AGENTS.md`:
+Harflow also hands a short static note (about 500 bytes, no paths) to the agent through a system-prompt channel
+where one was measured that grants nothing else: `--append-system-prompt` on Claude, `-c developer_instructions`
+on Codex (and the app-server's `developerInstructions`), and a read-only instructions file on opencode. The
+caller's prompt is never prefixed or rewritten, so a leading `/slash` command stays first. Claude and Codex read
+the note once, when the session starts, and keep it; opencode reads it on every run. Vibe and Antigravity have no
+such channel, so a task there relies on the environment variables and on the guidance below. `scratch.system_guidance`
+says per run whether the note was `delivered`, `reused_from_session` or `unavailable`, and
+`capabilities.system_guidance` (in `list_backends`) says how each backend takes it. Nothing depends on the note: it is
+never required for a launch. The measurements are in [backend CLI facts](backend-cli-facts.md#system-prompt-seams-for-the-scratch-note-2026-10-27).
+
+For any agent, paste this into `CLAUDE.md` or `AGENTS.md`:
 
 ```markdown
 ## Scratch folders
@@ -124,6 +133,10 @@ than falling back to `/tmp`. Mention the full path of anything the caller should
 
 ## Limits
 
+* The note is not available on every backend and is read once per session on Claude and Codex, so a session that
+  began before this feature, or on Vibe or Antigravity, relies on the variables and the guidance above; opencode
+  is skipped when the caller's own environment sets `OPENCODE_CONFIG_CONTENT`, and workflow builders and native
+  children carry no note.
 * `scratch.access` reports what Harflow granted. `no_additional_grant` is not a claim that writes are
   impossible, and `writable` is not a claim about the filesystem's own permissions.
 * Shared folders are not per-user quota-limited; use `scratch list` and the age policy to watch disk use.

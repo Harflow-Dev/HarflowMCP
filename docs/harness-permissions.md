@@ -107,7 +107,8 @@ Write-capable workers receive `HARFLOW_SCRATCH` (alias `HARFLOW_TASK_SCRATCH`), 
 `HARFLOW_CHAIN_SCRATCH` and, in a group, `HARFLOW_GROUP_SCRATCH` (shared folders; see
 [shared scratch](shared-scratch.md)). Claude and Codex also receive an explicit grant for each exact
 directory they may write; `scratch.access` reports `writable`, `no_additional_grant` or `sandbox_read_only` per
-path, so a shared folder exposed without a grant is never described as writable. A scratch path does not
+path, so a shared folder exposed without a grant is never described as writable. The short note about these folders
+travels in the backend's system prompt where a seam was measured, never in the caller's prompt. A scratch path does not
 approve Bash commands or grant network access; other adapters do not gain confinement or a directory grant
 merely because the path is provided.
 

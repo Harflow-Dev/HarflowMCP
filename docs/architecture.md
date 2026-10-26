@@ -291,6 +291,12 @@ Detail behind [shared scratch](shared-scratch.md); the rules that keep it safe:
 - **Nested grants never widen.** `TaskRegistry._caller_allows_shared` grants a confined dispatcher's child a shared
   folder only if it is already one of the dispatcher's writable roots or a chain it began (strict `spawned_by`
   ancestry); everything unreadable denies.
+- **Guidance goes through measured system-prompt seams, never the prompt.** `Capabilities.system_guidance`
+  (`first_turn_sticky`, `per_run` or none) and `with_system_guidance` live in `backends/`; nothing outside them
+  branches on a backend's name. Each `assert_safe` accepts exactly the one static note (`system_guidance.TEXT`), once,
+  in exactly one position, so no caller string can take the seam. It is applied after the approval configuration and
+  re-applied when a worktree launch rebuilds its invocation, never blocks a launch, and is disclosed per run in
+  `scratch.system_guidance`; `reused_from_session` is claimed only when the resumed task itself carried the note.
 - **Access states are claims about what Harflow granted** (`writable`, `no_additional_grant`, `sandbox_read_only`),
   derived from the real grant and the recorded `Enforcement`, never from the freedom's name.
 

@@ -44,7 +44,7 @@ from pathlib import Path
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from typing import Any, Literal, NamedTuple
 
-from . import control, followups, identity, inbox, lineage, retention, shared_scratch, store
+from . import control, followups, identity, inbox, lineage, retention, shared_scratch, store, system_guidance
 from .backends import (
     Accumulator,
     Backend,
@@ -1374,6 +1374,7 @@ class TaskRegistry:
 
             invocation = await self._configure_commands(backend, invocation, commands, freedom, repo_path, network)
             invocation = await approval_runtime.configure(backend, invocation, caller_approvals, freedom, max_turns, caller_write_approvals)
+            invocation = self._with_system_guidance(backend, invocation, freedom=freedom, network=network, resume=False, enabled=not workflow_builder)
 
             spawned_by, root_task_id, depth, max_depth, lineage_detected = self._resolve_lineage(
                 caller,
@@ -1431,7 +1432,8 @@ class TaskRegistry:
             **({"worktree_request": worktree_plan, "rebuild": {
                 "backend": backend.name, "prompt": prompt, "freedom": freedom, "session_id": session_id, "model": model,
                 "max_turns": max_turns, "reasoning_effort": reasoning_effort, "network": network, "commands": list(commands),
-                "caller_approvals": caller_approvals, "caller_write_approvals": caller_write_approvals}} if worktree_plan is not None else {}),
+                "caller_approvals": caller_approvals, "caller_write_approvals": caller_write_approvals,
+                "guidance": invocation.system_guidance is not None}} if worktree_plan is not None else {}),
             **({"worktree_info": worktree_inherit} if worktree_inherit else {}),
         )
 
@@ -1465,8 +1467,46 @@ class TaskRegistry:
             model=rebuild["model"], max_turns=rebuild["max_turns"], reasoning_effort=rebuild["reasoning_effort"],
             network=rebuild["network"])
         invocation = await self._configure_commands(backend, invocation, tuple(rebuild["commands"]), rebuild["freedom"], repo_path, rebuild["network"])
-        return await approval_runtime.configure(backend, invocation, rebuild["caller_approvals"], rebuild["freedom"],
-                                                rebuild["max_turns"], rebuild["caller_write_approvals"])
+        invocation = await approval_runtime.configure(backend, invocation, rebuild["caller_approvals"], rebuild["freedom"],
+                                                      rebuild["max_turns"], rebuild["caller_write_approvals"])
+        if rebuild.get("guidance"):
+            invocation = self._with_system_guidance(backend, invocation, freedom=rebuild["freedom"], network=rebuild["network"], resume=False)
+        return invocation
+
+    def _with_system_guidance(self, backend: Backend, invocation: Invocation, *, freedom: str, network: bool | None,
+                              resume: bool, enabled: bool = True) -> Invocation:
+        """Attach the static scratch note through the backend's measured seam, or leave the invocation alone.
+
+        Never blocks a launch: any failure (a file that cannot be written, a shape the backend refuses) means no
+        note, disclosed as `unavailable`. Workflow builders and native children, whose prompts Harflow composes
+        or whose transport is its own, never carry it."""
+        method = getattr(backend, "with_system_guidance", None)
+        if not enabled or method is None or getattr(backend.capabilities, "system_guidance", None) is None or invocation.native_subagent:
+            return invocation
+        try:
+            guided = method(invocation, system_guidance.TEXT, resume=resume,
+                            file=lambda: system_guidance.instructions_file(self.state_layout.root))
+            if guided is not invocation:
+                backend.assert_safe(guided, freedom, network)
+            return guided
+        except StateOwnershipError:
+            raise
+        except Exception:
+            log.debug("system guidance is unavailable for this launch", exc_info=True)
+            return invocation
+
+    def _parent_carried_guidance(self, parent_task_id: str | None) -> bool:
+        """Whether the session being resumed started with the note (delivered, or itself a reuse of it)."""
+        if parent_task_id is None:
+            return False
+        try:
+            parent = store.read(self._log_dir, parent_task_id, include_prompt=False)
+        except StateOwnershipError:
+            raise
+        except Exception:
+            return False
+        state = ((parent.scratch or {}).get("system_guidance") or {}).get("state") if parent is not None else None
+        return state in (system_guidance.DELIVERED, system_guidance.REUSED_FROM_SESSION)
 
     def _resource_request(self, names: list[str] | None, wait_seconds: int | None, inherit: dict[str, Any] | None, caller: Any) -> dict[str, Any] | None:
         """The resource request for a dispatch, or None when it asks for nothing.
@@ -1739,6 +1779,8 @@ class TaskRegistry:
                     except Exception as exc:
                         exc.harflow_not_started = True
                         raise
+                invocation = self._with_system_guidance(backend, invocation, freedom=freedom, network=effective_network, resume=True,
+                                                        enabled=not (workflow_builder or native_subagent))
             spawn_called = True
             task = await self._spawn(
                 invocation,
@@ -2040,6 +2082,11 @@ class TaskRegistry:
                         log.exception("task %s: could not clean scratch before spawn", task_id)
                 raise
 
+            mode = getattr(backend.capabilities, "system_guidance", None)
+            guidance_state = system_guidance.state_of(
+                mode, delivered=invocation.system_guidance is not None,
+                resume=parent_task_id is not None and self._parent_carried_guidance(parent_task_id))
+
             # So a nested harflow_mcp server started by this agent (a codex/vibe MCP tool call, a
             # claude/opencode subprocess) can find its way back to this task via
             # `lineage.detect_caller`'s HARFLOW_TASK_ID method, when the environment survives that far.
@@ -2119,7 +2166,8 @@ class TaskRegistry:
             resources=dict(resource_grant) if resource_grant else None,
             worktree=dict(worktree_info) if worktree_info else None,
             scratch_chain_id=scratch_chain_id or task_id,
-            scratch=allocation.as_dict() | {"notice": shared_scratch.notice(allocation)} if allocation is not None and (allocation.task or allocation.chain) else None,
+            scratch=(allocation.as_dict() | {"notice": shared_scratch.notice(allocation), "system_guidance": {"state": guidance_state, "version": system_guidance.VERSION}}
+                     if allocation is not None and (allocation.task or allocation.chain) else None),
             interaction_owner=interaction_owner,
             extra_writable_paths=serialize_paths(extra_path_grants),
             extra_path_certification=enforcement.extra_path_certification,

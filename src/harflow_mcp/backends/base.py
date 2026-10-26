@@ -58,6 +58,9 @@ class Invocation:
     # The shared chain and group folders granted to this run, in that order, after `scratch_directory`
     # and before any extra writable paths in a backend's `--add-dir` list.
     shared_scratch_directories: tuple[str, ...] = ()
+    # The version id of the static scratch-folder note this argv carries through a system-prompt
+    # seam (`system_guidance.VERSION`), or None when it carries none.
+    system_guidance: str | None = None
     native_subagent: bool = False
     caller_approvals: bool = False
     caller_write_approvals: bool = False
@@ -257,6 +260,11 @@ class Capabilities(NamedTuple):
 
     supports_caller_approvals: bool = False
     """Whether a version-qualified exact-action caller control transport exists."""
+
+    system_guidance: str | None = None
+    """How the backend takes Harflow's static scratch-folder note through a system-prompt seam that
+    grants nothing else: `first_turn_sticky` (read when the session starts, kept for the session),
+    `per_run` (read on every launch) or None (no such seam was measured)."""
 
     resume_may_start_fresh: bool = False
     """Whether an unavailable conversation can silently create a new one on resume.

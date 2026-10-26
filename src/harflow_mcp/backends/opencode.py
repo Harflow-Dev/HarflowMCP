@@ -51,10 +51,14 @@ The freedom mapping is agent-based, and measured rather than reasoned about:
 
 from __future__ import annotations
 
+import json
 import math
+import os
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from .. import system_guidance
 from . import normalize as nz
 from .mcp_approval import OpencodeApproval
 from .base import (
@@ -289,7 +293,40 @@ class OpencodeBackend(ExtraPathsUnsupported):
             caveats=(_NETWORK_CONTROL_CAVEAT,),
         ),
         supports_live_input=False,
+        # Measured (opencode 1.18.21): an `instructions` file path in OPENCODE_CONFIG_CONTENT joins the system
+        # prompt on every run (start and resume) and is not persisted in the session.
+        system_guidance=system_guidance.PER_RUN,
     )
+
+    def with_system_guidance(self, invocation: Invocation, text: str, *, resume: bool, file=None) -> Invocation:
+        """Point `OPENCODE_CONFIG_CONTENT` at a bridge-owned instructions file, on every launch.
+
+        Skipped when the caller's own environment already sets that variable: replacing it would drop their
+        inline configuration, and the note is never worth that."""
+        if invocation.system_guidance is not None or text != system_guidance.TEXT or file is None or os.environ.get("OPENCODE_CONFIG_CONTENT"):
+            return invocation
+        path = Path(file())
+        content = json.dumps({"instructions": [str(path)]}, separators=(",", ":"))
+        return replace(invocation, env={**invocation.env, "OPENCODE_CONFIG_CONTENT": content}, system_guidance=system_guidance.VERSION)
+
+    @staticmethod
+    def _expected_env(invocation: Invocation) -> dict[str, str]:
+        """The one environment contribution this backend ever makes: the guidance instructions pointer."""
+        if invocation.system_guidance is None:
+            return {}
+        if invocation.system_guidance != system_guidance.VERSION:
+            raise UnsafeInvocationError("unrecognised system guidance version")
+        value = dict(invocation.env).get("OPENCODE_CONFIG_CONTENT")
+        try:
+            document = json.loads(value) if isinstance(value, str) else None
+        except ValueError:
+            document = None
+        paths = document.get("instructions") if isinstance(document, dict) and set(document) == {"instructions"} else None
+        if (not isinstance(paths, list) or len(paths) != 1 or not isinstance(paths[0], str) or not os.path.isabs(paths[0])
+                or os.path.basename(paths[0]) != system_guidance.FILE_NAME
+                or value != json.dumps({"instructions": paths}, separators=(",", ":"))):
+            raise UnsafeInvocationError("OPENCODE_CONFIG_CONTENT must be exactly the guidance instructions pointer")
+        return {"OPENCODE_CONFIG_CONTENT": value}
 
     def build_start_argv(
         self,
@@ -383,7 +420,7 @@ class OpencodeBackend(ExtraPathsUnsupported):
     def assert_safe(
         self, invocation: Invocation, freedom: Freedom, network: bool | None = None
     ) -> None:
-        validate_invocation_env(invocation, {})
+        validate_invocation_env(invocation, self._expected_env(invocation) if isinstance(invocation, Invocation) else {})
         if isinstance(invocation, Invocation) and invocation.allowed_commands:
             raise UnsupportedCapability(self.allowed_commands_support()["reason"])
         if isinstance(invocation, Invocation) and invocation.extra_writable_paths:

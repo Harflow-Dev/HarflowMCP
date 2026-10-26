@@ -64,12 +64,15 @@ only: measured, `git push <local bare repo> HEAD:refs/heads/main` still landed w
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 import os
 import sys
 import tomllib
 
 from pathlib import Path
 from typing import Any
+
+from .. import system_guidance
 
 from . import normalize as nz
 from .mcp_approval import CodexApproval
@@ -228,6 +231,10 @@ VALUE_FLAGS = ("-C", "-s", "-c", "-m", "--add-dir")
 # parsing step for a malformed value to hide behind. Built by construction, not hardcoded loosely,
 # so NETWORK_ENABLE_PAIR (the `publish` network switch) stays the single source of truth for its own
 # literal.
+GUIDANCE_KEY = "developer_instructions"
+# A JSON string is a valid TOML basic string for this ASCII text; never `instructions` or
+# `model_instructions_file`, which replace the base prompt.
+GUIDANCE_PAIR = f"{GUIDANCE_KEY}={json.dumps(system_guidance.TEXT)}"
 PERMITTED_C_PAIRS: frozenset[str] = frozenset(
     {NEVER_ASK[1], NETWORK_ENABLE_PAIR, NETWORK_DISABLE_PAIR}
     | {f'{EFFORT_KEY}="{level}"' for level in EFFORTS}
@@ -353,6 +360,9 @@ class CodexBackend(ExtraPathsUnsupported):
             ),
         ),
         supports_live_input=False,
+        # Measured (codex-cli 0.163.0): `-c developer_instructions=<TOML string>` becomes a developer message
+        # that the rollout keeps, so it is delivered on a fresh start and later resumes reuse it.
+        system_guidance=system_guidance.FIRST_TURN_STICKY,
         supports_caller_approvals=True,
     )
 
@@ -612,6 +622,21 @@ class CodexBackend(ExtraPathsUnsupported):
         argv[index:index] = [part for directory in directories for part in ("--add-dir", directory)]
         return replace(invocation, argv=argv, shared_scratch_directories=directories)
 
+    def with_system_guidance(self, invocation: Invocation, text: str, *, resume: bool, file=None) -> Invocation:
+        """`-c developer_instructions=<note>` on a fresh `codex exec` (or the app-server's `thread/start`); a
+        resume reuses the thread's own copy."""
+        if resume or invocation.system_guidance is not None or text != system_guidance.TEXT:
+            return invocation
+        if invocation.control_pipe:
+            from . import codex_app_server as app_server
+            context = dict(invocation.control_context or {})
+            if context.get("thread_id"):
+                return invocation
+            return replace(invocation, control_context={**context, "guidance": text}, system_guidance=system_guidance.VERSION)
+        argv = list(invocation.argv)
+        argv[argv.index("--"):argv.index("--")] = ["-c", GUIDANCE_PAIR]
+        return replace(invocation, argv=argv, system_guidance=system_guidance.VERSION)
+
     def build_start_argv(
         self,
         prompt: str,
@@ -799,7 +824,11 @@ class CodexBackend(ExtraPathsUnsupported):
                 "backend's main safety property"
             )
 
-        seen, is_resume = self._parse_options(options, argv, bool(invocation.extra_writable_paths))
+        if invocation.system_guidance not in (None, system_guidance.VERSION):
+            raise UnsafeInvocationError("unrecognised system guidance version")
+        seen, is_resume = self._parse_options(options, argv, bool(invocation.extra_writable_paths), invocation.system_guidance == system_guidance.VERSION)
+        if is_resume and invocation.system_guidance is not None:
+            raise UnsafeInvocationError("a resume never carries system guidance: the thread keeps its own copy")
         expected_directories = ([invocation.scratch_directory] if invocation.scratch_directory else []) + list(invocation.shared_scratch_directories) + list(invocation.extra_writable_paths)
         if invocation.extra_writable_paths and freedom not in ("write_in_repo", "publish"):
             raise UnsafeInvocationError("extra writable paths require bounded workspace-write")
@@ -909,13 +938,15 @@ class CodexBackend(ExtraPathsUnsupported):
             expected_pairs = [pair] if invocation.extra_writable_paths else []
             if [value for value in pairs if value == pair] != expected_pairs:
                 raise UnsafeInvocationError("bounded extra paths require exactly the pinned sandbox overrides")
-        overrides_with_own_checks = {NEVER_ASK[1], NETWORK_ENABLE_PAIR, NETWORK_DISABLE_PAIR, *EXTRA_PATH_PAIRS}
+        if [value for value in pairs if value == GUIDANCE_PAIR] != ([GUIDANCE_PAIR] if invocation.system_guidance else []):
+            raise UnsafeInvocationError("developer_instructions must be exactly Harflow's scratch note, once, or absent")
+        overrides_with_own_checks = {NEVER_ASK[1], NETWORK_ENABLE_PAIR, NETWORK_DISABLE_PAIR, GUIDANCE_PAIR, *EXTRA_PATH_PAIRS}
         efforts = [pair for pair in pairs if pair not in overrides_with_own_checks]
         if len(efforts) > 1:
             raise UnsafeInvocationError(f"expected at most one {EFFORT_KEY} override: {argv!r}")
 
     @staticmethod
-    def _parse_options(options: list[str], argv: list[str], extra_paths: bool = False) -> tuple[dict[str, list[str]], bool]:
+    def _parse_options(options: list[str], argv: list[str], extra_paths: bool = False, guidance: bool = False) -> tuple[dict[str, list[str]], bool]:
         """Walk the option region strictly, refusing any token this backend would not have written.
 
         Mirrors OpencodeBackend._parse_options and exists for the same reason: searching for
@@ -963,7 +994,7 @@ class CodexBackend(ExtraPathsUnsupported):
                     # outright rather than silently dropped from `seen`, which would let it slip
                     # past every check below unexamined.
                     raise UnsafeInvocationError(f"-c/--config pair has no '=': {value!r}: {argv!r}")
-                if value not in PERMITTED_C_PAIRS and not (extra_paths and value in EXTRA_PATH_PAIRS):
+                if value not in PERMITTED_C_PAIRS and not (extra_paths and value in EXTRA_PATH_PAIRS) and not (guidance and value == GUIDANCE_PAIR):
                     raise UnsafeInvocationError(f"unexpected -c pair {value!r}: {argv!r}")
                 seen.setdefault(token, []).append(value)
                 index += 2

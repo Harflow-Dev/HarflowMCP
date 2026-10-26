@@ -971,3 +971,32 @@ knows. A grant is a statement of what Harflow added, not a sandbox.
 
 Codex repeated `--add-dir` is already measured (see the extra writable paths above); the implementation adds the
 shared folders to the same list, ahead of any extra grants, and keeps all four scope checks over every one of them.
+
+## System-prompt seams for the scratch note (2026-10-27)
+
+Harflow gives agents a short static note about the scratch variables (`system_guidance.TEXT`, at most 600 bytes,
+no paths; the variables carry the per-run paths). The caller's prompt is never prefixed or rewritten: a leading
+`/slash` command or skill invocation must stay first in the user message, and the handoff is delivered verbatim. So
+the note travels only through a backend's own system-prompt channel, and only where one was measured that grants
+nothing else. All measurements used isolated `HOME` and config directories and a localhost fake model API, with
+no model calls, recording each request body; a marker string stood for the note.
+
+| Backend (version) | Seam | Measured |
+| --- | --- | --- |
+| claude 2.1.310 | `--append-system-prompt <text>` before `--` (also in the stream-json live shape and with `--add-dir`, `--allowedTools`, `--model`, `--effort`, `--max-turns`) | The text is appended to the system prompt on a fresh session. A resume reuses the session's own snapshot: resuming without the flag still shows the original text, resuming with a different text shows the original, not the new one, and a session started without it never gets it from a resume (`--system-prompt-snapshot off` changes this, but Harflow never passes it). A `/slash` prompt expands exactly as without the flag, on start and on resume. Values of 100 KB and 600 KB were delivered intact (the note itself is under 600 bytes), also from `--append-system-prompt-file`. The text is stored in the session transcript. `first_turn_sticky`. |
+| codex-cli 0.163.0 `exec` | `-c developer_instructions=<JSON string>` before `--` | A JSON-encoded string is a valid TOML basic string and arrives as one developer-role message ahead of the user prompt (an unquoted value that is not valid TOML is taken literally; `true` parses as a boolean and delivers nothing, so the pair is always JSON-encoded). The rollout file keeps it: a resume without the flag still shows it, and a resume with a different text shows the original only. `instructions` and `model_instructions_file` also deliver text, but each shrank the request body by about 22 KB (the base instructions were replaced, not added to; `developer_instructions` added only its own length), and `experimental_instructions_file` and `base_instructions` delivered nothing, so none of them is used. `first_turn_sticky`. |
+| codex-cli 0.163.0 `app-server` | `developerInstructions` on `thread/start` | Accepted by the protocol schema and delivered on `thread/start`; `thread/resume` accepts the field too but the resume path does not send it, because the thread already holds the original. Used only on the caller-approvals transport, where the allowed-fields table is extended by exactly this field and `validate_context` refuses any text but the note. `first_turn_sticky`. |
+| opencode 1.18.21 | `OPENCODE_CONFIG_CONTENT={"instructions":["<absolute path>"]}` pointing at a read-only file under `<state root>/guidance/` | The file's text joins the first system message on every run, start and resume, and is not stored in the session, so a changed note applies at once: `per_run`. A path that does not exist delivers nothing and does not fail the run; literal text in `instructions` is read as a path, not as text. A caller-set `OPENCODE_CONFIG_CONTENT` would be replaced, so the seam is skipped (and disclosed as unavailable) when one is set. Harflow's only environment contribution on this backend is this exact shape (`validate_invocation_env`). |
+| vibe 2.26.1 and 3.0.2 | none shipped | 2.26.1: nothing delivers text without also granting file access (`--add-dir` with an `AGENTS.md`) or writing into the repository or `VIBE_HOME`; `VIBE_SYSTEM_PROMPT_ID` did not deliver. 3.0.2 (measured the same way) has two seams. `VIBE_AGENT_PATHS` with a shadow agent profile appends text to the system prompt on every run, but it replaces the built-in profile of the same name, which would couple the note to the permission profiles Harflow's freedoms rely on; the hidden `--agent-socket` delivers it too but cannot be combined with `--workdir`. Neither is shipped: vibe declares `system_guidance: None`, and the shadow-profile seam is a follow-up candidate if its profile policy can be kept identical to the built-ins. |
+| agy 1.4.7 | none | No system-prompt flag; not shipped. |
+
+Disclosure is per run in the task's `scratch.system_guidance` (`delivered`, `reused_from_session` or `unavailable`) and
+in each backend's `capabilities.system_guidance` (`first_turn_sticky`, `per_run` or none). `reused_from_session` is
+claimed only when the resumed task itself recorded the note as delivered or reused; a session that began before the note
+existed reports `unavailable` on resume. A failure to attach the note never blocks a launch. Workflow builders and native
+children carry none.
+
+Hazards recorded by the measurement: a note delivered once is sticky on claude and codex, which is why it is static
+(paths come from the environment, so a stale copy is never wrong); the text must be ASCII and free of a leading `-` (a
+value that starts with `-` is refused by the strict option walks); and each backend's `assert_safe` accepts exactly the
+note, once, in exactly one position, so a caller-controlled string can never take that seam.

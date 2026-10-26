@@ -34,6 +34,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from .. import system_guidance
 from . import codex_qualification as qualification
 from .base import ApprovalRefused, Invocation, UnsupportedCapability
 
@@ -53,7 +54,7 @@ MAX_REASON = 1024
 # Fields Harflow may send per method. Anything else is a programming error, never a pass-through.
 ALLOWED_PARAMS: dict[str, frozenset[str]] = {
     "initialize": frozenset({"clientInfo", "capabilities"}),
-    "thread/start": frozenset({"cwd", "approvalPolicy", "approvalsReviewer", "sandbox", "config", "model"}),
+    "thread/start": frozenset({"cwd", "approvalPolicy", "approvalsReviewer", "sandbox", "config", "model", "developerInstructions"}),
     "thread/resume": frozenset({"threadId", "cwd", "approvalPolicy", "approvalsReviewer", "sandbox", "config", "model"}),
     "hooks/list": frozenset({"cwds"}),
     "turn/start": frozenset({"threadId", "input"}),
@@ -174,7 +175,9 @@ def validate_context(ctx: Any) -> dict[str, Any]:
         raise ValueError("Invalid app-server control context field linked_roots")
     if type(ctx.get("write", False)) is not bool:
         raise ValueError("Invalid app-server control context field write")
-    if set(ctx) - {"transport", "model", "effort", "thread_id", "write", "linked_roots", *expected}:
+    if "guidance" in ctx and (ctx["guidance"] != system_guidance.TEXT or ctx.get("thread_id")):
+        raise ValueError("Invalid app-server control context field guidance")
+    if set(ctx) - {"transport", "model", "effort", "thread_id", "write", "linked_roots", "guidance", *expected}:
         raise ValueError("Unknown app-server control context field")
     return ctx
 
@@ -189,7 +192,8 @@ def assert_safe(invocation: Invocation, freedom: str) -> str | None:
         return "app-server argv is not the exact qualified shape"
     if (not invocation.control_pipe or invocation.stdin_mode != "devnull" or invocation.initial_input is not None or not invocation.caller_approvals
             or invocation.caller_write_approvals is not ctx.get("write", False) or invocation.native_subagent or invocation.allowed_commands or invocation.extra_writable_paths
-            or invocation.caller_approval_version != ctx["version"] or invocation.identity_markers != IDENTITY_MARKERS):
+            or invocation.caller_approval_version != ctx["version"] or invocation.identity_markers != IDENTITY_MARKERS
+            or invocation.system_guidance != (system_guidance.VERSION if ctx.get("guidance") else None)):
         return "app-server invocation carries an unexpected control field"
     if ctx["freedom"] != freedom:
         return "app-server freedom does not match the requested freedom"
@@ -321,6 +325,9 @@ def _thread_params(state: State) -> dict[str, Any]:
         params["model"] = ctx["model"]
     if ctx.get("thread_id"):
         params["threadId"] = ctx["thread_id"]
+    elif ctx.get("guidance"):
+        # Measured (codex-cli 0.163.0): accepted on `thread/start`, kept by the thread; never sent on resume.
+        params["developerInstructions"] = ctx["guidance"]
     return params
 
 

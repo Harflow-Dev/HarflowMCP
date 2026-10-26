@@ -78,6 +78,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .. import system_guidance
+
 from . import claude_denials
 from . import normalize as nz
 from .mcp_approval import ClaudeApproval
@@ -148,6 +150,7 @@ VALUE_FLAGS = (
     "--resume",
     "--agents",
     "--settings",
+    "--append-system-prompt",
 )
 
 # The one `--input-format` value this backend writes, and only on a live-input run. Measured (claude
@@ -447,6 +450,9 @@ class ClaudeBackend(ExtraPathsUnsupported):
             caveats=(_NETWORK_CONTROL_CAVEAT,),
         ),
         supports_live_input=True,
+        # Measured (2.1.310): `--append-system-prompt` is delivered on a fresh start and the session keeps
+        # that snapshot, so a resume (with or without the flag) shows the original text.
+        system_guidance=system_guidance.FIRST_TURN_STICKY,
         supports_caller_approvals=True,
         # Explicit, not just the default: claude folds a mid-turn message into the running turn
         # (measured, 2.1.281 — one result however many messages landed), so one further result
@@ -617,6 +623,15 @@ class ClaudeBackend(ExtraPathsUnsupported):
             index -= 1
         argv[index:index] = [part for directory in directories for part in ("--add-dir", directory)]
         return replace(invocation, argv=argv, shared_scratch_directories=directories)
+
+    def with_system_guidance(self, invocation: Invocation, text: str, *, resume: bool, file=None) -> Invocation:
+        """`--append-system-prompt <note>` on a fresh start only; a resume reuses the session's own copy."""
+        if resume or invocation.system_guidance is not None or text != system_guidance.TEXT:
+            return invocation
+        argv = list(invocation.argv)
+        index = argv.index("--") if "--" in argv else len(argv)
+        argv[index:index] = ["--append-system-prompt", text]
+        return replace(invocation, argv=argv, system_guidance=system_guidance.VERSION)
 
     def build_start_argv(
         self,
@@ -874,6 +889,11 @@ class ClaudeBackend(ExtraPathsUnsupported):
         if seen.get("--add-dir", []) != expected_directories or (expected_directories and freedom == "read_only"):
             raise UnsafeInvocationError("additional directory must match this invocation's writable scratch directory")
 
+
+        if seen.get("--append-system-prompt", []) != ([system_guidance.TEXT] if invocation.system_guidance == system_guidance.VERSION else []):
+            raise UnsafeInvocationError("--append-system-prompt must be exactly Harflow's scratch note, once, or absent")
+        if invocation.system_guidance not in (None, system_guidance.VERSION):
+            raise UnsafeInvocationError("unrecognised system guidance version")
 
         self._exactly_one(seen, "--verbose", argv)
         # Exactly once, like --verbose: a second copy would be a shape this backend never writes,

@@ -155,7 +155,12 @@ change needs a re-measurement recorded there. The code rules embedded in those f
     - Assignments over 32 KiB use one-shot stdin, written once then closed immediately, on codex,
       opencode, vibe and capped claude runs. Uncapped claude stays on live stream-json stdin.
     - vibe's large prompts use an empty `--prompt=` and refuse prompts with outer whitespace.
-  - **One-shot stdin must reach EOF immediately**, because codex and vibe block on an open pipe.
+  - **The scratch note travels only through a measured system-prompt seam**, declared as
+  `Capabilities.system_guidance` and attached by that backend's `with_system_guidance`, never as a prefix to the
+  caller's prompt (a leading `/slash` command must stay first, and handoffs are verbatim). Each `assert_safe` accepts
+  exactly `system_guidance.TEXT`, once, in one position; vibe and agy declare none; a failure to attach it never blocks
+  a launch.
+- **One-shot stdin must reach EOF immediately**, because codex and vibe block on an open pipe.
     Live stdin closes only through the pump's close protocol.
 
 ## Invariants
