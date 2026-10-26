@@ -144,7 +144,11 @@ landed (an unsealed inbox still looks open to other processes, which can append 
 "queued" after that read), so `_finish_pump` does a final read and reports every unread line
 `undelivered` before the run is published; and after exit, a lock that stays busy for `EXIT_CLOSE_GIVE_UP_SECONDS`
 gets `_close_unlocked` (seal first, then read), which senders cover by re-checking the seal after
-appending. A send is also refused once the run's own process is confirmed dead, whatever its record
+appending. A sealed inbox is not a settled task. `live_input` records the invocation capability;
+`input_channel` reports current acceptance, and `input_closed_reason` explains a known closure
+(the same reason appears in `supervision.live_input_closed_reason`). Once all owed results arrive,
+stdin must close so the headless CLI can exit; autonomous follow-up work may still be running.
+Wait for settlement before resuming. A send is also refused once the run's own process is confirmed dead, whatever its record
 still says. A message written after a result persists `input_after_result` on the record, so a
 recovered run whose replay shows no later result reads `failed`, not the earlier success.
 
@@ -245,13 +249,11 @@ explicitly, excluded from the cross-freedom refusal test, and covered by a test 
 really are identical. A collapse that is pinned by a test is a documented property; one that is
 merely true is a hole waiting to be mistaken for enforcement.
 
-The two fields `publish` added are named for what they assert. `publish_attempts_allowed_by_*`
-(its suffix keeps the pre-extraction product name: a stable wire field whose rename is deferred,
-allowlisted in `scripts/legacy-name-allowlist.json`) is deliberately **not** `publishing_permitted`: Harflow can say it removed the barriers under its
-own control, and nothing more — credentials, remote permissions, branch protection, hooks, an
-unauthenticated `gh`, and the agent's own behaviour all sit outside it. `network_access` is separate
-because network is the material difference for pushing, and `not_controlled` (claude, opencode, vibe)
-means the environment decides — which is not the same claim as `blocked`.
+The publication authorization field is `publish_attempts_allowed`. It reports only Harflow's
+requested authorization, not whether credentials, hooks, remote permissions, branch protection or
+the agent permit publication. The previous spelling remains a deprecated output/read alias for
+this release; contradictory aliases are refused. `network_access` separately reports network
+controls; `not_controlled` means the surrounding environment decides.
 
 If you add a backend or a freedom level, re-measure rather than reasoning about it, and record what
 you measured in [backend-cli-facts.md](backend-cli-facts.md). `tests/test_backends.py::test_enforcement_never_overclaims` enforces the shape;
@@ -278,14 +280,13 @@ precisely because vibe's `ingest` resets those per turn and would discard a disp
 a resumed run. Three rules keep that honest:
 
 - It is **disclosure, not a guard.** `start_task` returns after the process has spawned, so the
-  notice cannot gate anything; it says to cancel the task, never implies the run was held. It also
-  says the branch was read once, at spawn — the agent may switch branches later.
+  notice cannot gate anything. It describes the checkout observed at dispatch; the agent may
+  switch branches later. It does not predict or establish a commit or push on that branch.
 - The default branch is only ever what a remote's own locally recorded `HEAD` says. **Never fall
   back to "the branch is named `main` or `master`"** — a feature branch can be called `main` while
   the real default is something else, which is a test. No fetch, no `ls-remote`, no
   `remote set-head`.
-- **Not being able to tell is reported too.** For a run authorized to publish, "which branch this
-  would land on could not be determined" is material, so silence would be the wrong answer. Every
+- **Not being able to tell is reported too.** For a run authorized to publish, "the checkout at dispatch could not be determined" is material, so silence would be the wrong answer. Every
   failure mode — missing `git`, a timeout, a detached HEAD, several remotes with no `origin` — is
   absorbed into that notice rather than escaping, per the invariant that bookkeeping must never
   change an outcome. The probes run off the event loop, since they are blocking calls inside an

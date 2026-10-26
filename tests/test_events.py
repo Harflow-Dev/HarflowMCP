@@ -205,8 +205,9 @@ async def test_raw_offset_is_null_when_the_raw_log_cannot_be_opened(
     assert all(n["raw_offset"] is None for n in notices)
 
 
+@pytest.mark.parametrize('close_fails', [False, True])
 async def test_raw_offset_is_null_after_the_raw_log_handle_is_dropped(
-    tmp_path: Path, registered, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, registered, monkeypatch: pytest.MonkeyPatch, close_fails: bool
 ) -> None:
     """A write failure on the raw log mid-stream disables it for the rest of the run."""
     backend = registered(
@@ -236,6 +237,9 @@ async def test_raw_offset_is_null_after_the_raw_log_handle_is_dropped(
 
         def close(self):
             self._real.close()
+            if close_fails:
+                import errno
+                raise OSError(errno.ENOSPC, 'No space left on device')
 
     real_fdopen = tasks_module.os.fdopen
     real_open_descriptor = tasks_module.open_descriptor
@@ -269,6 +273,9 @@ async def test_raw_offset_is_null_after_the_raw_log_handle_is_dropped(
     assert len(notices) == 2
     assert notices[0]["raw_offset"] is not None
     assert notices[1]["raw_offset"] is None
+    assert task.status == 'completed'
+    assert not task.drain_failed
+    assert any('Raw output capture stopped' in notice for notice in task.bridge_notices)
 
 
 async def test_a_raising_normalizer_bumps_normalize_errors_and_never_touches_status(

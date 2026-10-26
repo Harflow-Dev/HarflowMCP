@@ -646,3 +646,37 @@ terminal evidence, or when Harflow itself is killed, can be left running, as wit
 exact ledger identity, `policy_denied` from the exact stderr router line for an exec-policy `forbidden` rule while a turn is active, and, on the exec path only,
 `approval_policy_never` from its stderr router line. Everything else, including sandbox denials, is `unclassified` (see [task outcomes](task-outcomes.md#permission-denial-classification)).
 
+
+## Capability discovery and publication disclosures
+
+Call `list_backends` before selecting optional permissions. Each entry reports
+`capabilities.extra_writable_paths` (bounded support, certification and refusal reason),
+`capabilities.allowed_commands`, and `capabilities.caller_approval_support`. Certification is
+specific to the installed harness and configuration. Unsupported bounded requests fail before
+launch. At `unrestricted`, extra paths are validated and disclosed as a no-op; they do not narrow
+access or establish bounded-write certification.
+
+`enforcement.publish_attempts_allowed` describes Harflow's authorization to attempt publication.
+The deprecated legacy alias remains identical for this release. Neither key guarantees publication
+or implies that network access works. Default-branch notices describe the checkout observed at
+dispatch; they do not claim where a later commit or push occurred.
+
+## Read-only plan files and harness state
+
+Read-only restricts agent tools according to each backend; it does not mean the CLI process leaves
+no state. Harness-owned session history, logs and configuration can persist in user state
+directories even when tool writes are sandboxed. Claude plan mode additionally permits its built-in
+plan file under `~/.claude/plans`, `CLAUDE_CONFIG_DIR/plans`, or a project-contained
+`plansDirectory` from settings. Enforcement explicitly discloses this exception. Vibe's read-only
+caveat already names its built-in plans-directory exception; its shell is not an OS boundary.
+Other agent-level modes must not be read as universal filesystem-write guarantees.
+
+Claude 2.1.310 accepts custom plan directories only within the project root, so this implementation
+does not redirect plans into external task scratch or add a writable-directory grant. For read-only
+runs, Harflow joins top-level Write/Edit calls to successful tool results and records existing
+regular files directly in a recognized plan directory as metadata-only artifacts. No target content
+is read, no arbitrary user config file becomes registrable, and symlinked files/ancestors are
+rejected. Built-in artifact provenance is an observation of the tool result, not verified contents
+or exclusive authorship. Unreported tools, subagent-only writes, disappeared files, replaced config
+and failed bookkeeping can leave tracking incomplete; a notice reports observation failures. The
+permission caveat still applies when artifact capture is unavailable.

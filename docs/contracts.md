@@ -278,7 +278,10 @@ Task snapshots add `supervision` with independent tri-state `owner_state` and
 `capture_state`: `live`, `lost_with_owner`, `unknown`, or `observed_terminal`.
 `input_channel` aliases `live_input_state`: `open`, `closed`, `closed_with_owner`,
 `unknown`, or `not_applicable`. Confirmed owner death alone supports the loss
-claim; conservative process guards do not establish verified liveness. Observed
+claim; conservative process guards do not establish verified liveness. `live_input` is the
+invocation capability, not a current acceptance claim. Optional `input_closed_reason` and
+`supervision.live_input_closed_reason` name a known sealed-input reason and are omitted when unavailable.
+Input closure can precede process exit; only observed settlement ends the running state. Observed
 terminal history retains its observed status. `last_captured_output_at` is the
 raw stream file modification time in UTC, or null when unavailable; supervision
 labels its source `raw_stream_log_mtime`.
@@ -343,3 +346,28 @@ retain their existing `detail` list of connection IDs and may add top-level `act
 `decision_id`, `reason` and `token_id` matched to the committed transition sequence.
 The public wire versions remain 1; these fields are additive. The run patch fixture
 covers the runner decision provenance.
+
+### Additive permission and continuation projections
+
+Enforcement adds `publish_attempts_allowed`, retaining
+`publish_attempts_allowed_by_polybridge` as a deprecated, identical alias for one release.
+Legacy-only records remain readable. Contradictory dual values are invalid, including during
+nested permission comparisons. This is an authorization disclosure, not a publication guarantee.
+No canonical fixture shapes are changed by these optional additions.
+
+MCP `get_task_status` adds `successor_tasks`: up to 20 retained authorized task IDs,
+`history_incomplete`, `has_more`, and a `list_task_page` detail reference. The listing accepts
+`predecessor_task_id` with its scope-bound cursor. It selects direct `parent_task_id` resumes and
+`continuation_of_task_id` continuations, never unrelated same-session records. Missing retained
+history cannot be reconstructed. Existing successor records keep their source IDs; predecessor
+owner metadata is not rewritten. Subscriptions remain attached to the original task ID.
+
+The unreleased 0.0.2 producer extends private artifact provenance with
+`{method: "observed_backend_plan", task_id, tool_use_id}` for engine-observed successful plan writes.
+The reader accepts both this variant and existing `verified_process_lineage` references, validating
+the variant strictly. Older engine implementations reject manifests containing the new variant as
+unavailable; downgrade readers cannot inspect those manifests, and must not rewrite them. Use the
+updated engine to read them. This private-format extension is distinct from additive status fields.
+The public artifact page retains its existing structure, adding a registrar method string and its
+evidence ID. The Mac artifact decoder accepts registrar strings and extra provenance fields, so no
+Mac fixture or version-gate update is required; canonical `contracts/v1` fixtures remain unchanged.

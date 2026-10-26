@@ -1246,12 +1246,12 @@ def _record_holds_session(record: TaskRecord) -> bool:
 def live_session_task_ids(log_dir: Path, session_id: str) -> set[str]:
     """Ids of the records whose run may still hold `session_id` — see `_record_holds_session`.
     Records only: takeover reservations are `control.takeover_reservations`."""
-    from .task_supervision import unresolved
+    from .task_supervision import session_reservations
     return {
         record.task_id
         for record in read_all(log_dir)
         if record.session_id == session_id and _record_holds_session(record)
-    } | {launch["task_id"] for launch in unresolved(log_dir) if launch.get("session_id") == session_id}
+    } | {launch["task_id"] for launch in session_reservations(log_dir) if launch.get("session_id") == session_id}
 
 
 @task_operation
@@ -1272,8 +1272,8 @@ def live_session_ids(log_dir: Path) -> set[str]:
     """
     # A backend that mints its own id may have died before disclosing one; nothing to exclude.
     live = {record.session_id for record in read_all(log_dir) if _record_holds_session(record)}
-    from .task_supervision import unresolved
-    live.update(launch["session_id"] for launch in unresolved(log_dir) if launch.get("session_id"))
+    from .task_supervision import session_reservations
+    live.update(launch["session_id"] for launch in session_reservations(log_dir) if launch.get("session_id"))
     live.update(
         session_id
         for session_id in control.takeover_reservations(log_dir).values()

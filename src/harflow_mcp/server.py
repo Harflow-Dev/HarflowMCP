@@ -166,7 +166,7 @@ mcp = MCPServer(
         "unauthenticated `gh` can all still stop it, and the agent may not even try — and it is "
         "authorization only: with network=True a lower freedom can mechanically reach a remote "
         "without having been authorized to publish. Check "
-        "`enforcement.publish_attempts_allowed_by_polybridge` and `enforcement.network_access` on "
+        "`enforcement.publish_attempts_allowed` and `enforcement.network_access` on "
         "the returned task rather than assuming from the freedom name alone. An optional `network` "
         "parameter on start_task and resume_task asks for network independently of the freedom: "
         "True asks harflow_mcp to impose no network barrier of its own, False asks it to impose "
@@ -184,8 +184,8 @@ mcp = MCPServer(
         "running turn on claude, or starting a new one if the agent is idle; on antigravity each "
         "written message is its own turn, even mid-turn. It returns 'queued', never 'delivered'. "
         "Once every turn the run owes has been answered and nothing is queued the task closes its "
-        "own input and settles as usual; a send after that is refused with 'finished; continue "
-        "with resume_task'.\n\n"
+        "own input before process exit; check input_channel and input_closed_reason. After input closes, wait for settlement before calling "
+        "resume_task.\n\n"
         "Any other standalone task (a backend without live input, or claude with max_turns) takes "
         "send_message too, but nothing is delivered while it runs: the message is queued "
         "(`delivery: 'next_continuation'`) and consumed, verbatim and exactly once, by the next "
@@ -447,6 +447,9 @@ async def list_backends() -> list[dict[str, Any]]:
     the session id) and, for every `freedom` level, the enforcement it really delivers.
     Ordinary script entrypoints retain version discovery and native eligibility checks.
     Extra-path qualification separately rejects selected scripts before version execution.
+    capabilities.extra_writable_paths reports bounded support, certification and refusal reason;
+    capabilities.allowed_commands and caller_approval_support report their qualification gates.
+    At unrestricted freedom, extra_writable_paths is a validated, disclosed no-op, not a bounded grant.
     """
     return await asyncio.to_thread(backends.describe_all)
 
@@ -515,7 +518,7 @@ async def start_task(
             remote permissions, branch protection and hooks are all
             outside harflow_mcp's control. How each level is enforced depends on the backend; the
             returned `enforcement` says what actually applies, via
-            `publish_attempts_allowed_by_polybridge` and `network_access` among other fields.
+            `publish_attempts_allowed` and `network_access` among other fields.
         model: Model for this run, in the backend's own naming. Rejected outright, rather than
             silently ignored, on a backend with no model-selection flag at all — vibe is the one
             such case; see list_backends' capabilities.supports_model_selection.
@@ -949,6 +952,11 @@ async def get_task_status(
     Artifact registration is a reference, not proof of valid contents, successful execution,
     or permission to copy or publish. Availability does not verify content integrity.
 
+    `parent_task_id` links a resume to its source; `continuation_of_task_id` links a new-session
+    continuation. `successor_tasks` derives the reverse links from retained, authorized headers,
+    with incompleteness and pagination explicitly reported. These links do not transfer reminders
+    or subscriptions to the successor.
+
     Confirmed usage limits add `failure_diagnostic` (category, reason, source, and optional
     provider-supplied reset_at). It is retained during process settlement and after failure;
     a running status during settlement does not authorize a replacement dispatch.
@@ -966,9 +974,10 @@ async def get_task_status(
     task = _reg().get(task_id)
     if task is not None:
         snapshot = task.snapshot()
-        return await asyncio.to_thread(
+        payload = await asyncio.to_thread(
             _status_payload, snapshot, include_tail=include_tail, log_dir=_reg().log_dir, task_id=task_id
         )
+        return await _with_successor_links(payload)
 
     record = _reg().recover(task_id)
     if record is None:
@@ -978,9 +987,24 @@ async def get_task_status(
             f"exists under {_reg().log_dir}. Use list_tasks to see what is known.",
         )
     snapshot = await asyncio.to_thread(store.snapshot, _reg().log_dir, record)
-    return await asyncio.to_thread(
+    payload = await asyncio.to_thread(
         _status_payload, snapshot, include_tail=include_tail, log_dir=_reg().log_dir, task_id=task_id
     )
+    return await _with_successor_links(payload)
+
+
+async def _with_successor_links(payload: dict[str, Any]) -> dict[str, Any]:
+    """Derive reverse links from authorized, bounded persisted headers, without changing owners."""
+    task_id = payload['task_id']
+    page = await list_task_page(limit=20, predecessor_task_id=task_id)
+    payload['successor_tasks'] = {
+        'task_ids': [item['task_id'] for item in page['items']],
+        'history_incomplete': bool(page.get('history_incomplete') or page.get('bootstrap_pending')),
+        'has_more': bool(page.get('has_more')),
+        'detail_ref': {'tool': 'list_task_page', 'predecessor_task_id': task_id,
+                       **({'cursor': page['next_cursor']} if page.get('next_cursor') else {})},
+    }
+    return payload
 
 
 def _wait_plan(timeout_seconds: Any, until: Any, default: int) -> wait_policy.WaitPlan:
@@ -1426,6 +1450,15 @@ async def resume_task(
 
     parent = _reg().get(task_id)
     try:
+        from .task_attachment import AttachedTask
+        if isinstance(parent, AttachedTask) and not parent.finished:
+            record = await asyncio.to_thread(parent.record)
+            if (record.pid is not None
+                    and await asyncio.to_thread(identity.identity_check, record.owner) == 'dead'
+                    and await asyncio.to_thread(identity.identity_check, identity.task_identity(record.pid, record.start_time, record.markers)) == 'dead'):
+                # A crashed owner cannot publish an exit receipt. Resume through the durable
+                # path, whose session lock still refuses ambiguous launches or other writers.
+                parent = None
         if parent is not None:
             # `finished`, not the status field: a cancellation in progress is not resumable yet.
             if not parent.finished:
@@ -1536,22 +1569,30 @@ async def list_tasks(
 @mcp.tool()
 @_task_document_errors
 @bounded_request
-async def list_task_page(limit: int = 100, cursor: str | None = None, active_only: bool = False, session_id: str | None = None, task_ids: list[str] | None = None) -> dict[str, Any]:
+async def list_task_page(limit: int = 100, cursor: str | None = None, active_only: bool = False, session_id: str | None = None, task_ids: list[str] | None = None, predecessor_task_id: str | None = None) -> dict[str, Any]:
     """Stable newest-first persisted task headers; inspect a task for reconciled status/output.
 
     bootstrap_pending indicates bounded indexing or requested-header refresh is preparing.
     Preserve loaded headers and cursors while catalog_state reports preparing.
     Active-only pages are a separate inventory and do not reorder history cursors.
+    predecessor_task_id selects direct resumes and continuations of that task, for following
+    successor links without scanning all retained history. Combine it with the returned cursor.
     """
     try:
+        if predecessor_task_id is not None:
+            await _guard_task_read(predecessor_task_id)
+            if task_ids is not None:
+                raise ValueError('predecessor_task_id cannot be combined with task_ids')
         from .workflow_inspection import managed_page_reader, page_indexing_response
         ready, managed = await asyncio.to_thread(managed_page_reader, _reg().log_dir)
         if not ready:
             return page_indexing_response(_reg().log_dir)
-        page = await asyncio.to_thread(store.list_page, _reg().log_dir, limit=limit, cursor=cursor, active_only=active_only, session_id=session_id, task_ids=task_ids)
+        page = await asyncio.to_thread(store.list_page, _reg().log_dir, limit=limit, cursor=cursor, active_only=active_only, session_id=session_id, task_ids=task_ids, filters={'predecessor_task_id': predecessor_task_id} if predecessor_task_id is not None else None)
         from .workflow_inspection import filter_task_reads
         visible = filter_task_reads(page['items'], managed)
         if managed is not None:
+            if predecessor_task_id is not None and (page.get('has_more') or len(visible) != len(page['items'])):
+                page['history_incomplete'] = True
             page['total_active_count'] = None if page.get('bootstrap_pending') or page.get('counts_complete') is False else sum(item.get('status') not in store.TERMINAL_RECORD_STATUSES for item in visible)
             page.pop('total_active_root_count', None)
             page.pop('total_attention_root_count', None)
@@ -1786,10 +1827,12 @@ async def send_message(task_id: str, text: str) -> dict[str, Any]:
     (`source: "injected"`) when it is written, or an `undelivered` event plus a notice if it never
     is (the run errored or exited first).
 
-    A live task closes its own input once it is idle with nothing queued, so it still settles
-    unattended. A send after that is refused with "finished; continue with resume_task" — which is
-    exactly what to do. Also refused: a live-input task that has settled, and one whose owning
-    harflow_mcp server is not confirmed alive. The response carries `delivery: "live_input"`.
+    A live task closes its own input once all owed results arrive and nothing is queued, so it
+    settles unattended. Input can close before the process exits, including while autonomous
+    follow-up work continues. `live_input` describes the invocation capability; `input_channel`
+    and `supervision.live_input_state` describe current acceptance. A refusal names the closure
+    reason: wait for settlement before resume_task. Also refused: a settled task or one whose
+    owner is not confirmed alive. The response carries `delivery: "live_input"`.
 
     A task without live input (a backend that has none, or claude started with max_turns) is not
     refused: the message goes to a durable per-task queue and the response is `status: "queued"`

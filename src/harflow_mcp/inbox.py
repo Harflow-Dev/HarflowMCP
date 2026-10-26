@@ -11,7 +11,7 @@ Three rules keep an acknowledged message from being lost silently:
   retention leaves it in place.
 * **The close is a marker, created under that lock.** The pump forwards (or drops) whatever is queued,
   creates `<id>.inbox.closed`, releases the lock, and only then closes stdin. A send that finds the
-  marker is refused with "finished; continue with resume_task"; one that got the lock first was
+  marker is refused with a closed-input reason and guidance to wait for settlement; one that got the lock first was
   already forwarded or reported undelivered.
 * **"queued", never "delivered".** A send only ever says it queued the message. The pump's own event
   log records what actually happened: a `user_message` event when written, an `undelivered` one (plus
@@ -46,7 +46,7 @@ CLOSED_SUFFIX = ".inbox.closed"
 LOCK_TIMEOUT_SECONDS = 10.0
 _LOCK_POLL_SECONDS = 0.05
 
-CLOSED_MESSAGE = "finished; continue with resume_task"
+CLOSED_MESSAGE = "closed live input; the task may still be running. Wait for settlement, then continue with resume_task"
 
 
 class SendRefused(RuntimeError):
@@ -97,13 +97,19 @@ def _is_seal(entry: Any) -> bool:
 
 
 @task_operation
-def is_closed(log_dir: Path, task_id: str) -> bool:
+def is_closed(log_dir: Path, task_id: str, *, tail_bytes: int | None = None) -> bool:
     """Input is closed: the marker exists, or — where the marker could not be created — the inbox
     itself carries a seal line (see `seal`)."""
     if closed_path(log_dir, task_id).exists():
         return True
     try:
-        data = inbox_path(log_dir, task_id).read_bytes()
+        if tail_bytes is None:
+            data = inbox_path(log_dir, task_id).read_bytes()
+        else:
+            with inbox_path(log_dir, task_id).open('rb') as stream:
+                stream.seek(0, os.SEEK_END)
+                stream.seek(max(0, stream.tell() - tail_bytes))
+                data = stream.read(tail_bytes)
     except OSError:
         return False
     if b'"closed"' not in data:
@@ -118,7 +124,40 @@ def is_closed(log_dir: Path, task_id: str) -> bool:
 
 
 @task_operation
-def mark_closed(log_dir: Path, task_id: str) -> None:
+def closure_reason(log_dir: Path, task_id: str) -> str | None:
+    """Best-effort bounded reason read; old markers remain valid without a reason."""
+    try:
+        with closed_path(log_dir, task_id).open("rb") as stream:
+            value = json.loads(stream.read(4097))
+        reason = value.get("reason") if isinstance(value, dict) else None
+        return reason if isinstance(reason, str) and len(reason) <= 2048 else None
+    except (OSError, ValueError, RecursionError):
+        pass
+    try:
+        path = inbox_path(log_dir, task_id)
+        with path.open("rb") as stream:
+            stream.seek(max(0, path.stat().st_size - 8192))
+            data = stream.read(8192)
+        for line in reversed(data.splitlines()):
+            try:
+                value = inbox_documents.decode(json.loads(line), task_id)
+                reason = value.get("reason")
+                if _is_seal(value):
+                    return reason if isinstance(reason, str) and len(reason) <= 2048 else None
+            except (ValueError, RecursionError, inbox_documents.InboxDocumentError):
+                continue
+    except OSError:
+        pass
+    return None
+
+
+def closed_message(log_dir: Path, task_id: str) -> str:
+    reason = closure_reason(log_dir, task_id)
+    return CLOSED_MESSAGE + (f". Closure reason: {reason}" if reason else "")
+
+
+@task_operation
+def mark_closed(log_dir: Path, task_id: str, reason: str | None = None) -> None:
     """Create the closed marker (idempotent). Raises `OSError` if it cannot be written."""
     path = closed_path(log_dir, task_id)
     try:
@@ -126,7 +165,7 @@ def mark_closed(log_dir: Path, task_id: str) -> None:
     except FileExistsError:
         return
     try:
-        os.write(fd, json.dumps({"at": _now_iso()}).encode("utf-8"))
+        os.write(fd, json.dumps({"at": _now_iso(), "reason": reason}).encode("utf-8"))
         os.fsync(fd)
     finally:
         os.close(fd)
@@ -134,16 +173,16 @@ def mark_closed(log_dir: Path, task_id: str) -> None:
 
 
 @task_operation
-def seal(log_dir: Path, task_id: str) -> None:
+def seal(log_dir: Path, task_id: str, reason: str | None = None) -> None:
     """Close input durably, so every sender sees it: the marker, or — if the directory refuses a new
     file — a seal line appended to the inbox itself, which `is_closed` also honours. Call with the
     lock held. Raises `OSError` only if neither could be written."""
     try:
-        mark_closed(log_dir, task_id)
+        mark_closed(log_dir, task_id, reason)
         return
     except OSError:
         pass
-    append_locked(log_dir, task_id, {"closed": True, "at": _now_iso()})
+    append_locked(log_dir, task_id, {"closed": True, "at": _now_iso(), "reason": reason})
 
 
 @task_operation
@@ -291,7 +330,7 @@ def send_to_record(
         # marker seen now means that read may already have happened, so the message is refused
         # rather than acknowledged; one appended before the marker existed is read and reported.
         if is_closed(log_dir, task_id):
-            raise SendRefused(f"task {task_id} has {CLOSED_MESSAGE}", code="closed")
+            raise SendRefused(f"task {task_id} has {closed_message(log_dir, task_id)}", code="closed")
         return queued_response(task_id, message)
     finally:
         unlock(fd)
@@ -307,7 +346,7 @@ def _check_open(log_dir: Path, record: store.TaskRecord) -> None:
             code="not_live_input",
         )
     if is_closed(log_dir, task_id):
-        raise SendRefused(f"task {task_id} has {CLOSED_MESSAGE}", code="closed")
+        raise SendRefused(f"task {task_id} has {closed_message(log_dir, task_id)}", code="closed")
     if record.status in store.TERMINAL_RECORD_STATUSES:
         raise SendRefused(
             f"task {task_id} has settled ({record.status}); continue with resume_task",

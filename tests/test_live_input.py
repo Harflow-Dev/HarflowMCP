@@ -625,11 +625,11 @@ async def test_a_send_after_the_close_is_refused_with_resume_advice(fake) -> Non
     await _settle(task)
     assert task.status == "completed"
 
-    with pytest.raises(inbox.SendRefused, match="finished; continue with resume_task") as caught:
+    with pytest.raises(inbox.SendRefused, match="closed live input; the task may still be running") as caught:
         await fake.registry.send_message(task, "too late")
     assert caught.value.code == "closed"
     # And from another process, via the on-disk inbox.
-    with pytest.raises(inbox.SendRefused, match="finished; continue with resume_task"):
+    with pytest.raises(inbox.SendRefused, match="closed live input; the task may still be running"):
         await fake.registry.send_to_record(task.task_id, "too late")
 
 
@@ -692,7 +692,7 @@ async def test_an_error_result_closes_input_and_the_run_fails(fake) -> None:
     assert task.status == "failed"
     assert task.acc.error_result_seen
     assert task.inbox_closed
-    with pytest.raises(inbox.SendRefused, match="finished; continue with resume_task"):
+    with pytest.raises(inbox.SendRefused, match="closed live input; the task may still be running"):
         await fake.registry.send_message(task, "anything")
 
 
@@ -705,7 +705,7 @@ async def test_a_run_that_exits_without_a_result_fails_and_closes_its_input(fake
     assert task.exit_code == 3
     assert task.status == "failed"
     assert task.inbox_closed
-    with pytest.raises(inbox.SendRefused, match="finished; continue with resume_task"):
+    with pytest.raises(inbox.SendRefused, match="closed live input; the task may still be running"):
         await fake.registry.send_message(task, "after exit")
 
 
@@ -891,9 +891,9 @@ async def test_a_send_racing_the_close_is_either_delivered_or_refused(tmp_path: 
 
     assert _texts(stdin.written) == ["just in time"]
     assert stdin.closed and inbox.is_closed(state, task.task_id)
-    with pytest.raises(inbox.SendRefused, match="finished; continue with resume_task"):
+    with pytest.raises(inbox.SendRefused, match="closed live input; the task may still be running"):
         inbox.send_to_record(state, task.task_id, "too late", by=None)
-    with pytest.raises(inbox.SendRefused, match="finished; continue with resume_task"):
+    with pytest.raises(inbox.SendRefused, match="closed live input; the task may still be running"):
         await registry.send_message(task, "too late")
 
 
@@ -1187,7 +1187,7 @@ async def test_a_marker_that_cannot_be_created_falls_back_to_a_seal_line(
     task = _stub_task(tmp_path, stdin)
     task.acc.result_count, task.acc.awaiting_input = 1, True
 
-    def no_marker(log_dir, task_id):
+    def no_marker(log_dir, task_id, reason=None):
         raise OSError("read-only directory")
 
     monkeypatch.setattr(inbox, "mark_closed", no_marker)
@@ -1214,11 +1214,11 @@ async def test_a_close_that_cannot_seal_keeps_input_open_and_retries(
     real_seal = inbox.seal
     failures = {"left": 3}
 
-    def flaky_seal(log_dir, task_id):
+    def flaky_seal(log_dir, task_id, reason=None):
         if failures["left"]:
             failures["left"] -= 1
             raise OSError("disk full")
-        real_seal(log_dir, task_id)
+        real_seal(log_dir, task_id, reason)
 
     monkeypatch.setattr(inbox, "seal", flaky_seal)
     pump = asyncio.create_task(registry._pump(task))
@@ -1240,7 +1240,7 @@ async def test_a_close_that_can_never_seal_ends_input_after_the_retry_limit(
     monkeypatch.setattr(tasks_module, "PUMP_POLL_SECONDS", 0.01)
     attempts = {"n": 0}
 
-    def never(log_dir, task_id):
+    def never(log_dir, task_id, reason=None):
         attempts["n"] += 1
         raise OSError("disk full")
 
@@ -1292,11 +1292,11 @@ async def test_the_idle_bound_is_only_marked_abandoned_when_the_close_happens(
     real_seal = inbox.seal
     failures = {"left": 2}
 
-    def flaky_seal(log_dir, task_id):
+    def flaky_seal(log_dir, task_id, reason=None):
         if failures["left"]:
             failures["left"] -= 1
             raise OSError("disk full")
-        real_seal(log_dir, task_id)
+        real_seal(log_dir, task_id, reason)
 
     monkeypatch.setattr(inbox, "seal", flaky_seal)
     pump = asyncio.create_task(registry._pump(task))
@@ -1467,7 +1467,7 @@ async def test_a_forced_close_with_background_work_open_is_abandonment(
     monkeypatch.setenv("HARFLOW_LIVE_IDLE_SECONDS", "1")
     monkeypatch.setattr(tasks_module, "PUMP_POLL_SECONDS", 0.01)
 
-    def never(log_dir, task_id):
+    def never(log_dir, task_id, reason=None):
         raise OSError("disk full")
 
     monkeypatch.setattr(inbox, "seal", never)
@@ -1529,7 +1529,7 @@ async def test_a_message_appended_after_a_forced_close_that_could_not_seal_is_re
     _record(tmp_path, task_id=task.task_id, owner=owner)
     monkeypatch.setattr(tasks_module, "PUMP_POLL_SECONDS", 0.01)
 
-    def never(log_dir, task_id):
+    def never(log_dir, task_id, reason=None):
         raise OSError("disk full")
 
     monkeypatch.setattr(inbox, "seal", never)
@@ -1557,7 +1557,7 @@ async def test_an_exit_path_close_that_could_not_seal_still_gets_the_final_read(
     task = _stub_task(tmp_path, _Stdin())
     task.proc.returncode = 0
 
-    def never(log_dir, task_id):
+    def never(log_dir, task_id, reason=None):
         raise OSError("disk full")
 
     monkeypatch.setattr(inbox, "seal", never)
@@ -2001,3 +2001,64 @@ async def test_usage_limit_settlement_does_not_break_a_concurrent_sender_flock(t
     assert not force_calls
     undelivered = [event['message_id'] for event in _events(registry.log_dir, task.task_id) if event['kind'] == 'undelivered']
     assert sorted(undelivered) == ['disk-limit-message', 'memory-limit-message']
+
+
+async def test_last_result_seals_input_before_process_exit_with_reason(tmp_path, monkeypatch, identities):
+    """The CLI can keep doing autonomous work after EOF; closed input is not settlement."""
+    import asyncio
+    import shlex
+    from harflow_mcp import inbox
+    release = tmp_path / 'allow-exit'
+    class WindingDown(_CatDouble):
+        def build_start_argv(self, prompt, **kwargs):
+            return Invocation([self.binary, '-c',
+                f"head -n 1 >/dev/null; echo '{RESULT_LINE}'; cat >/dev/null; "
+                f"while [ ! -e {shlex.quote(str(release))} ]; do sleep 0.01; done"],
+                stdin_mode=STDIN_PIPE, initial_input=self.encode_live_message(prompt))
+    backend = WindingDown(tmp_path / 'unused')
+    monkeypatch.setitem(backends.BACKENDS, backend.name, backend)
+    registry = TaskRegistry(log_dir=_task_dir(tmp_path), owner=OWNER)
+    task = await registry.start('hello', tmp_path, backend=backend)
+    identities.alive(OWNER['pid'])
+    identities.alive(task.proc.pid)
+    try:
+        async with asyncio.timeout(5):
+            while not task.inbox_closed:
+                await asyncio.sleep(0.01)
+        assert task.status == 'running' and not task.finished
+        assert task.proc.returncode is None
+        snapshot = task.snapshot()
+        assert snapshot['live_input'] is True
+        assert snapshot['input_channel'] == 'closed'
+        assert 'owed' in snapshot['input_closed_reason']
+        recovered = store.snapshot(registry.log_dir, store.read(registry.log_dir, task.task_id))
+        assert recovered['input_channel'] == 'closed'
+        assert recovered['input_closed_reason'] == snapshot['input_closed_reason']
+        for send in (lambda: registry.send_message(task, 'too late'),
+                     lambda: registry.send_to_record(task.task_id, 'too late')):
+            with pytest.raises(inbox.SendRefused, match='Wait for settlement.*owed'):
+                await send()
+        assert task.status == 'running'
+    finally:
+        release.touch()
+        await asyncio.wait_for(task.done.wait(), 5)
+    assert task.status == 'completed'
+
+
+def test_supervision_does_not_read_entire_live_inbox(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from harflow_mcp import inbox, supervision, identity
+    logs = _task_dir(tmp_path)
+    task_id = 'large-inbox'
+    path = inbox.inbox_path(logs, task_id)
+    path.write_bytes(b'\n' * (2 * 1024 * 1024))
+    monkeypatch.setattr(Path, 'read_bytes', lambda _path: pytest.fail('unbounded inbox read'))
+    monkeypatch.setattr(identity, 'identity_check', lambda _: 'alive')
+    monkeypatch.setattr(identity, 'check_detail', lambda _: ('alive', 'matched'))
+    record = SimpleNamespace(task_id=task_id, owner=OWNER, live_input=True,
+                             pid=123, start_time='time', markers=[])
+    assert supervision.fields(record, logs / f'{task_id}.jsonl', live=True)['input_channel'] == 'open'
+    assert supervision.fields(record, logs / f'{task_id}.jsonl')['input_channel'] == 'unknown'
+    with path.open('ab') as stream:
+        stream.write((json.dumps(inbox_documents.encode({'closed': True, 'reason': 'finished owed turn'}, task_id)) + '\n').encode())
+    assert supervision.fields(record, logs / f'{task_id}.jsonl')['input_channel'] == 'closed'

@@ -311,7 +311,7 @@ def _load(log_dir: Path, task_id: str, directory_fd: int | None = None):
             if any(observation[key] < 0 for key in ('device', 'inode', 'size')):
                 raise ValueError('Artifact manifest is unavailable')
         ids = [item['artifact_id'] for item in items]
-        if len(set(ids)) != len(ids) or any(item['provenance'] != {'method': 'verified_process_lineage', 'task_id': task_id} for item in items):
+        if len(set(ids)) != len(ids) or any(not _valid_provenance(item['provenance'], task_id) for item in items):
             raise ValueError('Artifact manifest provenance is unavailable')
         return items, raw
     finally:
@@ -473,6 +473,79 @@ def _task_lock(log_dir, task_id):
         directory_fd.close()
 
 
+def _valid_provenance(value, task_id):
+    if value == {'method': 'verified_process_lineage', 'task_id': task_id}:
+        return True
+    return (set(value) == {'method', 'task_id', 'tool_use_id'} and
+            value.get('method') == 'observed_backend_plan' and value.get('task_id') == task_id and
+            isinstance(value.get('tool_use_id'), str) and 0 < len(value['tool_use_id']) <= 256)
+
+
+def _backend_plan_target(record, path):
+    from .backends import get
+    target = Path(path)
+    if not get(record.backend).builtin_plan_path(target, Path(record.repo_path)):
+        raise ValueError('Not a built-in backend plan path')
+    return target, _observation(_regular_stat(target))
+
+
+@metadata_request()
+@task_operation
+def record_backend_plan(log_dir: Path, task_id: str, reference: dict) -> dict:
+    """Engine-only bookkeeping for a correlated successful built-in plan tool result.
+
+    This function is deliberately absent from MCP/ctl registration surfaces. It
+    grants no execution or caller registration authority and reads no file content.
+    """
+    store.validate_task_id(task_id)
+    with _task_lock(log_dir, task_id) as storage_fd:
+        record = _read_owner(log_dir, task_id)
+        if record is None or record.freedom != 'read_only':
+            raise ValueError('Built-in plan observation requires a read-only task')
+        binding = _authority(log_dir, record, registering=True)
+        target, observed = _backend_plan_target(record, reference['path'])
+        if observed != reference['registered_observation']:
+            raise ValueError('Observed plan file changed before registration')
+        provenance = {'method': 'observed_backend_plan', 'task_id': task_id,
+                      'tool_use_id': reference['tool_use_id']}
+        if not _valid_provenance(provenance, task_id):
+            raise ValueError('Invalid built-in plan evidence')
+        items, _ = _load(log_dir, task_id, storage_fd)
+        for item in items:
+            if item['path'] == str(target) and item['registered_observation'] == observed:
+                return item
+        if len(items) >= 100:
+            raise ValueError('Task artifact limit reached')
+        item = {'artifact_id': str(uuid.uuid4()), 'task_id': task_id, 'path': str(target),
+                'kind': 'report', 'note': 'Built-in plan file observed after successful tool result',
+                'registered_at': _now(), 'provenance': provenance, 'registered_observation': observed}
+        if binding is not None:
+            item['workflow'] = binding
+        raw = json.dumps({'product': PRODUCT, 'format': 'harflow.task.artifacts', 'v': 1,
+                          'product_version': PRODUCT_VERSION, 'task_id': task_id,
+                          'items': items + [item]}, ensure_ascii=False, allow_nan=False).encode('utf-8')
+        if len(raw) > MAX_BYTES:
+            raise ValueError('Task artifact manifest limit reached')
+        name = f'{task_id}.artifacts-{uuid.uuid4().hex}.tmp'
+        with catalog_lock(log_dir, layout=task_layout(log_dir)):
+            fd = open_descriptor(log_dir / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                 0o600, dir_fd=storage_fd, layout=task_layout(log_dir))
+            try:
+                with os.fdopen(fd, 'wb', closefd=False) as output:
+                    output.write(raw)
+                    output.flush()
+                    os.fsync(output.fileno())
+                os.replace(name, _path(log_dir, task_id).name, src_dir_fd=storage_fd, dst_dir_fd=storage_fd)
+                os.fsync(storage_fd)
+            finally:
+                fd.close()
+                try:
+                    os.unlink(name, dir_fd=storage_fd)
+                except FileNotFoundError:
+                    pass
+        return item
+
+
 @metadata_request()
 @task_operation
 def register(log_dir: Path, path: str, kind: str, note: str = '') -> dict:
@@ -558,7 +631,9 @@ def _availability(log_dir, record, item):
             state = 'changed'
         else:
             try:
-                _, observed = _target(log_dir, record, str(path))
+                _, observed = (_backend_plan_target(record, str(path))
+                               if item['provenance'].get('method') == 'observed_backend_plan'
+                               else _target(log_dir, record, str(path)))
                 if os.access(path, os.R_OK):
                     state = 'available' if observed == item['registered_observation'] else 'changed'
             except (OSError, ValueError, RuntimeError):

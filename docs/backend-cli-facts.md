@@ -878,3 +878,20 @@ repository alone. Unless a row says otherwise, thread settings were `approvalPol
   Tool processes hold pipes to the native process, not the server's stderr (opt-in test).
 - File-change approvals: a patch is joined by `itemId` with the earlier `item/started` of the same thread and turn; the completed item's
   `changes` equal the started ones; `grantRoot` was always null and an accept did not grant the root.
+
+## Claude plan-mode writes (Harflow remeasurement, 2026-10-26)
+
+Measured installed Claude Code **2.1.310** with isolated HOME and CLAUDE_CONFIG_DIR, a localhost
+fake Anthropic API and deterministic tool-use responses; no paid model requests. Repeat with:
+
+```sh
+HARFLOW_CLI_INTEGRATION=1 uv run pytest -q tests/test_claude_plan_files_cli.py
+```
+
+Both default `CLAUDE_CONFIG_DIR/plans` and a project `plansDirectory` setting allowed a Write to
+the prescribed random plan filename disclosed in the CLI's system prompt. Ordinary repository
+and outside-file Writes were explicitly denied in plan mode and neither file appeared. Both
+scripted runs exited zero. The installed implementation accepts `plansDirectory` only within the
+project root; it cannot select the engine's external task scratch through that setting. This
+measurement qualifies the plan-write disclosure/tracking case, not an OS boundary or arbitrary
+CLI versions/configurations. Runtime history/log writes are separate from agent-tool permissions.

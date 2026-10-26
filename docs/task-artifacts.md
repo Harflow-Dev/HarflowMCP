@@ -212,3 +212,17 @@ Inside the child they are listed as inherited and require selection again before
 worker or grandchild. Unselected parent references are not exposed. Recovery preserves stored
 bindings and selections; retries retain distinct execution identities. References follow the
 owner task's retention, and workflow tasks remain pinned while their tree is active.
+
+## Engine-observed built-in plans
+
+Read-only Claude runs can write built-in plan files despite plan mode. The owning engine records a
+reference after a correlated successful top-level Write/Edit result, with provenance
+`method: observed_backend_plan`, matching `task_id`, and bounded `tool_use_id`. It verifies a regular
+non-symlink file directly in a known plan namespace and saves stat metadata. These references use
+the existing 100-item/1-MiB manifest bounds and appear in the same artifact pages and summaries.
+Duplicate identical observations reuse the reference. Availability remains a stat-only observation.
+
+This engine-only path does not relax `register_artifact` caller/path authority or add execution
+permissions. Recognizing a custom plan directory reads at most 64 KiB plus an overflow byte from
+each of three regular, non-symlink settings files; plan content is never read. Tracking requires
+successful observed tool evidence and does not discover every unreported or subagent write.

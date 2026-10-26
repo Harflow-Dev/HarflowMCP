@@ -100,3 +100,31 @@ Its immutable managed engine must be updated deliberately after an engine
 release; changing this checkout does not change the application's paired engine.
 Private launch and native-observation documents are engine-owned state, not
 files the application reads or writes.
+
+## Dead executions and disk capacity
+
+A crash can leave a claimed or spawned launch reservation without a terminal receipt. Resume
+rechecks the saved owner and agent identities. A matching launch/task owner and session, with both
+processes confirmed dead, no longer holds the conversation busy. This also applies to task handles
+already attached in the observing server. The original reservation is retained; this is a new
+resume using the recorded session ID, not replay of the original execution and not an observed
+success or exit code. Live or indeterminate identities remain busy. Missing records, mismatched
+owner/session identity, and ambiguous pre-execution reservations remain reserved. Restore process
+inspection access, wait for a live run or close an active takeover before retrying; never delete
+reservation, lock or store files to bypass refusal. Context is recoverable only if the backend
+persisted a resumable session and its history remains available.
+
+Before creating a launch reservation, and again before executing in the owner, Harflow checks for
+at least **256 MiB (268435456 bytes)** free on each distinct filesystem used for task state/output,
+the checkout and temporary storage. This fixed reserve leaves room for metadata, logs and agent
+startup; it is a preflight, not reserved capacity or an estimate of the assignment's disk needs.
+Below the threshold, an actionable `Disk nearly full` refusal reports available/required bytes and
+the filesystem path. Failed capacity discovery also refuses before agent creation. Free space and
+retry. A failure after a reservation but before execution marks a proven not-started attempt for
+safe retry when that write succeeds; otherwise uncertainty remains reserved.
+
+The disk can still fill after preflight. Raw-log write or buffered-close failures disable raw
+capture while stdout continues draining; status notices disclose the lost capture. Metadata writes
+retain the last successfully replaced record. No exit receipt or task success is fabricated if it
+cannot be persisted. Recovery may show uncertain status or incomplete output until disk access is
+restored; in-memory output and files whose writes never succeeded cannot be reconstructed.

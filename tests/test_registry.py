@@ -777,7 +777,7 @@ def test_publish_with_network_blocked_is_still_disclosed_but_worded_differently(
     assert "'main'" in notice
     # Excluding one phrase is too weak on its own — it would accept the *unauthorized* wording,
     # which is false here. Assert all three truths this cell has to carry.
-    assert "is authorized to commit, push, and open a PR" in notice
+    assert "is authorized to attempt commits, pushes, and PR creation" in notice
     # Whole clauses, not the nouns: "permits a network-backed push but blocks a local path" would
     # satisfy a bare `"network-backed push" in notice` while saying the exact opposite.
     assert "blocks a network-backed push" in notice

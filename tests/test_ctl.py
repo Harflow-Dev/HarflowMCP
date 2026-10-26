@@ -430,7 +430,8 @@ def test_send_after_close_says_to_resume(
     assert code == 1
     doc = _one_doc(capsys)
     assert doc["error"]["code"] == "closed"
-    assert "finished; continue with resume_task" in doc["error"]["message"]
+    assert "closed live input" in doc["error"]["message"]
+    assert "Wait for settlement" in doc["error"]["message"]
 
 
 @pytest.mark.parametrize(

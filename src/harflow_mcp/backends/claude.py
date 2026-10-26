@@ -230,7 +230,9 @@ _UNRESTRICTED_COMPAT_BREAK_CAVEAT = (
 _MODE_CAVEATS: dict[str, tuple[str, ...]] = {
     "read_only": (
         "read-only is plan mode: an agent-level restriction, so it holds only as long as the agent "
-        "respects it",
+        "respects it. Claude may write its built-in plan file under ~/.claude/plans "
+        "(or CLAUDE_CONFIG_DIR/plans), or a project-contained plansDirectory configured in settings; "
+        "read_only does not forbid those plan writes",
     ),
     "write_in_repo": (
         "acceptEdits does additionally gate edits outside the working directory through the "
@@ -1122,6 +1124,14 @@ class ClaudeBackend(ExtraPathsUnsupported):
             network_access="not_controlled",
             caveats=caveats,
         )
+
+    def builtin_plan_path(self, path, repo):
+        from .claude_plan_files import plan_roots, _plain
+        return _plain(path) and path.parent in plan_roots(repo)
+
+    def observed_plan_files(self, event, acc, repo):
+        from .claude_plan_files import observe
+        return observe(event, acc.stream_state, repo)
 
     def ingest(self, event: dict[str, Any], acc: Accumulator) -> None:
         diagnostic = self.usage_limit_diagnostic(event)

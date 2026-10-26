@@ -16,6 +16,17 @@ Task observations retry transient metadata replacements up to three reads and re
 when metadata cannot be read reliably.
 Recovered tasks disclose owner/process uncertainty and capture continuity. Qualified Claude
 transcripts can supply bounded display-only recovery activity; see [public contracts](docs/contracts.md#supervision-and-recovery-activity).
+Live-input capability does not promise that stdin is still open: status reports `input_channel`
+and `input_closed_reason`. Wait for settlement before resuming a task whose input has closed.
+MCP task status exposes paged successor links; resumes and continuations retain their source IDs.
+Claude read-only plan mode permits built-in plan files; successful observed plan writes appear
+as metadata-only task artifacts. Harness session history and logs can also persist outside the
+checkout. See [harness permissions](docs/harness-permissions.md).
+New launches and resumes require at least 256 MiB free on state, checkout and temporary-storage
+filesystems. Confirmed-dead detached executions can resume their recorded conversation; live or
+uncertain sessions remain protected. See [supervision and recovery](docs/supervision.md).
+Backend discovery reports qualification gates for writable paths, caller approvals and command
+grants. At unrestricted access, validated extra writable paths are disclosed as a no-op.
 Live background wait bounds are persisted and configurable; see [task continuation](docs/task-continuation.md#live-background-wait-bound).
 
 Use `harflow-ctl version-info --json` to inspect runtime identity and compatibility without initializing state. Engine operations require compatible Harflow state, task metadata, saved workflow definitions, workflow run documents and workflow ownership receipts. Known qualified storage lines migrate conservatively before new-line writes. Use `harflow-ctl state-inspect --json` to inspect an incompatible root without changing it, then explicitly confirm its `state-recover` proposal to retain a sibling backup and create fresh state. `HARFLOW_STATE_ROOT` can also select a separate fresh state directory; see [state ownership and recovery](docs/contracts.md#state-ownership-and-recovery) for compatibility requirements.

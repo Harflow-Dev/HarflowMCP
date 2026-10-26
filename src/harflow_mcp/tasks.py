@@ -319,10 +319,10 @@ GIT_BASELINE_BUDGET_SECONDS = 1.5
 
 _UNDETERMINED_PUBLISH_NOTICE = (
     "this task was dispatched at freedom {freedom!r}, which authorizes it to commit, push, and "
-    "open a PR — but which branch it would land on could not be determined at spawn (no remote "
+    "open a PR — but the checkout branch could not be determined at dispatch (no remote "
     "HEAD recorded locally, a detached HEAD, several remotes with none named 'origin', git being "
     "unavailable, or the check timing out). For a publish-authorized run, that is itself worth "
-    "knowing: cancel this task now if you need to confirm the target branch before it proceeds. "
+    "knowing: cancel this task now if you need to confirm the checkout before it proceeds. "
     "This was sampled once, immediately before the agent was launched — not during the run — so "
     "the branch may already have changed by the time the agent started, and will not be "
     "re-checked if it changes later."
@@ -330,8 +330,9 @@ _UNDETERMINED_PUBLISH_NOTICE = (
 
 _ON_DEFAULT_BRANCH_PUBLISH_NOTICE = (
     "this task was dispatched at freedom {freedom!r} while checked out on the repository's default "
-    "branch ({branch!r}), and is authorized to commit, push, and open a PR directly against it — "
-    "nothing here blocked that. Cancel this task now if publishing to {branch!r} was not intended. "
+    "branch ({branch!r}). The task is authorized to attempt commits, pushes, and PR creation; "
+    "the eventual commit or publication branch is not established by this observation. Cancel this task "
+    "now if the sampled checkout was not intended. "
     "This was sampled once, immediately before the agent was launched — not during the run — so "
     "the branch may already have changed by the time the agent started, and will not be "
     "re-checked if it changes later."
@@ -347,23 +348,23 @@ _ON_DEFAULT_BRANCH_PUBLISH_NOTICE = (
 # byte-identical to publish's default, so the old freedom-name gate silently skipped it).
 _ON_DEFAULT_BRANCH_NETWORK_BLOCKED_NOTICE = (
     "this task was dispatched at freedom {freedom!r} while checked out on the repository's default "
-    "branch ({branch!r}), and is authorized to commit, push, and open a PR directly against it — "
+    "branch ({branch!r}). The task is authorized to attempt commits, pushes, and PR creation; "
     "harflow_mcp's own network barrier blocks a network-backed push and any network-backed PR "
     "creation here, but a push to a local path (measured: a bare repo under a writable root) "
-    "still succeeds, so the barrier stops network-backed operations only. Cancel this task now if "
-    "publishing to {branch!r} was not intended. This was sampled once, immediately before the "
+    "still succeeds, so the barrier stops network-backed operations only. The eventual commit or "
+    "publication branch is not established by this observation. This was sampled once, immediately before the "
     "agent was launched — not during the run — so the branch may already have changed by the time "
     "the agent started, and will not be re-checked if it changes later."
 )
 _UNDETERMINED_NETWORK_BLOCKED_NOTICE = (
     "this task was dispatched at freedom {freedom!r}, which authorizes it to commit, push, and "
-    "open a PR — but which branch it would land on could not be determined at spawn (no remote "
+    "open a PR — but the checkout branch could not be determined at dispatch (no remote "
     "HEAD recorded locally, a detached HEAD, several remotes with none named 'origin', git being "
     "unavailable, or the check timing out). HarflowMCP's own network barrier blocks a "
     "network-backed push and any network-backed PR creation here, but a push to a local path "
     "(measured: a bare repo under a writable root) still succeeds, so the barrier stops "
     "network-backed operations only. For a publish-authorized run, that is itself worth "
-    "knowing: cancel this task now if you need to confirm the target branch before it proceeds. "
+    "knowing: cancel this task now if you need to confirm the checkout before it proceeds. "
     "This was sampled once, immediately before the agent was launched — not during the run — so "
     "the branch may already have changed by the time the agent started, and will not be "
     "re-checked if it changes later."
@@ -372,8 +373,9 @@ _ON_DEFAULT_BRANCH_UNAUTHORIZED_REACHABLE_NOTICE = (
     "this task was dispatched at freedom {freedom!r}, which does not authorize committing, "
     "pushing, or opening a PR — but the mechanism it runs under nevertheless permits remote "
     "publication (enforcement.network_access is {network_access!r}), so a push can genuinely "
-    "reach a remote and nothing here blocked that. It is checked out on the repository's default "
-    "branch ({branch!r}). Cancel this task now if that was not intended. This was sampled once, "
+    "reach a remote. The checkout sampled at dispatch was on the repository's default "
+    "branch ({branch!r}); this does not establish the eventual commit or publication branch. "
+    "Cancel this task now if the sampled checkout was not intended. This was sampled once, "
     "immediately before the agent was launched — not during the run — so the branch may already "
     "have changed by the time the agent started, and will not be re-checked if it changes later."
 )
@@ -381,10 +383,10 @@ _UNDETERMINED_UNAUTHORIZED_REACHABLE_NOTICE = (
     "this task was dispatched at freedom {freedom!r}, which does not authorize committing, "
     "pushing, or opening a PR — but the mechanism it runs under nevertheless permits remote "
     "publication (enforcement.network_access is {network_access!r}), so a push can genuinely "
-    "reach a remote, and which branch it would land on could not be determined at spawn (no "
+    "reach a remote; the checkout branch could not be determined at dispatch (no "
     "remote HEAD recorded locally, a detached HEAD, several remotes with none named 'origin', "
     "git being unavailable, or the check timing out). That is itself worth knowing: cancel this "
-    "task now if you need to confirm the target branch before it proceeds. This was sampled "
+    "task now if you need to confirm the checkout before it proceeds. This was sampled "
     "once, immediately before the agent was launched — not during the run — so the branch may "
     "already have changed by the time the agent started, and will not be re-checked if it "
     "changes later."
@@ -1154,6 +1156,17 @@ class TaskRegistry:
         backend.assert_safe(result, freedom, network)
         return result
 
+    @staticmethod
+    def _extra_enforcement(backend, enforcement, grants, repo_path):
+        if not grants:
+            return enforcement
+        if enforcement.freedom == "unrestricted":
+            from .extra_paths import serialize_paths
+            return replace(enforcement, extra_writable_paths=tuple(serialize_paths(grants)),
+                           extra_path_certification=None,
+                           caveats=(*enforcement.caveats, "extra_writable_paths was validated but is a no-op at unrestricted freedom; it grants no additional access, confinement, or certification."))
+        return backend.extra_path_enforcement(enforcement, grants, repo_path)
+
     def _saved_extra_paths(self, record: Any, backend: Backend):
         from .extra_paths import restore_paths, revalidate_paths
         grants = restore_paths(record.extra_writable_paths)
@@ -1162,7 +1175,8 @@ class TaskRegistry:
             raise ValueError("Saved extra writable path authority is missing")
         if grants or certificate is not None:
             expected = backend.extra_path_support().get("certification")
-            if not grants or not certificate or certificate != expected:
+            noop = record.freedom == "unrestricted" and certificate is None
+            if not grants or (not noop and (not certificate or certificate != expected)):
                 raise ValueError("Saved extra writable path certification is unavailable or incompatible")
             if not isinstance(record.enforcement, Mapping) or record.enforcement.get("extra_writable_paths") != record.extra_writable_paths or record.enforcement.get("extra_path_certification") != certificate:
                 raise ValueError("Saved extra writable path authority disagrees with enforcement")
@@ -1225,14 +1239,14 @@ class TaskRegistry:
             await _bounded_extra_path_check(self._assert_extra_state, repo_path, grants)
         invocation = backend.build_start_argv("Permission preview", repo=repo_path, freedom=freedom, session_id=str(uuid.uuid4()) if backend.capabilities.chooses_session_id else None, model=None, max_turns=None, reasoning_effort=None, network=network)
         invocation = await self._configure_commands(backend, invocation, commands, freedom, repo_path, network)
-        invocation = await _bounded_extra_path_check(backend.qualify_extra_writable_paths, invocation, grants, freedom, network) if grants else invocation
-        if grants:
+        invocation = await _bounded_extra_path_check(backend.qualify_extra_writable_paths, invocation, grants, freedom, network) if grants and freedom != "unrestricted" else invocation
+        if grants and freedom != "unrestricted":
             # The qualifier asserted the invocation it returned; only the bridge-state check
             # remains, against the qualified invocation's scratch directory.
             await _bounded_extra_path_check(self._assert_extra_state, repo_path, grants, invocation)
         else:
             backend.assert_safe(invocation, freedom, network)
-        enforcement = backend.extra_path_enforcement(backend.enforcement(freedom, network), grants, repo_path) if grants else backend.enforcement(freedom, network)
+        enforcement = self._extra_enforcement(backend, backend.enforcement(freedom, network), grants, repo_path)
         enforcement = self._with_commands(backend, approval_runtime.with_approval_enforcement(backend, enforcement, approval_version, caller_approvals, caller_write_approvals), commands)
         self._resolve_lineage(caller, child_enforcement=enforcement, child_backend=backend.name, child_repo=repo_path, caller_write_approvals=caller_write_approvals)
         # A dispatch grants every non-read-only task of a scratch-aware backend a task-owned
@@ -1241,7 +1255,7 @@ class TaskRegistry:
         # the future root symbolically and never feeds it to the nested-authority comparison.
         if freedom != "read_only" and getattr(backend, "with_writable_directory", None) is not None and not (caller_approvals and not getattr(backend, "approval_scratch", lambda: True)()):
             enforcement = replace(enforcement, writable_roots=(*enforcement.writable_roots, FUTURE_TASK_SCRATCH_ROOT))
-        return {"backend": backend.name, "caller_approvals": caller_approvals, "caller_write_approvals": caller_write_approvals, "caller_approval_support": backend.caller_approval_support() if getattr(backend.capabilities, "supports_caller_approvals", False) else {"supported": False}, "approval_scope": "exact_action_once" if caller_approvals else None, "approval_transport": approval_runtime.transport(backend) if caller_approvals else None, "approval_limitations": approval_runtime.limitations(backend, caller_write_approvals), "freedom": freedom, "network": network, "repo_path": str(repo_path), "extra_writable_paths": serialize_paths(grants), "extra_path_certification": backend.extra_path_support().get("certification") if grants else None, "allowed_commands": list(commands), "enforcement": enforcement.as_dict(), "limitations": "Existing typed path identities are checked before launch; grants are unavailable to native workflows and interactive takeover."}
+        return {"backend": backend.name, "caller_approvals": caller_approvals, "caller_write_approvals": caller_write_approvals, "caller_approval_support": backend.caller_approval_support() if getattr(backend.capabilities, "supports_caller_approvals", False) else {"supported": False}, "approval_scope": "exact_action_once" if caller_approvals else None, "approval_transport": approval_runtime.transport(backend) if caller_approvals else None, "approval_limitations": approval_runtime.limitations(backend, caller_write_approvals), "freedom": freedom, "network": network, "repo_path": str(repo_path), "extra_writable_paths": serialize_paths(grants), "extra_path_certification": enforcement.extra_path_certification, "allowed_commands": list(commands), "enforcement": enforcement.as_dict(), "limitations": "Existing typed path identities are checked before launch; grants are unavailable to native workflows and interactive takeover."}
 
     @_with_authority_check_budget
     @layout_operation
@@ -1329,7 +1343,7 @@ class TaskRegistry:
 
             spawned_by, root_task_id, depth, max_depth, lineage_detected = self._resolve_lineage(
                 caller,
-                child_enforcement=self._with_commands(backend, approval_runtime.with_approval_enforcement(backend, backend.extra_path_enforcement(backend.enforcement(freedom, network), grants, repo_path) if grants else backend.enforcement(freedom, network), invocation.caller_approval_version, caller_approvals, caller_write_approvals), commands),  # type: ignore[arg-type]
+                child_enforcement=self._with_commands(backend, approval_runtime.with_approval_enforcement(backend, self._extra_enforcement(backend, backend.enforcement(freedom, network), grants, repo_path), invocation.caller_approval_version, caller_approvals, caller_write_approvals), commands),  # type: ignore[arg-type]
                 child_backend=backend.name,
                 child_repo=repo_path,
                 caller_write_approvals=caller_write_approvals,
@@ -1460,7 +1474,7 @@ class TaskRegistry:
         commands = self._command_grants(backend, allowed_commands, parent.allowed_commands, parent.freedom, Path(parent.repo_path), native=native_subagent, builder=workflow_builder)
         spawned_by, root_task_id, depth, max_depth, lineage_detected = self._resolve_lineage(
             caller,
-            child_enforcement=self._with_commands(backend, backend.extra_path_enforcement(backend.enforcement(parent.freedom, effective_network), grants, parent.repo_path) if grants else backend.enforcement(parent.freedom, effective_network), commands),  # type: ignore[arg-type]
+            child_enforcement=self._with_commands(backend, self._extra_enforcement(backend, backend.enforcement(parent.freedom, effective_network), grants, parent.repo_path), commands),  # type: ignore[arg-type]
             child_backend=backend.name,
             child_repo=parent.repo_path,
             caller_write_approvals=parent.caller_write_approvals,
@@ -1478,7 +1492,7 @@ class TaskRegistry:
                 if self.session_has_live_run(parent.session_id):
                     raise SessionBusyError(
                         f"session {parent.session_id} already has a running task, or is held by a takeover in "
-                        "the Monitor; two concurrent runs would corrupt its shared conversation state"
+                        "the Monitor, or has unverified launch/process liveness; two concurrent runs would corrupt its shared conversation state. Inspect get_task_status supervision and unresolved launch evidence; wait for a live run, restore process-inspection access for an indeterminate run, or close the active takeover before retrying. Do not delete reservations to force resume."
                     )
                 if require_unchanged_session:
                     try:
@@ -1669,6 +1683,9 @@ class TaskRegistry:
 
     @layout_operation
     async def _spawn(self, invocation: Invocation, **kwargs) -> Task:
+        from .disk_space import check_launch_space
+        with _before_spawn():
+            await asyncio.to_thread(check_launch_space, self._log_dir, kwargs['repo_path'])
         if self.execution_mode == "supervised":
             from .task_supervision import launch
             return await launch(self, invocation, kwargs)
@@ -1728,6 +1745,8 @@ class TaskRegistry:
         from .state_layout import require_dispatch_layout
         require_dispatch_layout(self._log_dir)
         with _before_spawn():
+            from .disk_space import check_launch_space
+            await asyncio.to_thread(check_launch_space, self._log_dir, repo_path)
             from . import approval_runtime
             approval_runtime.validate(backend, caller_approvals, freedom, max_turns, invocation.native_subagent, caller_write_approvals)
             if invocation.caller_approvals != caller_approvals or invocation.caller_write_approvals != caller_write_approvals:
@@ -1755,7 +1774,12 @@ class TaskRegistry:
                 # qualifier asserts the invocation it returns, so no immediate re-assert follows.
                 # Final backend validation below also reads filesystem identities off loop.
                 await _bounded_extra_path_check(self._assert_extra_state, repo_path, extra_path_grants, invocation)
-                invocation = await _bounded_extra_path_check(backend.qualify_extra_writable_paths, invocation, extra_path_grants, freedom, network)
+                if freedom == "unrestricted":
+                    if invocation.extra_writable_paths:
+                        raise ValueError("Unrestricted extra paths must not configure bounded grants")
+                    backend.assert_safe(invocation, freedom, network)
+                else:
+                    invocation = await _bounded_extra_path_check(backend.qualify_extra_writable_paths, invocation, extra_path_grants, freedom, network)
             else:
                 backend.assert_safe(invocation, freedom, network)
             if getattr(backend.capabilities, "tracks_background_tasks", False) and hasattr(backend, "configure_dispatch_context"):
@@ -1790,7 +1814,7 @@ class TaskRegistry:
             # three describe the same (freedom, network) pair.
             enforcement = backend.enforcement(freedom, network)  # type: ignore[arg-type]
             if extra_path_grants:
-                enforcement = backend.extra_path_enforcement(enforcement, extra_path_grants, repo_path)
+                enforcement = self._extra_enforcement(backend, enforcement, extra_path_grants, repo_path)
             enforcement = approval_runtime.with_approval_enforcement(backend, enforcement, approval_version, caller_approvals, caller_write_approvals)
             enforcement = self._with_commands(backend, enforcement, allowed_commands)
 
@@ -1868,7 +1892,8 @@ class TaskRegistry:
                         enforcement = replace(enforcement, writable_roots=(*enforcement.writable_roots, str(task_scratch)))
                 if extra_path_grants or invocation.extra_writable_paths:
                     await _bounded_extra_path_check(self._assert_extra_state, repo_path, extra_path_grants, invocation)
-                    await _bounded_extra_path_check(backend.assert_extra_writable_paths, invocation, extra_path_grants, freedom, network)
+                    if freedom != "unrestricted":
+                        await _bounded_extra_path_check(backend.assert_extra_writable_paths, invocation, extra_path_grants, freedom, network)
             except BaseException:
                 if task_scratch is not None:
                     try:
@@ -1948,7 +1973,7 @@ class TaskRegistry:
             allowed_commands_version=command_version,
             interaction_owner=interaction_owner,
             extra_writable_paths=serialize_paths(extra_path_grants),
-            extra_path_certification=backend.extra_path_support().get("certification") if extra_path_grants else None,
+            extra_path_certification=enforcement.extra_path_certification,
             enforcement=enforcement.as_dict(),
             markers=invocation.identity_markers if invocation.identity_markers is not None else _identity_markers(backend, session_id, repo_path),
             proc=proc,
@@ -2216,7 +2241,7 @@ class TaskRegistry:
         try:
             if task.inbox_closed or inbox.is_closed(self._log_dir, task.task_id):
                 raise inbox.SendRefused(
-                    f"task {task.task_id} has {inbox.CLOSED_MESSAGE}", code="closed"
+                    f"task {task.task_id} has {inbox.closed_message(self._log_dir, task.task_id)}", code="closed"
                 )
             if task.finished:
                 raise inbox.SendRefused(
@@ -2478,8 +2503,12 @@ class TaskRegistry:
                     self._note_input_written(task, wrote)  # turns are owed for those, EOF or not
             else:
                 self._report_undelivered(task, pending, reason)
+            close_reason = reason or {
+                CLOSE_IDLE: "all owed results arrived; stdin closed to allow process settlement",
+                CLOSE_IDLE_BOUND: "background work reached the configured idle bound",
+            }.get(kind, "input pump stopped")
             try:
-                inbox.seal(self._log_dir, task.task_id)
+                inbox.seal(self._log_dir, task.task_id, close_reason)
                 task.inbox_sealed = True
             except OSError:
                 log.error("task %s: could not seal its inbox", task.task_id, exc_info=True)
@@ -2514,7 +2543,7 @@ class TaskRegistry:
         `_finish_pump` retries it before the run is published. EOF kills any background task still
         open, which is recorded as abandoned, exactly as the idle bound would."""
         try:
-            inbox.seal(self._log_dir, task.task_id)
+            inbox.seal(self._log_dir, task.task_id, why)
             task.inbox_sealed = True
         except OSError:
             log.error("task %s: could not seal its inbox", task.task_id, exc_info=True)
@@ -2572,7 +2601,7 @@ class TaskRegistry:
         appending (`inbox.send_to_record`), so one that appended before the marker existed is read
         here, and one that finds it afterwards is refused: nothing acknowledged goes unreported."""
         try:
-            inbox.seal(self._log_dir, task.task_id)
+            inbox.seal(self._log_dir, task.task_id, why)
             task.inbox_sealed = True
         except OSError:
             log.error("task %s: could not seal its inbox", task.task_id, exc_info=True)
@@ -3886,7 +3915,7 @@ class TaskRegistry:
         commands = self._command_grants(backend, allowed_commands, record.allowed_commands, record.freedom, repo_path, native=native_subagent, builder=workflow_builder)
         spawned_by, root_task_id, depth, max_depth, lineage_detected = self._resolve_lineage(
             caller,
-            child_enforcement=self._with_commands(backend, backend.extra_path_enforcement(backend.enforcement(record.freedom, effective_network), grants, repo_path) if grants else backend.enforcement(record.freedom, effective_network), commands),  # type: ignore[arg-type]
+            child_enforcement=self._with_commands(backend, self._extra_enforcement(backend, backend.enforcement(record.freedom, effective_network), grants, repo_path), commands),  # type: ignore[arg-type]
             child_backend=backend.name,
             child_repo=repo_path,
             caller_write_approvals=record.caller_write_approvals,
@@ -3904,7 +3933,7 @@ class TaskRegistry:
                 if self.session_has_live_run(record.session_id):
                     raise SessionBusyError(
                         f"session {record.session_id} already has a running task, or is held by a takeover in "
-                        "the Monitor; two concurrent runs would corrupt its shared conversation state"
+                        "the Monitor, or has unverified launch/process liveness; two concurrent runs would corrupt its shared conversation state. Inspect get_task_status supervision and unresolved launch evidence; wait for a live run, restore process-inspection access for an indeterminate run, or close the active takeover before retrying. Do not delete reservations to force resume."
                     )
                 if require_unchanged_session:
                     try:
@@ -4314,6 +4343,7 @@ async def _drain_stdout(task: Task, registry: TaskRegistry) -> None:
             handle = os.fdopen(descriptor, "ab", closefd=False)
         except OSError:
             log.warning("task %s: cannot open %s; continuing without a raw log", task.task_id, task.log_path)
+            task.bridge_notices.append("Raw output capture unavailable: disk or filesystem write failed; the agent output is still being drained.")
 
         # Set once this drain sees the stream report a session other than the one a resume asked
         # for, so the bridge notice below is appended exactly once per run however many events
@@ -4349,7 +4379,11 @@ async def _drain_stdout(task: Task, registry: TaskRegistry) -> None:
                     raw_offset = handle.tell()
                 except OSError:
                     log.warning("task %s: raw log write failed; dropping it", task.task_id)
-                    handle.close()
+                    task.bridge_notices.append("Raw output capture stopped after a disk or filesystem write failure; later output is still being drained but may not be recoverable.")
+                    try:
+                        handle.close()
+                    except OSError:
+                        pass  # Buffered close may repeat ENOSPC; draining must continue.
                     handle = None
 
             task.last_output_at = time.monotonic()
@@ -4398,6 +4432,21 @@ async def _drain_stdout(task: Task, registry: TaskRegistry) -> None:
                 await approval_runtime.observe(registry, task, backend, event)
             previous_diagnostic = task.acc.failure_diagnostic
             backend.ingest(event, task.acc)
+            if task.freedom == 'read_only':
+                try:
+                    observe_plans = getattr(backend, 'observed_plan_files', None)
+                    if observe_plans is not None:
+                        from . import artifacts
+                        references = await asyncio.to_thread(observe_plans, event, task.acc, task.repo_path)
+                        for reference in references:
+                            await asyncio.to_thread(artifacts.record_backend_plan, registry.log_dir, task.task_id, reference)
+                except StateOwnershipError:
+                    raise
+                except Exception:
+                    # Plan observation is bookkeeping; never change the agent's outcome.
+                    log.warning('task %s: built-in plan artifact observation unavailable', task.task_id, exc_info=True)
+                    if 'Built-in plan artifact tracking is unavailable; inspect the raw stream for successful plan writes.' not in task.bridge_notices:
+                        task.bridge_notices.append('Built-in plan artifact tracking is unavailable; inspect the raw stream for successful plan writes.')
             if task.acc.failure_diagnostic is not None and previous_diagnostic is None:
                 registry._record_usage_limit(task)
             _record_events(task, backend, event, raw_offset)
@@ -4453,7 +4502,10 @@ async def _drain_stdout(task: Task, registry: TaskRegistry) -> None:
     finally:
         try:
             if handle is not None:
-                handle.close()
+                try:
+                    handle.close()
+                except OSError:
+                    log.warning("task %s: raw log close failed", task.task_id)
         finally:
             if descriptor is not None:
                 descriptor.close()

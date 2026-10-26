@@ -159,7 +159,9 @@ def qualify_enforcement(value: Any, *, require_core: bool = False, path: str = "
         raise ValueError(f"Malformed {path}")
     if require_core and not {"freedom", "mechanism", "os_enforced", "writes_confined"} <= value.keys():
         raise ValueError("Incomplete enforcement contract")
-    _shape(value, {"freedom": str, "mechanism": str, "os_enforced": bool, "writes_confined": bool, "writable_roots": list[str], "commit_push_blocked": bool, "direct_commit_commands_denied": bool, "publish_attempts_allowed_by_polybridge": bool, "network_access": str, "caveats": list[str], "extra_writable_paths": list[dict[str, Any]], "extra_path_certification": str | None, "extra_allowed_commands": list[str]}, path)
+    _shape(value, {"freedom": str, "mechanism": str, "os_enforced": bool, "writes_confined": bool, "writable_roots": list[str], "commit_push_blocked": bool, "direct_commit_commands_denied": bool, "publish_attempts_allowed": bool, "publish_attempts_allowed_by_polybridge": bool, "network_access": str, "caveats": list[str], "extra_writable_paths": list[dict[str, Any]], "extra_path_certification": str | None, "extra_allowed_commands": list[str]}, path)
+    if "publish_attempts_allowed" in value and "publish_attempts_allowed_by_polybridge" in value and value["publish_attempts_allowed"] != value["publish_attempts_allowed_by_polybridge"]:
+        raise ValueError(f"Contradictory publication intent aliases in {path}")
     _grants(value.get("extra_writable_paths", []))
     from .command_grants import check_bounds
     check_bounds(value.get("extra_allowed_commands", []))

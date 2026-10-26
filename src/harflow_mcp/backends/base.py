@@ -327,6 +327,11 @@ class Enforcement:
     extra_allowed_commands: tuple[str, ...] = ()
     """Dispatch-time command patterns granted to this run; empty (and omitted from `as_dict`) without `allowed_commands`."""
 
+    @property
+    def publish_attempts_allowed(self) -> bool:
+        """Canonical publication intent; the legacy constructor field remains compatible."""
+        return self.publish_attempts_allowed_by_polybridge
+
     def as_dict(self) -> dict[str, Any]:
         return {
             **({"caller_approval_tools": list(self.caller_approval_tools)} if self.caller_approval_tools else {}),
@@ -340,9 +345,14 @@ class Enforcement:
             "writable_roots": list(self.writable_roots),
             "commit_push_blocked": self.commit_push_blocked,
             "direct_commit_commands_denied": self.direct_commit_commands_denied,
-            "publish_attempts_allowed_by_polybridge": self.publish_attempts_allowed_by_polybridge,
+            "publish_attempts_allowed": self.publish_attempts_allowed,
+            # Deprecated alias retained for one compatibility version.
+            "publish_attempts_allowed_by_polybridge": self.publish_attempts_allowed,
             "network_access": self.network_access,
-            "caveats": list(self.caveats),
+            "caveats": [*self.caveats, *(
+                ["Read-only describes agent tool permissions; the harness may still persist session history, logs and configuration in its own user state directory."]
+                if self.freedom == "read_only" else []
+            )],
         }
 
 
@@ -617,6 +627,13 @@ class ExtraPathsUnsupported:
 
     def execution_configuration_namespaces(self, repo):
         raise UnsupportedCapability("backend execution configuration namespaces are not qualified")
+
+    def builtin_plan_path(self, path, repo):
+        return False
+
+    def observed_plan_files(self, event, acc, repo):
+        """Successful built-in plan writes observed by this backend; metadata only."""
+        return []
 
     def artifact_configuration_namespaces(self, repo):
         """Configuration namespaces excluded from metadata artifact registration."""
@@ -1004,7 +1021,19 @@ def nested_enforcement_violation(
     Pure on its inputs except for `os.path.realpath` on the two repo paths (needed to resolve a
     symlink pointing outside the parent's repo).
     """
-    parent = parent or {}
+    parent = dict(parent or {})
+    legacy = "publish_attempts_allowed_by_polybridge"
+    canonical = "publish_attempts_allowed"
+    for label, value in (("parent", parent), ("child", child)):
+        if isinstance(value, Mapping):
+            if canonical in value and legacy in value and value[canonical] != value[legacy]:
+                return _violation(canonical, f"{label} contradictory aliases", "cannot compare")
+            if canonical in value and type(value[canonical]) is not bool:
+                return _violation(canonical, f"{label} invalid intent", "cannot compare")
+            if legacy in value and type(value[legacy]) is not bool:
+                return _violation(canonical, f"{label} invalid intent", "cannot compare")
+    if canonical in parent:
+        parent[legacy] = parent[canonical]
     missing = [f for f in POLICY_FIELDS if f not in parent]
     if missing:
         return _violation("parent_enforcement_unrecorded", missing[0], "n/a (parent unrecorded)")
@@ -1046,7 +1075,11 @@ def nested_enforcement_violation(
     # publish_attempts_allowed_by_polybridge runs the other way: True means "permitted to try
     # publishing", so a parent that was *not* authorized (False) must not have a child that is.
     parent_publish = parent["publish_attempts_allowed_by_polybridge"]
-    child_publish = _field(child, "publish_attempts_allowed_by_polybridge")
+    child_publish = _field(child, "publish_attempts_allowed")
+    if child_publish is None:
+        child_publish = _field(child, "publish_attempts_allowed_by_polybridge")
+    if type(child_publish) is not bool:
+        return _violation(canonical, "child intent missing", "cannot compare")
     if not parent_publish and child_publish:
         return _violation(
             "publish_attempts_allowed_by_polybridge", parent_publish, child_publish

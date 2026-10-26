@@ -119,6 +119,27 @@ def unresolved(log_dir: Path):
 
 
 @task_operation
+def session_reservations(log_dir: Path):
+    """Unsettled launches that can still write a conversation; ambiguous launches stay reserved.
+
+    A crash may leave a spawned reservation forever. Only matching durable process identity,
+    with both owner and agent confirmed dead, releases its busy-session claim. This does not
+    authorize replaying the original launch or fabricate an exit receipt.
+    """
+    busy = []
+    for launch in unresolved(log_dir):
+        record = read_task_record(log_dir, launch['task_id'], include_prompt=False)
+        if (launch['state'] in {'claimed', 'spawned'} and record is not None
+                and launch.get('owner') is not None and record.owner == launch['owner']
+                and record.session_id == launch.get('session_id') and record.pid is not None
+                and identity.identity_check(record.owner) == 'dead'
+                and identity.identity_check(identity.task_identity(record.pid, record.start_time, record.markers)) == 'dead'):
+            continue
+        busy.append(launch)
+    return busy
+
+
+@task_operation
 def mark(log_dir: Path, task_id: str, generation: str, **changes):
     value = read_launch(log_dir, task_id)
     if value is None or value['generation'] != generation:

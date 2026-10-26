@@ -770,7 +770,10 @@ class Catalog:
                 conditions.append('session=?')
                 values.append(session_id)
             for key, value in filters.items():
-                if key == 'since':
+                if key == 'predecessor_task_id':
+                    conditions.append("(json_extract(payload,'$.parent_task_id') = ? OR json_extract(payload,'$.continuation_of_task_id') = ?)")
+                    values.extend((value, value))
+                elif key == 'since':
                     conditions.append('stamp >= ?')
                     values.append(value)
                 elif key == 'group':

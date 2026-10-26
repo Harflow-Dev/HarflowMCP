@@ -171,7 +171,7 @@ async def test_a_closed_live_task_is_not_redirected_into_the_ledger(log_dir: Pat
     put_record(log_dir, live_input=True, status="running", exit_code=None, finished_at=None,
                owner={"pid": 424_242, "start_time": "Wed Jan  1 00:00:00 2026", "markers": []})
     inbox.mark_closed(log_dir, SRC)
-    with pytest.raises(MCPError, match="finished; continue with resume_task"):
+    with pytest.raises(MCPError, match="closed live input.*Wait for settlement.*resume_task"):
         await server.send_message(SRC, "too late")
     assert not followups.state_path(log_dir, SRC).exists()
 

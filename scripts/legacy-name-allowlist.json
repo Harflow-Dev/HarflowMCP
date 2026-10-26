@@ -14,8 +14,8 @@
   {
     "file": "src/harflow_mcp/backends/base.py",
     "literal": "polybridge",
-    "reason": "Stable pre-extraction wire field; contract reset deferred.",
-    "count": 9
+    "reason": "Deprecated publication intent alias retained for one compatibility version, including legacy state validation.",
+    "count": 10
   },
   {
     "file": "src/harflow_mcp/backends/claude.py",
@@ -60,12 +60,6 @@
     "count": 2
   },
   {
-    "file": "src/harflow_mcp/server.py",
-    "literal": "polybridge",
-    "reason": "Stable pre-extraction wire field; contract reset deferred.",
-    "count": 2
-  },
-  {
     "file": "src/harflow_mcp/store.py",
     "literal": "pb_task_id",
     "reason": "Stable pre-extraction wire field; contract reset deferred.",
@@ -80,7 +74,7 @@
   {
     "file": "src/harflow_mcp/tasks.py",
     "literal": "polybridge",
-    "reason": "Stable pre-extraction wire field; contract reset deferred.",
+    "reason": "Deprecated publication intent alias retained for one compatibility version, including legacy state validation.",
     "count": 3
   },
   {
@@ -338,8 +332,8 @@
   {
     "file": "src/harflow_mcp/task_documents.py",
     "literal": "polybridge",
-    "reason": "Validate the unchanged historical enforcement payload field without renaming stored caller contracts.",
-    "count": 1
+    "reason": "Deprecated publication intent alias retained for one compatibility version, including legacy state validation.",
+    "count": 3
   },
   {
     "file": "tests/test_store.py",
@@ -387,6 +381,12 @@
     "file": "scripts/generate-approval-fixtures.py",
     "literal": "PB_DEPTH",
     "reason": "Clear inherited legacy caller signals for isolated fixture generation and redact their diagnostic names with explicit provenance.",
+    "count": 1
+  },
+  {
+    "file": "docs/contracts.md",
+    "literal": "polybridge",
+    "reason": "Documented deprecated publication-intent alias retained for one release.",
     "count": 1
   }
 ]

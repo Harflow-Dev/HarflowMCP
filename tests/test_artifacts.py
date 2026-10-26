@@ -1089,3 +1089,38 @@ def test_initial_task_lock_creation_waits_for_catalog_discovery(setup, monkeypat
             assert not future.done()
         future.result(timeout=5)
     assert (logs / f'{record.task_id}.lock').is_file()
+
+
+def test_engine_observed_backend_plan_preserves_registration_boundary(setup, monkeypatch):
+    logs, repo, record = setup
+    config = repo.parent / 'backend-config'
+    path = config / 'plans/actual.md'
+    path.parent.mkdir(parents=True); path.write_text('plan')
+    monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(config))
+    record = replace(record, backend='claude', freedom='read_only')
+    store.write(logs, record)
+    reference = {'path': str(path), 'tool_use_id': 'plan-write-1',
+                 'registered_observation': artifacts._observation(artifacts._regular_stat(path))}
+    with pytest.raises(ValueError):
+        artifacts.register(logs, str(path), 'report')
+    item = artifacts.record_backend_plan(logs, record.task_id, reference)
+    assert item == artifacts.record_backend_plan(logs, record.task_id, reference)
+    assert item['provenance']['method'] == 'observed_backend_plan'
+    page = artifacts.get(logs, record.task_id)
+    assert page['items'][0]['availability']['state'] == 'available'
+    path.write_text('updated plan')
+    assert artifacts.get(logs, record.task_id)['items'][0]['availability']['state'] == 'changed'
+    with pytest.raises(ValueError, match='changed'):
+        artifacts.record_backend_plan(logs, record.task_id, reference)
+    path.unlink()
+    assert artifacts.get(logs, record.task_id)['items'][0]['availability']['state'] == 'deleted'
+
+
+def test_engine_observed_backend_plan_refuses_other_namespace(setup, monkeypatch):
+    logs, repo, record = setup
+    record = replace(record, backend='claude', freedom='read_only')
+    store.write(logs, record)
+    path = repo / 'ordinary.md'; path.write_text('x')
+    with pytest.raises(ValueError, match='built-in'):
+        artifacts.record_backend_plan(logs, record.task_id,
+                                     {'path': str(path), 'tool_use_id': 'write', 'registered_observation': {}})

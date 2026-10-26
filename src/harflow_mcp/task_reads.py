@@ -19,12 +19,14 @@ REQUIRED_FIELDS = frozenset({'task_id', 'status', 'needs_reconciliation',
 
 
 def validate_filters(filters: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(filters, dict) or set(filters) - {'group', 'title_contains', 'repo', 'status', 'backend', 'since'}:
+    if not isinstance(filters, dict) or set(filters) - {'group', 'title_contains', 'repo', 'status', 'backend', 'since', 'predecessor_task_id'}:
         raise ValueError('Unknown task listing filter')
     result = {}
     for key, value in filters.items():
         if value is None:
             continue
+        if key == 'predecessor_task_id':
+            store.validate_task_id(value)
         if key == 'group':
             if not isinstance(value, str) or not value.strip() or len(value) > 128:
                 raise ValueError('group must be a nonblank string of at most 128 characters')
@@ -70,6 +72,8 @@ def brief_status(payload: dict[str, Any]) -> dict[str, Any]:
               for key, value in payload.items() if key in keys and (value is None or isinstance(value, (str, bool, int, float)))}
     if isinstance(payload.get('supervision'), dict):
         result['supervision'] = payload['supervision']
+    if isinstance(payload.get('successor_tasks'), dict):
+        result['successor_tasks'] = payload['successor_tasks']
     artifact = payload.get('artifact_summary')
     if isinstance(artifact, dict):
         count, state = artifact.get('count'), artifact.get('state')

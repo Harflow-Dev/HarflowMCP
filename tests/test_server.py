@@ -776,7 +776,7 @@ async def test_send_message_queues_for_the_next_continuation_without_live_input(
 async def test_send_message_after_close_says_to_resume(fake_task: Task) -> None:
     fake_task.live_input = True
     fake_task.inbox_closed = True
-    with pytest.raises(MCPError, match="finished; continue with resume_task"):
+    with pytest.raises(MCPError, match="closed live input.*Wait for settlement.*resume_task"):
         await call("send_message", task_id="task-1", text="hi")
 
 
