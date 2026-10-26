@@ -217,9 +217,16 @@ only; liveness is never stored) and each owner kind supplies its own "is it fini
   exist. Pollers write nothing when nothing changed.
 - **Corruption.** A ledger that cannot be parsed or qualified makes every operation raise
   `ResourceLedgerCorrupt`; it is never silently reset. `harflow-ctl resources-repair` (humans only,
-  the takeover gate) moves it to `ledger.corrupt-<timestamp>.json` and starts an empty ledger; it
-  refuses a healthy ledger. Later stages extend it to rebuild holders from durable launch and run
-  state; until then the person running it decides what was lost.
+  the takeover gate) is atomic and fail-closed: `begin_repair` keeps the corrupt file as
+  `ledger.corrupt-<timestamp>.json` and in the same step replaces it with a ledger carrying a repair
+  marker that every operation refuses (`ResourceLedgerRepairing`); `task_resources.collect_evidence`
+  then reads the durable launch receipts and task records outside the lock, and `complete_repair`
+  publishes the whole reconstruction in one atomic replace. A crash in between leaves the ledger
+  closed, not empty, and running the command again resumes it. The reconstruction keeps lending
+  relationships: a lender stays (flagged `release_requested` once settled) while any borrower is
+  unresolved, and a lender that cannot be found is replaced by a conservative entry owned by no task
+  that blocks its borrowers' names until they finish or a person releases it. It refuses a healthy
+  ledger. Waiting launches are not restored.
 - **Tasks use it through the launch receipt.** A task that asked for resources is acknowledged while its
   detached owner waits (`task_supervisor._acquire_resources`): the receipt moves
   `claimed -> waiting_for_resources -> granted -> spawned -> settled`, with `not_started` reachable

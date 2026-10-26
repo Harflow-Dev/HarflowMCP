@@ -208,8 +208,8 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     )
     release_p.add_argument(
         "--also-release-session", action="store_true",
-        help="also free the session claim of a granted launch; accepted now and a no-op until task "
-        "resources can hold one",
+        help="also free the session claim of a granted launch that has no task record (the reservation's "
+        "owner is asked nothing); launch-settle also settles its follow-ups and worktree usage",
     )
     release_p.add_argument("--json", action="store_true")
 
@@ -217,8 +217,10 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
         "resources-repair",
         help="move a corrupt resource ledger aside and start an empty one (for a person, never an agent)",
         description="Refuses a healthy ledger. The corrupt file is kept as ledger.corrupt-<timestamp>.json "
-        "in the resources directory. Holders are not rebuilt yet: check what is running before you "
-        "start work that needs a named resource.",
+        "in the resources directory. Every resource operation refuses while the repair runs, then the holders "
+        "and borrowers that unsettled task records and granted launches prove are restored in one step "
+        "(run it again if it was interrupted). Waiting launches are not restored: check what is running "
+        "before you start work that needs a named resource.",
     )
     repair_p.add_argument("--json", action="store_true")
 
@@ -973,23 +975,25 @@ def _cmd_resources_repair(args: argparse.Namespace) -> int:
         return refused
     log_dir = default_log_dir()
     try:
-        moved_to = resources.ResourceLedger(log_dir.parent).repair()
-        rebuilt = task_resources.rebuild(log_dir)
+        rebuilt = task_resources.repair(log_dir)
     except resources.ResourceError as exc:
         return _fail(args, exc.code, str(exc))
+    moved_to = rebuilt["moved_to"]
     result = {
-        "moved_to": str(moved_to),
+        "moved_to": moved_to,
         "rebuilt": True,
         "restored": rebuilt["restored"],
         "conflicts": rebuilt["conflicts"],
-        "note": "The ledger was started from durable evidence only: holders of unsettled task records and "
-        "granted launches were restored; waiting launches, borrowers and anything unprovable were not. "
-        "Verify what is running before starting work that needs a named resource.",
+        "note": "The ledger was published in one step from durable evidence only: holders of unsettled task records "
+        "and granted launches were restored together with the borrowers that depend on them (a lender that cannot "
+        "be found is replaced by an entry that blocks its borrowers' names until they finish or a person releases "
+        "it); waiting launches and anything unprovable were not. Verify what is running before starting work that "
+        "needs a named resource.",
     }
     if args.json:
         print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": result})))
     else:
-        print(f"moved the corrupt ledger to {moved_to}; restored {len(rebuilt['restored'])} holder(s)")
+        print(f"moved the corrupt ledger to {moved_to}; restored {len(rebuilt['restored'])} entr{'y' if len(rebuilt['restored']) == 1 else 'ies'}")
         print(result["note"], file=sys.stderr)
     return 0
 

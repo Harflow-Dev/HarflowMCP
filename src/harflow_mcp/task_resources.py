@@ -6,8 +6,8 @@
   is acknowledged to its caller while its detached owner waits (`waiting_for_resources`), then
   `granted`, then spawned. Until spawn there is no record, so every reader of `record.pid` or
   `outcome_unobserved` is untouched; the pending view below is built from the receipt.
-* **Scope.** A nested dispatch is under its caller's holding scope: the caller's reservation when
-  its record holds one, or a scope that declared nothing when the caller runs inside a workflow
+* **Scope.** A nested dispatch is under the nearest holding scope on its caller's `spawned_by` chain:
+  an ancestor's reservation, or a scope that declared nothing when an ancestor runs inside a workflow
   attempt (stage B; the workflow stage widens that). Such a dispatch may only borrow, never queue.
 * **Resolver.** `task_resolver` is what the reaper asks about a `task` entry. It decides from
   durable receipt and record state by task id, never from a post-spawn attach, and keeps the
@@ -80,23 +80,55 @@ def validate_request(names: Any, wait_seconds: Any) -> tuple[list[str], int]:
     return wanted, wait_seconds
 
 
+MAX_SCOPE_DEPTH = 64
+
+
+def _scope_of(log_dir: Path, task_id: str, record: Any, receipt: dict[str, Any] | None) -> Scope | None:
+    """The scope one task holds, or None when it holds nothing itself."""
+    if (log_dir.parent / "workflow-owners" / f"{task_id}.json").exists():
+        return Scope(None)
+    held = getattr(record, "resources", None) if record is not None else (receipt or {}).get("resources")
+    if isinstance(held, dict) and held.get("state") in ("held", "granted") and isinstance(held.get("reservation_id"), str):
+        return Scope(held["reservation_id"])
+    return None
+
+
 def holding_scope(log_dir: Path, caller: Any) -> Scope | None:
     """The scope a detected caller task puts a nested dispatch under, or None for a root dispatch.
 
-    A caller running inside a workflow attempt always holds a scope (its attempt holds a checkout
-    lease), even with no named resources, so it refuses every name until the workflow stage lets
-    attempts declare some. Otherwise the caller's own held reservation lends; a caller holding
-    nothing is no scope, and the dispatch queues like any other root request.
+    The scope is the nearest holder on the caller's `spawned_by` chain, the caller included: a task
+    that owns a `workflow-owners` receipt (a workflow attempt always holds a checkout lease, so it is
+    a scope even with no named resources and refuses every name until the workflow stage lets attempts
+    declare some), or one whose record or pending launch holds a reservation. A caller with no holder
+    anywhere above it is no scope, and the dispatch queues like any other root request. Walking the
+    chain is what stops a non-holding intermediate from hiding its ancestors' hold and letting a
+    grandchild queue behind a lender that is waiting on it. An ancestor that cannot be read, or a chain
+    that does not end, fails closed.
     """
+    from .task_supervision import read_launch, read_task_record
     if caller is None:
         return None
-    task_id = caller.record.task_id
-    if (log_dir.parent / "workflow-owners" / f"{task_id}.json").exists():
-        return Scope(None)
-    held = getattr(caller.record, "resources", None)
-    if isinstance(held, dict) and held.get("state") == "held" and isinstance(held.get("reservation_id"), str):
-        return Scope(held["reservation_id"])
-    return None
+    record, task_id = caller.record, caller.record.task_id
+    receipt = None
+    seen: set[str] = set()
+    while True:
+        if task_id in seen or len(seen) >= MAX_SCOPE_DEPTH:
+            raise ResourceNotDeclaredByScope("the dispatch lineage is cyclic or too deep to establish an enclosing scope; refused")
+        seen.add(task_id)
+        scope = _scope_of(log_dir, task_id, record, receipt)
+        if scope is not None:
+            return scope
+        parent = getattr(record, "spawned_by", None) if record is not None else (receipt or {}).get("spawned_by")
+        if not parent:
+            return None
+        try:
+            record = read_task_record(log_dir, parent, include_prompt=False)
+            receipt = read_launch(log_dir, parent) if record is None else None
+        except (store.TaskDocumentError, OSError, ValueError) as exc:
+            raise ResourceNotDeclaredByScope(f"the enclosing task {parent} cannot be read ({exc}); refused") from None
+        if record is None and receipt is None:
+            raise ResourceNotDeclaredByScope(f"the enclosing task {parent} cannot be found, so no enclosing scope can be established; refused")
+        task_id = parent
 
 
 def build_request(
@@ -568,46 +600,86 @@ def settle_uncertain(log_dir: Path, task_id: str) -> dict[str, Any]:
             "released_reservations": released, "followups": outcome}
 
 
-def rebuild(log_dir: Path) -> dict[str, Any]:
-    """Re-create held ledger entries from durable launch receipts and records, where provable.
+def _held_task_spec(task_id: str, held: dict[str, Any]) -> dict[str, Any]:
+    return {"reservation_id": held["reservation_id"], "names": list(held["names"]), "owner": {"kind": "task", "task_id": task_id}}
 
-    Provable means: a `granted` launch with no record (its owner may be about to spawn), or a
-    record whose `resources` is `held` and whose run is not conclusively settled. Waiting launches
-    are *not* restored (a waiting owner re-enqueues nothing, and a dead one never started). An entry
-    that conflicts with an already restored holder is reported, not forced.
+
+def collect_evidence(log_dir: Path) -> dict[str, Any]:
+    """The ledger entries that durable launch receipts and task records prove, as repair specs.
+
+    Provable means: a record whose `resources` is `held` and whose run is not conclusively settled,
+    or a `granted` launch with no record (its owner may be about to spawn). Roots come first; a
+    borrower is recorded with its lender, and the lender is kept while any borrower is unresolved:
+    from its own record when that is readable (flagged `release_requested` once the lender itself
+    settled), or as a conservative entry that blocks the borrowers' names when the lender cannot be
+    found, because freeing it early would break the guarantee the borrow was granted under. Waiting
+    launches are not restored (a live waiting owner finds its entry gone and settles `not_started`;
+    a dead one never started). Pure reads; nothing here takes the ledger lock.
     """
     from . import retention
     from .task_supervision import read_task_record, reservations
-    ledger = ledger_for(log_dir)
-    restored: list[str] = []
-    conflicts: list[dict[str, Any]] = []
+    roots: dict[str, dict[str, Any]] = {}
+    borrowers: list[dict[str, Any]] = []
+    by_reservation: dict[str, tuple[str, dict[str, Any]]] = {}
     seen: set[str] = set()
 
-    def attempt(task_id: str, held: dict[str, Any]) -> None:
+    def note(task_id: str, held: dict[str, Any], lender: str | None) -> None:
         rid = held.get("reservation_id")
-        if not isinstance(rid, str) or rid in seen:
+        if not isinstance(rid, str) or rid in seen or not isinstance(held.get("names"), list):
             return
         seen.add(rid)
-        try:
-            entry = ledger.restore_held(held["names"], {"kind": "task", "task_id": task_id}, rid)
-        except ResourceError as exc:
-            conflicts.append({"task_id": task_id, "reservation_id": rid, "reason": exc.code})
-            return
-        if entry is None:
-            conflicts.append({"task_id": task_id, "reservation_id": rid, "reason": "name_already_held"})
+        spec = _held_task_spec(task_id, held)
+        if lender:
+            borrowers.append(spec | {"borrows_from": lender})
         else:
-            restored.append(rid)
+            roots[rid] = spec
 
     for record in store.read_all(log_dir):
         held = getattr(record, "resources", None)
-        if not isinstance(held, dict) or held.get("state") != "held" or held.get("borrowed_from"):
+        if not isinstance(held, dict) or not isinstance(held.get("reservation_id"), str):
+            continue
+        by_reservation.setdefault(held["reservation_id"], (record.task_id, held))
+        if held.get("state") != "held":
             continue
         status = store.resolve_status(log_dir, record, detail=False)[0]
         if not retention._conclusively_settled(record, status):
-            attempt(record.task_id, held)
+            note(record.task_id, held, held.get("borrowed_from") if isinstance(held.get("borrowed_from"), str) else None)
     for receipt in reservations(log_dir):
         held = receipt.get("resources")
-        if (isinstance(held, dict) and receipt["state"] == "granted" and not held.get("scope")
+        if (isinstance(held, dict) and receipt["state"] == "granted"
                 and read_task_record(log_dir, receipt["task_id"], include_prompt=False) is None):
-            attempt(receipt["task_id"], held)
-    return {"restored": restored, "conflicts": conflicts}
+            scope = held.get("scope") if isinstance(held.get("scope"), dict) else {}
+            lender = held.get("borrowed_from") or scope.get("reservation_id")
+            note(receipt["task_id"], held, lender if isinstance(lender, str) else None)
+
+    conflicts: list[dict[str, Any]] = []
+    lenders: dict[str, list[dict[str, Any]]] = {}
+    for spec in borrowers:
+        lenders.setdefault(spec["borrows_from"], []).append(spec)
+    for lender, group in lenders.items():
+        if lender in roots:
+            continue
+        known = by_reservation.get(lender)
+        if known is not None and isinstance(known[1].get("names"), list):
+            roots[lender] = _held_task_spec(known[0], known[1] | {"reservation_id": lender}) | {"release_requested": True}
+            continue
+        # Nobody can say who the lender was or what it declared: block at least what its borrowers use.
+        names = sorted({name for spec in group for name in spec["names"]})
+        roots[lender] = {"reservation_id": lender, "names": names, "owner": {"kind": "task"}, "release_requested": True}
+        conflicts.extend({"task_id": spec["owner"]["task_id"], "reservation_id": lender, "reason": "lender_unknown"} for spec in group)
+    return {"specs": [*roots.values(), *borrowers], "conflicts": conflicts}
+
+
+def repair(log_dir: Path) -> dict[str, Any]:
+    """Repair a corrupt (or interrupted-repair) ledger from durable state, atomically and fail-closed.
+
+    The ledger refuses every operation from `begin_repair` until the complete reconstruction is
+    published, so nothing can take a name that is really held while the evidence is collected. If
+    collection fails, the ledger stays closed and running this again resumes the repair.
+    """
+    ledger = ledger_for(log_dir)
+    token = ledger.begin_repair()
+    evidence = collect_evidence(log_dir)
+    result = ledger.complete_repair(token, evidence["specs"])
+    return {"moved_to": str(token.moved_to) if token.moved_to is not None else None,
+            "restored": result.restored, "conflicts": [*evidence["conflicts"], *result.conflicts]}

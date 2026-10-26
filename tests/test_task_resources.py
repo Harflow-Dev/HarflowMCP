@@ -571,8 +571,9 @@ async def test_automatic_continuation_requeues_and_is_acknowledged_while_blocked
     if reservation["state"] == "accepted":
         assert launch_state(tmp_path, successor) in {"waiting_for_resources", "granted", "spawned", "settled"}
     await wait_for(lambda: store.read(log_dir, successor) is not None, 60)
-    assert store.read(log_dir, successor).continuation_of_task_id == first.task_id
-    assert store.read(log_dir, successor).resources["names"] == ["sim"]
+    # read_task_record retries a metadata replacement observed mid-read, which the successor's first writes cause.
+    assert task_supervision.read_task_record(log_dir, successor).continuation_of_task_id == first.task_id
+    assert task_supervision.read_task_record(log_dir, successor).resources["names"] == ["sim"]
     assert competitor.task_id != successor
 
 

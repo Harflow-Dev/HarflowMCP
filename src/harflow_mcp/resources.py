@@ -41,9 +41,13 @@ removes only entries whose generation is unchanged and whose verdict was `settle
 the entry: uncertainty never frees a resource.
 
 **Corruption is never silently reset.** A ledger that cannot be parsed or qualified makes every
-operation raise `ResourceLedgerCorrupt`. `repair` is the one explicit way out: it moves the file
-aside to `ledger.corrupt-<timestamp>.json` and starts an empty ledger. Later stages extend it to
-rebuild holders from durable launch and run state; in stage A there is nothing to rebuild from.
+operation raise `ResourceLedgerCorrupt`. Repair is the one explicit way out and it is atomic and
+fail-closed: `begin_repair` keeps the corrupt file as `ledger.corrupt-<timestamp>.json` and in the same
+step replaces it with a ledger carrying a repair marker, which every operation refuses
+(`ResourceLedgerRepairing`) until `complete_repair` publishes the whole reconstruction in one atomic
+replace. The caller collects its evidence (durable launch receipts and task records, including who is
+borrowing from whom) between the two, outside the lock; a crash in between leaves the ledger closed,
+not empty, and running repair again resumes it. `task_resources.repair` is that caller.
 """
 
 from __future__ import annotations
@@ -131,6 +135,16 @@ class LedgerNotCorrupt(ResourceError):
     code = "ledger_not_corrupt"
 
 
+class ResourceLedgerRepairing(ResourceError):
+    """A repair is in progress (or was interrupted): every operation refuses until it is published."""
+
+    code = "resource_ledger_repairing"
+
+
+class RepairNotInProgress(ResourceError):
+    code = "repair_not_in_progress"
+
+
 def capacity(name: str) -> int:
     """Slots for `name`. Capacity 1 for every name; the seam where configured capacity plugs in."""
     return 1
@@ -199,6 +213,20 @@ class ReapReport:
     errors: dict[str, str] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class RepairToken:
+    """Names the repair a caller started; only its holder may publish the reconstruction."""
+
+    id: str
+    moved_to: Path | None
+
+
+@dataclass
+class RepairResult:
+    restored: list[str] = field(default_factory=list)
+    conflicts: list[dict[str, Any]] = field(default_factory=list)
+
+
 Resolver = Callable[[Entry], str]
 
 
@@ -260,6 +288,16 @@ def _entry_view(raw: Mapping[str, Any]) -> Entry:
         deadline_at=raw.get("deadline_at"),
         release_requested=bool(raw.get("release_requested", False)),
     )
+
+
+def _validate_repair(repair: Any) -> dict[str, Any] | None:
+    if repair is None:
+        return None
+    if (type(repair) is not dict or type(repair.get("id")) is not str or RESERVATION_ID_RE.fullmatch(repair["id"]) is None
+            or type(repair.get("started_at")) is not str
+            or (repair.get("moved_to") is not None and type(repair["moved_to"]) is not str)):
+        raise ValueError("the ledger has an invalid repair marker")
+    return repair
 
 
 def _validate_document(document: Any) -> list[dict[str, Any]]:
@@ -442,21 +480,35 @@ class ResourceLedger:
         finally:
             os.close(descriptor)
 
-    def _read_entries(self) -> list[dict[str, Any]]:
+    def _read_document(self) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+        """The qualified entries and the repair marker, if any. Raises `ResourceLedgerCorrupt`."""
         try:
             with self.path.open("rb") as handle:
                 payload = handle.read(64 * 1024 * 1024)
         except FileNotFoundError:
-            return []
+            return [], None
         except OSError as exc:
             raise ResourceLedgerUnavailable(f"the resource ledger cannot be read: {exc}") from None
         try:
-            return _validate_document(json.loads(payload))
+            document = json.loads(payload)
+            entries = _validate_document(document)
+            return entries, _validate_repair(document.get("repair"))
         except (ValueError, RecursionError, UnicodeDecodeError, InvalidResourceRequest) as exc:
             raise ResourceLedgerCorrupt(
                 f"the resource ledger at {self.path} is corrupt ({exc}); every resource operation refuses "
                 "until a person runs `harflow-ctl resources-repair`"
             ) from None
+
+    def _read_entries(self) -> list[dict[str, Any]]:
+        """The entries of a usable ledger. A ledger being repaired is not usable: its entries are the
+        old, partial or empty ones, and acting on them could make an occupied resource look free."""
+        entries, repair = self._read_document()
+        if repair is not None:
+            raise ResourceLedgerRepairing(
+                f"the resource ledger is being repaired (since {repair['started_at']}); every resource operation "
+                "refuses until `harflow-ctl resources-repair` finishes (run it again if it was interrupted)"
+            )
+        return entries
 
     def _transact(self, action: Callable[[_Transaction], Any]) -> Any:
         """One bounded read-modify-write under the leaf lock. Nothing in `action` may block or await."""
@@ -763,26 +815,120 @@ class ResourceLedger:
 
     # ---- repair ----------------------------------------------------------------------------
 
-    def repair(self) -> Path:
-        """Move a corrupt ledger aside and start an empty one; return where the old file went.
+    def begin_repair(self) -> RepairToken:
+        """Close a corrupt ledger for repair and return the token that publishes the reconstruction.
 
-        Refuses a healthy ledger (`LedgerNotCorrupt`) so the command cannot be used to wipe live
-        reservations. Stage A rebuilds nothing: later stages extend this to restore holders from
-        durable launch and run state, and until then a person decides what was lost.
+        The corrupt file is kept as `ledger.corrupt-<timestamp>.json` and replaced, in one atomic
+        step, by a ledger carrying a repair marker. From then on every operation refuses
+        (`ResourceLedgerRepairing`) until `complete_repair` publishes the whole reconstruction, so
+        an occupied resource can never look free while the evidence is being collected, and a crash
+        in between leaves the ledger closed rather than empty. Calling it again on a ledger already
+        being repaired returns the same token, which is how an interrupted repair is resumed. A
+        healthy ledger is refused (`LedgerNotCorrupt`).
         """
         descriptor = self._lock()
         try:
             try:
-                self._read_entries()
+                _entries, repair = self._read_document()
             except ResourceLedgerCorrupt:
-                pass
+                repair = None
             else:
-                raise LedgerNotCorrupt("the resource ledger is healthy; nothing to repair")
+                if repair is None:
+                    raise LedgerNotCorrupt("the resource ledger is healthy; nothing to repair")
+                moved = repair.get("moved_to")
+                return RepairToken(repair["id"], Path(moved) if moved else None)
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
             target = self.directory / f"ledger.corrupt-{stamp}.json"
-            os.rename(self.path, target)
+            os.link(self.path, target)  # the evidence is kept before anything replaces it
             _fsync_directory(self.directory)
-            _atomic_write(self.path, _empty_document())
-            return target
+            token = RepairToken(uuid.uuid4().hex, target)
+            document = _empty_document()
+            document["repair"] = {"id": token.id, "started_at": _now(), "moved_to": str(target)}
+            _atomic_write(self.path, document)
+            return token
         finally:
             self._unlock(descriptor)
+
+    def complete_repair(self, token: RepairToken, specs: Iterable[Mapping[str, Any]]) -> RepairResult:
+        """Publish the complete reconstruction in one atomic replace and reopen the ledger.
+
+        Each spec is `{reservation_id, names, owner, borrows_from?, release_requested?}`. Roots are
+        restored first and never displace one another (an overlapping later root is reported as a
+        conflict, not forced); a borrower is restored only under a restored root that covers its
+        names. Everything is `held`: repair never queues.
+        """
+        built: list[dict[str, Any]] = []
+        result = RepairResult()
+        descriptor = self._lock()
+        try:
+            _entries, repair = self._read_document()
+            if repair is None or repair["id"] != token.id:
+                raise RepairNotInProgress("no repair with this token is in progress")
+            now = _now()
+            listed = [dict(spec) for spec in specs]
+            roots = [spec for spec in listed if not spec.get("borrows_from")]
+            borrowers = [spec for spec in listed if spec.get("borrows_from")]
+            held_names: set[str] = set()
+            restored_roots: dict[str, dict[str, Any]] = {}
+            seen: set[str] = set()
+
+            def entry_for(spec: Mapping[str, Any]) -> dict[str, Any] | None:
+                rid = spec.get("reservation_id")
+                try:
+                    wanted = validate_names(spec["names"])
+                    who = _owner_from(spec["owner"])
+                    validate_reservation_id(rid)
+                except (KeyError, ResourceError) as exc:
+                    result.conflicts.append({"reservation_id": rid, "reason": getattr(exc, "code", "invalid_evidence")})
+                    return None
+                if rid in seen:
+                    result.conflicts.append({"reservation_id": rid, "reason": "duplicate_reservation"})
+                    return None
+                seen.add(rid)
+                raw: dict[str, Any] = {"reservation_id": rid, "names": list(wanted), "state": "held", "owner": who.as_dict(),
+                                       "enqueued_at": now, "granted_at": now, "generation": 1}
+                if spec.get("release_requested"):
+                    raw["release_requested"] = True
+                return raw
+
+            for spec in roots:
+                raw = entry_for(spec)
+                if raw is None:
+                    continue
+                if not held_names.isdisjoint(raw["names"]):
+                    result.conflicts.append({"reservation_id": raw["reservation_id"], "reason": "name_already_held"})
+                    continue
+                held_names.update(raw["names"])
+                restored_roots[raw["reservation_id"]] = raw
+                built.append(raw)
+                result.restored.append(raw["reservation_id"])
+            for spec in borrowers:
+                raw = entry_for(spec)
+                if raw is None:
+                    continue
+                root = restored_roots.get(spec["borrows_from"])
+                if root is None or not set(raw["names"]) <= set(root["names"]):
+                    result.conflicts.append({"reservation_id": raw["reservation_id"], "reason": "lender_not_restored"})
+                    continue
+                raw["borrows_from"] = root["reservation_id"]
+                built.append(raw)
+                result.restored.append(raw["reservation_id"])
+            document = _empty_document()
+            document["entries"] = built
+            _atomic_write(self.path, document)
+        finally:
+            self._unlock(descriptor)
+        return result
+
+    def repair(self) -> Path:
+        """Move a corrupt ledger aside and start an empty one; return where the old file went.
+
+        Refuses a healthy ledger (`LedgerNotCorrupt`) so the command cannot be used to wipe live
+        reservations. This rebuilds nothing: `task_resources.repair` is the full repair, which
+        restores holders from durable launch and run state between `begin_repair` and
+        `complete_repair`.
+        """
+        token = self.begin_repair()
+        self.complete_repair(token, [])
+        assert token.moved_to is not None
+        return token.moved_to

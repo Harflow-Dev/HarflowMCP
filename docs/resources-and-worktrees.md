@@ -72,8 +72,10 @@ children may only ask for names it declared, and they are granted at once as a *
 capacity used, no queueing); any other name is refused with `resource_not_declared_by_scope`. Declare
 every resource at the outermost task. The rule is what keeps waits from forming a cycle: nothing
 that holds a resource ever waits for another one. Borrowers share the lender's names, so mutual
-exclusion *inside* one scope is the scope owner's job. A lender's release is deferred until its last
-borrower is done. A task started from inside a workflow attempt cannot request resources in this
+exclusion *inside* one scope is the scope owner's job. The scope is the nearest task on the
+caller's `spawned_by` chain that holds a reservation (a grandchild is covered through a child that
+holds nothing); an ancestor that cannot be read refuses the request. A lender's release is deferred
+until its last borrower is done. A task started from inside a workflow attempt cannot request resources in this
 release. When the caller cannot be identified, the request is refused.
 
 ### Recovery
@@ -95,10 +97,16 @@ release. When the caller cannot be identified, the request is refused.
   otherwise `delivery_unknown`. Check that no agent for the task is running first. It works from the
   launch receipt, so it still works after `resources-release` removed the reservation.
   The recovery commands refuse any detected agent caller and fail closed when that cannot be decided.
-- A corrupt ledger makes every resource operation refuse. `harflow-ctl resources-repair` moves it to
-  `ledger.corrupt-<timestamp>.json` and rebuilds the holders it can prove from durable state
-  (unsettled task records and `granted` launches). Waiting launches, borrowers and anything
-  unprovable are not restored: check what is running before starting work that needs a name.
+- A corrupt ledger makes every resource operation refuse. `harflow-ctl resources-repair` keeps it as
+  `ledger.corrupt-<timestamp>.json` and closes the ledger (every operation reports
+  `resource_ledger_repairing`) while it collects the holders it can prove from durable state
+  (unsettled task records and `granted` launches) and the borrowers that depend on them, then
+  publishes them all in one step. A lender with a live borrower stays held (`release_requested`
+  once the lender itself is done); one that cannot be found is replaced by an entry that blocks its
+  borrowers' names until they finish or you release it. If the command is interrupted the ledger
+  stays closed: run it again. Waiting launches are not restored (their owners settle them
+  `not_started`) and neither is anything unprovable: check what is running before starting work
+  that needs a name.
 
 ### Guidance for agents
 
