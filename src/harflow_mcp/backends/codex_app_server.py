@@ -934,6 +934,7 @@ def enforcement_caveats(environ: Any = None, write: bool = False) -> tuple[str, 
         ("File changes Codex asks about (patches outside the workspace) can be approved one exact patch at a time; the paths and diff are frozen at approval, a completion that differs stops the run, and writes to CODEX_HOME, Git config and hooks and every .codex and .agents from the Git root to the working directory are refused; the paths are re-checked just before the approval is written, and a changed or newly protected path is refused instead. "
          if write else "File changes outside the workspace are not approvable without caller_write_approvals: those requests are declined. ")
         + "MCP tool calls that need approval are always rejected.",
+        "No scratch directory is granted: HARFLOW_SCRATCH is not set, and HARFLOW_CHAIN_SCRATCH and HARFLOW_GROUP_SCRATCH, when set, name shared folders the sandbox leaves read-only.",
     ]
     if notes["mcp_servers"]:
         caveats.append("User MCP servers in CODEX_HOME/config.toml stay in effect: " + ", ".join(notes["mcp_servers"]) + ".")

@@ -447,8 +447,8 @@ class CodexBackend(ExtraPathsUnsupported):
         from ..canonical_paths import canonical
         repo = canonical(Path(invocation.argv[invocation.argv.index('-C') + 1]))
         scopes = [(repo, 'directory')]
-        if invocation.scratch_directory:
-            scopes.append((canonical(Path(invocation.scratch_directory)), 'directory'))
+        for scratch in ((invocation.scratch_directory,) if invocation.scratch_directory else ()) + tuple(invocation.shared_scratch_directories):
+            scopes.append((canonical(Path(scratch)), 'directory'))
         scopes.extend((Path(grant.path), grant.kind) for grant in grants)
         for scope, kind in scopes:
             info = scope.stat()
@@ -468,7 +468,7 @@ class CodexBackend(ExtraPathsUnsupported):
         from ..execution_config import assert_execution_config_outside_writes
         repo = Path(invocation.argv[invocation.argv.index('-C') + 1]).resolve(strict=True)
         try:
-            assert_execution_config_outside_writes(repo, grants, invocation.scratch_directory)
+            assert_execution_config_outside_writes(repo, grants, ((invocation.scratch_directory,) if invocation.scratch_directory else ()) + tuple(invocation.shared_scratch_directories))
         except (ValueError, OSError, RuntimeError) as exc:
             raise UnsafeInvocationError(str(exc)) from exc
 
@@ -477,8 +477,8 @@ class CodexBackend(ExtraPathsUnsupported):
         from ..canonical_paths import canonical
         repo = canonical(Path(invocation.argv[invocation.argv.index('-C') + 1]))
         scopes = [(repo, 'directory'), *((Path(g.path), g.kind) for g in grants)]
-        if invocation.scratch_directory:
-            scopes.append((canonical(Path(invocation.scratch_directory)), 'directory'))
+        for scratch in ((invocation.scratch_directory,) if invocation.scratch_directory else ()) + tuple(invocation.shared_scratch_directories):
+            scopes.append((canonical(Path(scratch)), 'directory'))
         try:
             return qualify_configuration(repo, scopes, [(Path(g.path), g.kind) for g in grants])
         except (ValueError, OSError, RuntimeError) as exc:
@@ -595,6 +595,22 @@ class CodexBackend(ExtraPathsUnsupported):
             index = argv.index("--add-dir")
         argv[index:index] = ["--add-dir", directory]
         return replace(invocation, argv=argv, scratch_directory=directory)
+
+    def with_shared_directories(self, invocation: Invocation, paths: tuple[Path, ...], freedom: Freedom) -> Invocation:
+        """One repeated `--add-dir` per shared chain/group folder: after the task scratch, before any extra grants."""
+        if freedom == "read_only":
+            raise ValueError("read-only tasks cannot receive writable shared scratch directories")
+        if invocation.shared_scratch_directories:
+            raise ValueError("invocation already has shared scratch directories")
+        directories = tuple(str(path.resolve()) for path in paths)
+        argv = list(invocation.argv)
+        index = argv.index("--") if "--" in argv else len(argv)
+        if index and argv[index - 1] == "resume":
+            index -= 1
+        if invocation.extra_writable_paths:
+            index = argv.index("--add-dir") + (2 if invocation.scratch_directory else 0)
+        argv[index:index] = [part for directory in directories for part in ("--add-dir", directory)]
+        return replace(invocation, argv=argv, shared_scratch_directories=directories)
 
     def build_start_argv(
         self,
@@ -784,7 +800,7 @@ class CodexBackend(ExtraPathsUnsupported):
             )
 
         seen, is_resume = self._parse_options(options, argv, bool(invocation.extra_writable_paths))
-        expected_directories = ([invocation.scratch_directory] if invocation.scratch_directory else []) + list(invocation.extra_writable_paths)
+        expected_directories = ([invocation.scratch_directory] if invocation.scratch_directory else []) + list(invocation.shared_scratch_directories) + list(invocation.extra_writable_paths)
         if invocation.extra_writable_paths and freedom not in ("write_in_repo", "publish"):
             raise UnsafeInvocationError("extra writable paths require bounded workspace-write")
         if seen.get("--add-dir", []) != expected_directories or (expected_directories and freedom == "read_only"):
@@ -1411,7 +1427,7 @@ class CodexBackend(ExtraPathsUnsupported):
 
     def approval_notice(self, write):
         return ("Caller approvals use `codex app-server` with approval policy on-request for one exact command. An approved command may run outside the OS sandbox. "
-                "This repository's .codex configuration is ignored, and no task scratch directory is provided (HARFLOW_TASK_SCRATCH is not set). No reusable permission grant is installed.")
+                "This repository's .codex configuration is ignored, and no task scratch directory is provided (HARFLOW_SCRATCH and HARFLOW_TASK_SCRATCH are not set). The shared chain and group folders (HARFLOW_CHAIN_SCRATCH, HARFLOW_GROUP_SCRATCH) are exposed read-only. No reusable permission grant is installed.")
 
     def approval_frame_kind(self, event):
         from . import codex_app_server as app_server

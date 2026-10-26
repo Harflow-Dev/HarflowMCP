@@ -564,9 +564,12 @@ async def start_task(
             enforcement.network_access stays "not_controlled" there. What actually applied is
             stated on the returned task's enforcement.network_access.
         group: Optional label (1-128 chars), inherited by any nested dispatch this task's own
-            agent makes through harflow_mcp (unless that dispatch gives its own). Purely
-            informational — harflow_mcp does not act on it — useful for tagging a family of
-            dispatches you want to find together later via list_tasks.
+            agent makes through harflow_mcp (unless that dispatch gives its own). Useful for
+            tagging a family of dispatches you want to find together later via list_tasks. It
+            also names a scratch folder shared by every task in the group, exposed to the
+            agent as $HARFLOW_GROUP_SCRATCH and reported as `scratch.group` in task status
+            (see docs/shared-scratch.md); every task also gets $HARFLOW_CHAIN_SCRATCH, shared
+            with its resumes and continuations.
         title: Optional short human-readable label (at most 90 characters after trimming, no
             control characters) shown for this task in the Monitor. Purely informational. It is
             never inherited from a calling task: a dispatch without a title has none. A
@@ -894,8 +897,8 @@ async def preview_task_permissions(
 
     Uses the same bounded extra_writable_paths validation, installed-version checks and detected
     owner caps as start_task. Returns requested/effective typed paths, certification and truthful
-    enforcement. Writable scratch-aware launches disclose future task scratch symbolically in
-    writable_roots without allocating it; read-only previews have no scratch root.
+    enforcement. Writable scratch-aware launches disclose future task, chain and group scratch
+    symbolically in writable_roots without allocating them; read-only previews have no scratch root.
     The preview is an observation, not a reservation: launch revalidates paths and
     configuration. Extra grants never authorize publication. Workflow/native-adapter grants and
     unverified harness configurations are unavailable. Known external backend execution configuration
@@ -2977,7 +2980,7 @@ async def register_artifact(path: str, kind: str, note: str = '') -> dict[str, A
     """Register an existing regular-file metadata reference for the verified calling task.
 
     No owner parameter is accepted. Relative paths use the recorded repository; only repository,
-    allocated own scratch, and revalidated saved grants are accepted. A standalone task, or a
+    allocated own scratch (including a granted shared chain or group folder), and revalidated saved grants are accepted. A standalone task, or a
     running workflow node, orchestrator turn or native-subagent controller, may register; its
     reference is bound to that workflow execution. Builders and inherited descendants are refused.
     A native subagent has no channel of its own: what it registers lands on its controller.

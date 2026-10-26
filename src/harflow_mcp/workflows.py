@@ -2911,7 +2911,7 @@ class WorkflowSupervisor:
                         self._task_update(activation["id"], task_id, {"dispatch_stage": "spawn_requested", **({"timeout_deadline": timeout_deadline} if timeout_deadline is not None else {})})
                         if role == "node" and freedom != "read_only":
                             from . import scratch
-                            dispatch_prompt += "\nTask scratch directory (absolute): " + str(scratch.directory(self.registry._log_dir, task_id).resolve()) + "\nUse this directory for temporary artifacts outside the repository; artifacts are retained with task records."
+                            dispatch_prompt += "\nTask scratch directory (absolute): " + str(scratch.directory(self.registry._log_dir, task_id).resolve()) + "\nUse this directory for temporary artifacts outside the repository; artifacts are retained with task records. $HARFLOW_CHAIN_SCRATCH and $HARFLOW_GROUP_SCRATCH, when set, are shared folders that persist across resumes and sibling tasks."
                             extra = len(dispatch_prompt.encode()) - context_delivery["total_bytes"]
                             context_delivery["total_bytes"] = context_delivery["serialized_bytes"] = len(dispatch_prompt.encode())
                             context_delivery["total_characters"] = context_delivery["serialized_characters"] = len(dispatch_prompt)

@@ -278,7 +278,40 @@ def sweep(log_dir: Path, days: int, now: datetime) -> dict[str, int]:
         _delete_task(log_dir, record, stats, now, _family(record.task_id, children), by_id)
 
     _sweep_native_events(log_dir, days, now, stats)
+    _sweep_shared_scratch(log_dir, stats, now)
     return stats
+
+
+def _sweep_shared_scratch(log_dir: Path, stats: dict[str, int], now: datetime) -> None:
+    """The shared chain and group folders' age policy (`HARFLOW_SHARED_SCRATCH_DAYS`, default 14).
+
+    Independent of task retention: a folder's age counts from its last use, which task deletion
+    advances (see `_touch_shared_scratch`), so shorter task retention cannot shorten it. Guarded:
+    a failure here never changes the task sweep."""
+    from . import shared_scratch
+    shared_days = shared_scratch.days_retained()
+    if shared_days is None:
+        return
+    try:
+        removed = shared_scratch.sweep(log_dir, shared_days, now)
+    except StateOwnershipError:
+        raise
+    except Exception:
+        log.warning("shared scratch sweep failed", exc_info=True)
+        return
+    stats["deleted_shared_scratch"] = removed["removed"]
+    stats["kept_shared_scratch"] = removed["kept_in_use"] + removed["kept_busy"] + removed["kept_young"]
+
+
+def _touch_shared_scratch(log_dir: Path, record: store.TaskRecord) -> None:
+    """Carry a record's last activity into its shared folders' metadata before the record goes."""
+    from . import shared_scratch
+    moment = shared_scratch._parse_time(record.finished_at) or shared_scratch._parse_time(record.started_at)
+    if moment is None:
+        return
+    shared_scratch.touch(log_dir, "chain", shared_scratch.effective_chain(record), moment)
+    if record.group:
+        shared_scratch.touch(log_dir, "group", record.group, moment)
 
 
 def _conclusively_settled(record: store.TaskRecord, status: str | None) -> bool:
@@ -616,6 +649,8 @@ def _delete_task_files_locked(log_dir: Path, task_id: str) -> bool:
             complete = False
     if not complete:
         return False
+    if qualified is not None:
+        _touch_shared_scratch(log_dir, qualified)
     try:
         from . import scratch
         scratch.remove(log_dir, task_id)

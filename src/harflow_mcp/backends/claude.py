@@ -603,6 +603,21 @@ class ClaudeBackend(ExtraPathsUnsupported):
         argv[index:index] = ["--add-dir", directory]
         return replace(invocation, argv=argv, scratch_directory=directory)
 
+    def with_shared_directories(self, invocation: Invocation, paths: tuple[Path, ...], freedom: Freedom) -> Invocation:
+        """One repeated `--add-dir` per shared chain/group folder, after the task scratch (measured, 2.1.310:
+        repeated `--add-dir` before `--` makes each directory writable)."""
+        if freedom == "read_only":
+            raise ValueError("read-only tasks cannot receive writable shared scratch directories")
+        if invocation.shared_scratch_directories:
+            raise ValueError("invocation already has shared scratch directories")
+        directories = tuple(str(path.resolve()) for path in paths)
+        argv = list(invocation.argv)
+        index = argv.index("--") if "--" in argv else len(argv)
+        if index and argv[index - 1] == "resume":
+            index -= 1
+        argv[index:index] = [part for directory in directories for part in ("--add-dir", directory)]
+        return replace(invocation, argv=argv, shared_scratch_directories=directories)
+
     def build_start_argv(
         self,
         prompt: str,
@@ -855,7 +870,7 @@ class ClaudeBackend(ExtraPathsUnsupported):
         seen = self._parse_options(options, argv)
         from .claude_approvals import assert_safe as assert_approvals_safe
         assert_approvals_safe(invocation, freedom, seen, live)
-        expected_directories = [invocation.scratch_directory] if invocation.scratch_directory else []
+        expected_directories = ([invocation.scratch_directory] if invocation.scratch_directory else []) + list(invocation.shared_scratch_directories)
         if seen.get("--add-dir", []) != expected_directories or (expected_directories and freedom == "read_only"):
             raise UnsafeInvocationError("additional directory must match this invocation's writable scratch directory")
 

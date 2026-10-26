@@ -91,7 +91,7 @@ def read_launch(log_dir: Path, task_id: str):
                 or not isinstance(value.get('generation'), str) or re.fullmatch('[a-f0-9]{32}', value['generation']) is None
                 or not isinstance(value.get('request_sha256'), str) or re.fullmatch('[a-f0-9]{64}', value['request_sha256']) is None
                 or not isinstance(value.get('backend'), str)
-                or any(value.get(key) is not None and not isinstance(value[key], str) for key in ('session_id', 'parent_task_id', 'chain_root_task_id'))
+                or any(value.get(key) is not None and not isinstance(value[key], str) for key in ('session_id', 'parent_task_id', 'chain_root_task_id', 'scratch_chain_id'))
                 or value.get('owner') is not None and (not isinstance(value['owner'], dict) or type(value['owner'].get('pid')) is not int or value['owner']['pid'] <= 0 or value['owner'].get('start_time') is not None and not isinstance(value['owner']['start_time'], str) or not isinstance(value['owner'].get('markers'), list) or any(not isinstance(marker, str) for marker in value['owner']['markers']))
                 or value.get('state') not in STATES
                 or any(value.get(key) is not None and not isinstance(value[key], str) for key in ('spawned_by', 'root_task_id', 'repo_path', 'freedom', 'title', 'group', 'created_at', 'not_started_reason'))
@@ -250,7 +250,7 @@ async def launch(registry, invocation, kwargs):
                  'directory_identity': _root_identity(log_dir), 'state': 'reserved',
                  'request_sha256': hashlib.sha256(raw).hexdigest(), 'configuration_sha256': configuration_hash, 'backend': backend.name,
                  'session_id': kwargs.get('session_id'), 'parent_task_id': kwargs.get('parent_task_id'),
-                 'chain_root_task_id': kwargs.get('chain_root_task_id'), 'owner': None,
+                 'chain_root_task_id': kwargs.get('chain_root_task_id'), 'scratch_chain_id': kwargs.get('scratch_chain_id'), 'owner': None,
                  'spawned_by': kwargs.get('spawned_by'), 'root_task_id': kwargs.get('root_task_id'),
                  'repo_path': kwargs['repo_path'], 'freedom': kwargs.get('freedom'), 'network': kwargs.get('network'),
                  'title': kwargs.get('title'), 'group': kwargs.get('group'),

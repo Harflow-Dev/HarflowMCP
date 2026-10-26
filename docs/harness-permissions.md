@@ -103,9 +103,13 @@ These levels authorize an assignment; they do not make the five harnesses equall
   settings. Builds/tests can be denied as mutating commands unless allowed. Publish bypasses the
   permission layer broadly, including operations outside the repository.
 
-Write-capable workers receive `HARFLOW_TASK_SCRATCH`. Claude and Codex also receive an explicit grant for
-that exact directory. A scratch path does not approve Bash commands or grant network access; other
-adapters do not gain confinement or a directory grant merely because the path is provided.
+Write-capable workers receive `HARFLOW_SCRATCH` (alias `HARFLOW_TASK_SCRATCH`), and every worker receives
+`HARFLOW_CHAIN_SCRATCH` and, in a group, `HARFLOW_GROUP_SCRATCH` (shared folders; see
+[shared scratch](shared-scratch.md)). Claude and Codex also receive an explicit grant for each exact
+directory they may write; `scratch.access` reports `writable`, `no_additional_grant` or `sandbox_read_only` per
+path, so a shared folder exposed without a grant is never described as writable. A scratch path does not
+approve Bash commands or grant network access; other adapters do not gain confinement or a directory grant
+merely because the path is provided.
 
 ## Network is a separate setting
 
@@ -358,7 +362,7 @@ have different settings and credentials. Avoid copying credential values into lo
 | A rule works in one checkout but not a workflow | Compare node working directory and loaded global/project/local/profile sources. A multi-repository parent may start outside each repository. | Put the minimum rule in the effective authorized scope, or start the assignment in its intended checkout. A file-access grant does not load another directory's project settings. | Fresh task in the same directory and execution mode; confirm the loaded setting sources. |
 | Bash needs approval despite edit access | Compare the exact command, wrapper, arguments, deny/ask rules and compound operations. Accept-edits does not approve every shell tool. | Add an exact required build/test rule, preserving deny/ask entries. Do not approve every Bash operation or raise access simply to hide a refusal. | Verify both the intended command and an adjacent disallowed command in an isolated fixture. |
 | Direct Git works but `git -C ...` fails | The command prefix or path differs. Vibe has additional version-specific checks described above. | Use direct Git in the assigned checkout; inspect a specific directory grant only if another checkout is authorized. | Run the actual read command in that directory and inspect denial evidence. |
-| Plan, screenshot or scratch output cannot be written | Check target path, writable roots and protected configuration paths. A command allow rule does not grant filesystem access. | Use `HARFLOW_TASK_SCRATCH` for temporary assignment output, or an explicitly authorized output directory. Keep plans out of protected settings directories. | One reversible file creation in the intended directory under the same access, followed by cleanup. |
+| Plan, screenshot or scratch output cannot be written | Check target path, writable roots and protected configuration paths. A command allow rule does not grant filesystem access. | Use `HARFLOW_SCRATCH` (or `HARFLOW_CHAIN_SCRATCH` / `HARFLOW_GROUP_SCRATCH` for output a later run or sibling should find) for temporary assignment output, or an explicitly authorized output directory. Keep plans out of protected settings directories. | One reversible file creation in the intended directory under the same access, followed by cleanup. |
 | Tool missing or wrong SDK/JDK selected | Compare service PATH, absolute binary, version and login-shell resolution. Startup files can replace environment values. | Select the required installed tool or provide the required environment through supported harness configuration. Avoid a blanket `env *` allowance. | Repeat the same command through the worker's shell and record its resolved path and version. |
 | Dependency or network operation fails | Separate sandbox denial, DNS/connection failure, HTTP authorization and provider/API failure. | Prepare dependencies locally or enable the saved node's network setting when authorized and supported; repair destination credentials separately. | Check the intended endpoint without exposing secrets; then run the required dependency operation. |
 | Login, provider or publishing authentication fails | Identify which process/service owns credentials and whether its provider/model is supported. | Complete that harness's login or service credential setup; retain repository scope and tool approvals. | Read-only authenticated status check in the same environment, then the authorized operation. |

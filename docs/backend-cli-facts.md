@@ -944,3 +944,30 @@ no extra writable roots, because granting the common directory would also expose
 hooks. Limit: this is the `codex sandbox` profile, not a `codex exec` run; requalify it through `codex
 exec` before claiming more. Harflow records the worktree path as the task's `repo_path`, so Codex's
 working-directory and writable-root handling see the worktree.
+
+## Claude repeated `--add-dir` (claude 2.1.310, 2026-10-27)
+
+Measured without a model call: `claude -p --output-format stream-json --verbose --permission-mode acceptEdits`
+with an isolated `HOME` and `CLAUDE_CONFIG_DIR`, a localhost fake Anthropic API (the scripted `Write` tool-use
+harness of `tests/fake_anthropic_api.py`) and each run in an empty working directory outside the target
+directories. `--add-dir <dir>` was given once per directory, before `--`, and `permission_denials` of the `result`
+event was read afterwards.
+
+| Case | Result |
+| --- | --- |
+| two `--add-dir`, `Write` into each | both files written, empty `permission_denials` |
+| three `--add-dir`, `Write` into each | all three written, empty `permission_denials` |
+| two `--add-dir`, `Write` into a third, ungranted directory | not written; one denial naming that file |
+| no `--add-dir`, `Write` into a directory outside the working directory (control) | not written; one denial |
+| two `--add-dir` together with `--allowedTools` and `--disallowedTools` | both written, no denial |
+
+So repeated `--add-dir` before `--` makes each named directory writable under `acceptEdits`, and only those
+directories. This is what `ClaudeBackend.with_shared_directories` relies on: one `--add-dir` for the task
+scratch, then one each for the shared chain and group scratch (see [shared scratch](shared-scratch.md)),
+and `assert_safe` accepts exactly that ordered list. Limits: `acceptEdits` Write only (Edit shares the permission
+layer but was not separately driven); the measurement says nothing about `bypassPermissions`, where the grant is
+redundant, and nothing about Bash, which `acceptEdits` auto-approves only inside the working directories it
+knows. A grant is a statement of what Harflow added, not a sandbox.
+
+Codex repeated `--add-dir` is already measured (see the extra writable paths above); the implementation adds the
+shared folders to the same list, ahead of any extra grants, and keeps all four scope checks over every one of them.

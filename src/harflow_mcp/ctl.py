@@ -232,6 +232,24 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     worktree_remove_p.add_argument("--task-id", required=True)
     worktree_remove_p.add_argument("--json", action="store_true")
 
+    scratch_p = sub.add_parser(
+        "scratch",
+        help="list or clean the shared chain and group scratch folders",
+        description="Shared scratch folders outlive a task: one per resume/continuation chain and one per group, "
+        "under <state root>/shared-scratch. Nothing removes one on task completion, restart or recovery; "
+        "only `scratch clean` and the HARFLOW_SHARED_SCRATCH_DAYS age policy do, and only when nothing references it unsettled.")
+    scratch_sub = scratch_p.add_subparsers(dest="scratch_command", required=True, parser_class=_ArgumentParser)
+    scratch_list_p = scratch_sub.add_parser("list", help="list shared folders with exact identity, size, last use and active users")
+    scratch_list_p.add_argument("--json", action="store_true")
+    scratch_clean_p = scratch_sub.add_parser(
+        "clean", help="remove one shared folder when nothing uses it (for a person, never an agent)",
+        description="Refuses while any task, launch or continuation that uses the folder is unsettled or uncertain, "
+        "while a referencing record is pinned, and while a retained record holds a registered artifact under it.")
+    scratch_target = scratch_clean_p.add_mutually_exclusive_group(required=True)
+    scratch_target.add_argument("--group", help="the exact group name")
+    scratch_target.add_argument("--chain", help="the chain id (shown by `scratch list`; the first task's id)")
+    scratch_clean_p.add_argument("--json", action="store_true")
+
     approval_list = sub.add_parser("approval-list", help="List permission request metadata")
     approval_target = approval_list.add_mutually_exclusive_group(required=True)
     approval_target.add_argument("--task-id")
@@ -475,6 +493,9 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
         repair_p,
         worktree_list_p,
         worktree_remove_p,
+        scratch_p,
+        scratch_list_p,
+        scratch_clean_p,
         run_p,
         resume_p,
         allowlist_p,
@@ -993,6 +1014,43 @@ def _cmd_worktree_remove(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_scratch_list(args: argparse.Namespace) -> int:
+    from . import shared_scratch
+    try:
+        entries = shared_scratch.inventory(default_log_dir())
+    except (shared_scratch.SharedScratchError, store.TaskDocumentError, OSError) as exc:
+        return _fail(args, getattr(exc, "code", "shared_scratch_error"), str(exc))
+    if args.json:
+        print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "shared_scratch": entries})))
+        return 0
+    if not entries:
+        print("no shared scratch folders")
+    for entry in entries:
+        size = f"{entry['bytes']}{'+' if entry['bytes_truncated'] else ''} bytes"
+        print(f"{entry['kind']:5} {entry['identity'] if entry['identity'] is not None else '(unknown)'}  {entry['path']}  {size}  "
+              f"last used {entry['last_used_at'] or 'unknown'}  {entry['active_tasks']} active")
+    return 0
+
+
+def _cmd_scratch_clean(args: argparse.Namespace) -> int:
+    from . import shared_scratch
+    refused = _human_only_refusal(args, "clean a shared scratch folder")
+    if refused is not None:
+        return refused
+    kind, identity = ("group", args.group) if args.group is not None else ("chain", args.chain)
+    try:
+        result = shared_scratch.clean(default_log_dir(), kind, identity)
+    except store.InvalidTaskId:
+        return _fail(args, "invalid_chain_id", f"not a valid chain id: {identity!r}")
+    except (shared_scratch.SharedScratchError, store.TaskDocumentError, OSError) as exc:
+        return _fail(args, getattr(exc, "code", "shared_scratch_error"), str(exc))
+    if args.json:
+        print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": result})))
+    else:
+        print(f"removed the {kind} folder {result['path']}; {result['note']}")
+    return 0
+
+
 def _network(raw: str | None) -> bool | None:
     return None if raw is None else raw == "true"
 
@@ -1483,6 +1541,8 @@ def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
         return _cmd_worktree_list(args)
     if args.command == "worktree-remove":
         return _cmd_worktree_remove(args)
+    if args.command == "scratch":
+        return _cmd_scratch_list(args) if args.scratch_command == "list" else _cmd_scratch_clean(args)
     if args.command == "resources":
         return _cmd_resources(args)
     if args.command == "resources-release":

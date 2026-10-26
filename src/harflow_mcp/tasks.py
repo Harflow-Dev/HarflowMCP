@@ -44,7 +44,7 @@ from pathlib import Path
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from typing import Any, Literal, NamedTuple
 
-from . import control, followups, identity, inbox, lineage, retention, store
+from . import control, followups, identity, inbox, lineage, retention, shared_scratch, store
 from .backends import (
     Accumulator,
     Backend,
@@ -73,6 +73,8 @@ EXTRA_PATH_CHECK_WORKERS = 4
 # `Enforcement.writable_roots` (see `_spawn`). `preview_permissions` discloses it so the
 # previewed writable_roots match what a launched task would carry, without allocating anything.
 FUTURE_TASK_SCRATCH_ROOT = "the task scratch directory (allocated per task at launch)"
+FUTURE_CHAIN_SCRATCH_ROOT = "the shared chain scratch directory (allocated at launch; the same for every resume and continuation)"
+FUTURE_GROUP_SCRATCH_ROOT = "the shared group scratch directory (allocated at launch when the task has a group)"
 
 # One shared wall-clock budget for every preflight authority read in a single request. Each
 # individual check can legally wait up to EXTRA_PATH_CHECK_BUDGET_SECONDS, so several of them
@@ -718,6 +720,10 @@ class Task:
     `released`) by `_monitor` once the exit is observed."""
     worktree: dict[str, Any] | None = None
     """The linked worktree this run executes in; see `store.TaskRecord.worktree`."""
+    scratch_chain_id: str | None = None
+    """The shared chain scratch identity; see `store.TaskRecord.scratch_chain_id`."""
+    scratch: dict[str, Any] | None = None
+    """The scratch folders this run was given; see `store.TaskRecord.scratch`."""
     interaction_owner: str = "caller"
     approval_generation: str = field(default_factory=lambda: str(uuid.uuid4()))
     approval_pending: bool = False
@@ -905,6 +911,7 @@ class Task:
             "interaction_owner": self.interaction_owner,
             **({"resources": dict(self.resources)} if self.resources else {}),
             **({"worktree": dict(self.worktree)} if self.worktree else {}),
+            **({"scratch": dict(self.scratch)} if self.scratch else {}),
             "approval_summary": self.approval_view,
             "task_id": self.task_id,
             **supervision.fields(self, self.log_path, observed_terminal=self.finished, live=True, input_closed=self.input_closed),
@@ -1229,7 +1236,8 @@ class TaskRegistry:
             return
         from .bridge_state import assert_state_outside_writes
         assert_state_outside_writes(self._log_dir, repo_path, grants,
-                                   invocation.scratch_directory if invocation is not None else None)
+                                   (*((invocation.scratch_directory,) if invocation.scratch_directory else ()), *invocation.shared_scratch_directories)
+                                   if invocation is not None else None)
 
     @_with_authority_check_budget
     @layout_operation
@@ -1264,6 +1272,8 @@ class TaskRegistry:
         # the future root symbolically and never feeds it to the nested-authority comparison.
         if freedom != "read_only" and getattr(backend, "with_writable_directory", None) is not None and not (caller_approvals and not getattr(backend, "approval_scratch", lambda: True)()):
             enforcement = replace(enforcement, writable_roots=(*enforcement.writable_roots, FUTURE_TASK_SCRATCH_ROOT))
+            if getattr(backend, "with_shared_directories", None) is not None:
+                enforcement = replace(enforcement, writable_roots=(*enforcement.writable_roots, FUTURE_CHAIN_SCRATCH_ROOT, FUTURE_GROUP_SCRATCH_ROOT))
         return {"backend": backend.name, "caller_approvals": caller_approvals, "caller_write_approvals": caller_write_approvals, "caller_approval_support": backend.caller_approval_support() if getattr(backend.capabilities, "supports_caller_approvals", False) else {"supported": False}, "approval_scope": "exact_action_once" if caller_approvals else None, "approval_transport": approval_runtime.transport(backend) if caller_approvals else None, "approval_limitations": approval_runtime.limitations(backend, caller_write_approvals), "freedom": freedom, "network": network, "repo_path": str(repo_path), "extra_writable_paths": serialize_paths(grants), "extra_path_certification": enforcement.extra_path_certification, "allowed_commands": list(commands), "enforcement": enforcement.as_dict(), "limitations": "Existing typed path identities are checked before launch; grants are unavailable to native workflows and interactive takeover."}
 
     @_with_authority_check_budget
@@ -1301,6 +1311,7 @@ class TaskRegistry:
         followup_source_task_id: str | None = None,
         worktree: dict[str, Any] | None = None,
         worktree_inherit: dict[str, Any] | None = None,
+        scratch_chain_id: str | None = None,
     ) -> Task:
         """Dispatch a fresh session. Returns once the subprocess exists, not once it finishes.
 
@@ -1414,6 +1425,7 @@ class TaskRegistry:
             chain_root_task_id=chain_root_task_id,
             chain_prompt=chain_prompt,
             message_ids=message_ids,
+            **({"scratch_chain_id": store.validate_task_id(scratch_chain_id)} if scratch_chain_id is not None else {}),
             **({"resource_request": resource_request} if resource_request is not None else {}),
             **({"followup_source_task_id": followup_source_task_id} if followup_source_task_id is not None else {}),
             **({"worktree_request": worktree_plan, "rebuild": {
@@ -1627,6 +1639,7 @@ class TaskRegistry:
                     consume_followups=consume_followups,
                     resource_request=resource_request,
                     worktree_info=getattr(parent, "worktree", None),
+                    scratch_chain_id=shared_scratch.effective_chain(parent),
                 )
         except control.LockTimeout:
             raise SessionBusyError(
@@ -1668,6 +1681,7 @@ class TaskRegistry:
         allowed_commands: tuple[str, ...] = (),
         resource_request: dict[str, Any] | None = None,
         worktree_info: dict[str, Any] | None = None,
+        scratch_chain_id: str | None = None,
     ) -> Task:
         """Build and spawn a resume, consuming the parent's queued follow-ups when asked to.
 
@@ -1758,6 +1772,7 @@ class TaskRegistry:
                 **({"resource_request": resource_request} if resource_request is not None else {}),
                 **({"followup_source_task_id": parent_task_id} if attempt is not None else {}),
                 **({"worktree_info": worktree_info} if worktree_info else {}),
+                **({"scratch_chain_id": scratch_chain_id} if scratch_chain_id is not None else {}),
             )
         except BaseException as exc:
             if attempt is not None:
@@ -1785,10 +1800,20 @@ class TaskRegistry:
         kwargs.pop("followup_source_task_id", None)
         return await self._execute_prepared(invocation, **kwargs)
 
-    async def _execute_prepared(
+    async def _execute_prepared(self, invocation: Invocation, **kwargs) -> Task:
+        """Run one prepared launch; the shared scratch locks it takes are always released on the way out."""
+        hold = shared_scratch.Hold()
+        try:
+            return await self._execute_prepared_locked(invocation, shared_hold=hold, **kwargs)
+        finally:
+            hold.release()
+
+    async def _execute_prepared_locked(
         self,
         invocation: Invocation,
         *,
+        shared_hold: shared_scratch.Hold,
+        scratch_chain_id: str | None = None,
         extra_path_grants: tuple = (),
         dispatch_origin: dict[str, Any] | None = None,
         backend: Backend,
@@ -1979,8 +2004,11 @@ class TaskRegistry:
             # Allocate after initial probes. Final authority reads may await below; the enclosing
             # cleanup boundary removes scratch on timeout, refusal or cancellation.
             task_scratch = None
+            allocation = None
             try:
-                if freedom != "read_only" and not (caller_approvals and not getattr(backend, "approval_scratch", lambda: True)()):
+                scratch_allowed = not (caller_approvals and not getattr(backend, "approval_scratch", lambda: True)())
+                task_granted = False
+                if freedom != "read_only" and scratch_allowed:
                     from . import scratch
                     from dataclasses import replace
                     task_scratch = scratch.create(self._log_dir, task_id)
@@ -1992,11 +2020,19 @@ class TaskRegistry:
                             invocation = writable(invocation, task_scratch, freedom)
                         backend.assert_safe(invocation, freedom, network)
                         enforcement = replace(enforcement, writable_roots=(*enforcement.writable_roots, str(task_scratch)))
+                        task_granted = True
+                if not invocation.native_subagent:
+                    invocation, enforcement, allocation = await self._allocate_shared_scratch(
+                        invocation, backend=backend, freedom=freedom, network=network, enforcement=enforcement,
+                        task_id=task_id, chain_id=scratch_chain_id or task_id, group=group, spawned_by=spawned_by,
+                        max_depth=max_depth, hold=shared_hold, task_scratch=task_scratch, task_granted=task_granted,
+                        scratch_allowed=scratch_allowed, extra_grants=bool(extra_path_grants))
                 if extra_path_grants or invocation.extra_writable_paths:
                     await _bounded_extra_path_check(self._assert_extra_state, repo_path, extra_path_grants, invocation)
                     if freedom != "unrestricted":
                         await _bounded_extra_path_check(backend.assert_extra_writable_paths, invocation, extra_path_grants, freedom, network)
             except BaseException:
+                shared_hold.release()
                 if task_scratch is not None:
                     try:
                         scratch.remove(self._log_dir, task_id)
@@ -2020,9 +2056,15 @@ class TaskRegistry:
                 "HARFLOW_BACKGROUND_IDLE_SECONDS": str(background_idle_seconds),
             }
 
-            spawn_env.pop("HARFLOW_TASK_SCRATCH", None)
+            for name in shared_scratch.ENV_NAMES:
+                spawn_env.pop(name, None)
             if task_scratch is not None:
-                spawn_env["HARFLOW_TASK_SCRATCH"] = str(task_scratch)
+                spawn_env[shared_scratch.ENV_TASK] = str(task_scratch)
+                spawn_env[shared_scratch.ENV_TASK_ALIAS] = str(task_scratch)
+            if allocation is not None:
+                for name, value in ((shared_scratch.ENV_CHAIN, allocation.chain), (shared_scratch.ENV_GROUP, allocation.group)):
+                    if value:
+                        spawn_env[name] = value
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -2040,6 +2082,7 @@ class TaskRegistry:
         except OSError as exc:
             # exec failed before returning a process; later failures remain ambiguous.
             exc.harflow_not_started = True  # type: ignore[attr-defined]
+            shared_hold.release()
             if task_scratch is not None:
                 try:
                     scratch.remove(self._log_dir, task_id)
@@ -2075,6 +2118,8 @@ class TaskRegistry:
             allowed_commands_version=command_version,
             resources=dict(resource_grant) if resource_grant else None,
             worktree=dict(worktree_info) if worktree_info else None,
+            scratch_chain_id=scratch_chain_id or task_id,
+            scratch=allocation.as_dict() | {"notice": shared_scratch.notice(allocation)} if allocation is not None and (allocation.task or allocation.chain) else None,
             interaction_owner=interaction_owner,
             extra_writable_paths=serialize_paths(extra_path_grants),
             extra_path_certification=enforcement.extra_path_certification,
@@ -2115,6 +2160,8 @@ class TaskRegistry:
         # discoverable by whichever process comes next.
         try:
             self.persist(task)
+            # Durable now: from here a cleaner sees this task's record, so the per-folder locks end.
+            shared_hold.release()
             for drain, name in [
                 (_drain_stdout, f"harflow-stdout-{task_id}"),
                 (_drain_stderr, f"harflow-stderr-{task_id}"),
@@ -2232,6 +2279,105 @@ class TaskRegistry:
             f" resumed-from={parent_task_id}" if parent_task_id else "",
         )
         return task
+
+    async def _allocate_shared_scratch(
+        self,
+        invocation: Invocation,
+        *,
+        backend: Backend,
+        freedom: str,
+        network: bool | None,
+        enforcement: Enforcement,
+        task_id: str,
+        chain_id: str,
+        group: str | None,
+        spawned_by: str | None,
+        max_depth: int | None,
+        hold: shared_scratch.Hold,
+        task_scratch: Path | None,
+        task_granted: bool,
+        scratch_allowed: bool,
+        extra_grants: bool,
+    ) -> tuple[Invocation, Enforcement, shared_scratch.Allocation]:
+        """Allocate this run's shared chain and group folders and grant the ones it may write.
+
+        Each folder's lock is taken (chain first, then group) before it is created and held in `hold`
+        until the task record is durable. The grant goes into the invocation and `writable_roots`
+        only where the backend can take one and the dispatcher is allowed to give it; every other
+        folder is still allocated and exposed (the environment variables), with the access it really
+        has recorded.
+        """
+        wanted = [("chain", chain_id)] + ([("group", group)] if group else [])
+        paths: dict[str, Path] = {}
+        for kind, identity in wanted:
+            await shared_scratch.lock_async(self._log_dir, kind, identity, hold)
+            paths[kind] = shared_scratch.allocate(self._log_dir, kind, identity)
+        with_shared = getattr(backend, "with_shared_directories", None)
+        granted: list[Path] = []
+        if freedom != "read_only" and scratch_allowed and with_shared is not None:
+            for kind, identity in wanted:
+                if spawned_by is None or await asyncio.to_thread(
+                        self._caller_allows_shared, kind, paths[kind], identity, task_id, spawned_by, max_depth):
+                    granted.append(paths[kind])
+        if granted:
+            if extra_grants:
+                invocation = await _bounded_extra_path_check(with_shared, invocation, tuple(granted), freedom)
+            else:
+                invocation = with_shared(invocation, tuple(granted), freedom)
+            backend.assert_safe(invocation, freedom, network)
+            enforcement = replace(enforcement, writable_roots=(*enforcement.writable_roots, *(str(path) for path in granted)))
+        sandboxed = enforcement.os_enforced and enforcement.writes_confined
+
+        def access(is_granted: bool) -> str:
+            return shared_scratch.WRITABLE if is_granted else (shared_scratch.SANDBOX_READ_ONLY if sandboxed else shared_scratch.NO_ADDITIONAL_GRANT)
+
+        allocation = shared_scratch.Allocation(
+            task=str(task_scratch) if task_scratch is not None else None,
+            chain=str(paths["chain"]), group=str(paths["group"]) if "group" in paths else None,
+            chain_id=chain_id, group_name=group)
+        if task_scratch is not None:
+            allocation.access["task"] = access(task_granted)
+        allocation.access["chain"] = access(paths["chain"] in granted)
+        if "group" in paths:
+            allocation.access["group"] = access(paths["group"] in granted)
+        return invocation, enforcement, allocation
+
+    def _caller_allows_shared(self, kind: str, path: Path, identity: str, task_id: str, spawned_by: str, max_depth: int | None) -> bool:
+        """Whether a nested dispatch may be granted write access to a shared folder.
+
+        A dispatcher whose writes are not confined has no restriction to preserve. A confined one
+        (codex's sandbox) cannot widen into another family's folder: the folder must already be one
+        of its own recorded writable roots, or (chain only) be a chain the dispatcher itself began
+        (a brand-new chain, or one whose root record descends from it by `spawned_by`, never merely
+        by sharing a root task). Anything unreadable denies.
+        """
+        try:
+            caller = store.read(self._log_dir, spawned_by, include_prompt=False)
+            if caller is None:
+                return False
+            recorded = caller.enforcement or {}
+            if recorded.get("writes_confined") is not True:
+                return True
+            if str(path) in (recorded.get("writable_roots") or ()):
+                return True
+            if kind != "chain":
+                return False
+            if identity == task_id:
+                return True
+            node: str | None = identity
+            for _ in range((max_depth if max_depth is not None else lineage.max_depth_default()) + 1):
+                record = store.read(self._log_dir, node, include_prompt=False) if node else None
+                if record is None:
+                    return False
+                if record.spawned_by == caller.task_id:
+                    return True
+                node = record.spawned_by
+            return False
+        except StateOwnershipError:
+            raise
+        except Exception:
+            log.debug("shared scratch authority could not be read; denying the grant", exc_info=True)
+            return False
 
     def _maybe_open_monitor(self, task: Task) -> None:
         return  # Native Harflow integration awaits the companion runtime.
@@ -2971,6 +3117,8 @@ class TaskRegistry:
                 allowed_commands=list(task.allowed_commands),
                 resources=dict(task.resources) if task.resources else None,
                 worktree=dict(task.worktree) if task.worktree else None,
+                scratch_chain_id=task.scratch_chain_id,
+                scratch=dict(task.scratch) if task.scratch else None,
                 interaction_owner=task.interaction_owner,
                 approval_generation=task.approval_generation,
                 parent_task_id=task.parent_task_id,
@@ -4134,6 +4282,7 @@ class TaskRegistry:
                     consume_followups=consume_followups,
                     resource_request=resource_request,
                     worktree_info=record.worktree,
+                    scratch_chain_id=shared_scratch.effective_chain(record),
                 )
         except control.LockTimeout:
             raise SessionBusyError(
@@ -4928,6 +5077,7 @@ async def _monitor(task: Task, registry: TaskRegistry) -> None:
                                 task.output_drained = False
                                 log.warning('Native final observation barrier failed for %s', task.task_id, exc_info=True)
                     _release_task_resources(registry, task)
+                    _touch_shared_scratch(registry, task)
                     launch_generation = getattr(registry, '_launch_generations', {}).get(task.task_id)
                     if launch_generation and task.auto_continue and task.output_drained:
                         from .task_supervision import mark
@@ -4979,6 +5129,20 @@ def _maintain(log_dir: Path) -> Any:
     except Exception:
         log.debug("resource reaper pass failed", exc_info=True)
     return swept
+
+
+def _touch_shared_scratch(registry: "TaskRegistry", task: Task) -> None:
+    """Record the settlement as the shared folders' last use, so the age policy counts from it.
+
+    Guarded: bookkeeping never changes an outcome (`shared_scratch.touch` swallows its own failures)."""
+    if task.exit_code is None or not task.scratch:
+        return
+    try:
+        shared_scratch.touch(registry.log_dir, "chain", shared_scratch.effective_chain(task))
+        if task.group:
+            shared_scratch.touch(registry.log_dir, "group", task.group)
+    except Exception:  # pragma: no cover - bookkeeping must never mask a finished run
+        log.debug("task %s: could not record shared scratch use", task.task_id, exc_info=True)
 
 
 def _release_task_resources(registry: "TaskRegistry", task: Task) -> None:

@@ -92,6 +92,13 @@ class TaskRecord:
     worktree: dict[str, Any] | None = None
     """The linked worktree this run executes in: `path` (equal to `repo_path`), `source_repo_path`,
     `base_ref`, `base_commit`, `branch`, `detached`. Additive: None for a task that asked for none."""
+    scratch_chain_id: str | None = None
+    """The id naming this run's shared chain scratch folder: the first task's id, inherited by every
+    resume and continuation. Additive: None for a record written before the field existed, which
+    is read as `chain_root_task_id`, then the task's own id (`shared_scratch.effective_chain`)."""
+    scratch: dict[str, Any] | None = None
+    """The scratch folders this run was given (`task`, `chain`, `group` paths, their `access` and
+    the `writable` ones), from `shared_scratch.Allocation`. Additive: None when none were allocated."""
     interaction_owner: str = "caller"
     approval_generation: str | None = None
     network: bool | None = None
@@ -1123,6 +1130,7 @@ def snapshot(log_dir: Path, record: TaskRecord, *, _replay_provider=None, respon
         "interaction_owner": record.interaction_owner,
         **({"resources": record.resources} if record.resources else {}),
         **({"worktree": record.worktree} if record.worktree else {}),
+        **({"scratch": record.scratch} if record.scratch else {}),
         "approval_summary": approvals.summary(log_dir, record.task_id),
         "pending_messages": pending,
         "queued_followups": queued_followups,
@@ -1211,6 +1219,7 @@ def brief(log_dir: Path, record: TaskRecord, *, responding_server=None) -> dict[
         "interaction_owner": record.interaction_owner,
         **({"resources": record.resources} if record.resources else {}),
         **({"worktree": record.worktree} if record.worktree else {}),
+        **({"scratch": record.scratch} if record.scratch else {}),
         "approval_summary": approvals.summary(log_dir, record.task_id),
         "task_id": record.task_id,
         **supervision.fields(record, log_path(log_dir, record.task_id), observed_terminal=record.status in TERMINAL_RECORD_STATUSES and not outcome_unobserved(record), responding_server=responding_server),

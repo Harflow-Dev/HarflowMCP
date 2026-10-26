@@ -4,13 +4,13 @@ from pathlib import Path
 from .canonical_paths import canonical
 
 
-def assert_execution_config_outside_writes(repo: Path, grants, scratch_directory: str | None = None) -> None:
+def assert_execution_config_outside_writes(repo: Path, grants, scratch_directory: str | tuple[str, ...] | list[str] | None = None) -> None:
     from . import backends
     from .runtime_paths import _chain
     repo = canonical(repo)
     scopes = [(repo, 'directory'), *((Path(g.path), g.kind) for g in grants)]
-    if scratch_directory is not None:
-        scopes.append((canonical(Path(scratch_directory)), 'directory'))
+    for scratch_path in ([scratch_directory] if isinstance(scratch_directory, str) else list(scratch_directory or ())):
+        scopes.append((canonical(Path(scratch_path)), 'directory'))
     for backend in backends.BACKENDS.values():
         namespaces = backend.execution_configuration_namespaces(repo)
         for category in ('external', 'project'):

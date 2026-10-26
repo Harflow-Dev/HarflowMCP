@@ -55,6 +55,9 @@ class Invocation:
     extra_path_runtime: tuple[Any, ...] | None = None
     extra_path_configuration: tuple[Any, ...] | None = None
     scratch_directory: str | None = None
+    # The shared chain and group folders granted to this run, in that order, after `scratch_directory`
+    # and before any extra writable paths in a backend's `--add-dir` list.
+    shared_scratch_directories: tuple[str, ...] = ()
     native_subagent: bool = False
     caller_approvals: bool = False
     caller_write_approvals: bool = False

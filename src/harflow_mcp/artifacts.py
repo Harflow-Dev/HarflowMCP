@@ -393,6 +393,25 @@ def _target(log_dir, record, spelling):
     scratch = directory(log_dir, record.task_id)
     own_scratch = not scratch.is_symlink() and not scratch.parent.is_symlink() and target.is_relative_to(scratch.resolve()) and str(scratch.resolve()) in (record.enforcement or {}).get('writable_roots', [])
     if not own_scratch:
+        # The task's shared chain and group folders count the same way, but only where the dispatch
+        # actually granted them (they are in its recorded writable roots) and the recorded folder is
+        # exactly the derived one, inside the bridge's own shared-scratch namespace.
+        from . import shared_scratch
+        recorded = getattr(record, 'scratch', None) or {}
+        roots = (record.enforcement or {}).get('writable_roots', [])
+        for kind, identity in (('chain', recorded.get('chain_id')), ('group', recorded.get('group_name'))):
+            if not identity or not recorded.get(kind):
+                continue
+            try:
+                folder = shared_scratch.directory(log_dir, kind, identity)
+            except (ValueError, store.InvalidTaskId):
+                continue
+            if (not folder.is_symlink() and not folder.parent.is_symlink() and not folder.parent.parent.is_symlink()
+                    and folder.exists() and str(folder.resolve()) == recorded[kind]
+                    and str(folder.resolve()) in roots and target.is_relative_to(folder.resolve())):
+                own_scratch = True
+                break
+    if not own_scratch:
         # Backend state and bridge state are never user artifact authority.
         forbidden = ('.harflow', '.polybridge', '.codex', '.claude', '.vibe', '.config', '.git')
         from .state_layout import protected_roots

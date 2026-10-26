@@ -9,7 +9,8 @@ first: it returns requested/effective typed scopes, certification and enforcemen
 without launching an agent or allocating task scratch. Launch revalidates this
 observation; preview does not reserve authority. For writable launches on scratch-aware
 backends, enforcement includes `the task scratch directory (allocated per task at launch)`
-as a symbolic future writable root. Read-only previews include no scratch root.
+as a symbolic future writable root, and the shared chain and group folders (`the shared chain scratch directory ...`,
+`the shared group scratch directory ...`) the same way. Read-only previews include no scratch root.
 `harflow-ctl backends --json` exposes declared support under
 `capabilities.extra_writable_paths` without a version or model probe. Use the
 permission preview to qualify the actual installed environment before launch.
@@ -172,7 +173,7 @@ The opt-in CLI test uses an isolated localhost fake Responses API, makes no paid
 calls and skips other versions/platforms. Support expansion requires new actual
 allowed-write/denied-write evidence for each version and configuration.
 
-Bounded workers cannot write bridge task/control state: the default `~/.harflow` state, and the active registry state (including custom task-directory aliases) are protected against repository or explicit grant overlap. This preserves saved authorization and lineage records. Only separately allocated per-task scratch remains writable; caller-supplied grants or repositories inside state/scratch are rejected. The shared registry check runs before qualification and again before execution, including permission previews. Ordinary requests without extra grants retain their existing behavior.
+Bounded workers cannot write bridge task/control state: the default `~/.harflow` state, and the active registry state (including custom task-directory aliases) are protected against repository or explicit grant overlap. This preserves saved authorization and lineage records. Only separately allocated per-task scratch and the shared chain and group scratch folders remain writable; caller-supplied grants or repositories inside state/scratch are rejected. The shared registry check runs before qualification and again before execution, including permission previews. Ordinary requests without extra grants retain their existing behavior.
 
 Extra-path qualification also protects known execution configuration namespaces of every registered backend, including backends absent from PATH. The backend declarations cover Claude's default/`CLAUDE_CONFIG_DIR` settings, MCP and plugin state; opencode's default and XDG config/data/cache/state paths plus `OPENCODE_CONFIG`, `OPENCODE_CONFIG_DIR`, `OPENCODE_TEST_HOME`, `OPENCODE_TUI_CONFIG`, `OPENCODE_TEST_MANAGED_CONFIG_DIR`, known system/managed preference inputs and inline configuration; Vibe's default/`VIBE_HOME` tools, plugins, agents and shared skills; and Antigravity's known `.gemini` and system settings namespaces. Existing other-backend configuration inputs are outside the qualified profile and reject requests, rather than claiming to parse arbitrary execution graphs. Relative or empty configuration-path overrides and nonempty inline configuration also reject requests. Missing namespaces, ancestors and symlink targets stay protected against repository, scratch and added-grant overlap. Use an isolated configuration environment; the feature does not modify user configuration.
 

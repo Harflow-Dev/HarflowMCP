@@ -265,6 +265,35 @@ only; liveness is never stored) and each owner kind supplies its own "is it fini
   with borrowers is flagged and goes with its last borrower), and `resources` is the ungated read the
   Monitor uses.
 
+## Shared scratch (`shared_scratch.py`)
+
+Detail behind [shared scratch](shared-scratch.md); the rules that keep it safe:
+
+- **Two namespaces, one root.** Per-task scratch stays `<root>/scratch/<task_id>`. Shared folders live under
+  `<root>/shared-scratch/{chain,group}/<key>`, separate because `TASK_ID_PATTERN` accepts the ids `chain` and
+  `group`, which would collide under `scratch/`. A chain key is a validated task id (`scratch_chain_id`, the first
+  task's id, inherited by resume and continuation; `chain_root_task_id` is untouched). A group key is a slug plus 16
+  hex digits of the SHA-256 of the exact string. Bridge-owned metadata (`.meta/<kind>/<key>.json`, `last_used_at`)
+  sits outside the agent-writable folder and is verified on reopen.
+- **Allocation happens in the launch owner**, in `_execute_prepared`, after the task scratch and before the extra-path
+  and bridge-state checks, so all four scope checks see the shared folders. The per-folder lock is taken (chain, then
+  group) with a bounded non-blocking poll before the pre-spawn window, held in a `Hold`, and released as soon as the
+  task record is durable (`persist`), and always on the way out of `_execute_prepared`. It is a leaf lock: never held
+  across a subprocess, a Git call or another lock, ordered after the session or chain lock and before `<id>.lock`.
+- **A reference is anything that may still use the folder**: an unsettled or uncertain record, an unresolved or
+  pending launch receipt (including one waiting for resources and a reserved continuation), a pinned record (workflow
+  or queued follow-ups), an unreadable record, or a retained record with a registered artifact under it. Worktree
+  tasks are ordinary: they get shared scratch like any task, and their receipts count as references like any other.
+- **Cleanup renames under the lock and deletes outside it** (`.trash`), never following symlinks. The age policy
+  runs from the retention sweep, after `_sweep_native_events`, and counts from the newest of the folder's
+  `last_used_at` and its records' `finished_at`; `retention._delete_task_files` first carries a record's last
+  activity into the metadata so shorter task retention cannot shorten it.
+- **Nested grants never widen.** `TaskRegistry._caller_allows_shared` grants a confined dispatcher's child a shared
+  folder only if it is already one of the dispatcher's writable roots or a chain it began (strict `spawned_by`
+  ancestry); everything unreadable denies.
+- **Access states are claims about what Harflow granted** (`writable`, `no_additional_grant`, `sandbox_read_only`),
+  derived from the real grant and the recorded `Enforcement`, never from the freedom's name.
+
 ## Takeover, ctl control commands, open-app (A4)
 
 - **Takeover is humans-only and ctl-only.** Never expose it over MCP. `ctl takeover` and

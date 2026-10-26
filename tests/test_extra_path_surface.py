@@ -61,6 +61,7 @@ async def test_preview_exposes_effective_scopes_without_task_or_scratch(git_repo
     assert result['extra_writable_paths'][0]['path'] == str(grant.resolve())
     assert result['enforcement']['writable_roots'] == [
         'the working directory', str(grant.resolve()), tasks.FUTURE_TASK_SCRATCH_ROOT,
+        tasks.FUTURE_CHAIN_SCRATCH_ROOT, tasks.FUTURE_GROUP_SCRATCH_ROOT,
     ]
     assert result['enforcement']['network_access'] == 'blocked'
     assert result['enforcement']['publish_attempts_allowed_by_polybridge'] is False

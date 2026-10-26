@@ -70,7 +70,7 @@ harness is certified to support registration. No permission is added by registra
 
 Relative paths resolve against the owning task's recorded repository directory.
 Registration requires an existing accessible regular file in that repository, the
-task's own allocated scratch directory, or an explicitly granted path whose saved
+task's own allocated scratch directory (or the shared chain or group folder it was granted), or an explicitly granted path whose saved
 identity still validates. Merely being able to access a path from the server does not
 authorize registration. Other tasks' scratch, bridge control state and protected
 execution configuration are not artifact scopes. Symlink destinations must satisfy
@@ -155,7 +155,7 @@ notes or file contents are nonsensitive. Artifact metadata is not added to compl
 webhooks by this change.
 
 Registration metadata follows its owning task record's retention. Existing task scratch
-cleanup can delete a referenced scratch file. Files in repositories or external granted
+cleanup can delete a referenced scratch file. A shared chain or group folder is never removed while a retained record holds a registered artifact under it, and a removed folder's artifacts read as `deleted`. Files in repositories or external granted
 locations are never deleted by artifact-reference cleanup. Registration is not archival
 storage. Concurrent registration and retention share the task lifecycle lock, and a
 receipt is returned only after its manifest is durably written. Retention preserves the
