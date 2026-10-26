@@ -41,6 +41,25 @@ def ledger_for(log_dir: Path) -> ResourceLedger:
     return ResourceLedger(log_dir.parent)
 
 
+class LaunchCancelled(RuntimeError):
+    """A pending launch's cancel request was honoured at the last point before the agent starts."""
+
+
+def ledger_entry_visible(log_dir: Path, receipt: dict[str, Any]) -> bool:
+    """Whether the ledger already has the entry a `waiting_for_resources` receipt names.
+
+    A launch that declared no resources has nothing to wait for and is visible by definition. A
+    ledger that cannot be read is not an acknowledgement; the owner settles such a launch itself.
+    """
+    held = receipt.get("resources")
+    if not isinstance(held, dict) or not held.get("reservation_id"):
+        return True
+    try:
+        return ledger_for(log_dir).get(held["reservation_id"]) is not None
+    except ResourceError:
+        return False
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -179,13 +198,17 @@ def cancel_launch(log_dir: Path, task_id: str, *, authorized: bool = False) -> d
     requested, settled = [], []
     for target in targets:
         receipt = pending_receipt(log_dir, target)
-        if receipt is None:
+        # A request is only worth writing for a launch an owner can still read it for; a settled
+        # one would keep the file forever.
+        if receipt is None or receipt["state"] not in (*PENDING_STATES, "reserved", "claimed"):
             continue
         request_cancel(log_dir, target)
         requested.append(target)
-        if receipt["state"] == "waiting_for_resources" and _owner_verdict(receipt) == "dead":
-            settle_cancelled(log_dir, receipt)
-            settled.append(target)
+        if receipt["state"] == "waiting_for_resources":
+            fresh = owner_confirmed_gone(log_dir, receipt)
+            if fresh is not None:
+                settle_cancelled(log_dir, fresh)
+                settled.append(target)
     spawned = read_task_record(log_dir, task_id, include_prompt=False) is not None
     return {"spawned": spawned, "cascade": {"pending_cancel_requested": requested, "pending_settled": settled}}
 
@@ -201,6 +224,30 @@ def _owner_verdict(receipt: dict[str, Any]) -> str:
         return identity.identity_check(owner)
     except Exception:
         return "undecidable"
+
+
+def reread_pending(log_dir: Path, receipt: dict[str, Any], states: tuple[str, ...]) -> dict[str, Any] | None:
+    """The current receipt when it is still in one of `states` with no record, else None.
+
+    For use after an owner was confirmed dead: the probe can be slow, and the owner may have
+    granted, spawned and died while it ran, so a verdict computed from the receipt read before it
+    is stale. A dead owner changes nothing further, so what this reads is final.
+    """
+    from .task_supervision import read_launch, read_task_record
+    fresh = read_launch(log_dir, receipt["task_id"])
+    if fresh is None or fresh["generation"] != receipt["generation"] or fresh["state"] not in states:
+        return None
+    if read_task_record(log_dir, receipt["task_id"], include_prompt=False) is not None:
+        return None
+    return fresh
+
+
+def owner_confirmed_gone(log_dir: Path, receipt: dict[str, Any], states: tuple[str, ...] = ("waiting_for_resources",)) -> dict[str, Any] | None:
+    """The fresh receipt when the launch is in `states`, its owner is dead and, re-read after that
+    probe, it is still there with no record; otherwise None (keep it)."""
+    if receipt["state"] not in states or _owner_verdict(receipt) != "dead":
+        return None
+    return reread_pending(log_dir, receipt, states)
 
 
 def _queue_details(log_dir: Path, receipt: dict[str, Any]) -> dict[str, Any]:
@@ -266,15 +313,17 @@ def view(log_dir: Path, receipt: dict[str, Any], *, check_owner: bool = False) -
         if verdict == "undecidable":
             payload["launch_state"] = "uncertain"
             payload["notices"].append("The launch owner cannot be inspected; its resources are kept until it can be settled.")
-        elif verdict == "dead":
+        elif verdict == "dead" and (fresh := reread_pending(log_dir, receipt, (state,))) is not None:
+            receipt = fresh
             worktree_state = (receipt.get("worktree") or {}).get("state")
             if worktree_state == "creating":
                 payload["worktree"]["state"] = "unknown"  # the owner died inside the Git command that writes
                 payload["notices"].append("The owner died while creating the worktree; its state is unknown and nothing was removed.")
             if state == "granted" and worktree_state not in ("planned", "creating"):
                 payload["launch_state"] = "uncertain"
-                payload["notices"].append("The launch owner is gone after the resources were granted and before a task record "
-                                          "appeared; the resources are kept. A person can release them with `harflow-ctl resources-release`.")
+                payload["notices"].append("The launch owner is gone after the launch was granted and before a task record "
+                                          "appeared, so whether the agent started is unknown; its resources are kept. A person who has "
+                                          f"checked can settle it with `harflow-ctl launch-settle --task-id {receipt['task_id']} --confirm-uncertain`.")
             else:
                 payload.update(status="failed", not_started=True, not_started_reason="owner_died")
         if payload["status"] == "running":
@@ -384,7 +433,9 @@ class PendingLaunch:
         receipt = read_launch(self.log_dir, self.task_id)
         if receipt is None or receipt["state"] in ("not_started", "settled"):
             return True
-        return receipt["state"] == "waiting_for_resources" and _owner_verdict(receipt) == "dead"
+        # A dead owner that never recorded a spawn is resolved too: waiting means it never started,
+        # granted means nobody can tell, and either way nothing will wake a waiter later.
+        return owner_confirmed_gone(self.log_dir, receipt, PENDING_STATES) is not None
 
 
 # ---- ledger release ----------------------------------------------------------------------------
@@ -424,11 +475,11 @@ def task_resolver(log_dir: Path):
             return KEEP
         if receipt["state"] == "not_started":
             return NEVER_STARTED
-        if receipt["state"] == "waiting_for_resources" and _owner_verdict(receipt) == "dead":
+        if receipt["state"] == "waiting_for_resources" and owner_confirmed_gone(log_dir, receipt) is not None:
             return NEVER_STARTED
-        if (receipt["state"] == "granted" and (receipt.get("worktree") or {}).get("state") in ("planned", "creating")
-                and _owner_verdict(receipt) == "dead"):
-            return NEVER_STARTED  # spawn follows `created`: the agent was never started
+        if receipt["state"] == "granted" and (fresh := owner_confirmed_gone(log_dir, receipt, ("granted",))) is not None:
+            if (fresh.get("worktree") or {}).get("state") in ("planned", "creating"):
+                return NEVER_STARTED  # spawn follows `created`: the agent was never started
         # `granted` without a record, an owner that cannot be inspected, and anything else: only a
         # person's `resources-release` frees these.
         return KEEP
@@ -459,6 +510,62 @@ def release_session_claim(log_dir: Path, task_id: str) -> str:
     mark(log_dir, task_id, receipt["generation"], state="not_started", not_started_reason="released_by_person",
          error="released with harflow-ctl resources-release")
     return "released"
+
+
+class LaunchSettleRefused(ValueError):
+    """`settle_uncertain` declined; `code` is the stable reason."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def settle_uncertain(log_dir: Path, task_id: str) -> dict[str, Any]:
+    """Settle a launch with no record whose owner is gone after it was granted. Blocking; humans only.
+
+    Whether the agent started is unknowable here, so a person decides. The caller (the ctl command)
+    has already applied the humans-only gate. Only a `granted` launch with no record and a confirmed
+    dead owner is touched. It releases every ledger entry the task owns, its session claim and its
+    worktree usage (all by settling the receipt `not_started`), and finalizes the follow-ups it was
+    handed: back to the queue only when the agent provably never started (the owner died while the
+    worktree was still being planned or made), otherwise `delivery_unknown`. It works from the receipt
+    alone, so a reservation that was released earlier with `resources-release` does not get in its way.
+    """
+    from . import followups
+    from .task_supervision import mark, read_launch, read_task_record
+    receipt = read_launch(log_dir, task_id)
+    if receipt is None:
+        raise LaunchSettleRefused("unknown_launch", f"no launch is recorded for task {task_id}")
+    if read_task_record(log_dir, task_id, include_prompt=False) is not None:
+        raise LaunchSettleRefused("launch_has_record", f"task {task_id} has a task record; stop or inspect that task instead")
+    if receipt["state"] != "granted":
+        raise LaunchSettleRefused("launch_not_uncertain", f"launch {task_id} is {receipt['state']}, not an uncertain granted launch")
+    fresh = owner_confirmed_gone(log_dir, receipt, ("granted",))
+    if fresh is None:
+        raise LaunchSettleRefused("launch_owner_not_dead", f"the owner of launch {task_id} is not confirmed dead, or the launch changed; try again later")
+    worktree = dict(fresh.get("worktree") or {})
+    provably_not_started = worktree.get("state") in ("planned", "creating")
+    released = []
+    ledger = ledger_for(log_dir)
+    wanted = {(fresh.get("resources") or {}).get("reservation_id")}
+    wanted |= {e.reservation_id for e in ledger.entries() if e.owner.task_id == task_id}
+    for reservation_id in sorted(r for r in wanted if r):
+        if ledger.release(reservation_id) != "absent":
+            released.append(reservation_id)
+    handed = fresh.get("followups")
+    outcome = None
+    if handed:
+        outcome = "released" if provably_not_started else "delivery_unknown"
+        followups.finish(log_dir, handed["task_id"], task_id, handed["ids"], outcome,
+                         None if provably_not_started else "the launch owner stopped after the launch was granted; a person settled it")
+    changes: dict[str, Any] = {"state": "not_started", "not_started_reason": "settled_by_person",
+                               "error": "settled with harflow-ctl launch-settle"}
+    if worktree.get("state") == "creating":
+        changes["worktree"] = worktree | {"state": "unknown"}
+    mark(log_dir, task_id, fresh["generation"], **changes)
+    clear_cancel(log_dir, task_id)
+    return {"task_id": task_id, "outcome": "never_started" if provably_not_started else "uncertain",
+            "released_reservations": released, "followups": outcome}
 
 
 def rebuild(log_dir: Path) -> dict[str, Any]:

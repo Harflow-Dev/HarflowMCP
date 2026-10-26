@@ -2113,6 +2113,20 @@ class TaskRegistry:
                     if value:
                         spawn_env[name] = value
 
+            # The last look at a cancel request for a launch that may have waited or built a checkout: a
+            # synchronous file test, so the no-await window before the spawn is untouched. A request that
+            # lands after this is seen by the owner right after the spawn and takes the normal cancel path.
+            if self.execution_mode == "supervised":
+                from . import task_resources
+                if task_resources.cancel_requested(self._log_dir, task_id):
+                    shared_hold.release()
+                    if task_scratch is not None:
+                        try:
+                            scratch.remove(self._log_dir, task_id)
+                        except OSError:
+                            log.exception("task %s: could not clean scratch after a cancel", task_id)
+                    raise task_resources.LaunchCancelled("cancelled before the task started")
+
         try:
             proc = await asyncio.create_subprocess_exec(
                 *invocation.argv,

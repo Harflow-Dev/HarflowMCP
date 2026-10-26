@@ -135,24 +135,29 @@ def session_reservations(log_dir: Path):
     with both owner and agent confirmed dead, releases its busy-session claim. This does not
     authorize replaying the original launch or fabricate an exit receipt.
     """
+    from . import task_resources
     busy = []
     for launch in unresolved(log_dir):
         record = read_task_record(log_dir, launch['task_id'], include_prompt=False)
+        # A dead owner is confirmed first and the receipt and record are read again afterwards: the
+        # probe can be slow, and an owner that granted, spawned and died meanwhile left an agent.
         if (launch['state'] == 'waiting_for_resources' and record is None and launch.get('owner') is not None
-                and identity.identity_check(launch['owner']) == 'dead'):
+                and task_resources.owner_confirmed_gone(log_dir, launch) is not None):
             # Spawn requires `granted` first, so a dead owner that was still waiting never started.
             continue
         if (launch['state'] == 'granted' and record is None and launch.get('owner') is not None
                 and (launch.get('worktree') or {}).get('state') in {'planned', 'creating'}
-                and identity.identity_check(launch['owner']) == 'dead'):
+                and (fresh := task_resources.owner_confirmed_gone(log_dir, launch, ('granted',))) is not None
+                and (fresh.get('worktree') or {}).get('state') in {'planned', 'creating'}):
             # Spawn follows `created`, so an owner that died while the worktree was still being
             # planned or made never started the agent.
             continue
-        if (launch['state'] in {'claimed', 'spawned'} and record is not None
+        if (launch['state'] in {'claimed', 'granted', 'spawned'} and record is not None
                 and launch.get('owner') is not None and record.owner == launch['owner']
                 and record.session_id == launch.get('session_id') and record.pid is not None
                 and identity.identity_check(record.owner) == 'dead'
                 and identity.identity_check(identity.task_identity(record.pid, record.start_time, record.markers)) == 'dead'):
+            # `granted` belongs here too: the record is written before the receipt moves to `spawned`.
             continue
         busy.append(launch)
     return busy
@@ -336,9 +341,15 @@ async def launch(registry, invocation, kwargs):
             error.harflow_not_started = True
             raise error
         if value['state'] in {'waiting_for_resources', 'granted'}:
-            # The owner holds the wait; the caller gets a handle, never a task that does not exist.
-            from .task_resources import PendingLaunch
-            return PendingLaunch(log_dir, value)
+            # `waiting_for_resources` is written before the ledger entry exists (so a crash between
+            # the two reads as never started). Acknowledge only once the entry is visible, so a
+            # launch that declared resources holds or queues for them by the time `start` returns.
+            from .task_resources import PendingLaunch, ledger_entry_visible
+            # A wait of 0 is "grant now or fail": the caller hears the owner's first answer instead.
+            immediate = value['state'] == 'waiting_for_resources' and (value.get('resources') or {}).get('wait_seconds') == 0
+            if not immediate and (value['state'] == 'granted' or await asyncio.to_thread(ledger_entry_visible, log_dir, value)):
+                # The owner holds the wait; the caller gets a handle, never a task that does not exist.
+                return PendingLaunch(log_dir, value)
         if proc.poll() is not None or asyncio.get_running_loop().time() >= deadline:
             raise RuntimeError(f'Task launch acknowledgement uncertain: {task_id}; reservation retained, do not retry execution')
         await asyncio.sleep(0.025)

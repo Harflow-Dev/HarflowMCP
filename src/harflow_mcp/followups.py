@@ -346,7 +346,17 @@ def _launch_verdict(log_dir: Path, successor: str) -> str | None | bool:
         owner_verdict = "undecidable"
     if owner_verdict != "dead":
         return None
-    return RELEASED if state == "waiting_for_resources" else DELIVERY_UNKNOWN
+    # The probe can be slow and the owner may have granted, spawned and died meanwhile, so the
+    # receipt and the record are read again now that it is confirmed gone; nothing changes after.
+    try:
+        fresh = read_launch(log_dir, successor)
+        if store.read(log_dir, successor, include_prompt=False) is not None:
+            return CONSUMED
+    except (store.TaskDocumentError, OSError):
+        return None
+    if fresh is None:
+        return DELIVERY_UNKNOWN
+    return RELEASED if fresh["state"] in ("waiting_for_resources", "not_started") else DELIVERY_UNKNOWN
 
 
 def _reserved_verdict(log_dir: Path, item: dict[str, Any]) -> str | None:

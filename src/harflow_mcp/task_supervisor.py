@@ -17,7 +17,7 @@ from .backends import Invocation, get
 from .extra_paths import restore_paths
 from .state_ownership import StateOwnershipError, state_session
 from . import followups
-from .tasks import TaskRegistry
+from .tasks import TaskRegistry, _before_spawn
 from .task_supervision import MAX_REQUEST, mark, read_launch
 from . import resources as resource_ledger
 from . import task_resources
@@ -193,30 +193,43 @@ async def run(descriptor: int, task_id: str, generation: str):
                     except _NotStarted:
                         _release_followups(registry.log_dir, task_id, request, 'released')
                         return
-                prepared = request['invocation']
-                prepared['initial_input'] = base64.b64decode(prepared['initial_input'], validate=True) if prepared['initial_input'] is not None else None
-                prepared['extra_writable_paths'] = tuple(prepared['extra_writable_paths'])
-                prepared['allowed_commands'] = tuple(prepared['allowed_commands'])
-                if 'identity_markers' in prepared:
-                    prepared['identity_markers'] = tuple(prepared['identity_markers'])
-                invocation = Invocation(**prepared)
-                if created is not None:
-                    # The checkout exists now: everything that reads the repository is built against it.
-                    invocation = await registry._rebuild_invocation(rebuild, Path(created['path']))
-                    request['kwargs']['worktree_info'] = {key: created.get(key) for key in (
-                        'path', 'source_repo_path', 'base_ref', 'base_commit', 'branch', 'detached')}
-                kwargs = request['kwargs']
-                kwargs['repo_path'] = Path(kwargs['repo_path'])
-                kwargs['backend'] = get(request['backend'])
-                kwargs['extra_path_grants'] = restore_paths(request['grants'])
-                registry._launch_generations = {task_id: generation}
+                # Everything from here to the spawn is before the spawn: a conclusive failure in
+                # rebuilding the invocation settles the launch `not_started`, never leaves it uncertain.
+                with _before_spawn():
+                    prepared = request['invocation']
+                    prepared['initial_input'] = base64.b64decode(prepared['initial_input'], validate=True) if prepared['initial_input'] is not None else None
+                    prepared['extra_writable_paths'] = tuple(prepared['extra_writable_paths'])
+                    prepared['allowed_commands'] = tuple(prepared['allowed_commands'])
+                    if 'identity_markers' in prepared:
+                        prepared['identity_markers'] = tuple(prepared['identity_markers'])
+                    invocation = Invocation(**prepared)
+                    if created is not None:
+                        # The checkout exists now: everything that reads the repository is built against it.
+                        invocation = await registry._rebuild_invocation(rebuild, Path(created['path']))
+                        request['kwargs']['worktree_info'] = {key: created.get(key) for key in (
+                            'path', 'source_repo_path', 'base_ref', 'base_commit', 'branch', 'detached')}
+                    kwargs = request['kwargs']
+                    kwargs['repo_path'] = Path(kwargs['repo_path'])
+                    kwargs['backend'] = get(request['backend'])
+                    kwargs['extra_path_grants'] = restore_paths(request['grants'])
+                    registry._launch_generations = {task_id: generation}
                 task = await registry._execute_prepared(invocation, **kwargs, **({'resource_grant': grant} if grant is not None else {}))
                 started = True
-                if grant is not None:
-                    # The spawn is the consumption point for follow-ups that were handed to a launch
-                    # that waited; `finish` is idempotent with the caller-side consumption.
-                    _release_followups(registry.log_dir, task_id, request, 'consumed')
+                # The spawn is the consumption point for follow-ups that were handed to a launch that
+                # may have waited; `finish` is idempotent with the caller-side consumption.
+                _release_followups(registry.log_dir, task_id, request, 'consumed')
                 mark(registry.log_dir, task_id, generation, state='spawned')
+                # A cancel that arrived after the last pre-spawn look: the agent exists now, so it
+                # takes the ordinary cancel path. The request file is cleared either way.
+                late_cancel = task_resources.cancel_requested(registry.log_dir, task_id)
+                task_resources.clear_cancel(registry.log_dir, task_id)
+                if late_cancel:
+                    try:
+                        await registry.cancel_cascade(task.task_id, workflow_control=True)
+                    except StateOwnershipError:
+                        raise
+                    except Exception:
+                        pass  # the owner keeps supervising the agent; the caller can cancel it again
                 await task.done.wait()
                 if task.monitor is not None:
                     await task.monitor
@@ -231,13 +244,19 @@ async def run(descriptor: int, task_id: str, generation: str):
             except BaseException as exc:
                 # A record or ambiguous process creation means execution can never safely retry.
                 if not started and store.read(registry.log_dir, task_id) is None and getattr(exc, 'harflow_not_started', False):
+                    cancelled = isinstance(exc, task_resources.LaunchCancelled)
                     if grant is not None:
                         task_resources.release_quietly(registry.log_dir, grant['reservation_id'])
-                        _release_followups(registry.log_dir, task_id, request, 'released')
+                    _release_followups(registry.log_dir, task_id, request, 'released')
                     mark(registry.log_dir, task_id, generation, state='not_started', error=str(exc),
-                         **({'not_started_reason': 'owner_error'} if grant is not None else {}))
+                         **({'not_started_reason': 'cancelled' if cancelled else 'owner_error'}
+                            if grant is not None or worktree_request is not None or cancelled else {}))
+                    task_resources.clear_cancel(registry.log_dir, task_id)
+                    if cancelled:
+                        return  # an honoured cancel is an outcome, not an owner failure
                 raise
         finally:
+            task_resources.clear_cancel(registry.log_dir, task_id)
             os.close(lock)
 
 

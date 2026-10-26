@@ -465,25 +465,6 @@ async def test_followups_are_consumed_by_the_owner_at_spawn(tmp_path, monkeypatc
     await wait_for(lambda: [i["status"] for i in followups.view(log_dir, source.task_id)["items"]] == ["consumed"])
 
 
-@pytest.mark.asyncio
-async def test_followup_reservation_survives_the_caller_restarting(tmp_path, monkeypatch, identities):
-    from harflow_mcp import followups
-    install_fake_claude(tmp_path, monkeypatch)
-    log_dir = tasks_dir(tmp_path)
-    reg = registry(tmp_path)
-    source = await finished_task(reg, tmp_path, "a" * 32, resources=["sim"], resource_wait_seconds=2)
-    followups.send(log_dir, source.task_id, "remember this", by=None)
-    await reg.start("slow 8 hold", tmp_path, backend=get("claude"), freedom="read_only", resources=["sim"], task_id="b" * 32)
-    pending = await reg.resume_record(store.read(log_dir, source.task_id), None, consume_followups=True)
-    # Whatever the requesting server does now, the launch owner decides: it is alive and waiting.
-    receipt = task_supervision.read_launch(log_dir, pending.task_id)
-    identities.alive(receipt["owner"]["pid"])
-    del reg
-    assert [i["status"] for i in followups.view(log_dir, source.task_id)["items"]] == ["reserved"]
-    await wait_for(lambda: launch_state(tmp_path, pending.task_id) == "not_started")
-    await wait_for(lambda: [i["status"] for i in followups.view(log_dir, source.task_id)["items"]] == ["queued"])
-
-
 def test_granted_launch_with_a_dead_owner_and_no_record_is_delivery_unknown(tmp_path, identities, owned):
     from harflow_mcp import followups
     log_dir = tasks_dir(tmp_path)

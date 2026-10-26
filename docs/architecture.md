@@ -262,8 +262,12 @@ only; liveness is never stored) and each owner kind supplies its own "is it fini
   on the ledger). `record.repo_path` is the worktree; retention keeps a task whose worktree exists.
 - **Recovery commands** are ctl-only and use `lineage.detect_caller_detail` and fail closed like
   takeover: `resources-release` removes one reservation after `--confirm-uncertain` (a reservation
-  with borrowers is flagged and goes with its last borrower), and `resources` is the ungated read the
-  Monitor uses.
+  with borrowers is flagged and goes with its last borrower), `launch-settle` settles a recordless
+  `granted` launch whose owner is confirmed dead (reservations, session claim, worktree usage and
+  follow-ups, from the launch receipt alone), and `resources` is the ungated read the Monitor uses.
+  Every verdict that frees something after an owner-liveness probe re-reads the receipt and record
+  afterwards (`task_resources.owner_confirmed_gone`): a probe can be slow, and an owner that granted,
+  spawned and died meanwhile left an agent.
 
 ## Shared scratch (`shared_scratch.py`)
 

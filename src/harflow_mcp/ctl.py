@@ -14,7 +14,8 @@ ledger (`followups.py`) of a task without live input, for its next continuation.
 The control commands act (A4.2): `cancel` runs the same cascade as `cancel_task` from a registry
 this process owns; `takeover` / `takeover-attach` are the human-only takeover (`takeover.py`);
 `resources` reads the resource reservation ledger and `resources-release` / `resources-repair` are its
-human-only recovery commands (`resources.py`); `run`
+human-only recovery commands (`resources.py`), as is `launch-settle` for a granted launch whose owner
+died without leaving a task record; `run`
 and `resume` fork a process that owns the new task until it settles (`detached.py`). `backends`
 reports the registered backends, whether each binary is on PATH (`backends.is_installed`) and each
 backend's declared capabilities (`backends.capability_metadata`, the same serialization as MCP
@@ -220,6 +221,20 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
         "start work that needs a named resource.",
     )
     repair_p.add_argument("--json", action="store_true")
+
+    settle_p = sub.add_parser(
+        "launch-settle",
+        help="settle a launch whose owner died after it was granted and left no task record "
+        "(for a person, never an agent)",
+        description="For a launch that has no task record and whose owner is confirmed dead, after its resources or "
+        "worktree were granted: whether the agent started cannot be known. Releases the launch's reservations, its "
+        "session claim and its worktree usage, and marks queued follow-ups delivery_unknown (back in the queue only "
+        "when the agent provably never started). Run it only after checking that no agent for this task is running.")
+    settle_p.add_argument("--task-id", required=True)
+    settle_p.add_argument(
+        "--confirm-uncertain", action="store_true", required=True,
+        help="required: you have checked that no agent for this task is running")
+    settle_p.add_argument("--json", action="store_true")
 
     worktree_list_p = sub.add_parser("worktree-list", help="list the task worktrees Harflow created, with their users")
     worktree_list_p.add_argument("--json", action="store_true")
@@ -491,6 +506,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
         resources_p,
         release_p,
         repair_p,
+        settle_p,
         worktree_list_p,
         worktree_remove_p,
         scratch_p,
@@ -975,6 +991,26 @@ def _cmd_resources_repair(args: argparse.Namespace) -> int:
     else:
         print(f"moved the corrupt ledger to {moved_to}; restored {len(rebuilt['restored'])} holder(s)")
         print(result["note"], file=sys.stderr)
+    return 0
+
+
+def _cmd_launch_settle(args: argparse.Namespace) -> int:
+    from . import task_resources
+
+    refused = _human_only_refusal(args, "settle an uncertain launch")
+    if refused is not None:
+        return refused
+    try:
+        task_id = store.validate_task_id(args.task_id)
+        result = task_resources.settle_uncertain(default_log_dir(), task_id)
+    except store.InvalidTaskId:
+        return _fail(args, "invalid_task_id", f"not a valid task id: {args.task_id!r}")
+    except task_resources.LaunchSettleRefused as exc:
+        return _fail(args, exc.code, str(exc))
+    if args.json:
+        print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": result})))
+    else:
+        print(f"{task_id}: settled ({result['outcome']}); released {len(result['released_reservations'])} reservation(s)")
     return 0
 
 
@@ -1549,6 +1585,8 @@ def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
         return _cmd_resources_release(args)
     if args.command == "resources-repair":
         return _cmd_resources_repair(args)
+    if args.command == "launch-settle":
+        return _cmd_launch_settle(args)
     if args.command == "cancel":
         return _cmd_cancel(args)
     if args.command == "takeover":

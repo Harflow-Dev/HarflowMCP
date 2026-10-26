@@ -347,6 +347,12 @@ async def _child(action: Action, write_fd: int | _Handshake, registry_factory: C
             send({"error": error_doc(exc)})
             return 1
         send({"task_id": task.task_id})
+        from .task_resources import PendingLaunch
+        if isinstance(task, PendingLaunch):
+            # The launch owner, not this process, holds the wait and will own the agent: nothing here
+            # has a task to supervise, and staying would only outlive the acknowledgement.
+            log.info("launch %s is %s under its own owner; leaving it there", task.task_id, task.launch_state)
+            return 0
         log.info("owning task %s until it settles", task.task_id)
         await task.done.wait()
         # Continuation callbacks are scheduled by the terminal monitor before it yields.

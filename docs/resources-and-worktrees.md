@@ -43,8 +43,9 @@ record** until it spawns, so nothing that reads a record sees it, and the call r
   `waiting_for_resource=NAME` to list those queued for one name. The indexed page (`group`,
   `limit`, ...) does not include them.
 - `cancel_task` (and `harflow-ctl cancel`) on a pending launch writes a pre-spawn cancel request that
-  the owner honours at its next poll, and cascades to pending descendants. A launch that has already
-  spawned is cancelled the ordinary way.
+  the owner honours at its next poll and again at the last point before the agent starts (after the
+  grant, the worktree and the pre-spawn checks), and cascades to pending descendants. A request that
+  lands after that point is applied by the owner right after the spawn, through the ordinary cancel.
 - After spawn the task record carries `resources {names, reservation_id, state, wait_started_at,
   granted_at, released_at, borrowed_from?}` in `get_task_status` and `harflow-ctl status`.
 - `harflow-ctl status` and `status-batch` answer a pending id with the additive error code
@@ -85,8 +86,15 @@ release. When the caller cannot be identified, the request is refused.
 - `harflow-ctl resources-release --reservation-id ID --confirm-uncertain [--also-release-session]`
   is the person's decision for an entry the reaper cannot settle. `--also-release-session` also
   settles the launch of a `granted` task that has no record, so its session is free to resume.
-  Both recovery commands refuse any detected agent caller and fail closed when that cannot be
-  decided.
+- `harflow-ctl launch-settle --task-id ID --confirm-uncertain` is the person's decision for a launch
+  that was granted, has no task record and whose owner is confirmed dead, so nobody can tell whether
+  the agent started (the usual cause is a launch that waited or made a worktree, then lost its owner
+  before the record appeared). It releases the launch's reservations, its session claim and its
+  worktree usage, and finalizes the queued follow-ups it was handed: back in the queue only if the
+  agent provably never started (the owner died while the worktree was still being planned or made),
+  otherwise `delivery_unknown`. Check that no agent for the task is running first. It works from the
+  launch receipt, so it still works after `resources-release` removed the reservation.
+  The recovery commands refuse any detected agent caller and fail closed when that cannot be decided.
 - A corrupt ledger makes every resource operation refuse. `harflow-ctl resources-repair` moves it to
   `ledger.corrupt-<timestamp>.json` and rebuilds the holders it can prove from durable state
   (unsettled task records and `granted` launches). Waiting launches, borrowers and anything
@@ -162,4 +170,4 @@ Limits: Git LFS and other filter drivers; Codex gains nothing from a worktree at
 `publish` (its sandbox denies Git directory writes there as in a normal checkout; see
 [backend CLI facts](backend-cli-facts.md#codex-and-linked-worktrees-codex-cli-0163-0-2026-10-27)); a
 worktree-only launch whose owner dies after the worktree is `created` keeps its session claim until a
-person settles it; workflows do not accept `worktree` yet; `notify` is not supported with `worktree`.
+person settles it with `launch-settle`; workflows do not accept `worktree` yet; `notify` is not supported with `worktree`.
