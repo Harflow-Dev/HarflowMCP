@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -561,16 +562,25 @@ def test_codex_reports_caller_approvals_as_qualified_with_write_approvals_but_no
 
 @pytest.fixture
 def prepared(tmp_path_factory, monkeypatch):
-    base = tmp_path_factory.mktemp("prepare")
-    repo, home, tmpdir = base / "repo", base / "codex-home", base / "tmp"
-    for path in (repo, home, tmpdir):
-        path.mkdir()
-    subprocess.run(["git", "init", "-q", str(repo)], check=True)
-    monkeypatch.setenv("CODEX_HOME", str(home))
-    monkeypatch.setenv("TMPDIR", str(tmpdir))
-    monkeypatch.setattr(backends, "version", lambda b: "codex-cli 0.163.0")
-    monkeypatch.setattr(sys, "platform", "darwin")
-    return SimpleNamespace(repo=repo, home=home, base=base)
+    with tempfile.TemporaryDirectory(prefix="harflow-codex-prepare-", dir="/var/tmp") as scratch:
+        base = Path(scratch)
+        resolved_base = base.resolve()
+        guarded_tmp = Path(os.path.realpath("/tmp"))
+        if resolved_base == guarded_tmp or resolved_base.is_relative_to(guarded_tmp):
+            raise AssertionError(f"prepared fixture scratch unexpectedly resolves under {guarded_tmp}: {resolved_base}")
+        repo, home, tmpdir = base / "repo", base / "codex-home", base / "tmp"
+        for path in (repo, home, tmpdir):
+            path.mkdir()
+        resolved_home = Path(os.path.realpath(home))
+        for root in (guarded_tmp, tmpdir.resolve(), repo.resolve()):
+            if resolved_home == root or resolved_home.is_relative_to(root):
+                raise AssertionError(f"prepared CODEX_HOME is inside a guarded root: {resolved_home}")
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        monkeypatch.setenv("CODEX_HOME", str(home))
+        monkeypatch.setenv("TMPDIR", str(tmpdir))
+        monkeypatch.setattr(backends, "version", lambda b: "codex-cli 0.163.0")
+        monkeypatch.setattr(sys, "platform", "darwin")
+        yield SimpleNamespace(repo=repo, home=home, base=base)
 
 
 def exec_invocation(repo, freedom="write_in_repo", prompt="hello", **kwargs):

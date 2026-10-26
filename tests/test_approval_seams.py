@@ -628,36 +628,57 @@ def test_supervised_launch_requests_carry_control_pipe_only_when_set():
 # --- review round 2 ---------------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_a_turn_frame_failure_never_delivers_a_concurrently_reserved_approval(state_workspace, monkeypatch):
+async def test_a_turn_frame_failure_never_delivers_a_concurrently_reserved_approval(state_workspace, monkeypatch, caplog):
     """The failing hook reserves a decision and then raises: the failure path must not write that answer."""
     from harflow_mcp import identity
     sink = state_workspace / "answer.txt"
     backend = _approval_double(sink, ASK + "head -n 1 > SINK; cat > /dev/null", "approval-turn-failure")
     holder = {}
+    early_turn_seen = asyncio.Event()
+    reserved_request_id = None
+    local_task = None
 
     def turn_frames(phase, acc):
+        nonlocal reserved_request_id
         if phase != "turn":
             return []
-        registry, task = holder["registry"], holder["task"]
+        registry = holder["registry"]
+        if "task" not in holder:
+            early_turn_seen.set()
+            return []
+        task = holder["task"]
         rows = approvals.rows(registry.log_dir, task.task_id)
         if not rows:
             return []
         row = rows[0]
         approvals.reserve(registry.log_dir, task.task_id, row["request_id"], row["action_digest"], row["owner_revision"], "approve", row["generation"])
+        reserved_request_id = row["request_id"]
         raise RuntimeError("turn frame hook failed after a decision was reserved")
 
     backend.outgoing_frames = turn_frames
     monkeypatch.setitem(backends.BACKENDS, backend.name, backend)
     registry = TaskRegistry(log_dir=state_workspace / "state" / "tasks", owner=identity.own_identity())
     holder["registry"] = registry
-    task = await registry.start("hello", state_workspace, backend=backend, caller_approvals=True)
-    holder["task"] = task
-    await _settled(task)
-    (final,) = approvals.rows(registry.log_dir, task.task_id)
-    # Which of the two closes the row first depends on whether the monitor's own invalidation sees the cancellation.
-    assert final["disposition"] in {"invalidated", "cancelled"} and final["delivery"] == "failed" and final["delivered_decision"] is None
-    assert not sink.exists() or sink.read_text() == ""
-    assert task.input_closed is True and task.cancel_requested is True
+    try:
+        local_task = await registry.start("hello", state_workspace, backend=backend, caller_approvals=True)
+        await asyncio.wait_for(early_turn_seen.wait(), 5)
+        assert early_turn_seen.is_set()
+        holder["task"] = local_task
+        local_task.pump_wake.set()
+        await _settled(local_task)
+        (final,) = approvals.rows(registry.log_dir, local_task.task_id)
+        # Which of the two closes the row first depends on whether the monitor's own invalidation sees the cancellation.
+        assert reserved_request_id == final["request_id"]
+        pump_failures = [record for record in caplog.records if record.name == "harflow_mcp.tasks" and "control pump failed" in record.getMessage()]
+        assert any(record.exc_info and isinstance(record.exc_info[1], RuntimeError) and str(record.exc_info[1]) == "turn frame hook failed after a decision was reserved" for record in pump_failures)
+        assert not any(record.exc_info and isinstance(record.exc_info[1], KeyError) for record in pump_failures)
+        assert final["disposition"] in {"invalidated", "cancelled"} and final["delivery"] == "failed" and final["delivered_decision"] is None
+        assert not sink.exists() or sink.read_text() == ""
+        assert local_task.input_closed is True and local_task.cancel_requested is True
+    finally:
+        if local_task is not None and not local_task.done.is_set():
+            await registry.cancel(local_task)
+            await _settled(local_task)
 
 
 @pytest.mark.asyncio
