@@ -1671,7 +1671,8 @@ class WorkflowStore:
                         return {"workflow_run_id": r["workflow_run_id"], "workflow_node_id": a["node_id"], "workflow_role": a["role"], "execution_contract": r.get("execution_contract"), "node_id": a["node_id"], "role": a["role"], "activation_id": a["id"], "status": r["status"], "workflow_status": r["status"], "workflow_settling": r.get("settling", False)}
         if receipt is not None:
             raise WorkflowError("Workflow ownership receipt no longer matches its run")
-        record = task_store.read(self.root / "tasks", task_id)
+        from .task_supervision import read_task_record
+        record = read_task_record(self.root / "tasks", task_id)
         if record is not None:
             for ancestor in dict.fromkeys((record.parent_task_id, record.spawned_by)):
                 if ancestor:
@@ -2697,7 +2698,8 @@ class WorkflowSupervisor:
                 return self._usage_limit_outcome(recovered["result"], node, role, activation, recovered["candidate"], candidates, recovered_task_id=recovered["task_id"])
         if (persistent_orchestrator or role == "builder" and run.get("builder_followup")) and previous.get("task_id"):
             parent = self.registry.get(previous["task_id"])
-            record = task_store.read(self.registry._log_dir, previous["task_id"])
+            from .task_supervision import read_task_record
+            record = read_task_record(self.registry._log_dir, previous["task_id"])
             retained = parent.snapshot() if parent is not None else None
             from .workflow_native_policy import orchestrator_contract
             source_candidate = next((c for c in candidates if key + ":" + _candidate_key(c) == previous.get("candidate")), candidates[0])
@@ -2921,7 +2923,8 @@ class WorkflowSupervisor:
                             if parent:
                                 task = await self.registry.resume(parent, dispatch_prompt, max_turns=candidate.get("max_turns"), background_idle_seconds=candidate.get("background_idle_seconds"), network=network, task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder", **({"require_unchanged_session": True} if strict_child_resume else {}))
                             else:
-                                record = task_store.read(self.registry._log_dir, previous["task_id"])
+                                from .task_supervision import read_task_record
+                                record = read_task_record(self.registry._log_dir, previous["task_id"])
                                 if record is None:
                                     raise SessionUnknownError("Previous resume session is unavailable")
                                 task = await self.registry.resume_record(record, dispatch_prompt, max_turns=candidate.get("max_turns"), background_idle_seconds=candidate.get("background_idle_seconds"), network=network, task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder", **({"require_unchanged_session": True} if strict_child_resume else {}))

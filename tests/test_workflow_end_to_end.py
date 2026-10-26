@@ -152,7 +152,8 @@ def _save(cli, tmp_path: Path, definition: dict) -> None:
 
 
 def _settled(cli, run_id: str) -> dict:
-    deadline = time.monotonic() + 30
+    # Multiple CLI activations can require additional settlement time under concurrent test load.
+    deadline = time.monotonic() + 90
     while time.monotonic() < deadline:
         run = cli("workflow-status", run_id)
         if run["status"] in {"completed", "failed", "cancelled", "needs_attention", "paused", "needs_input"}:

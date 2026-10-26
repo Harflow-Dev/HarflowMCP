@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Retry transient task metadata replacements during workflow ownership, attachment, continuation and live-message observations while retaining bounded reads, ownership checks and refusal on persistent uncertainty.
+
 - Clarify harness and Harflow interaction-channel terminology in MCP descriptions and CLI help while preserving public field and option names.
 
 - Allow the Mac Monitor response channel to answer caller-owned approval requests on engines advertising `caller-approvals.monitor-respond.v1`. Preserve `decided_by` semantics and add optional channel-derived `responder`; expose the existing bounded, untrusted decision reason fields and `awaiting_decision_count` without changing `pending_count` or `interaction_state`. Approval remains separate from delivery and execution: delivery-time path and protected-target checks can still convert a recorded approval to an effective Harflow rejection. MCP remains a caller channel and cannot claim Monitor authority. Authority remains inferred and cooperative, not authenticated.

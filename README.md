@@ -12,6 +12,8 @@ Version 0.0.2 is under development and unreleased. [Harflow](https://github.com/
 
 Detached task owners preserve output capture and live input across MCP server restarts.
 Workflow scheduler recovery is explicit; see [supervision and recovery](docs/supervision.md).
+Task observations retry transient metadata replacements up to three reads and retain uncertainty
+when metadata cannot be read reliably.
 Recovered tasks disclose owner/process uncertainty and capture continuity. Qualified Claude
 transcripts can supply bounded display-only recovery activity; see [public contracts](docs/contracts.md#supervision-and-recovery-activity).
 Live background wait bounds are persisted and configurable; see [task continuation](docs/task-continuation.md#live-background-wait-bound).

@@ -1,12 +1,14 @@
 import asyncio
 import copy
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from harflow_mcp import workflows as w
+from harflow_mcp import store
 from harflow_mcp import workflow_run_documents
 from harflow_mcp import workflow_receipt_documents
 from harflow_mcp import bounded_io
@@ -2366,6 +2368,93 @@ async def test_missing_resume_record_is_definitively_not_started(storage, tmp_pa
     assert current["activations"][0]["tasks"][0]["status"] == "not_started"
     assert current["status"] == "needs_attention"
     assert registry.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("inject_on", [1, 2])
+async def test_persistent_orchestrator_resume_uses_fresh_previous_record_without_duplicate_dispatch(
+    storage, tmp_path, monkeypatch, inject_on
+):
+    d = w.validate_definition(definition())
+    run = storage.create_run(d, "request", tmp_path, freedom="read_only", network=None)
+    rid = run["workflow_run_id"]
+    node = storage.get_run(rid)["definition"]["nodes"][1]
+    config = storage.get_run(rid)["definition"]["orchestrator"]
+    prior = store.TaskRecord(
+        task_id="prior-record",
+        backend="codex",
+        session_id="retained-session",
+        repo_path=str(tmp_path),
+        started_at="2026-10-26T00:00:00+00:00",
+        status="completed",
+        exit_code=0,
+        freedom="read_only",
+        network=None,
+        title="stale",
+    )
+    assert store.write_landed(storage.root / "tasks", prior)
+    storage.update_run(rid, lambda value: value.update(
+        status="running",
+        runner_policy="guided",
+        supervisor_pid=__import__("os").getpid(),
+        sessions={"orchestrator": {
+            "task_id": prior.task_id,
+            "session_id": prior.session_id,
+            "candidate": "orchestrator:" + w._candidate_key(config),
+        }},
+    ), "fixture")
+
+    class ResumeRegistry(FakeRegistry):
+        def __init__(self, root):
+            super().__init__(root, [{"summary": "fresh start should not happen"}])
+            self.resume_records = []
+            self.fresh_starts = 0
+
+        async def resume_record(self, record, prompt, **kwargs):
+            self.resume_records.append(record)
+            return await super().start(prompt, Path("."), **kwargs)
+
+        async def start(self, prompt, repo_path, **kwargs):
+            self.fresh_starts += 1
+            return await super().start(prompt, repo_path, **kwargs)
+
+    registry = ResumeRegistry(storage.root)
+    supervisor = w.WorkflowSupervisor(registry, storage)
+    supervisor.run_id = rid
+    activation = supervisor._activation(node["id"], "orchestrator")
+    target = store.record_path(storage.root / "tasks", prior.task_id)
+    real_read_text = Path.read_text
+    reads = 0
+    injected = False
+    writing = False
+
+    def race(candidate: Path, *args: object, **kwargs: object) -> str:
+        nonlocal reads, injected, writing
+        raw = real_read_text(candidate, *args, **kwargs)
+        if candidate == target and not writing:
+            reads += 1
+            if reads == inject_on and not injected:
+                injected = True
+                writing = True
+                try:
+                    assert store.write_landed(storage.root / "tasks", replace(prior, title="fresh"))
+                finally:
+                    writing = False
+        return raw
+
+    monkeypatch.setattr(Path, "read_text", race)
+    await supervisor._dispatch(node, "assignment", "orchestrator", activation)
+    assert injected
+    assert reads >= inject_on + 1
+    assert len(registry.resume_records) == 1
+    assert registry.resume_records[0].title == "fresh"
+    assert registry.fresh_starts == 0
+    assert len(registry.calls) == 1
+    current_activation = storage.get_run(rid)["activations"][-1]
+    assert len(current_activation["tasks"]) == 1
+    task = current_activation["tasks"][0]
+    assert task["status"] == "completed"
+    assert storage.get_run(rid)["status"] != "needs_attention"
 
 
 @pytest.mark.asyncio

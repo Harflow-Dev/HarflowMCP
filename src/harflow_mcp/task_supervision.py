@@ -96,13 +96,13 @@ def read_launch(log_dir: Path, task_id: str):
 
 
 @task_operation
-def read_task_record(log_dir: Path, task_id: str):
+def read_task_record(log_dir: Path, task_id: str, **read_options):
     """Retry only a positively observed metadata replacement, never a malformed source."""
     for attempt in range(3):
         try:
-            return store.read(log_dir, task_id)
+            return store.read(log_dir, task_id, **read_options)
         except store.TaskDocumentError as exc:
-            if not getattr(exc, '_source_changed_during_read', False) or attempt == 2:
+            if getattr(exc, '_source_changed_during_read', False) is not True or attempt == 2:
                 raise
 
 
@@ -278,7 +278,7 @@ def owner_holds_unsettled(log_dir: Path, record):
 
 @task_operation
 def attachable(log_dir: Path, task_id: str):
-    record = store.read(log_dir, task_id)
+    record = read_task_record(log_dir, task_id)
     if record is None:
         return False
     if record.exit_code is not None and record.output_drained and record.finished_at:

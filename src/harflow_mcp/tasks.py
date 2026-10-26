@@ -1293,7 +1293,8 @@ class TaskRegistry:
             if interaction_owner == "monitor":
                 await approval_runtime.authorize(self, interaction_owner="monitor")
             caller = await self._mutation_caller()
-            source = await _bounded_extra_path_check(store.read, self._log_dir, continuation_of_task_id) if continuation_of_task_id is not None else None
+            from .task_supervision import read_task_record
+            source = await _bounded_extra_path_check(read_task_record, self._log_dir, continuation_of_task_id) if continuation_of_task_id is not None else None
             if continuation_of_task_id is not None and source is None:
                 raise ValueError("Continuation source unavailable")
             if source is not None and (source.backend != backend.name or source.freedom != freedom or source.network != network or Path(source.repo_path) != repo_path or source.model != model or source.reasoning_effort != reasoning_effort or source.caller_approvals != caller_approvals or source.caller_write_approvals != caller_write_approvals or source.interaction_owner != interaction_owner):
@@ -1334,7 +1335,7 @@ class TaskRegistry:
                 caller_write_approvals=caller_write_approvals,
             )
             if continuation_of_task_id is not None:
-                source = await _bounded_extra_path_check(store.read, self._log_dir, continuation_of_task_id)
+                source = await _bounded_extra_path_check(read_task_record, self._log_dir, continuation_of_task_id)
                 if source is None:
                     raise ValueError("Continuation source unavailable")
                 spawned_by, root_task_id, depth, max_depth, lineage_detected = (
@@ -1424,7 +1425,8 @@ class TaskRegistry:
                 workflow_builder=workflow_builder, native_subagent=native_subagent,
                 native_settings=native_settings, require_unchanged_session=require_unchanged_session,
                 consume_followups=consume_followups, allowed_commands=allowed_commands)
-        store.read(self._log_dir, parent.task_id, include_prompt=False)
+        from .task_supervision import read_task_record
+        read_task_record(self._log_dir, parent.task_id, include_prompt=False)
         from .state_layout import require_dispatch_layout
         require_dispatch_layout(self._log_dir)
         if followup_prompt is None and not consume_followups:
@@ -2193,7 +2195,8 @@ class TaskRegistry:
         from .task_attachment import AttachedTask
         if isinstance(task, AttachedTask):
             return await self.send_to_record(task.task_id, text)
-        store.read(self._log_dir, task.task_id, include_prompt=False)
+        from .task_supervision import read_task_record
+        read_task_record(self._log_dir, task.task_id, include_prompt=False)
         from .workflow_hooks import refuse_direct_message
         await asyncio.to_thread(refuse_direct_message, self._log_dir, task.task_id)
         if not task.live_input:
@@ -2230,9 +2233,10 @@ class TaskRegistry:
     @layout_operation
     async def send_to_record(self, task_id: str, text: str) -> dict[str, Any]:
         """Queue `text` for a live-input task another server owns, via its on-disk inbox."""
+        from .task_supervision import read_task_record
         from .workflow_hooks import refuse_direct_message
         await asyncio.to_thread(refuse_direct_message, self._log_dir, task_id)
-        record = await asyncio.to_thread(store.read, self._log_dir, task_id)
+        record = await asyncio.to_thread(read_task_record, self._log_dir, task_id)
         if record is not None and not record.live_input:
             return await self.queue_followup(task_id, record, text)
         if record is not None and has_extra_path_authority(record):
@@ -2255,9 +2259,10 @@ class TaskRegistry:
     @layout_operation
     async def cancel_queued_followup(self, task_id: str, message_id: str) -> dict[str, Any]:
         """Cancel a still-queued follow-up, under the checks a send takes."""
+        from .task_supervision import read_task_record
         from .workflow_hooks import refuse_direct_message
         await asyncio.to_thread(refuse_direct_message, self._log_dir, task_id)
-        record = await asyncio.to_thread(store.read, self._log_dir, task_id)
+        record = await asyncio.to_thread(read_task_record, self._log_dir, task_id)
         if record is None:
             raise inbox.SendRefused(f"unknown task_id: {task_id}", code="unknown_task")
         if has_extra_path_authority(record):
@@ -2883,10 +2888,11 @@ class TaskRegistry:
     @layout_operation
     def attach(self, task_id: str):
         from .task_attachment import AttachedTask
+        from .task_supervision import read_task_record
         store.validate_task_id(task_id)
         if task_id in self._tasks:
             return self._tasks[task_id]
-        if store.read(self._log_dir, task_id) is None:
+        if read_task_record(self._log_dir, task_id) is None:
             return None
         task = self._attached.setdefault(task_id, AttachedTask(self._log_dir, task_id, registry=self))
         self.prune()

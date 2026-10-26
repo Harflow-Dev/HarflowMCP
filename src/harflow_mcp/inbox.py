@@ -274,7 +274,8 @@ def send_to_record(
             code="lock_timeout",
         ) from None
     try:
-        record = store.read(log_dir, task_id)
+        from .task_supervision import read_task_record
+        record = read_task_record(log_dir, task_id)
         if record is None:
             raise SendRefused(f"unknown task_id: {task_id}", code="unknown_task")
         _check_open(log_dir, record)

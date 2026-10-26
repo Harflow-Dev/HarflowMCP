@@ -21,6 +21,13 @@ authorize execution. Concurrent reconnects never execute the reservation again.
 A proven pre-execution failure permits an identical retry. An interrupted or
 unacknowledged launch remains reserved when execution cannot be ruled out.
 
+Task observations make at most three attempts to read metadata when its source is positively
+observed to change during that read. Each attempt reads the source again with the same
+limits and shared metadata budget; existing catalog cache updates may still occur.
+Malformed metadata and other failures are not retried. If the bounded reads still fail,
+the observation retains uncertainty and refuses the dependent action. This retries only
+the metadata read, never execution, message appends, reservations or recovery itself.
+
 Only the task owner's monitor publishes terminal settlement, after observing
 process exit and completing bounded drainage and input reconciliation. An
 observed exit and an inferred process death are different evidence. Drain failure
