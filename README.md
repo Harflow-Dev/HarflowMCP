@@ -11,7 +11,7 @@ Vibe 3.0.1 headless dispatch uses its Rust CLI and the `ask` approval profile fo
 Version 0.0.3 is a pre-release. [Harflow](https://github.com/Harflow-Dev/HarflowMac), the companion macOS application, is maintained separately and prepares its own exact paired engine runtime. Its managed runtime and MCP registrations work independently of the app process; see the [managed runtime guide](https://github.com/Harflow-Dev/HarflowMac/blob/main/docs/managed-runtime.md).
 
 Detached task owners preserve output capture and live input across MCP server restarts.
-Tasks can take turns on a named, exclusive resource (a simulator, a device, a database) with `resources`; a waiting task is acknowledged at once and reports `waiting_for_resources` until it spawns. See [resources](docs/resources-and-worktrees.md).
+Tasks can take turns on a named, exclusive resource (a simulator, a device, a database) with `resources`; a waiting task is acknowledged at once and reports `waiting_for_resources` until it spawns. A task can also run in its own linked Git worktree with `worktree`, leaving your checkout untouched. See [resources and worktrees](docs/resources-and-worktrees.md).
 
 Workflow scheduler recovery is explicit; see [supervision and recovery](docs/supervision.md).
 Task status distinguishes the dispatching server, execution owner and responding server.
@@ -42,7 +42,7 @@ Use `harflow-ctl version-info --json` to inspect runtime identity and compatibil
 - [Getting started](docs/getting-started.md)
 - [Workflows](docs/workflows.md), including acknowledged context sections and bounded instruction inspection
 - [Task continuation](docs/task-continuation.md)
-- [Resources](docs/resources-and-worktrees.md)
+- [Resources and worktrees](docs/resources-and-worktrees.md)
 - [Task artifacts](docs/task-artifacts.md)
 - [Task and workflow notifications](docs/task-notifications.md) (qualified Harflow database required)
 - [Public contracts and runtime compatibility](docs/contracts.md)

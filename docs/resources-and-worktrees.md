@@ -1,10 +1,15 @@
-# Resources
+# Resources and worktrees
+
+Two independent options on a dispatched task: named exclusive [resources](#resources) and a private
+[worktree](#worktrees). They combine: resources are granted first, then the worktree is made.
+
+## Resources
 
 Named, exclusive resources let tasks take turns on something only one of them can use at a time: an
 iOS simulator, a test database, a device, a branch. Resources grant nothing and change no access;
-they only order who may start. (Task worktrees are documented here when they ship.)
+they only order who may start.
 
-## Using resources
+### Using resources
 
 ```text
 start_task(prompt, repo_path, resources=["ios-simulator"], resource_wait_seconds=1800)
@@ -24,7 +29,7 @@ harflow-ctl run --backend claude --repo . --prompt "..." --resource ios-simulato
 - The names are released when the run's exit is observed. A grandchild process that outlives the
   agent (a simulator, a dev server) can still be running; cleanup hooks are future work.
 
-## A task that is waiting
+### A task that is waiting
 
 A task with resources is acknowledged at once and waits in its detached owner. It has **no task
 record** until it spawns, so nothing that reads a record sees it, and the call returns
@@ -46,7 +51,7 @@ record** until it spawns, so nothing that reads a record sees it, and the call r
   `task_pending_launch` and `launch_state` in `error.data` (`data` in a batch row); `list` is
   unchanged. `harflow-ctl resources --json` shows every name with its holders and queue.
 
-## Resume, continue and follow-ups
+### Resume, continue and follow-ups
 
 `resume_task`, `continue_task` and automatic continuation inherit the task's `resources.names` and
 **re-queue**; they never inherit a held reservation, so there is a gap between a task's release and
@@ -59,7 +64,7 @@ marked consumed when the task actually spawns, and queued again if the launch ne
 expired, it was cancelled, or its owner died while it was still waiting). If the owner dies after the
 grant and before a record appeared, the delivery is `delivery_unknown`.
 
-## Nested tasks: declare at the top
+### Nested tasks: declare at the top
 
 A task that runs another task through Harflow is a *holding scope* when it holds resources. Its
 children may only ask for names it declared, and they are granted at once as a **borrow** (no
@@ -70,7 +75,7 @@ exclusion *inside* one scope is the scope owner's job. A lender's release is def
 borrower is done. A task started from inside a workflow attempt cannot request resources in this
 release. When the caller cannot be identified, the request is refused.
 
-## Recovery
+### Recovery
 
 - The reaper frees an entry whose owner is provably finished or never started: a task record that
   is conclusively settled, a launch marked `not_started`, or a waiting launch whose owner is dead.
@@ -87,7 +92,7 @@ release. When the caller cannot be identified, the request is refused.
   (unsettled task records and `granted` launches). Waiting launches, borrowers and anything
   unprovable are not restored: check what is running before starting work that needs a name.
 
-## Guidance for agents
+### Guidance for agents
 
 Paste into an agent's instructions where it dispatches Harflow tasks:
 
@@ -96,8 +101,65 @@ Paste into an agent's instructions where it dispatches Harflow tasks:
 > a task you start from there may only use names you hold. A task waiting for resources reports
 > `launch_state: "waiting_for_resources"`: keep waiting rather than starting it again.
 
-## Limits
+### Limits
 
 Capacity is one and not configurable. A grandchild that outlives its agent can outlast the release.
 Resources do not isolate anything: two tasks that do not name a resource can still collide on it.
 The Mac Monitor does not show pending tasks yet; it can read them from `harflow-ctl resources --json`.
+
+## Worktrees
+
+```text
+start_task(prompt, repo_path, freedom="write_in_repo", worktree={"base_ref": "main", "branch": "fix/login"})
+harflow-ctl run --backend claude --repo . --prompt "..." --worktree [--worktree-base REF] [--worktree-branch NAME | --worktree-detach]
+```
+
+The task runs in `<worktree_root>/<task_id>`, a linked Git worktree of `repo_path`, so it can write
+without touching your checkout or index. The root is `HARFLOW_WORKTREE_ROOT` (an absolute path;
+default `~/.harflow-worktrees`). It must lie outside Harflow's state directories and outside the
+source repository (neither may contain the other), or the request is refused.
+
+- `base_ref` defaults to the repository's `HEAD` and is resolved to a commit by the launch owner
+  *after* any resource grant, so a task that waited is based on what the ref names then. `branch`
+  defaults to `harflow/<task_id>` and must not exist; `detach: true` checks the commit out with no
+  branch (and excludes `branch`). Git's own refusal to check a branch out in two places stands.
+- The call returns once the launch is accepted, typically as `launch_state: "granted"` while the
+  worktree is made, and the task has no record until it spawns. The pending view carries
+  `worktree {path, source_repo_path, base_ref, branch, detached, base_commit, state}` with state
+  `planned`, `creating`, `created`, `failed`, or `unknown` when the owner died inside the Git command.
+- After spawn the record's **`repo_path` is the worktree**: it is the working directory, the base of
+  the backend argv and identity markers, the session store key, and what resume, continuation,
+  approvals and extra paths use. An additive `worktree` object keeps `source_repo_path`, `base_ref`,
+  `base_commit`, `branch` and `detached`. The path is deterministic, so the invocation is first built
+  against the planned path and then rebuilt by the owner once the checkout exists (command grants and
+  approval configuration read the real tree).
+- Resume and continuation run in the same worktree. If it has been removed they refuse with a message
+  that says so.
+
+Safety: the request is refused at `read_only` (creating a worktree writes the source repository's Git
+directory), for any nested or undetermined caller (a confined parent must not make Harflow write its
+`.git`), in the in-process registry, and when the repository configures Git filter drivers
+(`filter.*.clean|smudge|process`, so Git LFS is unsupported). Creation runs Git with
+`core.hooksPath=/dev/null` and `core.fsmonitor=false`, so no repository hook (including
+`post-checkout`) or monitor program runs; it never uses `--force` or a reset and leaves your
+checkout, index and untracked files alone. If creation fails, the launch settles `not_started`
+(`worktree_failed`), resources are released and a partial directory is reported but never removed.
+
+Cleanup is explicit and for a person only (`lineage.detect_caller_detail`, failing closed):
+
+```text
+harflow-ctl worktree-list --json
+harflow-ctl worktree-remove --task-id ID
+```
+
+`worktree-remove` takes the per-worktree usage lock (`<root>/.locks/<id>.lock`, which every launch into
+the path also takes briefly before writing its receipt), refuses while any task or launch using the path
+is unsettled or uncertain, and refuses unless `git status --porcelain --untracked-files=all` is empty;
+then it runs `git worktree remove` without `--force`. The branch is never deleted. Retention never
+deletes the record of a task whose worktree still exists.
+
+Limits: Git LFS and other filter drivers; Codex gains nothing from a worktree at `write_in_repo` or
+`publish` (its sandbox denies Git directory writes there as in a normal checkout; see
+[backend CLI facts](backend-cli-facts.md#codex-and-linked-worktrees-codex-cli-0163-0-2026-10-27)); a
+worktree-only launch whose owner dies after the worktree is `created` keeps its session claim until a
+person settles it; workflows do not accept `worktree` yet; `notify` is not supported with `worktree`.

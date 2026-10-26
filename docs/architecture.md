@@ -248,6 +248,18 @@ only; liveness is never stored) and each owner kind supplies its own "is it fini
   it; a caller with a `workflow-owners/<task_id>` receipt is a holding scope with no reservation and
   refuses every name (stage D widens this); other callers are no scope. A continuation stays under
   its source's lender while that lender still holds.
+- **Worktrees (`worktrees.py`).** A task's `worktree` is *planned* by the parent
+  (`TaskRegistry._plan_worktree`: supervised only, never `read_only`, never for a detected or
+  undetermined caller) at the deterministic path `<root>/<task_id>`, so the invocation, markers and
+  `request_sha256` bind to it; the receipt carries `worktree {state: planned -> creating -> created
+  | failed}`. The *owner* creates it (`task_supervisor._create_worktree`) after any resource grant,
+  acknowledging first with `granted` so a long checkout cannot outlast the caller's handshake, then
+  rebuilds the invocation against the real tree (`TaskRegistry._rebuild_invocation`) before the
+  unchanged `_execute_prepared` pre-spawn block. A crash in `creating` is reported as `unknown`;
+  nothing is removed automatically, and an owner that died before `created` never spawned, so its
+  launch releases its session and resources. `launch()` and `worktree-remove` serialize on the
+  per-worktree usage lock; the lock sits with the other file locks (it is never held while waiting
+  on the ledger). `record.repo_path` is the worktree; retention keeps a task whose worktree exists.
 - **Recovery commands** are ctl-only and use `lineage.detect_caller_detail` and fail closed like
   takeover: `resources-release` removes one reservation after `--confirm-uncertain` (a reservation
   with borrowers is flagged and goes with its last borrower), and `resources` is the ungated read the

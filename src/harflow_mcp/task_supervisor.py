@@ -35,6 +35,44 @@ def _iso(moment: datetime) -> str:
     return moment.isoformat()
 
 
+async def _create_worktree(registry, task_id: str, generation: str, plan: dict, grant: dict | None) -> dict:
+    """Create the planned worktree in the owner, recording `creating` and `created` in the receipt.
+
+    Runs after any resource grant, so the base ref is resolved after the wait. A refusal or failure
+    settles the launch `not_started`, releases the resources and reports a partial directory; nothing
+    is removed automatically.
+    """
+    from . import worktrees
+    log_dir = registry.log_dir
+
+    def settle(exc: Exception, partial: str | None) -> None:
+        if grant is not None:
+            task_resources.release_quietly(log_dir, grant['reservation_id'])
+        info = plan | {'state': 'failed', 'error': str(exc)[:500], **({'partial_path': partial} if partial else {})}
+        mark(log_dir, task_id, generation, state='not_started', not_started_reason='worktree_failed', error=str(exc)[:1000],
+             worktree=info)
+        task_resources.clear_cancel(log_dir, task_id)
+
+    if task_resources.cancel_requested(log_dir, task_id):
+        settle(RuntimeError('cancelled before the worktree was created'), None)
+        mark(log_dir, task_id, generation, not_started_reason='cancelled')
+        raise _NotStarted()
+
+    def creating(info: dict) -> None:
+        mark(log_dir, task_id, generation, worktree=info)
+
+    try:
+        created = await asyncio.to_thread(worktrees.create, plan, on_creating=creating)
+    except worktrees.WorktreeError as exc:
+        settle(exc, exc.partial_path)
+        raise _NotStarted() from None
+    except OSError as exc:
+        settle(exc, plan['path'] if os.path.lexists(plan['path']) else None)
+        raise _NotStarted() from None
+    mark(log_dir, task_id, generation, worktree=created)
+    return created
+
+
 async def _acquire_resources(registry, task_id: str, generation: str, request: dict) -> dict:
     """Wait for the requested names in the owner, recording each step in the launch receipt.
 
@@ -135,6 +173,8 @@ async def run(descriptor: int, task_id: str, generation: str):
             started = False
             grant = None
             try:
+                worktree_request = request['kwargs'].pop('worktree_request', None)
+                rebuild = request['kwargs'].pop('rebuild', None)
                 if request['kwargs'].get('resource_request') is not None:
                     try:
                         grant = await _acquire_resources(registry, task_id, generation, request['kwargs'].pop('resource_request'))
@@ -143,6 +183,16 @@ async def run(descriptor: int, task_id: str, generation: str):
                         return
                 else:
                     request['kwargs'].pop('resource_request', None)
+                    if worktree_request is not None:
+                        # Acknowledge now: creating a checkout can take longer than the caller's handshake.
+                        mark(registry.log_dir, task_id, generation, state='granted')
+                created = None
+                if worktree_request is not None:
+                    try:
+                        created = await _create_worktree(registry, task_id, generation, worktree_request, grant)
+                    except _NotStarted:
+                        _release_followups(registry.log_dir, task_id, request, 'released')
+                        return
                 prepared = request['invocation']
                 prepared['initial_input'] = base64.b64decode(prepared['initial_input'], validate=True) if prepared['initial_input'] is not None else None
                 prepared['extra_writable_paths'] = tuple(prepared['extra_writable_paths'])
@@ -150,6 +200,11 @@ async def run(descriptor: int, task_id: str, generation: str):
                 if 'identity_markers' in prepared:
                     prepared['identity_markers'] = tuple(prepared['identity_markers'])
                 invocation = Invocation(**prepared)
+                if created is not None:
+                    # The checkout exists now: everything that reads the repository is built against it.
+                    invocation = await registry._rebuild_invocation(rebuild, Path(created['path']))
+                    request['kwargs']['worktree_info'] = {key: created.get(key) for key in (
+                        'path', 'source_repo_path', 'base_ref', 'base_commit', 'branch', 'detached')}
                 kwargs = request['kwargs']
                 kwargs['repo_path'] = Path(kwargs['repo_path'])
                 kwargs['backend'] = get(request['backend'])

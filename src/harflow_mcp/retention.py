@@ -258,6 +258,12 @@ def sweep(log_dir: Path, days: int, now: datetime) -> dict[str, int]:
     for record in sorted(records, key=lambda r: r.task_id in continuation_roots):
         if record.task_id in pinned:
             continue
+        if record.worktree and os.path.lexists(record.worktree.get("path", "")):
+            # The worktree is the only place its work lives; the record that names it stays until a
+            # person removes the worktree.
+            stats.setdefault("kept_worktree", 0)
+            stats["kept_worktree"] += 1
+            continue
         if statuses.get(record.task_id) not in store.TERMINAL_RECORD_STATUSES:
             continue
         if not _older_than(record, days, now):

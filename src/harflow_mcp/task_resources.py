@@ -32,6 +32,11 @@ CANCEL_SUFFIX = ".launch-cancel.json"
 PENDING_STATES = ("waiting_for_resources", "granted")
 
 
+def is_pending_kind(receipt: dict[str, Any] | None) -> bool:
+    """A launch that may have no record for a while: it asked for resources or for a worktree."""
+    return receipt is not None and (isinstance(receipt.get("resources"), dict) or isinstance(receipt.get("worktree"), dict))
+
+
 def ledger_for(log_dir: Path) -> ResourceLedger:
     return ResourceLedger(log_dir.parent)
 
@@ -131,7 +136,7 @@ def pending_descendants(log_dir: Path, root_id: str) -> list[str]:
     """Launches with no record yet that descend from `root_id` by `spawned_by` or `root_task_id`."""
     from .task_supervision import reservations
     pending = {r["task_id"]: r for r in reservations(log_dir)
-               if isinstance(r.get("resources"), dict) and r["state"] in (*PENDING_STATES, "reserved", "claimed")
+               if is_pending_kind(r) and r["state"] in (*PENDING_STATES, "reserved", "claimed")
                and pending_receipt(log_dir, r["task_id"]) is not None}
     found: set[str] = set()
     changed = True
@@ -242,22 +247,31 @@ def view(log_dir: Path, receipt: dict[str, Any], *, check_owner: bool = False) -
         "group": receipt.get("group"), "parent_task_id": receipt.get("parent_task_id"),
         "spawned_by": receipt.get("spawned_by"), "root_task_id": receipt.get("root_task_id"),
         "started_at": receipt.get("created_at"), "pending_launch": True, "recovered": False,
-        "launch_state": state, "status": "running", "resources": {"state": "waiting" if state == "waiting_for_resources" else state, **resources},
+        "launch_state": state, "status": "running",
         "notices": [], "enforcement": _nominal_enforcement(receipt),
     }
+    if isinstance(receipt.get("resources"), dict):
+        payload["resources"] = {"state": "waiting" if state == "waiting_for_resources" else state, **resources}
+    if isinstance(receipt.get("worktree"), dict):
+        payload["worktree"] = dict(receipt["worktree"])
     payload["enforcement_note"] = "Nominal for the requested freedom; the spawned task reports what was actually enforced."
     if state == "not_started":
         cancelled = receipt.get("not_started_reason") == "cancelled"
         payload.update(status="cancelled" if cancelled else "failed", not_started=True,
                        not_started_reason=receipt.get("not_started_reason"), detail=receipt.get("error"))
-        payload["resources"]["state"] = "not_started"
+        if "resources" in payload:
+            payload["resources"]["state"] = "not_started"
     elif state in PENDING_STATES or state in ("reserved", "claimed"):
         verdict = _owner_verdict(receipt) if check_owner else "alive"
         if verdict == "undecidable":
             payload["launch_state"] = "uncertain"
             payload["notices"].append("The launch owner cannot be inspected; its resources are kept until it can be settled.")
         elif verdict == "dead":
-            if state == "granted":
+            worktree_state = (receipt.get("worktree") or {}).get("state")
+            if worktree_state == "creating":
+                payload["worktree"]["state"] = "unknown"  # the owner died inside the Git command that writes
+                payload["notices"].append("The owner died while creating the worktree; its state is unknown and nothing was removed.")
+            if state == "granted" and worktree_state not in ("planned", "creating"):
                 payload["launch_state"] = "uncertain"
                 payload["notices"].append("The launch owner is gone after the resources were granted and before a task record "
                                           "appeared; the resources are kept. A person can release them with `harflow-ctl resources-release`.")
@@ -290,8 +304,8 @@ def pending_receipt(log_dir: Path, task_id: str) -> dict[str, Any] | None:
 
 def pending_view(log_dir: Path, task_id: str, *, check_owner: bool = True) -> dict[str, Any] | None:
     receipt = pending_receipt(log_dir, task_id)
-    if receipt is None or not isinstance(receipt.get("resources"), dict):
-        return None  # a launch without resources is only a handshake in flight, not a pending task
+    if not is_pending_kind(receipt):
+        return None  # a launch without resources or a worktree is only a handshake in flight, not a pending task
     return view(log_dir, receipt, check_owner=check_owner)
 
 
@@ -299,7 +313,7 @@ def pending_views(log_dir: Path, *, check_owner: bool = False) -> list[dict[str,
     from .task_supervision import reservations
     found = []
     for receipt in reservations(log_dir):
-        if isinstance(receipt.get("resources"), dict) and receipt["state"] not in ("spawned", "settled"):
+        if is_pending_kind(receipt) and receipt["state"] not in ("spawned", "settled"):
             if pending_receipt(log_dir, receipt["task_id"]) is not None:
                 found.append(view(log_dir, receipt, check_owner=check_owner))
     return found
@@ -412,6 +426,9 @@ def task_resolver(log_dir: Path):
             return NEVER_STARTED
         if receipt["state"] == "waiting_for_resources" and _owner_verdict(receipt) == "dead":
             return NEVER_STARTED
+        if (receipt["state"] == "granted" and (receipt.get("worktree") or {}).get("state") in ("planned", "creating")
+                and _owner_verdict(receipt) == "dead"):
+            return NEVER_STARTED  # spawn follows `created`: the agent was never started
         # `granted` without a record, an owner that cannot be inspected, and anything else: only a
         # person's `resources-release` frees these.
         return KEEP

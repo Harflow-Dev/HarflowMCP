@@ -221,6 +221,17 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     )
     repair_p.add_argument("--json", action="store_true")
 
+    worktree_list_p = sub.add_parser("worktree-list", help="list the task worktrees Harflow created, with their users")
+    worktree_list_p.add_argument("--json", action="store_true")
+
+    worktree_remove_p = sub.add_parser(
+        "worktree-remove",
+        help="remove one task's worktree when nothing uses it and it is clean (for a person, never an agent)",
+        description="Refuses while any task or launch using the worktree is unsettled or uncertain, and while the "
+        "tree has uncommitted or untracked changes. Never forces, never deletes the branch.")
+    worktree_remove_p.add_argument("--task-id", required=True)
+    worktree_remove_p.add_argument("--json", action="store_true")
+
     approval_list = sub.add_parser("approval-list", help="List permission request metadata")
     approval_target = approval_list.add_mutually_exclusive_group(required=True)
     approval_target.add_argument("--task-id")
@@ -266,6 +277,13 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
                             "the task waits in the background while another run holds it. Not for --workflow runs")
     run_p.add_argument("--resource-wait-seconds", type=int, default=None,
                        help="how long to wait for --resource names, 0..21600 (default 3600; 0 = grant now or fail)")
+    run_p.add_argument("--worktree", action="store_true",
+                       help="run the task in its own linked Git worktree under HARFLOW_WORKTREE_ROOT (default ~/.harflow-worktrees); "
+                            "refused at read_only and for workflow runs")
+    run_p.add_argument("--worktree-base", default=None, metavar="REF", help="commit-ish the worktree starts from (default HEAD)")
+    worktree_target = run_p.add_mutually_exclusive_group()
+    worktree_target.add_argument("--worktree-branch", default=None, metavar="NAME", help="new branch for the worktree (default harflow/<task id>)")
+    worktree_target.add_argument("--worktree-detach", action="store_true", help="check the commit out detached, with no branch")
     run_p.add_argument("--group", default=None)
     run_p.add_argument("--title", default=None)
     run_p.add_argument("--json", action="store_true")
@@ -455,6 +473,8 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
         resources_p,
         release_p,
         repair_p,
+        worktree_list_p,
+        worktree_remove_p,
         run_p,
         resume_p,
         allowlist_p,
@@ -586,9 +606,10 @@ def _status_snapshot(log_dir: Path, task_id: str, managed: Any) -> dict[str, Any
     except Exception as exc:
         raise _StatusReadRefused("workflow_read_refused", str(exc)) from None
     if record is None:
+        from . import task_resources
         from .task_supervision import read_launch
         receipt = read_launch(log_dir, task_id)
-        if receipt is not None and isinstance(receipt.get("resources"), dict) and receipt["state"] not in {"spawned", "settled"}:
+        if receipt is not None and task_resources.is_pending_kind(receipt) and receipt["state"] not in {"spawned", "settled"}:
             # Not a task yet: its owner holds the wait. An older consumer treats the code as unknown.
             raise _StatusReadRefused(
                 "task_pending_launch",
@@ -936,6 +957,42 @@ def _cmd_resources_repair(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_worktree_list(args: argparse.Namespace) -> int:
+    from . import worktrees
+    try:
+        entries = worktrees.inventory(default_log_dir())
+    except (worktrees.WorktreeError, OSError) as exc:
+        return _fail(args, getattr(exc, "code", "worktree_error"), str(exc))
+    if args.json:
+        print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "worktrees": entries})))
+        return 0
+    if not entries:
+        print("no task worktrees")
+    for entry in entries:
+        users = ", ".join(f"{u['task_id']} ({u['status']})" for u in entry["users"]) or "unused"
+        print(f"{entry['task_id']}  {entry['path']}  {'exists' if entry['exists'] else 'missing'}  {users}")
+    return 0
+
+
+def _cmd_worktree_remove(args: argparse.Namespace) -> int:
+    from . import worktrees
+    refused = _human_only_refusal(args, "remove a task worktree")
+    if refused is not None:
+        return refused
+    try:
+        task_id = store.validate_task_id(args.task_id)
+        result = worktrees.remove(default_log_dir(), task_id)
+    except store.InvalidTaskId:
+        return _fail(args, "invalid_task_id", f"not a valid task id: {args.task_id!r}")
+    except worktrees.WorktreeError as exc:
+        return _fail(args, exc.code, str(exc))
+    if args.json:
+        print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": result})))
+    else:
+        print(f"removed {result['path']}; {result['note']}")
+    return 0
+
+
 def _network(raw: str | None) -> bool | None:
     return None if raw is None else raw == "true"
 
@@ -981,6 +1038,7 @@ def _run_action(args: argparse.Namespace):
             **({'extra_writable_paths': args.extra_writable_path} if args.extra_writable_path is not None else {}),
             **({'allowed_commands': getattr(args, 'allowed_command', None)} if getattr(args, 'allowed_command', None) is not None else {}),
             **({'resources': args.resource} if getattr(args, 'resource', None) is not None else {}),
+            **({'worktree': {key: value for key, value in (('base_ref', args.worktree_base), ('branch', args.worktree_branch), ('detach', args.worktree_detach or None)) if value is not None}} if getattr(args, 'worktree', False) else {}),
             **({'resource_wait_seconds': args.resource_wait_seconds} if getattr(args, 'resource_wait_seconds', None) is not None else {}),
         )
 
@@ -1421,6 +1479,10 @@ def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
         return _cmd_backends(args)
     if args.command == "send":
         return _cmd_send(args)
+    if args.command == "worktree-list":
+        return _cmd_worktree_list(args)
+    if args.command == "worktree-remove":
+        return _cmd_worktree_remove(args)
     if args.command == "resources":
         return _cmd_resources(args)
     if args.command == "resources-release":
@@ -1445,11 +1507,15 @@ def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
                 return _fail(args, "invalid_params", "workflow runs do not accept task group or title")
             if args.resource is not None or args.resource_wait_seconds is not None:
                 return _fail(args, "invalid_params", "resources are unavailable for workflow launches")
+            if args.worktree:
+                return _fail(args, "invalid_params", "worktree is unavailable for workflow launches")
             args.name = args.workflow
             args.command = "workflow-start"
             return _cmd_workflow(args)
         if not args.backend:
             return _fail(args, "invalid_params", "--backend is required without --workflow")
+        if not args.worktree and (args.worktree_base is not None or args.worktree_branch is not None or args.worktree_detach):
+            return _fail(args, "invalid_params", "--worktree-base, --worktree-branch and --worktree-detach need --worktree")
         if args.goal is not None or args.goal_file is not None:
             return _fail(args, "invalid_params", "--goal is available only with --workflow")
         return _cmd_detached(args, _run_action(args))

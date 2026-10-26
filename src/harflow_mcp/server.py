@@ -504,6 +504,7 @@ async def start_task(
     allowed_commands: list[StrictStr] | None = None,
     resources: list[StrictStr] | None = None,
     resource_wait_seconds: StrictInt | None = None,
+    worktree: dict[str, StrictStr | StrictBool | None] | None = None,
 ) -> dict[str, Any]:
     """Dispatch a coding task to a headless agent and return immediately.
 
@@ -623,6 +624,18 @@ async def start_task(
             docs/resources-and-worktrees.md.
         resource_wait_seconds: How long to wait for `resources`, 0..21600 (default 3600). 0 means grant
             now or fail. A task that waits out the bound never starts and reports `not_started`.
+        worktree: Optional `{base_ref?, branch?, detach?}`: run the task in its own linked Git worktree,
+            `<HARFLOW_WORKTREE_ROOT>/<task_id>` (default root `~/.harflow-worktrees`), so it can write
+            without touching your checkout or index. `base_ref` (default the repository's HEAD) is
+            resolved to a commit after any resource wait; `branch` (default `harflow/<task_id>`) must
+            not exist yet, or `detach: true` checks out the commit with no branch. The task's
+            `repo_path` and working directory are the worktree, and `worktree.source_repo_path`
+            keeps the original. Refused at `read_only`, for nested dispatches and for a repository that
+            configures Git filter drivers (including LFS); repository hooks do not run while it is
+            created. Nothing removes a worktree or deletes its branch automatically: use
+            `harflow-ctl worktree-list` and `worktree-remove`. The call returns once the launch is
+            accepted, typically with `launch_state: "granted"` while the worktree is made. See
+            docs/resources-and-worktrees.md.
 
     Returns the new task_id and its starting state. The run continues in the background; poll
     get_task_status or call wait_for_task to follow it.
@@ -672,6 +685,8 @@ async def start_task(
             raise MCPError(INVALID_PARAMS, "workflow runs do not accept task group or title")
         if resources is not None or resource_wait_seconds is not None:
             raise MCPError(INVALID_PARAMS, "resources are unavailable for workflow launches")
+        if worktree is not None:
+            raise MCPError(INVALID_PARAMS, "worktree is unavailable for workflow launches")
         return await start_workflow(
             name=workflow, prompt=prompt, repo_path=repo_path,
             overrides={k: v for k, v in {"backend": backend, "model": model, "max_turns": max_turns,
@@ -694,6 +709,14 @@ async def start_task(
     _check_allowed_commands(chosen, freedom, path, allowed_commands)
     if resources is None and resource_wait_seconds is not None:
         raise MCPError(INVALID_PARAMS, "resource_wait_seconds requires resources")
+    if worktree is not None:
+        from . import worktrees
+        try:
+            worktrees.validate_spec(worktree)
+        except ValueError as exc:
+            raise MCPError(INVALID_PARAMS, str(exc)) from None
+        if notify is not None:
+            raise MCPError(INVALID_PARAMS, "notify is not supported together with worktree yet: the launch has no record until it spawns")
     if resources is not None and notify is not None:
         raise MCPError(INVALID_PARAMS, "notify is not supported together with resources yet: a task waiting for resources has no record to notify about")
     if resources is not None:
@@ -746,6 +769,7 @@ async def start_task(
             **({'allowed_commands': allowed_commands} if allowed_commands is not None else {}),
             **({'resources': resources} if resources is not None else {}),
             **({'resource_wait_seconds': resource_wait_seconds} if resource_wait_seconds is not None else {}),
+            **({'worktree': worktree} if worktree is not None else {}),
             **({'task_id': reserved_id} if reserved_id is not None else {}),
         )
     except resource_ledger.ResourceError as exc:

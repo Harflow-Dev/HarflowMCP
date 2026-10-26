@@ -926,3 +926,21 @@ correlation seam. Both cases produce exactly the observed plan reference and its
 identity; denied ordinary writes produce no reference. No argv, permission-mode or transport
 behavior changed. Separate fake-process contention tests verify that blocked artifact registration
 does not block stdout/results, alter `output_drained`, or turn successful execution into failure.
+
+## Codex and linked worktrees (codex-cli 0.163.0, 2026-10-27)
+
+Measured model-free with `codex sandbox -P :workspace -- sh -c ...` (the seatbelt sandbox that backs
+`workspace-write`; no `codex exec`, no model call), in a repository and in a linked worktree of it, both
+outside the temporary directories that the sandbox makes writable by default:
+
+- Writing a file in the working tree: allowed in both.
+- Writing under the repository's `.git` in the normal checkout: `Operation not permitted`.
+- In the linked worktree: writing under its own gitdir (`<repo>/.git/worktrees/<name>`) and under the
+  common directory (`<repo>/.git`): `Operation not permitted`.
+
+So a worktree changes nothing for Codex at `write_in_repo` and `publish`: Git writes (commits, branch
+changes) are denied there exactly as in a normal checkout, and work at `unrestricted`. Decision: parity,
+no extra writable roots, because granting the common directory would also expose `.git/config` and
+hooks. Limit: this is the `codex sandbox` profile, not a `codex exec` run; requalify it through `codex
+exec` before claiming more. Harflow records the worktree path as the task's `repo_path`, so Codex's
+working-directory and writable-root handling see the worktree.

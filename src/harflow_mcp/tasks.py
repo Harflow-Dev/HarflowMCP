@@ -716,6 +716,8 @@ class Task:
     resources: dict[str, Any] | None = None
     """The named resources this run holds; see `store.TaskRecord.resources`. Released (state
     `released`) by `_monitor` once the exit is observed."""
+    worktree: dict[str, Any] | None = None
+    """The linked worktree this run executes in; see `store.TaskRecord.worktree`."""
     interaction_owner: str = "caller"
     approval_generation: str = field(default_factory=lambda: str(uuid.uuid4()))
     approval_pending: bool = False
@@ -902,6 +904,7 @@ class Task:
             "caller_write_approvals": self.caller_write_approvals,
             "interaction_owner": self.interaction_owner,
             **({"resources": dict(self.resources)} if self.resources else {}),
+            **({"worktree": dict(self.worktree)} if self.worktree else {}),
             "approval_summary": self.approval_view,
             "task_id": self.task_id,
             **supervision.fields(self, self.log_path, observed_terminal=self.finished, live=True, input_closed=self.input_closed),
@@ -1296,6 +1299,8 @@ class TaskRegistry:
         resource_wait_seconds: int | None = None,
         resource_inherit: dict[str, Any] | None = None,
         followup_source_task_id: str | None = None,
+        worktree: dict[str, Any] | None = None,
+        worktree_inherit: dict[str, Any] | None = None,
     ) -> Task:
         """Dispatch a fresh session. Returns once the subprocess exists, not once it finishes.
 
@@ -1318,6 +1323,13 @@ class TaskRegistry:
                 await approval_runtime.authorize(self, interaction_owner="monitor")
             caller = await self._mutation_caller()
             resource_request = self._resource_request(resources, resource_wait_seconds, resource_inherit, caller)
+            worktree_plan = None
+            if worktree is not None:
+                # Planned only: the owner creates it after any resource grant. The invocation below is
+                # built against the deterministic planned path and rebuilt by the owner once it exists.
+                task_id = task_id or str(uuid.uuid4())
+                worktree_plan = self._plan_worktree(worktree, repo_path, freedom, caller, task_id)
+                source_repo_path, repo_path = repo_path, Path(worktree_plan["path"])
             from .task_supervision import read_task_record
             source = await _bounded_extra_path_check(read_task_record, self._log_dir, continuation_of_task_id) if continuation_of_task_id is not None else None
             if continuation_of_task_id is not None and source is None:
@@ -1404,7 +1416,45 @@ class TaskRegistry:
             message_ids=message_ids,
             **({"resource_request": resource_request} if resource_request is not None else {}),
             **({"followup_source_task_id": followup_source_task_id} if followup_source_task_id is not None else {}),
+            **({"worktree_request": worktree_plan, "rebuild": {
+                "backend": backend.name, "prompt": prompt, "freedom": freedom, "session_id": session_id, "model": model,
+                "max_turns": max_turns, "reasoning_effort": reasoning_effort, "network": network, "commands": list(commands),
+                "caller_approvals": caller_approvals, "caller_write_approvals": caller_write_approvals}} if worktree_plan is not None else {}),
+            **({"worktree_info": worktree_inherit} if worktree_inherit else {}),
         )
+
+    def _plan_worktree(self, spec: dict[str, Any], repo_path: Path, freedom: str, caller: Any, task_id: str) -> dict[str, Any]:
+        """The worktree plan for a fresh task, or a refusal raised before anything is launched.
+
+        Supervised execution only (the owner creates it), never at `read_only` (creating a worktree
+        writes the source repository's Git directory, which a read-only task must not cause), and
+        never for a nested dispatch: a confined parent must not be able to make Harflow write its
+        `.git` through a child. `caller` is None only when no caller was positively established.
+        """
+        if self.execution_mode != "supervised":
+            raise ValueError("worktrees require supervised execution (a server or harflow-ctl); this in-process registry refuses them")
+        if freedom == "read_only":
+            raise ValueError("worktree is unavailable at read_only: creating one writes the source repository's Git directory")
+        if caller is not None:
+            raise ValueError("worktree is unavailable to nested dispatches; start the task from outside another task")
+        from . import worktrees
+        return worktrees.plan(task_id, repo_path, spec, self._log_dir)
+
+    async def _rebuild_invocation(self, rebuild: dict[str, Any], repo_path: Path) -> Invocation:
+        """Build a worktree task's invocation again, now that its working directory exists.
+
+        Everything that reads the repository (command grants, approval configuration) is evaluated
+        against the real checkout, not the planned path.
+        """
+        from . import approval_runtime
+        backend = get_backend(rebuild["backend"])
+        invocation = backend.build_start_argv(
+            rebuild["prompt"], repo=repo_path, freedom=rebuild["freedom"], session_id=rebuild["session_id"],
+            model=rebuild["model"], max_turns=rebuild["max_turns"], reasoning_effort=rebuild["reasoning_effort"],
+            network=rebuild["network"])
+        invocation = await self._configure_commands(backend, invocation, tuple(rebuild["commands"]), rebuild["freedom"], repo_path, rebuild["network"])
+        return await approval_runtime.configure(backend, invocation, rebuild["caller_approvals"], rebuild["freedom"],
+                                                rebuild["max_turns"], rebuild["caller_write_approvals"])
 
     def _resource_request(self, names: list[str] | None, wait_seconds: int | None, inherit: dict[str, Any] | None, caller: Any) -> dict[str, Any] | None:
         """The resource request for a dispatch, or None when it asks for nothing.
@@ -1576,6 +1626,7 @@ class TaskRegistry:
                     task_id=task_id,
                     consume_followups=consume_followups,
                     resource_request=resource_request,
+                    worktree_info=getattr(parent, "worktree", None),
                 )
         except control.LockTimeout:
             raise SessionBusyError(
@@ -1616,6 +1667,7 @@ class TaskRegistry:
         background_idle_seconds: float | None = None,
         allowed_commands: tuple[str, ...] = (),
         resource_request: dict[str, Any] | None = None,
+        worktree_info: dict[str, Any] | None = None,
     ) -> Task:
         """Build and spawn a resume, consuming the parent's queued follow-ups when asked to.
 
@@ -1705,6 +1757,7 @@ class TaskRegistry:
                 message_ids=attempt.ids if attempt is not None else None,
                 **({"resource_request": resource_request} if resource_request is not None else {}),
                 **({"followup_source_task_id": parent_task_id} if attempt is not None else {}),
+                **({"worktree_info": worktree_info} if worktree_info else {}),
             )
         except BaseException as exc:
             if attempt is not None:
@@ -1723,8 +1776,9 @@ class TaskRegistry:
     @layout_operation
     async def _spawn(self, invocation: Invocation, **kwargs) -> Task:
         from .disk_space import check_launch_space
-        with _before_spawn():
-            await asyncio.to_thread(check_launch_space, self._log_dir, kwargs['repo_path'])
+        if "worktree_request" not in kwargs:  # a planned path does not exist yet; the owner checks after creating it
+            with _before_spawn():
+                await asyncio.to_thread(check_launch_space, self._log_dir, kwargs['repo_path'])
         if self.execution_mode == "supervised":
             from .task_supervision import launch
             return await launch(self, invocation, kwargs)
@@ -1768,6 +1822,7 @@ class TaskRegistry:
         message_ids: list[str] | None = None,
         allowed_commands: tuple[str, ...] | list[str] = (),
         resource_grant: dict[str, Any] | None = None,
+        worktree_info: dict[str, Any] | None = None,
     ) -> Task:
         # Re-checked at the point of execution, not only where the argv was built, so no future
         # caller of this method can launch an agent without its backend's guarantees — and, now
@@ -2019,6 +2074,7 @@ class TaskRegistry:
             allowed_commands=list(allowed_commands),
             allowed_commands_version=command_version,
             resources=dict(resource_grant) if resource_grant else None,
+            worktree=dict(worktree_info) if worktree_info else None,
             interaction_owner=interaction_owner,
             extra_writable_paths=serialize_paths(extra_path_grants),
             extra_path_certification=enforcement.extra_path_certification,
@@ -2914,6 +2970,7 @@ class TaskRegistry:
                 caller_approval_version=task.caller_approval_version,
                 allowed_commands=list(task.allowed_commands),
                 resources=dict(task.resources) if task.resources else None,
+                worktree=dict(task.worktree) if task.worktree else None,
                 interaction_owner=task.interaction_owner,
                 approval_generation=task.approval_generation,
                 parent_task_id=task.parent_task_id,
@@ -3728,7 +3785,7 @@ class TaskRegistry:
         """
         from . import task_resources
         pending = await asyncio.to_thread(task_resources.pending_receipt, self._log_dir, task_id)
-        if pending is None or not isinstance(pending.get("resources"), dict):
+        if pending is None or not task_resources.is_pending_kind(pending):
             return None
         from .workflow_hooks import pause_for_task, refuse_managed, refuse_native_control
         refuse_native_control(self._log_dir, task_id)
@@ -3979,6 +4036,11 @@ class TaskRegistry:
         # a different repository, since the original run.
         repo_path = Path(record.repo_path)
         if not repo_path.is_dir():
+            if record.worktree:
+                raise RepoUnavailableError(
+                    f"the worktree this task ran in no longer exists: {record.repo_path} (it was removed; "
+                    f"its branch, if any, is kept in {record.worktree.get('source_repo_path')}). Start a new task instead"
+                )
             raise RepoUnavailableError(
                 f"the repository this task ran in no longer exists: {record.repo_path}"
             )
@@ -4071,6 +4133,7 @@ class TaskRegistry:
                     task_id=task_id,
                     consume_followups=consume_followups,
                     resource_request=resource_request,
+                    worktree_info=record.worktree,
                 )
         except control.LockTimeout:
             raise SessionBusyError(

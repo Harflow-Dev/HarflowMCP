@@ -331,7 +331,7 @@ def _launch_verdict(log_dir: Path, successor: str) -> str | None | bool:
         receipt = read_launch(log_dir, successor)
     except (store.TaskDocumentError, OSError):
         return False
-    if receipt is None or not isinstance(receipt.get("resources"), dict):
+    if receipt is None or not (isinstance(receipt.get("resources"), dict) or isinstance(receipt.get("worktree"), dict)):
         return False
     state = receipt["state"]
     if state == "not_started":

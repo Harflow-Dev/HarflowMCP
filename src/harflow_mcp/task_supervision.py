@@ -96,6 +96,7 @@ def read_launch(log_dir: Path, task_id: str):
                 or value.get('state') not in STATES
                 or any(value.get(key) is not None and not isinstance(value[key], str) for key in ('spawned_by', 'root_task_id', 'repo_path', 'freedom', 'title', 'group', 'created_at', 'not_started_reason'))
                 or value.get('resources') is not None and (not isinstance(value['resources'], dict) or not isinstance(value['resources'].get('names'), list))
+                or value.get('worktree') is not None and (not isinstance(value['worktree'], dict) or not isinstance(value['worktree'].get('path'), str))
                 or value.get('followups') is not None and (not isinstance(value['followups'], dict) or not isinstance(value['followups'].get('task_id'), str) or not isinstance(value['followups'].get('ids'), list))):
             raise ValueError('Incompatible task launch reservation')
         return value
@@ -140,6 +141,12 @@ def session_reservations(log_dir: Path):
         if (launch['state'] == 'waiting_for_resources' and record is None and launch.get('owner') is not None
                 and identity.identity_check(launch['owner']) == 'dead'):
             # Spawn requires `granted` first, so a dead owner that was still waiting never started.
+            continue
+        if (launch['state'] == 'granted' and record is None and launch.get('owner') is not None
+                and (launch.get('worktree') or {}).get('state') in {'planned', 'creating'}
+                and identity.identity_check(launch['owner']) == 'dead'):
+            # Spawn follows `created`, so an owner that died while the worktree was still being
+            # planned or made never started the agent.
             continue
         if (launch['state'] in {'claimed', 'spawned'} and record is not None
                 and launch.get('owner') is not None and record.owner == launch['owner']
@@ -253,7 +260,22 @@ async def launch(registry, invocation, kwargs):
                                   'scope': resource_request.get('scope'), 'state': 'requested'}
         if 'followups' in request:
             value['followups'] = request['followups']
-        _write(log_dir / f'{task_id}.launch.json', value)
+        if kwargs.get('worktree_request') is not None:
+            value['worktree'] = dict(kwargs['worktree_request'])
+        # A launch into a worktree takes its usage lock just long enough to write the receipt, so a
+        # removal that already decided "nothing uses it" cannot be overtaken by this launch.
+        from . import worktrees
+        if kwargs.get('worktree_request') is not None or worktrees.is_worktree_path(Path(kwargs['repo_path'])):
+            try:
+                with worktrees.usage_lock(Path(kwargs['repo_path'])):
+                    if kwargs.get('worktree_request') is None and not Path(kwargs['repo_path']).is_dir():
+                        raise worktrees.WorktreeError(f"the worktree {kwargs['repo_path']} no longer exists", code='worktree_missing')
+                    _write(log_dir / f'{task_id}.launch.json', value)
+            except worktrees.WorktreeError as exc:
+                exc.harflow_not_started = True  # nothing was written or started
+                raise
+        else:
+            _write(log_dir / f'{task_id}.launch.json', value)
     finally:
         os.close(lock)
     read_fd, write_fd = os.pipe()
@@ -308,7 +330,7 @@ async def launch(registry, invocation, kwargs):
         if value['state'] == 'not_started':
             # A launch that asked for resources and was refused (nothing free right now, or a borrow
             # that was no longer covered) is a request error, not an owner fault.
-            error = (ValueError if value.get('resources') is not None else RuntimeError)(value.get('error', 'Task owner refused launch before execution'))
+            error = (ValueError if value.get('resources') is not None or value.get('worktree') is not None else RuntimeError)(value.get('error', 'Task owner refused launch before execution'))
             error.harflow_not_started = True
             raise error
         if value['state'] in {'waiting_for_resources', 'granted'}:

@@ -212,6 +212,9 @@ Server restarts and recovered runs are explained in "When the client restarts th
   never across an `await`, a subprocess (including `ps`), Git or another lock. Waiting for resources
   happens in the detached owner holding no lock; the launch receipt is the waiting task's only state
   (no TaskRecord until spawn), and uncertainty never frees an entry.
+- Task worktrees (`worktrees.py`) are created by the launch owner with `core.hooksPath=/dev/null`, never
+  forced or removed automatically; a launch into one takes `<root>/.locks/<id>.lock` only to write its
+  receipt, and `worktree-remove` is humans-only and fail-closed like takeover.
 
 See "When the client restarts the server" in [docs/architecture.md](docs/architecture.md) for the
 failure modes, accepted limits and the follow-up ledger sequence.
