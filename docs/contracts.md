@@ -1,10 +1,10 @@
 # Harflow public wire contracts
 
-HarflowMCP 0.0.2 is unreleased. This specification covers ctl, setup, normalized events and version-info. Persisted task metadata, saved workflow definitions, workflow run documents, ownership receipts, follow-up ledgers, control phase payloads, live-input inbox rows, task artifact manifests and approval ledgers use qualified Harflow formats; store ownership and registered schema-preserving migration are defined below. Raw vendor streams, MCP negotiation, cursors and internal indexes are unchanged.
+HarflowMCP 0.0.3 is a pre-release. This specification covers ctl, setup, normalized events and version-info. Persisted task metadata, saved workflow definitions, workflow run documents, ownership receipts, follow-up ledgers, control phase payloads, live-input inbox rows, task artifact manifests and approval ledgers use qualified Harflow formats; store ownership and registered schema-preserving migration are defined below. Raw vendor streams, MCP negotiation, cursors and internal indexes are unchanged.
 
 ## Common envelope
 
-Every wire document contains `product: "harflow"`, a format discriminator, integer `v: 1`, and `product_version: "0.0.2"`. Booleans are not integer versions. The formats are `harflow.ctl`, `harflow.setup`, `harflow.event` and `harflow.version-info`.
+Every wire document contains `product: "harflow"`, a format discriminator, integer `v: 1`, and `product_version: "0.0.3"`. Booleans are not integer versions. The formats are `harflow.ctl`, `harflow.setup`, `harflow.event` and `harflow.version-info`.
 
 Validate identity and format before interpreting either a payload or an error. Missing or foreign product/format, unsupported versions and malformed product versions are rejected. Unknown optional fields and unknown normalized event kinds are additive. Payload fields cannot override the reserved common envelope fields.
 
@@ -363,7 +363,7 @@ and `has_more`. The listing accepts
 history cannot be reconstructed. Existing successor records keep their source IDs; predecessor
 owner metadata is not rewritten. Subscriptions remain attached to the original task ID.
 
-The unreleased 0.0.2 producer extends private artifact provenance with
+The 0.0.3 producer extends private artifact provenance with
 `{method: "observed_backend_plan", task_id, tool_use_id}` for engine-observed successful plan writes.
 The reader accepts both this variant and existing `verified_process_lineage` references, validating
 the variant strictly. Older engine implementations reject manifests containing the new variant as

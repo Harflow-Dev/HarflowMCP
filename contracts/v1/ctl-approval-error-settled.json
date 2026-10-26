@@ -1,1 +1,1 @@
-{"error":{"code":"approval_error","data":{"reason":"settled"},"message":"Approval request is already settled"},"format":"harflow.ctl","product":"harflow","product_version":"0.0.2","v":1}
+{"error":{"code":"approval_error","data":{"reason":"settled"},"message":"Approval request is already settled"},"format":"harflow.ctl","product":"harflow","product_version":"0.0.3","v":1}

@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from typing import Any
 
 PRODUCT = "harflow"
-PRODUCT_VERSION = "0.0.2"
+PRODUCT_VERSION = "0.0.3"
 WIRE_VERSION = 1
 CTL_FORMAT = "harflow.ctl"
 SETUP_FORMAT = "harflow.setup"

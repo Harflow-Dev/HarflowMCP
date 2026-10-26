@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.0.2
+## 0.0.3
 
 - Retry verified task metadata replacements during attached cancellation and recovered cancellation delivery, settlement and handoff, retaining bounded retries and refusal before effects on malformed or persistently changing metadata.
 
@@ -15,6 +15,8 @@
 - Add neutral publication intent with a deprecated identical alias, report the checkout sampled at dispatch, and accept validated unrestricted extra paths as a disclosed no-op across launch and recovery (#49).
 - Disclose Claude plan-mode file writes and record successful observed built-in plans as metadata-only artifacts; qualify the behavior with no-paid Claude 2.1.310 probes (#50).
 - Release matching dead-owner/dead-agent session reservations for context-preserving resume, including attached tasks; preflight 256 MiB free per required filesystem and preserve draining/recovery evidence after disk-write failures (#52).
+
+## 0.0.2
 
 - Retry transient task metadata replacements during workflow ownership, attachment, continuation and live-message observations while retaining bounded reads, ownership checks and refusal on persistent uncertainty.
 
