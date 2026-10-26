@@ -190,7 +190,11 @@ def sweep(log_dir: Path, days: int, now: datetime) -> dict[str, int]:
             if reservation_path.stat().st_size > 4096:
                 continue
             reservation = json.loads(reservation_path.read_text())
-            if reservation.get('state') == 'reserved':
+            # `accepted` is a successor still waiting for resources; once its record exists or its
+            # launch settled, the reservation no longer needs the chain kept.
+            accepted_pending = reservation.get('state') == 'accepted' and any(
+                launch['task_id'] == reservation.get('task_id') for launch in launches)
+            if reservation.get('state') == 'reserved' or accepted_pending:
                 protected.add(reservation_path.name.removesuffix('.continuation.json'))
                 protected.add(reservation.get('chain_root_task_id'))
         except (OSError, ValueError, TypeError):

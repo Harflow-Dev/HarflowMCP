@@ -174,7 +174,16 @@ async def continue_task(registry: Any, task_id: str, extra_prompt: str | None = 
                 return child
             if saved_child is not None:
                 raise ValueError(f"Continuation already exists: {reservation['task_id']}")
-            if reservation.get('state') != 'not_started':
+            if reservation.get('state') == 'accepted':
+                # Acknowledged while it waits for resources: the same successor, never a second one.
+                from .task_resources import PendingLaunch
+                from .task_supervision import read_launch
+                receipt = read_launch(registry.log_dir, reservation['task_id'])
+                if receipt is not None and receipt['state'] in {'waiting_for_resources', 'granted'}:
+                    return PendingLaunch(registry.log_dir, receipt)
+                if receipt is None or receipt['state'] != 'not_started':
+                    raise ValueError(f"Continuation reservation unsettled: {reservation['task_id']}; refusing duplicate execution")
+            elif reservation.get('state') != 'not_started':
                 raise ValueError(f"Continuation reservation unsettled: {reservation['task_id']}; refusing duplicate execution")
         if automatic:
             if source.auto_continue <= 0 or live is None or source.status == 'cancelled' or live.cancel_requested or live.acc.denials or live.acc.failure_diagnostic:
@@ -202,8 +211,15 @@ async def continue_task(registry: Any, task_id: str, extra_prompt: str | None = 
             _write(path, {'task_id': identifier, 'state': 'reserved', 'chain_root_task_id': root, 'automatic': automatic, 'request_fingerprint': fingerprint}, layout=registry.state_layout)
             try:
                 spawn_called = True
-                child = await registry.start(prompt, Path(source.repo_path), backend=get_backend(source.backend), freedom=source.freedom, model=source.model, reasoning_effort=source.reasoning_effort, network=source.network, caller_approvals=source.caller_approvals, caller_write_approvals=source.caller_write_approvals, interaction_owner=source.interaction_owner, max_turns=source.max_turns, background_idle_seconds=effective_idle, group=source.group, title=source.title, task_id=identifier, auto_continue=max(source.auto_continue - 1, 0) if automatic else 0, continuation_of_task_id=task_id, chain_root_task_id=root, chain_prompt=None, **({'allowed_commands': list(explicit_commands)} if explicit_commands is not None else {}), **({'message_ids': attempt.ids} if attempt is not None else {}))
+                child = await registry.start(prompt, Path(source.repo_path), backend=get_backend(source.backend), freedom=source.freedom, model=source.model, reasoning_effort=source.reasoning_effort, network=source.network, caller_approvals=source.caller_approvals, caller_write_approvals=source.caller_write_approvals, interaction_owner=source.interaction_owner, max_turns=source.max_turns, background_idle_seconds=effective_idle, group=source.group, title=source.title, task_id=identifier, auto_continue=max(source.auto_continue - 1, 0) if automatic else 0, continuation_of_task_id=task_id, chain_root_task_id=root, chain_prompt=None, **({'allowed_commands': list(explicit_commands)} if explicit_commands is not None else {}), **({'message_ids': attempt.ids, 'followup_source_task_id': task_id} if attempt is not None else {}), **({'resource_inherit': source.resources} if source.resources and source.resources.get('names') else {}))
                 from .task_attachment import AttachedTask
+                from .task_resources import PendingLaunch
+                if isinstance(child, PendingLaunch):
+                    # Accepted, not started: it has no record to update and its lineage rides in the receipt.
+                    _write(path, {'task_id': identifier, 'state': 'accepted', 'chain_root_task_id': root, 'request_fingerprint': fingerprint}, layout=registry.state_layout)
+                    if attempt is not None:
+                        await attempt.handed_off(child)
+                    return child
                 if not isinstance(child, AttachedTask):
                     child.spawned_by, child.root_task_id = source.spawned_by, source.root_task_id
                     child.depth, child.max_depth = source.depth, source.max_depth

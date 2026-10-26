@@ -261,6 +261,11 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
                        help="Existing absolute file/directory grant; repeat up to 16 times; verified harnesses only")
     run_p.add_argument("--allowed-command", action="append", default=None,
                        help="Bash command pattern granted for this run only; repeat up to 16 times. Claude Code at write_in_repo or publish only; see docs/harness-permissions.md")
+    run_p.add_argument("--resource", action="append", default=None, metavar="NAME",
+                       help="exclusive named resource the task needs before it starts (repeatable, at most 16); "
+                            "the task waits in the background while another run holds it. Not for --workflow runs")
+    run_p.add_argument("--resource-wait-seconds", type=int, default=None,
+                       help="how long to wait for --resource names, 0..21600 (default 3600; 0 = grant now or fail)")
     run_p.add_argument("--group", default=None)
     run_p.add_argument("--title", default=None)
     run_p.add_argument("--json", action="store_true")
@@ -558,10 +563,11 @@ def _cmd_backends(args: argparse.Namespace) -> int:
 class _StatusReadRefused(Exception):
     """One task id's share of a read: the same code and message single `status` reports."""
 
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, data: dict[str, Any] | None = None) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
+        self.data = data
 
 
 def _status_snapshot(log_dir: Path, task_id: str, managed: Any) -> dict[str, Any]:
@@ -580,6 +586,14 @@ def _status_snapshot(log_dir: Path, task_id: str, managed: Any) -> dict[str, Any
     except Exception as exc:
         raise _StatusReadRefused("workflow_read_refused", str(exc)) from None
     if record is None:
+        from .task_supervision import read_launch
+        receipt = read_launch(log_dir, task_id)
+        if receipt is not None and isinstance(receipt.get("resources"), dict) and receipt["state"] not in {"spawned", "settled"}:
+            # Not a task yet: its owner holds the wait. An older consumer treats the code as unknown.
+            raise _StatusReadRefused(
+                "task_pending_launch",
+                f"task {task_id} has not started: its launch is {receipt['state']}; no task record exists until it spawns",
+                {"launch_state": receipt["state"], **({"not_started_reason": receipt["not_started_reason"]} if receipt.get("not_started_reason") else {})})
         raise _StatusReadRefused("unknown_task", f"unknown task_id: {task_id}")
     from .workflow_inspection import decorate_tasks
     return decorate_tasks([store.snapshot(log_dir, record)], log_dir)[0]
@@ -605,7 +619,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
     try:
         snapshot = _status_snapshot(log_dir, task_id, managed)
     except _StatusReadRefused as exc:
-        return _fail(args, exc.code, exc.message)
+        return _fail(args, exc.code, exc.message, exc.data)
 
     if getattr(args, 'brief', False):
         from .task_reads import brief_status
@@ -659,7 +673,7 @@ def _cmd_status_batch(args: argparse.Namespace) -> int:
         except store.TaskDocumentError as exc:
             errors[task_id] = {"code": exc.code, "message": str(exc)}
         except _StatusReadRefused as exc:
-            errors[task_id] = {"code": exc.code, "message": exc.message}
+            errors[task_id] = {"code": exc.code, "message": exc.message, **({"data": exc.data} if exc.data else {})}
 
     if args.json:
         print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "tasks": tasks, "errors": errors})))
@@ -726,6 +740,10 @@ def _cmd_cancel(args: argparse.Namespace) -> int:
         return _fail(args, "invalid_task_id", f"not a valid task id: {args.task_id!r}")
     log_dir = default_log_dir()
     if store.read(log_dir, task_id) is None:
+        from . import task_resources
+        pending = task_resources.pending_view(log_dir, task_id)
+        if pending is not None:
+            return _cancel_pending(args, log_dir, task_id)
         return _fail(args, "unknown_task", f"unknown task_id: {task_id}")
 
     registry = tasks_module.TaskRegistry(log_dir=log_dir, open_monitor=False, execution_mode="supervised")
@@ -761,6 +779,22 @@ def _cmd_cancel(args: argparse.Namespace) -> int:
         print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": result})))
     else:
         print(f"{task_id}: {status}")
+    return 0
+
+
+def _cancel_pending(args: argparse.Namespace, log_dir: Path, task_id: str) -> int:
+    """`cancel` for a launch with no record: ask its owner to stop waiting, in the existing result shape."""
+    from . import task_resources
+    outcome = task_resources.cancel_launch(log_dir, task_id)
+    if outcome["spawned"]:
+        return _cmd_cancel(args)  # it spawned while we asked: the ordinary cancel takes over
+    view = task_resources.pending_view(log_dir, task_id)
+    status = view["status"] if view is not None else "cancelled"
+    result = {"task_id": task_id, "status": status, "cascade": outcome["cascade"]}
+    if args.json:
+        print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": result})))
+    else:
+        print(f"{task_id}: {status} (cancel requested before the task started)")
     return 0
 
 
@@ -830,55 +864,68 @@ def _human_only_refusal(args: argparse.Namespace, what: str) -> int | None:
 
 
 def _cmd_resources_release(args: argparse.Namespace) -> int:
-    from . import resources
+    from . import resources, task_resources
 
     refused = _human_only_refusal(args, "release a resource reservation")
     if refused is not None:
         return refused
+    log_dir = default_log_dir()
     try:
         reservation_id = resources.validate_reservation_id(args.reservation_id)
-        ledger = resources.ResourceLedger(default_log_dir().parent)
+        ledger = resources.ResourceLedger(log_dir.parent)
+        entry = ledger.get(reservation_id)
         outcome = ledger.release(reservation_id)
     except resources.ResourceError as exc:
         return _fail(args, exc.code, str(exc))
     if outcome == "absent":
         return _fail(args, "unknown_reservation", f"unknown reservation {reservation_id}")
+    session = "not_requested"
+    if args.also_release_session:
+        # Only a `granted` launch with no record holds a session claim the ledger cannot see; a
+        # running task's claim is its live process, which a person must stop, not release.
+        task_id = entry.owner.task_id if entry is not None else None
+        session = task_resources.release_session_claim(log_dir, task_id) if task_id else "not_applicable"
     result = {
         "reservation_id": reservation_id,
         "outcome": outcome,
-        # Accepted for forward compatibility; nothing holds a session claim before task resources.
         "also_release_session": bool(args.also_release_session),
-        "session_released": False,
+        "session_released": session == "released",
+        **({"session": session} if args.also_release_session else {}),
     }
     if args.json:
         print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": result})))
     elif outcome == "release_requested":
         print(f"{reservation_id}: release requested; it goes when its last borrower is released")
     else:
-        print(f"{reservation_id}: released")
+        print(f"{reservation_id}: released" + ("; session claim released" if session == "released" else ""))
     return 0
 
 
 def _cmd_resources_repair(args: argparse.Namespace) -> int:
-    from . import resources
+    from . import resources, task_resources
 
     refused = _human_only_refusal(args, "repair the resource ledger")
     if refused is not None:
         return refused
+    log_dir = default_log_dir()
     try:
-        moved_to = resources.ResourceLedger(default_log_dir().parent).repair()
+        moved_to = resources.ResourceLedger(log_dir.parent).repair()
+        rebuilt = task_resources.rebuild(log_dir)
     except resources.ResourceError as exc:
         return _fail(args, exc.code, str(exc))
     result = {
         "moved_to": str(moved_to),
-        "rebuilt": False,
-        "note": "The ledger was started empty. Holders are not rebuilt from durable state yet; verify what is "
-        "running before starting work that needs a named resource.",
+        "rebuilt": True,
+        "restored": rebuilt["restored"],
+        "conflicts": rebuilt["conflicts"],
+        "note": "The ledger was started from durable evidence only: holders of unsettled task records and "
+        "granted launches were restored; waiting launches, borrowers and anything unprovable were not. "
+        "Verify what is running before starting work that needs a named resource.",
     }
     if args.json:
         print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": result})))
     else:
-        print(f"moved the corrupt ledger to {moved_to}")
+        print(f"moved the corrupt ledger to {moved_to}; restored {len(rebuilt['restored'])} holder(s)")
         print(result["note"], file=sys.stderr)
     return 0
 
@@ -927,6 +974,8 @@ def _run_action(args: argparse.Namespace):
             interaction_owner="monitor" if args.monitor else "caller",
             **({'extra_writable_paths': args.extra_writable_path} if args.extra_writable_path is not None else {}),
             **({'allowed_commands': getattr(args, 'allowed_command', None)} if getattr(args, 'allowed_command', None) is not None else {}),
+            **({'resources': args.resource} if getattr(args, 'resource', None) is not None else {}),
+            **({'resource_wait_seconds': args.resource_wait_seconds} if getattr(args, 'resource_wait_seconds', None) is not None else {}),
         )
 
     return action
@@ -1388,6 +1437,8 @@ def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
                 return _fail(args, "invalid_params", "Workflow retries belong to their supervisor; --auto-continue is unavailable")
             if args.group is not None or args.title is not None:
                 return _fail(args, "invalid_params", "workflow runs do not accept task group or title")
+            if args.resource is not None or args.resource_wait_seconds is not None:
+                return _fail(args, "invalid_params", "resources are unavailable for workflow launches")
             args.name = args.workflow
             args.command = "workflow-start"
             return _cmd_workflow(args)

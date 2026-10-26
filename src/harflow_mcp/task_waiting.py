@@ -33,7 +33,9 @@ def _record_exists(directory, task_id):
     try:
         store.record_path(directory, task_id).stat()
     except FileNotFoundError:
-        return False
+        # A launch still waiting for resources has no record yet, but it is a task the caller knows.
+        from . import task_resources
+        return task_resources.pending_receipt(directory, task_id) is not None
     return True
 
 
@@ -47,7 +49,14 @@ def _owner_alive(record):
 def _recovered(directory, task_id):
     record = store.read(directory, task_id, include_prompt=False, metadata_byte_limit=METADATA_BYTES)
     if record is None:
-        return None
+        from . import task_resources
+        view = task_resources.pending_view(directory, task_id)
+        if view is None:
+            return None
+        source = SimpleNamespace(backend=view["backend"], session_id=view.get("session_id"), title=view.get("title"),
+                                 failure_diagnostic=None, caller_approvals=False)
+        status = view["status"] if view["launch_state"] != "uncertain" else "running"
+        return source, status, view.get("next_step"), "pending_launch"
     header, _, unobserved = store.listing_header(record)
     store._project_indexed_status(header, record)
     status, note = header["status"], header.get("note")

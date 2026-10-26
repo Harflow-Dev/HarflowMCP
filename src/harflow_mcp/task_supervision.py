@@ -17,6 +17,7 @@ import sys
 import stat
 import re
 import uuid
+from datetime import datetime, timezone
 
 from . import identity, store
 from .state_access import task_operation, assert_task_owned
@@ -27,6 +28,10 @@ from .wire_contracts import PRODUCT, PRODUCT_VERSION
 FORMAT = 'harflow.task-launch'
 MAX_REQUEST = 4 * 1024 * 1024
 LAUNCH_HANDSHAKE_SECONDS = 30.0
+# The owner moves through these in order. `waiting_for_resources` and `granted` exist only for a
+# launch that asked for resources; `not_started` is reachable from every state before `spawned`
+# (from `granted` only when the failure is proven to precede the spawn).
+STATES = {'reserved', 'claimed', 'waiting_for_resources', 'granted', 'spawned', 'settled', 'not_started'}
 
 
 def _write(path, document):
@@ -88,7 +93,10 @@ def read_launch(log_dir: Path, task_id: str):
                 or not isinstance(value.get('backend'), str)
                 or any(value.get(key) is not None and not isinstance(value[key], str) for key in ('session_id', 'parent_task_id', 'chain_root_task_id'))
                 or value.get('owner') is not None and (not isinstance(value['owner'], dict) or type(value['owner'].get('pid')) is not int or value['owner']['pid'] <= 0 or value['owner'].get('start_time') is not None and not isinstance(value['owner']['start_time'], str) or not isinstance(value['owner'].get('markers'), list) or any(not isinstance(marker, str) for marker in value['owner']['markers']))
-                or value.get('state') not in {'reserved', 'claimed', 'spawned', 'settled', 'not_started'}):
+                or value.get('state') not in STATES
+                or any(value.get(key) is not None and not isinstance(value[key], str) for key in ('spawned_by', 'root_task_id', 'repo_path', 'freedom', 'title', 'group', 'created_at', 'not_started_reason'))
+                or value.get('resources') is not None and (not isinstance(value['resources'], dict) or not isinstance(value['resources'].get('names'), list))
+                or value.get('followups') is not None and (not isinstance(value['followups'], dict) or not isinstance(value['followups'].get('task_id'), str) or not isinstance(value['followups'].get('ids'), list))):
             raise ValueError('Incompatible task launch reservation')
         return value
     except (ValueError, TypeError) as exc:
@@ -129,6 +137,10 @@ def session_reservations(log_dir: Path):
     busy = []
     for launch in unresolved(log_dir):
         record = read_task_record(log_dir, launch['task_id'], include_prompt=False)
+        if (launch['state'] == 'waiting_for_resources' and record is None and launch.get('owner') is not None
+                and identity.identity_check(launch['owner']) == 'dead'):
+            # Spawn requires `granted` first, so a dead owner that was still waiting never started.
+            continue
         if (launch['state'] in {'claimed', 'spawned'} and record is not None
                 and launch.get('owner') is not None and record.owner == launch['owner']
                 and record.session_id == launch.get('session_id') and record.pid is not None
@@ -202,8 +214,13 @@ async def launch(registry, invocation, kwargs):
     kwargs['repo_path'] = str(kwargs['repo_path'])
     request_invocation = invocation_request(invocation)
     generation = uuid.uuid4().hex
+    # Consumption of queued follow-ups is finalized by the owner at spawn when the launch may wait.
+    followup_source = kwargs.pop('followup_source_task_id', None)
+    resource_request = kwargs.get('resource_request')
     request = {'task_id': task_id, 'generation': generation, 'root': str(registry.state_layout.root),
                'backend': backend.name, 'invocation': request_invocation, 'grants': grants, 'kwargs': kwargs}
+    if followup_source is not None and kwargs.get('message_ids'):
+        request['followups'] = {'task_id': followup_source, 'ids': list(kwargs['message_ids'])}
     configuration = dict(request)
     configuration.pop('generation')
     # Observer provenance does not change the authorized execution configuration.
@@ -226,7 +243,16 @@ async def launch(registry, invocation, kwargs):
                  'directory_identity': _root_identity(log_dir), 'state': 'reserved',
                  'request_sha256': hashlib.sha256(raw).hexdigest(), 'configuration_sha256': configuration_hash, 'backend': backend.name,
                  'session_id': kwargs.get('session_id'), 'parent_task_id': kwargs.get('parent_task_id'),
-                 'chain_root_task_id': kwargs.get('chain_root_task_id'), 'owner': None}
+                 'chain_root_task_id': kwargs.get('chain_root_task_id'), 'owner': None,
+                 'spawned_by': kwargs.get('spawned_by'), 'root_task_id': kwargs.get('root_task_id'),
+                 'repo_path': kwargs['repo_path'], 'freedom': kwargs.get('freedom'), 'network': kwargs.get('network'),
+                 'title': kwargs.get('title'), 'group': kwargs.get('group'),
+                 'created_at': datetime.now(timezone.utc).isoformat()}
+        if resource_request is not None:
+            value['resources'] = {'names': list(resource_request['names']), 'wait_seconds': resource_request['wait_seconds'],
+                                  'scope': resource_request.get('scope'), 'state': 'requested'}
+        if 'followups' in request:
+            value['followups'] = request['followups']
         _write(log_dir / f'{task_id}.launch.json', value)
     finally:
         os.close(lock)
@@ -280,9 +306,15 @@ async def launch(registry, invocation, kwargs):
         if value is None:
             raise store.TaskDocumentError(task_id, 'Reserved launch source disappeared', code='task_unavailable')
         if value['state'] == 'not_started':
-            error = RuntimeError(value.get('error', 'Task owner refused launch before execution'))
+            # A launch that asked for resources and was refused (nothing free right now, or a borrow
+            # that was no longer covered) is a request error, not an owner fault.
+            error = (ValueError if value.get('resources') is not None else RuntimeError)(value.get('error', 'Task owner refused launch before execution'))
             error.harflow_not_started = True
             raise error
+        if value['state'] in {'waiting_for_resources', 'granted'}:
+            # The owner holds the wait; the caller gets a handle, never a task that does not exist.
+            from .task_resources import PendingLaunch
+            return PendingLaunch(log_dir, value)
         if proc.poll() is not None or asyncio.get_running_loop().time() >= deadline:
             raise RuntimeError(f'Task launch acknowledgement uncertain: {task_id}; reservation retained, do not retry execution')
         await asyncio.sleep(0.025)

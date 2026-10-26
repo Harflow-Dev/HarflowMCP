@@ -85,6 +85,10 @@ class TaskRecord:
     caller_write_approvals: bool = False
     caller_approval_version: str | None = None
     allowed_commands: list[str] = field(default_factory=list)
+    resources: dict[str, Any] | None = None
+    """Named resources this run asked for and holds (`state: held`) or has released, with the
+    reservation id, wait and grant times and `borrowed_from` for a nested borrow. Additive: None for
+    a task that asked for none, and for every record written before the field existed."""
     interaction_owner: str = "caller"
     approval_generation: str | None = None
     network: bool | None = None
@@ -1114,6 +1118,7 @@ def snapshot(log_dir: Path, record: TaskRecord, *, _replay_provider=None, respon
         "caller_write_approvals": record.caller_write_approvals,
         **({"caller_approved_writes": approved_writes} if record.caller_write_approvals else {}),
         "interaction_owner": record.interaction_owner,
+        **({"resources": record.resources} if record.resources else {}),
         "approval_summary": approvals.summary(log_dir, record.task_id),
         "pending_messages": pending,
         "queued_followups": queued_followups,
@@ -1200,6 +1205,7 @@ def brief(log_dir: Path, record: TaskRecord, *, responding_server=None) -> dict[
         "caller_approvals": record.caller_approvals,
         "caller_write_approvals": record.caller_write_approvals,
         "interaction_owner": record.interaction_owner,
+        **({"resources": record.resources} if record.resources else {}),
         "approval_summary": approvals.summary(log_dir, record.task_id),
         "task_id": record.task_id,
         **supervision.fields(record, log_path(log_dir, record.task_id), observed_terminal=record.status in TERMINAL_RECORD_STATUSES and not outcome_unobserved(record), responding_server=responding_server),

@@ -81,6 +81,7 @@ SUCCESSOR_CACHE_LIMIT = 256
 
 QUEUED, RESERVED, CONSUMED, CANCELLED = "queued", "reserved", "consumed", "cancelled"
 UNDELIVERABLE, DELIVERY_UNKNOWN = "undeliverable", "delivery_unknown"
+RELEASED = "released"
 STATUSES = followup_documents.STATUSES
 FINAL_STATUSES = frozenset({CONSUMED, CANCELLED})
 OUTSTANDING_STATUSES = STATUSES - FINAL_STATUSES
@@ -316,6 +317,38 @@ def _is_this_process(owner: Any) -> bool:
     return mine is None or theirs is None or mine == theirs
 
 
+def _launch_verdict(log_dir: Path, successor: str) -> str | None | bool:
+    """What the successor's launch receipt says, for a launch that may be waiting for resources.
+
+    `False` means the receipt has nothing to add (no receipt, or one that is not in a resource
+    state) and the ordinary owner rules apply. Otherwise the same answers as `_reserved_verdict`:
+    a waiting or granted launch whose owner is alive or cannot be inspected is in progress (None);
+    one that never started releases the items back to the queue; a granted launch whose owner is
+    gone with no record may already have spawned, so the delivery is unknown.
+    """
+    from .task_supervision import read_launch
+    try:
+        receipt = read_launch(log_dir, successor)
+    except (store.TaskDocumentError, OSError):
+        return False
+    if receipt is None or not isinstance(receipt.get("resources"), dict):
+        return False
+    state = receipt["state"]
+    if state == "not_started":
+        return RELEASED
+    if state not in ("waiting_for_resources", "granted"):
+        return False
+    try:
+        owner_verdict = identity.identity_check(receipt.get("owner"))
+    except StateOwnershipError:
+        raise
+    except Exception:
+        owner_verdict = "undecidable"
+    if owner_verdict != "dead":
+        return None
+    return RELEASED if state == "waiting_for_resources" else DELIVERY_UNKNOWN
+
+
 def _reserved_verdict(log_dir: Path, item: dict[str, Any]) -> str | None:
     """What a `reserved` item has become, or None while it is still genuinely in progress."""
     assert_task_owned(log_dir)
@@ -330,6 +363,9 @@ def _reserved_verdict(log_dir: Path, item: dict[str, Any]) -> str | None:
         return CONSUMED
     if _key(log_dir, successor) in _INFLIGHT:
         return None
+    launched = _launch_verdict(log_dir, successor)
+    if launched is not False:
+        return launched
     owner = item.get("owner")
     if _is_this_process(owner):
         return DELIVERY_UNKNOWN
@@ -394,6 +430,13 @@ def _resolve(
         if verdict == CONSUMED:
             doc["items"][doc["items"].index(item)] = _final(item, CONSUMED, now)
             doc["sealed_by"] = successor
+        elif verdict == RELEASED:
+            # The successor provably never started: the messages are queued again.
+            item["status"] = QUEUED
+            for stale in ("successor_task_id", "owner", "at", "reason"):
+                item.pop(stale, None)
+            if doc.get("sealed_by") == successor:
+                doc["sealed_by"] = None
         else:
             item.update(status=DELIVERY_UNKNOWN, at=now, reason=(
                 f"the continuation {successor} was being started when its owner stopped or its "
@@ -877,6 +920,26 @@ def finish(
         _INFLIGHT.discard(_key(log_dir, successor))
 
 
+@task_operation
+def handoff(log_dir: Path, task_id: str, successor: str, owner: dict[str, Any] | None) -> None:
+    """Re-own this successor's `reserved` items by its launch owner. Blocking."""
+    try:
+        with _locked(log_dir, task_id):
+            doc = _load(log_dir, task_id)
+            changed = False
+            for item in doc["items"]:
+                if item["status"] == RESERVED and item.get("successor_task_id") == successor and owner is not None:
+                    item["owner"] = owner
+                    changed = True
+            if changed:
+                _store(log_dir, task_id, doc)
+    except (control.LockTimeout, Unavailable, _TooLarge, OSError, store.TaskDocumentError):
+        log.warning("task %s: follow-up hand-off write failed; the launch receipt still decides", task_id, exc_info=True)
+    finally:
+        # This process no longer decides the item; the receipt and its owner do.
+        _INFLIGHT.discard(_key(log_dir, successor))
+
+
 @dataclass
 class Attempt:
     """One consumption of a task's queued messages by one successor."""
@@ -918,6 +981,18 @@ class Attempt:
         successor, never an error."""
         if not await self._terminal(CONSUMED):
             self._notice(registry, task)
+
+    @layout_operation
+    async def handed_off(self, launch: Any) -> None:
+        """The successor was acknowledged while it waits for resources: nothing is consumed yet.
+
+        The owner finalizes consumption at spawn and releases the messages if the launch never
+        starts. Until then the reservation belongs to the launch owner, so a caller that dies now
+        neither strands it nor resolves it as `delivery_unknown`.
+        """
+        work = owned_job(self.state_layout, run_owned_worker(self.state_layout, handoff, self.log_dir, self.task_id,
+                                                              self.successor_id, getattr(launch, "receipt", {}).get("owner")))
+        await asyncio.shield(work)
 
     @layout_operation
     async def fail(self, registry: Any, error: BaseException, spawn_called: bool) -> None:

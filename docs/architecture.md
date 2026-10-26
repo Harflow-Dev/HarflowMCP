@@ -220,6 +220,34 @@ only; liveness is never stored) and each owner kind supplies its own "is it fini
   the takeover gate) moves it to `ledger.corrupt-<timestamp>.json` and starts an empty ledger; it
   refuses a healthy ledger. Later stages extend it to rebuild holders from durable launch and run
   state; until then the person running it decides what was lost.
+- **Tasks use it through the launch receipt.** A task that asked for resources is acknowledged while its
+  detached owner waits (`task_supervisor._acquire_resources`): the receipt moves
+  `claimed -> waiting_for_resources -> granted -> spawned -> settled`, with `not_started` reachable
+  from every state before `spawned` (from `granted` only when a failure is proven to precede the
+  spawn). No TaskRecord exists until spawn, so `record.pid` and `outcome_unobserved` readers never
+  see a pending task; `task_resources.PendingLaunch` and `view` are built from the receipt, and
+  `launch()` returns a `PendingLaunch` where it used to return a task. The whole pre-spawn
+  qualification in `_execute_prepared` runs *after* the grant. The reservation id is written to the
+  receipt before the entry can exist. The owner releases on `_monitor`'s terminal-publish path only
+  when the exit was observed (never on the `abandoned`/`CancelledError` path, invariant 1); the
+  reaper covers everything else.
+- **The task resolver** (`task_resources.task_resolver`) decides from durable state by task id:
+  a conclusively settled record (`retention._conclusively_settled`) is `settled`; a launch
+  `not_started`, or `waiting_for_resources` with a dead owner (spawn requires `granted` first), is
+  `never_started`; everything else, including `granted` with no record and an owner that cannot be
+  inspected, is `keep`. Waiting launches also run the reaper (every 15 s), as does the server's
+  maintenance pass.
+- **Sessions and follow-ups.** A waiting or granted launch is unresolved, so its session stays busy;
+  `session_reservations` releases only a `waiting_for_resources` launch whose owner is conclusively
+  dead. Queued follow-ups handed to a waiting launch are re-owned by the launch owner
+  (`followups.handoff`); `followups._launch_verdict` reads the successor's receipt (in progress,
+  released to queued on `not_started`, `delivery_unknown` for `granted` with a dead owner and no
+  record) and the owner finalizes consumption at spawn. A continuation's reservation file gains
+  `accepted`, distinct from `started`.
+- **Scope.** `task_resources.holding_scope`: a detected caller whose record holds a reservation lends
+  it; a caller with a `workflow-owners/<task_id>` receipt is a holding scope with no reservation and
+  refuses every name (stage D widens this); other callers are no scope. A continuation stays under
+  its source's lender while that lender still holds.
 - **Recovery commands** are ctl-only and use `lineage.detect_caller_detail` and fail closed like
   takeover: `resources-release` removes one reservation after `--confirm-uncertain` (a reservation
   with borrowers is flagged and goes with its last borrower), and `resources` is the ungated read the

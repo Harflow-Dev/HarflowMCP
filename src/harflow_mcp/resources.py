@@ -92,8 +92,9 @@ POLL_MAX_SECONDS = 2.0
 LOCK_TIMEOUT_SECONDS = 10.0
 
 
-class ResourceError(Exception):
-    """Base of every typed refusal; `code` is the stable machine-readable reason."""
+class ResourceError(ValueError):
+    """Base of every typed refusal; `code` is the stable machine-readable reason. A ValueError so a
+    request refused before launch reads as invalid parameters everywhere one already does."""
 
     code = "resource_error"
 
@@ -553,6 +554,38 @@ class ResourceLedger:
         root = transaction.find(root_id)
         return root if root is not None else holder
 
+    def check_borrow(self, names: Iterable[str], scope: Scope) -> None:
+        """Raise `ResourceNotDeclaredByScope` unless `scope` would lend every name right now.
+
+        A read-only early answer for a caller that should be refused before anything is launched;
+        the owner repeats the real check in `request`, because the scope can change in between.
+        """
+        wanted = validate_names(names)
+        transaction = _Transaction(self._read_only(), self._capacity_of, self._clock)
+        self._borrow_root(transaction, scope, wanted)
+
+    def restore_held(self, names: Iterable[str], owner: Owner | Mapping[str, Any], reservation_id: str) -> Entry | None:
+        """Re-create a held entry from durable evidence (`resources-repair`). Never queues, never
+        borrows, and never displaces a current holder: `None` when a name is already held."""
+        wanted = validate_names(names)
+        who = _owner_from(owner)
+        rid = validate_reservation_id(reservation_id)
+
+        def action(transaction: _Transaction) -> Entry | None:
+            if transaction.find(rid) is not None:
+                return _entry_view(transaction.find(rid))
+            for raw in transaction.entries:
+                if raw["state"] == "held" and raw.get("borrows_from") is None and not set(raw["names"]).isdisjoint(wanted):
+                    return None
+            now = transaction.clock()
+            raw = {"reservation_id": rid, "names": list(wanted), "state": "held", "owner": who.as_dict(),
+                   "enqueued_at": now, "granted_at": now, "generation": 1}
+            transaction.entries.append(raw)
+            transaction.dirty = True
+            return _entry_view(raw)
+
+        return self._transact(action)
+
     def poll(self, reservation_id: str, *, dequeue_if_queued: bool = False) -> Entry:
         """Run the grant pass and report the entry. Writes nothing when nothing changed.
 
@@ -604,6 +637,7 @@ class ResourceLedger:
         should_continue: Callable[[], Any] | None = None,
         poll_initial: float = POLL_INITIAL_SECONDS,
         poll_max: float = POLL_MAX_SECONDS,
+        reservation_id: str | None = None,
     ) -> Entry:
         """Wait for a grant. The lock is never held across the sleeps between polls.
 
@@ -611,8 +645,9 @@ class ResourceLedger:
         `should_continue()` (sync or async) says no; either way the queued entry is removed in the
         same transaction as the final poll. A cancellation of this coroutine releases the entry
         too. On success the caller owns the returned reservation and must `release` it.
+        `reservation_id` lets a caller record the id durably before the entry can exist.
         """
-        rid = uuid.uuid4().hex
+        rid = validate_reservation_id(reservation_id) if reservation_id is not None else uuid.uuid4().hex
         started = time.monotonic()
         deadline_at = None
         if timeout is not None:
@@ -638,7 +673,8 @@ class ResourceLedger:
                 if reason == "cancelled":
                     raise ResourceWaitCancelled(f"the wait for {', '.join(entry.names)} was cancelled")
                 if reason == "expired":
-                    raise ResourceWaitExpired(f"timed out after {timeout:g}s waiting for {', '.join(entry.names)}")
+                    raise ResourceWaitExpired(
+                        f"{', '.join(entry.names)} not available" + (" (a wait of 0 grants now or fails)" if timeout == 0 else f" after waiting {timeout:g}s"))
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, poll_max)
             return entry

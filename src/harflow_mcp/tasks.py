@@ -713,6 +713,9 @@ class Task:
     caller_approval_version: str | None = None
     allowed_commands: list[str] = field(default_factory=list)
     allowed_commands_version: str | None = None
+    resources: dict[str, Any] | None = None
+    """The named resources this run holds; see `store.TaskRecord.resources`. Released (state
+    `released`) by `_monitor` once the exit is observed."""
     interaction_owner: str = "caller"
     approval_generation: str = field(default_factory=lambda: str(uuid.uuid4()))
     approval_pending: bool = False
@@ -898,6 +901,7 @@ class Task:
             "caller_approvals": self.caller_approvals,
             "caller_write_approvals": self.caller_write_approvals,
             "interaction_owner": self.interaction_owner,
+            **({"resources": dict(self.resources)} if self.resources else {}),
             "approval_summary": self.approval_view,
             "task_id": self.task_id,
             **supervision.fields(self, self.log_path, observed_terminal=self.finished, live=True, input_closed=self.input_closed),
@@ -1288,6 +1292,10 @@ class TaskRegistry:
         extra_writable_paths: list[str] | None = None,
         message_ids: list[str] | None = None,
         allowed_commands: list[str] | None = None,
+        resources: list[str] | None = None,
+        resource_wait_seconds: int | None = None,
+        resource_inherit: dict[str, Any] | None = None,
+        followup_source_task_id: str | None = None,
     ) -> Task:
         """Dispatch a fresh session. Returns once the subprocess exists, not once it finishes.
 
@@ -1309,6 +1317,7 @@ class TaskRegistry:
             if interaction_owner == "monitor":
                 await approval_runtime.authorize(self, interaction_owner="monitor")
             caller = await self._mutation_caller()
+            resource_request = self._resource_request(resources, resource_wait_seconds, resource_inherit, caller)
             from .task_supervision import read_task_record
             source = await _bounded_extra_path_check(read_task_record, self._log_dir, continuation_of_task_id) if continuation_of_task_id is not None else None
             if continuation_of_task_id is not None and source is None:
@@ -1393,7 +1402,24 @@ class TaskRegistry:
             chain_root_task_id=chain_root_task_id,
             chain_prompt=chain_prompt,
             message_ids=message_ids,
+            **({"resource_request": resource_request} if resource_request is not None else {}),
+            **({"followup_source_task_id": followup_source_task_id} if followup_source_task_id is not None else {}),
         )
+
+    def _resource_request(self, names: list[str] | None, wait_seconds: int | None, inherit: dict[str, Any] | None, caller: Any) -> dict[str, Any] | None:
+        """The resource request for a dispatch, or None when it asks for nothing.
+
+        Resources need the supervised registry: its detached owner is what waits, so no lock and no
+        caller is blocked on the ledger. An in-process registry refuses rather than block in-process.
+        """
+        if names is None and not (inherit and inherit.get("names")):
+            return None
+        if self.execution_mode != "supervised":
+            raise ValueError("resources require supervised execution (a server or harflow-ctl); this in-process registry refuses them")
+        from . import task_resources
+        if names is not None:
+            return task_resources.build_request(self._log_dir, names, wait_seconds, caller)
+        return task_resources.inherited_request(self._log_dir, inherit, caller)
 
     @_with_authority_check_budget
     @layout_operation
@@ -1470,6 +1496,7 @@ class TaskRegistry:
         # read-only and must never block on, or be blocked by, another resume of this session.
         caller = await self._mutation_caller()
         with _before_spawn():
+            resource_request = self._resource_request(None, None, getattr(parent, "resources", None), caller)
             grants = await self._resolve_extra_paths_async(caller, None, backend, parent)
         if grants and (native_subagent or workflow_builder):
             raise ValueError("Extra writable paths are unavailable to native workflows or workflow builders")
@@ -1548,6 +1575,7 @@ class TaskRegistry:
                     lineage_detected=lineage_detected,
                     task_id=task_id,
                     consume_followups=consume_followups,
+                    resource_request=resource_request,
                 )
         except control.LockTimeout:
             raise SessionBusyError(
@@ -1587,6 +1615,7 @@ class TaskRegistry:
         consume_followups: bool,
         background_idle_seconds: float | None = None,
         allowed_commands: tuple[str, ...] = (),
+        resource_request: dict[str, Any] | None = None,
     ) -> Task:
         """Build and spawn a resume, consuming the parent's queued follow-ups when asked to.
 
@@ -1674,13 +1703,21 @@ class TaskRegistry:
                 lineage_detected=lineage_detected,
                 task_id=spawn_id,
                 message_ids=attempt.ids if attempt is not None else None,
+                **({"resource_request": resource_request} if resource_request is not None else {}),
+                **({"followup_source_task_id": parent_task_id} if attempt is not None else {}),
             )
         except BaseException as exc:
             if attempt is not None:
                 await attempt.fail(self, exc, spawn_called)
             raise
         if attempt is not None:
-            await attempt.consumed(self, task)
+            from .task_resources import PendingLaunch
+            if isinstance(task, PendingLaunch):
+                # Queued for resources: the owner finalizes consumption at spawn, and the
+                # reservation now belongs to the launch owner.
+                await attempt.handed_off(task)
+            else:
+                await attempt.consumed(self, task)
         return task
 
     @layout_operation
@@ -1691,6 +1728,7 @@ class TaskRegistry:
         if self.execution_mode == "supervised":
             from .task_supervision import launch
             return await launch(self, invocation, kwargs)
+        kwargs.pop("followup_source_task_id", None)
         return await self._execute_prepared(invocation, **kwargs)
 
     async def _execute_prepared(
@@ -1729,6 +1767,7 @@ class TaskRegistry:
         chain_prompt: str | None = None,
         message_ids: list[str] | None = None,
         allowed_commands: tuple[str, ...] | list[str] = (),
+        resource_grant: dict[str, Any] | None = None,
     ) -> Task:
         # Re-checked at the point of execution, not only where the argv was built, so no future
         # caller of this method can launch an agent without its backend's guarantees — and, now
@@ -1979,6 +2018,7 @@ class TaskRegistry:
             caller_approval_version=approval_version,
             allowed_commands=list(allowed_commands),
             allowed_commands_version=command_version,
+            resources=dict(resource_grant) if resource_grant else None,
             interaction_owner=interaction_owner,
             extra_writable_paths=serialize_paths(extra_path_grants),
             extra_path_certification=enforcement.extra_path_certification,
@@ -2873,6 +2913,7 @@ class TaskRegistry:
                 caller_write_approvals=task.caller_write_approvals,
                 caller_approval_version=task.caller_approval_version,
                 allowed_commands=list(task.allowed_commands),
+                resources=dict(task.resources) if task.resources else None,
                 interaction_owner=task.interaction_owner,
                 approval_generation=task.approval_generation,
                 parent_task_id=task.parent_task_id,
@@ -3663,7 +3704,18 @@ class TaskRegistry:
             if caller is not None:
                 refuse_managed(self._log_dir, caller.record.task_id)
             pause_for_task(self._log_dir, task_id, "Task cancelled outside the workflow supervisor")
-        return await self._shielded(self._cancel_cascade(task_id), f"harflow-cascade-{task_id}")
+        result = await self._shielded(self._cancel_cascade(task_id), f"harflow-cascade-{task_id}")
+        from . import task_resources
+        pending = await asyncio.to_thread(task_resources.pending_descendants, self._log_dir, task_id)
+        if pending:
+            # Launches still waiting for resources have no process to signal; ask their owners to stop.
+            stopped = await asyncio.to_thread(self._cancel_pending_launches, pending)
+            result = {**result, "pending_cancel_requested": stopped}
+        return result
+
+    def _cancel_pending_launches(self, task_ids: list[str]) -> list[str]:
+        from . import task_resources
+        return [target for task_id in task_ids for target in task_resources.cancel_launch(self._log_dir, task_id)["cascade"]["pending_cancel_requested"]]
 
     async def _shielded(self, coro: Any, name: str) -> Any:
         self._loop = asyncio.get_running_loop()
@@ -3923,6 +3975,7 @@ class TaskRegistry:
         # Same ordering as `resume`: caller detection and the caps run before the session lock.
         caller = await self._mutation_caller()
         with _before_spawn():
+            resource_request = self._resource_request(None, None, record.resources, caller)
             grants = await self._resolve_extra_paths_async(caller, None, backend, record)
         if grants and (native_subagent or workflow_builder):
             raise ValueError("Extra writable paths are unavailable to native workflows or workflow builders")
@@ -3996,6 +4049,7 @@ class TaskRegistry:
                     lineage_detected=lineage_detected,
                     task_id=task_id,
                     consume_followups=consume_followups,
+                    resource_request=resource_request,
                 )
         except control.LockTimeout:
             raise SessionBusyError(
@@ -4049,7 +4103,7 @@ class TaskRegistry:
             return
 
         task = owned_job(self.state_layout,
-            run_owned_worker(self.state_layout, retention.maybe_sweep, self._log_dir), name="harflow-maintenance"
+            run_owned_worker(self.state_layout, _maintain, self._log_dir), name="harflow-maintenance"
         )
         self._maintenance = task
 
@@ -4789,6 +4843,7 @@ async def _monitor(task: Task, registry: TaskRegistry) -> None:
                             except Exception:
                                 task.output_drained = False
                                 log.warning('Native final observation barrier failed for %s', task.task_id, exc_info=True)
+                    _release_task_resources(registry, task)
                     launch_generation = getattr(registry, '_launch_generations', {}).get(task.task_id)
                     if launch_generation and task.auto_continue and task.output_drained:
                         from .task_supervision import mark
@@ -4823,6 +4878,43 @@ async def _monitor(task: Task, registry: TaskRegistry) -> None:
                     log.exception("task %s: could not write the task_finished event", task.task_id)
         finally:
             _close_events_after_writers(task)
+
+
+def _maintain(log_dir: Path) -> Any:
+    """The server's background pass: the retention sweep, then the resource reaper.
+
+    The reaper only ever removes entries whose owner is provably settled or never started, and
+    waiting launches run it themselves, so a failure here is logged and never changes the sweep.
+    """
+    swept = retention.maybe_sweep(log_dir)
+    try:
+        from . import task_resources
+        task_resources.reap(log_dir)
+    except StateOwnershipError:
+        raise
+    except Exception:
+        log.debug("resource reaper pass failed", exc_info=True)
+    return swept
+
+
+def _release_task_resources(registry: "TaskRegistry", task: Task) -> None:
+    """Free the task's named resources on the terminal-publish path, once its exit was observed.
+
+    Never reached from the `abandoned`/`CancelledError` path (invariant 1): a server being torn
+    down does not know the agent is gone, and the reaper decides that later. A run whose exit was
+    never observed keeps its hold for the same reason. Guarded: bookkeeping never changes an outcome.
+    """
+    held = task.resources
+    if not held or held.get("state") != "held" or task.exit_code is None:
+        return
+    try:
+        from .task_resources import release_quietly
+        if release_quietly(registry.log_dir, held.get("reservation_id")):
+            task.resources = {**held, "state": "released", "released_at": _now().isoformat()}
+    except StateOwnershipError:
+        raise
+    except Exception:  # pragma: no cover - bookkeeping must never mask a finished run
+        log.exception("task %s: releasing its resources failed", task.task_id)
 
 
 # `task_finished` carries a bounded projection (never tool input), so the event stays within its size budget.

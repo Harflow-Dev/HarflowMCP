@@ -208,6 +208,10 @@ Server restarts and recovered runs are explained in "When the client restarts th
 - Lock order: session lock (or the `continuation-<root>` chain lock), then `<id>.lock` and
   `<id>.followups.lock`; never the reverse. A deadlock-free order is the only thing keeping
   takeover, resume and retention from stalling each other.
+- The resource ledger (`resources.py`) lock is a leaf: taken last, held for one bounded read-modify-write,
+  never across an `await`, a subprocess (including `ps`), Git or another lock. Waiting for resources
+  happens in the detached owner holding no lock; the launch receipt is the waiting task's only state
+  (no TaskRecord until spawn), and uncertainty never frees an entry.
 
 See "When the client restarts the server" in [docs/architecture.md](docs/architecture.md) for the
 failure modes, accepted limits and the follow-up ledger sequence.

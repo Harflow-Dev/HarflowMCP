@@ -86,7 +86,10 @@ def error_doc(exc: BaseException) -> dict[str, str]:
     if isinstance(exc, StateOwnershipError):
         return {"code": getattr(exc, "code", "state_incompatible"), "message": str(exc)}
     from . import backends
+    from .resources import ResourceError
     from .tasks import RepoUnavailableError, SessionBusyError, SessionUnknownError
+    if isinstance(exc, ResourceError):
+        return {"code": exc.code, "message": str(exc)}
 
     try:
         from mcp import MCPError

@@ -29,6 +29,8 @@ from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
 from mcp.types import INTERNAL_ERROR, INVALID_PARAMS
 
+from . import resources as resource_ledger
+from . import task_resources
 from . import backends, control, followups, identity, inbox, store, wait_policy
 from .backends import DEFAULT_BACKEND, DEFAULT_FREEDOM, FREEDOMS
 from .catalog import bounded_request
@@ -500,6 +502,8 @@ async def start_task(
     notify: str | None = None,
     extra_writable_paths: list[StrictStr] | None = None,
     allowed_commands: list[StrictStr] | None = None,
+    resources: list[StrictStr] | None = None,
+    resource_wait_seconds: StrictInt | None = None,
 ) -> dict[str, Any]:
     """Dispatch a coding task to a headless agent and return immediately.
 
@@ -604,6 +608,21 @@ async def start_task(
             nothing. A nested dispatch may grant only exact patterns its caller holds (unless the caller is
             unrestricted) and never inherits them. resume_task and continue_task inherit the saved list when
             omitted and replace it when given. See docs/harness-permissions.md.
+        resources: Optional list of 1-16 resource names (lowercase letters, digits and `. _ : -`, at most
+            64 characters, starting with a letter or digit; for example `ios-simulator` or `repo:main`)
+            this task needs exclusively. Capacity is one per name: the task does not start until it
+            holds every name, strictly first come first served per name, all or none. While it waits
+            it has no task record: the call returns at once with `status: "running"` and
+            `launch_state: "waiting_for_resources"`, and get_task_status, wait_for_task, list_tasks and
+            cancel_task all work on it. Names are released when the run's exit is observed. Resources
+            grant no access and are accepted at every freedom; they need a supervised server or
+            `harflow-ctl`. A task started by a task that holds resources may only use names that parent
+            declared (they are borrowed, never queued); declare every resource at the outermost task.
+            A task started from inside a workflow attempt cannot request any in this release.
+            resume_task, continue_task and automatic continuation re-queue the same names. See
+            docs/resources-and-worktrees.md.
+        resource_wait_seconds: How long to wait for `resources`, 0..21600 (default 3600). 0 means grant
+            now or fail. A task that waits out the bound never starts and reports `not_started`.
 
     Returns the new task_id and its starting state. The run continues in the background; poll
     get_task_status or call wait_for_task to follow it.
@@ -651,6 +670,8 @@ async def start_task(
             raise MCPError(INVALID_PARAMS, "Workflow retries belong to their supervisor; auto_continue is unavailable")
         if group is not None or title is not None:
             raise MCPError(INVALID_PARAMS, "workflow runs do not accept task group or title")
+        if resources is not None or resource_wait_seconds is not None:
+            raise MCPError(INVALID_PARAMS, "resources are unavailable for workflow launches")
         return await start_workflow(
             name=workflow, prompt=prompt, repo_path=repo_path,
             overrides={k: v for k, v in {"backend": backend, "model": model, "max_turns": max_turns,
@@ -671,6 +692,16 @@ async def start_task(
     normalized_title = _normalize_title(title)
     path = await _validate_repo_path(repo_path)
     _check_allowed_commands(chosen, freedom, path, allowed_commands)
+    if resources is None and resource_wait_seconds is not None:
+        raise MCPError(INVALID_PARAMS, "resource_wait_seconds requires resources")
+    if resources is not None and notify is not None:
+        raise MCPError(INVALID_PARAMS, "notify is not supported together with resources yet: a task waiting for resources has no record to notify about")
+    if resources is not None:
+        from .task_resources import validate_request
+        try:
+            validate_request(resources, resource_wait_seconds)
+        except ValueError as exc:
+            raise MCPError(INVALID_PARAMS, str(exc)) from None
 
     notification = None
     reserved_id = None
@@ -713,8 +744,20 @@ async def start_task(
             auto_continue=auto_continue,
             **({'extra_writable_paths': extra_writable_paths} if extra_writable_paths is not None else {}),
             **({'allowed_commands': allowed_commands} if allowed_commands is not None else {}),
+            **({'resources': resources} if resources is not None else {}),
+            **({'resource_wait_seconds': resource_wait_seconds} if resource_wait_seconds is not None else {}),
             **({'task_id': reserved_id} if reserved_id is not None else {}),
         )
+    except resource_ledger.ResourceError as exc:
+        if reserved_id is not None:
+            from .notifications import discard_unstarted
+            try:
+                await _notification_io(discard_unstarted, _reg().log_dir, reserved_id)
+            except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):
+                raise
+            except Exception:
+                log.warning('Notification reservation cleanup unavailable for task %s', reserved_id)
+        raise MCPError(INVALID_PARAMS, str(exc), data={"code": exc.code}) from None
     except (Exception, asyncio.CancelledError) as exc:
         not_started = getattr(exc, 'harflow_not_started', False) is True
         request_error = isinstance(exc, backends.UnsupportedCapability) or (isinstance(exc, ValueError) and not_started)
@@ -933,6 +976,11 @@ async def get_task_status(
         include_successors: Fetch the first authorized page of successor IDs. Defaults false:
             ordinary polling includes a detail reference without scanning retained task history.
 
+    A task still waiting for its `resources` has no record yet: it reports `status: "running"`,
+    `launch_state` (`waiting_for_resources`, `granted`, `uncertain`, or `not_started` once it
+    settled without starting, with `not_started_reason`) and `resources` (names, queue `position`,
+    `blocked_by`, deadline). See docs/resources-and-worktrees.md.
+
     Returns the task's status, summary, enforcement, and `recent_activity` — a list of ≤ 5 one-line
     strings describing the most recent meaningful events (tool calls, failed tool results, assistant
     messages, notices). For running tasks this gives a live summary without the bulk of the
@@ -988,6 +1036,10 @@ async def get_task_status(
 
     record = _reg().recover(task_id)
     if record is None:
+        pending = await asyncio.to_thread(task_resources.pending_view, _reg().log_dir, task_id)
+        if pending is not None:
+            # No record exists until the task spawns; the launch receipt is the whole truth.
+            return pending | {"recent_activity": [], "queued_followups": await asyncio.to_thread(followups.view, _reg().log_dir, task_id)}
         raise MCPError(
             INVALID_PARAMS,
             f"unknown task_id: {task_id}. No task with that id is running, and no record of one "
@@ -1060,6 +1112,32 @@ async def _await_with_progress(task: Task, plan: wait_policy.WaitPlan, ctx: Cont
             plan.progress_total,
             f"{task.backend} task {task.task_id} still running ({task.duration_seconds:.0f}s elapsed)",
         )
+
+
+async def _wait_pending(task_id: str, plan: wait_policy.WaitPlan, ctx: Context | None, clock) -> tuple[Any, str]:
+    """Hold on a launch that has no record yet. Returns `(record, stop_reason)` once it spawned, or
+    `(view, stop_reason)` while it still waits or after it settled without starting."""
+    step = 0
+    while True:
+        view = await asyncio.to_thread(task_resources.pending_view, _reg().log_dir, task_id)
+        if view is None:
+            record = _reg().recover(task_id)
+            if record is not None:
+                return record, wait_policy.STOP_TERMINAL
+            raise MCPError(INVALID_PARAMS, f"unknown task_id: {task_id}. Use list_tasks to see what is known.")
+        if view["status"] in TERMINAL_STATUSES:
+            return view, wait_policy.STOP_TERMINAL
+        if view["launch_state"] == "uncertain" and plan.terminal_mode:
+            return view, wait_policy.STOP_UNAVAILABLE
+        remaining = clock.remaining()
+        if remaining <= 0:
+            return view, plan.expiry_reason
+        await asyncio.sleep(min(1.0, remaining))
+        step += 1
+        if step % 5 == 0:
+            await wait_policy.report_progress(
+                ctx.report_progress if ctx is not None else None, step // 5, plan.progress_total,
+                f"{task_id} waiting for resources")
 
 
 def _dead_without_observed_exit(record: store.TaskRecord, status: str) -> bool:
@@ -1219,6 +1297,9 @@ async def wait_for_task(
     `recent_activity` — a list of ≤ 5 one-line strings describing the most recent meaningful events
     — for a live summary without the bulk of the raw stream.
 
+    A task still waiting for its `resources` is running as far as a wait is concerned: the wait
+    holds until it spawns and settles, or reports `not_started` if it never starts.
+
     A coding task can easily run for many minutes. Expect several calls rather than one long one.
     Confirmed usage limits retain `failure_diagnostic` and partial output while the task owner
     settles the process. Waiting does not retry the task or authorize a paid fallback.
@@ -1241,10 +1322,26 @@ async def wait_for_task(
     else:
         record = _reg().recover(task_id)
         if record is None:
-            raise MCPError(
-                INVALID_PARAMS,
-                f"unknown task_id: {task_id}. Use list_tasks to see what is known.",
-            )
+            pending = await asyncio.to_thread(task_resources.pending_view, _reg().log_dir, task_id)
+            if pending is None:
+                raise MCPError(
+                    INVALID_PARAMS,
+                    f"unknown task_id: {task_id}. Use list_tasks to see what is known.",
+                )
+            outcome = await _wait_pending(task_id, plan, ctx, clock)
+            if isinstance(outcome[0], dict):
+                view, stop_reason = outcome
+                finished = view["status"] in TERMINAL_STATUSES
+                if not finished:
+                    view["next_step"] = (
+                        f"still waiting for resources after {clock.elapsed():.0f}s and unaffected by this wait — "
+                        "call wait_for_task again, or poll get_task_status")
+                view.update(recent_activity=[], outcome_observed=True) if finished else view.update(recent_activity=[])
+                view.update(wait_policy.result_fields(plan, stop_reason, clock.elapsed(), "wait_for_task", "get_task_status", None))
+                return view
+            # It spawned while we waited: carry on with what is left of the hold.
+            record = outcome[0]
+            plan = wait_policy.WaitPlan(plan.until, plan.requested, max(0, int(clock.remaining())))
         record, stop_reason, outcome_observed = await _poll_recovered(record, plan, ctx)
         try:
             snapshot = await asyncio.to_thread(attached.snapshot) if attached is not None else await asyncio.to_thread(store.snapshot, _reg().log_dir, record)
@@ -1370,6 +1467,9 @@ async def continue_task(task_id: str, extra_prompt: str | None = None, notes_pat
     complete output drainage and a durable terminal record must be observed; old or inferred
     records without settlement evidence are refused. Workflow-owned tasks use workflow recovery.
     Concurrent identical retries share one successor; mismatched or unsettled reservations fail.
+    A source that had `resources` re-queues the same names; while they are busy the successor is
+    acknowledged with `launch_state: "waiting_for_resources"` (the reservation is `accepted`, and a
+    retry returns the same pending successor).
     The returned continuation_of_task_id is separate from session resume/delegation ancestry.
 
     Follow-ups queued on the source with send_message are consumed by this call: they appear
@@ -1436,6 +1536,10 @@ async def resume_task(
     The new task's task_started event lists the message_ids. A message cannot be consumed twice;
     one that cannot be proven undelivered after a failed launch is kept as delivery_unknown rather
     than re-queued.
+
+    A task that had `resources` re-queues the same names; if they are busy the call returns at once
+    with `launch_state: "waiting_for_resources"`, hands the consumed follow-ups to the waiting launch
+    (consumed when it spawns, queued again if it never starts) and has no record until then.
 
     Returns a new task_id sharing the original session, and returns immediately as with start_task.
     Runs on the same backend, model, reasoning_effort and freedom as the original — none of these
@@ -1523,12 +1627,18 @@ async def list_tasks(
     group: str | None = None, title_contains: str | None = None, repo: str | None = None,
     since: str | None = None, limit: StrictInt | None = None,
     fields: list[str] | None = None, cursor: str | None = None,
+    waiting_for_resource: str | None = None,
 ) -> list[dict[str, Any]] | dict[str, Any]:
     """List dispatched tasks, oldest first.
 
     Args:
         status: Optional filter — running, completed, failed, timed_out or cancelled.
         backend: Optional filter by harness, e.g. "codex".
+        waiting_for_resource: Optional resource name: only launches that have not started and are
+            still queued for it (`launch_state: "waiting_for_resources"`). Uses the unpaged listing.
+
+    The unpaged listing also carries launches that are waiting for resources and have no task
+    record yet (`pending_launch: true`); the indexed page does not.
 
     Includes tasks from earlier harflow_mcp server processes, marked `recovered: true`.
     Supplying group/title_contains/repo/since/limit/fields/cursor selects a bounded newest-first
@@ -1540,6 +1650,8 @@ async def list_tasks(
     When status_reconciliation_pending is true, results are incomplete: retry the same filters
     without a cursor as directed by polling_guidance, even if has_more is false.
     """
+    if waiting_for_resource is not None and any(value is not None for value in (group, title_contains, repo, since, limit, fields, cursor)):
+        raise MCPError(INVALID_PARAMS, "waiting_for_resource uses the unpaged listing; omit group, title_contains, repo, since, limit, fields and cursor")
     if any(value is not None for value in (group, title_contains, repo, since, limit, fields, cursor)):
         from .task_reads import list_tasks as compact_list
         # The bounded reader enforces managed-workflow visibility before projections.
@@ -1567,6 +1679,11 @@ async def list_tasks(
     live = _reg().list()
     entries = [task.brief() for task in live]
     entries.extend(_reg().recovered_briefs(exclude={task.task_id for task in live}))
+    known = {entry["task_id"] for entry in entries}
+    entries.extend(entry for entry in await asyncio.to_thread(task_resources.pending_views, _reg().log_dir) if entry["task_id"] not in known)
+    if waiting_for_resource is not None:
+        entries = [entry for entry in entries if entry.get("pending_launch") and entry.get("launch_state") == "waiting_for_resources"
+                   and waiting_for_resource in (entry.get("resources") or {}).get("names", [])]
     entries = await _filter_task_reads(entries)
     entries.sort(key=lambda entry: (entry.get("started_at") or "", entry["task_id"]))
 
@@ -1616,6 +1733,32 @@ async def list_task_page(limit: int = 100, cursor: str | None = None, active_onl
         raise MCPError(INVALID_PARAMS, str(exc)) from None
 
 
+async def _cancel_pending(task_id: str) -> dict[str, Any] | None:
+    """Cancel a launch that has no record: ask its owner to stop waiting, or settle it if the owner is gone.
+
+    The launch can spawn between the request and the answer; `cancel_launch` reports that, and the
+    ordinary cascade then takes over for the spawned task.
+    """
+    log_dir = _reg().log_dir
+    pending = await asyncio.to_thread(task_resources.pending_view, log_dir, task_id)
+    if pending is None:
+        return None
+    from .workflow_hooks import refuse_managed
+    caller = await _reg()._mutation_caller()
+    if caller is not None:
+        refuse_managed(log_dir, caller.record.task_id)
+    result = await asyncio.to_thread(task_resources.cancel_launch, log_dir, task_id)
+    if result.get("spawned"):
+        cascade = await _reg().cancel_cascade(task_id)
+        record = _reg().recover(task_id)
+        snapshot = await asyncio.to_thread(store.snapshot, log_dir, record)
+        payload = await asyncio.to_thread(_status_payload, snapshot, include_tail=False, log_dir=log_dir, task_id=task_id)
+        payload["cascade"] = cascade
+        return payload
+    view = await asyncio.to_thread(task_resources.pending_view, log_dir, task_id) or pending
+    return view | {"recent_activity": [], "cancel_requested": True, "cascade": result["cascade"]}
+
+
 @mcp.tool()
 @_task_document_errors
 async def cancel_task(task_id: str) -> dict[str, Any]:
@@ -1624,6 +1767,10 @@ async def cancel_task(task_id: str) -> dict[str, Any]:
 
     Args:
         task_id: Identifier of the task to stop.
+
+    A launch still waiting for resources is stopped before it starts: the request is recorded, its
+    owner honours it at the next poll, and pending descendants are asked to stop too
+    (`cascade.pending_cancel_requested`).
 
     Already-finished tasks are returned unchanged. Work the agent had already written to disk is
     left in place. Tasks started by an earlier harflow_mcp server process can be stopped too, via
@@ -1640,6 +1787,9 @@ async def cancel_task(task_id: str) -> dict[str, Any]:
     from .caller_policy import require_mutation
     await _guard_mutation()
     if _reg().get(task_id) is None and _reg().recover(task_id) is None:
+        cancelled = await _cancel_pending(task_id)
+        if cancelled is not None:
+            return cancelled
         raise MCPError(INVALID_PARAMS, f"unknown task_id: {task_id}")
 
     try:

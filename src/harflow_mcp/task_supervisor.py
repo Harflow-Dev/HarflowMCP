@@ -9,13 +9,108 @@ import json
 import os
 from pathlib import Path
 import sys
+import time
+import uuid
 
 from . import identity, store
 from .backends import Invocation, get
 from .extra_paths import restore_paths
-from .state_ownership import state_session
+from .state_ownership import StateOwnershipError, state_session
+from . import followups
 from .tasks import TaskRegistry
 from .task_supervision import MAX_REQUEST, mark, read_launch
+from . import resources as resource_ledger
+from . import task_resources
+from datetime import datetime, timedelta, timezone
+
+
+REAP_INTERVAL_SECONDS = 15.0
+
+
+class _NotStarted(Exception):
+    """The launch settled `not_started` before spawning (its receipt already says so)."""
+
+
+def _iso(moment: datetime) -> str:
+    return moment.isoformat()
+
+
+async def _acquire_resources(registry, task_id: str, generation: str, request: dict) -> dict:
+    """Wait for the requested names in the owner, recording each step in the launch receipt.
+
+    The reservation id is written before the entry can exist, so a crash between the two leaves a
+    receipt that names an entry that was never created, which the resolver reads as never started.
+    Returns the grant to attach to the record. Raises `_NotStarted` after settling the receipt.
+    """
+    log_dir = registry.log_dir
+    ledger = task_resources.ledger_for(log_dir)
+    names, wait = request['names'], request['wait_seconds']
+    scope = request.get('scope')
+    reservation_id = uuid.uuid4().hex
+    started = datetime.now(timezone.utc)
+    held = {'names': names, 'wait_seconds': wait, 'scope': scope, 'state': 'waiting', 'reservation_id': reservation_id,
+            'wait_started_at': _iso(started), 'deadline_at': _iso(started + timedelta(seconds=wait))}
+
+    def settle(reason: str, error: str) -> None:
+        task_resources.release_quietly(log_dir, reservation_id)
+        mark(log_dir, task_id, generation, state='not_started', not_started_reason=reason, error=error,
+             resources=held | {'state': 'not_started'})
+        task_resources.clear_cancel(log_dir, task_id)
+
+    mark(log_dir, task_id, generation, state='waiting_for_resources', resources=held)
+    last_reap = [0.0]
+
+    async def keep_waiting() -> bool:
+        # Every waiter also drives the reaper, so a holder that died is noticed while anyone waits.
+        if time.monotonic() - last_reap[0] >= REAP_INTERVAL_SECONDS:
+            last_reap[0] = time.monotonic()
+            try:
+                await asyncio.to_thread(task_resources.reap, log_dir)
+            except StateOwnershipError:
+                raise
+            except Exception:
+                pass
+        return not task_resources.cancel_requested(log_dir, task_id)
+
+    try:
+        entry = await ledger.acquire(
+            names, {'kind': 'task', 'task_id': task_id},
+            scope=resource_ledger.Scope(scope['reservation_id']) if scope is not None else None,
+            timeout=wait, reservation_id=reservation_id,
+            should_continue=keep_waiting)
+    except resource_ledger.ResourceWaitExpired as exc:
+        settle('resource_wait_expired', str(exc))
+        raise _NotStarted() from None
+    except resource_ledger.ResourceWaitCancelled as exc:
+        settle('cancelled', str(exc))
+        raise _NotStarted() from None
+    except resource_ledger.ResourceError as exc:
+        settle('owner_error', f'{exc.code}: {exc}')
+        raise _NotStarted() from None
+    granted = held | {'state': 'granted', 'granted_at': entry.granted_at}
+    if entry.borrows_from is not None:
+        granted['borrowed_from'] = entry.borrows_from
+    if task_resources.cancel_requested(log_dir, task_id):
+        held = granted
+        settle('cancelled', 'cancelled before the task started')
+        raise _NotStarted()
+    mark(log_dir, task_id, generation, state='granted', resources=granted)
+    return {'names': names, 'reservation_id': reservation_id, 'state': 'held', 'wait_seconds': wait,
+            'wait_started_at': held['wait_started_at'], 'granted_at': entry.granted_at,
+            **({'borrowed_from': entry.borrows_from} if entry.borrows_from is not None else {})}
+
+
+def _release_followups(log_dir, task_id: str, request: dict, outcome: str) -> None:
+    """Settle the queued follow-ups a waiting launch was handed. Guarded: bookkeeping never changes an outcome."""
+    handed = request.get('followups')
+    if not handed:
+        return
+    try:
+        followups.finish(log_dir, handed['task_id'], task_id, handed['ids'], outcome)
+    except StateOwnershipError:
+        raise
+    except Exception:
+        pass
 
 
 async def run(descriptor: int, task_id: str, generation: str):
@@ -38,7 +133,16 @@ async def run(descriptor: int, task_id: str, generation: str):
                 raise ValueError('Private authorization does not match task reservation')
             mark(registry.log_dir, task_id, generation, state='claimed', owner=registry._owner)
             started = False
+            grant = None
             try:
+                if request['kwargs'].get('resource_request') is not None:
+                    try:
+                        grant = await _acquire_resources(registry, task_id, generation, request['kwargs'].pop('resource_request'))
+                    except _NotStarted:
+                        _release_followups(registry.log_dir, task_id, request, 'released')
+                        return
+                else:
+                    request['kwargs'].pop('resource_request', None)
                 prepared = request['invocation']
                 prepared['initial_input'] = base64.b64decode(prepared['initial_input'], validate=True) if prepared['initial_input'] is not None else None
                 prepared['extra_writable_paths'] = tuple(prepared['extra_writable_paths'])
@@ -51,8 +155,12 @@ async def run(descriptor: int, task_id: str, generation: str):
                 kwargs['backend'] = get(request['backend'])
                 kwargs['extra_path_grants'] = restore_paths(request['grants'])
                 registry._launch_generations = {task_id: generation}
-                task = await registry._execute_prepared(invocation, **kwargs)
+                task = await registry._execute_prepared(invocation, **kwargs, **({'resource_grant': grant} if grant is not None else {}))
                 started = True
+                if grant is not None:
+                    # The spawn is the consumption point for follow-ups that were handed to a launch
+                    # that waited; `finish` is idempotent with the caller-side consumption.
+                    _release_followups(registry.log_dir, task_id, request, 'consumed')
                 mark(registry.log_dir, task_id, generation, state='spawned')
                 await task.done.wait()
                 if task.monitor is not None:
@@ -68,7 +176,11 @@ async def run(descriptor: int, task_id: str, generation: str):
             except BaseException as exc:
                 # A record or ambiguous process creation means execution can never safely retry.
                 if not started and store.read(registry.log_dir, task_id) is None and getattr(exc, 'harflow_not_started', False):
-                    mark(registry.log_dir, task_id, generation, state='not_started', error=str(exc))
+                    if grant is not None:
+                        task_resources.release_quietly(registry.log_dir, grant['reservation_id'])
+                        _release_followups(registry.log_dir, task_id, request, 'released')
+                    mark(registry.log_dir, task_id, generation, state='not_started', error=str(exc),
+                         **({'not_started_reason': 'owner_error'} if grant is not None else {}))
                 raise
         finally:
             os.close(lock)

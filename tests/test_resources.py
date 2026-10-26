@@ -451,7 +451,7 @@ def test_ctl_resources_release_and_repair_for_a_human(home: Path, capsys: pytest
     waiting = ledger.request(["a"], task("b"))
     code, document = run_ctl(capsys, "resources-release", "--reservation-id", held.reservation_id, "--confirm-uncertain", "--also-release-session", "--json")
     assert code == 0
-    assert document["result"] == {"reservation_id": held.reservation_id, "outcome": "released", "also_release_session": True, "session_released": False}
+    assert document["result"] == {"reservation_id": held.reservation_id, "outcome": "released", "also_release_session": True, "session_released": False, "session": "unknown"}
     assert ledger.get(waiting.reservation_id).held
 
     code, document = run_ctl(capsys, "resources-release", "--reservation-id", "nope", "--confirm-uncertain", "--json")
@@ -464,7 +464,7 @@ def test_ctl_resources_release_and_repair_for_a_human(home: Path, capsys: pytest
     code, document = run_ctl(capsys, "resources", "--json")
     assert code == 1 and document["error"]["code"] == "resource_ledger_corrupt"
     code, document = run_ctl(capsys, "resources-repair", "--json")
-    assert code == 0 and document["result"]["rebuilt"] is False
+    assert code == 0 and document["result"]["rebuilt"] is True and document["result"]["restored"] == []
     assert Path(document["result"]["moved_to"]).read_text() == "garbage"
     code, document = run_ctl(capsys, "resources", "--json")
     assert code == 0 and document["resources"] == []
