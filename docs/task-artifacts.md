@@ -226,3 +226,23 @@ This engine-only path does not relax `register_artifact` caller/path authority o
 permissions. Recognizing a custom plan directory reads at most 64 KiB plus an overflow byte from
 each of three regular, non-symlink settings files; plan content is never read. Tracking requires
 successful observed tool evidence and does not discover every unreported or subagent write.
+
+Plan observations are queued as bounded metadata-only candidates, with no filesystem/configuration
+or artifact-lock work in the stdout drainer. A separate task-local worker owns correlation state.
+It is not an output drainer and cannot make `output_drained` false. Admission permits at most 128
+queued candidates plus one active candidate, within 512 KiB including active data; each event
+extracts at most 100 candidates. Limits and failed observations produce notices instead of changing
+the task outcome. Non-candidate events start no worker or thread-pool operation. After stdout and
+input settlement, the owner allows two seconds for plan metadata completion; a timeout discards
+queued work and reports incomplete tracking. An already-running metadata write retains its own
+store lease and may finish later. No further candidates start after closure.
+
+New observed-plan provenance stores `plan_directory` and `plan_directory_identity` (device/inode)
+from the validated directory. Registration still checks the backend's current plan namespace.
+Availability then uses the recorded directory, its identity and a regular direct-child file through
+a no-symlink descriptor walk; it does not read the observer's HOME, CLAUDE_CONFIG_DIR or current
+settings. Changing those settings does not revoke the historical reference. Replacing the recorded
+directory or introducing a symlink makes availability unavailable. Older observed-plan references
+without a saved directory identity remain readable but unavailable; the original trusted namespace
+cannot be reconstructed safely. This is metadata observation, not a new caller registration or
+filesystem permission. Older validators can reject the new provenance variant as unavailable.

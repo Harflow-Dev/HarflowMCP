@@ -355,8 +355,9 @@ Legacy-only records remain readable. Contradictory dual values are invalid, incl
 nested permission comparisons. This is an authorization disclosure, not a publication guarantee.
 No canonical fixture shapes are changed by these optional additions.
 
-MCP `get_task_status` adds `successor_tasks`: up to 20 retained authorized task IDs,
-`history_incomplete`, `has_more`, and a `list_task_page` detail reference. The listing accepts
+MCP `get_task_status` includes a `successor_tasks` detail reference by default. Explicit
+`include_successors: true` adds up to 20 retained authorized task IDs, `history_incomplete`
+and `has_more`. The listing accepts
 `predecessor_task_id` with its scope-bound cursor. It selects direct `parent_task_id` resumes and
 `continuation_of_task_id` continuations, never unrelated same-session records. Missing retained
 history cannot be reconstructed. Existing successor records keep their source IDs; predecessor
@@ -392,3 +393,21 @@ These are additive v1 response fields; decoders and version gates remain unchang
 approval-status fixtures include the observer projections, using an isolated deterministic
 responding identity, and the Mac repository vendors the byte-identical complete bundle. Engine
 fixtures are generated first; consumer decoding is then verified against the new manifest digest.
+
+### Review follow-ups: detail projections and plan provenance
+
+`get_task_status` adds `include_successors` (default false). Default `successor_tasks` contains
+`state: "not_requested"` and the existing `list_task_page` detail reference, without an ID array or
+completeness claim. Explicit inclusion returns `state: "loaded"` and the authorized first page,
+including pagination/incompleteness fields. Compact status preserves that reference and opt-in
+behavior. Ordinary status polling performs no successor catalog query; explicit page reads retain
+all existing authority checks. This changes the default of the unreleased MCP-only projection;
+ctl snapshots and canonical fixtures retain their structure.
+
+Optional detail `supervision.dispatch_origin_state` reports qualified dispatcher liveness separately
+from observer mode; it is omitted for records with no origin. It is diagnostic, never authority.
+Private `observed_backend_plan` provenance accepts legacy three-key references and a strict new
+variant adding `plan_directory` plus `{device, inode}` in `plan_directory_identity`. Only new
+references can establish availability independently of the reader's environment; legacy references
+remain readable but unavailable. No canonical fixture requires a shape change for these optional
+fields, and existing Mac decoders ignore unknown provenance members.

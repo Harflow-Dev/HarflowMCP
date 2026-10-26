@@ -60,3 +60,15 @@ def test_claude_plan_file_write_exception(tmp_path, monkeypatch, custom):
     assert all(block.get('is_error') for block in tool_results[1:])
     assert not (repo / 'ordinary.md').exists()
     assert not (tmp_path / 'outside.md').exists()
+    # Feed actual CLI stream frames through the metadata-only worker seam, after process exit.
+    from harflow_mcp.backends.claude_plan_files import candidates, observe_candidates
+    observed, state = [], {}
+    for line in result.stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        observed.extend(observe_candidates(candidates(event), state, repo))
+    assert [item['path'] for item in observed] == [str(plan)]
+    assert observed[0]['plan_directory'] == str(plan.parent)
+    assert observed[0]['plan_directory_identity']['inode'] == plan.parent.stat().st_ino

@@ -154,3 +154,17 @@ Use `observation_mode` rather than treating that boolean as proof of a crash. Ac
 liveness and capture continuity remain separate `supervision` evidence. Responding identity is
 recomputed for snapshot, brief, compact and indexed-list reads; cached headers do not establish
 which server is responding now. A size-pruned origin yields unknown rather than a continuity claim.
+
+Detail and compact status reads add `supervision.dispatch_origin_state` when a dispatch origin is
+recorded: `alive`, `dead`, or `undecidable`, using process-generation-qualified evidence. Matching
+the current responding process proves that origin alive without an extra probe. Missing origin
+omits the diagnostic; missing generation stays undecidable. A different observer with a live
+origin and a different observer with a dead origin are therefore distinguishable while keeping
+existing observation modes. Dead dispatch origin does not establish replacement: a short-lived
+ctl dispatcher can exit normally. This diagnostic never changes execution ownership, capture or
+session-busy decisions, and indexed listing does not add per-row dispatcher probes.
+
+Observed settled live-input tasks refuse sends as `settled`, naming their terminal status, before
+checking sealed input. A running sealed task still returns `closed` and its closure reason. A
+terminal-looking record without an observed outcome retains closed/exited/uncertain guidance;
+its saved status is not proof that the process settled.

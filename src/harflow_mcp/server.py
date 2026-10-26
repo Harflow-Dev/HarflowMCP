@@ -917,6 +917,7 @@ async def get_task_status(
     task_id: str,
     include_tail: bool = False,
     brief: StrictBool = False,
+    include_successors: StrictBool = False,
 ) -> dict[str, Any]:
     """Report a dispatched task's current state without blocking.
 
@@ -929,6 +930,8 @@ async def get_task_status(
             normalized events.
         brief: Return an 8 KiB display projection with bounded summary/outcome, the last three
             activities and detail references. Overrides include_tail. Full reads remain available.
+        include_successors: Fetch the first authorized page of successor IDs. Defaults false:
+            ordinary polling includes a detail reference without scanning retained task history.
 
     Returns the task's status, summary, enforcement, and `recent_activity` — a list of ≤ 5 one-line
     strings describing the most recent meaningful events (tool calls, failed tool results, assistant
@@ -956,7 +959,8 @@ async def get_task_status(
 
     `parent_task_id` links a resume to its source; `continuation_of_task_id` links a new-session
     continuation. `successor_tasks` derives the reverse links from retained, authorized headers,
-    with incompleteness and pagination explicitly reported. These links do not transfer reminders
+    when include_successors is true; otherwise only a detail reference is returned.
+    Incompleteness and pagination are explicit. These links do not transfer reminders
     or subscriptions to the successor.
 
     Confirmed usage limits add `failure_diagnostic` (category, reason, source, and optional
@@ -972,7 +976,7 @@ async def get_task_status(
     """
     if brief:
         from .task_reads import brief_status
-        return brief_status(await get_task_status(task_id, include_tail=False))
+        return brief_status(await get_task_status(task_id, include_tail=False, include_successors=include_successors))
     await _guard_task_read(task_id)
     task = _reg().get(task_id)
     if task is not None:
@@ -980,7 +984,7 @@ async def get_task_status(
         payload = await asyncio.to_thread(
             _status_payload, snapshot, include_tail=include_tail, log_dir=_reg().log_dir, task_id=task_id
         )
-        return await _with_successor_links(payload)
+        return await _with_successor_links(payload, include=include_successors)
 
     record = _reg().recover(task_id)
     if record is None:
@@ -993,14 +997,19 @@ async def get_task_status(
     payload = await asyncio.to_thread(
         _status_payload, snapshot, include_tail=include_tail, log_dir=_reg().log_dir, task_id=task_id
     )
-    return await _with_successor_links(payload)
+    return await _with_successor_links(payload, include=include_successors)
 
 
-async def _with_successor_links(payload: dict[str, Any]) -> dict[str, Any]:
+async def _with_successor_links(payload: dict[str, Any], *, include: bool = False) -> dict[str, Any]:
     """Derive reverse links from authorized, bounded persisted headers, without changing owners."""
     task_id = payload['task_id']
+    reference = {'tool': 'list_task_page', 'predecessor_task_id': task_id}
+    if not include:
+        payload['successor_tasks'] = {'state': 'not_requested', 'detail_ref': reference}
+        return payload
     page = await list_task_page(limit=20, predecessor_task_id=task_id)
     payload['successor_tasks'] = {
+        'state': 'loaded',
         'task_ids': [item['task_id'] for item in page['items']],
         'history_incomplete': bool(page.get('history_incomplete') or page.get('bootstrap_pending')),
         'has_more': bool(page.get('has_more')),

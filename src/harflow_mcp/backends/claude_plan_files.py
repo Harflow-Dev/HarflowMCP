@@ -43,47 +43,64 @@ def plan_roots(repo: Path) -> tuple[Path, ...]:
     return tuple(dict.fromkeys(roots))
 
 
-def observe(event: dict, state: dict, repo: Path) -> list[dict]:
-    """Join successful top-level Write/Edit results to bounded pending calls.
-
-    Paths must be regular files directly in an explicit plan directory. Returned
-    references contain stat metadata only; neither plan content nor arbitrary config
-    files are read. Duplicate/replayed results produce no additional reference.
-    """
+def candidates(event: dict) -> tuple[dict, ...]:
+    """Extract bounded metadata only, without filesystem or configuration access."""
     if event.get('parent_tool_use_id'):
-        return []
+        return ()
     message = event.get('message')
     blocks = message.get('content') if isinstance(message, dict) else None
     if not isinstance(blocks, list):
-        return []
-    pending = state.setdefault('plan_file_calls', {})
-    result = []
+        return ()
+    frames = []
     for block in blocks:
         if not isinstance(block, dict):
             continue
         if event.get('type') == 'assistant' and block.get('type') == 'tool_use' and block.get('name') in ('Write', 'Edit'):
-            call_id, arguments = block.get('id'), block.get('input')
+            arguments = block.get('input')
+            call_id = block.get('id')
             path = arguments.get('file_path') if isinstance(arguments, dict) else None
-            if isinstance(call_id, str) and len(call_id) <= 256 and isinstance(path, str) and len(path) <= 4096 and len(pending) < 100:
-                pending.setdefault(call_id, path)
-        if event.get('type') != 'user' or block.get('type') != 'tool_result':
-            continue
-        call_id = block.get('tool_use_id')
-        if not isinstance(call_id, str):
+            if (isinstance(call_id, str) and 0 < len(call_id) <= 256 and len(call_id.encode('utf-8')) <= 256 and
+                    isinstance(path, str) and 0 < len(path) <= 4096 and len(path.encode('utf-8')) <= 4096):
+                frames.append({'id': call_id, 'path': path})
+        elif event.get('type') == 'user' and block.get('type') == 'tool_result':
+            call_id = block.get('tool_use_id')
+            if isinstance(call_id, str) and 0 < len(call_id) <= 256 and len(call_id.encode('utf-8')) <= 256:
+                frames.append({'id': call_id, 'error': bool(block.get('is_error'))})
+        if len(frames) == 100:
+            break
+    return tuple(frames)
+
+
+def observe_candidates(frames, state: dict, repo: Path) -> list[dict]:
+    """Observe extracted frames using exclusively worker-owned correlation state."""
+    from ..artifacts import _regular_stat, _observation
+    pending = state.setdefault('plan_file_calls', {})
+    result = []
+    for frame in frames:
+        call_id = frame['id']
+        if 'path' in frame:
+            if len(pending) < 100:
+                pending.setdefault(call_id, frame['path'])
             continue
         raw = pending.pop(call_id, None)
-        if raw is None or block.get('is_error'):
+        if raw is None or frame['error']:
             continue
         path = Path(raw)
         try:
             if not _plain(path) or path.parent not in plan_roots(repo):
                 continue
-            info = path.lstat()
-            if not stat.S_ISREG(info.st_mode):
-                continue
+            directory = path.parent.stat(follow_symlinks=False)
+            directory_identity = {'device': directory.st_dev, 'inode': directory.st_ino}
+            info = _regular_stat(path, directory_identity=directory_identity)
             result.append({'path': str(path), 'tool_use_id': call_id,
-                           'registered_observation': {'device': info.st_dev, 'inode': info.st_ino,
-                                                      'size': info.st_size, 'mtime_ns': info.st_mtime_ns}})
+                           'plan_directory': str(path.parent),
+                           'plan_directory_identity': directory_identity,
+                           'registered_observation': _observation(info)})
         except (OSError, ValueError):
             continue
     return result
+
+
+def observe(event: dict, state: dict, repo: Path) -> list[dict]:
+    """Compatibility adapter for callers already running observation off-thread."""
+    return observe_candidates(candidates(event), state, repo)

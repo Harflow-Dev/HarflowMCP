@@ -352,7 +352,7 @@ def _observation(info):
     return {'device': info.st_dev, 'inode': info.st_ino, 'size': info.st_size, 'mtime_ns': info.st_mtime_ns}
 
 
-def _regular_stat(path):
+def _regular_stat(path, *, directory_identity=None):
     """Observe metadata without following any component replaced after canonicalization."""
     descriptor = os.open(path.anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
@@ -361,6 +361,10 @@ def _regular_stat(path):
                             dir_fd=descriptor)
             os.close(descriptor)
             descriptor = child
+        if directory_identity is not None:
+            parent = os.fstat(descriptor)
+            if {'device': parent.st_dev, 'inode': parent.st_ino} != directory_identity:
+                raise ValueError('Recorded plan directory identity changed')
         flags = getattr(os, 'O_EVTONLY', getattr(os, 'O_PATH', os.O_RDONLY))
         final = os.open(path.name, flags | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=descriptor)
         try:
@@ -476,17 +480,34 @@ def _task_lock(log_dir, task_id):
 def _valid_provenance(value, task_id):
     if value == {'method': 'verified_process_lineage', 'task_id': task_id}:
         return True
-    return (set(value) == {'method', 'task_id', 'tool_use_id'} and
-            value.get('method') == 'observed_backend_plan' and value.get('task_id') == task_id and
-            isinstance(value.get('tool_use_id'), str) and 0 < len(value['tool_use_id']) <= 256)
+    legacy = {'method', 'task_id', 'tool_use_id'}
+    if (not isinstance(value, dict) or value.get('method') != 'observed_backend_plan' or
+            value.get('task_id') != task_id or not isinstance(value.get('tool_use_id'), str) or
+            not 0 < len(value['tool_use_id'].encode('utf-8')) <= 256):
+        return False
+    if set(value) == legacy:
+        return True
+    directory = value.get('plan_directory')
+    identity = value.get('plan_directory_identity')
+    return (set(value) == legacy | {'plan_directory', 'plan_directory_identity'} and
+            isinstance(directory, str) and 0 < len(directory.encode('utf-8')) <= 4096 and
+            Path(directory).is_absolute() and '..' not in Path(directory).parts and
+            isinstance(identity, dict) and set(identity) == {'device', 'inode'} and
+            all(type(v) is int and v >= 0 for v in identity.values()))
 
 
-def _backend_plan_target(record, path):
-    from .backends import get
+def _backend_plan_target(record, path, provenance=None):
     target = Path(path)
-    if not get(record.backend).builtin_plan_path(target, Path(record.repo_path)):
-        raise ValueError('Not a built-in backend plan path')
-    return target, _observation(_regular_stat(target))
+    if provenance is None:
+        from .backends import get
+        if not get(record.backend).builtin_plan_path(target, Path(record.repo_path)):
+            raise ValueError('Not a built-in backend plan path')
+        return target, _observation(_regular_stat(target))
+    if not _valid_provenance(provenance, record.task_id) or 'plan_directory' not in provenance:
+        raise ValueError('Recorded plan directory identity is unavailable')
+    if target.parent != Path(provenance['plan_directory']):
+        raise ValueError('Plan must be a direct child of its recorded directory')
+    return target, _observation(_regular_stat(target, directory_identity=provenance['plan_directory_identity']))
 
 
 @metadata_request()
@@ -503,13 +524,18 @@ def record_backend_plan(log_dir: Path, task_id: str, reference: dict) -> dict:
         if record is None or record.freedom != 'read_only':
             raise ValueError('Built-in plan observation requires a read-only task')
         binding = _authority(log_dir, record, registering=True)
+        if set(reference) != {'path', 'tool_use_id', 'registered_observation', 'plan_directory', 'plan_directory_identity'}:
+            raise ValueError('Invalid built-in plan reference')
         target, observed = _backend_plan_target(record, reference['path'])
         if observed != reference['registered_observation']:
             raise ValueError('Observed plan file changed before registration')
         provenance = {'method': 'observed_backend_plan', 'task_id': task_id,
-                      'tool_use_id': reference['tool_use_id']}
+                      'tool_use_id': reference['tool_use_id'],
+                      'plan_directory': reference['plan_directory'],
+                      'plan_directory_identity': reference['plan_directory_identity']}
         if not _valid_provenance(provenance, task_id):
             raise ValueError('Invalid built-in plan evidence')
+        _backend_plan_target(record, reference['path'], provenance)
         items, _ = _load(log_dir, task_id, storage_fd)
         for item in items:
             if item['path'] == str(target) and item['registered_observation'] == observed:
@@ -631,7 +657,7 @@ def _availability(log_dir, record, item):
             state = 'changed'
         else:
             try:
-                _, observed = (_backend_plan_target(record, str(path))
+                _, observed = (_backend_plan_target(record, str(path), item['provenance'])
                                if item['provenance'].get('method') == 'observed_backend_plan'
                                else _target(log_dir, record, str(path)))
                 if os.access(path, os.R_OK):

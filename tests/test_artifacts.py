@@ -1099,7 +1099,10 @@ def test_engine_observed_backend_plan_preserves_registration_boundary(setup, mon
     monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(config))
     record = replace(record, backend='claude', freedom='read_only')
     store.write(logs, record)
+    directory_info = path.parent.stat()
     reference = {'path': str(path), 'tool_use_id': 'plan-write-1',
+                 'plan_directory': str(path.parent),
+                 'plan_directory_identity': {'device': directory_info.st_dev, 'inode': directory_info.st_ino},
                  'registered_observation': artifacts._observation(artifacts._regular_stat(path))}
     with pytest.raises(ValueError):
         artifacts.register(logs, str(path), 'report')
@@ -1108,6 +1111,10 @@ def test_engine_observed_backend_plan_preserves_registration_boundary(setup, mon
     assert item['provenance']['method'] == 'observed_backend_plan'
     page = artifacts.get(logs, record.task_id)
     assert page['items'][0]['availability']['state'] == 'available'
+    monkeypatch.setenv('HOME', str(repo.parent / 'new-home'))
+    monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(repo.parent / 'new-config'))
+    assert artifacts.get(logs, record.task_id)['items'][0]['availability']['state'] == 'available'
+    monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(config))
     path.write_text('updated plan')
     assert artifacts.get(logs, record.task_id)['items'][0]['availability']['state'] == 'changed'
     with pytest.raises(ValueError, match='changed'):

@@ -628,6 +628,14 @@ class ExtraPathsUnsupported:
     def execution_configuration_namespaces(self, repo):
         raise UnsupportedCapability("backend execution configuration namespaces are not qualified")
 
+    def plan_file_candidates(self, event):
+        """Bounded stream metadata; this synchronous seam must perform no I/O."""
+        return ()
+
+    def observe_plan_candidates(self, candidates, state, repo):
+        """Worker-only metadata observation using exclusively worker-owned state."""
+        return []
+
     def builtin_plan_path(self, path, repo):
         return False
 

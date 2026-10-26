@@ -2,6 +2,8 @@
 
 ## 0.0.2
 
+- Address review follow-ups: separate dispatcher liveness from observer mode, move bounded plan metadata work off stdout draining, retain plan directory identity for environment-independent availability, report observed settled sends precisely, and make successor history lookup opt-in during status polling.
+
 - Distinguish dispatch origin, detached execution owner and responding server so normal fresh attachments are not labelled recovered; retain explicit unknown identity and independent liveness evidence (#54).
 - Preserve partial Git observations, report bounded phase/probe diagnostics and fix large packed-refs status inspection without increasing probe budgets (#55).
 

@@ -783,6 +783,7 @@ class Task:
     ("pending") until that capture lands — see `_spawn` — so `identity.identity_check` on a record
     with a null `start_time` falls back to its legacy pid+markers comparison."""
     dispatch_origin: dict[str, Any] | None = None
+    plan_observations: Any = None
     owner: dict[str, Any] | None = None
     """The process owning execution/output capture, separate from the dispatching server."""
     base_commit: str | None = None
@@ -2247,14 +2248,14 @@ class TaskRegistry:
                 code="lock_timeout",
             ) from None
         try:
-            if task.inbox_closed or inbox.is_closed(self._log_dir, task.task_id):
-                raise inbox.SendRefused(
-                    f"task {task.task_id} has {inbox.closed_message(self._log_dir, task.task_id)}", code="closed"
-                )
             if task.finished:
                 raise inbox.SendRefused(
                     f"task {task.task_id} has settled ({task.status}); continue with resume_task",
                     code="settled",
+                )
+            if task.inbox_closed or inbox.is_closed(self._log_dir, task.task_id):
+                raise inbox.SendRefused(
+                    f"task {task.task_id} has {inbox.closed_message(self._log_dir, task.task_id)}", code="closed"
                 )
             message = inbox.make_message(text, self._owner)
             inbox.append_locked(self._log_dir, task.task_id, message)
@@ -4443,12 +4444,11 @@ async def _drain_stdout(task: Task, registry: TaskRegistry) -> None:
             backend.ingest(event, task.acc)
             if task.freedom == 'read_only':
                 try:
-                    observe_plans = getattr(backend, 'observed_plan_files', None)
-                    if observe_plans is not None:
-                        from . import artifacts
-                        references = await asyncio.to_thread(observe_plans, event, task.acc, task.repo_path)
-                        for reference in references:
-                            await asyncio.to_thread(artifacts.record_backend_plan, registry.log_dir, task.task_id, reference)
+                    if task.plan_observations is None:
+                        from .plan_observations import PlanObservations
+                        task.plan_observations = PlanObservations(backend, task.repo_path, registry.log_dir,
+                                                                task.task_id, task.bridge_notices.append)
+                    task.plan_observations.enqueue(event)
                 except StateOwnershipError:
                     raise
                 except Exception:
@@ -4673,6 +4673,8 @@ async def _monitor(task: Task, registry: TaskRegistry) -> None:
         exit_code = await task.proc.wait()
         drained = await _finish_draining(task)
         await registry._finish_pump(task)
+        if task.plan_observations is not None:
+            await task.plan_observations.finish()
         pump_finished = task.pump is None or (
             task.pump.done() and not task.pump.cancelled() and task.pump.exception() is None
         )

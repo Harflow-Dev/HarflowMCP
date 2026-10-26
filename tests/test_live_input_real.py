@@ -352,5 +352,5 @@ async def test_harflow_mcp_two_message_run_end_to_end(git_repo: Path, tmp_path: 
     injected = [e for e in events if e["kind"] == "user_message" and e["source"] == "injected"]
     assert [e["message_id"] for e in injected] == [queued["message_id"]]
 
-    with pytest.raises(inbox.SendRefused, match="closed live input.*Wait for settlement.*resume_task"):
+    with pytest.raises(inbox.SendRefused, match="settled.*resume_task"):
         await registry.send_message(task, "too late")

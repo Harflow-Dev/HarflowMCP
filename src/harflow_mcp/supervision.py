@@ -75,7 +75,17 @@ def evidence(record: Any, raw_log: Path, *, observed_terminal: bool = False,
 
 def fields(record: Any, raw_log: Path, *, responding_server=None, **kwargs) -> dict[str, Any]:
     value = evidence(record, raw_log, **kwargs)
-    return {**observation_fields(record, responding_server=responding_server), "supervision": value, "output_capture": value["capture_state"],
+    observation = observation_fields(record, responding_server=responding_server)
+    origin = observation["dispatch_origin"]
+    if origin is not None:
+        # Diagnostic only: catalog projections deliberately do not probe processes per row.
+        # Matching the current process generation proves continuity without an OS lookup.
+        value["dispatch_origin_state"] = (
+            "undecidable" if not origin["start_time"] else
+            "alive" if origin == observation["responding_server"] else
+            identity.identity_check(origin)
+        )
+    return {**observation, "supervision": value, "output_capture": value["capture_state"],
             "input_channel": value["live_input_state"],
             **({"input_closed_reason": value["live_input_closed_reason"]} if 'live_input_closed_reason' in value else {}),
             "last_captured_output_at": value["last_captured_output_at"]}

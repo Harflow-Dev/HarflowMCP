@@ -1125,6 +1125,14 @@ class ClaudeBackend(ExtraPathsUnsupported):
             caveats=caveats,
         )
 
+    def plan_file_candidates(self, event):
+        from .claude_plan_files import candidates
+        return candidates(event)
+
+    def observe_plan_candidates(self, candidates, state, repo):
+        from .claude_plan_files import observe_candidates
+        return observe_candidates(candidates, state, repo)
+
     def builtin_plan_path(self, path, repo):
         from .claude_plan_files import plan_roots, _plain
         return _plain(path) and path.parent in plan_roots(repo)

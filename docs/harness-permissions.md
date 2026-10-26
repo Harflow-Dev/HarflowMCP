@@ -674,7 +674,8 @@ Other agent-level modes must not be read as universal filesystem-write guarantee
 Claude 2.1.310 accepts custom plan directories only within the project root, so this implementation
 does not redirect plans into external task scratch or add a writable-directory grant. For read-only
 runs, Harflow joins top-level Write/Edit calls to successful tool results and records existing
-regular files directly in a recognized plan directory as metadata-only artifacts. No target content
+regular files directly in a recognized plan directory as metadata-only artifacts through a separate
+bounded worker. Saved directory identity makes later availability independent of reader settings. No target content
 is read, no arbitrary user config file becomes registrable, and symlinked files/ancestors are
 rejected. Built-in artifact provenance is an observation of the tool result, not verified contents
 or exclusive authorship. Unreported tools, subagent-only writes, disappeared files, replaced config

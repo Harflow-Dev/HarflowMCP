@@ -31,7 +31,7 @@ async def test_reverse_links_are_paged_and_scoped(task_directory):
     assert {row['task_id'] for page in (first, second) for row in page['items']} == {'resume', 'continue'}
     with pytest.raises(Exception, match='cursor'):
         await server.list_task_page(limit=1, predecessor_task_id='unrelated', cursor=first['next_cursor'])
-    status = await server.get_task_status('source')
+    status = await server.get_task_status('source', include_successors=True)
     assert set(status['successor_tasks']['task_ids']) == {'resume', 'continue'}
     assert status['successor_tasks']['history_incomplete'] is False
     assert (await server.get_task_status('resume'))['parent_task_id'] == 'source'
@@ -44,7 +44,7 @@ async def test_successor_page_filters_managed_visibility(task_directory, monkeyp
     store.write(task_directory, task('source'))
     store.write(task_directory, task('hidden', parent_task_id='source'))
     monkeypatch.setattr(workflow_inspection, 'filter_task_reads', lambda entries, managed: [])
-    result = await server._with_successor_links({'task_id': 'source'})
+    result = await server._with_successor_links({'task_id': 'source'}, include=True)
     assert result['successor_tasks']['task_ids'] == []
 
 
@@ -56,10 +56,23 @@ async def test_managed_truncation_is_not_reported_as_complete(task_directory, mo
     monkeypatch.setattr(server, '_guard_task_read', _no_guard)
     monkeypatch.setattr(workflow_inspection, 'managed_page_reader', lambda _: (True, ({}, {})))
     monkeypatch.setattr(workflow_inspection, 'filter_task_reads', lambda entries, managed: entries)
-    result = await server._with_successor_links({'task_id': 'source'})
+    result = await server._with_successor_links({'task_id': 'source'}, include=True)
     assert len(result['successor_tasks']['task_ids']) == 20
     assert result['successor_tasks']['history_incomplete'] is True
 
 
 async def _no_guard(*args, **kwargs):
     return None
+
+
+async def test_ordinary_status_does_not_scan_successors(task_directory, monkeypatch):
+    store.write(task_directory, task('source'))
+    async def forbidden(*args, **kwargs):
+        pytest.fail('ordinary status must not scan successor history')
+    monkeypatch.setattr(server, 'list_task_page', forbidden)
+    for brief in (False, True):
+        result = await server.get_task_status('source', brief=brief)
+        assert result['successor_tasks'] == {
+            'state': 'not_requested',
+            'detail_ref': {'tool': 'list_task_page', 'predecessor_task_id': 'source'},
+        }

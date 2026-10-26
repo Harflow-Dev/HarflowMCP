@@ -625,11 +625,11 @@ async def test_a_send_after_the_close_is_refused_with_resume_advice(fake) -> Non
     await _settle(task)
     assert task.status == "completed"
 
-    with pytest.raises(inbox.SendRefused, match="closed live input; the task may still be running") as caught:
+    with pytest.raises(inbox.SendRefused, match=r"has settled \(completed\)") as caught:
         await fake.registry.send_message(task, "too late")
-    assert caught.value.code == "closed"
+    assert caught.value.code == "settled"
     # And from another process, via the on-disk inbox.
-    with pytest.raises(inbox.SendRefused, match="closed live input; the task may still be running"):
+    with pytest.raises(inbox.SendRefused, match=r"has settled \(completed\)"):
         await fake.registry.send_to_record(task.task_id, "too late")
 
 
@@ -692,7 +692,7 @@ async def test_an_error_result_closes_input_and_the_run_fails(fake) -> None:
     assert task.status == "failed"
     assert task.acc.error_result_seen
     assert task.inbox_closed
-    with pytest.raises(inbox.SendRefused, match="closed live input; the task may still be running"):
+    with pytest.raises(inbox.SendRefused, match=r"has settled \(failed\)"):
         await fake.registry.send_message(task, "anything")
 
 
@@ -705,7 +705,7 @@ async def test_a_run_that_exits_without_a_result_fails_and_closes_its_input(fake
     assert task.exit_code == 3
     assert task.status == "failed"
     assert task.inbox_closed
-    with pytest.raises(inbox.SendRefused, match="closed live input; the task may still be running"):
+    with pytest.raises(inbox.SendRefused, match=r"has settled \(failed\)"):
         await fake.registry.send_message(task, "after exit")
 
 
@@ -1018,12 +1018,14 @@ def _record(tmp_path: Path, **overrides) -> None:
         ({"live_input": False}, True, "not_live_input"),
         ({}, True, "closed"),
         ({"status": "completed", "exit_code": 0}, False, "settled"),
+        ({"status": "completed", "exit_code": 0}, True, "settled"),
+        ({"status": "failed", "exit_code": None}, True, "closed"),
         ({"owner": {"pid": 999_999_9, "start_time": "Mon Jan  1 00:00:00 2001", "markers": []}},
          False, "owner_not_alive"),
         ({"owner": None}, False, "owner_not_alive"),
         ({"owner": {"pid": 1, "start_time": None, "markers": []}}, False, "owner_not_alive"),
     ],
-    ids=["not-live", "closed", "settled", "owner-dead", "owner-unknown", "owner-legacy"],
+    ids=["not-live", "closed", "settled", "settled-closed", "unobserved-closed", "owner-dead", "owner-unknown", "owner-legacy"],
 )
 def test_a_non_owner_send_is_refused_in_order(tmp_path: Path, overrides, closed, code) -> None:
     log_dir = _task_dir(tmp_path)
@@ -2062,3 +2064,17 @@ def test_supervision_does_not_read_entire_live_inbox(tmp_path, monkeypatch):
     with path.open('ab') as stream:
         stream.write((json.dumps(inbox_documents.encode({'closed': True, 'reason': 'finished owed turn'}, task_id)) + '\n').encode())
     assert supervision.fields(record, logs / f'{task_id}.jsonl')['input_channel'] == 'closed'
+
+
+@pytest.mark.parametrize("closed", [False, True])
+def test_unobserved_terminal_does_not_establish_settlement(tmp_path, monkeypatch, closed):
+    log_dir = _task_dir(tmp_path)
+    _record(tmp_path, status="failed", exit_code=None, pid=123, start_time="generation")
+    monkeypatch.setattr(inbox.identity, "identity_check", lambda _: "alive")
+    if closed:
+        inbox.mark_closed(log_dir, "t1")
+        with pytest.raises(inbox.SendRefused) as caught:
+            inbox.send_to_record(log_dir, "t1", "hi", by=None)
+        assert caught.value.code == "closed"
+    else:
+        assert inbox.send_to_record(log_dir, "t1", "hi", by=None)["status"] == "queued"

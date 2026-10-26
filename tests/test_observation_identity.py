@@ -58,7 +58,7 @@ def test_fresh_durable_attachment_and_owner_read(saved):
 @pytest.mark.parametrize('origin_state', ['alive', 'dead', 'undecidable'])
 def test_other_observer_does_not_infer_owner_loss(saved, monkeypatch, origin_state):
     directory, record = saved
-    monkeypatch.setattr(identity, 'identity_check', lambda value: origin_state if value == ORIGIN else 'alive')
+    monkeypatch.setattr(identity, 'identity_check', lambda value: origin_state if value.get('pid') == ORIGIN['pid'] else 'alive')
     registry = Registry(OTHER)
     task = AttachedTask(directory, record.task_id, registry=registry)
     for payload in (task.snapshot(), task.brief()):
@@ -66,6 +66,7 @@ def test_other_observer_does_not_infer_owner_loss(saved, monkeypatch, origin_sta
         assert payload['observation_mode'] == 'recovered'
         assert payload['output_capture'] == 'live'
         assert payload['supervision']['owner_state'] == 'alive'
+        assert payload['supervision']['dispatch_origin_state'] == origin_state
         assert payload['owner'] == OWNER
         assert 'does not imply owner loss' in payload['observation_note']
 
@@ -138,3 +139,35 @@ def test_same_origin_observed_completion_does_not_claim_recovery(saved):
         assert payload['output_capture'] == 'observed_terminal'
         assert 'Recovered from disk' not in payload.get('note', '')
     assert snapshot['note'] == snapshot['observation_note']
+
+
+def test_current_origin_is_alive_without_origin_probe(saved, monkeypatch):
+    directory, record = saved
+    calls = []
+    def check(value):
+        calls.append(value)
+        return 'alive'
+    monkeypatch.setattr(identity, 'identity_check', check)
+    payload = store.snapshot(directory, record, responding_server=ORIGIN)
+    assert payload['supervision']['dispatch_origin_state'] == 'alive'
+    assert all(value.get('pid') != ORIGIN['pid'] for value in calls)
+
+
+@pytest.mark.parametrize('origin', [None, {'pid': 101, 'start_time': None, 'markers': []}])
+def test_unqualified_origin_state_is_explicit_or_absent(saved, origin):
+    directory, record = saved
+    record = replace(record, dispatch_origin=origin)
+    store.write(directory, record)
+    payload = store.snapshot(directory, record, responding_server=OTHER)
+    if origin is None:
+        assert 'dispatch_origin_state' not in payload['supervision']
+    else:
+        assert payload['supervision']['dispatch_origin_state'] == 'undecidable'
+
+
+def test_catalog_relationship_projection_does_not_probe_processes(saved, monkeypatch):
+    _, record = saved
+    def unexpected(_):
+        raise AssertionError('catalog observation must not probe processes')
+    monkeypatch.setattr(identity, 'identity_check', unexpected)
+    assert supervision.observation_fields(record, responding_server=OTHER)['observation_mode'] == 'recovered'

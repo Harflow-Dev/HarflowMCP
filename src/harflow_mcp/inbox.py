@@ -296,7 +296,7 @@ def send_to_record(
 ) -> dict[str, Any]:
     """Queue `text` for a live-input task this process does not own. Blocking: run it in a worker
     thread, or from a CLI. Refusals raise `SendRefused`, checked in this order under the lock: not a
-    live-input run, input already closed, task settled, its process confirmed exited, owner not
+    live-input run, observed task settlement, input already closed, its process confirmed exited, owner not
     confirmed alive.
 
     The owner check is strict: only `alive` passes. An owner that is gone cannot pump the message,
@@ -345,13 +345,13 @@ def _check_open(log_dir: Path, record: store.TaskRecord) -> None:
             "runs; continue it with resume_task once it has finished",
             code="not_live_input",
         )
-    if is_closed(log_dir, task_id):
-        raise SendRefused(f"task {task_id} has {closed_message(log_dir, task_id)}", code="closed")
-    if record.status in store.TERMINAL_RECORD_STATUSES:
+    if record.status in store.TERMINAL_RECORD_STATUSES and not store.outcome_unobserved(record):
         raise SendRefused(
             f"task {task_id} has settled ({record.status}); continue with resume_task",
             code="settled",
         )
+    if is_closed(log_dir, task_id):
+        raise SendRefused(f"task {task_id} has {closed_message(log_dir, task_id)}", code="closed")
     if record.pid is not None:
         leader = identity.task_identity(record.pid, record.start_time, record.markers)
         if identity.identity_check(leader) == "dead":

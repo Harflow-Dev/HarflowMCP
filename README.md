@@ -14,7 +14,8 @@ Detached task owners preserve output capture and live input across MCP server re
 Workflow scheduler recovery is explicit; see [supervision and recovery](docs/supervision.md).
 Task status distinguishes the dispatching server, execution owner and responding server.
 A normal attachment to a task launched by this server is not recovered; another observer or missing
-identity is explained explicitly. See [supervision and recovery](docs/supervision.md).
+identity is explained explicitly. Detail reads separately report dispatcher liveness, and routine
+status polling provides a successor reference without scanning history. See [supervision and recovery](docs/supervision.md).
 Git outcomes retain partial observations with per-probe failure and budget diagnostics; see
 [observed task outcomes](docs/task-outcomes.md).
 Task observations retry transient metadata replacements up to three reads and retain uncertainty

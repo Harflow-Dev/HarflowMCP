@@ -895,3 +895,10 @@ scripted runs exited zero. The installed implementation accepts `plansDirectory`
 project root; it cannot select the engine's external task scratch through that setting. This
 measurement qualifies the plan-write disclosure/tracking case, not an OS boundary or arbitrary
 CLI versions/configurations. Runtime history/log writes are separate from agent-tool permissions.
+
+The review-follow-up measurement uses those same two isolated CLI probes to feed actual stream
+Write/Edit/result events through the bounded metadata candidate extractor and worker-owned
+correlation seam. Both cases produce exactly the observed plan reference and its directory/inode
+identity; denied ordinary writes produce no reference. No argv, permission-mode or transport
+behavior changed. Separate fake-process contention tests verify that blocked artifact registration
+does not block stdout/results, alter `output_drained`, or turn successful execution into failure.
