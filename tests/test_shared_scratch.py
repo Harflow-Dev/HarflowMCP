@@ -35,13 +35,13 @@ def log_dir_of(tmp_path: Path) -> Path:
 
 
 def record(task_id: str, *, group=None, chain=None, status="completed", finished_at="2026-01-01T00:01:00+00:00",
-           repo_path="/tmp", started_at="2026-01-01T00:00:00+00:00", **kwargs) -> store.TaskRecord:
+           repo_path="/tmp", started_at="2026-01-01T00:00:00+00:00", backend="claude", **kwargs) -> store.TaskRecord:
     settled = status != "running"
-    fields = {"enforcement": backends.get("claude").enforcement("write_in_repo").as_dict()} | kwargs
+    fields = {"enforcement": backends.get(backend).enforcement("write_in_repo").as_dict()} | kwargs
     if not settled:
         fields |= {"pid": 4242, "start_time": "Mon Jan  1 00:00:00 2001", "markers": ["x"]}
     return store.TaskRecord(
-        task_id=task_id, backend="claude", session_id=None, repo_path=repo_path, started_at=started_at,
+        task_id=task_id, backend=backend, session_id=None, repo_path=repo_path, started_at=started_at,
         group=group, scratch_chain_id=chain, status=status, exit_code=0 if settled else None,
         finished_at=finished_at if settled else None, output_drained=settled, **fields)
 
@@ -441,18 +441,22 @@ async def test_unsupported_grants_still_expose_the_folders_for_native_free_dispa
 # ---- access states ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("name,freedom,scratch_allowed,expected", [
-    ("claude", "write_in_repo", True, "writable"),
-    ("claude", "read_only", True, "no_additional_grant"),
-    ("codex", "write_in_repo", True, "writable"),
-    ("codex", "read_only", True, "sandbox_read_only"),
-    ("codex", "write_in_repo", False, "sandbox_read_only"),  # codex app-server with caller approvals
-    ("opencode", "write_in_repo", True, "no_additional_grant"),
+@pytest.mark.parametrize("name,freedom,scratch_allowed,approvals,expected", [
+    ("claude", "write_in_repo", True, False, "writable"),
+    ("claude", "read_only", True, False, "no_additional_grant"),
+    ("codex", "write_in_repo", True, False, "writable"),
+    ("codex", "read_only", True, False, "sandbox_read_only"),
+    # An approved command may run outside the sandbox, so a folder without a grant is not claimed read-only.
+    ("codex", "write_in_repo", False, True, "no_additional_grant"),
+    ("codex", "read_only", False, True, "no_additional_grant"),
+    ("opencode", "write_in_repo", True, False, "no_additional_grant"),
 ])
-async def test_access_states_never_overclaim(name, freedom, scratch_allowed, expected, tmp_path):
+async def test_access_states_never_overclaim(name, freedom, scratch_allowed, approvals, expected, tmp_path):
+    from harflow_mcp import approval_runtime
     registry = TaskRegistry(log_dir=log_dir_of(tmp_path), open_monitor=False)
     backend, invocation = build(name, tmp_path, freedom)
-    enforcement = backend.enforcement(freedom)
+    enforcement = approval_runtime.with_approval_enforcement(backend, backend.enforcement(freedom), "0.0.0-test", approvals, False)
+    assert bool(enforcement.caller_approval_tools) is approvals
     _, _, allocation = await registry._allocate_shared_scratch(
         invocation, backend=backend, freedom=freedom, network=None, enforcement=enforcement, task_id="access",
         chain_id="access", group="G", spawned_by=None, max_depth=None, hold=shared_scratch.Hold(), task_scratch=None,
@@ -464,19 +468,20 @@ async def test_access_states_never_overclaim(name, freedom, scratch_allowed, exp
 # ---- nested authority ------------------------------------------------------------------------
 
 
-def seed_caller(tmp_path, task_id="caller", *, confined=True, roots=()):
+def seed_caller(tmp_path, task_id="caller", *, confined=True, roots=(), backend="claude", repo="/tmp"):
     log_dir = log_dir_of(tmp_path)
     enforcement = backends.get("codex").enforcement("write_in_repo").as_dict()
     if not confined:
         enforcement["writes_confined"] = False
-    enforcement["writable_roots"] = list(roots)
-    assert store.write_landed(log_dir, record(task_id, enforcement=enforcement))
+    if roots is not None:
+        enforcement["writable_roots"] = list(roots)
+    assert store.write_landed(log_dir, record(task_id, enforcement=enforcement, backend=backend, repo_path=str(repo)))
     return enforcement
 
 
-def allows(registry, tmp_path, kind, identity, task_id="child", spawned_by="caller"):
+def allows(registry, tmp_path, kind, identity, task_id="child", spawned_by="caller", created=False):
     path = shared_scratch.directory(log_dir_of(tmp_path), kind, identity)
-    return registry._caller_allows_shared(kind, path, identity, task_id, spawned_by, 5)
+    return registry._caller_allows_shared(kind, path, identity, task_id, spawned_by, 5, created)
 
 
 def test_an_unconfined_caller_restricts_nothing(tmp_path):
@@ -497,7 +502,8 @@ def test_a_confined_caller_grants_only_what_it_holds_or_began(tmp_path):
     registry = TaskRegistry(log_dir=log_dir, open_monitor=False)
     assert allows(registry, tmp_path, "group", "X")                      # already one of the caller's roots
     assert not allows(registry, tmp_path, "group", "Y")                  # another family's group by renaming
-    assert allows(registry, tmp_path, "chain", "child", task_id="child")  # a brand-new chain
+    assert allows(registry, tmp_path, "chain", "child", task_id="child", created=True)  # a brand-new chain
+    assert not allows(registry, tmp_path, "chain", "child", task_id="child")  # the same id, but the folder was already there
     assert allows(registry, tmp_path, "chain", "child1")                 # a chain the caller began
     assert allows(registry, tmp_path, "chain", "child2")                 # a grandchild's chain, by strict ancestry
     assert not allows(registry, tmp_path, "chain", "sibling")            # a sibling family's chain
@@ -883,3 +889,502 @@ async def test_the_permission_preview_discloses_the_shared_roots_symbolically(tm
     read_only = await registry.preview_permissions(repo, backend=backends.get("claude"), freedom="read_only")
     assert tasks.FUTURE_CHAIN_SCRATCH_ROOT not in read_only["enforcement"]["writable_roots"]
     assert not (tmp_path / "state" / "shared-scratch").exists()
+
+
+# ---- review hardening (stage E round 1) ------------------------------------------------------
+
+
+def meta_file(tmp_path, kind, key):
+    return tmp_path / "state" / "shared-scratch" / ".meta" / kind / f"{key}.json"
+
+
+def read_meta(tmp_path, kind, key):
+    return json.loads(meta_file(tmp_path, kind, key).read_text())
+
+
+def test_touch_is_serialized_with_the_folder_lock(tmp_path):
+    """A stale read-compare-write outside the lock could move the retention time backwards."""
+    log_dir, _chain, _group = populate(tmp_path)
+    before = meta_file(tmp_path, "chain", "c1").read_text()
+    with shared_scratch.locked(log_dir, "chain", "c1"):
+        assert shared_scratch.touch(log_dir, "chain", "c1", NOW, timeout=0.05) is False
+    assert meta_file(tmp_path, "chain", "c1").read_text() == before
+    assert shared_scratch.touch(log_dir, "chain", "c1", datetime.now(timezone.utc) + timedelta(days=1)) is True
+    assert meta_file(tmp_path, "chain", "c1").read_text() != before
+
+
+def test_touch_never_moves_the_time_backwards_and_needs_no_lock_for_an_unknown_folder(tmp_path):
+    log_dir, _chain, _group = populate(tmp_path)
+    shared_scratch.touch(log_dir, "chain", "c1", NOW + timedelta(days=400))
+    newest = read_meta(tmp_path, "chain", "c1")["last_used_at"]
+    assert shared_scratch.touch(log_dir, "chain", "c1", NOW - timedelta(days=30)) is True
+    assert read_meta(tmp_path, "chain", "c1")["last_used_at"] == newest
+    assert shared_scratch.touch(log_dir, "chain", "never-allocated", NOW) is True
+    assert not shared_scratch._lock_path(log_dir, "chain", "never-allocated").exists()
+
+
+async def test_concurrent_touches_and_allocations_keep_valid_metadata_and_the_newest_time(tmp_path):
+    log_dir, _chain, _group = populate(tmp_path)
+    moments = [datetime.now(timezone.utc) + timedelta(days=index) for index in range(1, 41)]
+
+    def touch(moment):
+        return shared_scratch.touch(log_dir, "chain", "c1", moment, timeout=20)
+
+    def reopen():
+        with shared_scratch.locked(log_dir, "chain", "c1", timeout=20):
+            shared_scratch.allocate(log_dir, "chain", "c1")
+        return True
+
+    results = await asyncio.gather(*(asyncio.to_thread(touch, moment) for moment in reversed(moments)),
+                                   *(asyncio.to_thread(reopen) for _ in range(10)))
+    assert all(results)
+    meta = read_meta(tmp_path, "chain", "c1")  # valid JSON after every writer
+    assert datetime.fromisoformat(meta["last_used_at"]) == moments[-1]
+    assert not list(meta_file(tmp_path, "chain", "c1").parent.glob(".*.tmp"))
+
+
+def test_every_metadata_writer_gets_its_own_temporary_file(tmp_path, monkeypatch):
+    log_dir, _chain, _group = populate(tmp_path)
+    sources = []
+    real = os.replace
+    monkeypatch.setattr(shared_scratch.os, "replace", lambda source, target: (sources.append(str(source)), real(source, target))[1])
+    meta = read_meta(tmp_path, "chain", "c1")
+    shared_scratch._write_meta(log_dir, "chain", "c1", meta)
+    shared_scratch._write_meta(log_dir, "chain", "c1", meta)
+    assert len(sources) == 2 and sources[0] != sources[1]
+    assert not list(meta_file(tmp_path, "chain", "c1").parent.glob(".*.tmp"))
+
+
+def test_the_orphan_sweep_drops_a_writers_stale_temporary_file(tmp_path):
+    log_dir, _chain, _group = populate(tmp_path)
+    stale = meta_file(tmp_path, "chain", "c1").parent / ".c1.json.abc.tmp"
+    stale.write_text("{")
+    os.utime(stale, (NOW.timestamp(),) * 2)
+    shared_scratch.sweep(log_dir, 14, NOW + timedelta(days=1))
+    assert not stale.exists() and meta_file(tmp_path, "chain", "c1").exists()
+
+
+def seed_recovered(tmp_path, identities, task_id="c1", **kwargs):
+    """A task whose owner died and whose exit nobody saw, found dead long after it started."""
+    log_dir = log_dir_of(tmp_path)
+    identities.dead(4242)
+    assert store.write_landed(log_dir, record(task_id, chain="c1", status="running", started_at="2026-01-01T00:00:00+00:00", **kwargs))
+    return log_dir
+
+
+def test_a_task_settled_by_recovery_keeps_its_folder_past_the_retention_period(tmp_path, identities):
+    log_dir, chain, _group = populate(tmp_path)
+    seed_recovered(tmp_path, identities)
+    backdate(log_dir, "chain", "c1", 90)
+    state = shared_scratch.State(log_dir)
+    assert state.settled["c1"] and store.outcome_unobserved(state.by_id["c1"])
+    # Its start time is five months old; the moment recovery found it settled is what counts.
+    assert shared_scratch.sweep(log_dir, 14, NOW)["removed"] == 0 and chain.exists()
+    meta = read_meta(tmp_path, "chain", "c1")
+    assert datetime.fromisoformat(meta["last_used_at"]) == NOW and meta["settled_seen"] == ["c1"]
+    # Observed once: the retention period then runs from that moment.
+    assert shared_scratch.sweep(log_dir, 14, NOW + timedelta(days=10))["removed"] == 0
+    assert read_meta(tmp_path, "chain", "c1")["last_used_at"] == meta["last_used_at"]
+    assert shared_scratch.sweep(log_dir, 14, NOW + timedelta(days=20))["removed"] == 1 and not chain.exists()
+
+
+def test_an_unrecorded_settlement_keeps_the_folder(tmp_path, identities):
+    log_dir, chain, _group = populate(tmp_path)
+    seed_recovered(tmp_path, identities)
+    backdate(log_dir, "chain", "c1", 90)
+    with shared_scratch.locked(log_dir, "chain", "c1"):
+        pass
+    real = shared_scratch.observe_settlement
+    assert real(log_dir, "chain", "c1", ["c1"], NOW, timeout=0.0) is True  # recorded
+    meta_file(tmp_path, "chain", "c1").write_text("{")  # now unreadable: the observation cannot be written
+    stats = shared_scratch.sweep(log_dir, 14, NOW + timedelta(days=60))
+    assert stats["removed"] == 0 and chain.exists()
+
+
+def test_settlement_observation_is_recorded_once_per_task_and_bounded(tmp_path):
+    log_dir, _chain, _group = populate(tmp_path)
+    backdate(log_dir, "chain", "c1", 90)
+    assert shared_scratch.observe_settlement(log_dir, "chain", "c1", ["a", "b"], NOW) is True
+    later = NOW + timedelta(days=3)
+    assert shared_scratch.observe_settlement(log_dir, "chain", "c1", ["a"], later) is True
+    assert read_meta(tmp_path, "chain", "c1")["last_used_at"] == NOW.isoformat()  # already seen: no advance
+    ids = [f"t{index}" for index in range(shared_scratch.SETTLED_SEEN_LIMIT + 5)]
+    assert shared_scratch.observe_settlement(log_dir, "chain", "c1", ids, later) is True
+    seen = read_meta(tmp_path, "chain", "c1")["settled_seen"]
+    assert len(seen) == shared_scratch.SETTLED_SEEN_LIMIT and seen[-1] == ids[-1]
+    assert shared_scratch.observe_settlement(log_dir, "chain", "nowhere", ["a"], NOW) is False
+
+
+def test_retention_carries_an_unobserved_task_as_now_not_as_its_start_time(tmp_path, identities):
+    from harflow_mcp import retention
+    log_dir, chain, _group = populate(tmp_path)
+    seed_recovered(tmp_path, identities)
+    backdate(log_dir, "chain", "c1", 90)
+    with state_ownership.state_session(resolve_layout(root=tmp_path / "state")):
+        assert retention._delete_task_files(log_dir, "c1")
+    carried = datetime.fromisoformat(read_meta(tmp_path, "chain", "c1")["last_used_at"])
+    assert carried > datetime.now(timezone.utc) - timedelta(minutes=5)
+    assert shared_scratch.sweep(log_dir, 14, datetime.now(timezone.utc) + timedelta(days=1))["removed"] == 0 and chain.exists()
+
+
+def test_retention_keeps_a_record_whose_activity_cannot_be_carried(tmp_path):
+    from harflow_mcp import retention
+    log_dir, chain, _group = populate(tmp_path)
+    store.write_landed(log_dir, record("c1", chain="c1"))
+    with state_ownership.state_session(resolve_layout(root=tmp_path / "state")):
+        with shared_scratch.locked(log_dir, "chain", "c1"):
+            assert retention._delete_task_files(log_dir, "c1") is False
+        assert (log_dir / "c1.meta.json").exists()
+        assert retention._delete_task_files(log_dir, "c1") is True
+    assert not (log_dir / "c1.meta.json").exists() and chain.exists()
+
+
+def test_retention_runs_the_shared_policy_when_task_retention_is_disabled(tmp_path, monkeypatch):
+    from harflow_mcp import retention
+    log_dir, chain, _group = populate(tmp_path)
+    backdate(log_dir, "chain", "c1", 90)
+    monkeypatch.setenv("HARFLOW_RETENTION_DAYS", "0")
+    monkeypatch.setenv("HARFLOW_SHARED_SCRATCH_DAYS", "14")
+    stats = retention.maybe_sweep(log_dir, now=NOW)
+    assert stats == {"deleted_shared_scratch": 1, "kept_shared_scratch": 1} and not chain.exists()
+    assert (tmp_path / "state" / "maintenance.stamp").exists()
+    monkeypatch.setenv("HARFLOW_SHARED_SCRATCH_DAYS", "0")
+    assert retention.maybe_sweep(log_dir, now=NOW + timedelta(days=3)) is None
+
+
+def test_the_sweep_scans_the_records_once_not_once_per_folder(tmp_path, monkeypatch):
+    log_dir = log_dir_of(tmp_path)
+    paths = [shared_scratch.allocate(log_dir, "chain", f"old{index}") for index in range(5)]
+    for index in range(5):
+        backdate(log_dir, "chain", f"old{index}", 90)
+    calls = []
+    real = store.scan
+    monkeypatch.setattr(store, "scan", lambda *args, **kwargs: (calls.append(1), real(*args, **kwargs))[1])
+    assert shared_scratch.sweep(log_dir, 14, NOW)["removed"] == 5
+    assert len(calls) == 1 and not any(path.exists() for path in paths)
+
+
+def test_the_sweep_refuses_a_folder_that_gained_a_user_between_snapshot_and_lock(tmp_path, identities, monkeypatch):
+    from contextlib import contextmanager
+    log_dir, chain, _group = populate(tmp_path)
+    store.write_landed(log_dir, record("c1", chain="c1"))
+    backdate(log_dir, "chain", "c1", 90)
+    real = shared_scratch.locked
+
+    @contextmanager
+    def resumed(*args, **kwargs):
+        # What a resume does under this lock before the sweep gets it: allocate (advancing last use) and a new record.
+        with real(*args, **kwargs):
+            shared_scratch.allocate(log_dir, "chain", "c1")
+            store.write_landed(log_dir, record("c2", chain="c1", status="running"))
+        with real(*args, **kwargs):
+            yield
+
+    monkeypatch.setattr(shared_scratch, "locked", resumed)
+    stats = shared_scratch.sweep(log_dir, 14, NOW)
+    assert stats["removed"] == 0 and stats["kept_in_use"] == 1 and chain.exists()
+
+
+def test_the_sweep_recheck_sees_a_launch_receipt_that_appeared_after_the_snapshot(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+    from harflow_mcp import task_supervision
+    log_dir, chain, _group = populate(tmp_path)
+    store.write_landed(log_dir, record("c1", chain="c1"))
+    backdate(log_dir, "chain", "c1", 90)
+    receipt = {"task_id": "waiting", "state": "waiting_for_resources", "group": None, "scratch_chain_id": "c1", "chain_root_task_id": None}
+    armed = []
+    real_receipts = task_supervision.reservations
+    monkeypatch.setattr(task_supervision, "reservations", lambda directory: real_receipts(directory) + ([receipt] if armed else []))
+    real = shared_scratch.locked
+
+    @contextmanager
+    def arming(*args, **kwargs):
+        armed.append(True)
+        with real(*args, **kwargs):
+            yield
+
+    monkeypatch.setattr(shared_scratch, "locked", arming)
+    stats = shared_scratch.sweep(log_dir, 14, NOW)
+    assert stats["removed"] == 0 and stats["kept_in_use"] == 1 and chain.exists()
+
+
+def test_the_recheck_reads_only_the_folders_own_members(tmp_path):
+    log_dir, _chain, _group = populate(tmp_path)
+    for name, chain in (("a", "c1"), ("b", "c1"), ("other", "elsewhere")):
+        store.write_landed(log_dir, record(name, chain=chain))
+    snapshot = shared_scratch.State(log_dir)
+    narrowed = shared_scratch.State.narrowed(snapshot, "chain", "c1")
+    assert sorted(narrowed.by_id) == ["a", "b"]
+    (log_dir / "a.meta.json").unlink()
+    assert sorted(shared_scratch.State.narrowed(snapshot, "chain", "c1").by_id) == ["b"]
+
+
+def test_a_cleaned_folder_leaves_no_lock_file_behind(tmp_path):
+    log_dir, chain, group = populate(tmp_path)
+    store.write_landed(log_dir, record("c1", group="MT-1", chain="c1"))
+    locks = tmp_path / "state" / "shared-scratch" / ".locks"
+    assert shared_scratch.touch(log_dir, "chain", "c1", datetime.now(timezone.utc) + timedelta(days=1))
+    assert list(locks.iterdir())
+    shared_scratch.clean(log_dir, "chain", "c1")
+    backdate(log_dir, "group", "MT-1", 90)
+    assert shared_scratch.sweep(log_dir, 14, NOW)["removed"] == 1
+    assert list(locks.iterdir()) == []
+
+
+async def test_a_waiter_on_a_removed_lock_file_ends_up_on_the_live_one(tmp_path):
+    import threading
+    log_dir, _chain, _group = populate(tmp_path)
+    path = shared_scratch._lock_path(log_dir, "chain", "c1")
+    entered, release = threading.Event(), threading.Event()
+
+    def waiter():
+        with shared_scratch.locked(log_dir, "chain", "c1", timeout=10):
+            entered.set()
+            release.wait(10)
+
+    outer = shared_scratch.locked(log_dir, "chain", "c1")
+    outer.__enter__()
+    task = asyncio.create_task(asyncio.to_thread(waiter))
+    await asyncio.sleep(0.2)
+    path.unlink()  # what a cleaner does under the lock
+    outer.__exit__(None, None, None)
+    await asyncio.wait_for(asyncio.to_thread(entered.wait, 10), 12)
+    try:
+        with pytest.raises(shared_scratch.SharedScratchError) as failure:
+            with shared_scratch.locked(log_dir, "chain", "c1", timeout=0.0):
+                pass
+        assert failure.value.code == "shared_scratch_busy"
+    finally:
+        release.set()
+        await task
+
+
+def test_a_lock_won_on_a_replaced_file_is_dropped_and_retried(tmp_path, monkeypatch):
+    log_dir, _chain, _group = populate(tmp_path)
+    path = shared_scratch._lock_path(log_dir, "chain", "c1")
+    with shared_scratch.locked(log_dir, "chain", "c1"):
+        pass
+    stale = os.open(path, os.O_RDWR)
+    stale_inode = os.fstat(stale).st_ino
+    path.unlink()  # the old file is gone from the path; stale still refers to it
+    real = shared_scratch._open_lock
+    opened = []
+
+    def reopen(*args):
+        descriptor = stale if not opened else real(*args)
+        opened.append(descriptor)
+        return descriptor
+
+    monkeypatch.setattr(shared_scratch, "_open_lock", reopen)
+    descriptor = shared_scratch._try_lock(log_dir, "chain", "c1")
+    try:
+        assert descriptor is not None and len(opened) == 2  # the first attempt was dropped, the second held
+        assert os.fstat(descriptor).st_ino == os.stat(path).st_ino != stale_inode
+    finally:
+        os.close(descriptor)
+
+
+def test_shared_scratch_state_access_needs_the_owned_state_root(tmp_path):
+    from harflow_mcp.state_ownership import StateOwnershipError
+    foreign = tmp_path / "foreign" / "tasks"
+    foreign.mkdir(parents=True)
+    with pytest.raises(StateOwnershipError):
+        with shared_scratch.locked(foreign, "chain", "x"):
+            pass
+    with pytest.raises(StateOwnershipError):
+        shared_scratch.touch(foreign, "chain", "x", NOW)
+    with pytest.raises(StateOwnershipError):
+        shared_scratch.observe_settlement(foreign, "chain", "x", ["t"], NOW)
+
+
+def test_unreadable_metadata_blocks_reuse_and_clean_repairs_it(tmp_path, identities):
+    log_dir, chain, _group = populate(tmp_path)
+    meta_file(tmp_path, "chain", "c1").write_text("{not json")
+    with pytest.raises(shared_scratch.SharedScratchError) as failure:
+        shared_scratch.allocate(log_dir, "chain", "c1")
+    assert failure.value.code == "shared_scratch_unsafe" and "harflow-ctl scratch clean --chain c1" in str(failure.value)
+    group = shared_scratch.key_for("group", "MT-1")
+    meta_file(tmp_path, "group", group).write_text('{"format": "other"}')
+    with pytest.raises(shared_scratch.SharedScratchError) as failure:
+        shared_scratch.allocate(log_dir, "group", "MT-1")
+    assert "harflow-ctl scratch clean --group" in str(failure.value)
+    # The repair path still honours the blocker checks.
+    store.write_landed(log_dir, record("c1", chain="c1", status="running"))
+    with pytest.raises(shared_scratch.SharedScratchError) as failure:
+        shared_scratch.clean(log_dir, "chain", "c1")
+    assert failure.value.code == "shared_scratch_in_use" and chain.exists()
+    (log_dir / "c1.meta.json").unlink()
+    result = shared_scratch.clean(log_dir, "chain", "c1")
+    assert result["deleted"] and not chain.exists() and not meta_file(tmp_path, "chain", "c1").exists()
+    assert shared_scratch.clean(log_dir, "group", "MT-1")["deleted"]
+    assert shared_scratch.allocate(log_dir, "chain", "c1").is_dir()
+
+
+def test_the_sweep_leaves_a_folder_with_unreadable_metadata_to_a_person(tmp_path):
+    log_dir, chain, _group = populate(tmp_path)
+    meta_file(tmp_path, "chain", "c1").write_text("{not json")
+    stats = shared_scratch.sweep(log_dir, 14, NOW + timedelta(days=400))
+    assert stats["kept_in_use"] >= 1 and chain.exists()
+
+
+def test_the_artifact_blocker_compares_canonical_paths(tmp_path):
+    log_dir, chain, _group = populate(tmp_path)
+    link = tmp_path / "link"
+    link.symlink_to(tmp_path / "state", target_is_directory=True)
+    store.write_landed(log_dir, record("c1", chain="c1"))
+    state = shared_scratch.State(log_dir)
+    through_link = link / "shared-scratch" / "chain" / "c1"
+    (log_dir / "c1.artifacts.json").write_text(json.dumps({"items": [{"path": str(chain / "a")}]}))  # recorded resolved
+    assert [b["kind"] for b in state.blockers("chain", "c1", through_link)] == ["artifact"]
+    (log_dir / "c1.artifacts.json").write_text(json.dumps({"items": [{"path": str(through_link / "a")}]}))  # recorded via the link
+    assert [b["kind"] for b in state.blockers("chain", "c1", chain)] == ["artifact"]
+    (log_dir / "c1.artifacts.json").write_text(json.dumps({"items": [{"path": str(tmp_path / "elsewhere")}]}))
+    assert state.blockers("chain", "c1", chain) == []
+
+
+def test_inventory_counts_distinct_blockers_once_and_reports_their_kinds(tmp_path, identities):
+    log_dir, _chain, _group = populate(tmp_path)
+    store.write_landed(log_dir, record("c1", group="MT-1", chain="c1", status="running"))
+    (log_dir / "broken.meta.json").write_text("{not json")
+    entries = {(e["kind"], e["identity"]): e for e in shared_scratch.inventory(log_dir)}
+    chain = entries[("chain", "c1")]
+    assert chain["active_tasks"] == 1  # the unreadable record is not an active user of this folder
+    assert chain["blockers"] == {"active": 1, "unreadable": 1, "pinned": 0, "artifact": 0}
+    assert entries[("group", "MT-1")]["blockers"]["active"] == 1
+    counts = shared_scratch.blocker_counts([
+        {"task_id": "a", "kind": "task"}, {"task_id": "a", "kind": "task"}, {"task_id": "b", "kind": "launch"},
+        {"task_id": "c", "kind": "continuation"}, {"task_id": "d", "kind": "pinned"}, {"task_id": "e", "kind": "artifact"},
+        {"task_id": "f", "kind": "unreadable_record"}])
+    assert counts == {"active": 3, "unreadable": 1, "pinned": 1, "artifact": 1}
+
+
+def test_a_chain_named_like_the_new_task_is_granted_only_when_allocation_created_it(tmp_path):
+    log_dir = log_dir_of(tmp_path)
+    path, created = shared_scratch.allocate_folder(log_dir, "chain", "child")
+    assert created is True
+    again, created = shared_scratch.allocate_folder(log_dir, "chain", "child")
+    assert again == path and created is False
+    adopted = tmp_path / "state" / "shared-scratch" / "chain" / "adopted"
+    adopted.mkdir(parents=True)
+    assert shared_scratch.allocate_folder(log_dir, "chain", "adopted")[1] is False
+    assert shared_scratch.allocate(log_dir, "chain", "child") == path
+
+
+async def test_allocation_reports_whether_the_fresh_chain_shortcut_applies(tmp_path):
+    seed_caller(tmp_path)
+    log_dir = log_dir_of(tmp_path)
+    registry = TaskRegistry(log_dir=log_dir, open_monitor=False)
+    pre_existing = shared_scratch.allocate(log_dir, "chain", "reused-id")
+    backend, invocation = build("codex", tmp_path)
+    holds = []
+
+    async def allocate(task_id):
+        hold = shared_scratch.Hold()
+        holds.append(hold)
+        _, _, allocation = await registry._allocate_shared_scratch(
+            invocation, backend=backend, freedom="write_in_repo", network=None, enforcement=backend.enforcement("write_in_repo"),
+            task_id=task_id, chain_id=task_id, group=None, spawned_by="caller", max_depth=5, hold=hold,
+            task_scratch=None, task_granted=False, scratch_allowed=True, extra_grants=False)
+        return allocation
+
+    try:
+        fresh = await allocate("fresh-id")
+        assert fresh.access["chain"] == "writable" and fresh.denied == []
+        reused = await allocate("reused-id")
+        assert reused.access["chain"] == "sandbox_read_only" and reused.denied == ["chain"] and pre_existing.is_dir()
+    finally:
+        for hold in holds:
+            hold.release()
+
+
+# Nested launches from a confined caller (launch level)
+
+
+def written_roots(argv):
+    return [argv[index + 1] for index, token in enumerate(argv) if token == "--add-dir"]
+
+
+async def test_a_denied_nested_group_loses_its_grant_reports_read_only_and_is_noticed(tmp_path, monkeypatch):
+    capture = Capture(monkeypatch)
+    seed_caller(tmp_path, "caller", roots=(), backend="codex")
+    registry = TaskRegistry(log_dir=log_dir_of(tmp_path), open_monitor=False)
+    task = await launch(registry, "codex", tmp_path, group="G", task_id="nested", spawned_by="caller")
+    try:
+        env, argv = capture.launches[0].env, capture.launches[0].argv
+        roots = written_roots(argv)
+        assert env["HARFLOW_GROUP_SCRATCH"] not in roots and env["HARFLOW_CHAIN_SCRATCH"] in roots  # its own fresh chain stays granted
+        assert Path(env["HARFLOW_GROUP_SCRATCH"]).is_dir()
+        scratch = task.snapshot()["scratch"]
+        assert scratch["access"]["group"] == "sandbox_read_only" and scratch["access"]["chain"] == "writable"
+        assert scratch["group"] not in task.enforcement["writable_roots"]
+        notices = [text for text in task.bridge_notices if "HARFLOW_GROUP_SCRATCH" in text and "No write access" in text]
+        assert len(notices) == 1 and not any("HARFLOW_CHAIN_SCRATCH" in text and "No write access" in text for text in task.bridge_notices)
+    finally:
+        await stop(registry, task)
+
+
+def sibling_family(tmp_path, backend="codex"):
+    """A finished task of another family that holds a chain, with a session id so it can be resumed."""
+    log_dir = log_dir_of(tmp_path)
+    shared_scratch.allocate(log_dir, "chain", "sibling")
+    sibling = replace(record("sibling", repo_path=str(tmp_path), backend=backend), session_id="22222222-2222-4222-8222-222222222222")
+    assert store.write_landed(log_dir, sibling)
+    return sibling
+
+
+async def test_a_confined_caller_resuming_another_familys_task_gets_that_chain_read_only(tmp_path, monkeypatch):
+    from harflow_mcp import lineage
+    capture = Capture(monkeypatch)
+    seed_caller(tmp_path, "caller", roots=None, backend="codex", repo=tmp_path)  # a confined codex caller with the ordinary roots only
+    log_dir = log_dir_of(tmp_path)
+    sibling = sibling_family(tmp_path)
+    caller_record = store.read(log_dir, "caller", include_prompt=False)
+    registry = TaskRegistry(log_dir=log_dir, open_monitor=False, caller_override=lineage.Caller(caller_record, "ancestry"))
+    task = await registry.resume_record(sibling, "carry on")
+    try:
+        chain = str(shared_scratch.directory(log_dir, "chain", "sibling"))
+        assert chain not in written_roots(capture.launches[0].argv) and capture.launches[0].env["HARFLOW_CHAIN_SCRATCH"] == chain
+        assert task.snapshot()["scratch"]["access"]["chain"] == "sandbox_read_only"
+        assert task.spawned_by == "caller" and any("No write access" in text for text in task.bridge_notices)
+    finally:
+        await stop(registry, task)
+
+
+async def test_a_continuation_takes_its_grant_from_the_sources_authority_not_the_callers(tmp_path, monkeypatch):
+    """A continuation is the source task's own authority (settings must match it, lineage is transferred from it),
+    so a confined caller continuing a root-level task in another family is not what limits the grant."""
+    from harflow_mcp import lineage
+    from harflow_mcp.task_continuation import continue_task
+    capture = Capture(monkeypatch)
+    seed_caller(tmp_path, "caller", roots=None, backend="codex", repo=tmp_path)
+    log_dir = log_dir_of(tmp_path)
+    sibling_family(tmp_path)
+    caller_record = store.read(log_dir, "caller", include_prompt=False)
+    registry = TaskRegistry(log_dir=log_dir, open_monitor=False, caller_override=lineage.Caller(caller_record, "ancestry"))
+    task = await continue_task(registry, "sibling", "carry on")
+    try:
+        chain = str(shared_scratch.directory(log_dir, "chain", "sibling"))
+        assert chain in written_roots(capture.launches[0].argv) and task.snapshot()["scratch"]["access"]["chain"] == "writable"
+    finally:
+        await stop(registry, task)
+
+
+async def test_a_continuation_of_a_confined_dispatchers_task_keeps_the_denial(tmp_path, monkeypatch):
+    from harflow_mcp.task_continuation import continue_task
+    capture = Capture(monkeypatch)
+    seed_caller(tmp_path, "dispatcher", roots=None, backend="codex", repo=tmp_path)
+    log_dir = log_dir_of(tmp_path)
+    shared_scratch.allocate(log_dir, "chain", "root-x")
+    assert store.write_landed(log_dir, record("root-x", repo_path=str(tmp_path), backend="codex", spawned_by="elsewhere"))
+    sibling = replace(record("sibling", chain="root-x", repo_path=str(tmp_path), backend="codex", spawned_by="dispatcher"),
+                      session_id="22222222-2222-4222-8222-222222222222")
+    assert store.write_landed(log_dir, sibling)
+    registry = TaskRegistry(log_dir=log_dir, open_monitor=False)
+    task = await continue_task(registry, "sibling", "carry on")
+    try:
+        chain = str(shared_scratch.directory(log_dir, "chain", "root-x"))
+        assert chain not in written_roots(capture.launches[0].argv) and capture.launches[0].env["HARFLOW_CHAIN_SCRATCH"] == chain
+        assert task.snapshot()["scratch"]["access"]["chain"] == "sandbox_read_only"
+        assert any("No write access" in text and "HARFLOW_CHAIN_SCRATCH" in text for text in task.bridge_notices)
+    finally:
+        await stop(registry, task)

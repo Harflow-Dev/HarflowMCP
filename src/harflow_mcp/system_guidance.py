@@ -71,6 +71,20 @@ def instructions_file(state_root: Path) -> Path:
     return path
 
 
+def is_canonical_file(path: str) -> bool:
+    """Whether `path` is the bridge-owned instructions file: absolute, named `FILE_DIRECTORY/FILE_NAME`,
+    neither it nor its directory a symlink, and holding exactly the static note. An invocation that points
+    a CLI at any other file is refused, however well formed the pointer looks."""
+    candidate = Path(path)
+    if (not candidate.is_absolute() or candidate.name != FILE_NAME or candidate.parent.name != FILE_DIRECTORY
+            or candidate.parent.is_symlink() or candidate.is_symlink()):
+        return False
+    try:
+        return candidate.is_file() and candidate.read_text(encoding="utf-8") == TEXT + "\n"
+    except (OSError, ValueError):
+        return False
+
+
 def state_of(mode: str | None, *, delivered: bool, resume: bool) -> str:
     """What a run got: delivered, reused from its session, or unavailable."""
     if delivered:

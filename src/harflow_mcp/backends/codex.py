@@ -1458,7 +1458,7 @@ class CodexBackend(ExtraPathsUnsupported):
 
     def approval_notice(self, write):
         return ("Caller approvals use `codex app-server` with approval policy on-request for one exact command. An approved command may run outside the OS sandbox. "
-                "This repository's .codex configuration is ignored, and no task scratch directory is provided (HARFLOW_SCRATCH and HARFLOW_TASK_SCRATCH are not set). The shared chain and group folders (HARFLOW_CHAIN_SCRATCH, HARFLOW_GROUP_SCRATCH) are exposed read-only. No reusable permission grant is installed.")
+                "This repository's .codex configuration is ignored, and no task scratch directory is provided (HARFLOW_SCRATCH and HARFLOW_TASK_SCRATCH are not set). The shared chain and group folders (HARFLOW_CHAIN_SCRATCH, HARFLOW_GROUP_SCRATCH) are exposed with no write grant: the sandbox leaves them read-only, but an approved command may write there. No reusable permission grant is installed.")
 
     def approval_frame_kind(self, event):
         from . import codex_app_server as app_server

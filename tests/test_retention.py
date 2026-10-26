@@ -142,6 +142,7 @@ def test_maybe_sweep_does_nothing_when_disabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("HARFLOW_RETENTION_DAYS", "0")
+    monkeypatch.setenv("HARFLOW_SHARED_SCRATCH_DAYS", "0")
     log_dir = tmp_path / "tasks"
 
     assert retention.maybe_sweep(log_dir) is None

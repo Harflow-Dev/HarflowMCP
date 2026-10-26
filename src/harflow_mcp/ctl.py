@@ -262,7 +262,8 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     scratch_clean_p = scratch_sub.add_parser(
         "clean", help="remove one shared folder when nothing uses it (for a person, never an agent)",
         description="Refuses while any task, launch or continuation that uses the folder is unsettled or uncertain, "
-        "while a referencing record is pinned, and while a retained record holds a registered artifact under it.")
+        "while a referencing record is pinned, and while a retained record holds a registered artifact under it. "
+        "Once those checks pass it also repairs a folder whose metadata is unreadable, removing the folder with it.")
     scratch_target = scratch_clean_p.add_mutually_exclusive_group(required=True)
     scratch_target.add_argument("--group", help="the exact group name")
     scratch_target.add_argument("--chain", help="the chain id (shown by `scratch list`; the first task's id)")

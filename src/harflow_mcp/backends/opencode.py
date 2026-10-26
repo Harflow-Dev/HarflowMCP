@@ -323,9 +323,9 @@ class OpencodeBackend(ExtraPathsUnsupported):
             document = None
         paths = document.get("instructions") if isinstance(document, dict) and set(document) == {"instructions"} else None
         if (not isinstance(paths, list) or len(paths) != 1 or not isinstance(paths[0], str) or not os.path.isabs(paths[0])
-                or os.path.basename(paths[0]) != system_guidance.FILE_NAME
+                or not system_guidance.is_canonical_file(paths[0])
                 or value != json.dumps({"instructions": paths}, separators=(",", ":"))):
-            raise UnsafeInvocationError("OPENCODE_CONFIG_CONTENT must be exactly the guidance instructions pointer")
+            raise UnsafeInvocationError("OPENCODE_CONFIG_CONTENT must be exactly the pointer to the bridge-owned guidance instructions file")
         return {"OPENCODE_CONFIG_CONTENT": value}
 
     def build_start_argv(

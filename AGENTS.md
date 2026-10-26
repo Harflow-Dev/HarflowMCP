@@ -219,7 +219,8 @@ Server restarts and recovered runs are explained in "When the client restarts th
   (no TaskRecord until spawn), and uncertainty never frees an entry.
 - Shared chain and group scratch (`shared_scratch.py`) is allocated by the launch owner under a per-folder `flock` that is a
   leaf lock (bounded poll before the pre-spawn window, held until the task record is durable, ordered after the session or
-  chain lock and before `<id>.lock`); cleanup renames under it and deletes outside it, and refuses while anything that may use
+  chain lock and before `<id>.lock`; metadata updates take it too, and code already holding `<id>.lock` only tries it for
+  a bounded time); cleanup renames under it and deletes outside it, and refuses while anything that may use
   the folder is unsettled, uncertain, pending, pinned or holds an artifact there. Access states (`writable`,
   `no_additional_grant`, `sandbox_read_only`) report what was granted, never what a freedom name suggests.
 - Task worktrees (`worktrees.py`) are created by the launch owner with `core.hooksPath=/dev/null`, never

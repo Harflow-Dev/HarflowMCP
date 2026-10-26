@@ -20,10 +20,13 @@ Rules enforced here rather than hoped for:
   the retention-driven age policy) refuses while any referencing task, launch or continuation is
   unsettled or uncertain, any referencing record is pinned, or a retained record holds a registered
   artifact under the folder.
-* **Allocation and cleanup are serialized** by a per-folder `flock` (`.locks/<kind>-<key>.lock`),
-  a leaf lock held only for a bounded check-and-act. Cleaners rename the folder into `.trash` under
-  the lock and delete it outside it. Lock order: session or chain lock, then this lock, then
-  `<id>.lock`.
+* **Allocation, metadata updates and cleanup are serialized** by a per-folder `flock`
+  (`.locks/<kind>-<key>.lock`) held only for a bounded check-and-act (allocation holds it from before
+  the existence check until the task record is durable). Cleaners rename the folder into `.trash`
+  under the lock, unlink the lock file while holding it, and delete the folder outside it. Waiters
+  verify after `flock` that they hold the file still at the path and retry otherwise. Lock order:
+  session or chain lock, then this lock, then `<id>.lock`; callers that already hold `<id>.lock`
+  (retention) only ever try this lock for a bounded time.
 """
 from __future__ import annotations
 
@@ -36,14 +39,17 @@ import logging
 import os
 import re
 import shutil
+import tempfile
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterable, Iterator
 
 from . import store
+from .state_access import assert_task_owned, task_operation
+from .state_ownership import StateOwnershipError
 
 log = logging.getLogger(__name__)
 
@@ -57,6 +63,8 @@ SLUG_MAX = 48
 DAYS_ENV = "HARFLOW_SHARED_SCRATCH_DAYS"
 DEFAULT_DAYS = 14
 LOCK_WAIT_SECONDS = 5.0
+METADATA_LOCK_SECONDS = 0.5
+SETTLED_SEEN_LIMIT = 256
 SIZE_ENTRY_LIMIT = 200_000
 TRASH_MIN_AGE_SECONDS = 3600
 
@@ -171,6 +179,7 @@ class Hold:
 
 
 def _open_lock(log_dir: Path, kind: str, key: str) -> int:
+    assert_task_owned(log_dir)
     _ensure_layout(log_dir, kind)
     return os.open(_lock_path(log_dir, kind, key), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
 
@@ -181,44 +190,63 @@ def _busy(kind: str, key: str) -> SharedScratchError:
         code="shared_scratch_busy")
 
 
+def _try_lock(log_dir: Path, kind: str, key: str) -> int | None:
+    """One attempt at the folder's lock: its descriptor, or None while another holder has it.
+
+    A cleaner unlinks the lock file while holding it, so a waiter that wins the `flock` afterwards holds
+    a file no longer at the path. That is not the lock: it is dropped and the attempt repeats on the
+    file now at the path, so two parties can never believe they hold the same folder's lock."""
+    path = _lock_path(log_dir, kind, key)
+    while True:
+        descriptor = _open_lock(log_dir, kind, key)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            os.close(descriptor)
+            if exc.errno not in (errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK):
+                raise
+            return None
+        except BaseException:
+            os.close(descriptor)
+            raise
+        try:
+            held, current = os.fstat(descriptor), os.stat(path, follow_symlinks=False)
+            if (held.st_dev, held.st_ino) == (current.st_dev, current.st_ino):
+                return descriptor
+        except FileNotFoundError:
+            pass
+        except BaseException:
+            os.close(descriptor)
+            raise
+        os.close(descriptor)
+
+
 async def lock_async(log_dir: Path, kind: str, identity: str, hold: Hold, timeout: float = LOCK_WAIT_SECONDS) -> None:
     """Take the folder's lock into `hold`, polling without blocking the event loop. Bounded."""
     key = key_for(kind, identity)
-    descriptor = _open_lock(log_dir, kind, key)
     deadline = time.monotonic() + timeout
-    try:
-        while True:
-            try:
-                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except OSError as exc:
-                if exc.errno not in (errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK):
-                    raise
-                if time.monotonic() >= deadline:
-                    raise _busy(kind, key) from None
-                await asyncio.sleep(0.02)
-    except BaseException:
-        os.close(descriptor)
-        raise
-    hold.add(descriptor)
+    while True:
+        descriptor = _try_lock(log_dir, kind, key)
+        if descriptor is not None:
+            hold.add(descriptor)
+            return
+        if time.monotonic() >= deadline:
+            raise _busy(kind, key)
+        await asyncio.sleep(0.02)
 
 
 @contextmanager
 def locked(log_dir: Path, kind: str, identity: str, *, timeout: float = 2.0) -> Iterator[None]:
     key = key_for(kind, identity)
-    descriptor = _open_lock(log_dir, kind, key)
     deadline = time.monotonic() + timeout
+    while True:
+        descriptor = _try_lock(log_dir, kind, key)
+        if descriptor is not None:
+            break
+        if time.monotonic() >= deadline:
+            raise _busy(kind, key)
+        time.sleep(0.01)
     try:
-        while True:
-            try:
-                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except OSError as exc:
-                if exc.errno not in (errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK):
-                    raise
-                if time.monotonic() >= deadline:
-                    raise _busy(kind, key) from None
-                time.sleep(0.01)
         yield
     finally:
         os.close(descriptor)
@@ -231,28 +259,35 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _repair_hint(kind: str, key: str) -> str:
+    target = f"--chain {key}" if kind == "chain" else "--group <the group name>"
+    return f"; once its tasks have settled, repair it with `harflow-ctl scratch clean {target}`, which removes the folder with its metadata"
+
+
 def _read_meta(log_dir: Path, kind: str, key: str) -> dict[str, Any] | None:
     path = _meta_path(log_dir, kind, key)
     try:
         if path.is_symlink() or path.stat().st_size > 65536:
-            raise SharedScratchError(f"shared scratch metadata {path} is unsafe", code="shared_scratch_unsafe")
+            raise SharedScratchError(f"shared scratch metadata {path} is unsafe" + _repair_hint(kind, key), code="shared_scratch_unsafe")
         value = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return None
     except (OSError, ValueError) as exc:
-        raise SharedScratchError(f"shared scratch metadata {path} is unreadable: {exc}", code="shared_scratch_unsafe") from exc
+        raise SharedScratchError(f"shared scratch metadata {path} is unreadable: {exc}" + _repair_hint(kind, key), code="shared_scratch_unsafe") from exc
     if (not isinstance(value, dict) or value.get("format") != META_FORMAT or value.get("kind") != kind
             or value.get("key") != key or not isinstance(value.get("identity"), str)):
-        raise SharedScratchError(f"shared scratch metadata {path} is not valid", code="shared_scratch_unsafe")
+        raise SharedScratchError(f"shared scratch metadata {path} is not valid" + _repair_hint(kind, key), code="shared_scratch_unsafe")
     return value
 
 
 def _write_meta(log_dir: Path, kind: str, key: str, meta: dict[str, Any]) -> None:
+    """Replace the metadata atomically. Every writer gets its own temporary file: the event loop and the
+    retention thread can write in one process, so a pid-derived name would be shared."""
     path = _meta_path(log_dir, kind, key)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    descriptor, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    temporary = Path(name)
     try:
-        with open(temporary, "w", encoding="utf-8") as handle:
-            os.fchmod(handle.fileno(), 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             json.dump(meta, handle, ensure_ascii=False, allow_nan=False)
             handle.flush()
             os.fsync(handle.fileno())
@@ -274,43 +309,105 @@ def _parse_time(value: Any) -> datetime | None:
     return moment if moment.tzinfo is not None else moment.replace(tzinfo=timezone.utc)
 
 
-def touch(log_dir: Path, kind: str, identity: str, when: datetime | None = None) -> None:
-    """Advance `last_used_at` (never backwards). Guarded: bookkeeping never changes an outcome."""
+def touch(log_dir: Path, kind: str, identity: str, when: datetime | None = None, *, timeout: float = METADATA_LOCK_SECONDS) -> bool:
+    """Advance `last_used_at` (never backwards), serialized with allocation and cleanup by the folder's lock.
+
+    True when the update is durable or there is nothing to update (no metadata for this identity); False
+    when it could not be made (lock busy, unreadable metadata, write failure). The lock is only tried for
+    `timeout` seconds, so a caller that holds `<id>.lock` cannot deadlock against a launch holding this one.
+    Guarded: bookkeeping never changes an outcome, but ownership failures propagate."""
+    assert_task_owned(log_dir)
     try:
         key = key_for(kind, identity)
-        meta = _read_meta(log_dir, kind, key)
-        if meta is None or meta["identity"] != identity:
-            return
-        moment = when or _now()
-        current = _parse_time(meta.get("last_used_at"))
-        if current is not None and current >= moment:
-            return
-        _write_meta(log_dir, kind, key, {**meta, "last_used_at": moment.isoformat()})
+        if not os.path.lexists(_meta_path(log_dir, kind, key)):
+            return True  # no folder was ever allocated for this identity; take no lock for nothing
+        with locked(log_dir, kind, identity, timeout=timeout):
+            meta = _read_meta(log_dir, kind, key)
+            if meta is None or meta["identity"] != identity:
+                return True
+            moment = when or _now()
+            current = _parse_time(meta.get("last_used_at"))
+            if current is None or current < moment:
+                _write_meta(log_dir, kind, key, {**meta, "last_used_at": moment.isoformat()})
+            return True
+    except StateOwnershipError:
+        raise
     except Exception:
         log.debug("could not update shared scratch metadata", exc_info=True)
+        return False
+
+
+def observe_settlement(log_dir: Path, kind: str, identity: str, task_ids: Iterable[str], now: datetime | None = None,
+                       *, timeout: float = METADATA_LOCK_SECONDS) -> bool:
+    """Durably record that recovery first found these tasks settled, advancing `last_used_at` to now.
+
+    A task whose exit was never observed has no known finish time: its start time says nothing about when
+    it last used the folder. The first observation of its settlement is the best available instant, and it
+    must be on disk before cleanup is allowed to count age. Each task id is recorded once (`settled_seen`,
+    bounded; an id dropped from the bound only ever extends retention once more). True when every id is
+    recorded; False when it could not be, in which case the folder must be kept."""
+    assert_task_owned(log_dir)
+    ids = list(dict.fromkeys(task_ids))
+    if not ids:
+        return True
+    try:
+        key = key_for(kind, identity)
+        if not os.path.lexists(_meta_path(log_dir, kind, key)):
+            return False
+        with locked(log_dir, kind, identity, timeout=timeout):
+            meta = _read_meta(log_dir, kind, key)
+            if meta is None or meta["identity"] != identity:
+                return False
+            seen = [value for value in meta.get("settled_seen", []) if isinstance(value, str)]
+            fresh = [identifier for identifier in ids if identifier not in seen]
+            if not fresh:
+                return True
+            moment = now or _now()
+            current = _parse_time(meta.get("last_used_at"))
+            _write_meta(log_dir, kind, key, {
+                **meta, "last_used_at": (moment if current is None or current < moment else current).isoformat(),
+                "settled_seen": (seen + fresh)[-SETTLED_SEEN_LIMIT:]})
+            return True
+    except StateOwnershipError:
+        raise
+    except Exception:
+        log.debug("could not record shared scratch settlement", exc_info=True)
+        return False
 
 
 # ---- allocation --------------------------------------------------------------------------------
 
 
 def allocate(log_dir: Path, kind: str, identity: str, *, now: datetime | None = None) -> Path:
-    """Create or reopen the folder. The caller holds its lock; metadata is written before `mkdir`.
+    """Create or reopen the folder; see `allocate_folder`."""
+    return allocate_folder(log_dir, kind, identity, now=now)[0]
+
+
+@task_operation
+def allocate_folder(log_dir: Path, kind: str, identity: str, *, now: datetime | None = None) -> tuple[Path, bool]:
+    """Create or reopen the folder and say whether this call created it. The caller holds its lock;
+    metadata is written before `mkdir`.
 
     An existing folder is reopened only when its metadata names exactly this identity; a mismatch
     (a hash collision, or tampering) refuses. A folder with no metadata is adopted only because its
-    name is derived from this identity, and gets fresh metadata.
+    name is derived from this identity, and gets fresh metadata. Only a folder with neither metadata
+    nor a directory beforehand counts as created.
     """
     key = key_for(kind, identity)
     _ensure_layout(log_dir, kind)
     path = root(log_dir) / kind / key
-    moment = (now or _now()).isoformat()
+    instant = now or _now()
+    moment = instant.isoformat()
     meta = _read_meta(log_dir, kind, key)
+    created = meta is None and not os.path.lexists(path)
     if meta is not None:
         if meta["identity"] != identity:
             raise SharedScratchError(
                 f"the shared {kind} scratch folder {key} belongs to a different {kind}; refusing to reuse it",
                 code="shared_scratch_mismatch")
-        meta = {**meta, "last_used_at": moment}
+        previous = _parse_time(meta.get("last_used_at"))
+        # Never backwards: a metadata update that already recorded a later use stands.
+        meta = {**meta, "last_used_at": moment if previous is None or previous < instant else meta["last_used_at"]}
     else:
         meta = {"format": META_FORMAT, "v": 1, "kind": kind, "key": key, "identity": identity,
                 "created_at": moment, "last_used_at": moment}
@@ -319,7 +416,7 @@ def allocate(log_dir: Path, kind: str, identity: str, *, now: datetime | None = 
     _write_meta(log_dir, kind, key, meta)
     path.mkdir(exist_ok=True, mode=0o700)
     os.chmod(path, 0o700)
-    return path.resolve()
+    return path.resolve(), created
 
 
 @dataclass
@@ -332,6 +429,8 @@ class Allocation:
     chain_id: str | None = None
     group_name: str | None = None
     access: dict[str, str] = field(default_factory=dict)
+    # Folders whose write grant a nested dispatch was refused; reported on bridge notices, not in `as_dict`.
+    denied: list[str] = field(default_factory=list)
 
     @property
     def writable(self) -> list[str]:
@@ -374,7 +473,10 @@ def effective_chain(record: Any) -> str:
 
 
 def _under(manifest_path: Path, directory_path: Path) -> bool:
+    """Whether a registered artifact lies under the folder, comparing canonical paths (the state root may be
+    reached through a symlink while artifacts record resolved paths)."""
     try:
+        folder = directory_path.resolve()
         with manifest_path.open("rb") as handle:
             data = json.loads(handle.read(4 * 1024 * 1024 + 1))
         items = data.get("items", []) if isinstance(data, dict) else None
@@ -382,26 +484,44 @@ def _under(manifest_path: Path, directory_path: Path) -> bool:
             return True
         for item in items:
             path = item.get("path") if isinstance(item, dict) else None
-            if not isinstance(path, str) or Path(path).is_relative_to(directory_path):
+            if not isinstance(path, str) or Path(path).resolve().is_relative_to(folder):
                 return True
         return False
     except FileNotFoundError:
         return False
-    except (OSError, ValueError, TypeError, AttributeError):
+    except (OSError, ValueError, TypeError, AttributeError, RuntimeError):
         return True  # unreadable counts as present
 
 
 class State:
-    """One consistent read of everything that can reference a shared folder."""
+    """One consistent read of everything that can reference a shared folder.
 
-    def __init__(self, log_dir: Path) -> None:
+    `State(log_dir)` scans every task record. `State.narrowed(snapshot, kind, identity)` re-reads only the
+    members of one folder from an earlier snapshot, with the live receipts, continuations and pins: what
+    a per-folder recheck under that folder's lock needs without scanning every record again. A task
+    started in the folder since the snapshot cannot be missed that way, because starting one rewrites the
+    folder's `last_used_at` under the lock the recheck holds."""
+
+    def __init__(self, log_dir: Path, *, narrowed: tuple["State", str, str] | None = None) -> None:
         from . import followups, retention
         from .task_supervision import reservations
         from .workflows import WorkflowStore
         self.log_dir = Path(log_dir)
-        scan = store.scan(self.log_dir)
-        self.records = scan.records
-        self.refused = sorted(scan.refusals)
+        if narrowed is None:
+            scan = store.scan(self.log_dir)
+            self.records = scan.records
+            self.refused = sorted(scan.refusals)
+        else:
+            snapshot, kind, identity = narrowed
+            self.records, self.refused = [], list(snapshot.refused)
+            for member in snapshot.members(kind, identity):
+                try:
+                    fresh = store.read(self.log_dir, member.task_id, include_prompt=False)
+                except (store.TaskDocumentError, store.InvalidTaskId):
+                    self.refused.append(member.task_id)
+                    continue
+                if fresh is not None:
+                    self.records.append(fresh)
         self.statuses = {r.task_id: store.resolve_status(self.log_dir, r, detail=False)[0] for r in self.records}
         self.settled = {r.task_id: retention._conclusively_settled(r, self.statuses[r.task_id]) for r in self.records}
         pinned = set(WorkflowStore(root=self.log_dir.parent).pinned_tasks())
@@ -424,6 +544,10 @@ class State:
             if isinstance(value, dict) and (value.get("state") == "reserved" or (value.get("state") == "accepted" and task_id in launching)):
                 self.continuations.append(value | {"task_id": task_id})
         self.by_id = {r.task_id: r for r in self.records}
+
+    @classmethod
+    def narrowed(cls, snapshot: "State", kind: str, identity: str) -> "State":
+        return cls(snapshot.log_dir, narrowed=(snapshot, kind, identity))
 
     @staticmethod
     def _matches(kind: str, identity: str, chain: str | None, group: str | None) -> bool:
@@ -458,10 +582,19 @@ class State:
                     seen.add(reservation["task_id"])
         return found
 
+    def unobserved_settled(self, kind: str, identity: str) -> list[Any]:
+        """Members proven settled whose exit nobody observed, so their finish time is unknown."""
+        return [r for r in self.members(kind, identity) if self.settled[r.task_id] and store.outcome_unobserved(r)]
+
     def last_activity(self, kind: str, identity: str) -> datetime | None:
+        """The newest observed finish among members. A member whose exit was never observed has no known
+        finish: its start time and any backstop `finished_at` say nothing about when it last used the
+        folder, so it counts only through `observe_settlement`."""
         latest = None
         for record in self.members(kind, identity):
-            moment = _parse_time(record.finished_at) or _parse_time(record.started_at)
+            if store.outcome_unobserved(record):
+                continue
+            moment = _parse_time(record.finished_at)
             if moment is not None and (latest is None or moment > latest):
                 latest = moment
         return latest
@@ -506,6 +639,24 @@ def _entries(log_dir: Path) -> list[tuple[str, str, Path]]:
     return found
 
 
+_BLOCKER_GROUPS = {"task": "active", "launch": "active", "continuation": "active", "unreadable_record": "unreadable",
+                   "pinned": "pinned", "artifact": "artifact"}
+
+
+def blocker_counts(blockers: list[dict[str, Any]]) -> dict[str, int]:
+    """Distinct blockers by group: `active` (unsettled tasks, launches and continuations), `unreadable`
+    (records that cannot be read), `pinned` and `artifact`. Each blocker is one task id counted once."""
+    counts = {"active": 0, "unreadable": 0, "pinned": 0, "artifact": 0}
+    seen: set[tuple[str, str]] = set()
+    for blocker in blockers:
+        group = _BLOCKER_GROUPS.get(blocker["kind"], "active")
+        if (group, blocker["task_id"]) not in seen:
+            seen.add((group, blocker["task_id"]))
+            counts[group] += 1
+    return counts
+
+
+@task_operation
 def inventory(log_dir: Path) -> list[dict[str, Any]]:
     """Every shared folder with its exact identity, size, last use and unsettled users."""
     state = State(log_dir)
@@ -521,25 +672,29 @@ def inventory(log_dir: Path) -> list[dict[str, Any]]:
         size, truncated = directory_size(path)
         used = _parse_time(meta.get("last_used_at")) if meta else None
         activity = state.last_activity(kind, identity) if identity else None
-        blockers = state.blockers(kind, identity, path) if identity else []
+        counts = blocker_counts(state.blockers(kind, identity, path)) if identity else blocker_counts([])
         result.append({
             "kind": kind, "key": name, "identity": identity, "path": str(path.resolve()), "bytes": size,
             "bytes_truncated": truncated, "last_used_at": used.isoformat() if used else None,
             "last_task_activity": activity.isoformat() if activity else None,
-            "active_tasks": len(blockers), "orphan": identity is None or (activity is None and not state.members(kind, identity)),
+            "active_tasks": counts["active"], "blockers": counts,
+            "orphan": identity is None or (activity is None and not state.members(kind, identity)),
         })
     return result
 
 
 def _remove(log_dir: Path, kind: str, key: str, path: Path) -> Path:
-    """Rename into `.trash` (the caller holds the lock) and drop the metadata; returns the trashed path."""
+    """Rename into `.trash` (the caller holds the lock), drop the metadata and the lock file; returns the
+    trashed path. Unlinking the lock file under the lock keeps `.locks` from growing without bound; a
+    waiter that wins the old file's `flock` notices it left the path and retries (`_try_lock`)."""
     _ensure_layout(log_dir, kind)
     trashed = root(log_dir) / TRASH_DIRECTORY / f"{kind}-{key}-{int(time.time() * 1000)}"
     os.rename(path, trashed)
-    try:
-        _meta_path(log_dir, kind, key).unlink()
-    except FileNotFoundError:
-        pass
+    for leftover in (_meta_path(log_dir, kind, key), _lock_path(log_dir, kind, key)):
+        try:
+            leftover.unlink()
+        except FileNotFoundError:
+            pass
     return trashed
 
 
@@ -554,14 +709,22 @@ def _delete_trash(trashed: Path) -> bool:
         return False
 
 
+@task_operation
 def clean(log_dir: Path, kind: str, identity: str) -> dict[str, Any]:
-    """Remove one folder, or refuse with the reason. Blocking; for a person (the ctl gate)."""
+    """Remove one folder, or refuse with the reason. Blocking; for a person (the ctl gate).
+
+    Unreadable metadata does not stop a person repairing the folder: the blocker checks run as usual, and
+    the folder is then removed together with the metadata (the folder's name is derived from the identity
+    given, so the right folder is the one named)."""
     key = key_for(kind, identity)
     path = root(log_dir) / kind / key
     with locked(log_dir, kind, identity):
         if path.is_symlink() or not os.path.lexists(path):
             raise SharedScratchError(f"no shared {kind} scratch folder exists for {identity!r}", code="shared_scratch_unknown")
-        meta = _read_meta(log_dir, kind, key)
+        try:
+            meta = _read_meta(log_dir, kind, key)
+        except SharedScratchError:
+            meta = None
         if meta is not None and meta["identity"] != identity:
             raise SharedScratchError(f"the folder {key} belongs to a different {kind}", code="shared_scratch_mismatch")
         busy = State(log_dir).blockers(kind, identity, path)
@@ -576,11 +739,17 @@ def clean(log_dir: Path, kind: str, identity: str) -> dict[str, Any]:
             "deleted": deleted, "note": "The folder was removed." if deleted else f"The folder was moved to {trashed}; deleting it failed and the sweep will retry."}
 
 
+@task_operation
 def sweep(log_dir: Path, days: int, now: datetime | None = None) -> dict[str, int]:
     """The age policy: remove folders unused for more than `days` that nothing references.
 
-    Age is the newest of the metadata's `last_used_at`, the newest `finished_at` among retained
-    referencing records, and, for a folder with no metadata, its modification time.
+    Age is the newest of the metadata's `last_used_at`, the newest observed `finished_at` among retained
+    referencing records, and, for a folder with no metadata, its modification time. A referencing task
+    that recovery found settled without an observed exit has no known finish: the sweep first records the
+    moment it observed that settlement in the folder's metadata, and keeps the folder if it cannot.
+
+    One snapshot of all records selects candidates; under each candidate's lock only that folder's
+    members, receipts, continuations and pins are read again.
     """
     stats = {"removed": 0, "kept_in_use": 0, "kept_busy": 0, "kept_young": 0, "failed": 0}
     moment = now or _now()
@@ -600,6 +769,16 @@ def sweep(log_dir: Path, days: int, now: datetime | None = None) -> dict[str, in
                 stats["kept_in_use"] += 1  # cannot derive an identity; leave it for a person
                 continue
             identity = name
+        unobserved = [record.task_id for record in state.unobserved_settled(kind, identity)]
+        if unobserved:
+            try:
+                recorded = observe_settlement(log_dir, kind, identity, unobserved, moment)
+                meta = _read_meta(log_dir, kind, name) if recorded else None
+            except SharedScratchError:
+                recorded = False
+            if not recorded:
+                stats["kept_in_use"] += 1
+                continue
         used = max((t for t in (_parse_time(meta.get("last_used_at")) if meta else None, state.last_activity(kind, identity)) if t is not None), default=None)
         if used is None:
             try:
@@ -614,14 +793,15 @@ def sweep(log_dir: Path, days: int, now: datetime | None = None) -> dict[str, in
             continue
         try:
             with locked(log_dir, kind, identity, timeout=0.0):
-                fresh = State(log_dir)
-                fresh_used = max((t for t in (_parse_time((_read_meta(log_dir, kind, name) or {}).get("last_used_at")), fresh.last_activity(kind, identity)) if t is not None), default=used)
+                fresh = State.narrowed(state, kind, identity)
+                fresh_meta = _read_meta(log_dir, kind, name) or {}
+                fresh_used = max((t for t in (_parse_time(fresh_meta.get("last_used_at")), fresh.last_activity(kind, identity)) if t is not None), default=used)
                 if fresh_used >= cutoff or fresh.blockers(kind, identity, path):
                     stats["kept_in_use"] += 1
                     continue
                 trashed = _remove(log_dir, kind, name, path)
-        except SharedScratchError:
-            stats["kept_busy"] += 1
+        except SharedScratchError as exc:
+            stats["kept_busy" if exc.code == "shared_scratch_busy" else "kept_in_use"] += 1
             continue
         except OSError:
             stats["failed"] += 1
@@ -670,7 +850,9 @@ def _sweep_orphan_meta(log_dir: Path, now: datetime) -> None:
         except OSError:
             continue
         for name in names:
-            if name.endswith(".json") and not os.path.lexists(root(log_dir) / kind / name[:-5]):
+            orphan = (name.endswith(".json") and not os.path.lexists(root(log_dir) / kind / name[:-5])) or (
+                name.startswith(".") and name.endswith(".tmp"))  # a writer that died before its replace
+            if orphan:
                 try:
                     if now.timestamp() - (base / name).stat().st_mtime > TRASH_MIN_AGE_SECONDS:
                         (base / name).unlink()

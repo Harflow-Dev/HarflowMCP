@@ -2072,6 +2072,11 @@ class TaskRegistry:
                         task_id=task_id, chain_id=scratch_chain_id or task_id, group=group, spawned_by=spawned_by,
                         max_depth=max_depth, hold=shared_hold, task_scratch=task_scratch, task_granted=task_granted,
                         scratch_allowed=scratch_allowed, extra_grants=bool(extra_path_grants))
+                    for kind in allocation.denied:
+                        bridge_notices.append(
+                            f"No write access was granted to the shared {kind} scratch folder "
+                            f"(${shared_scratch.ENV_CHAIN if kind == 'chain' else shared_scratch.ENV_GROUP}): the task that dispatched this one "
+                            "cannot write there itself, so a nested dispatch is not given more. `scratch.access` reports what it has.")
                 if extra_path_grants or invocation.extra_writable_paths:
                     await _bounded_extra_path_check(self._assert_extra_state, repo_path, extra_path_grants, invocation)
                     if freedom != "unrestricted":
@@ -2374,16 +2379,20 @@ class TaskRegistry:
         """
         wanted = [("chain", chain_id)] + ([("group", group)] if group else [])
         paths: dict[str, Path] = {}
+        created: dict[str, bool] = {}
         for kind, identity in wanted:
             await shared_scratch.lock_async(self._log_dir, kind, identity, hold)
-            paths[kind] = shared_scratch.allocate(self._log_dir, kind, identity)
+            paths[kind], created[kind] = shared_scratch.allocate_folder(self._log_dir, kind, identity)
+        denied: list[str] = []
         with_shared = getattr(backend, "with_shared_directories", None)
         granted: list[Path] = []
         if freedom != "read_only" and scratch_allowed and with_shared is not None:
             for kind, identity in wanted:
                 if spawned_by is None or await asyncio.to_thread(
-                        self._caller_allows_shared, kind, paths[kind], identity, task_id, spawned_by, max_depth):
+                        self._caller_allows_shared, kind, paths[kind], identity, task_id, spawned_by, max_depth, created[kind]):
                     granted.append(paths[kind])
+                else:
+                    denied.append(kind)
         if granted:
             if extra_grants:
                 invocation = await _bounded_extra_path_check(with_shared, invocation, tuple(granted), freedom)
@@ -2391,7 +2400,9 @@ class TaskRegistry:
                 invocation = with_shared(invocation, tuple(granted), freedom)
             backend.assert_safe(invocation, freedom, network)
             enforcement = replace(enforcement, writable_roots=(*enforcement.writable_roots, *(str(path) for path in granted)))
-        sandboxed = enforcement.os_enforced and enforcement.writes_confined
+        # Caller approvals let an approved command run outside the sandbox, so the sandbox alone no longer
+        # says a folder without a grant is read-only.
+        sandboxed = enforcement.os_enforced and enforcement.writes_confined and not enforcement.caller_approval_tools
 
         def access(is_granted: bool) -> str:
             return shared_scratch.WRITABLE if is_granted else (shared_scratch.SANDBOX_READ_ONLY if sandboxed else shared_scratch.NO_ADDITIONAL_GRANT)
@@ -2399,7 +2410,7 @@ class TaskRegistry:
         allocation = shared_scratch.Allocation(
             task=str(task_scratch) if task_scratch is not None else None,
             chain=str(paths["chain"]), group=str(paths["group"]) if "group" in paths else None,
-            chain_id=chain_id, group_name=group)
+            chain_id=chain_id, group_name=group, denied=denied)
         if task_scratch is not None:
             allocation.access["task"] = access(task_granted)
         allocation.access["chain"] = access(paths["chain"] in granted)
@@ -2407,7 +2418,8 @@ class TaskRegistry:
             allocation.access["group"] = access(paths["group"] in granted)
         return invocation, enforcement, allocation
 
-    def _caller_allows_shared(self, kind: str, path: Path, identity: str, task_id: str, spawned_by: str, max_depth: int | None) -> bool:
+    def _caller_allows_shared(self, kind: str, path: Path, identity: str, task_id: str, spawned_by: str, max_depth: int | None,
+                              created: bool = False) -> bool:
         """Whether a nested dispatch may be granted write access to a shared folder.
 
         A dispatcher whose writes are not confined has no restriction to preserve. A confined one
@@ -2427,8 +2439,8 @@ class TaskRegistry:
                 return True
             if kind != "chain":
                 return False
-            if identity == task_id:
-                return True
+            if identity == task_id and created:
+                return True  # the child's own brand-new chain; a folder that already existed is someone's
             node: str | None = identity
             for _ in range((max_depth if max_depth is not None else lineage.max_depth_default()) + 1):
                 record = store.read(self._log_dir, node, include_prompt=False) if node else None
@@ -5210,6 +5222,8 @@ def _touch_shared_scratch(registry: "TaskRegistry", task: Task) -> None:
         shared_scratch.touch(registry.log_dir, "chain", shared_scratch.effective_chain(task))
         if task.group:
             shared_scratch.touch(registry.log_dir, "group", task.group)
+    except StateOwnershipError:
+        raise
     except Exception:  # pragma: no cover - bookkeeping must never mask a finished run
         log.debug("task %s: could not record shared scratch use", task.task_id, exc_info=True)
 

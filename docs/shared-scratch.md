@@ -47,8 +47,10 @@ has one of three states in `scratch.access`:
 * `no_additional_grant`: no grant was added. The backend does not confine writes (opencode, vibe,
   Antigravity, and Claude when read-only), or approved commands may still write. The folder exists and the
   variable is set; the claim is only that Harflow added nothing.
-* `sandbox_read_only`: the folder is exposed but the OS sandbox leaves it read-only (Codex read-only, and
-  Codex with caller approvals, which keeps no scratch grant at all; `HARFLOW_SCRATCH` is then unset).
+* `sandbox_read_only`: the folder is exposed but the OS sandbox leaves it read-only (Codex read-only). Codex
+  with caller approvals keeps no scratch grant at all (`HARFLOW_SCRATCH` is then unset) and reports
+  `no_additional_grant` for the shared folders: an approved command may run outside the sandbox, so the sandbox
+  alone is not a promise that they stay read-only.
 
 A `read_only` task gets the folders and variables (it may read earlier outputs) and no write grant.
 Native workflow children get no shared folders. `scratch.notice` states the actual state of each path.
@@ -76,26 +78,41 @@ harflow-ctl scratch clean (--group NAME | --chain ID) [--json]
 
 * `scratch list` shows each folder's exact group or chain id, path, size (a bounded walk like `du`;
   symlinks are counted, never followed, and `bytes_truncated` says if the bound cut it short), last use,
-  last task activity and the number of unsettled users.
+  last task activity and the number of unsettled users (`active_tasks`: tasks, launches and reserved
+  continuations still using the folder, each counted once). `blockers` breaks every reason the folder cannot be
+  cleaned down by kind: `active`, `unreadable` (records that cannot be read, which block every folder), `pinned`
+  and `artifact`.
 * `scratch clean` is for a verified person: it uses the takeover gate and fails closed with `agent_caller`
   or `caller_undecidable`. It refuses with `shared_scratch_in_use` while any task using the folder is not
   conclusively settled (including recovered live tasks and uncertain ones), any launch is pending (including
   a launch waiting for resources) or a reserved continuation names it, any referencing record is pinned (by
   a workflow, or by queued follow-ups), a referencing record cannot be read, or a retained record holds a
   registered artifact under it. Otherwise it renames the folder into `<state root>/shared-scratch/.trash`
-  under the folder's lock and deletes it outside the lock, never following symlinks.
+  under the folder's lock and deletes it outside the lock, never following symlinks. A folder whose metadata
+  is unreadable or invalid refuses a new launch with `shared_scratch_unsafe`, which names this command: once the
+  checks above pass, `scratch clean` removes the folder together with the damaged metadata.
 * **Age policy.** The retention sweep (a live server, at most once per 24 hours) removes folders unused for
   more than `HARFLOW_SHARED_SCRATCH_DAYS` days (default `14`; `0` or a negative number disables it). A folder
   is eligible only when nothing references it unsettled or pinned, and its age is the newest of its
-  `last_used_at` (advanced at allocation and when a task settles), the newest `finished_at` among retained
-  referencing records, and, for a folder with no metadata, its modification time. Task retention carries a
-  record's last activity into the folder's metadata before the record is deleted, so a shorter task retention
-  cannot shorten shared retention.
+  `last_used_at` (advanced at allocation and when a task settles), the newest observed `finished_at` among
+  retained referencing records, and, for a folder with no metadata, its modification time. A task whose exit
+  was never observed (its owner died and recovery later proved it gone) has no known finish time and its start
+  time does not count: the sweep first records the moment it found the task settled in the folder's metadata
+  (`last_used_at` advances to that moment, once per task), and keeps the folder if that cannot be written.
+  Task retention carries a record's last activity into the folder's metadata before the record is deleted (an
+  unobserved one counts as now), and keeps the record when that cannot be written, so a shorter task retention
+  cannot shorten shared retention. The age policy runs on its own whenever `HARFLOW_SHARED_SCRATCH_DAYS` is
+  positive, including when `HARFLOW_RETENTION_DAYS` disables deleting task records.
 * **Locks.** Allocation takes the folder's lock (`shared-scratch/.locks/<kind>-<key>.lock`, chain before
-  group) before it checks or creates the folder and holds it until the task record is durable; cleanup takes
-  it for the whole check-and-rename. The wait is bounded: a launch that cannot get a lock within a few seconds
-  fails as not started with `shared_scratch_busy`. The lock is a leaf: never held across a subprocess or
-  another lock, and ordered after the session or chain lock and before `<id>.lock`.
+  group) before it checks or creates the folder and holds it across the agent's spawn until the task record is
+  durable; the descriptor is not inherited by the child. Cleanup takes it for the whole check-and-rename, and so
+  does every metadata update (settlement, retention carrying a record's activity), which is why a stale write
+  cannot move a folder's last use backwards. The wait is bounded: a launch that cannot get a lock within a few
+  seconds fails as not started with `shared_scratch_busy`. Lock order is the session or chain lock, then the
+  chain folder's lock, then the group folder's lock, then `<id>.lock`; code that already holds `<id>.lock`
+  (the retention sweep) and the settlement hook only try the lock for a fraction of a second, so the order
+  cannot deadlock, and give up (keeping the record) rather than wait. A cleaner unlinks the lock file while it
+  holds it; a waiter that wins the old file checks it is still the file at the path and retries otherwise.
 
 `get_task_artifacts` reports an artifact whose shared folder was removed as missing (`deleted`).
 `register_artifact` accepts a file inside a chain or group folder the task was granted, like its own scratch;

@@ -294,14 +294,20 @@ Detail behind [shared scratch](shared-scratch.md); the rules that keep it safe:
   group) with a bounded non-blocking poll before the pre-spawn window, held in a `Hold`, and released as soon as the
   task record is durable (`persist`), and always on the way out of `_execute_prepared`. It is a leaf lock: never held
   across a subprocess, a Git call or another lock, ordered after the session or chain lock and before `<id>.lock`.
+  Metadata updates take the same lock, so they cannot reorder; callers that already hold `<id>.lock` (retention, the
+  settlement hook) only try it for a bounded time and keep their record on failure. Cleaners unlink the lock file
+  under the lock and waiters re-verify the file's identity after `flock`.
 - **A reference is anything that may still use the folder**: an unsettled or uncertain record, an unresolved or
   pending launch receipt (including one waiting for resources and a reserved continuation), a pinned record (workflow
   or queued follow-ups), an unreadable record, or a retained record with a registered artifact under it. Worktree
   tasks are ordinary: they get shared scratch like any task, and their receipts count as references like any other.
 - **Cleanup renames under the lock and deletes outside it** (`.trash`), never following symlinks. The age policy
   runs from the retention sweep, after `_sweep_native_events`, and counts from the newest of the folder's
-  `last_used_at` and its records' `finished_at`; `retention._delete_task_files` first carries a record's last
-  activity into the metadata so shorter task retention cannot shorten it.
+  `last_used_at` and its records' observed `finished_at`; `retention._delete_task_files` first carries a record's last
+  activity into the metadata (and keeps the record if it cannot) so shorter task retention cannot shorten it. A task
+  whose exit was never observed has no finish time: the sweep records the moment it found it settled
+  (`observe_settlement`) before counting age. One snapshot selects candidates and each candidate is rechecked under its
+  lock from its own members only. The sweep runs even when task-record retention is disabled.
 - **Nested grants never widen.** `TaskRegistry._caller_allows_shared` grants a confined dispatcher's child a shared
   folder only if it is already one of the dispatcher's writable roots or a chain it began (strict `spawned_by`
   ancestry); everything unreadable denies.
@@ -312,7 +318,8 @@ Detail behind [shared scratch](shared-scratch.md); the rules that keep it safe:
   re-applied when a worktree launch rebuilds its invocation, never blocks a launch, and is disclosed per run in
   `scratch.system_guidance`; `reused_from_session` is claimed only when the resumed task itself carried the note.
 - **Access states are claims about what Harflow granted** (`writable`, `no_additional_grant`, `sandbox_read_only`),
-  derived from the real grant and the recorded `Enforcement`, never from the freedom's name.
+  derived from the real grant and the recorded `Enforcement`, never from the freedom's name. Caller approvals can run a
+  command outside the sandbox, so a Codex run with them is never reported `sandbox_read_only`.
 
 ## Takeover, ctl control commands, open-app (A4)
 

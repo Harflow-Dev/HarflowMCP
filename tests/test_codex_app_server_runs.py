@@ -590,7 +590,9 @@ async def test_a_request_after_the_turn_ended_stops_the_run(world):
 
 def test_the_preview_and_launch_notices_say_there_is_no_scratch_directory():
     backend = get("codex")
-    assert "HARFLOW_SCRATCH and HARFLOW_TASK_SCRATCH are not set" in backend.approval_notice(False) and "exposed read-only" in backend.approval_notice(False) and backend.approval_scratch() is False
+    notice = backend.approval_notice(False)
+    assert "HARFLOW_SCRATCH and HARFLOW_TASK_SCRATCH are not set" in notice and "no write grant" in notice and "an approved command may write there" in notice
+    assert "exposed read-only" not in notice and backend.approval_scratch() is False
     assert "Dispatch can still refuse" in backend.approval_limitations(False)
 
 
