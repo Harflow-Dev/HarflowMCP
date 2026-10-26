@@ -12,7 +12,7 @@ BRIEF_BYTES = 8192
 TEXT_BYTES = 1024
 LIST_FIELDS = frozenset({'task_id', 'backend', 'status', 'title', 'group', 'repo_path',
     'started_at', 'finished_at', 'session_id', 'parent_task_id', 'root_task_id',
-    'duration_seconds', 'background_idle_seconds', 'output_capture', 'input_channel', 'last_captured_output_at', 'recovered', 'persisted_status', 'observed_exit',
+    'duration_seconds', 'background_idle_seconds', 'output_capture', 'input_channel', 'last_captured_output_at', 'recovered', 'observation_mode', 'observation_note', 'owner', 'dispatch_origin', 'responding_server', 'persisted_status', 'observed_exit',
     'needs_reconciliation', 'process_identity_state', 'needs_direct_lookup', 'note'})
 REQUIRED_FIELDS = frozenset({'task_id', 'status', 'needs_reconciliation',
     'needs_direct_lookup', 'persisted_status', 'observed_exit', 'process_identity_state'})
@@ -72,6 +72,10 @@ def brief_status(payload: dict[str, Any]) -> dict[str, Any]:
               for key, value in payload.items() if key in keys and (value is None or isinstance(value, (str, bool, int, float)))}
     if isinstance(payload.get('supervision'), dict):
         result['supervision'] = payload['supervision']
+    for key in ('owner', 'dispatch_origin', 'responding_server'):
+        value = payload.get(key)
+        if isinstance(value, dict) and type(value.get('pid')) is int:
+            result[key] = {'pid': value['pid'], 'start_time': _text(value['start_time'], 128) if isinstance(value.get('start_time'), str) else None}
     if isinstance(payload.get('successor_tasks'), dict):
         result['successor_tasks'] = payload['successor_tasks']
     artifact = payload.get('artifact_summary')

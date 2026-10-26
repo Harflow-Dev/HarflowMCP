@@ -63,34 +63,67 @@ class GitProbe:
     """Disable repository executable integrations before inspecting working tree contents."""
     def __init__(self, path: Path):
         self.path = path
-        self.deadline = time.monotonic() + BUDGET
+        self.started = time.monotonic()
+        self.deadline = self.started + BUDGET
+        self.diagnostics: list[dict[str, Any]] = []
         self.config = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
                        "-c", "submodule.recurse=false", "-c", "diff.external="]
 
+    def summary(self) -> dict[str, Any]:
+        return {"budget_ms": round(BUDGET * 1000),
+                "elapsed_ms": round((time.monotonic() - self.started) * 1000),
+                "probes": self.diagnostics[:16]}
+
     def read(self, *args: str, environment: dict[str, str] | None = None) -> str | None:
-        # Spool rather than buffering unbounded output in server memory; stop at the ceiling.
+        started = time.monotonic()
+        # Only command names/options are retained, never repository paths or Git stderr.
+        name = " ".join(arg for arg in args if not arg.startswith(("--git-dir=", "--work-tree=")))
+        entry: dict[str, Any] = {"probe": name[:160], "status": "error", "elapsed_ms": 0}
+        self.diagnostics.append(entry)
+        if started >= self.deadline:
+            entry["status"] = "skipped_budget_exhausted"
+            return None
         env = {**{key: value for key, value in os.environ.items()
                   if key not in GIT_LOCAL_ENV and not key.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"))},
                "GIT_NO_LAZY_FETCH": "1", "GIT_OPTIONAL_LOCKS": "0",
                "GIT_TERMINAL_PROMPT": "0", "GIT_PAGER": "cat", **(environment or {})}
-        with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
-            proc = subprocess.Popen(["git", "--no-optional-locks", "-C", str(self.path), *self.config, *args],
-                                    stdout=output, stderr=errors, stdin=subprocess.DEVNULL, env=env)
-            try:
-                while proc.poll() is None:
-                    if time.monotonic() >= self.deadline or os.fstat(output.fileno()).st_size > MAX_OUTPUT or os.fstat(errors.fileno()).st_size > MAX_OUTPUT:
-                        raise ValueError("Git observation exceeded time/output budget")
-                    time.sleep(0.01)
-                if os.fstat(output.fileno()).st_size > MAX_OUTPUT:
-                    raise ValueError("Git observation exceeded output budget")
-                if proc.returncode:
+        proc = None
+        try:
+            with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
+                # Environment and temporary-file setup also consume the shared budget.
+                if time.monotonic() >= self.deadline:
+                    entry["status"] = "skipped_budget_exhausted"
                     return None
-                output.seek(0)
-                return output.read(MAX_OUTPUT).decode("utf-8", errors="replace")
-            finally:
-                if proc.poll() is None:
-                    proc.kill()
-                proc.wait()
+                proc = subprocess.Popen(["git", "--no-optional-locks", "-C", str(self.path), *self.config, *args],
+                                        stdout=output, stderr=errors, stdin=subprocess.DEVNULL, env=env)
+                try:
+                    while True:
+                        code = proc.poll()
+                        if os.fstat(output.fileno()).st_size > MAX_OUTPUT or os.fstat(errors.fileno()).st_size > MAX_OUTPUT:
+                            entry["status"] = "output_limit"
+                            return None
+                        if code is not None:
+                            entry.update(status="success" if code == 0 else "git_failure", returncode=code)
+                            if code:
+                                return None
+                            output.seek(0)
+                            return output.read(MAX_OUTPUT).decode("utf-8", errors="replace")
+                        remaining = self.deadline - time.monotonic()
+                        if remaining <= 0:
+                            entry["status"] = "time_limit"
+                            return None
+                        time.sleep(min(0.01, remaining))
+                finally:
+                    if proc.poll() is None:
+                        proc.kill()
+                    proc.wait()
+                    entry["stdout_bytes"] = os.fstat(output.fileno()).st_size
+                    entry["stderr_bytes"] = os.fstat(errors.fileno()).st_size
+        except Exception as exc:
+            entry["error_type"] = type(exc).__name__[:64]
+            return None
+        finally:
+            entry["elapsed_ms"] = round((time.monotonic() - started) * 1000)
 
     def status(self, worktree: str | None = None) -> str | None:
         # Read the original index and object database through a disposable Git directory with
@@ -112,10 +145,16 @@ class GitProbe:
                     with os.fdopen(descriptor, "rb") as metadata:
                         if not stat.S_ISREG(os.fstat(metadata.fileno()).st_mode):
                             raise ValueError("Git metadata is not a regular file")
-                        data = metadata.read(MAX_OUTPUT + 1)
-                    if len(data) > MAX_OUTPUT:
-                        raise ValueError("Git metadata exceeds budget")
-                    (isolated / name).write_bytes(data)
+                        if name == "HEAD":
+                            data = metadata.read(MAX_OUTPUT + 1)
+                            if len(data) > MAX_OUTPUT:
+                                raise ValueError("HEAD metadata exceeds input limit")
+                            (isolated / name).write_bytes(data)
+                        else:
+                            # Large packed ref databases are inputs, not retained output. Let
+                            # Git read them under the subprocess time/output ceiling, just as
+                            # it reads the refs and objects symlinked above.
+                            (isolated / name).symlink_to(source)
             config = "[core]\nrepositoryformatversion = 0\nbare = false\n"
             if object_format == "sha256":
                 config = "[core]\nrepositoryformatversion = 1\nbare = false\n[extensions]\nobjectFormat = sha256\n"
@@ -129,19 +168,46 @@ class GitProbe:
                              environment=environment)
 
 
-def baseline(path: Path) -> dict[str, Any]:
-    result: dict[str, Any] = {"head": None, "branch": None, "repository_root": None, "working_tree_status": None,
-                              "provenance": "local Git observation with executable filters disabled", "error": None}
+def empty_baseline() -> dict[str, Any]:
+    return {"head": None, "branch": None, "repository_root": None, "working_tree_status": None,
+            "provenance": "local Git observation with executable filters disabled", "error": None}
+
+
+def interrupted_baseline(partial: dict[str, Any], reason: str, budget: float) -> dict[str, Any]:
+    """Freeze known evidence before the background worker finishes; never await it indefinitely."""
+    result = partial.copy()
+    if isinstance(partial.get("diagnostics"), dict):
+        result["diagnostics"] = partial["diagnostics"].copy()
+        result["diagnostics"]["probes"] = [entry.copy() for entry in
+            list(partial["diagnostics"].get("probes", []))[:16]]
+    result["observation_status"] = "partial" if any(result.get(key) is not None for key in
+        ("head", "branch", "repository_root", "working_tree_status")) else "unavailable"
+    result["error"] = "Git observation interrupted: " + reason
+    diagnostics = result.setdefault("diagnostics", {"phase": "baseline", "probes": []})
+    diagnostics["outer_status"] = reason
+    diagnostics["outer_budget_ms"] = round(budget * 1000)
+    return result
+
+
+def baseline(path: Path, partial: dict[str, Any] | None = None) -> dict[str, Any]:
+    result = partial if partial is not None else empty_baseline()
+    probe = GitProbe(path)
+    result["diagnostics"] = {"phase": "baseline", "budget_ms": round(BUDGET * 1000), "probes": probe.diagnostics}
     try:
-        probe = GitProbe(path)
         result["head"] = _strip(probe.read("rev-parse", "--verify", "HEAD"))
         result["branch"] = _strip(probe.read("symbolic-ref", "--quiet", "--short", "HEAD"))
         result["repository_root"] = _strip(probe.read("rev-parse", "--show-toplevel"))
         result["working_tree_status"] = probe.status(result["repository_root"])
-        if result["working_tree_status"] is None:
-            result["error"] = "working tree observation unavailable"
-    except Exception:
-        result["error"] = "Git observation unavailable or exceeded budget"
+    except Exception as exc:
+        probe.diagnostics.append({"probe": "status_setup", "status": "error", "error_type": type(exc).__name__[:64], "reason": str(exc)[:160] if isinstance(exc, ValueError) else "metadata_setup_failed"})
+    available = sum(result[key] is not None for key in ("head", "branch", "repository_root", "working_tree_status"))
+    result["observation_status"] = "success" if available == 4 else "partial" if available else "unavailable"
+    result["diagnostics"] = {"phase": "baseline", **probe.summary()}
+    if result["working_tree_status"] is None:
+        failures = [item for item in probe.diagnostics if item["status"] != "success"]
+        reason = failures[-1]["status"] if failures else "unavailable"
+        result["error"] = "working tree observation unavailable: " + reason
+
     return result
 
 
@@ -158,8 +224,9 @@ def capture(path: Path, start: dict[str, Any] | None, evidence: dict[str, Any]) 
         "external_writes": evidence.get("external_writes") or None,
         "last_build_test": evidence.get("last_build_test"),
         "evidence_provenance": "normalized structured tool calls/results; unavailable when absent or unsupported"}
+    probe = GitProbe(path)
+    end["diagnostics"]["phase"] = "terminal"
     try:
-        probe = GitProbe(path)
         base, head = result["base_commit"], result["head_commit"]
         if base and head and re.fullmatch(r"[0-9a-f]{40,64}", base) and re.fullmatch(r"[0-9a-f]{40,64}", head):
             commits = probe.read("rev-list", "--max-count=101", f"{base}..{head}")
@@ -173,8 +240,9 @@ def capture(path: Path, start: dict[str, Any] | None, evidence: dict[str, Any]) 
             counts = _strip(probe.read("rev-list", "--left-right", "--count", "HEAD...@{upstream}"))
             result["local_upstream"] = {"ref": upstream, "ahead_behind": counts,
                                         "provenance": "local tracking ref; no remote contacted"}
-    except Exception:
-        pass
+    except Exception as exc:
+        probe.diagnostics.append({"probe": "capture_setup", "status": "error", "error_type": type(exc).__name__[:64]})
+    result["diagnostics"] = {"phase": "capture", **probe.summary()}
     return result
 
 

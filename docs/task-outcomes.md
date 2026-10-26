@@ -11,6 +11,32 @@ status. `base_commit`, `head_commit`, `new_commits` (at most 100, with a truncat
 oversized output or timeout produces explicit unavailable fields. Failures never affect the
 agent's execution status.
 
+Baseline and terminal observations add `observation_status`: `success` when all four fields
+(HEAD, branch, repository root and working-tree status) are available, `partial` when some are
+available, or `unavailable`. Detached HEAD and unborn repositories can legitimately be partial.
+Each observation's `diagnostics` names its `phase` (`baseline` or `terminal`), shared `budget_ms`,
+`elapsed_ms` and at most 16 probes. The enclosing outcome has separate `capture` diagnostics for
+commit range, diffstat and local upstream queries. These phases use independent 1.5-second probe
+budgets; a working-tree check may fail while a later capture query independently succeeds.
+
+Each probe has a bounded semantic command label, `elapsed_ms` and a status: `success`,
+`git_failure` (nonzero exit), `time_limit`, `output_limit`, `skipped_budget_exhausted` (no command
+started), or `error` (spawn/metadata setup). Optional return codes, byte counts and bounded error
+categories identify the failure without retaining stderr contents. No Git subprocess starts once
+its shared deadline has expired. The 256-KiB stdout/stderr ceiling does not limit the packed-refs
+input database: Git consumes large refs through the same isolated directory under its time budget.
+
+The outer starting-observation guard freezes available partial fields rather than replacing the
+entire baseline with null. Its diagnostics add `outer_status` (`outer_timeout` or `worker_error`)
+and `outer_budget_ms`. It remains a best-effort observation: filesystem setup/cleanup and OS process
+creation are not a hard real-time guarantee. An unavailable field does not invalidate a separately
+observed commit or diffstat. Their provenance remains local Git, while normalized tool evidence
+has its separate provenance; agent narration is never promoted to independently observed Git.
+Inspect the affected phase/probe to distinguish command failure from skipped work. For time/output
+limits, reduce unrelated checkout activity or inspect repository status separately; Harflow keeps
+its bounds and does not infer the missing result. Optional observation failures never change the
+task's completion status.
+
 [Task artifact registrations](task-artifacts.md) are separate metadata references.
 A task may register a report and later fail; neither registration nor current path
 availability establishes successful execution or content validity.

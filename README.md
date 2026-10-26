@@ -12,6 +12,11 @@ Version 0.0.2 is a pre-release. [Harflow](https://github.com/Harflow-Dev/Harflow
 
 Detached task owners preserve output capture and live input across MCP server restarts.
 Workflow scheduler recovery is explicit; see [supervision and recovery](docs/supervision.md).
+Task status distinguishes the dispatching server, execution owner and responding server.
+A normal attachment to a task launched by this server is not recovered; another observer or missing
+identity is explained explicitly. See [supervision and recovery](docs/supervision.md).
+Git outcomes retain partial observations with per-probe failure and budget diagnostics; see
+[observed task outcomes](docs/task-outcomes.md).
 Task observations retry transient metadata replacements up to three reads and retain uncertainty
 when metadata cannot be read reliably.
 Recovered tasks disclose owner/process uncertainty and capture continuity. Qualified Claude

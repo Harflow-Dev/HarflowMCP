@@ -121,6 +121,7 @@ class World:
         stack.enter_context(mock.patch.object(store, "datetime", SeededDatetime))
         stack.enter_context(mock.patch("uuid.uuid4", self.next_uuid))
         stack.enter_context(mock.patch.object(identity, "identity_check", lambda _identity: self.facts["identity"]))
+        stack.enter_context(mock.patch.object(identity, "own_identity", lambda: {"pid": 6789, "start_time": "responding-server-start", "markers": []}))
         stack.enter_context(mock.patch.object(lineage, "detect_caller_detail", lambda *_a, **_k: SimpleNamespace(caller=None, undecidable=self.facts["undecidable"])))
         stack.enter_context(mock.patch.object(ctl, "default_log_dir", lambda: self.tasks_dir))
         stack.enter_context(state_ownership.state_session(resolve_layout(root=self.root)))

@@ -186,7 +186,7 @@ async def launch(registry, invocation, kwargs):
     from .extra_paths import serialize_paths
     from .task_attachment import AttachedTask
     task_id = store.validate_task_id(kwargs.get('task_id') or str(uuid.uuid4()))
-    kwargs = dict(kwargs, task_id=task_id)
+    kwargs = dict(kwargs, task_id=task_id, dispatch_origin=registry._owner)
     backend = kwargs.pop('backend')
     # Resolve only registered backend keys in the child. Test object injection uses local mode.
     from .backends import get
@@ -206,6 +206,8 @@ async def launch(registry, invocation, kwargs):
                'backend': backend.name, 'invocation': request_invocation, 'grants': grants, 'kwargs': kwargs}
     configuration = dict(request)
     configuration.pop('generation')
+    # Observer provenance does not change the authorized execution configuration.
+    configuration['kwargs'] = {key: value for key, value in kwargs.items() if key != 'dispatch_origin'}
     configuration_hash = hashlib.sha256(json.dumps(configuration, ensure_ascii=False, allow_nan=False).encode()).hexdigest()
     raw = json.dumps(request, ensure_ascii=False, allow_nan=False).encode()
     if len(raw) > MAX_REQUEST:

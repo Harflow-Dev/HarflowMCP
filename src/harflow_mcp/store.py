@@ -122,9 +122,9 @@ class TaskRecord:
     so it is null ("pending") until that capture lands, and null forever for a record written
     before this field existed. Paired with `markers` for `identity.identity_check`."""
     owner: dict[str, Any] | None = None
-    """The bridge server process that dispatched this task — `identity.own_identity()` at spawn.
-    Distinct from `pid`/`pgid`, which identify the task's own subprocess, not the server that
-    started it. None for a record written before this field existed."""
+    """Execution/output-capture owner, distinct from the agent and responding server."""
+    dispatch_origin: dict[str, Any] | None = None
+    """Server process that requested execution; absent on older task records."""
     base_commit: str | None = None
     """`git rev-parse HEAD` in the repo at spawn, before the agent ran — None if the repo had no
     commit yet, or the probe failed or timed out."""
@@ -461,13 +461,15 @@ def listing_header(record: TaskRecord) -> tuple[dict[str, Any], float, bool]:
     """Listing metadata only: never reconstruct an outcome by replaying a stream."""
     keys = ('task_id', 'backend', 'session_id', 'repo_path', 'status', 'freedom', 'started_at',
             'parent_task_id', 'continuation_of_task_id', 'chain_root_task_id', 'spawned_by', 'root_task_id', 'depth', 'max_depth', 'group', 'title',
-            'lineage_detected', 'live_input', 'workflow_builder', 'owner', 'finished_at')
+            'lineage_detected', 'live_input', 'workflow_builder', 'owner', 'dispatch_origin', 'finished_at')
     header = {key: getattr(record, key) for key in keys}
     for key, value in list(header.items()):
         if isinstance(value, str):
             header[key] = value[:1000]
     if isinstance(record.owner, dict):
         header['owner'] = {key: value for key, value in record.owner.items() if key in {'pid', 'start_time'}}
+    if isinstance(record.dispatch_origin, dict):
+        header['dispatch_origin'] = {key: value for key, value in record.dispatch_origin.items() if key in {'pid', 'start_time'}}
     try:
         duration = _duration_seconds(record, record.finished_at)
     except (TypeError, ValueError):
@@ -476,7 +478,8 @@ def listing_header(record: TaskRecord) -> tuple[dict[str, Any], float, bool]:
                   output_capture='unknown' if outcome_unobserved(record) else 'observed_terminal',
                   input_channel=('unknown' if outcome_unobserved(record) else 'closed') if record.live_input else 'not_applicable',
                   last_captured_output_at=None)
-    header.update(recovered=True, duration_seconds=duration, notices=[str(n)[:500] for n in record.bridge_notices[:4]])
+    header.update(duration_seconds=duration, notices=[str(n)[:500] for n in record.bridge_notices[:4]])
+    header.update(supervision.observation_fields(record))
     unobserved = outcome_unobserved(record)
     header.update(persisted_status=record.status, observed_exit=not unobserved, needs_reconciliation=unobserved, status_reconciled=False, process_identity_state=None)
     if unobserved:
@@ -735,7 +738,12 @@ def list_page(log_dir: Path, *, limit: int = 100, cursor: str | None = None, act
             related.append(header)
             queue[0:0] = [header[key] for key in ('parent_task_id', 'continuation_of_task_id', 'chain_root_task_id', 'spawned_by', 'root_task_id') if header.get(key) and header[key] not in visited]
         apply_read_state(page, catalog.state(db))
-    page['related_headers'] = related
+    from types import SimpleNamespace
+    for item in [*page['items'], *related]:
+        if not item.get('needs_direct_lookup'):
+            item.update(supervision.observation_fields(SimpleNamespace(**item)))
+    page['items'] = [bound_header(item) for item in page['items']]
+    page['related_headers'] = [bound_header(item) for item in related]
     return page
 
 
@@ -1062,7 +1070,7 @@ def _notices(record: TaskRecord, state: Accumulator) -> list[str]:
 
 
 @task_operation
-def snapshot(log_dir: Path, record: TaskRecord, *, _replay_provider=None) -> dict[str, Any]:
+def snapshot(log_dir: Path, record: TaskRecord, *, _replay_provider=None, responding_server=None) -> dict[str, Any]:
     """A recovered task's state, shaped like a live snapshot so callers need no special casing."""
     from . import artifacts, recovery_activity
     qualified = read(log_dir, record.task_id, include_prompt=False)
@@ -1098,7 +1106,7 @@ def snapshot(log_dir: Path, record: TaskRecord, *, _replay_provider=None) -> dic
     from . import followups
     queued_followups = followups.view(log_dir, record.task_id)
     from . import approvals
-    supervision_fields = supervision.fields(record, log_path(log_dir, record.task_id), observed_terminal=record.status in TERMINAL_RECORD_STATUSES and not outcome_unobserved(record))
+    supervision_fields = supervision.fields(record, log_path(log_dir, record.task_id), observed_terminal=record.status in TERMINAL_RECORD_STATUSES and not outcome_unobserved(record), responding_server=responding_server)
     approved_writes, write_notice = approvals.backend_approved_writes(log_dir, record.task_id, get_backend(record.backend)) if record.caller_write_approvals else ([], None)
     denials, denial_categories = classified_denials(get_backend(record.backend), state, record.freedom)
     return {
@@ -1169,13 +1177,12 @@ def snapshot(log_dir: Path, record: TaskRecord, *, _replay_provider=None) -> dic
         "extra_path_certification": record.extra_path_certification,
         "allowed_commands": list(record.allowed_commands),
         "metadata_persisted": True,
-        "recovered": True,
-        "note": note,
+        "note": (supervision_fields["observation_note"] if not supervision_fields["recovered"] and (owned or supervision_fields["output_capture"] == "observed_terminal") else note),
     } | control.taken_over_fields(log_dir, record.task_id)
 
 
 @task_operation
-def brief(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
+def brief(log_dir: Path, record: TaskRecord, *, responding_server=None) -> dict[str, Any]:
     """Listing shape for a recovered task, using the same status resolution as `snapshot`.
 
     Carries the bridge's own notices but not the backend's, matching `Task.brief` so `list_tasks`
@@ -1195,7 +1202,7 @@ def brief(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
         "interaction_owner": record.interaction_owner,
         "approval_summary": approvals.summary(log_dir, record.task_id),
         "task_id": record.task_id,
-        **supervision.fields(record, log_path(log_dir, record.task_id), observed_terminal=record.status in TERMINAL_RECORD_STATUSES and not outcome_unobserved(record)),
+        **supervision.fields(record, log_path(log_dir, record.task_id), observed_terminal=record.status in TERMINAL_RECORD_STATUSES and not outcome_unobserved(record), responding_server=responding_server),
         "workflow_builder": record.workflow_builder,
         "backend": record.backend,
         "session_id": record.session_id,
@@ -1224,7 +1231,6 @@ def brief(log_dir: Path, record: TaskRecord) -> dict[str, Any]:
         "owner": record.owner,
         "owned_by_live_server": owned if status == "running" else None,
         "metadata_persisted": True,
-        "recovered": True,
     } | control.taken_over_fields(log_dir, record.task_id)
 
 

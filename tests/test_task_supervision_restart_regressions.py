@@ -45,6 +45,9 @@ async def test_supervised_observer_restart_sends_live_input_without_duplicate_ex
     task_id = "1" * 32
     task = await first.start("slow 2 first", tmp_path, backend=get("claude"), freedom="read_only", task_id=task_id)
     await _wait_for(lambda: store.read(log_dir, task.task_id) is not None)
+    persisted = task_supervision.read_task_record(log_dir, task.task_id)
+    assert persisted.dispatch_origin == first._owner
+    assert persisted.owner != persisted.dispatch_origin
     identities.alive(task_supervision.read_task_record(log_dir, task.task_id).owner["pid"])
     attached = second.attach(task.task_id)
     assert attached is not None

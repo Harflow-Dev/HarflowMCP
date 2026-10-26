@@ -2,6 +2,9 @@
 
 ## 0.0.2
 
+- Distinguish dispatch origin, detached execution owner and responding server so normal fresh attachments are not labelled recovered; retain explicit unknown identity and independent liveness evidence (#54).
+- Preserve partial Git observations, report bounded phase/probe diagnostics and fix large packed-refs status inspection without increasing probe budgets (#55).
+
 - Explain sealed live input without calling a still-running task finished, retain closure reasons, and expose paged reverse resume/continuation links (#47).
 - Add neutral publication intent with a deprecated identical alias, report the checkout sampled at dispatch, and accept validated unrestricted extra paths as a disclosed no-op across launch and recovery (#49).
 - Disclose Claude plan-mode file writes and record successful observed built-in plans as metadata-only artifacts; qualify the behavior with no-paid Claude 2.1.310 probes (#50).

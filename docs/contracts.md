@@ -370,4 +370,25 @@ unavailable; downgrade readers cannot inspect those manifests, and must not rewr
 updated engine to read them. This private-format extension is distinct from additive status fields.
 The public artifact page retains its existing structure, adding a registrar method string and its
 evidence ID. The Mac artifact decoder accepts registrar strings and extra provenance fields, so no
-Mac fixture or version-gate update is required; canonical `contracts/v1` fixtures remain unchanged.
+Mac fixture or version-gate update is required; this plan-provenance extension itself does not alter canonical fixtures.
+
+### Observer identity and Git diagnostics
+
+Task status, brief and list projections add bounded `dispatch_origin`, `responding_server`,
+`observation_mode` and `observation_note`. `owner` retains its execution-owner meaning. The
+optional private task field `dispatch_origin` is qualified like a process identity and is carried
+through the private launch transfer. Older records with no origin remain readable and report
+unknown observation continuity. These diagnostic fields do not authorize any state mutation.
+`recovered` now reflects the observer relationship, with conservative true for unknown identity;
+see [supervision](supervision.md#dispatch-origin-owner-and-responding-server).
+
+Outcome baseline/terminal objects add optional `observation_status` and bounded `diagnostics`;
+the outcome root adds capture diagnostics. Each diagnostic uses a phase, millisecond budgets and
+timings, and at most 16 probe entries with bounded labels/categories and optional numeric byte
+counts/return codes. Outer baseline interruption can retain partial evidence and name its outer
+status/budget. Existing outcome fields and attribution/provenance semantics are unchanged.
+
+These are additive v1 response fields; decoders and version gates remain unchanged. Canonical
+approval-status fixtures include the observer projections, using an isolated deterministic
+responding identity, and the Mac repository vendors the byte-identical complete bundle. Engine
+fixtures are generated first; consumer decoding is then verified against the new manifest digest.

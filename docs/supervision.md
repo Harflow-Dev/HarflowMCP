@@ -128,3 +128,29 @@ capture while stdout continues draining; status notices disclose the lost captur
 retain the last successfully replaced record. No exit receipt or task success is fabricated if it
 cannot be persisted. Recovery may show uncertain status or incomplete output until disk access is
 restored; in-memory output and files whose writes never succeeded cannot be reconstructed.
+
+## Dispatch origin, owner and responding server
+
+`owner` identifies the process that executes the agent and captures output; it is normally a
+separate detached process, so its PID can differ from the MCP server immediately after startup.
+Optional persisted `dispatch_origin` identifies the server that requested that execution.
+`responding_server` identifies the process serving the current observation. Display projections
+include only PID and process start time for the latter two identities. These are diagnostic roles,
+not caller authentication or additional execution authority.
+
+`observation_mode` and `observation_note` explain their relationship:
+
+- `owner`: the responding process is the execution owner.
+- `attached`: the responding process matches the recorded dispatch origin; this is normal detached
+  operation, including a task that finishes before its first status request.
+- `recovered`: a different responding process is reading a task with a known origin. This does not
+  establish that either process died or that execution ownership changed.
+- `unknown`: origin or responder process-generation evidence is missing. Old records remain valid;
+  Harflow does not invent an origin or infer a restart.
+
+Matching requires PID and nonempty process start time, so PID reuse does not establish continuity.
+`recovered` is false for owner/attached, true for recovered/unknown for conservative compatibility.
+Use `observation_mode` rather than treating that boolean as proof of a crash. Actual owner/process
+liveness and capture continuity remain separate `supervision` evidence. Responding identity is
+recomputed for snapshot, brief, compact and indexed-list reads; cached headers do not establish
+which server is responding now. A size-pruned origin yields unknown rather than a continuity claim.

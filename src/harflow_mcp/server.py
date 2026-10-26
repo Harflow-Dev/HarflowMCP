@@ -940,9 +940,11 @@ async def get_task_status(
     cost nor tokens nor a turn count).
 
     `enforcement` states what the run's restrictions actually amounted to, and `mcp_servers` (where
-    the backend reports them) shows what the agent loaded. Tasks started by an earlier harflow_mcp
-    server process are still reported, marked `recovered: true` with a `note` explaining what is and
-    is not known about them.
+    the backend reports them) shows what the agent loaded. `owner` identifies execution/output
+    capture; `dispatch_origin` and dynamic `responding_server` distinguish the requester from this
+    reader. `observation_mode` is owner, attached, recovered or unknown. A same-origin normal
+    attachment reports `recovered: false`; another reader or missing process-generation evidence
+    reports true with an explanation. PID differences alone do not establish owner loss.
 
     Live, recovered and brief snapshots include `artifact_summary` with a bounded `count` and
     `state` (available or unavailable). Supported standalone owners may include `detail_ref`:
@@ -962,7 +964,8 @@ async def get_task_status(
     a running status during settlement does not authorize a replacement dispatch.
 
     Terminal `outcome` records starting and ending Git observations, commits and diff statistics,
-    local upstream comparison, and best-effort structured tool evidence for external file writes
+    local upstream comparison, optional bounded phase/probe diagnostics and partial-result status,
+    and best-effort structured tool evidence for external file writes
     and the last build/test command. Missing evidence is null, including pushed state without
     observed publication evidence. These shared-repository observations do not establish task
     authorship or goal completion. Old records without captured outcomes return null.

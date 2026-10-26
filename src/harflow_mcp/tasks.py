@@ -782,8 +782,9 @@ class Task:
     """This task's own process start time, from `identity.capture` shortly after spawn. Null
     ("pending") until that capture lands — see `_spawn` — so `identity.identity_check` on a record
     with a null `start_time` falls back to its legacy pid+markers comparison."""
+    dispatch_origin: dict[str, Any] | None = None
     owner: dict[str, Any] | None = None
-    """The bridge server process that dispatched this task — `identity.own_identity()` at spawn."""
+    """The process owning execution/output capture, separate from the dispatching server."""
     base_commit: str | None = None
     """`git rev-parse HEAD` in the repo at spawn, before the agent ran. None if the repo had no
     commit yet, or the probe failed or timed out."""
@@ -1696,6 +1697,7 @@ class TaskRegistry:
         invocation: Invocation,
         *,
         extra_path_grants: tuple = (),
+        dispatch_origin: dict[str, Any] | None = None,
         backend: Backend,
         prompt: str,
         repo_path: Path,
@@ -1860,19 +1862,24 @@ class TaskRegistry:
             # own bounded wait rather than piggybacking on a budget sized for a check some dispatches
             # skip outright. Still strictly before the spawn, so it cannot introduce an await into the
             # no-await window between `create_subprocess_exec` and registration below.
+            from .task_outcomes import baseline, empty_baseline, interrupted_baseline
+            partial_baseline = empty_baseline()
             try:
-                from .task_outcomes import baseline
                 git_baseline = await asyncio.wait_for(
-                    asyncio.to_thread(baseline, repo_path), timeout=GIT_BASELINE_BUDGET_SECONDS + 0.2
+                    asyncio.to_thread(baseline, repo_path, partial_baseline), timeout=GIT_BASELINE_BUDGET_SECONDS + 0.2
                 )
                 base_commit = git_baseline["head"]
                 observed_status = git_baseline["working_tree_status"]
                 start_dirty = bool(observed_status) if observed_status is not None else None
             except StateOwnershipError:
                 raise
-            except Exception:
-                base_commit, start_dirty = None, None
-                git_baseline = None
+            except Exception as exc:
+                git_baseline = interrupted_baseline(partial_baseline,
+                    "outer_timeout" if isinstance(exc, TimeoutError) else "worker_error",
+                    GIT_BASELINE_BUDGET_SECONDS + 0.2)
+                base_commit = git_baseline["head"]
+                observed_status = git_baseline["working_tree_status"]
+                start_dirty = bool(observed_status) if observed_status is not None else None
 
             # Allocate after initial probes. Final authority reads may await below; the enclosing
             # cleanup boundary removes scratch on timeout, refusal or cancellation.
@@ -1980,6 +1987,7 @@ class TaskRegistry:
             pgid=proc.pid,
             bridge_notices=bridge_notices,
             owner=self._owner,
+            dispatch_origin=dispatch_origin if dispatch_origin is not None else self._owner,
             base_commit=base_commit,
             start_dirty=start_dirty,
             git_baseline=git_baseline,
@@ -2885,6 +2893,7 @@ class TaskRegistry:
                 bridge_notices=list(task.bridge_notices),
                 start_time=task.start_time,
                 owner=dict(task.owner) if task.owner is not None else None,
+                dispatch_origin=dict(task.dispatch_origin) if task.dispatch_origin is not None else None,
                 base_commit=task.base_commit,
                 start_dirty=task.start_dirty,
                 git_baseline=task.git_baseline,

@@ -122,12 +122,14 @@ def qualify_payload(payload: Any, task_id: str, record_type: type) -> Any:
         record = record_type(**payload)
         if record.task_id != task_id:
             raise ValueError("Task document id does not match source id")
-        if record.owner is not None:
-            if not {"pid", "start_time", "markers"} <= record.owner.keys():
-                raise ValueError("Incomplete process owner")
-            _shape(record.owner, {"pid": int, "start_time": str | None, "markers": list[str]}, "owner")
-            if record.owner["pid"] <= 0:
-                raise ValueError("Invalid process owner pid")
+        for identity_key in ("owner", "dispatch_origin"):
+            value = getattr(record, identity_key)
+            if value is not None:
+                if not {"pid", "start_time", "markers"} <= value.keys():
+                    raise ValueError(f"Incomplete process {identity_key}")
+                _shape(value, {"pid": int, "start_time": str | None, "markers": list[str]}, identity_key)
+                if value["pid"] <= 0:
+                    raise ValueError(f"Invalid process {identity_key} pid")
         for key in ("pid", "pgid", "max_turns"):
             if getattr(record, key) is not None and getattr(record, key) <= 0:
                 raise ValueError(f"Invalid task.{key}")

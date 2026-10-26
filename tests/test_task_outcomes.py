@@ -193,3 +193,146 @@ def test_local_git_environment_contract_is_covered():
     local_names = subprocess.run(['git', 'rev-parse', '--local-env-vars'], check=True,
         capture_output=True, text=True).stdout.splitlines()
     assert set(local_names) <= GIT_LOCAL_ENV
+
+
+def test_large_packed_refs_are_bounded_inputs_not_retained_output(tmp_path):
+    from harflow_mcp.task_outcomes import MAX_OUTPUT
+    repo = repository(tmp_path)
+    head = git(repo, 'rev-parse', 'HEAD')
+    packed = '# pack-refs with: peeled fully-peeled sorted\n' + ''.join(
+        f'{head} refs/tags/representative-{index:06d}\n' for index in range(5000))
+    assert len(packed.encode()) > MAX_OUTPUT
+    (repo / '.git' / 'packed-refs').write_text(packed)
+    result = baseline(repo)
+    assert result['working_tree_status'] == ''
+    assert result['observation_status'] == 'success'
+    assert result['error'] is None
+    labels = [item['probe'] for item in result['diagnostics']['probes']]
+    assert 'rev-parse --verify HEAD' in labels
+    assert 'rev-parse --show-toplevel' in labels
+    assert 'rev-parse --absolute-git-dir' in labels
+    assert 'rev-parse --path-format=absolute --git-common-dir' in labels
+    assert 'rev-parse --show-object-format' in labels
+
+
+def test_git_probe_failure_error_and_output_limit_are_distinct(tmp_path, monkeypatch):
+    import harflow_mcp.task_outcomes as outcomes
+    probe = outcomes.GitProbe(tmp_path)
+    assert probe.read('rev-parse', '--verify', 'HEAD') is None
+    assert probe.diagnostics[-1]['status'] == 'git_failure'
+    assert probe.diagnostics[-1]['returncode'] != 0
+    monkeypatch.setattr(outcomes, 'MAX_OUTPUT', 2)
+    assert probe.read('--version') is None
+    assert probe.diagnostics[-1]['status'] == 'output_limit'
+    def unavailable(*args, **kwargs):
+        raise FileNotFoundError('not retained')
+    monkeypatch.setattr(outcomes.subprocess, 'Popen', unavailable)
+    assert probe.read('--version') is None
+    assert probe.diagnostics[-1]['status'] == 'error'
+    assert probe.diagnostics[-1]['error_type'] == 'FileNotFoundError'
+    assert 'not retained' not in str(probe.diagnostics)
+
+
+def test_git_probe_exhausted_budget_does_not_spawn(tmp_path, monkeypatch):
+    import harflow_mcp.task_outcomes as outcomes
+    probe = outcomes.GitProbe(tmp_path)
+    probe.deadline = 0
+    def forbidden(*args, **kwargs):
+        pytest.fail('Git must not start after budget exhaustion')
+    monkeypatch.setattr(outcomes.subprocess, 'Popen', forbidden)
+    assert probe.read('--version') is None
+    assert probe.diagnostics[-1]['status'] == 'skipped_budget_exhausted'
+
+
+def test_git_probe_rechecks_budget_after_temporary_file_setup(tmp_path, monkeypatch):
+    import harflow_mcp.task_outcomes as outcomes
+    probe = outcomes.GitProbe(tmp_path)
+    original = outcomes.tempfile.TemporaryFile
+    def delayed_setup(*args, **kwargs):
+        probe.deadline = 0
+        return original(*args, **kwargs)
+    monkeypatch.setattr(outcomes.tempfile, 'TemporaryFile', delayed_setup)
+    def forbidden(*args, **kwargs):
+        pytest.fail('Git must not start after setup consumed budget')
+    monkeypatch.setattr(outcomes.subprocess, 'Popen', forbidden)
+    assert probe.read('--version') is None
+    assert probe.diagnostics[-1]['status'] == 'skipped_budget_exhausted'
+
+
+def test_git_probe_timeout_then_skipped_preserves_bounded_diagnostics(tmp_path, monkeypatch):
+    import sys
+    import time
+    import harflow_mcp.task_outcomes as outcomes
+    original = subprocess.Popen
+    def slow(*args, **kwargs):
+        return original([sys.executable, '-c', 'import time; time.sleep(5)'], **kwargs)
+    monkeypatch.setattr(outcomes.subprocess, 'Popen', slow)
+    probe = outcomes.GitProbe(tmp_path)
+    probe.deadline = time.monotonic() + 0.05
+    started = time.monotonic()
+    assert probe.read('--version') is None
+    assert probe.read('--version') is None
+    assert time.monotonic() - started < 1
+    assert [item['status'] for item in probe.diagnostics] == ['time_limit', 'skipped_budget_exhausted']
+
+
+def test_partial_terminal_status_keeps_committed_range(tmp_path, monkeypatch):
+    import harflow_mcp.task_outcomes as outcomes
+    repo = repository(tmp_path)
+    start = baseline(repo)
+    (repo / 'file').write_text('next\n')
+    git(repo, 'add', 'file')
+    git(repo, 'commit', '-m', 'next')
+    def unavailable_status(self, worktree=None):
+        self.diagnostics.append({'probe': 'status', 'status': 'time_limit', 'elapsed_ms': 1500})
+        return None
+    monkeypatch.setattr(outcomes.GitProbe, 'status', unavailable_status)
+    result = capture(repo, start, {})
+    assert result['terminal']['observation_status'] == 'partial'
+    assert result['terminal']['diagnostics']['phase'] == 'terminal'
+    assert result['terminal']['working_tree_status'] is None
+    assert result['terminal']['head'] == git(repo, 'rev-parse', 'HEAD')
+    assert result['new_commits'] == [result['head_commit']]
+    assert 'file' in result['committed_diff_stat']
+    assert result['diagnostics']['phase'] == 'capture'
+    assert 'time_limit' in result['terminal']['error']
+
+
+def test_outer_timeout_freezes_partial_without_later_worker_mutation():
+    from harflow_mcp.task_outcomes import empty_baseline, interrupted_baseline
+    partial = empty_baseline()
+    partial.update(head='observed', diagnostics={'phase': 'baseline', 'probes': [
+        {'probe': 'rev-parse --verify HEAD', 'status': 'success'}]})
+    result = interrupted_baseline(partial, 'outer_timeout', 1.7)
+    partial['head'] = 'later'
+    partial['diagnostics']['probes'].append({'probe': 'status', 'status': 'success'})
+    assert result['head'] == 'observed'
+    assert result['observation_status'] == 'partial'
+    assert len(result['diagnostics']['probes']) == 1
+    assert result['diagnostics']['outer_status'] == 'outer_timeout'
+    assert result['diagnostics']['outer_budget_ms'] == 1700
+
+
+def test_non_git_and_missing_git_report_baseline_terminal_and_capture_failure(tmp_path, monkeypatch):
+    start = baseline(tmp_path)
+    assert start['observation_status'] == 'unavailable'
+    assert all(item['status'] == 'git_failure' for item in start['diagnostics']['probes'])
+    monkeypatch.setenv('PATH', str(tmp_path))
+    result = capture(tmp_path, start, {})
+    assert result['terminal']['observation_status'] == 'unavailable'
+    assert all(item['status'] == 'error' for item in result['terminal']['diagnostics']['probes'])
+    assert result['terminal']['error'] == 'working tree observation unavailable: error'
+    assert result['diagnostics']['probes'][0]['error_type'] == 'FileNotFoundError'
+    assert result['baseline'] is start
+    assert result['head_commit'] is None
+    assert result['new_commits'] is None
+
+
+def test_exhausted_baseline_reports_skipped_probes_and_retains_provenance(tmp_path, monkeypatch):
+    import harflow_mcp.task_outcomes as outcomes
+    monkeypatch.setattr(outcomes, 'BUDGET', 0)
+    result = baseline(tmp_path)
+    assert result['observation_status'] == 'unavailable'
+    assert result['diagnostics']['budget_ms'] == 0
+    assert all(item['status'] == 'skipped_budget_exhausted' for item in result['diagnostics']['probes'])
+    assert result['provenance'] == 'local Git observation with executable filters disabled'

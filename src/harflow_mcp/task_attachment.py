@@ -85,12 +85,16 @@ class AttachedTask:
             payload['notices'] = [*payload.get('notices', []), *self._observer_notices]
         return payload
 
+    def _responding_server(self):
+        registry = self._registry() if self._registry is not None else None
+        return getattr(registry, '_owner', None) if registry is not None else None
+
     def brief(self):
-        return self._with_observer_notices(self._view(store.brief))
+        return self._with_observer_notices(self._view(lambda directory, record: store.brief(directory, record, responding_server=self._responding_server())))
 
     def snapshot(self):
         from .attached_replay import replay
-        return self._with_observer_notices(self._view(lambda directory, record: store.snapshot(directory, record, _replay_provider=replay)))
+        return self._with_observer_notices(self._view(lambda directory, record: store.snapshot(directory, record, _replay_provider=replay, responding_server=self._responding_server())))
 
     @property
     def acc(self):
