@@ -231,7 +231,31 @@ rather than reasoning about it, and record the new measurements here. Do not "ti
   silent no-op on them. `max` — the value opencode's own `--help` gives as an example — appears in no
   model's variant list.
 
-**vibe (Mistral Vibe CLI 2.25.1)**
+**vibe 3.0.1 (requalified 2026-10-26, isolated HOME/VIBE_HOME and loopback fake provider)**
+- Installed Python launcher unconditionally execs the bundled Rust CLI; `VIBE_CLI=python` is
+  ignored. Harflow retains that harmless selector for older launchers, without claiming all older
+  releases support the current profile. `plan` is removed; `read_only` now selects `ask`.
+- `ask` is an approval policy, not a read-only write-tool exclusion. Inherited user/project
+  policies or a custom ask profile can pre-approve writes. No OS boundary or confinement is claimed.
+- Actual streamed start, explicit session resume and 40,005-byte one-shot stdin all exit 0;
+  `sessionId`, `turnId`, `source: turn_start` and assistant text are compatible with the parser.
+  The measured resume emitted live entries only; the parser still excludes historical replay.
+- A scripted Bash mutation needing approval emits a matching-turn approval callback and failed
+  `file_system.bash` effect; no file is created. The existing denial parser accepts that shape.
+  A later scripted answer exits 0 and classifies completed with the denial retained. Setting
+  inherited `[tools.bash] permission="always"` allows that same mutation under `ask`, measured.
+- A one-turn cap after a tool call exits 3 with stderr `Stopped: turn_limit`, without an assistant
+  stop envelope. Nonzero-exit classification already reports failed; historical stop-envelope
+  handling remains for older streams. Vibe 3 caps are not automatically continued: only the
+  older structured stop-envelope signal is certified for continuation. A provider usage-limit
+  response (HTTP 402, fake `usage_limit` body, retry budget 0.1 seconds) is also a failed run
+  and never automatically continued. This does not qualify HTTP 429 retry timing.
+- Reproducible no-paid qualification: `HARFLOW_CLI_INTEGRATION=1 uv run pytest tests/test_vibe_cli.py`.
+  Provider traffic is scripted on localhost with a custom local model and isolated configuration;
+  this does not qualify paid-provider authentication, model reasoning or arbitrary user profiles.
+
+**Historical vibe (Mistral Vibe CLI 2.25.1; superseded where stated above)**
+
 - **Select the Python entrypoint for headless dispatch (2.26.1, 2026-10-24).** The installed
   `launcher.py` dispatches `VIBE_CLI=python` to the Python entrypoint and `VIBE_CLI=rust` to Rust.
   With no selector, it follows the cached GrowthBook `vibe_cli_rust_tui_rollout`; the default

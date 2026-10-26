@@ -81,7 +81,7 @@ or move verification to a suitable node.
 | Claude Code | `plan`; direct Git commit/push deny patterns | `acceptEdits`; same deny patterns (plus any `allowed_commands`, which cannot override them) | `acceptEdits`; Git commit/push allow rules only, with bridge deny patterns removed | `bypassPermissions`; bridge allow/deny patterns omitted |
 | Codex | `read-only` OS sandbox | `workspace-write`; network off by default | `workspace-write`; network on by default | `danger-full-access` |
 | OpenCode | `plan` agent | `build` agent | `build` agent; same mechanism as local writing | `build` plus `--auto` |
-| Vibe | `plan` profile | `accept-edits` profile | `auto-approve`; same mechanism as unrestricted | `auto-approve` profile |
+| Vibe | `ask` approval profile (not a write-tool exclusion) | `accept-edits` profile | `auto-approve`; same mechanism as unrestricted | `auto-approve` profile |
 | Antigravity | `--mode plan` | `--mode accept-edits` | `--dangerously-skip-permissions`; same mechanism as unrestricted | `--dangerously-skip-permissions` |
 
 These levels authorize an assignment; they do not make the five harnesses equally confined:
@@ -96,8 +96,8 @@ These levels authorize an assignment; they do not make the five harnesses equall
 - **OpenCode:** no bridge OS sandbox. The measured plan agent declined writes; that observation
   establishes model restraint, not guaranteed tool enforcement. Build already writes without
   `--auto`; auto-approval only affects requests that would otherwise ask and does not override denies.
-- **Vibe:** no bridge OS sandbox. Plan restricts edit tools, but Bash still follows user rules;
-  permissive Bash can allow mutations. Accept-edits approves edit tools but leaves Bash approval
+- **Vibe:** no bridge OS sandbox. `ask` is an approval policy without a read-only write-tool exclusion;
+  inherited user/project policies or custom profiles can pre-approve mutations, including Bash. Accept-edits approves edit tools but leaves Bash approval
   separate. Publish auto-approves tools broadly, rather than adding a narrow publishing exception.
 - **Antigravity:** no bridge OS sandbox. Plan/accept-edits use the harness permission layer and
   settings. Builds/tests can be denied as mutating commands unless allowed. Publish bypasses the
@@ -667,8 +667,7 @@ Read-only restricts agent tools according to each backend; it does not mean the 
 no state. Harness-owned session history, logs and configuration can persist in user state
 directories even when tool writes are sandboxed. Claude plan mode additionally permits its built-in
 plan file under `~/.claude/plans`, `CLAUDE_CONFIG_DIR/plans`, or a project-contained
-`plansDirectory` from settings. Enforcement explicitly discloses this exception. Vibe's read-only
-caveat already names its built-in plans-directory exception; its shell is not an OS boundary.
+`plansDirectory` from settings. Enforcement explicitly discloses this exception. Vibe's `ask` profile does not impose a read-only write-tool exclusion; its shell is not an OS boundary.
 Other agent-level modes must not be read as universal filesystem-write guarantees.
 
 Claude 2.1.310 accepts custom plan directories only within the project root, so this implementation

@@ -980,12 +980,12 @@ LEGACY_ARGV: dict[str, dict[str, dict[str, list[str]]]] = {
     "vibe": {
         "read_only": {
             "start": [
-                "vibe", "--output", "streaming", "--trust", "--agent", "plan",
+                "vibe", "--output", "streaming", "--trust", "--agent", "ask",
                 "--workdir", "/tmp/repo",
                 "--prompt=do a thing",
             ],
             "resume": [
-                "vibe", "--output", "streaming", "--trust", "--agent", "plan",
+                "vibe", "--output", "streaming", "--trust", "--agent", "ask",
                 "--workdir", "/tmp/repo", "--resume", "abc-123",
                 "--prompt=more",
             ],
@@ -2251,7 +2251,7 @@ def with_extra_vibe_options(argv: list[str], *extra: str) -> list[str]:
 
 @pytest.mark.parametrize(
     ("freedom", "agent"),
-    [("read_only", "plan"), ("write_in_repo", "accept-edits"), ("publish", "auto-approve"),
+    [("read_only", "ask"), ("write_in_repo", "accept-edits"), ("publish", "auto-approve"),
      ("unrestricted", "auto-approve")],
 )
 def test_vibe_freedom_maps_to_an_agent(freedom: str, agent: str) -> None:
@@ -2391,9 +2391,11 @@ def test_vibe_refuses_a_workdir_value_that_looks_like_an_option() -> None:
         VibeBackend().assert_safe(inv(argv), "write_in_repo")
 
 
-def test_vibe_plan_caveat_states_that_bash_is_still_governed_by_the_users_config() -> None:
+def test_vibe_ask_caveat_discloses_inherited_write_approvals() -> None:
     caveats = " ".join(VibeBackend().enforcement("read_only").caveats)
     assert "bash" in caveats.lower()
+    assert "not a read-only write-tool exclusion" in caveats
+    assert "custom ask profile" in caveats
 
 
 def test_vibe_reasoning_effort_caveat_explains_why_it_is_config_only() -> None:

@@ -1,7 +1,7 @@
 """Mistral vibe backend.
 
-CLI facts established by measurement (vibe 2.25.1), not assumption — see also the plan that
-introduced this module and CLAUDE.md's per-CLI section.
+Current invocation qualified on Vibe 3.0.1; stream handling also retains measured Vibe 2.25.1
+behavior. See docs/backend-cli-facts.md for current and historical qualification.
 
 **Invocation and stdin**
 * `get_prompt_from_stdin()` runs unconditionally before mode dispatch and reads `sys.stdin` whenever
@@ -90,10 +90,9 @@ introduced this module and CLAUDE.md's per-CLI section.
   closes — stated here rather than left implied.
 
 **Freedom levers** (`vibe/core/agents/models.py`)
-* `--agent plan` sets `write_file`/`edit` to `permission: "never"` (allowlisted only inside the plans
-  dir) — a real refusal. **But `bash` is untouched**, falling back to the user's own `[tools.bash]`
-  config; a user with `permission = "always"` there could still write via `bash`. So
-  `writes_confined` is **False** at every freedom.
+* `--agent ask` is the approval policy used for read_only (Vibe 3 removed plan). It does not
+  exclude write tools. Inherited user/project policies or a custom ask profile can pre-approve
+  writes; `writes_confined` remains False. Programmatic requests needing approval are denied.
 * `--agent accept-edits` auto-approves `write_file`/`edit` only. `--agent auto-approve` sets
   `bypass_tool_permissions: True`. Every approval callback is otherwise auto-denied in programmatic
   mode, so anything not pre-approved by the agent profile or the user's own config simply fails.
@@ -157,7 +156,7 @@ BINARY = "vibe"
 ARGV_PROMPT_BYTES = 32 * 1024
 
 AGENTS: dict[str, str] = {
-    "read_only": "plan",
+    "read_only": "ask",
     "write_in_repo": "accept-edits",
     # Not accept-edits: measured, a `git commit` under accept-edits produced an approval `callback`
     # and was auto-denied (the user's [tools.bash] allowlist did not cover it), and no commit
@@ -214,16 +213,15 @@ _NETWORK_CONTROL_CAVEAT = (
     "network=False is refused outright: there is no barrier this backend could raise, and a "
     "silently-ignored block would be indistinguishable from an enforced one"
 )
-_PLAN_CAVEAT = (
-    "read_only is --agent plan: write_file and edit get permission \"never\" (allowlisted only "
-    "inside the plans dir) — a real refusal, not model restraint. But bash is untouched, so it "
-    "falls back to the user's own [tools.bash] config; a user with permission = \"always\" there "
-    "could still write via bash"
+_ASK_CAVEAT = (
+    "read_only is --agent ask: an approval policy, not a read-only write-tool exclusion. "
+    "Programmatic approval requests are auto-denied, but inherited user/project policies or a "
+    "custom ask profile can pre-approve writes, including bash commands and edit tools"
 )
 _ACCEPT_EDITS_CAVEAT = (
     "write_in_repo is --agent accept-edits: write_file and edit are auto-approved, but nothing "
     "confines them to repo_path, and bash is governed by the user's own [tools.bash] config just as "
-    "in plan mode"
+    "in ask mode"
 )
 _AUTO_APPROVE_CAVEAT = (
     "unrestricted is --agent auto-approve, which sets bypass_tool_permissions: True — every "
@@ -238,7 +236,7 @@ _PUBLISH_COLLAPSE_CAVEAT = (
 )
 
 _MODE_CAVEATS: dict[str, tuple[str, ...]] = {
-    "read_only": (_PLAN_CAVEAT,),
+    "read_only": (_ASK_CAVEAT,),
     "write_in_repo": (_ACCEPT_EDITS_CAVEAT,),
     "publish": (_AUTO_APPROVE_CAVEAT, _PUBLISH_COLLAPSE_CAVEAT),
     "unrestricted": (_AUTO_APPROVE_CAVEAT,),
@@ -914,7 +912,7 @@ class VibeBackend(ExtraPathsUnsupported):
         return [self.binary, "--trust", "--workdir", str(repo_path), "--resume", session_id]
 
     def continuation_reason(self, acc: Accumulator, exit_code: int | None) -> str | None:
-        """Observed recoverable cutoff, or None when no certified signal exists."""
+        """Certified older stop-envelope cutoff; Vibe 3 stderr-only caps are not auto-continued."""
         if (
             exit_code == 1
             and acc.stream_state.get("continuation_turn_cap")

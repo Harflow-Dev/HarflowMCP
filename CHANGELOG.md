@@ -2,6 +2,8 @@
 
 ## 0.0.2
 
+- Support Vibe 3.0.1 dispatch with `ask` instead of the removed `plan` profile, disclose its weaker approval-only policy, and qualify native start/resume, large stdin, denials and failures against a local fake provider.
+
 - Address review follow-ups: separate dispatcher liveness from observer mode, move bounded plan metadata work off stdout draining, retain plan directory identity for environment-independent availability, report observed settled sends precisely, and make successor history lookup opt-in during status polling.
 
 - Distinguish dispatch origin, detached execution owner and responding server so normal fresh attachments are not labelled recovered; retain explicit unknown identity and independent liveness evidence (#54).
