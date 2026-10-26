@@ -2,6 +2,8 @@
 
 ## 0.0.2
 
+- Retry verified task metadata replacements during attached cancellation and recovered cancellation delivery, settlement and handoff, retaining bounded retries and refusal before effects on malformed or persistently changing metadata.
+
 - Support Vibe 3.0.1 dispatch with `ask` instead of the removed `plan` profile, disclose its weaker approval-only policy, and qualify native start/resume, large stdin, denials and failures against a local fake provider.
 
 - Address review follow-ups: separate dispatcher liveness from observer mode, move bounded plan metadata work off stdout draining, retain plan directory identity for environment-independent availability, report observed settled sends precisely, and make successor history lookup opt-in during status polling.

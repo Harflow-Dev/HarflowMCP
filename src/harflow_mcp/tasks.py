@@ -3154,7 +3154,8 @@ class TaskRegistry:
         `("not_signalled", reason)`, or `("case2" | "case3", record)` by whether its owning server
         is confirmed dead.
         """
-        record = store.read(self._log_dir, task_id)
+        from .task_supervision import read_task_record
+        record = read_task_record(self._log_dir, task_id, include_prompt=False)
         if record is None:
             return "skip", None
         if record.status in store.TERMINAL_RECORD_STATUSES and record.exit_code is not None:
@@ -3193,7 +3194,8 @@ class TaskRegistry:
         now, that signal worked, so it still reports `signalled`.
         """
         task_id = record.task_id
-        fresh = store.read(self._log_dir, task_id, include_prompt=False)
+        from .task_supervision import read_task_record
+        fresh = read_task_record(self._log_dir, task_id, include_prompt=False)
         if fresh is None:
             return "gone", None
         record = fresh
@@ -3483,7 +3485,8 @@ class TaskRegistry:
     def _kill_if_ours(self, record: store.TaskRecord) -> bool:
         """SIGKILL the recorded group only if the leader is still provably ours — checked in the
         same worker call as the signal, so no await separates the evidence from the act."""
-        fresh = store.read(self._log_dir, record.task_id, include_prompt=False)
+        from .task_supervision import read_task_record
+        fresh = read_task_record(self._log_dir, record.task_id, include_prompt=False)
         if fresh is None:
             return False
         record = fresh
@@ -3497,7 +3500,8 @@ class TaskRegistry:
         """The record if its owner has settled it — terminal and observed, or terminal with the
         leader confirmed dead. An unobserved terminal status (a torn-down server's backstop) can
         sit on a live process, and trusting it would skip the SIGKILL that process still needs."""
-        record = store.read(self._log_dir, task_id)
+        from .task_supervision import read_task_record
+        record = read_task_record(self._log_dir, task_id, include_prompt=False)
         if record is None or record.status not in store.TERMINAL_RECORD_STATUSES:
             return None
         if not store.outcome_unobserved(record):
@@ -3858,7 +3862,7 @@ class TaskRegistry:
         elif kind == "case2":
             outcome = await self._cascade_case2(payload)
             if outcome.kind == "handoff":
-                fresh = await asyncio.to_thread(store.read, self._log_dir, record.task_id)
+                fresh = await asyncio.to_thread(read_task_record, self._log_dir, record.task_id, include_prompt=False)
                 if fresh is not None:
                     await self._cascade_case3_batch([fresh], frozenset({record.task_id}))
         else:

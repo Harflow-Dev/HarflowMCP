@@ -89,12 +89,14 @@ def context(registry: Any, record: store.TaskRecord, extra_prompt: str | None, n
 @storage_operation
 async def stop_chain(registry: Any, task_id: str) -> None:
     """Serialize cancellation with reservation/spawn so an acknowledged stop cannot restart."""
-    source = store.read(registry.log_dir, task_id)
+    from .task_supervision import read_task_record
+
+    source = read_task_record(registry.log_dir, task_id, include_prompt=False)
     if source is None:
         return
     root = source.chain_root_task_id or task_id
     async with control.session_lock(registry.log_dir, 'continuation-' + root):
-        source = store.read(registry.log_dir, task_id)
+        source = read_task_record(registry.log_dir, task_id, include_prompt=False)
         if source is None or not (source.auto_continue or source.continuation_of_task_id or (registry.log_dir / f'{task_id}.continuation.json').exists()):
             return
         _write(registry.log_dir / f'{root}.continuation-stopped.json', {'cancelled_task_id': task_id}, layout=registry.state_layout)

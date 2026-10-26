@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -577,3 +577,171 @@ async def test_real_registry_ambiguous_launch_keeps_reservation(tmp_path, monkey
     finally:
         for proc in processes:
             await proc.communicate()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('race_read', [1, 2, 3], ids=['initial', 'locked', 'attached-record'])
+async def test_stop_chain_retries_metadata_replacement_before_cancellation(tmp_path, monkeypatch, race_read):
+    from harflow_mcp.task_continuation import stop_chain
+
+    source = record(tmp_path, auto_continue=1)
+    registry = Registry(tmp_path)
+    original = store.read
+    calls = 0
+
+    def read(directory, task_id, **options):
+        nonlocal calls
+        calls += 1
+        handoff_read = 4 if race_read < 3 else 3
+        assert options == ({'include_prompt': False} if calls < handoff_read else {})
+        if calls == race_read:
+            error = store.TaskDocumentError(task_id, 'Task metadata changed while reading', code='task_unavailable')
+            error._source_changed_during_read = True
+            raise error
+        return original(directory, task_id, **options)
+
+    monkeypatch.setattr(store, 'read', read)
+    from harflow_mcp.task_attachment import AttachedTask
+    from harflow_mcp.tasks import TaskRegistry
+    actual_registry = TaskRegistry(log_dir=registry.log_dir)
+    cancelled = AsyncMock()
+    monkeypatch.setattr(actual_registry, "cancel_recovered", cancelled)
+    attached = AttachedTask(registry.log_dir, source.task_id)
+    assert await actual_registry.cancel(attached) is attached
+    assert calls == 4  # Two stop-chain reads, one retry, then AttachedTask.record().
+    marker = registry.log_dir / f'{source.task_id}.continuation-stopped.json'
+    assert json.loads(marker.read_text()) == {'cancelled_task_id': source.task_id}
+    cancelled.assert_awaited_once()
+    assert cancelled.call_args.args[0].task_id == source.task_id
+    registry.start.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('race_read', [1, 2], ids=['initial', 'locked'])
+@pytest.mark.parametrize('marker', [None, False, 1, 'yes', True], ids=['unmarked', 'false', 'integer', 'string', 'exhausted'])
+async def test_stop_chain_metadata_refusal_has_no_cancellation_effect(tmp_path, monkeypatch, race_read, marker):
+    from harflow_mcp.task_continuation import stop_chain
+
+    source = record(tmp_path, auto_continue=1)
+    registry = Registry(tmp_path)
+    original = store.read
+    calls = 0
+    failure = store.TaskDocumentError(source.task_id, 'Task metadata changed while reading', code='task_unavailable')
+    if marker is not None:
+        failure._source_changed_during_read = marker
+
+    def read(directory, task_id, **options):
+        nonlocal calls
+        calls += 1
+        assert options == {'include_prompt': False}
+        if calls >= race_read:
+            raise failure
+        return original(directory, task_id, **options)
+
+    monkeypatch.setattr(store, 'read', read)
+    from harflow_mcp.task_attachment import AttachedTask
+    from harflow_mcp.tasks import TaskRegistry
+    actual_registry = TaskRegistry(log_dir=registry.log_dir)
+    cancelled = AsyncMock()
+    monkeypatch.setattr(actual_registry, "cancel_recovered", cancelled)
+    with pytest.raises(store.TaskDocumentError) as raised:
+        await actual_registry.cancel(AttachedTask(registry.log_dir, source.task_id))
+    assert raised.value is failure
+    assert calls == race_read - 1 + (3 if marker is True else 1)
+    assert not (registry.log_dir / f'{source.task_id}.continuation-stopped.json').exists()
+    cancelled.assert_not_awaited()
+    registry.start.assert_not_awaited()
+
+
+@pytest.mark.parametrize('method', ['_triage_target', '_deliver_recorded_cancel', '_kill_if_ours', '_settled_record'])
+@pytest.mark.parametrize('failure_mode', ['replacement', 'unmarked', 'nonboolean', 'exhausted'])
+def test_recovered_cancellation_reads_retry_only_verified_replacements(tmp_path, monkeypatch, method, failure_mode):
+    from harflow_mcp import identity
+    from harflow_mcp.tasks import TaskRegistry
+
+    source = record(tmp_path)
+    registry = TaskRegistry(log_dir=state_dir(tmp_path))
+    original = store.read
+    calls = 0
+    failure = store.TaskDocumentError(source.task_id, 'Task metadata changed while reading', code='task_unavailable')
+    if failure_mode != 'unmarked':
+        failure._source_changed_during_read = 1 if failure_mode == 'nonboolean' else True
+
+    def read(directory, task_id, **options):
+        nonlocal calls
+        calls += 1
+        assert options == {'include_prompt': False}
+        if failure_mode != 'replacement' or calls == 1:
+            raise failure
+        return original(directory, task_id, **options)
+
+    # A read failure must happen before any signal or cancellation control write.
+    check = Mock(return_value=('dead', 'gone'))
+    begin = Mock(side_effect=AssertionError('unexpected cancellation write'))
+    signal_group = Mock(side_effect=AssertionError('unexpected signal'))
+    monkeypatch.setattr(store, 'read', read)
+    monkeypatch.setattr(identity, 'check_detail', check)
+    monkeypatch.setattr('harflow_mcp.control.begin_attempt', begin)
+    monkeypatch.setattr('harflow_mcp.tasks._signal_recorded_group', signal_group)
+    target = source.task_id if method in {'_triage_target', '_settled_record'} else source
+    if failure_mode == 'replacement':
+        result = getattr(registry, method)(target)
+        assert calls == 2
+        if method == '_triage_target':
+            assert result == ('skip', None)
+        elif method == '_deliver_recorded_cancel':
+            assert result == ('gone', None)
+        elif method == '_kill_if_ours':
+            assert result is False
+        else:
+            assert result.task_id == source.task_id
+    else:
+        with pytest.raises(store.TaskDocumentError) as raised:
+            getattr(registry, method)(target)
+        assert raised.value is failure
+        assert calls == (3 if failure_mode == 'exhausted' else 1)
+        check.assert_not_called()
+    begin.assert_not_called()
+    signal_group.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('failure_mode', ['replacement', 'unmarked', 'nonboolean', 'exhausted'])
+async def test_recovered_cancel_handoff_retries_only_verified_replacement(tmp_path, monkeypatch, failure_mode):
+    from harflow_mcp.tasks import TaskRegistry
+
+    source = record(tmp_path)
+    registry = TaskRegistry(log_dir=state_dir(tmp_path))
+    monkeypatch.setattr(registry, '_triage_target', lambda _: ('case2', source))
+    monkeypatch.setattr(registry, '_cascade_case2', AsyncMock(return_value=SimpleNamespace(kind='handoff')))
+    delivery = AsyncMock()
+    monkeypatch.setattr(registry, '_cascade_case3_batch', delivery)
+    original = store.read
+    calls = 0
+    failure = store.TaskDocumentError(source.task_id, 'Task metadata changed while reading', code='task_unavailable')
+    if failure_mode != 'unmarked':
+        failure._source_changed_during_read = 1 if failure_mode == 'nonboolean' else True
+
+    def read(directory, task_id, **options):
+        nonlocal calls
+        calls += 1
+        if calls == 1 or failure_mode != 'replacement':
+            assert options == {'include_prompt': False}
+            raise failure
+        return original(directory, task_id, **options)
+
+    monkeypatch.setattr(store, 'read', read)
+    if failure_mode == 'replacement':
+        result = await registry._cancel_recovered(source)
+        assert result.task_id == source.task_id
+        assert calls == 3  # Failed handoff read, retry, then returned observation.
+        delivery.assert_awaited_once()
+        args = delivery.call_args.args
+        assert args[0][0].task_id == source.task_id
+        assert args[1] == frozenset({source.task_id})
+    else:
+        with pytest.raises(store.TaskDocumentError) as raised:
+            await registry._cancel_recovered(source)
+        assert raised.value is failure
+        assert calls == (3 if failure_mode == 'exhausted' else 1)
+        delivery.assert_not_awaited()
