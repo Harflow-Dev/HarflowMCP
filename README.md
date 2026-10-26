@@ -8,7 +8,7 @@ Current limits of these two features: `allowed_commands` is qualified only on Cl
 
 Vibe runs use its Python CLI entrypoint for headless dispatch; interactive takeover continues with the user's inherited environment.
 
-Version 0.0.2 is under development and unreleased. [Harflow](https://github.com/Harflow-Dev/HarflowMac), the companion macOS application, is maintained separately and prepares its own exact paired engine runtime. Its managed runtime and MCP registrations work independently of the app process; see the [managed runtime guide](https://github.com/Harflow-Dev/HarflowMac/blob/main/docs/managed-runtime.md).
+Version 0.0.2 is a pre-release. [Harflow](https://github.com/Harflow-Dev/HarflowMac), the companion macOS application, is maintained separately and prepares its own exact paired engine runtime. Its managed runtime and MCP registrations work independently of the app process; see the [managed runtime guide](https://github.com/Harflow-Dev/HarflowMac/blob/main/docs/managed-runtime.md).
 
 Detached task owners preserve output capture and live input across MCP server restarts.
 Workflow scheduler recovery is explicit; see [supervision and recovery](docs/supervision.md).

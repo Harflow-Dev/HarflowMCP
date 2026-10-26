@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.0.2
 
 - Retry transient task metadata replacements during workflow ownership, attachment, continuation and live-message observations while retaining bounded reads, ownership checks and refusal on persistent uncertainty.
 
