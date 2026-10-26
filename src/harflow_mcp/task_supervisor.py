@@ -45,16 +45,16 @@ async def _create_worktree(registry, task_id: str, generation: str, plan: dict, 
     from . import worktrees
     log_dir = registry.log_dir
 
-    def settle(exc: Exception, partial: str | None) -> None:
+    async def settle(exc: Exception, partial: str | None) -> None:
         if grant is not None:
-            task_resources.release_quietly(log_dir, grant['reservation_id'])
+            await asyncio.to_thread(task_resources.release_quietly, log_dir, grant['reservation_id'])
         info = plan | {'state': 'failed', 'error': str(exc)[:500], **({'partial_path': partial} if partial else {})}
         mark(log_dir, task_id, generation, state='not_started', not_started_reason='worktree_failed', error=str(exc)[:1000],
              worktree=info)
         task_resources.clear_cancel(log_dir, task_id)
 
     if task_resources.cancel_requested(log_dir, task_id):
-        settle(RuntimeError('cancelled before the worktree was created'), None)
+        await settle(RuntimeError('cancelled before the worktree was created'), None)
         mark(log_dir, task_id, generation, not_started_reason='cancelled')
         raise _NotStarted()
 
@@ -64,10 +64,10 @@ async def _create_worktree(registry, task_id: str, generation: str, plan: dict, 
     try:
         created = await asyncio.to_thread(worktrees.create, plan, on_creating=creating)
     except worktrees.WorktreeError as exc:
-        settle(exc, exc.partial_path)
+        await settle(exc, exc.partial_path)
         raise _NotStarted() from None
     except OSError as exc:
-        settle(exc, plan['path'] if os.path.lexists(plan['path']) else None)
+        await settle(exc, plan['path'] if os.path.lexists(plan['path']) else None)
         raise _NotStarted() from None
     mark(log_dir, task_id, generation, worktree=created)
     return created
@@ -89,8 +89,11 @@ async def _acquire_resources(registry, task_id: str, generation: str, request: d
     held = {'names': names, 'wait_seconds': wait, 'scope': scope, 'state': 'waiting', 'reservation_id': reservation_id,
             'wait_started_at': _iso(started), 'deadline_at': _iso(started + timedelta(seconds=wait))}
 
-    def settle(reason: str, error: str) -> None:
-        task_resources.release_quietly(log_dir, reservation_id)
+    async def settle(reason: str, error: str, *, release: bool = True) -> None:
+        # `acquire` already removed an entry it gave up on, so only a grant that is being abandoned
+        # needs releasing here.
+        if release:
+            await asyncio.to_thread(task_resources.release_quietly, log_dir, reservation_id)
         mark(log_dir, task_id, generation, state='not_started', not_started_reason=reason, error=error,
              resources=held | {'state': 'not_started'})
         task_resources.clear_cancel(log_dir, task_id)
@@ -117,20 +120,20 @@ async def _acquire_resources(registry, task_id: str, generation: str, request: d
             timeout=wait, reservation_id=reservation_id,
             should_continue=keep_waiting)
     except resource_ledger.ResourceWaitExpired as exc:
-        settle('resource_wait_expired', str(exc))
+        await settle('resource_wait_expired', str(exc), release=False)
         raise _NotStarted() from None
     except resource_ledger.ResourceWaitCancelled as exc:
-        settle('cancelled', str(exc))
+        await settle('cancelled', str(exc), release=False)
         raise _NotStarted() from None
     except resource_ledger.ResourceError as exc:
-        settle('owner_error', f'{exc.code}: {exc}')
+        await settle('owner_error', f'{exc.code}: {exc}', release=False)
         raise _NotStarted() from None
     granted = held | {'state': 'granted', 'granted_at': entry.granted_at}
     if entry.borrows_from is not None:
         granted['borrowed_from'] = entry.borrows_from
     if task_resources.cancel_requested(log_dir, task_id):
         held = granted
-        settle('cancelled', 'cancelled before the task started')
+        await settle('cancelled', 'cancelled before the task started')
         raise _NotStarted()
     mark(log_dir, task_id, generation, state='granted', resources=granted)
     return {'names': names, 'reservation_id': reservation_id, 'state': 'held', 'wait_seconds': wait,
@@ -246,6 +249,8 @@ async def run(descriptor: int, task_id: str, generation: str):
                 if not started and store.read(registry.log_dir, task_id) is None and getattr(exc, 'harflow_not_started', False):
                     cancelled = isinstance(exc, task_resources.LaunchCancelled)
                     if grant is not None:
+                        # Synchronous on purpose: this runs while a cancellation may be propagating, and
+                        # an await here would be cancelled again before the release landed.
                         task_resources.release_quietly(registry.log_dir, grant['reservation_id'])
                     _release_followups(registry.log_dir, task_id, request, 'released')
                     mark(registry.log_dir, task_id, generation, state='not_started', error=str(exc),

@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -183,20 +184,25 @@ def clear_cancel(log_dir: Path, task_id: str) -> None:
     cancel_path(log_dir, task_id).unlink(missing_ok=True)
 
 
-def pending_descendants(log_dir: Path, root_id: str) -> list[str]:
-    """Launches with no record yet that descend from `root_id` by `spawned_by` or `root_task_id`."""
+def pending_descendants(log_dir: Path, root_id: str, seeds: Iterable[str] = ()) -> list[str]:
+    """Launches with no record yet that descend from `root_id` by `spawned_by` or `root_task_id`.
+
+    `seeds` are recorded descendants already known to belong to `root_id` (the cascade's own targets):
+    a pending launch under one of them descends from `root_id` even though no pending receipt links them.
+    """
     from .task_supervision import reservations
     pending = {r["task_id"]: r for r in reservations(log_dir)
                if is_pending_kind(r) and r["state"] in (*PENDING_STATES, "reserved", "claimed")
                and pending_receipt(log_dir, r["task_id"]) is not None}
     found: set[str] = set()
+    known = {root_id, *seeds}
     changed = True
     while changed:
         changed = False
         for task_id, receipt in pending.items():
             if task_id in found or task_id == root_id:
                 continue
-            if receipt.get("spawned_by") in found | {root_id} or receipt.get("root_task_id") == root_id:
+            if receipt.get("spawned_by") in found | known or receipt.get("root_task_id") == root_id:
                 found.add(task_id)
                 changed = True
     return sorted(found)
@@ -327,13 +333,14 @@ def view(log_dir: Path, receipt: dict[str, Any], *, check_owner: bool = False) -
         "spawned_by": receipt.get("spawned_by"), "root_task_id": receipt.get("root_task_id"),
         "started_at": receipt.get("created_at"), "pending_launch": True, "recovered": False,
         "launch_state": state, "status": "running",
-        "notices": [], "enforcement": _nominal_enforcement(receipt),
+        "notices": [], "enforcement": receipt.get("enforcement"),
     }
     if isinstance(receipt.get("resources"), dict):
         payload["resources"] = {"state": "waiting" if state == "waiting_for_resources" else state, **resources}
     if isinstance(receipt.get("worktree"), dict):
         payload["worktree"] = dict(receipt["worktree"])
-    payload["enforcement_note"] = "Nominal for the requested freedom; the spawned task reports what was actually enforced."
+    if receipt.get("enforcement") is not None:
+        payload["enforcement_note"] = "Planned by the caller before the launch; the spawned task reports what was actually enforced."
     if state == "not_started":
         cancelled = receipt.get("not_started_reason") == "cancelled"
         payload.update(status="cancelled" if cancelled else "failed", not_started=True,
@@ -364,14 +371,6 @@ def view(log_dir: Path, receipt: dict[str, Any], *, check_owner: bool = False) -
                                     if state == "waiting_for_resources" else
                                     "resources granted; the task is about to start. Call wait_for_task or poll get_task_status")
     return payload
-
-
-def _nominal_enforcement(receipt: dict[str, Any]) -> dict[str, Any]:
-    from . import backends
-    try:
-        return backends.get(receipt["backend"]).enforcement(receipt.get("freedom") or "write_in_repo", receipt.get("network")).as_dict()
-    except Exception:
-        return {}
 
 
 def pending_receipt(log_dir: Path, task_id: str) -> dict[str, Any] | None:
@@ -441,8 +440,9 @@ class PendingLaunch:
         self.persistence_error = None
 
     @property
-    def enforcement(self) -> dict[str, Any]:
-        return _nominal_enforcement(self.receipt)
+    def enforcement(self) -> dict[str, Any] | None:
+        """The caller's planned enforcement from the receipt, or None when the launch recorded none."""
+        return self._fresh().get("enforcement")
 
     @property
     def status(self) -> str:

@@ -54,6 +54,7 @@ STATUS_BUDGET_SECONDS = 60.0
 GIT_SAFE_ARGS = ("-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
                  "-c", "diff.external=", "-c", "submodule.recurse=false")
 GIT_SAFE_ENV = {"GIT_NO_LAZY_FETCH": "1", "GIT_TERMINAL_PROMPT": "0"}
+HARDENED_ENV = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_SYSTEM": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
 FILTER_PATTERN = r"^filter\..*\.(process|smudge|clean)$"
 
 
@@ -272,6 +273,21 @@ def verify_link(path: Path, source: Path) -> tuple[Path, Path]:
     return git_dir, common
 
 
+CONFIG_PATTERN = r"^(core\.(fsmonitor|hookspath|sshcommand|pager|editor)|include\.|includeif\..*\.path|filter\..*\.(process|smudge|clean)|diff\..*\.(textconv|command)|diff\.external)$"
+
+
+def check_config_pinned(path: Path, git_dir: Path) -> None:
+    """Refuse a worktree whose effective configuration (including `config.worktree` and includes) names
+    anything Git would execute. The command line overrides what it can; this refuses what it cannot."""
+    result = subprocess.run(
+        ["git", *GIT_SAFE_ARGS, f"--git-dir={git_dir}", f"--work-tree={path}", "config", "--show-origin", "--get-regexp", CONFIG_PATTERN],
+        env={**os.environ, **GIT_SAFE_ENV, **HARDENED_ENV}, capture_output=True, text=True, timeout=GIT_TIMEOUT_SECONDS, check=False, cwd=str(path))
+    local = [line for line in result.stdout.splitlines() if line.strip() and "config.worktree" in line.split("\t", 1)[0]]
+    if result.returncode == 0 and local:
+        raise WorktreeError("the worktree's own configuration defines settings Git would execute (" + local[0].split("\t", 1)[-1].split()[0]
+                            + "); remove them before removing the worktree", code="worktree_filters_unsupported")
+
+
 def check_filters_pinned(path: Path, git_dir: Path) -> None:
     """The filter check over a verified worktree's own effective configuration (shared plus its own)."""
     result = subprocess.run(
@@ -350,6 +366,28 @@ def users(log_dir: Path, path: Path) -> list[dict[str, Any]]:
     return found
 
 
+def recorded_paths(log_dir: Path) -> list[Path]:
+    """Canonical paths of every worktree Harflow recorded (receipts and records), without inspecting them."""
+    from . import store
+    from .task_supervision import reservations
+    found: set[str] = set()
+    for receipt in reservations(log_dir):
+        info = receipt.get("worktree")
+        if isinstance(info, dict) and isinstance(info.get("path"), str):
+            found.add(str(_canonical(Path(info["path"]))))
+    for record in store.read_all(log_dir):
+        info = getattr(record, "worktree", None)
+        if isinstance(info, dict) and isinstance(info.get("path"), str):
+            found.add(str(_canonical(Path(info["path"]))))
+    return sorted(Path(item) for item in found)
+
+
+def containing_worktree(log_dir: Path, repo_path: Path) -> Path | None:
+    """The recorded worktree that `repo_path` is, or lies inside, from durable records only."""
+    target = _canonical(Path(repo_path))
+    return next((path for path in recorded_paths(log_dir) if target == path or target.is_relative_to(path)), None)
+
+
 def inventory(log_dir: Path) -> list[dict[str, Any]]:
     """The worktrees Harflow knows of, from launch receipts and task records, with their users."""
     from . import store
@@ -396,6 +434,7 @@ def remove(log_dir: Path, task_id: str) -> dict[str, Any]:
         git_dir, common = verify_link(path, source)
         check_filters(source)
         check_filters_pinned(path, git_dir)
+        check_config_pinned(path, git_dir)
         from .task_outcomes import GitProbe
         observed = GitProbe(path, budget=STATUS_BUDGET_SECONDS).status(str(path), git_dir=str(git_dir), common=str(common))
         if observed is None:
@@ -404,6 +443,17 @@ def remove(log_dir: Path, task_id: str) -> dict[str, Any]:
         if observed.strip():
             raise WorktreeError("the worktree has uncommitted or untracked changes; commit, stash or delete them first",
                                 code="worktree_dirty")
-        _git(source, "worktree", "remove", str(path))
+        # Git's own dirty check would run status under the tree's configuration, so it is skipped
+        # (--force) after the hardened probe above decided; everything that could have changed since
+        # is verified again immediately before, under the usage lock.
+        git_dir, _common = verify_link(path, source)
+        check_filters(source)
+        check_filters_pinned(path, git_dir)
+        check_config_pinned(path, git_dir)
+        subprocess.run(["git", *GIT_SAFE_ARGS, "-C", str(source), "worktree", "remove", "--force", str(path)],
+                       env={**os.environ, **GIT_SAFE_ENV, **HARDENED_ENV}, capture_output=True, text=True,
+                       timeout=GIT_TIMEOUT_SECONDS, check=False)
+        if path.exists():
+            raise WorktreeError(f"git could not remove {path}", code="worktree_git_failed")
     return {"task_id": task_id, "path": str(path), "removed": True, "branch": entry.get("branch"),
             "note": "The branch, if any, was kept."}

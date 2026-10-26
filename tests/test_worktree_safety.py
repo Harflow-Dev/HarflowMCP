@@ -160,3 +160,33 @@ def test_lock_path_is_the_same_for_every_spelling_of_the_path(source, tmp_path, 
     link = tmp_path / "alias"
     link.symlink_to(path.parent)
     assert worktrees.lock_path(link / path.name) == worktrees.lock_path(path)
+
+
+# ---- items 19 and 20 -------------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_plain_launch_inside_a_recorded_worktree_takes_its_usage_lock(tmp_path, source, monkeypatch, identities) -> None:
+    install_fake_claude(tmp_path, monkeypatch)
+    log_dir = tasks_dir(tmp_path)
+    reg = registry(tmp_path)
+    await reg.start("reply done", source, backend=get("claude"), freedom="write_in_repo", max_turns=3, worktree={}, task_id="a" * 32)
+    await wait_for(lambda: (r := store.read(log_dir, "a" * 32)) is not None and r.finished_at and r.output_drained)
+    path = Path(store.read(log_dir, "a" * 32).worktree["path"])
+    monkeypatch.setenv("HARFLOW_WORKTREE_ROOT", str(tmp_path / "somewhere-else"))
+    original = worktrees.usage_lock
+    monkeypatch.setattr(worktrees, "usage_lock", lambda p, timeout=10.0: original(p, timeout=0.3))
+    with worktrees.usage_lock(path):
+        with pytest.raises(worktrees.WorktreeError) as busy:
+            await reg.start("reply plain", path, backend=get("claude"), freedom="write_in_repo", task_id="b" * 32)
+        assert busy.value.code == "worktree_busy"
+
+
+def test_worktree_config_that_would_execute_is_refused_and_never_run(source, tmp_path, owned, identities, marker) -> None:
+    script, ran = marker
+    made = seed_created(source, tmp_path, owned)
+    path = Path(made["path"])
+    git(source, "config", "extensions.worktreeConfig", "true")
+    git(path, "config", "--worktree", "core.fsmonitor", str(script))
+    assert remove_code(owned.tasks_directory, "a" * 32) == "worktree_filters_unsupported"
+    assert not ran.exists() and path.exists()

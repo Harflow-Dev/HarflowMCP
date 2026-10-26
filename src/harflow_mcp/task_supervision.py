@@ -213,6 +213,9 @@ async def launch(registry, invocation, kwargs):
     from .task_attachment import AttachedTask
     task_id = store.validate_task_id(kwargs.get('task_id') or str(uuid.uuid4()))
     kwargs = dict(kwargs, task_id=task_id, dispatch_origin=registry._owner)
+    # The caller's computed enforcement for the child; it is reported while the launch is pending and
+    # is not part of what the owner executes.
+    planned_enforcement = kwargs.pop('planned_enforcement', None)
     backend = kwargs.pop('backend')
     # Resolve only registered backend keys in the child. Test object injection uses local mode.
     from .backends import get
@@ -262,6 +265,8 @@ async def launch(registry, invocation, kwargs):
                  'repo_path': kwargs['repo_path'], 'freedom': kwargs.get('freedom'), 'network': kwargs.get('network'),
                  'title': kwargs.get('title'), 'group': kwargs.get('group'),
                  'created_at': datetime.now(timezone.utc).isoformat()}
+        if planned_enforcement is not None:
+            value['enforcement'] = planned_enforcement
         if resource_request is not None:
             value['resources'] = {'names': list(resource_request['names']), 'wait_seconds': resource_request['wait_seconds'],
                                   'scope': resource_request.get('scope'), 'state': 'requested'}
@@ -277,6 +282,10 @@ async def launch(registry, invocation, kwargs):
         from . import worktrees
         recorded = kwargs.get('worktree_request') or kwargs.get('worktree_info')
         lock_target = recorded.get('path') if isinstance(recorded, dict) and recorded.get('path') else None
+        if lock_target is None:
+            # A plain launch whose repo_path is itself a recorded worktree races a removal just the same.
+            inside = worktrees.containing_worktree(log_dir, Path(kwargs['repo_path']))
+            lock_target = str(inside) if inside is not None else None
         if lock_target is not None:
             try:
                 with worktrees.usage_lock(Path(lock_target)):

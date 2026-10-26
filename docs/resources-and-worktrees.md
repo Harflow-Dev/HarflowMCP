@@ -170,8 +170,7 @@ harflow-ctl worktree-remove --task-id ID
 
 `worktree-remove` takes the per-worktree usage lock (`<root>/.locks/<id>.lock`, which every launch into
 the path also takes briefly before writing its receipt), refuses while any task or launch using the path
-is unsettled or uncertain, and refuses unless the tree is clean; then it runs `git worktree remove`
-without `--force`. The tree belongs to an agent that may have rewritten its `.git` file or configured
+is unsettled or uncertain, and refuses unless the tree is clean; then, after verifying the link and the configuration again, it runs `git worktree remove --force` under hardened Git (no global or system configuration), because Git's own dirty check would run in the agent's tree; cleanliness was already decided by the hardened probe. The tree belongs to an agent that may have rewritten its `.git` file or configured
 a program to run, so removal never trusts it: it first proves that `.git` names a directory directly
 under the source repository's `worktrees/` and that the `commondir` and `gitdir` back-links agree
 (otherwise `worktree_link_invalid`), refuses if the shared or the worktree's own configuration defines

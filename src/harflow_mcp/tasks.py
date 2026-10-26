@@ -1333,7 +1333,7 @@ class TaskRegistry:
             if interaction_owner == "monitor":
                 await approval_runtime.authorize(self, interaction_owner="monitor")
             caller = await self._mutation_caller()
-            resource_request = self._resource_request(resources, resource_wait_seconds, resource_inherit, caller)
+            resource_request = await asyncio.to_thread(self._resource_request, resources, resource_wait_seconds, resource_inherit, caller)
             worktree_plan = None
             if worktree is not None:
                 # Planned only: the owner creates it after any resource grant. The invocation below is
@@ -1376,9 +1376,10 @@ class TaskRegistry:
             invocation = await approval_runtime.configure(backend, invocation, caller_approvals, freedom, max_turns, caller_write_approvals)
             invocation = self._with_system_guidance(backend, invocation, freedom=freedom, network=network, resume=False, enabled=not workflow_builder)
 
+            planned_enforcement = self._with_commands(backend, approval_runtime.with_approval_enforcement(backend, self._extra_enforcement(backend, backend.enforcement(freedom, network), grants, repo_path), invocation.caller_approval_version, caller_approvals, caller_write_approvals), commands)  # type: ignore[arg-type]
             spawned_by, root_task_id, depth, max_depth, lineage_detected = self._resolve_lineage(
                 caller,
-                child_enforcement=self._with_commands(backend, approval_runtime.with_approval_enforcement(backend, self._extra_enforcement(backend, backend.enforcement(freedom, network), grants, repo_path), invocation.caller_approval_version, caller_approvals, caller_write_approvals), commands),  # type: ignore[arg-type]
+                child_enforcement=planned_enforcement,
                 child_backend=backend.name,
                 child_repo=repo_path,
                 caller_write_approvals=caller_write_approvals,
@@ -1426,6 +1427,7 @@ class TaskRegistry:
             chain_root_task_id=chain_root_task_id,
             chain_prompt=chain_prompt,
             message_ids=message_ids,
+            planned_enforcement=planned_enforcement.as_dict(),
             **({"scratch_chain_id": store.validate_task_id(scratch_chain_id)} if scratch_chain_id is not None else {}),
             **({"resource_request": resource_request} if resource_request is not None else {}),
             **({"followup_source_task_id": followup_source_task_id} if followup_source_task_id is not None else {}),
@@ -1598,7 +1600,7 @@ class TaskRegistry:
         # read-only and must never block on, or be blocked by, another resume of this session.
         caller = await self._mutation_caller()
         with _before_spawn():
-            resource_request = self._resource_request(None, None, getattr(parent, "resources", None), caller)
+            resource_request = await asyncio.to_thread(self._resource_request, None, None, getattr(parent, "resources", None), caller)
             grants = await self._resolve_extra_paths_async(caller, None, backend, parent)
         if grants and (native_subagent or workflow_builder):
             raise ValueError("Extra writable paths are unavailable to native workflows or workflow builders")
@@ -1840,6 +1842,7 @@ class TaskRegistry:
             from .task_supervision import launch
             return await launch(self, invocation, kwargs)
         kwargs.pop("followup_source_task_id", None)
+        kwargs.pop("planned_enforcement", None)
         return await self._execute_prepared(invocation, **kwargs)
 
     async def _execute_prepared(self, invocation: Invocation, **kwargs) -> Task:
@@ -3973,7 +3976,11 @@ class TaskRegistry:
             pause_for_task(self._log_dir, task_id, "Task cancelled outside the workflow supervisor")
         result = await self._shielded(self._cancel_cascade(task_id), f"harflow-cascade-{task_id}")
         from . import task_resources
-        pending = await asyncio.to_thread(task_resources.pending_descendants, self._log_dir, task_id)
+        # A pending launch can sit under a recorded intermediate (a task that already has a record),
+        # so the walk is seeded with every recorded descendant the cascade covers.
+        local_lineage = [(t.task_id, t.spawned_by, t.root_task_id) for t in self._tasks.values()]
+        recorded = await asyncio.to_thread(self._cascade_targets, task_id, local_lineage)
+        pending = await asyncio.to_thread(task_resources.pending_descendants, self._log_dir, task_id, tuple(recorded))
         if pending:
             # Launches still waiting for resources have no process to signal; ask their owners to stop.
             stopped = await asyncio.to_thread(self._cancel_pending_launches, pending)
@@ -4268,7 +4275,7 @@ class TaskRegistry:
         # Same ordering as `resume`: caller detection and the caps run before the session lock.
         caller = await self._mutation_caller()
         with _before_spawn():
-            resource_request = self._resource_request(None, None, record.resources, caller)
+            resource_request = await asyncio.to_thread(self._resource_request, None, None, record.resources, caller)
             grants = await self._resolve_extra_paths_async(caller, None, backend, record)
         if grants and (native_subagent or workflow_builder):
             raise ValueError("Extra writable paths are unavailable to native workflows or workflow builders")

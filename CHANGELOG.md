@@ -17,6 +17,8 @@
 
 - Stop `harflow-ctl worktree-remove` from running anything an agent configured: it first proves the worktree's `.git` file leads to `<common>/worktrees/<name>` of the recorded source repository with matching `commondir` and `gitdir` back-links (`worktree_link_invalid` otherwise), refuses filter drivers in the shared or the worktree's own configuration, and reads the status through the configuration-free Git directory that outcome capture uses with `--git-dir` and `--work-tree` pinned, so a rewritten `.git` file, `core.fsmonitor`, a filter or an external diff can no longer execute in the person's process. Launches into a worktree now take its usage lock from the recorded worktree metadata instead of the currently configured `HARFLOW_WORKTREE_ROOT`.
 
+- Tighten pending-launch reporting and worktree removal: a pending launch reports the enforcement its caller planned (recorded in the launch receipt) or `null`, never a nominal guess; a cascade cancel reaches pending launches under recorded intermediates; ledger reads on the request path run off the event loop; `worktree-remove` decides cleanliness only with the hardened probe, refuses a worktree configuration that names anything Git would execute, and removes with `--force` under hardened Git so Git's own status never runs in the agent's tree; and a plain launch whose `repo_path` is inside any recorded worktree takes that worktree's usage lock.
+
 ## 0.0.3
 
 - Retry verified task metadata replacements during attached cancellation and recovered cancellation delivery, settlement and handoff, retaining bounded retries and refusal before effects on malformed or persistently changing metadata.
