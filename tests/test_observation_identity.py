@@ -171,3 +171,22 @@ def test_catalog_relationship_projection_does_not_probe_processes(saved, monkeyp
         raise AssertionError('catalog observation must not probe processes')
     monkeypatch.setattr(identity, 'identity_check', unexpected)
     assert supervision.observation_fields(record, responding_server=OTHER)['observation_mode'] == 'recovered'
+
+
+def test_settled_brief_and_snapshot_add_no_dispatcher_process_probe(saved, monkeypatch):
+    directory, record = saved
+    record = replace(record, status='completed', exit_code=0,
+                     finished_at='2026-10-26T00:00:01+00:00')
+    store.write(directory, record)
+    monkeypatch.setattr(identity, 'own_identity', lambda: OTHER)
+    def forbidden(*args, **kwargs):
+        pytest.fail('settled history must not spawn per-row process probes')
+    monkeypatch.setattr(identity, 'identity_check', forbidden)
+    monkeypatch.setattr(identity, 'check_detail', forbidden)
+    for read in (store.brief, store.snapshot):
+        payload = read(directory, record)
+        assert payload['supervision']['dispatch_origin_state'] == 'undecidable'
+        assert payload['output_capture'] == 'observed_terminal'
+    # A matching responding process is already known alive without a subprocess lookup.
+    payload = store.snapshot(directory, record, responding_server=ORIGIN)
+    assert payload['supervision']['dispatch_origin_state'] == 'alive'

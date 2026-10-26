@@ -83,6 +83,7 @@ def fields(record: Any, raw_log: Path, *, responding_server=None, **kwargs) -> d
         value["dispatch_origin_state"] = (
             "undecidable" if not origin["start_time"] else
             "alive" if origin == observation["responding_server"] else
+            "undecidable" if kwargs.get("observed_terminal", False) else
             identity.identity_check(origin)
         )
     return {**observation, "supervision": value, "output_capture": value["capture_state"],

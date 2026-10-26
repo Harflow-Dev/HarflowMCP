@@ -162,7 +162,9 @@ omits the diagnostic; missing generation stays undecidable. A different observer
 origin and a different observer with a dead origin are therefore distinguishable while keeping
 existing observation modes. Dead dispatch origin does not establish replacement: a short-lived
 ctl dispatcher can exit normally. This diagnostic never changes execution ownership, capture or
-session-busy decisions, and indexed listing does not add per-row dispatcher probes.
+session-busy decisions, and indexed listing does not add per-row dispatcher probes. Observed-terminal history also
+skips external dispatcher probes in briefs, lists and batch status; it reports undecidable unless
+the origin is the current responding process, whose liveness is already established.
 
 Observed settled live-input tasks refuse sends as `settled`, naming their terminal status, before
 checking sealed input. A running sealed task still returns `closed` and its closure reason. A
