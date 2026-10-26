@@ -270,13 +270,18 @@ async def launch(registry, invocation, kwargs):
         if kwargs.get('worktree_request') is not None:
             value['worktree'] = dict(kwargs['worktree_request'])
         # A launch into a worktree takes its usage lock just long enough to write the receipt, so a
-        # removal that already decided "nothing uses it" cannot be overtaken by this launch.
+        # removal that already decided "nothing uses it" cannot be overtaken by this launch. The
+        # worktree is recognised from what was recorded for it (the plan of a fresh launch, the
+        # `worktree` of the record being resumed), never from the root configured right now, which
+        # can have changed since it was created.
         from . import worktrees
-        if kwargs.get('worktree_request') is not None or worktrees.is_worktree_path(Path(kwargs['repo_path'])):
+        recorded = kwargs.get('worktree_request') or kwargs.get('worktree_info')
+        lock_target = recorded.get('path') if isinstance(recorded, dict) and recorded.get('path') else None
+        if lock_target is not None:
             try:
-                with worktrees.usage_lock(Path(kwargs['repo_path'])):
-                    if kwargs.get('worktree_request') is None and not Path(kwargs['repo_path']).is_dir():
-                        raise worktrees.WorktreeError(f"the worktree {kwargs['repo_path']} no longer exists", code='worktree_missing')
+                with worktrees.usage_lock(Path(lock_target)):
+                    if kwargs.get('worktree_request') is None and not Path(lock_target).is_dir():
+                        raise worktrees.WorktreeError(f"the worktree {lock_target} no longer exists", code='worktree_missing')
                     _write(log_dir / f'{task_id}.launch.json', value)
             except worktrees.WorktreeError as exc:
                 exc.harflow_not_started = True  # nothing was written or started

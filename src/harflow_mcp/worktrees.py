@@ -18,8 +18,16 @@ Safety rules, each enforced here rather than hoped for:
 * **Nothing is forced.** Never `--force`, never a reset, never a branch deletion. The caller's
   checkout and index are untouched; Git's own refusal to check a branch out in two places stands.
 * **Removal is explicit.** Only a person (ctl, humans-only gate) removes a worktree, and only when
-  no unsettled or uncertain task uses it and `git status` is clean, under the per-worktree usage
-  lock that every launch into the path also takes.
+  no unsettled or uncertain task uses it and the tree is clean, under the per-worktree usage lock
+  that every launch into the path also takes.
+* **The worktree is the agent's, so Git never trusts it.** Its `.git` file is plain text an agent can
+  rewrite to point at a Git directory whose configuration runs a program (fsmonitor, a filter, an
+  external diff) in the human's process. Before any Git call inside the tree, `verify_link` proves the
+  `.git` file names `<common>/worktrees/<name>` of the recorded source repository and that the
+  `commondir` and `gitdir` back-links agree; the cleanliness check then pins `--git-dir` and
+  `--work-tree` and runs in the disposable, configuration-free Git directory that outcome capture uses
+  (`task_outcomes.GitProbe.status`), after the effective configuration (the source's and the
+  worktree's own) has been checked for filter drivers.
 """
 from __future__ import annotations
 
@@ -27,6 +35,7 @@ import errno
 import fcntl
 import os
 import re
+import stat
 import subprocess
 import time
 from contextlib import contextmanager
@@ -37,10 +46,13 @@ ROOT_ENV = "HARFLOW_WORKTREE_ROOT"
 DEFAULT_ROOT_NAME = ".harflow-worktrees"
 LOCK_DIRECTORY = ".locks"
 GIT_TIMEOUT_SECONDS = 120
+STATUS_BUDGET_SECONDS = 60.0
 
 # `core.hooksPath=/dev/null` disables every hook; `core.fsmonitor=false` stops a configured
-# monitor program; `GIT_NO_LAZY_FETCH` stops a promisor remote from running a transport helper.
-GIT_SAFE_ARGS = ("-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false")
+# monitor program; an empty `diff.external` stops an external diff program; `GIT_NO_LAZY_FETCH` stops
+# a promisor remote from running a transport helper.
+GIT_SAFE_ARGS = ("-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+                 "-c", "diff.external=", "-c", "submodule.recurse=false")
 GIT_SAFE_ENV = {"GIT_NO_LAZY_FETCH": "1", "GIT_TERMINAL_PROMPT": "0"}
 FILTER_PATTERN = r"^filter\..*\.(process|smudge|clean)$"
 
@@ -200,11 +212,85 @@ def create(plan_document: dict[str, Any], *, on_creating=None) -> dict[str, Any]
     return {**plan_document, "base_commit": sha, "state": "created"}
 
 
+# ---- the link between a worktree and its repository ---------------------------------------------
+
+MAX_LINK_FILE_BYTES = 4096
+
+
+def _read_small_file(path: Path) -> str:
+    """A small regular file's text, never through a symlink; `WorktreeError` for anything else."""
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as exc:
+        raise WorktreeError(f"{path} cannot be read ({exc.strerror or exc})", code="worktree_link_invalid") from None
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise WorktreeError(f"{path} is not a regular file", code="worktree_link_invalid")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            data = handle.read(MAX_LINK_FILE_BYTES + 1)
+    finally:
+        os.close(descriptor)
+    if len(data) > MAX_LINK_FILE_BYTES:
+        raise WorktreeError(f"{path} is unexpectedly large", code="worktree_link_invalid")
+    return data.decode("utf-8", errors="replace")
+
+
+def _real(path: str | Path) -> str:
+    return os.path.realpath(path)
+
+
+def common_dir(source: Path) -> Path:
+    """The common Git directory of the source repository, resolved. Git runs in the caller's own checkout."""
+    result = _git(source, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    return Path(_real(result.stdout.strip()))
+
+
+def verify_link(path: Path, source: Path) -> tuple[Path, Path]:
+    """Prove `path` is a linked worktree of `source` and return `(git_dir, common_dir)`, resolved.
+
+    The agent that ran in the tree can rewrite its `.git` file. This accepts it only when that file
+    (a regular file, not a symlink) says `gitdir: <D>` with `D` directly under
+    `<common>/worktrees/` of the source repository, `D/commondir` leads back to that common
+    directory and `D/gitdir` names this very `.git` file. Anything else is `worktree_link_invalid`,
+    and no Git command has been run inside the tree by then.
+    """
+    common = common_dir(source)
+    text = _read_small_file(Path(path) / ".git")
+    line = text.strip()
+    if not line.startswith("gitdir: ") or "\n" in line or not os.path.isabs(line[len("gitdir: "):]):
+        raise WorktreeError(f"{path}/.git is not a plain absolute 'gitdir:' link", code="worktree_link_invalid")
+    git_dir = Path(_real(line[len("gitdir: "):]))
+    if git_dir.parent != common / "worktrees" or git_dir.name in ("", ".", ".."):
+        raise WorktreeError(f"{path}/.git points outside the source repository's worktree directory ({git_dir})",
+                            code="worktree_link_invalid")
+    commondir_text = _read_small_file(git_dir / "commondir").strip()
+    if not commondir_text or _real(git_dir / commondir_text) != str(common):
+        raise WorktreeError(f"the Git directory {git_dir} does not belong to the source repository", code="worktree_link_invalid")
+    back = _read_small_file(git_dir / "gitdir").strip()
+    if not back or _real(back) != os.path.join(_real(path), ".git"):
+        raise WorktreeError(f"the Git directory {git_dir} belongs to a different worktree", code="worktree_link_invalid")
+    return git_dir, common
+
+
+def check_filters_pinned(path: Path, git_dir: Path) -> None:
+    """The filter check over a verified worktree's own effective configuration (shared plus its own)."""
+    result = subprocess.run(
+        ["git", *GIT_SAFE_ARGS, f"--git-dir={git_dir}", f"--work-tree={path}", "config", "--get-regexp", FILTER_PATTERN],
+        env={**os.environ, **GIT_SAFE_ENV}, capture_output=True, text=True, timeout=GIT_TIMEOUT_SECONDS, check=False, cwd=str(path))
+    if result.returncode == 0 and result.stdout.strip():
+        names = sorted({line.split()[0] for line in result.stdout.splitlines() if line.strip()})
+        raise WorktreeError(
+            "the worktree's configuration defines Git filter drivers (" + ", ".join(names[:4]) + "), which would run code "
+            "while its status is read; remove them before removing the worktree", code="worktree_filters_unsupported")
+
+
 # ---- usage lock --------------------------------------------------------------------------------
 
 
 def lock_path(path: Path) -> Path:
-    return Path(path).parent / LOCK_DIRECTORY / f"{Path(path).name}.lock"
+    """The usage lock of a worktree, the same for every spelling of its path (symlinks resolved)."""
+    canonical = _canonical(Path(path))
+    return canonical.parent / LOCK_DIRECTORY / f"{canonical.name}.lock"
 
 
 @contextmanager
@@ -303,12 +389,21 @@ def remove(log_dir: Path, task_id: str) -> dict[str, Any]:
                 + "; wait for them to settle or settle them first", code="worktree_in_use")
         if not path.is_dir():
             raise WorktreeError(f"{path} no longer exists; run `git worktree prune` in {source} if Git still lists it", code="worktree_missing")
-        status = _git(path, "status", "--porcelain", "--untracked-files=all")
-        if status.stdout.strip():
-            raise WorktreeError("the worktree has uncommitted or untracked changes; commit, stash or delete them first",
-                                code="worktree_dirty")
         if not source.is_dir():
             raise WorktreeError(f"the source repository {source} is unavailable", code="worktree_source_missing")
+        # Nothing below runs Git inside the tree until its link to the repository is proven, and the
+        # configuration it would run under (the source's and the worktree's own) is free of filters.
+        git_dir, common = verify_link(path, source)
+        check_filters(source)
+        check_filters_pinned(path, git_dir)
+        from .task_outcomes import GitProbe
+        observed = GitProbe(path, budget=STATUS_BUDGET_SECONDS).status(str(path), git_dir=str(git_dir), common=str(common))
+        if observed is None:
+            raise WorktreeError("the worktree's state could not be observed within its budget, so it is not removed",
+                                code="worktree_status_unavailable")
+        if observed.strip():
+            raise WorktreeError("the worktree has uncommitted or untracked changes; commit, stash or delete them first",
+                                code="worktree_dirty")
         _git(source, "worktree", "remove", str(path))
     return {"task_id": task_id, "path": str(path), "removed": True, "branch": entry.get("branch"),
             "note": "The branch, if any, was kept."}

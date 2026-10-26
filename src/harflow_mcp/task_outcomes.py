@@ -61,10 +61,10 @@ def _command_match(command: str) -> bool:
 
 class GitProbe:
     """Disable repository executable integrations before inspecting working tree contents."""
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, budget: float | None = None):
         self.path = path
         self.started = time.monotonic()
-        self.deadline = self.started + BUDGET
+        self.deadline = self.started + (BUDGET if budget is None else budget)
         self.diagnostics: list[dict[str, Any]] = []
         self.config = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
                        "-c", "submodule.recurse=false", "-c", "diff.external="]
@@ -125,14 +125,19 @@ class GitProbe:
         finally:
             entry["elapsed_ms"] = round((time.monotonic() - started) * 1000)
 
-    def status(self, worktree: str | None = None) -> str | None:
+    def status(self, worktree: str | None = None, *, git_dir: str | None = None, common: str | None = None) -> str | None:
         # Read the original index and object database through a disposable Git directory with
         # no repository/global/system config. Enumerating filter names then overriding them is
         # unsafe: another process could add a new driver between enumeration and status.
-        git_dir = _strip(self.read("rev-parse", "--absolute-git-dir"))
-        common = _strip(self.read("rev-parse", "--path-format=absolute", "--git-common-dir"))
+        # A caller that has already verified where the Git directories are (a task worktree an
+        # agent can repoint) passes `git_dir` and `common`, so nothing is discovered through the
+        # tree being inspected.
+        pinned = git_dir is not None and common is not None
+        if not pinned:
+            git_dir = _strip(self.read("rev-parse", "--absolute-git-dir"))
+            common = _strip(self.read("rev-parse", "--path-format=absolute", "--git-common-dir"))
         worktree = worktree or _strip(self.read("rev-parse", "--show-toplevel"))
-        object_format = _strip(self.read("rev-parse", "--show-object-format"))
+        object_format = _strip(self.read(*(("--git-dir=" + git_dir,) if pinned else ()), "rev-parse", "--show-object-format"))
         if not git_dir or not common or not worktree or object_format not in ("sha1", "sha256"):
             return None
         with tempfile.TemporaryDirectory(prefix="harflow_mcp-git-observation-") as directory:

@@ -265,7 +265,10 @@ only; liveness is never stored) and each owner kind supplies its own "is it fini
   unchanged `_execute_prepared` pre-spawn block. A crash in `creating` is reported as `unknown`;
   nothing is removed automatically, and an owner that died before `created` never spawned, so its
   launch releases its session and resources. `launch()` and `worktree-remove` serialize on the
-  per-worktree usage lock; the lock sits with the other file locks (it is never held while waiting
+  per-worktree usage lock, which `launch()` takes whenever the worktree is named by the recorded plan or the
+  resumed record's `worktree` (never inferred from the current `HARFLOW_WORKTREE_ROOT`) and which is keyed by
+  the canonical path; `worktree-remove` runs no Git command inside the tree until `worktrees.verify_link`
+  has proven its `.git` file leads to `<common>/worktrees/<name>` of the recorded source; the lock sits with the other file locks (it is never held while waiting
   on the ledger). `record.repo_path` is the worktree; retention keeps a task whose worktree exists.
 - **Recovery commands** are ctl-only and use `lineage.detect_caller_detail` and fail closed like
   takeover: `resources-release` removes one reservation after `--confirm-uncertain` (a reservation

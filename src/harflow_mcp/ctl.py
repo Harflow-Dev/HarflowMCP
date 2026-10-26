@@ -244,8 +244,9 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     worktree_remove_p = sub.add_parser(
         "worktree-remove",
         help="remove one task's worktree when nothing uses it and it is clean (for a person, never an agent)",
-        description="Refuses while any task or launch using the worktree is unsettled or uncertain, and while the "
-        "tree has uncommitted or untracked changes. Never forces, never deletes the branch.")
+        description="Refuses while any task or launch using the worktree is unsettled or uncertain, while the "
+        "tree has uncommitted or untracked changes, and when its .git link does not lead back to the recorded "
+        "source repository or Git filter drivers are configured. Never forces, never deletes the branch.")
     worktree_remove_p.add_argument("--task-id", required=True)
     worktree_remove_p.add_argument("--json", action="store_true")
 

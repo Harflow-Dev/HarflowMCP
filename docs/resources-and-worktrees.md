@@ -170,8 +170,14 @@ harflow-ctl worktree-remove --task-id ID
 
 `worktree-remove` takes the per-worktree usage lock (`<root>/.locks/<id>.lock`, which every launch into
 the path also takes briefly before writing its receipt), refuses while any task or launch using the path
-is unsettled or uncertain, and refuses unless `git status --porcelain --untracked-files=all` is empty;
-then it runs `git worktree remove` without `--force`. The branch is never deleted. Retention never
+is unsettled or uncertain, and refuses unless the tree is clean; then it runs `git worktree remove`
+without `--force`. The tree belongs to an agent that may have rewritten its `.git` file or configured
+a program to run, so removal never trusts it: it first proves that `.git` names a directory directly
+under the source repository's `worktrees/` and that the `commondir` and `gitdir` back-links agree
+(otherwise `worktree_link_invalid`), refuses if the shared or the worktree's own configuration defines
+Git filter drivers (`worktree_filters_unsupported`), and reads the status through the same
+configuration-free, pinned Git directory that task outcome capture uses, so no fsmonitor, filter,
+hook or external diff program configured in the repository runs in your process. The branch is never deleted. Retention never
 deletes the record of a task whose worktree still exists.
 
 Limits: Git LFS and other filter drivers; Codex gains nothing from a worktree at `write_in_repo` or
