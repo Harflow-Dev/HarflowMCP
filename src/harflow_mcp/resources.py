@@ -854,8 +854,9 @@ class ResourceLedger:
 
         Each spec is `{reservation_id, names, owner, borrows_from?, release_requested?}`. Roots are
         restored first and never displace one another (an overlapping later root is reported as a
-        conflict, not forced); a borrower is restored only under a restored root that covers its
-        names. Everything is `held`: repair never queues.
+        conflict, not forced); a borrower is restored under its lender, or, when the lender was not
+        restored, under another restored root that covers its names, else as a root over the names not
+        yet held (reported as a conflict either way, never dropped). Everything is `held`: repair never queues.
         """
         built: list[dict[str, Any]] = []
         result = RepairResult()
@@ -908,8 +909,21 @@ class ResourceLedger:
                     continue
                 root = restored_roots.get(spec["borrows_from"])
                 if root is None or not set(raw["names"]) <= set(root["names"]):
+                    # The lender lost a conflict (or never was found). The borrower still holds, so it is
+                    # attached to a restored root that covers its names, else it holds what is not yet
+                    # held itself; it is never dropped, which would show its names as free.
+                    root = next((r for r in restored_roots.values() if set(raw["names"]) <= set(r["names"])), None)
+                    if root is None:
+                        free = sorted(set(raw["names"]) - held_names)
+                        if free:
+                            raw["names"] = free
+                            held_names.update(free)
+                            restored_roots[raw["reservation_id"]] = raw
+                            built.append(raw)
+                            result.restored.append(raw["reservation_id"])
+                        result.conflicts.append({"reservation_id": raw["reservation_id"], "reason": "lender_not_restored"})
+                        continue
                     result.conflicts.append({"reservation_id": raw["reservation_id"], "reason": "lender_not_restored"})
-                    continue
                 raw["borrows_from"] = root["reservation_id"]
                 built.append(raw)
                 result.restored.append(raw["reservation_id"])

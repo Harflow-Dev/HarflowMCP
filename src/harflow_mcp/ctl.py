@@ -246,7 +246,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
         help="remove one task's worktree when nothing uses it and it is clean (for a person, never an agent)",
         description="Refuses while any task or launch using the worktree is unsettled or uncertain, while the "
         "tree has uncommitted or untracked changes, and when its .git link does not lead back to the recorded "
-        "source repository or Git filter drivers are configured, and when it has initialized submodules or is locked with `git worktree lock`. Never forces, never deletes the branch.")
+        "source repository or Git filter drivers are configured, and when it has initialized submodules or is locked with `git worktree lock`. Never discards changes, never deletes the branch.")
     worktree_remove_p.add_argument("--task-id", required=True)
     worktree_remove_p.add_argument("--json", action="store_true")
 
@@ -1001,7 +1001,7 @@ def _cmd_resources_repair(args: argparse.Namespace) -> int:
 
 
 def _cmd_launch_settle(args: argparse.Namespace) -> int:
-    from . import task_resources
+    from . import resources, task_resources
 
     refused = _human_only_refusal(args, "settle an uncertain launch")
     if refused is not None:
@@ -1011,8 +1011,8 @@ def _cmd_launch_settle(args: argparse.Namespace) -> int:
         result = task_resources.settle_uncertain(default_log_dir(), task_id)
     except store.InvalidTaskId:
         return _fail(args, "invalid_task_id", f"not a valid task id: {args.task_id!r}")
-    except task_resources.LaunchSettleRefused as exc:
-        return _fail(args, exc.code, str(exc))
+    except (task_resources.LaunchSettleRefused, resources.ResourceError) as exc:
+        return _fail(args, exc.code, str(exc))  # a corrupt, repairing or locked ledger settles nothing
     if args.json:
         print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": result})))
     else:

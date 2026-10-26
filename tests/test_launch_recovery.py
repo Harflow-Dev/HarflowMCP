@@ -424,3 +424,89 @@ async def test_followups_are_consumed_when_the_launch_spawns_after_the_caller_di
     await wait_for(lambda: task_supervision.read_task_record(log_dir, info["task_id"]) is not None, 60)
     path = log_dir / f"{source.task_id}{followups.STATE_SUFFIX}"
     await wait_for(lambda: [i["status"] for i in json.loads(path.read_text())["ledger"]["items"]] == ["consumed"])
+
+
+# ---- round 2 ------------------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["returns_false", "raises"])
+async def test_an_unfinalized_followup_settlement_is_never_requeued(tmp_path, source, monkeypatch, identities, failure):
+    install_fake_claude(tmp_path, monkeypatch)
+    log_dir = tasks_dir(tmp_path)
+    reg = registry(tmp_path)
+    previous = await finished_task(reg, tmp_path, "a" * 32)
+    identities.dead(OWNER["pid"])
+    followups.send(log_dir, previous.task_id, "note", by=None)
+    attempt = await followups.begin(log_dir, previous.task_id, "c" * 32, OWNER)
+    write_receipt(tmp_path, "c" * 32, "granted", owner=OWNER, repo_path=str(tmp_path / "wt"),
+                  worktree={"path": str(tmp_path / "wt"), "state": "created", "source_repo_path": str(source)},
+                  followups={"task_id": previous.task_id, "ids": attempt.ids})
+
+    def broken(*args, **kwargs):
+        if failure == "raises":
+            raise RuntimeError("stopped between the receipt and the ledger")
+        return False
+
+    with monkeypatch.context() as patched:
+        patched.setattr(followups, "finish", broken)
+        if failure == "raises":
+            with pytest.raises(RuntimeError):
+                settle(tmp_path, "c" * 32)
+        else:
+            settle(tmp_path, "c" * 32)
+    assert launch_state(tmp_path, "c" * 32) == "not_started"
+    followups._INFLIGHT.clear()  # a fresh process knows nothing of this attempt: only the receipt speaks
+    assert item_statuses(log_dir, previous.task_id) == ["delivery_unknown"]
+
+
+def test_ctl_launch_settle_reports_a_corrupt_ledger_instead_of_failing(tmp_path, monkeypatch, identities, capsys):
+    from harflow_mcp import ctl, lineage
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("HARFLOW_STATE_ROOT", str(tmp_path / "state"))
+    assert ctl.main(["resources", "--json"]) == 0
+    capsys.readouterr()
+    identities.dead(OWNER["pid"])
+    write_receipt(tmp_path, "a" * 32, "granted", owner=OWNER, resources={"names": ["sim"], "state": "granted"})
+    monkeypatch.setattr(lineage, "detect_caller_detail", lambda *a, **k: lineage.Detection(None))
+    ledger(tmp_path).directory.mkdir(parents=True, exist_ok=True)
+    ledger(tmp_path).path.write_text("garbage")
+    assert ctl.main(["launch-settle", "--task-id", "a" * 32, "--confirm-uncertain", "--json"]) == 1
+    assert json.loads(capsys.readouterr().out.splitlines()[-1])["error"]["code"] == "resource_ledger_corrupt"
+    assert launch_state(tmp_path, "a" * 32) == "granted"
+
+
+@pytest.mark.asyncio
+async def test_the_worktree_scan_for_a_launch_runs_off_the_event_loop(tmp_path, monkeypatch, identities):
+    import threading
+    install_fake_claude(tmp_path, monkeypatch)
+    seen = []
+    real = worktrees.containing_worktree
+    monkeypatch.setattr(worktrees, "containing_worktree", lambda *a, **k: (seen.append(threading.current_thread()), real(*a, **k))[1])
+    await registry(tmp_path).start("reply x", tmp_path, backend=get("claude"), freedom="read_only", task_id="a" * 32)
+    assert seen and all(thread is not threading.main_thread() for thread in seen)
+
+
+@pytest.mark.asyncio
+async def test_owner_killed_while_the_worktree_is_being_created_is_never_started_and_settles(tmp_path, source, monkeypatch, identities):
+    import signal
+    install_fake_claude(tmp_path, monkeypatch)
+    log_dir = tasks_dir(tmp_path)
+    signal_dir = hook(monkeypatch, tmp_path, "worktree_add")
+    reg = registry(tmp_path)
+    started = await reg.start("reply x", source, backend=get("claude"), freedom="write_in_repo", worktree={}, resources=["sim"], task_id="a" * 32)
+    await wait_for(lambda: (signal_dir / "reached").exists())
+    receipt = task_supervision.read_launch(log_dir, started.task_id)
+    assert receipt["state"] == "granted" and receipt["worktree"]["state"] == "creating"
+    os.kill(receipt["owner"]["pid"], signal.SIGKILL)
+    identities.dead(receipt["owner"]["pid"])
+    view = task_resources.pending_view(log_dir, started.task_id)
+    assert view["status"] == "failed" and view["not_started_reason"] == "owner_died" and view["worktree"]["state"] == "unknown"
+    assert started.task_id not in {r["task_id"] for r in task_supervision.session_reservations(log_dir)}
+    # Spawn follows `created`, so the reaper frees the name; the person can still settle the receipt.
+    task_resources.reap(log_dir)
+    assert all(entry.owner.task_id != started.task_id for entry in ledger(tmp_path).entries())
+    assert settle(tmp_path, started.task_id)["outcome"] == "never_started"
+    settled = task_supervision.read_launch(log_dir, started.task_id)
+    assert settled["state"] == "not_started" and settled["worktree"]["state"] == "unknown"
+    assert not Path(receipt["worktree"]["path"]).exists() and spawn_log(tmp_path) == []

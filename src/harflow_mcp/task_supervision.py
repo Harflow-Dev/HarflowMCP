@@ -248,6 +248,19 @@ async def launch(registry, invocation, kwargs):
         raise ValueError('Authorized task launch exceeds private transfer bound')
     log_dir = registry.log_dir
     log_dir.mkdir(parents=True, exist_ok=True)
+    # A launch into a worktree takes its usage lock just long enough to write the receipt, so a
+    # removal that already decided "nothing uses it" cannot be overtaken by this launch. The
+    # worktree is recognised from what was recorded for it (the plan of a fresh launch, the
+    # `worktree` of the record being resumed), never from the root configured right now, which
+    # can have changed since it was created.
+    from . import worktrees
+    recorded = kwargs.get('worktree_request') or kwargs.get('worktree_info')
+    lock_target = recorded.get('path') if isinstance(recorded, dict) and recorded.get('path') else None
+    if lock_target is None:
+        # A plain launch whose repo_path is itself a recorded worktree races a removal just the same.
+        # The scan reads every record and receipt, so it runs off the event loop and before the launch lock.
+        inside = await asyncio.to_thread(worktrees.containing_worktree, log_dir, Path(kwargs['repo_path']))
+        lock_target = str(inside) if inside is not None else None
     lock = os.open(log_dir / f'{task_id}.launch.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
         # Nonblocking: a competing owner is never joined by executing the same request again.
@@ -274,18 +287,6 @@ async def launch(registry, invocation, kwargs):
             value['followups'] = request['followups']
         if kwargs.get('worktree_request') is not None:
             value['worktree'] = dict(kwargs['worktree_request'])
-        # A launch into a worktree takes its usage lock just long enough to write the receipt, so a
-        # removal that already decided "nothing uses it" cannot be overtaken by this launch. The
-        # worktree is recognised from what was recorded for it (the plan of a fresh launch, the
-        # `worktree` of the record being resumed), never from the root configured right now, which
-        # can have changed since it was created.
-        from . import worktrees
-        recorded = kwargs.get('worktree_request') or kwargs.get('worktree_info')
-        lock_target = recorded.get('path') if isinstance(recorded, dict) and recorded.get('path') else None
-        if lock_target is None:
-            # A plain launch whose repo_path is itself a recorded worktree races a removal just the same.
-            inside = worktrees.containing_worktree(log_dir, Path(kwargs['repo_path']))
-            lock_target = str(inside) if inside is not None else None
         if lock_target is not None:
             try:
                 with worktrees.usage_lock(Path(lock_target)):

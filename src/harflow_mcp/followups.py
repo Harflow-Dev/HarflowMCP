@@ -335,7 +335,7 @@ def _launch_verdict(log_dir: Path, successor: str) -> str | None | bool:
         return False
     state = receipt["state"]
     if state == "not_started":
-        return RELEASED
+        return DELIVERY_UNKNOWN if receipt.get("followups_delivery_unknown") else RELEASED
     if state not in ("waiting_for_resources", "granted"):
         return False
     try:
@@ -355,6 +355,8 @@ def _launch_verdict(log_dir: Path, successor: str) -> str | None | bool:
     except (store.TaskDocumentError, OSError):
         return None
     if fresh is None:
+        return DELIVERY_UNKNOWN
+    if fresh["state"] == "not_started" and fresh.get("followups_delivery_unknown"):
         return DELIVERY_UNKNOWN
     return RELEASED if fresh["state"] in ("waiting_for_resources", "not_started") else DELIVERY_UNKNOWN
 

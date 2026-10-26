@@ -3988,15 +3988,26 @@ class TaskRegistry:
             pause_for_task(self._log_dir, task_id, "Task cancelled outside the workflow supervisor")
         result = await self._shielded(self._cancel_cascade(task_id), f"harflow-cascade-{task_id}")
         from . import task_resources
-        # A pending launch can sit under a recorded intermediate (a task that already has a record),
-        # so the walk is seeded with every recorded descendant the cascade covers.
-        local_lineage = [(t.task_id, t.spawned_by, t.root_task_id) for t in self._tasks.values()]
-        recorded = await asyncio.to_thread(self._cascade_targets, task_id, local_lineage)
-        pending = await asyncio.to_thread(task_resources.pending_descendants, self._log_dir, task_id, tuple(recorded))
-        if pending:
+        requested: list[str] = []
+        handled: set[str] = set()
+        for _ in range(CASCADE_MAX_ROUNDS):
+            # A pending launch can sit under a recorded intermediate (a task that already has a record),
+            # so the walk is seeded with every recorded descendant the cascade covers.
+            local_lineage = [(t.task_id, t.spawned_by, t.root_task_id) for t in self._tasks.values()]
+            recorded = await asyncio.to_thread(self._cascade_targets, task_id, local_lineage)
+            pending = [item for item in await asyncio.to_thread(task_resources.pending_descendants, self._log_dir, task_id, tuple(recorded))
+                       if item not in handled]
+            if not pending:
+                break
             # Launches still waiting for resources have no process to signal; ask their owners to stop.
+            handled.update(pending)
             stopped = await asyncio.to_thread(self._cancel_pending_launches, pending)
-            result = {**result, "pending_cancel_requested": stopped}
+            requested.extend(item for item in stopped if item not in requested)
+            # A launch can spawn while its request is written, after the owner's last look at it. It is
+            # a task by now, so the ordinary cascade (which also reaches what it dispatched) stops it.
+            result = await self._shielded(self._cancel_cascade(task_id), f"harflow-cascade-{task_id}")
+        if handled:
+            result = {**result, "pending_cancel_requested": requested}
         return result
 
     def _cancel_pending_launches(self, task_ids: list[str]) -> list[str]:

@@ -31,6 +31,8 @@ DEFAULT_WAIT_SECONDS = 3600
 MAX_WAIT_SECONDS = 21600
 CANCEL_SUFFIX = ".launch-cancel.json"
 PENDING_STATES = ("waiting_for_resources", "granted")
+# Set on a `not_started` receipt whose handed-over follow-ups may have reached an agent.
+UNCERTAIN_FOLLOWUPS_KEY = "followups_delivery_unknown"
 
 
 def is_pending_kind(receipt: dict[str, Any] | None) -> bool:
@@ -539,8 +541,11 @@ def release_session_claim(log_dir: Path, task_id: str) -> str:
         return "unknown"
     if receipt["state"] not in ("granted", "waiting_for_resources") or read_task_record(log_dir, task_id, include_prompt=False) is not None:
         return "not_applicable"
+    changes: dict[str, Any] = {}
+    if receipt["state"] == "granted" and receipt.get("followups") and (receipt.get("worktree") or {}).get("state") not in ("planned", "creating"):
+        changes[UNCERTAIN_FOLLOWUPS_KEY] = True  # the agent may have started: its follow-ups must not return to the queue
     mark(log_dir, task_id, receipt["generation"], state="not_started", not_started_reason="released_by_person",
-         error="released with harflow-ctl resources-release")
+         error="released with harflow-ctl resources-release", **changes)
     return "released"
 
 
@@ -586,16 +591,21 @@ def settle_uncertain(log_dir: Path, task_id: str) -> dict[str, Any]:
             released.append(reservation_id)
     handed = fresh.get("followups")
     outcome = None
-    if handed:
-        outcome = "released" if provably_not_started else "delivery_unknown"
-        followups.finish(log_dir, handed["task_id"], task_id, handed["ids"], outcome,
-                         None if provably_not_started else "the launch owner stopped after the launch was granted; a person settled it")
     changes: dict[str, Any] = {"state": "not_started", "not_started_reason": "settled_by_person",
                                "error": "settled with harflow-ctl launch-settle"}
     if worktree.get("state") == "creating":
         changes["worktree"] = worktree | {"state": "unknown"}
+    if handed:
+        outcome = "released" if provably_not_started else "delivery_unknown"
+        if not provably_not_started:
+            # Recorded in the receipt before the ledger is written: if that write fails, or this process
+            # stops between the two, reconciliation still reads the uncertainty from the receipt.
+            changes[UNCERTAIN_FOLLOWUPS_KEY] = True
     mark(log_dir, task_id, fresh["generation"], **changes)
     clear_cancel(log_dir, task_id)
+    if handed:
+        followups.finish(log_dir, handed["task_id"], task_id, handed["ids"], outcome,
+                         None if provably_not_started else "the launch owner stopped after the launch was granted; a person settled it")
     return {"task_id": task_id, "outcome": "never_started" if provably_not_started else "uncertain",
             "released_reservations": released, "followups": outcome}
 
@@ -608,7 +618,9 @@ def collect_evidence(log_dir: Path) -> dict[str, Any]:
     """The ledger entries that durable launch receipts and task records prove, as repair specs.
 
     Provable means: a record whose `resources` is `held` and whose run is not conclusively settled,
-    or a `granted` launch with no record (its owner may be about to spawn). Roots come first; a
+    or a `granted` launch with no record (its owner may be about to spawn). An owner granted a name
+    while its receipt still said `waiting_for_resources` is not found here: it confirms its grant
+    after publishing `granted` and requests it again if a repair dropped it. Roots come first; a
     borrower is recorded with its lender, and the lender is kept while any borrower is unresolved:
     from its own record when that is readable (flagged `release_requested` once the lender itself
     settled), or as a conservative entry that blocks the borrowers' names when the lender cannot be
@@ -617,7 +629,7 @@ def collect_evidence(log_dir: Path) -> dict[str, Any]:
     a dead one never started). Pure reads; nothing here takes the ledger lock.
     """
     from . import retention
-    from .task_supervision import read_task_record, reservations
+    from .task_supervision import reservations
     roots: dict[str, dict[str, Any]] = {}
     borrowers: list[dict[str, Any]] = []
     by_reservation: dict[str, tuple[str, dict[str, Any]]] = {}
@@ -634,7 +646,13 @@ def collect_evidence(log_dir: Path) -> dict[str, Any]:
         else:
             roots[rid] = spec
 
-    for record in store.read_all(log_dir):
+    # Receipts are read before records. A launch that spawns in between has a record by the time the
+    # records are read, so it is found there; one that spawns later is still `granted` with no record
+    # in what was read first. Reading records first would let that launch fall between the two.
+    snapshot = reservations(log_dir)
+    records = list(store.read_all(log_dir))
+    recorded_ids = {record.task_id for record in records}
+    for record in records:
         held = getattr(record, "resources", None)
         if not isinstance(held, dict) or not isinstance(held.get("reservation_id"), str):
             continue
@@ -644,10 +662,9 @@ def collect_evidence(log_dir: Path) -> dict[str, Any]:
         status = store.resolve_status(log_dir, record, detail=False)[0]
         if not retention._conclusively_settled(record, status):
             note(record.task_id, held, held.get("borrowed_from") if isinstance(held.get("borrowed_from"), str) else None)
-    for receipt in reservations(log_dir):
+    for receipt in snapshot:
         held = receipt.get("resources")
-        if (isinstance(held, dict) and receipt["state"] == "granted"
-                and read_task_record(log_dir, receipt["task_id"], include_prompt=False) is None):
+        if isinstance(held, dict) and receipt["state"] == "granted" and receipt["task_id"] not in recorded_ids:
             scope = held.get("scope") if isinstance(held.get("scope"), dict) else {}
             lender = held.get("borrowed_from") or scope.get("reservation_id")
             note(receipt["task_id"], held, lender if isinstance(lender, str) else None)

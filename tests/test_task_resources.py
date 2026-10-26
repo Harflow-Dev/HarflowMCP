@@ -660,3 +660,38 @@ async def test_root_caller_cancels_a_pending_launch_and_its_pending_descendants(
     assert sorted(result["cascade"]["pending_cancel_requested"]) == [parent.task_id, child.task_id]
     await wait_for(lambda: launch_state(tmp_path, parent.task_id) == "not_started" and launch_state(tmp_path, child.task_id) == "not_started")
     assert await reg.cancel_pending("e" * 32) is None
+
+
+@pytest.mark.asyncio
+async def test_a_pending_child_that_spawns_during_the_cascade_is_cancelled_as_a_task(tmp_path, monkeypatch, identities):
+    install_fake_claude(tmp_path, monkeypatch)
+    log_dir = tasks_dir(tmp_path)
+    reg = registry(tmp_path)
+    root = await reg.start("slow 30 one", tmp_path, backend=get("claude"), freedom="read_only", task_id="a" * 32)
+    await wait_for(lambda: task_supervision.read_task_record(log_dir, root.task_id) is not None)
+    identities.alive(OWNER["pid"])
+    child = "b" * 32
+    write_receipt(tmp_path, child, "waiting_for_resources", owner=OWNER, spawned_by=root.task_id, root_task_id=root.task_id,
+                  resources={"names": ["sim"], "state": "waiting", "reservation_id": "r" * 32})
+    real_launch = task_resources.cancel_launch
+    targets = []
+
+    def spawning(directory, task_id, **kwargs):
+        outcome = real_launch(directory, task_id, **kwargs)
+        if task_id == child:  # the child spawns just after its owner looked for the request
+            store.write(directory, store.TaskRecord(task_id=child, backend="claude", session_id=None, repo_path="/x",
+                                                    started_at="2026-01-01T00:00:00+00:00", status="running",
+                                                    spawned_by=root.task_id, root_task_id=root.task_id))
+        return outcome
+
+    real_cascade = reg._cancel_cascade
+
+    async def spying(task_id):
+        targets.append(set(reg._cascade_targets(task_id, [])))
+        return await real_cascade(task_id)
+
+    monkeypatch.setattr(task_resources, "cancel_launch", spawning)
+    monkeypatch.setattr(reg, "_cancel_cascade", spying)
+    result = await reg.cancel_cascade(root.task_id, workflow_control=True)
+    assert result["pending_cancel_requested"] == [child]
+    assert len(targets) == 2 and child not in targets[0] and child in targets[1]

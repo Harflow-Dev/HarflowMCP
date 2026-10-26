@@ -192,7 +192,7 @@ def test_worktree_config_that_would_execute_is_refused_and_never_run(source, tmp
     assert not ran.exists() and path.exists()
 
 
-# ---- round 2: containment, no --force, submodules and locks ---------------------------------------
+# ---- round 2: containment, submodules and locks ---------------------------------------
 
 
 def test_a_task_running_in_a_subdirectory_of_the_worktree_blocks_removal(source, tmp_path, owned, identities) -> None:
@@ -232,16 +232,17 @@ def test_a_worktree_with_an_initialized_submodule_is_refused_and_keeps_its_chang
     assert (sub / "lib.txt").read_text() == "dirty change only inside the submodule" and path.exists()
 
 
-def test_the_removal_probe_sees_dirty_submodules(source, tmp_path, owned, identities) -> None:
-    from harflow_mcp.task_outcomes import GitProbe
+def test_a_malicious_submodule_configuration_is_never_executed(source, tmp_path, owned, identities, marker) -> None:
+    script, ran = marker
     made = seed_created(source, tmp_path, owned)
     path = Path(made["path"])
     sub = with_submodule(source, tmp_path, path)
+    git(sub, "config", "core.fsmonitor", str(script))
+    git(sub, "config", "filter.x.clean", str(script))
     (sub / "lib.txt").write_text("dirty")
-    git_dir, common = worktrees.verify_link(path, source)
-    probe = GitProbe(path, budget=30.0)
-    assert probe.status(str(path), git_dir=str(git_dir), common=str(common)).strip() == ""
-    assert "sub" in probe.status(str(path), git_dir=str(git_dir), common=str(common), ignore_submodules="none")
+    (sub / ".gitattributes").write_text("* filter=x\n")
+    assert remove_code(owned.tasks_directory, "a" * 32) == "worktree_has_submodules"
+    assert not ran.exists() and path.exists()
 
 
 def test_a_locked_worktree_is_not_removed(source, tmp_path, owned, identities) -> None:
@@ -254,7 +255,7 @@ def test_a_locked_worktree_is_not_removed(source, tmp_path, owned, identities) -
     assert worktrees.remove(owned.tasks_directory, "a" * 32)["removed"] is True
 
 
-def test_removal_does_not_pass_force_to_git(source, tmp_path, owned, identities, monkeypatch) -> None:
+def test_removal_uses_a_single_force_after_the_full_proof(source, tmp_path, owned, identities, monkeypatch) -> None:
     seen = []
     real = worktrees.subprocess.run
 
@@ -265,5 +266,6 @@ def test_removal_does_not_pass_force_to_git(source, tmp_path, owned, identities,
     seed_created(source, tmp_path, owned)
     monkeypatch.setattr(worktrees.subprocess, "run", spy)
     worktrees.remove(owned.tasks_directory, "a" * 32)
-    removals = [argv for argv in seen if "remove" in argv]
-    assert removals and all("--force" not in argv and "-f" not in argv for argv in removals)
+    removals = [argv for argv in seen if "worktree" in argv and "remove" in argv]
+    assert len(removals) == 1 and removals[0].count("--force") == 1
+    assert all("--ignore-submodules=none" not in argv for argv in seen)

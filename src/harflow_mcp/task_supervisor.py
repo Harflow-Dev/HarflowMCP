@@ -113,32 +113,65 @@ async def _acquire_resources(registry, task_id: str, generation: str, request: d
                 pass
         return not task_resources.cancel_requested(log_dir, task_id)
 
-    try:
-        entry = await ledger.acquire(
-            names, {'kind': 'task', 'task_id': task_id},
-            scope=resource_ledger.Scope(scope['reservation_id']) if scope is not None else None,
-            timeout=wait, reservation_id=reservation_id,
-            should_continue=keep_waiting)
-    except resource_ledger.ResourceWaitExpired as exc:
-        await settle('resource_wait_expired', str(exc), release=False)
-        raise _NotStarted() from None
-    except resource_ledger.ResourceWaitCancelled as exc:
-        await settle('cancelled', str(exc), release=False)
-        raise _NotStarted() from None
-    except resource_ledger.ResourceError as exc:
-        await settle('owner_error', f'{exc.code}: {exc}', release=False)
-        raise _NotStarted() from None
-    granted = held | {'state': 'granted', 'granted_at': entry.granted_at}
-    if entry.borrows_from is not None:
-        granted['borrowed_from'] = entry.borrows_from
-    if task_resources.cancel_requested(log_dir, task_id):
-        held = granted
-        await settle('cancelled', 'cancelled before the task started')
-        raise _NotStarted()
-    mark(log_dir, task_id, generation, state='granted', resources=granted)
+    deadline = started + timedelta(seconds=wait)
+    remaining = float(wait)
+    while True:
+        try:
+            entry = await ledger.acquire(
+                names, {'kind': 'task', 'task_id': task_id},
+                scope=resource_ledger.Scope(scope['reservation_id']) if scope is not None else None,
+                timeout=remaining, reservation_id=reservation_id,
+                should_continue=keep_waiting)
+        except resource_ledger.ResourceWaitExpired as exc:
+            await settle('resource_wait_expired', str(exc), release=False)
+            raise _NotStarted() from None
+        except resource_ledger.ResourceWaitCancelled as exc:
+            await settle('cancelled', str(exc), release=False)
+            raise _NotStarted() from None
+        except resource_ledger.ResourceError as exc:
+            await settle('owner_error', f'{exc.code}: {exc}', release=False)
+            raise _NotStarted() from None
+        granted = held | {'state': 'granted', 'granted_at': entry.granted_at}
+        if entry.borrows_from is not None:
+            granted['borrowed_from'] = entry.borrows_from
+        if task_resources.cancel_requested(log_dir, task_id):
+            held = granted
+            await settle('cancelled', 'cancelled before the task started')
+            raise _NotStarted()
+        mark(log_dir, task_id, generation, state='granted', resources=granted)
+        # A repair that ran while this receipt still said `waiting_for_resources` rebuilt the ledger
+        # without this grant. The receipt says `granted` now, so any repair that starts from here
+        # restores it; one that already published is detected here and the grant is requested again.
+        verdict = await asyncio.to_thread(_grant_survives, ledger, reservation_id)
+        if verdict is True:
+            break
+        if verdict is None:
+            await settle('owner_error', 'the resource ledger did not finish a repair in time; the grant could not be confirmed')
+            raise _NotStarted()
+        mark(log_dir, task_id, generation, state='waiting_for_resources', resources=held)
+        remaining = max((deadline - datetime.now(timezone.utc)).total_seconds(), 0.0)
     return {'names': names, 'reservation_id': reservation_id, 'state': 'held', 'wait_seconds': wait,
             'wait_started_at': held['wait_started_at'], 'granted_at': entry.granted_at,
             **({'borrowed_from': entry.borrows_from} if entry.borrows_from is not None else {})}
+
+
+GRANT_CONFIRM_SECONDS = 60.0
+
+
+def _grant_survives(ledger, reservation_id: str) -> bool | None:
+    """Whether the ledger still holds this grant: True, False (it is gone), or None when it stays
+    closed for repair past `GRANT_CONFIRM_SECONDS`. Blocking."""
+    deadline = time.monotonic() + GRANT_CONFIRM_SECONDS
+    while True:
+        try:
+            entry = ledger.get(reservation_id)
+            return entry is not None and entry.held
+        except resource_ledger.ResourceLedgerRepairing:
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(0.2)
+        except resource_ledger.ResourceError:
+            return None
 
 
 def _release_followups(log_dir, task_id: str, request: dict, outcome: str) -> None:

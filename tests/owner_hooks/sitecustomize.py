@@ -32,6 +32,17 @@ if _hook:
             return _original(*args, **kwargs)
 
         worktrees.create = _create
+    elif point == "worktree_add":
+        # Pause once the receipt says `creating`, right before the Git command that writes.
+        from harflow_mcp import worktrees
+        _git = worktrees._git
+
+        def _paused_git(repo, *args, **kwargs):
+            if args[:2] == ("worktree", "add"):
+                _pause(directory)
+            return _git(repo, *args, **kwargs)
+
+        worktrees._git = _paused_git
     elif point == "baseline":
         from harflow_mcp import task_outcomes
         _baseline = task_outcomes.baseline

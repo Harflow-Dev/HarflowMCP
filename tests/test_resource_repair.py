@@ -197,3 +197,82 @@ def test_an_unreadable_ancestor_fails_closed(tmp_path, owned) -> None:
     # A chain with no holder anywhere is simply no scope.
     store.write(log_dir, record_for("z" * 32, "/x", status="running"))
     assert task_resources.holding_scope(log_dir, caller) is None
+
+
+# ---- round 2: grants and spawns racing a repair ---------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_grant_dropped_by_a_repair_that_ran_before_the_receipt_said_granted_is_requested_again(tmp_path, monkeypatch, identities, owned) -> None:
+    from types import SimpleNamespace
+    from harflow_mcp import task_supervisor
+    log_dir = owned.tasks_directory
+    identities.alive(OWNER["pid"])
+    write_receipt(tmp_path, "a" * 32, "claimed", owner=OWNER)
+    real_mark = task_supervisor.mark
+    fired = []
+
+    def mark(directory, task_id, generation, **changes):
+        if changes.get("state") == "granted" and not fired:
+            fired.append(1)
+            # The ledger was corrupted and repaired after the owner acquired but while the receipt still
+            # said waiting: the repair has no evidence of this grant and rebuilds without it.
+            corrupt(tmp_path)
+            task_resources.repair(directory)
+            assert ledger(tmp_path).entries() == []
+        return real_mark(directory, task_id, generation, **changes)
+
+    monkeypatch.setattr(task_supervisor, "mark", mark)
+    grant = await task_supervisor._acquire_resources(
+        SimpleNamespace(log_dir=log_dir), "a" * 32, "c" * 32, {"names": ["sim"], "wait_seconds": 5, "scope": None})
+    assert fired and grant["state"] == "held"
+    held = [e for e in ledger(tmp_path).entries() if e.held]
+    assert [(e.owner.task_id, e.reservation_id) for e in held] == [("a" * 32, grant["reservation_id"])]
+    assert not ledger(tmp_path).request(["sim"], task("other")).held
+    assert task_supervisor.read_launch(log_dir, "a" * 32)["state"] == "granted"
+
+
+def test_a_launch_that_spawns_between_the_receipt_and_record_scans_is_still_restored(tmp_path, monkeypatch, identities, owned) -> None:
+    from harflow_mcp import task_supervision
+    log_dir = owned.tasks_directory
+    identities.alive(OWNER["pid"])
+    identities.alive(777)
+    rid = "r" * 32
+    write_receipt(tmp_path, "a" * 32, "granted", owner=OWNER, resources={"names": ["sim"], "state": "granted", "reservation_id": rid})
+    spawned = running("a" * 32, rid, ["sim"], pid=777)
+    fired = []
+
+    def after_first_scan(real):
+        def scan(*args, **kwargs):
+            found = real(*args, **kwargs)
+            if not fired:
+                fired.append(1)
+                store.write(log_dir, spawned)  # the owner spawns right after whichever scan came first
+            return found
+        return scan
+
+    monkeypatch.setattr(store, "read_all", after_first_scan(store.read_all))
+    monkeypatch.setattr(task_supervision, "reservations", after_first_scan(task_supervision.reservations))
+    corrupt(tmp_path)
+    result = task_resources.repair(log_dir)
+    assert result["restored"] == [rid]
+    assert not ledger(tmp_path).request(["sim"], task("other")).held
+
+
+def test_a_borrower_whose_lender_lost_a_conflict_is_kept_not_dropped(tmp_path) -> None:
+    led = ResourceLedger(tmp_path / "state")
+    led.request(["x"], task("seed"))
+    led.path.write_text("garbage")
+    token = led.begin_repair()
+    result = led.complete_repair(token, [
+        {"reservation_id": "ra", "names": ["lab", "sim"], "owner": task("a")},
+        {"reservation_id": "rb", "names": ["gpu", "lab"], "owner": task("b")},  # overlaps ra: not restored
+        {"reservation_id": "rc", "names": ["gpu"], "owner": task("c"), "borrows_from": "rb"},
+        {"reservation_id": "rd", "names": ["lab"], "owner": task("d"), "borrows_from": "rb"},
+    ])
+    assert {c["reservation_id"] for c in result.conflicts} >= {"rb", "rc", "rd"}
+    entries = {e.reservation_id: e for e in led.entries()}
+    assert entries["rd"].borrows_from == "ra"  # attached to the restored root that covers it
+    assert entries["rc"].borrows_from is None and entries["rc"].names == ("gpu",)  # held as a root
+    assert not led.request(["gpu"], task("late")).held
+    assert led.release("ra") == "release_requested"  # ra still has its borrower

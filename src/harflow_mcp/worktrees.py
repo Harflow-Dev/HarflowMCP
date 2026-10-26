@@ -15,9 +15,9 @@ Safety rules, each enforced here rather than hoped for:
   `core.fsmonitor=false`, so no hook (including `post-checkout`) and no fsmonitor program executes
   during creation, and a repository that configures clean/smudge/process filter drivers (Git LFS
   included) is refused, because checking out or inspecting such a tree would run them.
-* **Nothing is forced.** Never `--force`, never a reset, never a branch deletion. The caller's
-  checkout and index are untouched; Git's own refusal to check a branch out in two places stands, and
-  so does its refusal to remove a locked or dirty worktree.
+* **Nothing is discarded.** Never a reset, never a branch deletion, and removal is refused for a dirty
+  tree, an initialized submodule or a locked worktree. The caller's checkout and index are untouched;
+  Git's own refusal to check a branch out in two places stands.
 * **Removal is explicit.** Only a person (ctl, humans-only gate) removes a worktree, and only when
   no unsettled or uncertain task uses it and the tree is clean, under the per-worktree usage lock
   that every launch into the path also takes.
@@ -28,8 +28,10 @@ Safety rules, each enforced here rather than hoped for:
   `commondir` and `gitdir` back-links agree; the cleanliness check then pins `--git-dir` and
   `--work-tree` and runs in the disposable, configuration-free Git directory that outcome capture uses
   (`task_outcomes.GitProbe.status`), after the effective configuration (the source's and the
-  worktree's own) has been checked for filter drivers. The whole proof is repeated immediately before
-  `git worktree remove` (without `--force`), under the usage lock; initialized submodules are refused.
+  worktree's own) has been checked for filter drivers. The whole proof (link, configuration, no initialized submodule, not locked, clean) is repeated
+  immediately before `git worktree remove --force`, under the usage lock. `--force` only keeps Git from
+  running its own status inside the tree under the tree's configuration; a stray process writing between
+  the final probe and the removal is the residual window.
 """
 from __future__ import annotations
 
@@ -303,8 +305,9 @@ def check_filters_pinned(path: Path, git_dir: Path) -> None:
 
 
 def check_no_submodules(path: Path, git_dir: Path) -> None:
-    """Refuse a worktree with a populated or initialized submodule: its changes cannot be inspected
-    without running Git inside a directory the agent controls, and removal would discard them."""
+    """Refuse a worktree with a populated or initialized submodule. Its changes cannot be inspected
+    without running Git inside a directory the agent controls (the status probe never recurses into
+    submodules), and removal would discard them."""
     modules = git_dir / "modules"
     if modules.is_dir() and any(modules.iterdir()):
         raise WorktreeError("the worktree has initialized submodules, which are not inspected or removed",
@@ -335,9 +338,10 @@ def prove_removable(path: Path, source: Path) -> None:
     check_filters_pinned(path, git_dir)
     check_config_pinned(path, git_dir)
     check_no_submodules(path, git_dir)
+    if os.path.lexists(git_dir / "locked"):
+        raise WorktreeError("the worktree is locked (`git worktree lock`); unlock it first", code="worktree_locked")
     from .task_outcomes import GitProbe
-    observed = GitProbe(path, budget=STATUS_BUDGET_SECONDS).status(
-        str(path), git_dir=str(git_dir), common=str(common), ignore_submodules="none")
+    observed = GitProbe(path, budget=STATUS_BUDGET_SECONDS).status(str(path), git_dir=str(git_dir), common=str(common))
     if observed is None:
         raise WorktreeError("the worktree's state could not be observed within its budget, so it is not removed",
                             code="worktree_status_unavailable")
@@ -463,8 +467,7 @@ def remove(log_dir: Path, task_id: str) -> dict[str, Any]:
     """Remove the worktree created for `task_id`, or refuse with the reason. Blocking; humans only.
 
     Refuses while any user is unsettled or uncertain and while the tree has any tracked or
-    untracked change (submodules included) and refuses initialized submodules. `git worktree remove`
-    runs without `--force`, so a locked worktree stays; the branch stays.
+    untracked change, refuses initialized submodules and locked worktrees, and keeps the branch.
     """
     entry = next((e for e in inventory(log_dir) if e.get("task_id") == task_id), None)
     if entry is None:
@@ -484,14 +487,16 @@ def remove(log_dir: Path, task_id: str) -> dict[str, Any]:
         # inside the tree until its link to the repository is proven, the configuration it would run
         # under is free of anything executable, and the hardened probe found no change at all.
         prove_removable(path, source)
-        # Git's own dirty, submodule and lock checks stay as the last word (no --force), under the
-        # same hardening and the configuration just verified.
-        result = subprocess.run(["git", *GIT_SAFE_ARGS, "-C", str(source), "worktree", "remove", str(path)],
+        # `--force` only stops Git from running its own status inside the agent's tree under the tree's
+        # configuration: cleanliness, submodules and locks were just decided above, under the same lock.
+        # What remains is a window in which a stray process of the agent writes between the final probe
+        # and the removal; the person who runs this has checked that nothing uses the worktree.
+        result = subprocess.run(["git", *GIT_SAFE_ARGS, "-C", str(source), "worktree", "remove", "--force", str(path)],
                                 env={**os.environ, **GIT_SAFE_ENV, **HARDENED_ENV}, capture_output=True, text=True,
                                 timeout=GIT_TIMEOUT_SECONDS, check=False)
         if path.exists():
             detail = (result.stderr or result.stdout).strip()[:300]
             raise WorktreeError(f"git did not remove {path}: {detail}",
-                                code="worktree_locked" if "locked" in detail else "worktree_git_failed")
+                                code="worktree_git_failed")
     return {"task_id": task_id, "path": str(path), "removed": True, "branch": entry.get("branch"),
             "note": "The branch, if any, was kept."}
