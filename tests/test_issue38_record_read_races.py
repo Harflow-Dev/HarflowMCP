@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -261,6 +262,118 @@ def test_registry_attach_returns_fresh_handle_without_launching_execution(
     assert registry._tasks == {}
     assert not list(task_dir.glob("*.launch.json"))
     assert injected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("triage_kind", ["done", "case2"])
+async def test_cancel_recovered_returns_fresh_final_record_after_one_replacement(
+    task_dir: Path, monkeypatch: pytest.MonkeyPatch, triage_kind: str
+) -> None:
+    from harflow_mcp.tasks import TaskRegistry
+
+    record = _record(title="stale")
+    assert store.write_landed(task_dir, record)
+    path = store.record_path(task_dir, record.task_id)
+    real_read_text = Path.read_text
+    injected = False
+    action_calls = 0
+    registry = TaskRegistry(log_dir=task_dir, owner={"pid": 1, "start_time": "test", "markers": []})
+
+    def triage(task_id: str):
+        return (triage_kind, record)
+
+    async def case2(payload):
+        nonlocal action_calls
+        action_calls += 1
+        return SimpleNamespace(kind="done")
+
+    monkeypatch.setattr(registry, "_triage_target", triage)
+    monkeypatch.setattr(registry, "_cascade_case2", case2)
+    monkeypatch.setattr(registry, "_cascade_case3_batch", lambda *args: pytest.fail("unexpected case3 action"))
+
+    def race(candidate: Path, *args: object, **kwargs: object) -> str:
+        nonlocal injected
+        raw = real_read_text(candidate, *args, **kwargs)
+        if candidate == path and not injected:
+            injected = True
+            assert store.write_landed(task_dir, replace(record, title="fresh"))
+        return raw
+
+    monkeypatch.setattr(Path, "read_text", race)
+    result = await registry._cancel_recovered(record)
+    assert result.title == "fresh"
+    assert injected
+    assert action_calls == (1 if triage_kind == "case2" else 0)
+
+
+@pytest.mark.asyncio
+async def test_cancel_recovered_persistent_final_replacements_propagate_and_act_once(
+    task_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from harflow_mcp.tasks import TaskRegistry
+
+    record = _record(title="stale")
+    assert store.write_landed(task_dir, record)
+    path = store.record_path(task_dir, record.task_id)
+    real_read_text = Path.read_text
+    replacements = 0
+    writing = False
+    action_calls = 0
+    registry = TaskRegistry(log_dir=task_dir, owner={"pid": 1, "start_time": "test", "markers": []})
+
+    async def case2(payload):
+        nonlocal action_calls
+        action_calls += 1
+        return SimpleNamespace(kind="done")
+
+    monkeypatch.setattr(registry, "_triage_target", lambda task_id: ("case2", record))
+    monkeypatch.setattr(registry, "_cascade_case2", case2)
+
+    def persistent_race(candidate: Path, *args: object, **kwargs: object) -> str:
+        nonlocal replacements, writing
+        raw = real_read_text(candidate, *args, **kwargs)
+        if candidate == path and not writing:
+            replacements += 1
+            writing = True
+            try:
+                assert store.write_landed(task_dir, replace(record, title=f"fresh-{replacements}"))
+            finally:
+                writing = False
+        return raw
+
+    monkeypatch.setattr(Path, "read_text", persistent_race)
+    with pytest.raises(store.TaskDocumentError) as raised:
+        await registry._cancel_recovered(record)
+    assert getattr(raised.value, "_source_changed_during_read", None) is True
+    assert replacements == 3
+    assert action_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_cancel_recovered_verified_absence_returns_input_after_one_action(
+    task_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from harflow_mcp.tasks import TaskRegistry
+
+    record = _record(title="stale")
+    assert store.write_landed(task_dir, record)
+    path = store.record_path(task_dir, record.task_id)
+    action_calls = 0
+    registry = TaskRegistry(log_dir=task_dir, owner={"pid": 1, "start_time": "test", "markers": []})
+
+    async def case2(payload):
+        nonlocal action_calls
+        action_calls += 1
+        path.unlink()
+        return SimpleNamespace(kind="done")
+
+    monkeypatch.setattr(registry, "_triage_target", lambda task_id: ("case2", record))
+    monkeypatch.setattr(registry, "_cascade_case2", case2)
+
+    result = await registry._cancel_recovered(record)
+    assert result is record
+    assert not path.exists()
+    assert action_calls == 1
 
 
 def test_task_association_uses_fresh_parent_after_replacement_and_keeps_active_workflow_gate(

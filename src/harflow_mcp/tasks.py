@@ -3811,6 +3811,8 @@ class TaskRegistry:
         target is — case 3's shared write once the owner is confirmed dead, or the record's own
         owner settling it after case 2's signal.
         """
+        from .task_supervision import read_task_record
+
         kind, payload = await asyncio.to_thread(self._triage_target, record.task_id)
         if kind == "case3":
             await self._cascade_case3_batch([payload])
@@ -3825,7 +3827,7 @@ class TaskRegistry:
                 "recovered task %s not signalled (%s)", record.task_id, payload or "already settled"
             )
 
-        return store.read(self._log_dir, record.task_id) or record
+        return read_task_record(self._log_dir, record.task_id) or record
 
     @_with_authority_check_budget
     @layout_operation
