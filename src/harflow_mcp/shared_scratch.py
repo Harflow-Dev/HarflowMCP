@@ -64,7 +64,7 @@ DAYS_ENV = "HARFLOW_SHARED_SCRATCH_DAYS"
 DEFAULT_DAYS = 14
 LOCK_WAIT_SECONDS = 5.0
 METADATA_LOCK_SECONDS = 0.5
-SETTLED_SEEN_LIMIT = 256
+SETTLED_SEEN_LIMIT = 1024
 SIZE_ENTRY_LIMIT = 200_000
 TRASH_MIN_AGE_SECONDS = 3600
 
@@ -343,30 +343,42 @@ def observe_settlement(log_dir: Path, kind: str, identity: str, task_ids: Iterab
 
     A task whose exit was never observed has no known finish time: its start time says nothing about when
     it last used the folder. The first observation of its settlement is the best available instant, and it
-    must be on disk before cleanup is allowed to count age. Each task id is recorded once (`settled_seen`,
-    bounded; an id dropped from the bound only ever extends retention once more). True when every id is
-    recorded; False when it could not be, in which case the folder must be kept."""
+    must be on disk before cleanup is allowed to count age. `task_ids` is every member currently in that
+    state; each is recorded once (`settled_seen`), so a later sweep does not advance the clock again, and
+    ids that are no longer members are dropped. More than `SETTLED_SEEN_LIMIT` members cannot all be
+    remembered, and forgetting one would let it extend the folder's life on every sweep, so that is
+    refused (False) and the folder is kept until retention has deleted enough of those records. A folder
+    with no metadata is adopted like `allocate_folder` does: the name derives from the identity, so fresh
+    metadata is written under the lock. True when every id is recorded; False when it could not be, in
+    which case the folder must be kept."""
     assert_task_owned(log_dir)
     ids = list(dict.fromkeys(task_ids))
     if not ids:
         return True
+    if len(ids) > SETTLED_SEEN_LIMIT:
+        return False
     try:
         key = key_for(kind, identity)
-        if not os.path.lexists(_meta_path(log_dir, kind, key)):
+        folder = root(log_dir) / kind / key
+        if not os.path.lexists(_meta_path(log_dir, kind, key)) and (folder.is_symlink() or not folder.is_dir()):
             return False
         with locked(log_dir, kind, identity, timeout=timeout):
             meta = _read_meta(log_dir, kind, key)
-            if meta is None or meta["identity"] != identity:
-                return False
-            seen = [value for value in meta.get("settled_seen", []) if isinstance(value, str)]
-            fresh = [identifier for identifier in ids if identifier not in seen]
-            if not fresh:
-                return True
             moment = now or _now()
+            if meta is None:
+                if folder.is_symlink() or not folder.is_dir():
+                    return False
+                meta = {"format": META_FORMAT, "v": 1, "kind": kind, "key": key, "identity": identity,
+                        "created_at": moment.isoformat(), "last_used_at": moment.isoformat()}
+            elif meta["identity"] != identity:
+                return False
+            seen = {value for value in meta.get("settled_seen", []) if isinstance(value, str)}
+            if all(identifier in seen for identifier in ids):
+                return True
             current = _parse_time(meta.get("last_used_at"))
             _write_meta(log_dir, kind, key, {
                 **meta, "last_used_at": (moment if current is None or current < moment else current).isoformat(),
-                "settled_seen": (seen + fresh)[-SETTLED_SEEN_LIMIT:]})
+                "settled_seen": ids})
             return True
     except StateOwnershipError:
         raise

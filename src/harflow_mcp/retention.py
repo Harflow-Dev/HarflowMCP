@@ -19,6 +19,7 @@ import hashlib
 import math
 import logging
 import os
+import threading
 import json
 import sqlite3
 import stat
@@ -489,6 +490,9 @@ def _retention_catalog_locks(log_dir: Path):
     with catalog_lock(log_dir.parent / 'workflow-runs', layout=task_layout(log_dir)), catalog_lock(log_dir, layout=task_layout(log_dir)):
         yield
 
+_carry = threading.local()  # `busy`: the last deletion was kept because a shared folder could not take the carried activity
+
+
 def _delete_task(
     log_dir: Path,
     record: store.TaskRecord,
@@ -574,8 +578,11 @@ def _delete_task(
                     if not _empty_inbox(log_dir, task_id):
                         stats["kept_locked"] += 1
                         return
+                    _carry.busy = False
                     if not _delete_task_files(log_dir, task_id):
-                        stats["kept_delete_failed"] += 1
+                        # A shared folder whose lock was busy is not a failed deletion: the task stays for the next sweep.
+                        stats["kept_shared_busy" if _carry.busy else "kept_delete_failed"] = stats.get(
+                            "kept_shared_busy" if _carry.busy else "kept_delete_failed", 0) + 1
                         return
                     stats["deleted_tasks"] += 1
         finally:
@@ -651,6 +658,7 @@ def _delete_task_files_locked(log_dir: Path, task_id: str) -> bool:
         return False
     # Before anything is deleted: a record whose activity cannot be carried into its shared folders stays.
     if qualified is not None and not _touch_shared_scratch(log_dir, qualified):
+        _carry.busy = True  # read by `_delete_task` to tell this from a failed deletion
         return False
     for path in entries:
         name = path.name

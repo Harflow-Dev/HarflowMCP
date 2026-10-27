@@ -1001,18 +1001,54 @@ def test_an_unrecorded_settlement_keeps_the_folder(tmp_path, identities):
     assert stats["removed"] == 0 and chain.exists()
 
 
-def test_settlement_observation_is_recorded_once_per_task_and_bounded(tmp_path):
+def test_settlement_observation_is_recorded_once_per_task_and_refuses_what_it_cannot_remember(tmp_path, monkeypatch):
     log_dir, _chain, _group = populate(tmp_path)
     backdate(log_dir, "chain", "c1", 90)
     assert shared_scratch.observe_settlement(log_dir, "chain", "c1", ["a", "b"], NOW) is True
     later = NOW + timedelta(days=3)
     assert shared_scratch.observe_settlement(log_dir, "chain", "c1", ["a"], later) is True
     assert read_meta(tmp_path, "chain", "c1")["last_used_at"] == NOW.isoformat()  # already seen: no advance
-    ids = [f"t{index}" for index in range(shared_scratch.SETTLED_SEEN_LIMIT + 5)]
-    assert shared_scratch.observe_settlement(log_dir, "chain", "c1", ids, later) is True
-    seen = read_meta(tmp_path, "chain", "c1")["settled_seen"]
-    assert len(seen) == shared_scratch.SETTLED_SEEN_LIMIT and seen[-1] == ids[-1]
+    monkeypatch.setattr(shared_scratch, "SETTLED_SEEN_LIMIT", 4)
+    # More members than can be remembered: forgetting one would extend the folder on every sweep, so none is recorded.
+    assert shared_scratch.observe_settlement(log_dir, "chain", "c1", ["a", "b", "c", "d", "e"], later) is False
+    assert read_meta(tmp_path, "chain", "c1")["last_used_at"] == NOW.isoformat()
+    assert shared_scratch.observe_settlement(log_dir, "chain", "c1", ["c", "d"], later) is True
+    assert read_meta(tmp_path, "chain", "c1")["settled_seen"] == ["c", "d"]  # members that went are dropped
     assert shared_scratch.observe_settlement(log_dir, "chain", "nowhere", ["a"], NOW) is False
+
+
+def test_many_unobserved_members_do_not_extend_the_folder_on_every_sweep(tmp_path, identities):
+    """More members than the old bound of 256: each is recorded once, so the retention period still runs out."""
+    log_dir, chain, _group = populate(tmp_path)
+    identities.dead(4242)
+    for index in range(300):
+        assert store.write_landed(log_dir, record(f"t{index}", chain="c1", status="running", started_at="2026-01-01T00:00:00+00:00"))
+    backdate(log_dir, "chain", "c1", 90)
+    assert shared_scratch.sweep(log_dir, 14, NOW)["removed"] == 0
+    assert read_meta(tmp_path, "chain", "c1")["last_used_at"] == NOW.isoformat()
+    assert shared_scratch.sweep(log_dir, 14, NOW + timedelta(days=10))["removed"] == 0
+    assert read_meta(tmp_path, "chain", "c1")["last_used_at"] == NOW.isoformat()
+    assert shared_scratch.sweep(log_dir, 14, NOW + timedelta(days=20))["removed"] == 1 and not chain.exists()
+
+
+def test_a_folder_without_metadata_and_with_unobserved_members_is_adopted_and_eventually_swept(tmp_path, identities):
+    log_dir, chain, _group = populate(tmp_path)
+    seed_recovered(tmp_path, identities)
+    meta_file(tmp_path, "chain", "c1").unlink()
+    assert shared_scratch.sweep(log_dir, 14, NOW)["removed"] == 0 and chain.exists()
+    assert read_meta(tmp_path, "chain", "c1")["last_used_at"] == NOW.isoformat()
+    assert shared_scratch.sweep(log_dir, 14, NOW + timedelta(days=20))["removed"] == 1 and not chain.exists()
+
+
+def test_the_settlement_touch_on_the_event_loop_never_waits_for_a_busy_folder(tmp_path):
+    import time
+    from harflow_mcp import tasks
+    log_dir, _chain, _group = populate(tmp_path)
+    task = SimpleNamespace(exit_code=0, scratch={"task": "x"}, group="MT-1", scratch_chain_id="c1", chain_root_task_id=None, task_id="c1")
+    with shared_scratch.locked(log_dir, "chain", "c1"), shared_scratch.locked(log_dir, "group", "MT-1"):
+        started = time.monotonic()
+        tasks._touch_shared_scratch(SimpleNamespace(log_dir=log_dir), task)
+        assert time.monotonic() - started < 0.2
 
 
 def test_retention_carries_an_unobserved_task_as_now_not_as_its_start_time(tmp_path, identities):
@@ -1033,10 +1069,21 @@ def test_retention_keeps_a_record_whose_activity_cannot_be_carried(tmp_path):
     store.write_landed(log_dir, record("c1", chain="c1"))
     with state_ownership.state_session(resolve_layout(root=tmp_path / "state")):
         with shared_scratch.locked(log_dir, "chain", "c1"):
+            retention._carry.busy = False
             assert retention._delete_task_files(log_dir, "c1") is False
+            assert retention._carry.busy is True  # counted as kept_shared_busy, not as a failed deletion
         assert (log_dir / "c1.meta.json").exists()
         assert retention._delete_task_files(log_dir, "c1") is True
     assert not (log_dir / "c1.meta.json").exists() and chain.exists()
+
+
+def test_a_sweep_counts_a_busy_shared_folder_apart_from_a_failed_deletion(tmp_path):
+    from harflow_mcp import retention
+    log_dir, _chain, _group = populate(tmp_path)
+    store.write_landed(log_dir, record("c1", chain="c1"))
+    with shared_scratch.locked(log_dir, "chain", "c1"):
+        stats = retention.sweep(log_dir, 1, datetime.now(timezone.utc) + timedelta(days=30))
+    assert stats.get("kept_shared_busy") == 1 and stats["kept_delete_failed"] == 0 and stats["deleted_tasks"] == 0
 
 
 def test_retention_runs_the_shared_policy_when_task_retention_is_disabled(tmp_path, monkeypatch):
@@ -1350,13 +1397,31 @@ async def test_a_confined_caller_resuming_another_familys_task_gets_that_chain_r
         await stop(registry, task)
 
 
-async def test_a_continuation_takes_its_grant_from_the_sources_authority_not_the_callers(tmp_path, monkeypatch):
-    """A continuation is the source task's own authority (settings must match it, lineage is transferred from it),
-    so a confined caller continuing a root-level task in another family is not what limits the grant."""
+async def test_a_confined_caller_continuing_another_familys_task_gets_that_chain_read_only(tmp_path, monkeypatch):
+    """A continuation takes the source's lineage, but the grant is bounded by the actual caller too."""
     from harflow_mcp import lineage
     from harflow_mcp.task_continuation import continue_task
     capture = Capture(monkeypatch)
     seed_caller(tmp_path, "caller", roots=None, backend="codex", repo=tmp_path)
+    log_dir = log_dir_of(tmp_path)
+    sibling_family(tmp_path)
+    caller_record = store.read(log_dir, "caller", include_prompt=False)
+    registry = TaskRegistry(log_dir=log_dir, open_monitor=False, caller_override=lineage.Caller(caller_record, "ancestry"))
+    task = await continue_task(registry, "sibling", "carry on")
+    try:
+        chain = str(shared_scratch.directory(log_dir, "chain", "sibling"))
+        assert chain not in written_roots(capture.launches[0].argv) and capture.launches[0].env["HARFLOW_CHAIN_SCRATCH"] == chain
+        assert task.snapshot()["scratch"]["access"]["chain"] == "sandbox_read_only"
+        assert any("No write access" in text and "HARFLOW_CHAIN_SCRATCH" in text for text in task.bridge_notices)
+    finally:
+        await stop(registry, task)
+
+
+async def test_an_unconfined_caller_continuing_a_root_level_task_still_gets_its_chain(tmp_path, monkeypatch):
+    from harflow_mcp import lineage
+    from harflow_mcp.task_continuation import continue_task
+    capture = Capture(monkeypatch)
+    seed_caller(tmp_path, "caller", confined=False, roots=None, backend="codex", repo=tmp_path)
     log_dir = log_dir_of(tmp_path)
     sibling_family(tmp_path)
     caller_record = store.read(log_dir, "caller", include_prompt=False)

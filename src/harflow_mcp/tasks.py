@@ -1429,6 +1429,9 @@ class TaskRegistry:
             message_ids=message_ids,
             planned_enforcement=planned_enforcement.as_dict(),
             **({"scratch_chain_id": store.validate_task_id(scratch_chain_id)} if scratch_chain_id is not None else {}),
+            # A continuation takes the source's lineage, so the shared-folder grant is bounded by the
+            # actual caller's authority as well as the source's.
+            **({"shared_caller": caller.record.task_id} if continuation_of_task_id is not None and caller is not None else {}),
             **({"resource_request": resource_request} if resource_request is not None else {}),
             **({"followup_source_task_id": followup_source_task_id} if followup_source_task_id is not None else {}),
             **({"worktree_request": worktree_plan, "rebuild": {
@@ -1488,6 +1491,8 @@ class TaskRegistry:
         try:
             guided = method(invocation, system_guidance.TEXT, resume=resume,
                             file=lambda: system_guidance.instructions_file(self.state_layout.root))
+            if guided is not invocation and guided.system_guidance_root is not None:
+                guided = replace(guided, system_guidance_root=str(self.state_layout.root))
             if guided is not invocation:
                 backend.assert_safe(guided, freedom, network)
             return guided
@@ -1859,6 +1864,7 @@ class TaskRegistry:
         *,
         shared_hold: shared_scratch.Hold,
         scratch_chain_id: str | None = None,
+        shared_caller: str | None = None,
         extra_path_grants: tuple = (),
         dispatch_origin: dict[str, Any] | None = None,
         backend: Backend,
@@ -2070,7 +2076,7 @@ class TaskRegistry:
                     invocation, enforcement, allocation = await self._allocate_shared_scratch(
                         invocation, backend=backend, freedom=freedom, network=network, enforcement=enforcement,
                         task_id=task_id, chain_id=scratch_chain_id or task_id, group=group, spawned_by=spawned_by,
-                        max_depth=max_depth, hold=shared_hold, task_scratch=task_scratch, task_granted=task_granted,
+                        shared_caller=shared_caller, max_depth=max_depth, hold=shared_hold, task_scratch=task_scratch, task_granted=task_granted,
                         scratch_allowed=scratch_allowed, extra_grants=bool(extra_path_grants))
                     for kind in allocation.denied:
                         bridge_notices.append(
@@ -2362,6 +2368,7 @@ class TaskRegistry:
         chain_id: str,
         group: str | None,
         spawned_by: str | None,
+        shared_caller: str | None = None,
         max_depth: int | None,
         hold: shared_scratch.Hold,
         task_scratch: Path | None,
@@ -2388,8 +2395,12 @@ class TaskRegistry:
         granted: list[Path] = []
         if freedom != "read_only" and scratch_allowed and with_shared is not None:
             for kind, identity in wanted:
-                if spawned_by is None or await asyncio.to_thread(
-                        self._caller_allows_shared, kind, paths[kind], identity, task_id, spawned_by, max_depth, created[kind]):
+                allowed = True
+                for who in dict.fromkeys((spawned_by, shared_caller)):
+                    if who is not None and allowed:
+                        allowed = await asyncio.to_thread(
+                            self._caller_allows_shared, kind, paths[kind], identity, task_id, who, max_depth, created[kind])
+                if allowed:
                     granted.append(paths[kind])
                 else:
                     denied.append(kind)
@@ -5230,9 +5241,10 @@ def _touch_shared_scratch(registry: "TaskRegistry", task: Task) -> None:
     if task.exit_code is None or not task.scratch:
         return
     try:
-        shared_scratch.touch(registry.log_dir, "chain", shared_scratch.effective_chain(task))
+        # One non-blocking try: this runs on the event loop, and `finished_at` already covers an observed exit.
+        shared_scratch.touch(registry.log_dir, "chain", shared_scratch.effective_chain(task), timeout=0.0)
         if task.group:
-            shared_scratch.touch(registry.log_dir, "group", task.group)
+            shared_scratch.touch(registry.log_dir, "group", task.group, timeout=0.0)
     except StateOwnershipError:
         raise
     except Exception:  # pragma: no cover - bookkeeping must never mask a finished run

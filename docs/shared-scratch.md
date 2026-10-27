@@ -64,7 +64,9 @@ folder by renaming a group or resuming a sibling's chain: the folder must alread
 own recorded writable roots, or (chain only) a brand-new chain, or a chain whose root task was itself
 dispatched by it (strict `spawned_by` ancestry, not merely a shared root task). Anything else is exposed
 read-only with the real state in `scratch.access`, and a denial persists across hops: a grandchild of a
-task holding a folder read-only is denied too.
+task holding a folder read-only is denied too. A `continue_task` takes the source's lineage, but the grant
+is bounded by the actual caller as well: a confined caller continuing another family's task gets that
+folder read-only.
 
 ## Lifecycle
 

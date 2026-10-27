@@ -61,6 +61,9 @@ class Invocation:
     # The version id of the static scratch-folder note this argv carries through a system-prompt
     # seam (`system_guidance.VERSION`), or None when it carries none.
     system_guidance: str | None = None
+    # The state root whose `guidance` directory holds the instructions file a per-run seam points at; a
+    # backend that reads the file by path accepts it only from there.
+    system_guidance_root: str | None = None
     native_subagent: bool = False
     caller_approvals: bool = False
     caller_write_approvals: bool = False

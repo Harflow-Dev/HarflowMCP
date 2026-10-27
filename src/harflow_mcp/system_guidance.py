@@ -20,6 +20,9 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from .state_layout import resolve_layout
+from .state_ownership import assert_owned
+
 VERSION = "scratch-guidance-1"
 FIRST_TURN_STICKY = "first_turn_sticky"
 PER_RUN = "per_run"
@@ -44,7 +47,10 @@ FILE_DIRECTORY = "guidance"
 
 
 def instructions_file(state_root: Path) -> Path:
-    """The read-only instructions file for per-run seams, created (or repaired) idempotently."""
+    """The read-only instructions file for per-run seams, created (or repaired) idempotently.
+
+    Written only into a state root this process owns, like every other state writer."""
+    assert_owned(resolve_layout(root=Path(state_root)))
     directory = Path(state_root) / FILE_DIRECTORY
     if directory.is_symlink():
         raise ValueError("the guidance directory must not be a symlink")
@@ -71,15 +77,20 @@ def instructions_file(state_root: Path) -> Path:
     return path
 
 
-def is_canonical_file(path: str) -> bool:
-    """Whether `path` is the bridge-owned instructions file: absolute, named `FILE_DIRECTORY/FILE_NAME`,
-    neither it nor its directory a symlink, and holding exactly the static note. An invocation that points
-    a CLI at any other file is refused, however well formed the pointer looks."""
+def is_canonical_file(path: str, state_root: str | os.PathLike[str] | None) -> bool:
+    """Whether `path` is the bridge-owned instructions file of `state_root`: absolute, named
+    `FILE_DIRECTORY/FILE_NAME` directly under that root, neither it nor its directory a symlink, and
+    holding exactly the static note. An invocation that points a CLI at any other file, a well-formed
+    copy under another root included, is refused, however the pointer looks."""
+    if state_root is None:
+        return False
     candidate = Path(path)
     if (not candidate.is_absolute() or candidate.name != FILE_NAME or candidate.parent.name != FILE_DIRECTORY
             or candidate.parent.is_symlink() or candidate.is_symlink()):
         return False
     try:
+        if os.path.realpath(candidate.parent.parent) != os.path.realpath(state_root):
+            return False
         return candidate.is_file() and candidate.read_text(encoding="utf-8") == TEXT + "\n"
     except (OSError, ValueError):
         return False

@@ -307,7 +307,8 @@ class OpencodeBackend(ExtraPathsUnsupported):
             return invocation
         path = Path(file())
         content = json.dumps({"instructions": [str(path)]}, separators=(",", ":"))
-        return replace(invocation, env={**invocation.env, "OPENCODE_CONFIG_CONTENT": content}, system_guidance=system_guidance.VERSION)
+        return replace(invocation, env={**invocation.env, "OPENCODE_CONFIG_CONTENT": content}, system_guidance=system_guidance.VERSION,
+                       system_guidance_root=str(path.parent.parent))
 
     @staticmethod
     def _expected_env(invocation: Invocation) -> dict[str, str]:
@@ -323,7 +324,7 @@ class OpencodeBackend(ExtraPathsUnsupported):
             document = None
         paths = document.get("instructions") if isinstance(document, dict) and set(document) == {"instructions"} else None
         if (not isinstance(paths, list) or len(paths) != 1 or not isinstance(paths[0], str) or not os.path.isabs(paths[0])
-                or not system_guidance.is_canonical_file(paths[0])
+                or not system_guidance.is_canonical_file(paths[0], invocation.system_guidance_root)
                 or value != json.dumps({"instructions": paths}, separators=(",", ":"))):
             raise UnsafeInvocationError("OPENCODE_CONFIG_CONTENT must be exactly the pointer to the bridge-owned guidance instructions file")
         return {"OPENCODE_CONFIG_CONTENT": value}

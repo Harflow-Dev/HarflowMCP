@@ -199,6 +199,8 @@ def invocation_request(invocation):
         request_invocation['control_pipe'] = True
     if invocation.system_guidance is not None:
         request_invocation['system_guidance'] = invocation.system_guidance
+    if invocation.system_guidance_root is not None:
+        request_invocation['system_guidance_root'] = invocation.system_guidance_root
     if invocation.control_context is not None:
         request_invocation['control_context'] = invocation.control_context
     if invocation.identity_markers is not None:

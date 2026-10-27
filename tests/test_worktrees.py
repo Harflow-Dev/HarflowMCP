@@ -271,6 +271,7 @@ def registry(root: Path) -> TaskRegistry:
 async def test_worktree_task_runs_in_the_worktree_and_records_it(tmp_path, source, monkeypatch, identities):
     install_recording_claude(tmp_path, monkeypatch)
     log_dir = tasks_dir(tmp_path)
+    read = task_supervision.read_task_record  # retries a record replaced mid-read
     marker = tmp_path / "hook-ran"
     hook = source / ".git" / "hooks" / "post-checkout"
     hook.write_text(f"#!/bin/sh\ntouch {marker}\n")
@@ -281,8 +282,8 @@ async def test_worktree_task_runs_in_the_worktree_and_records_it(tmp_path, sourc
     task_id = "a" * 32
     started = await reg.start("slow 1 hi", source, backend=get("claude"), freedom="write_in_repo", worktree={}, task_id=task_id)
     assert isinstance(started, task_resources.PendingLaunch) or started.task_id == task_id
-    await wait_for(lambda: (r := store.read(log_dir, task_id)) is not None and r.finished_at and r.output_drained)
-    record = store.read(log_dir, task_id)
+    await wait_for(lambda: (r := read(log_dir, task_id)) is not None and r.finished_at and r.output_drained)
+    record = read(log_dir, task_id)
     expected = str(Path(os.path.realpath(tmp_path)) / "worktrees" / task_id)
     assert record.repo_path == expected
     assert record.worktree["path"] == expected and record.worktree["source_repo_path"] == str(source)
@@ -296,8 +297,8 @@ async def test_worktree_task_runs_in_the_worktree_and_records_it(tmp_path, sourc
     assert snapshot["worktree"]["path"] == expected and snapshot["repo_path"] == expected
     # Resuming works in the same worktree and carries it.
     again = await reg.resume_record(record, "reply again")
-    await wait_for(lambda: store.read(log_dir, again.task_id) is not None)
-    assert store.read(log_dir, again.task_id).repo_path == expected and store.read(log_dir, again.task_id).worktree["path"] == expected
+    await wait_for(lambda: read(log_dir, again.task_id) is not None)
+    assert read(log_dir, again.task_id).repo_path == expected and read(log_dir, again.task_id).worktree["path"] == expected
 
 
 @pytest.mark.asyncio
