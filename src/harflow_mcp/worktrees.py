@@ -304,10 +304,12 @@ def check_filters_pinned(path: Path, git_dir: Path) -> None:
             "while its status is read; remove them before removing the worktree", code="worktree_filters_unsupported")
 
 
-def check_no_submodules(path: Path, git_dir: Path) -> None:
+def check_no_submodules(path: Path, git_dir: Path, common: Path | None = None) -> None:
     """Refuse a worktree with a populated or initialized submodule. Its changes cannot be inspected
     without running Git inside a directory the agent controls (the status probe never recurses into
-    submodules), and removal would discard them."""
+    submodules), and removal would discard them. An initialized submodule is recognised by its Git
+    directory, in the worktree's own `modules` directory or under `<common>/modules/<path>`, even
+    when its working directory is empty."""
     modules = git_dir / "modules"
     if modules.is_dir() and any(modules.iterdir()):
         raise WorktreeError("the worktree has initialized submodules, which are not inspected or removed",
@@ -326,6 +328,9 @@ def check_no_submodules(path: Path, git_dir: Path) -> None:
             if target.is_dir() and any(target.iterdir()):
                 raise WorktreeError(f"the worktree has a populated submodule ({relative}), which is not inspected or removed",
                                     code="worktree_has_submodules")
+            if common is not None and (Path(common) / "modules" / relative).is_dir():
+                raise WorktreeError(f"the worktree has an initialized submodule ({relative}), which is not inspected or removed",
+                                    code="worktree_has_submodules")
 
 
 def prove_removable(path: Path, source: Path) -> None:
@@ -337,7 +342,7 @@ def prove_removable(path: Path, source: Path) -> None:
     check_filters(source)
     check_filters_pinned(path, git_dir)
     check_config_pinned(path, git_dir)
-    check_no_submodules(path, git_dir)
+    check_no_submodules(path, git_dir, common)
     if os.path.lexists(git_dir / "locked"):
         raise WorktreeError("the worktree is locked (`git worktree lock`); unlock it first", code="worktree_locked")
     from .task_outcomes import GitProbe

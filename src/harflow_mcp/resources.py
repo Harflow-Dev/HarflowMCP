@@ -855,8 +855,9 @@ class ResourceLedger:
         Each spec is `{reservation_id, names, owner, borrows_from?, release_requested?}`. Roots are
         restored first and never displace one another (an overlapping later root is reported as a
         conflict, not forced); a borrower is restored under its lender, or, when the lender was not
-        restored, under another restored root that covers its names, else as a root over the names not
-        yet held (reported as a conflict either way, never dropped). Everything is `held`: repair never queues.
+        restored, under another restored root that covers all its names, else under a conservative
+        stand-in for the lender that blocks every name its borrowers held until they settle (reported
+        as a conflict either way; a borrower is never dropped or narrowed). Everything is `held`: repair never queues.
         """
         built: list[dict[str, Any]] = []
         result = RepairResult()
@@ -903,27 +904,33 @@ class ResourceLedger:
                 restored_roots[raw["reservation_id"]] = raw
                 built.append(raw)
                 result.restored.append(raw["reservation_id"])
+            substitutes: dict[str, dict[str, Any]] = {}
+            taken_ids = {raw["reservation_id"] for raw in built} | {spec.get("reservation_id") for spec in borrowers}
             for spec in borrowers:
                 raw = entry_for(spec)
                 if raw is None:
                     continue
-                root = restored_roots.get(spec["borrows_from"])
-                if root is None or not set(raw["names"]) <= set(root["names"]):
-                    # The lender lost a conflict (or never was found). The borrower still holds, so it is
-                    # attached to a restored root that covers its names, else it holds what is not yet
-                    # held itself; it is never dropped, which would show its names as free.
-                    root = next((r for r in restored_roots.values() if set(raw["names"]) <= set(r["names"])), None)
-                    if root is None:
-                        free = sorted(set(raw["names"]) - held_names)
-                        if free:
-                            raw["names"] = free
-                            held_names.update(free)
-                            restored_roots[raw["reservation_id"]] = raw
-                            built.append(raw)
-                            result.restored.append(raw["reservation_id"])
-                        result.conflicts.append({"reservation_id": raw["reservation_id"], "reason": "lender_not_restored"})
-                        continue
+                wanted = set(raw["names"])
+                lender = spec["borrows_from"]
+                root = restored_roots.get(lender)
+                if root is None or not wanted <= set(root["names"]):
+                    # The lender lost a conflict (or never was found). The borrower keeps every name it
+                    # held: it attaches to a restored root that covers them all, else to a conservative
+                    # stand-in for the lender that blocks all of them until the borrower settles. It is
+                    # never dropped or narrowed, which would show names it still uses as free once the
+                    # root that won them released.
                     result.conflicts.append({"reservation_id": raw["reservation_id"], "reason": "lender_not_restored"})
+                    root = next((r for r in (*restored_roots.values(), *substitutes.values()) if wanted <= set(r["names"])), None)
+                    if root is None:
+                        root = substitutes.get(lender)
+                        if root is None:
+                            stand_in = lender if lender not in taken_ids else uuid.uuid4().hex
+                            taken_ids.add(stand_in)
+                            root = {"reservation_id": stand_in, "names": [], "state": "held", "owner": {"kind": "task"},
+                                    "enqueued_at": now, "granted_at": now, "generation": 1, "release_requested": True}
+                            substitutes[lender] = root
+                            built.append(root)
+                        root["names"] = sorted(set(root["names"]) | wanted)
                 raw["borrows_from"] = root["reservation_id"]
                 built.append(raw)
                 result.restored.append(raw["reservation_id"])

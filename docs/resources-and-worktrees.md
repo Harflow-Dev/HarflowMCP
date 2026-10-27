@@ -103,7 +103,9 @@ release. When the caller cannot be identified, the request is refused.
   (unsettled task records and `granted` launches) and the borrowers that depend on them, then
   publishes them all in one step. A lender with a live borrower stays held (`release_requested`
   once the lender itself is done); one that cannot be found is replaced by an entry that blocks its
-  borrowers' names until they finish or you release it. If the command is interrupted the ledger
+  borrowers' names until they finish or you release it. The same applies when the lender
+  conflicted with another restored holder over a name: a borrower is never narrowed to the names
+  the other holder did not win, so every name it held stays blocked until it finishes. If the command is interrupted the ledger
   stays closed: run it again. Waiting launches are not restored (their owners settle them
   `not_started`) and neither is anything unprovable: check what is running before starting work
   that needs a name.
@@ -170,7 +172,7 @@ harflow-ctl worktree-remove --task-id ID
 
 `worktree-remove` takes the per-worktree usage lock (`<root>/.locks/<id>.lock`, which every launch into
 the path also takes briefly before writing its receipt), refuses while any task or launch using the path
-is unsettled or uncertain (a task running in a subdirectory of the worktree counts), and refuses unless the tree is clean; it also refuses a worktree with an initialized or populated submodule and one locked with `git worktree lock` (`worktree_locked`). Everything is verified again immediately before the removal, and `git worktree remove --force` then runs under hardened Git (no global or system configuration), only so that Git does not run its own status inside the agent's tree under the tree's configuration. The residual window is a stray process of the agent writing between the final probe and the removal. The tree belongs to an agent that may have rewritten its `.git` file or configured
+is unsettled or uncertain (a task running in a subdirectory of the worktree counts), and refuses unless the tree is clean; it also refuses a worktree with an initialized submodule (including one whose working directory is empty but whose Git directory exists under `<common>/modules/<path>`), a populated submodule, and one locked with `git worktree lock` (`worktree_locked`). Everything is verified again immediately before the removal, and `git worktree remove --force` then runs under hardened Git (no global or system configuration), only so that Git does not run its own status inside the agent's tree under the tree's configuration. The residual window is a stray process of the agent writing between the final probe and the removal. The tree belongs to an agent that may have rewritten its `.git` file or configured
 a program to run, so removal never trusts it: it first proves that `.git` names a directory directly
 under the source repository's `worktrees/` and that the `commondir` and `gitdir` back-links agree
 (otherwise `worktree_link_invalid`), refuses if the shared or the worktree's own configuration defines

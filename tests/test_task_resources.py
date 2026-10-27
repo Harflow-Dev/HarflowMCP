@@ -695,3 +695,48 @@ async def test_a_pending_child_that_spawns_during_the_cascade_is_cancelled_as_a_
     result = await reg.cancel_cascade(root.task_id, workflow_control=True)
     assert result["pending_cancel_requested"] == [child]
     assert len(targets) == 2 and child not in targets[0] and child in targets[1]
+
+
+@pytest.mark.asyncio
+async def test_a_pending_child_that_spawns_before_the_pending_scan_is_cancelled_as_a_task(tmp_path, monkeypatch, identities):
+    install_fake_claude(tmp_path, monkeypatch)
+    log_dir = tasks_dir(tmp_path)
+    reg = registry(tmp_path)
+    root = await reg.start("slow 30 one", tmp_path, backend=get("claude"), freedom="read_only", task_id="a" * 32)
+    await wait_for(lambda: task_supervision.read_task_record(log_dir, root.task_id) is not None)
+    identities.alive(OWNER["pid"])
+    child = "b" * 32
+    write_receipt(tmp_path, child, "waiting_for_resources", owner=OWNER, spawned_by=root.task_id, root_task_id=root.task_id,
+                  resources={"names": ["sim"], "state": "waiting", "reservation_id": "r" * 32})
+    real_cascade = reg._cancel_cascade
+    passes = []
+
+    async def spying(task_id):
+        outcome = await real_cascade(task_id)
+        passes.append(set(outcome["_covered_targets"]))
+        if len(passes) == 1:  # the child spawns after the recorded-task cascade, before the pending scan
+            store.write(log_dir, store.TaskRecord(task_id=child, backend="claude", session_id=None, repo_path="/x",
+                                                  started_at="2026-01-01T00:00:00+00:00", status="running",
+                                                  spawned_by=root.task_id, root_task_id=root.task_id))
+        return outcome
+
+    monkeypatch.setattr(reg, "_cancel_cascade", spying)
+    result = await reg.cancel_cascade(root.task_id, workflow_control=True)
+    assert len(passes) == 2 and child not in passes[0] and child in passes[1]
+    assert "_covered_targets" not in result
+
+
+def test_cascade_passes_are_merged_not_replaced() -> None:
+    from harflow_mcp.tasks import TaskRegistry
+    first = {"cancelled_descendants": ["x"], "sigkill_survivors": ["s"], "owner_still_settling": [], "rounds": 2,
+             "not_signalled": [{"task_id": "n", "reason": "r"}], "not_recorded": [{"task_id": "s", "reason": "why"}],
+             "cascade_incomplete": True, "history_incomplete": True, "refused_tasks": [{"task_id": "z"}], "unconverged": ["u"]}
+    latest = {"cancelled_descendants": ["y"], "sigkill_survivors": [], "owner_still_settling": ["o"], "rounds": 1,
+              "not_signalled": [], "not_recorded": [], "cascade_incomplete": False, "history_incomplete": False,
+              "refused_tasks": [], "unconverged": []}
+    merged = TaskRegistry._merge_cascade_results(first, latest)
+    assert merged["cancelled_descendants"] == ["x", "y"] and merged["sigkill_survivors"] == ["s"]
+    assert merged["owner_still_settling"] == ["o"] and merged["rounds"] == 2
+    assert merged["not_signalled"] == first["not_signalled"] and merged["not_recorded"] == first["not_recorded"]
+    assert merged["refused_tasks"] == [{"task_id": "z"}] and merged["history_incomplete"] is True
+    assert merged["unconverged"] == [] and merged["cascade_incomplete"] is True

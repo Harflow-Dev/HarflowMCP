@@ -225,7 +225,9 @@ only; liveness is never stored) and each owner kind supplies its own "is it fini
   closed, not empty, and running the command again resumes it. The reconstruction keeps lending
   relationships: a lender stays (flagged `release_requested` once settled) while any borrower is
   unresolved, and a lender that cannot be found is replaced by a conservative entry owned by no task
-  that blocks its borrowers' names until they finish or a person releases it. It refuses a healthy
+  that blocks its borrowers' names until they finish or a person releases it; a lender that lost a
+  name conflict to another restored holder is replaced the same way, so a borrower never holds
+  fewer names than it used. It refuses a healthy
   ledger. Waiting launches are not restored.
 - **Tasks use it through the launch receipt.** A task that asked for resources is acknowledged while its
   detached owner waits (`task_supervisor._acquire_resources`): the receipt moves

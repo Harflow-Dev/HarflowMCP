@@ -242,6 +242,7 @@ CANCEL_VERDICT_POLL_SECONDS = 0.25
 # times it will do that before reporting what it found rather than looping forever on a lineage
 # that keeps growing.
 CASCADE_MAX_ROUNDS = 5
+_COVERED_KEY = "_covered_targets"  # internal: the targets a `_cancel_cascade` pass processed; never returned to callers
 
 # Retries for a `.sig` whose write failed after the SIGTERM it records was delivered: a few quick
 # in-line attempts, then a registry-held background job that keeps going with capped backoff.
@@ -3999,6 +4000,8 @@ class TaskRegistry:
             pause_for_task(self._log_dir, task_id, "Task cancelled outside the workflow supervisor")
         result = await self._shielded(self._cancel_cascade(task_id), f"harflow-cascade-{task_id}")
         from . import task_resources
+        # `covered` is what the cascade passes have already processed (None when a pass reported none).
+        covered = self._covered_by(result)
         requested: list[str] = []
         handled: set[str] = set()
         for _ in range(CASCADE_MAX_ROUNDS):
@@ -4008,18 +4011,49 @@ class TaskRegistry:
             recorded = await asyncio.to_thread(self._cascade_targets, task_id, local_lineage)
             pending = [item for item in await asyncio.to_thread(task_resources.pending_descendants, self._log_dir, task_id, tuple(recorded))
                        if item not in handled]
-            if not pending:
+            # A pending launch that spawned after the last pass, but before the scan above, is no longer
+            # pending and was never signalled: it is a recorded task the cascade has not covered.
+            unsignalled = set(recorded) - covered if covered is not None else set()
+            if not pending and not unsignalled:
                 break
-            # Launches still waiting for resources have no process to signal; ask their owners to stop.
-            handled.update(pending)
-            stopped = await asyncio.to_thread(self._cancel_pending_launches, pending)
-            requested.extend(item for item in stopped if item not in requested)
+            if pending:
+                # Launches still waiting for resources have no process to signal; ask their owners to stop.
+                handled.update(pending)
+                stopped = await asyncio.to_thread(self._cancel_pending_launches, pending)
+                requested.extend(item for item in stopped if item not in requested)
             # A launch can spawn while its request is written, after the owner's last look at it. It is
             # a task by now, so the ordinary cascade (which also reaches what it dispatched) stops it.
-            result = await self._shielded(self._cancel_cascade(task_id), f"harflow-cascade-{task_id}")
+            latest = await self._shielded(self._cancel_cascade(task_id), f"harflow-cascade-{task_id}")
+            if covered is not None:
+                covered |= self._covered_by(latest) or set()
+            result = self._merge_cascade_results(result, latest)
         if handled:
             result = {**result, "pending_cancel_requested": requested}
-        return result
+        return {key: value for key, value in result.items() if key != _COVERED_KEY}
+
+    @staticmethod
+    def _covered_by(result: dict[str, Any]) -> set[str] | None:
+        """The targets a cascade pass processed, or None when the pass did not say."""
+        covered = result.get(_COVERED_KEY)
+        return set(covered) if covered is not None else None
+
+    @staticmethod
+    def _merge_cascade_results(first: dict[str, Any], latest: dict[str, Any]) -> dict[str, Any]:
+        """Combine two cascade passes: lists are united (so a `sigkill_survivor` or `not_recorded` entry
+        from an earlier pass is kept), the round count is the largest, the incompleteness flags are re-derived from the
+        merged evidence, and `unconverged` is the last pass's."""
+        merged = dict(first)
+        for key, value in latest.items():
+            prior = merged.get(key)
+            if key == "unconverged" or not isinstance(prior, list) or not isinstance(value, list):
+                merged[key] = max(prior, value) if key == "rounds" and isinstance(prior, int) and isinstance(value, int) else value
+                continue
+            united = prior + [item for item in value if item not in prior]
+            merged[key] = sorted(united) if all(isinstance(item, str) for item in united) else united
+        if "refused_tasks" in merged:
+            merged["history_incomplete"] = bool(merged["refused_tasks"])
+            merged["cascade_incomplete"] = bool(merged.get("unconverged")) or bool(merged["refused_tasks"])
+        return merged
 
     def _cancel_pending_launches(self, task_ids: list[str]) -> list[str]:
         from . import task_resources
@@ -4218,6 +4252,7 @@ class TaskRegistry:
             "history_incomplete": bool(refusals),
             "refused_tasks": [exc.as_dict() for exc in refusals.values()],
             "unconverged": unconverged,
+            _COVERED_KEY: sorted(processed),
         }
 
     @layout_operation

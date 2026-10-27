@@ -232,6 +232,23 @@ def test_a_worktree_with_an_initialized_submodule_is_refused_and_keeps_its_chang
     assert (sub / "lib.txt").read_text() == "dirty change only inside the submodule" and path.exists()
 
 
+def test_an_initialized_but_empty_submodule_with_its_git_dir_in_the_common_directory_is_refused(source, tmp_path, owned, identities) -> None:
+    import shutil
+    made = seed_created(source, tmp_path, owned)
+    path = Path(made["path"])
+    sub = with_submodule(source, tmp_path, path)
+    worktree_git = Path(worktrees.verify_link(path, source)[0])
+    common = Path(worktrees.verify_link(path, source)[1])
+    # Initialized, but the working directory is empty and the Git directory is under <common>/modules/<path>.
+    (common / "modules").mkdir(exist_ok=True)
+    shutil.move(str(worktree_git / "modules" / "sub"), str(common / "modules" / "sub"))
+    shutil.rmtree(sub)
+    sub.mkdir()
+    assert not (worktree_git / "modules").exists() or not any((worktree_git / "modules").iterdir())
+    assert remove_code(owned.tasks_directory, "a" * 32) == "worktree_has_submodules"
+    assert path.exists()
+
+
 def test_a_malicious_submodule_configuration_is_never_executed(source, tmp_path, owned, identities, marker) -> None:
     script, ran = marker
     made = seed_created(source, tmp_path, owned)

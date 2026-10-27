@@ -273,6 +273,48 @@ def test_a_borrower_whose_lender_lost_a_conflict_is_kept_not_dropped(tmp_path) -
     assert {c["reservation_id"] for c in result.conflicts} >= {"rb", "rc", "rd"}
     entries = {e.reservation_id: e for e in led.entries()}
     assert entries["rd"].borrows_from == "ra"  # attached to the restored root that covers it
-    assert entries["rc"].borrows_from is None and entries["rc"].names == ("gpu",)  # held as a root
+    assert entries["rc"].names == ("gpu",) and entries["rc"].borrows_from == "rb"  # under a stand-in for its lender
+    assert entries["rb"].names == ("gpu",) and entries["rb"].release_requested and entries["rb"].borrows_from is None
     assert not led.request(["gpu"], task("late")).held
     assert led.release("ra") == "release_requested"  # ra still has its borrower
+
+
+def repaired(tmp_path, specs):
+    led = ResourceLedger(tmp_path / "state")
+    led.request(["x"], task("seed"))
+    led.path.write_text("garbage")
+    return led, led.complete_repair(led.begin_repair(), specs)
+
+
+def test_a_borrower_spanning_overlapping_and_uncovered_names_keeps_every_name_blocked(tmp_path) -> None:
+    led, result = repaired(tmp_path, [
+        {"reservation_id": "ra", "names": ["lab", "sim"], "owner": task("a")},
+        {"reservation_id": "rb", "names": ["gpu", "lab"], "owner": task("b")},  # overlaps ra: not restored
+        {"reservation_id": "rc", "names": ["gpu", "lab"], "owner": task("c"), "borrows_from": "rb"},
+    ])
+    entries = {e.reservation_id: e for e in led.entries()}
+    assert entries["rc"].names == ("gpu", "lab")  # not narrowed to the names ra did not win
+    assert led.release("ra") == "released"  # the winning root settles
+    late = [led.request(["lab"], task("late-lab")), led.request(["gpu"], task("late-gpu"))]
+    assert not any(e.held for e in late)  # the overlap name stays blocked while rc lives
+    for e in late:
+        led.release(e.reservation_id)
+    assert led.release("rc") == "released"
+    assert led.request(["lab", "gpu"], task("after")).held  # and is freed once the borrower settles
+
+
+def test_a_borrower_covered_only_by_several_roots_together_is_not_dropped(tmp_path) -> None:
+    led, result = repaired(tmp_path, [
+        {"reservation_id": "ra", "names": ["lab"], "owner": task("a")},
+        {"reservation_id": "rb", "names": ["sim"], "owner": task("b")},
+        {"reservation_id": "rl", "names": ["lab", "sim"], "owner": task("l")},  # overlaps both: not restored
+        {"reservation_id": "rc", "names": ["lab", "sim"], "owner": task("c"), "borrows_from": "rl"},
+    ])
+    assert "rc" in result.restored
+    assert led.release("ra") == "released" and led.release("rb") == "released"
+    late = [led.request(["lab"], task("late-lab")), led.request(["sim"], task("late-sim"))]
+    assert not any(e.held for e in late)
+    for e in late:
+        led.release(e.reservation_id)
+    assert led.release("rc") == "released"
+    assert led.request(["lab", "sim"], task("after")).held
