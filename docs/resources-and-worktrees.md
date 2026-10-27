@@ -1,6 +1,6 @@
 # Resources and worktrees
 
-Two independent options on a dispatched task: named exclusive [resources](#resources) and a private
+Two independent options on dispatched tasks and workflows: named exclusive [resources](#resources) and a private
 [worktree](#worktrees). They combine: resources are granted first, then the worktree is made.
 
 ## Resources
@@ -25,7 +25,7 @@ harflow-ctl run --backend claude --repo . --prompt "..." --resource ios-simulato
   out its bound never starts: it reports `status: "failed"`, `not_started: true` and
   `not_started_reason: "resource_wait_expired"`.
 - Resources are accepted at every freedom, including `read_only`, and need supervised execution (the
-  MCP server and `harflow-ctl`). Workflow launches do not accept them yet.
+  MCP server and `harflow-ctl`). Workflows declare resources in their saved definition; see [workflow scopes](#workflow-scopes).
 - The names are released when the run's exit is observed. A grandchild process that outlives the
   agent (a simulator, a dev server) can still be running; cleanup hooks are future work.
 
@@ -75,8 +75,37 @@ that holds a resource ever waits for another one. Borrowers share the lender's n
 exclusion *inside* one scope is the scope owner's job. The scope is the nearest task on the
 caller's `spawned_by` chain that holds a reservation (a grandchild is covered through a child that
 holds nothing); an ancestor that cannot be read refuses the request. A lender's release is deferred
-until its last borrower is done. A task started from inside a workflow attempt cannot request resources in this
-release. When the caller cannot be identified, the request is refused.
+until its last borrower is done. A workflow attempt is always a holding scope, even with no named resources; an empty scope refuses every name. Workflow-managed agents remain subject to the direct-dispatch guard. When the caller cannot be identified, the request is refused.
+
+### Workflow scopes
+
+Saved definitions may declare top-level `resources: ["ios-simulator"]` for the run and
+`resources` on connected or on-demand agent nodes for one candidate attempt. Run names remain
+held through `paused`, `needs_input` and `needs_attention`, until terminal settlement and resolution
+of every attempt and borrower. Node names must be a subset when the run declares resources;
+they borrow the run's hold. Without a run scope, each node attempt queues independently before
+occupying a harness slot or checkout lease. Siblings borrowing one run scope share its names;
+use separate attempt scopes when siblings must exclude one another. Resource waits have a
+3600-second bound; expiry leaves the attempt not started and the workflow needing attention.
+Pause or cancel stops a queued attempt without dispatching it.
+
+`prefer_subagent` nodes cannot declare attempt resources. Native and headless nodes without
+attempt names have the same run-scope resource coverage. Run-workflow nodes take no resource
+field; linked children borrow from their enclosing run scope. Resource names grant no filesystem,
+network or publication access.
+
+A standalone task with a holding scope may call `start_workflow` only when the run and every
+connected or on-demand node in the pinned dependency tree request names covered by that scope.
+An uncovered name is `resource_not_declared_by_scope`. Workflow-managed agents still cannot
+launch independent workflows or tasks directly; saved workflow nodes use the shared scheduler.
+Internal workflow-attempt lineage is a scope even when empty, so a descendant cannot queue for a
+new resource while its ancestor holds a checkout lease.
+
+Compact status keeps `resource_wait` as an object for the run-level wait and exposes
+`resource_waits` as an array of up to eight active activation waits, each with names and blockers.
+`resource_held_waiting_for_slot` reports an active named holder blocked on an intra-tree slot. Paged execution
+views retain each candidate's `resource_attempt` and its queued, granted, not-started or attached
+state. Monitor snapshots expose these fields; a native Mac UI for them is separate work.
 
 ### Recovery
 
@@ -100,15 +129,15 @@ release. When the caller cannot be identified, the request is refused.
 - A corrupt ledger makes every resource operation refuse. `harflow-ctl resources-repair` keeps it as
   `ledger.corrupt-<timestamp>.json` and closes the ledger (every operation reports
   `resource_ledger_repairing`) while it collects the holders it can prove from durable state
-  (unsettled task records and `granted` launches) and the borrowers that depend on them, then
+  (unsettled task records, `granted` launches, workflow run holds and granted or attached workflow attempts) and the borrowers that depend on them, then
   publishes them all in one step. A lender with a live borrower stays held (`release_requested`
   once the lender itself is done); one that cannot be found is replaced by an entry that blocks its
   borrowers' names until they finish or you release it. The same applies when the lender
   conflicted with another restored holder over a name: a borrower is never narrowed to the names
   the other holder did not win, so every name it held stays blocked until it finishes. If the command is interrupted the ledger
-  stays closed: run it again. Waiting launches are not restored (their owners settle them
+  stays closed: run it again. Queued workflow attempts and waiting task launches are not restored (their owners settle them
   `not_started`) and neither is anything unprovable: check what is running before starting work
-  that needs a name.
+  that needs a name. Workflow grants are confirmed after persistence and before dispatch, so a repair that collected earlier queued state cannot erase a grant unnoticed. Read-only workflow resolvers never reconcile or free a run merely because its supervisor died; explicit scheduler recovery reconciles pre-dispatch attempts.
 
 ### Guidance for agents
 
@@ -167,11 +196,11 @@ Cleanup is explicit and for a person only (`lineage.detect_caller_detail`, faili
 
 ```text
 harflow-ctl worktree-list --json
-harflow-ctl worktree-remove --task-id ID
+harflow-ctl worktree-remove --task-id ID  # task ID or root workflow run ID
 ```
 
 `worktree-remove` takes the per-worktree usage lock (`<root>/.locks/<id>.lock`, which every launch into
-the path also takes briefly before writing its receipt), refuses while any task or launch using the path
+the path also takes briefly before writing its receipt), refuses while any task, launch or workflow run using the path
 is unsettled or uncertain (a task running in a subdirectory of the worktree counts), and refuses unless the tree is clean; it also refuses a worktree with an initialized submodule (including one whose working directory is empty but whose Git directory exists under `<common>/modules/<path>`), a populated submodule, and one locked with `git worktree lock` (`worktree_locked`). Everything is verified again immediately before the removal, and `git worktree remove --force` then runs under hardened Git (no global or system configuration), only so that Git does not run its own status inside the agent's tree under the tree's configuration. The residual window is a stray process of the agent writing between the final probe and the removal. The tree belongs to an agent that may have rewritten its `.git` file or configured
 a program to run, so removal never trusts it: it first proves that `.git` names a directory directly
 under the source repository's `worktrees/` and that the `commondir` and `gitdir` back-links agree
@@ -185,4 +214,71 @@ Limits: Git LFS and other filter drivers; Codex gains nothing from a worktree at
 `publish` (its sandbox denies Git directory writes there as in a normal checkout; see
 [backend CLI facts](backend-cli-facts.md#codex-and-linked-worktrees-codex-cli-0163-0-2026-10-27)); a
 worktree-only launch whose owner dies after the worktree is `created` keeps its session claim until a
-person settles it with `launch-settle`; workflows do not accept `worktree` yet; `notify` is not supported with `worktree`.
+person settles it with `launch-settle`; workflow worktrees follow the same Git and permission limitations; `notify` is not supported with `worktree`.
+
+
+### One worktree per workflow
+
+`start_workflow(name, prompt, repo_path, worktree={"base_ref": "main"})` or
+`harflow-ctl workflow-start NAME --repo . --prompt "..." --worktree` creates one worktree at
+`<worktree_root>/<run_id>`, with default branch `harflow/workflow-<run_id>`. The supervisor creates
+it after the run-scope grant and before any dispatch. Every node and linked child run uses that
+execution path; the run's `source_repo_path` and `worktree` metadata retain the original checkout.
+Task shared scratch and system guidance continue to use the existing launch-owner paths.
+
+`preview_workflow_run(..., worktree={...})` and `harflow-ctl workflow-preview ... --worktree`
+disclose the plan. Resources, worktree options and root are included in the preview hash. Requests
+are refused for nested or undecidable callers and when every agent in the pinned tree is
+`read_only`. A crash during creation leaves an uncertain retained path and requires inspection;
+it is never automatically retried or deleted. Non-terminal and unsettled workflow runs prevent
+removal even between node tasks. Pass the root run ID to `worktree-remove --task-id`.
+
+### Workflow recovery boundaries
+
+A standalone task holding resources can start a workflow only when it covers every resource
+in the pinned dependency tree, including on-demand nodes. Before launch returns, the workflow
+publishes and confirms its own borrow anchor. With no explicit run scope, the runtime-only
+`resource_anchor_names` is the union of those declarations; the saved definition is unchanged.
+The anchor survives its caller's exit. A positive initial supervisor launch failure releases the anchor
+and leaves the run needing attention; resume must borrow again from the recorded original lender,
+which must still be held and not release-requested. It never falls back to an independent queue.
+A failed replacement supervisor retains established holds while descendants may remain active.
+Workflow-managed agents cannot directly start independent tasks or workflows; saved Run workflow
+nodes provide linked child execution.
+
+Reapers read persisted workflow state only. Dead queued owners and stale task outcomes remain
+conservative blockers until explicit workflow recovery or cancellation reconciles them. This can
+block later FIFO waiters. Candidate waits default to 3600 seconds; an explicit retry or fallback
+starts a new bounded wait and loses its former FIFO position. Ledger corruption, repair, or a lost
+queued reservation stops scheduling with a durable not-started attempt and attention; no candidate
+fallback or optional bypass is inferred. Repair does not reconstruct queued requests.
+
+A restart during workflow worktree creation changes `creating` to `unknown`, keeps resources held,
+and requires attention. Cancel the run, wait for settlement, then inspect `worktree-list` and remove
+a clean retained checkout explicitly by its run ID. Creation is never automatically retried.
+`worktree-list` workflow rows identify their owner with `workflow_run_id`; task rows keep `task_id`.
+
+Preview and start validate resources along every pinned invocation path. A child declaration may
+narrow its nearest enclosing run declaration but cannot add names; a child without a declaration
+inherits that scope, including for its on-demand nodes. Definitions reused under multiple parents
+are checked independently for each path.
+
+Ordinary launch containment checks read small qualified workflow-worktree lookup receipts in
+`workflow-worktrees/` under the selected state root. Registration is durable before a root run is
+published or Git creates its checkout. Orphan receipts remain conservative path hints; they never
+authorize execution or removal. Explicit inventory and removal still read qualified full runs and
+refuse when workflow state is unreadable.
+
+External caller coverage is only acquisition provenance: a workflow with no declared names and
+no acquired anchor exposes an empty scope, even if its caller holds other resources. Linked children
+refresh their parent's current held scope rather than relying on an older saved reservation hint.
+When a named root needs to reacquire, it can borrow only from its recorded original external lender.
+
+Workflow run publication finds existing checkout locks through small task launch plans and workflow
+lookup receipts. If a task launch file was removed before its task metadata during partial retention,
+a targeted read of valid task IDs in the requested path's ancestors preserves record-only worktree
+locking, including nested paths and paths under an older configured worktree root.
+
+Lookup receipts are retained after worktree removal. Corrupt engine-owned lookup metadata fails
+closed; G04 does not automatically prune or repair these receipts. A missing worktree may therefore
+remain visible in inventory without triggering creation or cleanup.

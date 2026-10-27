@@ -104,7 +104,8 @@ async def _execute(requests: list[dict[str, Any]]) -> list[tuple[bool, dict[str,
     launched = False
     owner_run = first["prepared"]["owner_run"]
     try:
-        await tree.acquire_slot(continue_running, control=True)
+        from .workflow_resources import acquire_slot
+        await acquire_slot(supervisor, first["activation"], continue_running, control=True)
         control_held = True
         # Re-read the owning session after preceding batches/control turns have
         # settled. Never resume the stale task captured while queueing.
@@ -123,7 +124,7 @@ async def _execute(requests: list[dict[str, Any]]) -> list[tuple[bool, dict[str,
         run, owner_run, owner, record, native = (prepared[k] for k in ("run", "owner_run", "owner", "record", "native"))
         entries = []
         for index, request in valid:
-            await tree.acquire_slot(continue_running)
+            await acquire_slot(request["supervisor"], request["activation"], continue_running)
             acquired += 1
             settings = request["prepared"]["settings"]
             execution_id, nonce = uuid.uuid4().hex, uuid.uuid4().hex

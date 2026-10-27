@@ -372,6 +372,8 @@ def validate_definition(raw: dict[str, Any]) -> dict[str, Any]:
             node["max_context_questions"] = _positive(node.get("max_context_questions", 10), "max_context_questions", 100)
     from .workflow_on_demand import validate_nodes
     d["on_demand_nodes"] = validate_nodes(d.get("on_demand_nodes", []), set(by_id))
+    from .workflow_resources import validate_definition as validate_resources
+    validate_resources(d)
     starts = [n["id"] for n in nodes if n["type"] == "start"]
     if len(starts) != 1 or not any(n["type"] == "end" for n in nodes):
         raise WorkflowError("Workflow needs exactly one Start and at least one End")
@@ -1282,7 +1284,7 @@ class WorkflowStore:
             return run
 
     @layout_operation
-    def create_run(self, definition: dict[str, Any], prompt: str, repo_path: Path, *, freedom: str = "write_in_repo", network: bool | None = None, kind: str = "workflow", permission_policy: str = "legacy_ceiling", caller: Any = None, dependency_tree: dict[str, Any] | None = None, owner_contracts: dict[str, Any] | None = None, goal: str | None = None, run_id: str | None = None) -> dict[str, Any]:
+    def create_run(self, definition: dict[str, Any], prompt: str, repo_path: Path, *, freedom: str = "write_in_repo", network: bool | None = None, kind: str = "workflow", permission_policy: str = "legacy_ceiling", caller: Any = None, dependency_tree: dict[str, Any] | None = None, owner_contracts: dict[str, Any] | None = None, goal: str | None = None, run_id: str | None = None, resource_scope: dict[str, Any] | None = None, worktree: dict[str, Any] | None = None) -> dict[str, Any]:
         if permission_policy not in {"saved_node", "legacy_ceiling"}:
             raise WorkflowError("Unknown workflow permission policy")
         if freedom not in FREEDOMS:
@@ -1294,6 +1296,10 @@ class WorkflowStore:
             raise WorkflowError("Repository directory does not exist")
         rid = _identifier(run_id) if run_id is not None else uuid.uuid4().hex
         run = {"workflow_run_id": rid, "kind": kind, "name": definition["name"], "definition": copy.deepcopy(definition), "revision": definition.get("revision", 0), "prompt": prompt, "repo_path": str(Path(repo_path).resolve()), "freedom": freedom, "network": network, "status": "starting", "created_at": time.time(), "updated_at": time.time(), "sequence": 0, "transitions": 0, "activations": [], "decisions": [], "sessions": {}, "suppressed_candidates": [], "pending": [], "joins": {}, "instructions": "", "attempt_grants": {}, "supervisor_pid": None}
+        if resource_scope is not None:
+            run["resource_scope"] = copy.deepcopy(resource_scope)
+        if worktree is not None:
+            run.update(worktree=copy.deepcopy(worktree), source_repo_path=worktree["source_repo_path"])
         from .workflow_goals import initialize
         initialize(run, goal)
         if caller is not None:
@@ -1313,23 +1319,30 @@ class WorkflowStore:
         run.update(retry_counts={}, retry_grants={})
         if dependency_tree is not None:
             run["dependency_tree"] = copy.deepcopy(dependency_tree)
-        from .workflow_run_documents import encode
-        document = encode(run)
-        from .catalog import catalog_lock, Catalog
-        with catalog_lock(self.runs, layout=self.state_layout):
-            if self._run_source(rid) is not None:
-                raise WorkflowError("Workflow run id already exists")
-            previous_directory_mtime = self.runs.stat().st_mtime_ns
-            Catalog(self.runs, '.json', layout=self.state_layout).invalidate(rid)
-            written_source = self._replace_run(rid, document, None)
-            try:
-                self._index_run(run, previous_directory_mtime=previous_directory_mtime, written_source=written_source)
-            except StateOwnershipError as exc:
-                exc.published, exc.workflow_run_id = True, rid
-                exc.args = (f"Run published; subsequent indexing incomplete: {exc}",)
-                raise
-            except Exception as exc:
-                raise WorkflowRunDocumentError(rid, f"Run published; subsequent indexing incomplete: {exc}", code="workflow_run_unavailable", published=True) from exc
+        from contextlib import nullcontext
+        from .worktrees import usage_lock, containing_worktree_for_publication
+        usage_path = Path(worktree["path"]) if worktree is not None else containing_worktree_for_publication(self.root / "tasks", Path(repo_path))
+        with usage_lock(usage_path) if usage_path is not None else nullcontext():
+            from .workflow_run_documents import encode
+            document = encode(run)
+            from .catalog import catalog_lock, Catalog
+            with catalog_lock(self.runs, layout=self.state_layout):
+                if self._run_source(rid) is not None:
+                    raise WorkflowError("Workflow run id already exists")
+                if worktree is not None:
+                    from .workflow_worktree_receipts import register
+                    register(self.root / "tasks", rid, worktree)
+                previous_directory_mtime = self.runs.stat().st_mtime_ns
+                Catalog(self.runs, '.json', layout=self.state_layout).invalidate(rid)
+                written_source = self._replace_run(rid, document, None)
+                try:
+                    self._index_run(run, previous_directory_mtime=previous_directory_mtime, written_source=written_source)
+                except StateOwnershipError as exc:
+                    exc.published, exc.workflow_run_id = True, rid
+                    exc.args = (f"Run published; subsequent indexing incomplete: {exc}",)
+                    raise
+                except Exception as exc:
+                    raise WorkflowRunDocumentError(rid, f"Run published; subsequent indexing incomplete: {exc}", code="workflow_run_unavailable", published=True) from exc
         return run
 
     @layout_operation
@@ -1721,7 +1734,7 @@ class WorkflowStore:
         return result
 
     @layout_operation
-    def reconcile_run(self, run_id: str) -> dict[str, Any]:
+    def reconcile_run(self, run_id: str, *, resource_owner_dead: bool = False) -> dict[str, Any]:
         """Recover recorded outcomes, or authoritative quota failures after confirmed death."""
         def reconcile(r: dict[str, Any]) -> None:
             for activation in r["activations"]:
@@ -1766,7 +1779,9 @@ class WorkflowStore:
                     node = next((n for n in r["definition"]["nodes"] if n["id"] == activation["node_id"]), {})
                     derive_invocation_activation(self, r, activation, node)
                     continue
-                if activation["status"] in {"running", "reserved", "uncertain"} and all(t["status"] not in {"reserved", "running", "uncertain"} for t in activation["tasks"]):
+                resource_attempt = activation.get("resource_attempt") or {}
+                pre_slot = resource_attempt and not any((t.get("resource_attempt") or {}).get("id") == resource_attempt["id"] for t in activation["tasks"])
+                if not pre_slot and activation["status"] in {"running", "reserved", "uncertain"} and all(t["status"] not in {"reserved", "running", "uncertain"} for t in activation["tasks"]):
                     activation["status"] = "completed" if activation["tasks"] and activation["tasks"][-1]["status"] == "completed" else "failed"
                 if activation.get("on_demand_call_id"):
                     continue
@@ -1788,8 +1803,9 @@ class WorkflowStore:
         result = self.update_run(run_id, reconcile, "reconciled")
         if result.get("execution_contract") == "delegation":
             from .workflow_delegation import reconcile_delegation
-            return self.update_run(run_id, reconcile_delegation, "delegation_reconciled")
-        return result
+            result = self.update_run(run_id, reconcile_delegation, "delegation_reconciled")
+        from .workflow_resources import reconcile as reconcile_resources
+        return reconcile_resources(self, result, owner_dead=resource_owner_dead)
 
 
 def _attachable_task(log_dir: Path, task_id: str) -> bool:
@@ -1863,11 +1879,29 @@ def _launch(storage: WorkflowStore, run_id: str) -> None:
         # These failures precede a successfully returned child process. Keep the
         # reservation and its owner recoverable instead of leaving a phantom start.
         reason = f"Supervisor could not start for workflow run {run_id}: {exc}"
+        initial_anchor = (reservation.get("status") == "starting"
+                          and not reservation.get("execution_initialized")
+                          and not reservation.get("activations")
+                          and not reservation.get("supervisor_pid")
+                          and not reservation.get("supervisor_identity")
+                          and "resource_scope" in reservation
+                          and (reservation.get("resources") or {}).get("borrowed_from"))
+        release_reservation = None
         def launch_failed(r: dict[str, Any]) -> None:
+            nonlocal release_reservation
             # An independently advanced run owns its newer outcome and supervisor.
             if r.get("sequence") == reservation.get("sequence") and r.get("status") == reservation.get("status"):
                 r.update(status="needs_attention", attention_reason=reason)
+                # A replacement scheduler's failure says nothing about existing
+                # descendants. Only an unstarted initial anchor can be released.
+                if initial_anchor:
+                    release_reservation = r["resources"]["reservation_id"]
+                    r["resources"].update(state="not_started", released=True)
         storage.update_run(run_id, launch_failed, "supervisor_launch_failed")
+        if release_reservation is not None:
+            from .workflow_resources import cleanup
+            from .task_resources import ledger_for
+            cleanup(lambda: ledger_for(storage.root / "tasks").release(release_reservation))
         raise WorkflowError(reason) from exc
     finally:
         if output is not None:
@@ -1875,7 +1909,7 @@ def _launch(storage: WorkflowStore, run_id: str) -> None:
 
 
 @root_operation
-async def start_workflow(name: str, prompt: str, repo_path: Path, *, overrides: dict[str, Any] | None = None, freedom: str | None = None, network: bool | None = None, root: Path | None = None, interaction_owner: str = "caller", definition_snapshot: dict[str, Any] | None = None, dependency_tree: dict[str, Any] | None = None, expected_preview_hash: str | None = None, goal: str | None = None, run_id: str | None = None, _verified_caller: Any = _CALLER_UNSET) -> dict[str, Any]:
+async def start_workflow(name: str, prompt: str, repo_path: Path, *, overrides: dict[str, Any] | None = None, freedom: str | None = None, network: bool | None = None, root: Path | None = None, interaction_owner: str = "caller", definition_snapshot: dict[str, Any] | None = None, dependency_tree: dict[str, Any] | None = None, expected_preview_hash: str | None = None, goal: str | None = None, run_id: str | None = None, worktree: dict[str, Any] | None = None, _verified_caller: Any = _CALLER_UNSET) -> dict[str, Any]:
     from .workflow_goals import validate_goal
     validate_goal(goal)
     if interaction_owner not in {"caller", "monitor"}:
@@ -1916,19 +1950,36 @@ async def start_workflow(name: str, prompt: str, repo_path: Path, *, overrides: 
                 check_node_grants(node, node["id"], effective_freedom(node, "unrestricted", permission_policy="saved_node"), Path(repo_path))
     from .workflow_native_policy import digest, plan_owner_contracts
     contracts = plan_owner_contracts(definition, dependency_tree, network=network)
-    preview_hash = digest({"definition": definition, "dependency_tree": dependency_tree, "repo_path": str(Path(repo_path).resolve()), "network": network, "owner_contracts": contracts})
+    from .workflow_resources import worktree_preview, validate_tree_scopes
+    validate_tree_scopes(dependency_tree)
+    planned = worktree_preview(Path(repo_path), worktree, storage.root / "tasks", dependency_tree)
+    preview_hash = digest({"definition": definition, "dependency_tree": dependency_tree, "repo_path": str(Path(repo_path).resolve()), "network": network, "owner_contracts": contracts, **({"worktree": planned} if planned is not None else {})})
     if expected_preview_hash is not None and preview_hash != expected_preview_hash:
         raise WorkflowError("Workflow launch preview changed; refresh permissions before starting")
     caller = await _capture_caller(storage, None, _verified_caller)
-    run = storage.create_run(definition, prompt, repo_path, freedom="unrestricted", network=network, permission_policy="saved_node", caller=caller, dependency_tree=dependency_tree, owner_contracts=contracts, goal=goal, run_id=run_id)
+    from .workflow_resources import check_launch_scope
+    resource_scope = check_launch_scope(storage.root / "tasks", caller, dependency_tree)
+    if worktree is not None and caller is not None:
+        raise WorkflowError("Workflow worktrees are unavailable for nested callers")
+    run_id = run_id or uuid.uuid4().hex
+    actual_plan = None
+    if planned is not None:
+        from . import worktrees
+        spec = dict(worktree)
+        if not spec.get("branch") and not spec.get("detach"):
+            spec["branch"] = f"harflow/workflow-{run_id}"
+        actual_plan = worktrees.plan(run_id, Path(repo_path).resolve(), spec, storage.root / "tasks")
+    run = await asyncio.to_thread(storage.create_run, definition, prompt, repo_path, freedom="unrestricted", network=network, permission_policy="saved_node", caller=caller, dependency_tree=dependency_tree, owner_contracts=contracts, goal=goal, run_id=run_id, resource_scope=resource_scope, worktree=actual_plan)
     storage.update_run(run["workflow_run_id"], lambda r: r.update(interaction_owner=interaction_owner, preview_hash=preview_hash), "interaction_owner")
+    from .workflow_resources import establish_anchor
+    run = await establish_anchor(storage, storage.get_run(run_id), dependency_tree)
     _launch(storage, run["workflow_run_id"])
     run["preview_hash"] = preview_hash
     return run
 
 
 @root_operation
-def preview_workflow_run(name: str, repo_path: Path, *, overrides: dict[str, Any] | None = None, network: bool | None = None, root: Path | None = None) -> dict[str, Any]:
+def preview_workflow_run(name: str, repo_path: Path, *, overrides: dict[str, Any] | None = None, network: bool | None = None, root: Path | None = None, worktree: dict[str, Any] | None = None) -> dict[str, Any]:
     """Read-only launch permissions and compatibility for the same pinned launch inputs."""
     from .workflow_references import definition_sha256, resolve_dependencies
     from .workflow_native_policy import digest, plan_owner_contracts, orchestrator_contract
@@ -1941,8 +1992,11 @@ def preview_workflow_run(name: str, repo_path: Path, *, overrides: dict[str, Any
         entry["definition"]["context_delivery"] = "optimized_v1"
         entry["definition_sha256"] = definition_sha256(entry["definition"])
     contracts = plan_owner_contracts(definition, tree, network=network)
-    preview_hash = digest({"definition": definition, "dependency_tree": tree, "repo_path": str(Path(repo_path).resolve()), "network": network, "owner_contracts": contracts})
-    return {"name": name, "definition_hash": definition_sha256(definition), "preview_hash": preview_hash, "owner_contracts": contracts, "effective_owner_contract": orchestrator_contract({"definition": definition, "owner_contracts": contracts}), "disclosure": "The orchestrator receives these permissions so its native children can perform their work."}
+    from .workflow_resources import worktree_preview, validate_tree_scopes
+    validate_tree_scopes(tree)
+    planned = worktree_preview(Path(repo_path), worktree, storage.root / "tasks", tree)
+    preview_hash = digest({"definition": definition, "dependency_tree": tree, "repo_path": str(Path(repo_path).resolve()), "network": network, "owner_contracts": contracts, **({"worktree": planned} if planned is not None else {})})
+    return {"name": name, "definition_hash": definition_sha256(definition), "preview_hash": preview_hash, "resources": definition.get("resources", []), "worktree": planned, "owner_contracts": contracts, "effective_owner_contract": orchestrator_contract({"definition": definition, "owner_contracts": contracts}), "disclosure": "The orchestrator receives these permissions so its native children can perform their work."}
 
 
 def launch_definition(definition: dict[str, Any], overrides: dict[str, Any] | None) -> dict[str, Any]:
@@ -2856,14 +2910,29 @@ class WorkflowSupervisor:
             # the reservation is written, released on every exit from the attempt.
             # An uncertain attempt keeps its slot until reconciliation.
             slot_uncertain = False
+            from . import resources, workflow_resources
+            resource_attempt = None
             try:
+                if role == "node":
+                    if existing_attempt:
+                        resource_attempt = copy.deepcopy(existing_attempt.get("resource_attempt"))
+                    else:
+                        resource_attempt = await workflow_resources.acquire_attempt(self, activation, node, candidate_position)
                 held_key = (self.run_id, task_id)
                 if existing_attempt and held_key in self.tree.held:
                     self.tree.held.pop(held_key)
                 else:
-                    await self.tree.acquire_slot(lambda: self.tree.tree_running(self.run(refresh_atomic=True), refresh_atomic=True), control=role != "node")
+                    await workflow_resources.acquire_slot(self, activation, lambda: self.tree.tree_running(self.run(refresh_atomic=True), refresh_atomic=True), control=role != "node")
             except DispatchNotStarted:
+                workflow_resources.cleanup(lambda: workflow_resources.finish_attempt(self, activation["id"], resource_attempt))
                 return None
+            except resources.ResourceError as exc:
+                workflow_resources.cleanup(lambda: workflow_resources.finish_attempt(self, activation["id"], resource_attempt))
+                self.attention("Resource acquisition stopped before dispatch: " + str(exc))
+                return None
+            except BaseException:
+                workflow_resources.cleanup(lambda: workflow_resources.finish_attempt(self, activation["id"], resource_attempt))
+                raise
             reservation = {"task_id": task_id, "candidate": candidate, "status": "reserved", "dispatch_stage": "preparing", "reserved_at": time.time(), "freedom": freedom, "assignment_prompt": display_prompt, "repo_path": run["repo_path"], "network": network, "session_mode": "resume" if use_resume else "fresh", "resume_task_id": previous.get("task_id") if use_resume else None, "execution_kind": "headless", "execution_fallback_reason": activation.get("execution_fallback_reason")}
             reservation["context_delivery"] = context_delivery
             reservation["harness_metadata"] = {"requested": copy.deepcopy(candidate), "effective": {"backend": candidate["backend"], "model": candidate.get("model"), "reasoning_effort": candidate.get("reasoning_effort"), "freedom": freedom, "settings_source": "explicit_launch_arguments", "default_model": "unknown" if not candidate.get("model") else None, "provider_identity": "unknown"}, "observed": None, "provenance": "validated_launch_configuration", "verification_status": "configured_not_observed"}
@@ -2871,6 +2940,9 @@ class WorkflowSupervisor:
                 reservation = copy.deepcopy(existing_attempt)
             def reserve(r: dict[str, Any]) -> None:
                 a = next(a for a in r["activations"] if a["id"] == activation["id"])
+                if resource_attempt is not None:
+                    workflow_resources.attach_attempt(self, activation["id"], resource_attempt, reservation)
+                    a["resource_attempt"] = copy.deepcopy(resource_attempt)
                 a["tasks"].append(reservation)
                 if role == "node" and a.get("continue_previous"):
                     a["execution_session_mode"] = reservation["session_mode"]
@@ -2886,6 +2958,7 @@ class WorkflowSupervisor:
             except BaseException:
                 # No spawn was requested; failed persistence must not strand a permit.
                 self.tree.release_slot(control=role != "node")
+                workflow_resources.cleanup(lambda: workflow_resources.abandon_attempt(self, activation["id"], resource_attempt))
                 raise
             capability_stage = "settings"
             try:
@@ -3085,6 +3158,7 @@ class WorkflowSupervisor:
                     self.tree.hold_slot(self.run_id, task_id, control=role != "node")
                 else:
                     self.tree.release_slot(control=role != "node")
+                workflow_resources.cleanup(lambda: workflow_resources.finish_attempt(self, activation["id"], resource_attempt))
         reason = f"All agents unavailable for {key}"
         if selected_candidate and self._retry_usage_recovery_choice(node, role, activation, selected_candidate, reason):
             return None
@@ -3557,7 +3631,8 @@ class WorkflowSupervisor:
     @layout_operation
     async def reconcile(self) -> bool:
         """Reconcile owner evidence; detached owners retain their pipes."""
-        self.store.reconcile_run(self.run_id)
+        before = self.run(refresh_atomic=True)
+        self.store.reconcile_run(self.run_id, resource_owner_dead=not _supervisor_present(before))
         from .workflow_on_demand import reconcile as reconcile_on_demand
         reconcile_on_demand(self.store, self.run(refresh_atomic=True))
         if self.tree.slots is None:
@@ -3617,6 +3692,11 @@ class WorkflowSupervisor:
                 r.update(status="needs_attention", attention_reason="Selectable parallel branches require guided delegation execution")
             r.update(supervisor_pid=os.getpid(), supervisor_identity=identity.own_identity())
         self.update(initialize, "supervisor_started")
+        from .workflow_resources import prepare_run, release_run
+        if self.tree.tree_running(self.run(refresh_atomic=True), refresh_atomic=True):
+            if not await prepare_run(self) and self.run(refresh_atomic=True)["status"] != "cancelling":
+                self.update(lambda r: r.update(supervisor_pid=None, supervisor_identity=None), "supervisor_stopped")
+                return
         active: dict[str, asyncio.Task[Any]] = {}
         try:
             while True:
@@ -3706,6 +3786,8 @@ class WorkflowSupervisor:
             if active:
                 await asyncio.gather(*active.values(), return_exceptions=True)
             self.tree.release_held(run_id)
+            from .workflow_resources import cleanup as resource_cleanup
+            resource_cleanup(lambda: release_run(self.store, self.run(refresh_atomic=True)))
             try:
                 self.update(lambda r: r.update(supervisor_pid=None, supervisor_identity=None), "supervisor_stopped")
             except (WorkflowReceiptDocumentError, ReadLimit) as cleanup:

@@ -385,6 +385,12 @@ def child_run_record(store: Any, parent_run: dict[str, Any], activation: dict[st
         # Selected references stay out of the indexed inputs, which seed the child's Start token.
         **({"invocation_artifact_refs": copy.deepcopy(invocation["artifact_refs"])} if invocation.get("artifact_refs") else {}),
     }
+    if parent_run.get("worktree"):
+        child.update(worktree=copy.deepcopy(parent_run["worktree"]), source_repo_path=parent_run["worktree"]["source_repo_path"])
+    from .workflow_resources import scope_for_run
+    resource_scope = scope_for_run(store, parent_run)
+    if resource_scope is not None:
+        child["resource_scope"] = {"reservation_id": resource_scope.reservation_id}
     from .workflow_goals import context as goal_context
     constraints = goal_context(parent_run, root=store.root)
     if parent_run.get("goal") is not None:

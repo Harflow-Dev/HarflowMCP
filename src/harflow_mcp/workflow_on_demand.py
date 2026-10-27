@@ -22,10 +22,10 @@ def validate_nodes(raw: Any, connected_ids: set[str], *, allow_incomplete: bool 
     if not isinstance(raw, list):
         raise WorkflowError("on_demand_nodes must be an array")
     result, ids = [], set(connected_ids)
-    allowed = {"id", "title", "instructions", "call_condition", "agent", "freedom", "network", "session_mode", "execution_mode"}
+    allowed = {"id", "title", "instructions", "call_condition", "agent", "freedom", "network", "session_mode", "execution_mode", "resources"}
     for item in raw:
         if not isinstance(item, dict) or set(item) - allowed:
-            raise WorkflowError("On-demand nodes accept only id, title, instructions, call_condition, agent, freedom, network, session_mode and execution_mode")
+            raise WorkflowError("On-demand nodes accept only id, title, instructions, call_condition, agent, freedom, network, session_mode, execution_mode and resources")
         node = copy.deepcopy(item)
         nid = _identifier(node.get("id"))
         if nid in ids:

@@ -8,7 +8,7 @@
   `outcome_unobserved` is untouched; the pending view below is built from the receipt.
 * **Scope.** A nested dispatch is under the nearest holding scope on its caller's `spawned_by` chain:
   an ancestor's reservation, or a scope that declared nothing when an ancestor runs inside a workflow
-  attempt (stage B; the workflow stage widens that). Such a dispatch may only borrow, never queue.
+  attempt (including its run and attempt resource coverage). Such a dispatch may only borrow, never queue.
 * **Resolver.** `task_resolver` is what the reaper asks about a `task` entry. It decides from
   durable receipt and record state by task id, never from a post-spawn attach, and keeps the
   entry on every uncertain answer.
@@ -89,7 +89,15 @@ MAX_SCOPE_DEPTH = 64
 def _scope_of(log_dir: Path, task_id: str, record: Any, receipt: dict[str, Any] | None) -> Scope | None:
     """The scope one task holds, or None when it holds nothing itself."""
     if (log_dir.parent / "workflow-owners" / f"{task_id}.json").exists():
-        return Scope(None)
+        from .workflow_receipt_io import read
+        from .workflow_resources import scope_for_task
+        try:
+            owner, _source = read(log_dir.parent / "workflow-owners" / f"{task_id}.json")
+            return scope_for_task(log_dir, owner)
+        except Exception:
+            # An unqualified receipt still proves a workflow boundary, never names
+            # it may lend. The empty scope retains the pre-integration refusal.
+            return Scope(None)
     held = getattr(record, "resources", None) if record is not None else (receipt or {}).get("resources")
     if isinstance(held, dict) and held.get("state") in ("held", "granted") and isinstance(held.get("reservation_id"), str):
         return Scope(held["reservation_id"])
@@ -101,8 +109,7 @@ def holding_scope(log_dir: Path, caller: Any) -> Scope | None:
 
     The scope is the nearest holder on the caller's `spawned_by` chain, the caller included: a task
     that owns a `workflow-owners` receipt (a workflow attempt always holds a checkout lease, so it is
-    a scope even with no named resources and refuses every name until the workflow stage lets attempts
-    declare some), or one whose record or pending launch holds a reservation. A caller with no holder
+    a scope even with no named resources and then refuses every name), or one whose record or pending launch holds a reservation. A caller with no holder
     anywhere above it is no scope, and the dispatch queues like any other root request. Walking the
     chain is what stops a non-holding intermediate from hiding its ancestors' hold and letting a
     grandchild queue behind a lender that is waiting on it. An ancestor that cannot be read, or a chain
@@ -522,8 +529,9 @@ def task_resolver(log_dir: Path):
 
 
 def reap(log_dir: Path):
-    """Run the reaper with the task resolver; the only owner kind with one in this stage."""
-    return ledger_for(log_dir).reap({"task": task_resolver(log_dir)})
+    """Run the reaper with task, workflow run and workflow attempt resolvers."""
+    from .workflow_resources import owner_resolvers
+    return ledger_for(log_dir).reap({"task": task_resolver(log_dir), **owner_resolvers(log_dir)})
 
 
 # ---- recovery commands -------------------------------------------------------------------------
@@ -669,6 +677,21 @@ def collect_evidence(log_dir: Path) -> dict[str, Any]:
             lender = held.get("borrowed_from") or scope.get("reservation_id")
             note(receipt["task_id"], held, lender if isinstance(lender, str) else None)
 
+    from .workflow_resources import collect_evidence as workflow_evidence
+    workflow_specs = workflow_evidence(log_dir)
+    required = {spec["borrows_from"] for spec in [*borrowers, *workflow_specs] if spec.get("borrows_from") and not spec.get("release_requested")}
+    while True:
+        parents = {spec["borrows_from"] for spec in workflow_specs if spec["reservation_id"] in required and spec.get("borrows_from")}
+        if parents <= required:
+            break
+        required |= parents
+    for spec in workflow_specs:
+        if spec.get("release_requested") and spec["reservation_id"] not in required:
+            continue
+        if spec.get("borrows_from"):
+            borrowers.append(spec)
+        else:
+            roots[spec["reservation_id"]] = spec
     conflicts: list[dict[str, Any]] = []
     lenders: dict[str, list[dict[str, Any]]] = {}
     for spec in borrowers:
@@ -683,7 +706,7 @@ def collect_evidence(log_dir: Path) -> dict[str, Any]:
         # Nobody can say who the lender was or what it declared: block at least what its borrowers use.
         names = sorted({name for spec in group for name in spec["names"]})
         roots[lender] = {"reservation_id": lender, "names": names, "owner": {"kind": "task"}, "release_requested": True}
-        conflicts.extend({"task_id": spec["owner"]["task_id"], "reservation_id": lender, "reason": "lender_unknown"} for spec in group)
+        conflicts.extend({"owner": spec["owner"], **({"task_id": spec["owner"]["task_id"]} if spec["owner"].get("task_id") else {}), "reservation_id": lender, "reason": "lender_unknown"} for spec in group)
     return {"specs": [*roots.values(), *borrowers], "conflicts": conflicts}
 
 

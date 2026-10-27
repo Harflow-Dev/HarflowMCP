@@ -238,16 +238,16 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
         help="required: you have checked that no agent for this task is running")
     settle_p.add_argument("--json", action="store_true")
 
-    worktree_list_p = sub.add_parser("worktree-list", help="list the task worktrees Harflow created, with their users")
+    worktree_list_p = sub.add_parser("worktree-list", help="list task and workflow worktrees Harflow created, with their users")
     worktree_list_p.add_argument("--json", action="store_true")
 
     worktree_remove_p = sub.add_parser(
         "worktree-remove",
-        help="remove one task's worktree when nothing uses it and it is clean (for a person, never an agent)",
-        description="Refuses while any task or launch using the worktree is unsettled or uncertain, while the "
+        help="remove one task or workflow worktree when nothing uses it and it is clean (for a person, never an agent)",
+        description="Refuses while any task, launch or workflow run using the worktree is unsettled or uncertain, while the "
         "tree has uncommitted or untracked changes, and when its .git link does not lead back to the recorded "
         "source repository or Git filter drivers are configured, and when it has initialized submodules or is locked with `git worktree lock`. Never discards changes, never deletes the branch.")
-    worktree_remove_p.add_argument("--task-id", required=True)
+    worktree_remove_p.add_argument("--task-id", required=True, help="Creating task ID or root workflow run ID")
     worktree_remove_p.add_argument("--json", action="store_true")
 
     scratch_p = sub.add_parser(
@@ -316,10 +316,10 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
                        help="how long to wait for --resource names, 0..21600 (default 3600; 0 = grant now or fail)")
     run_p.add_argument("--worktree", action="store_true",
                        help="run the task in its own linked Git worktree under HARFLOW_WORKTREE_ROOT (default ~/.harflow-worktrees); "
-                            "refused at read_only and for workflow runs")
+                            "refused for read_only tasks and workflows whose agent nodes are all read_only")
     run_p.add_argument("--worktree-base", default=None, metavar="REF", help="commit-ish the worktree starts from (default HEAD)")
     worktree_target = run_p.add_mutually_exclusive_group()
-    worktree_target.add_argument("--worktree-branch", default=None, metavar="NAME", help="new branch for the worktree (default harflow/<task id>)")
+    worktree_target.add_argument("--worktree-branch", default=None, metavar="NAME", help="new branch for the worktree (default harflow/<task id>, or harflow/workflow-<run_id> with --workflow)")
     worktree_target.add_argument("--worktree-detach", action="store_true", help="check the commit out detached, with no branch")
     run_p.add_argument("--group", default=None)
     run_p.add_argument("--title", default=None)
@@ -482,6 +482,11 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
                 if action == "start":
                     wp.add_argument("--freedom", default=None, choices=("read_only", "write_in_repo", "publish", "unrestricted"))
                 wp.add_argument("--network", choices=("true", "false"))
+                wp.add_argument("--worktree", action="store_true", help="Use one shared worktree for this root workflow and its child runs")
+                wp.add_argument("--worktree-base", help="Base ref resolved after run resources are granted")
+                worktree_mode = wp.add_mutually_exclusive_group()
+                worktree_mode.add_argument("--worktree-branch", help="New local branch; default harflow/workflow-<run_id>")
+                worktree_mode.add_argument("--worktree-detach", action="store_true", help="Create a detached workflow worktree")
                 if action == "start":
                     wp.add_argument("--expected-preview-hash")
         if action == "wait":
@@ -1030,16 +1035,16 @@ def _cmd_worktree_list(args: argparse.Namespace) -> int:
         print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "worktrees": entries})))
         return 0
     if not entries:
-        print("no task worktrees")
+        print("no worktrees")
     for entry in entries:
-        users = ", ".join(f"{u['task_id']} ({u['status']})" for u in entry["users"]) or "unused"
-        print(f"{entry['task_id']}  {entry['path']}  {'exists' if entry['exists'] else 'missing'}  {users}")
+        users = ", ".join(f"{u.get('task_id') or u['workflow_run_id']} ({u['status']})" for u in entry["users"]) or "unused"
+        print(f"{entry.get('task_id') or entry['workflow_run_id']}  {entry['path']}  {'exists' if entry['exists'] else 'missing'}  {users}")
     return 0
 
 
 def _cmd_worktree_remove(args: argparse.Namespace) -> int:
     from . import worktrees
-    refused = _human_only_refusal(args, "remove a task worktree")
+    refused = _human_only_refusal(args, "remove a task or workflow worktree")
     if refused is not None:
         return refused
     try:
@@ -1345,8 +1350,14 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
             prompt = _workflow_prompt(args) if action != "preview" else ""
             candidate = {k: v for k, v in {"backend": args.backend, "model": args.model,
                          "reasoning_effort": args.reasoning_effort, "max_turns": args.max_turns, "background_idle_seconds": getattr(args, "background_idle_seconds", None), "caller_approvals": args.caller_approvals, "caller_write_approvals": getattr(args, "caller_write_approvals", None)}.items() if v is not None}
+            worktree_guard = {}
+            if action != "build":
+                if not getattr(args, "worktree", False) and any((getattr(args, "worktree_base", None), getattr(args, "worktree_branch", None), getattr(args, "worktree_detach", False))):
+                    raise ValueError("--worktree-base, --worktree-branch and --worktree-detach need --worktree")
+                if getattr(args, "worktree", False):
+                    worktree_guard = {"worktree": {k: v for k, v in (("base_ref", args.worktree_base), ("branch", args.worktree_branch), ("detach", args.worktree_detach or None)) if v is not None}}
             if action == "preview":
-                return await server._workflow_call("preview", name=args.name, repo_path=args.repo, overrides=candidate or None, network=_network(args.network))
+                return await server._workflow_call("preview", name=args.name, repo_path=args.repo, overrides=candidate or None, network=_network(args.network), **worktree_guard)
             if action == "build":
                 definition = json.loads(args.definition_json) if args.definition_json else None
                 if args.definition:
@@ -1359,8 +1370,8 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
             goal = _workflow_text(args, "goal")
             goal_guard = {"goal": goal} if goal is not None else {}
             if args.monitor:
-                return await server._workflow_call("start", name=args.name, prompt=prompt, repo_path=args.repo, overrides=candidate or None, freedom=args.freedom, network=_network(args.network), interaction_owner="monitor", **preview_guard, **goal_guard)
-            return await server._workflow_call("start", name=args.name, prompt=prompt, repo_path=args.repo, overrides=candidate or None, freedom=args.freedom, network=_network(args.network), **preview_guard, **goal_guard)
+                return await server._workflow_call("start", name=args.name, prompt=prompt, repo_path=args.repo, overrides=candidate or None, freedom=args.freedom, network=_network(args.network), interaction_owner="monitor", **preview_guard, **goal_guard, **worktree_guard)
+            return await server._workflow_call("start", name=args.name, prompt=prompt, repo_path=args.repo, overrides=candidate or None, freedom=args.freedom, network=_network(args.network), **preview_guard, **goal_guard, **worktree_guard)
         if action == "revise-goal":
             return await server._workflow_call("revise_goal", run_id=args.workflow_run_id,
                 goal=_workflow_text(args, "goal"), expected_revision=args.expected_revision,
@@ -1611,8 +1622,6 @@ def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
                 return _fail(args, "invalid_params", "workflow runs do not accept task group or title")
             if args.resource is not None or args.resource_wait_seconds is not None:
                 return _fail(args, "invalid_params", "resources are unavailable for workflow launches")
-            if args.worktree:
-                return _fail(args, "invalid_params", "worktree is unavailable for workflow launches")
             args.name = args.workflow
             args.command = "workflow-start"
             return _cmd_workflow(args)

@@ -12,11 +12,13 @@ BUDGET = 24 * 1024
 VIEWS = {"executions": "activations", "decisions": "decisions", "checklist": "tasks", "checklist_disposition": "checklist_disposition", "technical_plan": "technical_plan", "definition": "definition", "owner_contracts": "owner_contracts", "question": "input_question", "reason": "reason", "wait_reason": "wait_reason", "checkout_wait": "checkout_wait", "summary": "summary", "failure_reason": "failure_reason", "attention_reason": "attention_reason", "builder_draft": "builder_draft", "generated_definition": "generated_definition"}
 
 
+VIEWS.update({key: key for key in ("resources", "resource_wait", "resource_waits", "worktree", "source_repo_path")})
 PUBLIC_VIEWS = frozenset(VIEWS) | {"goal", "goal_history", "goal_assessment"}
 
 # These lossless views are fetched only when their digest changes. Executions have
 # individual identities so a new checkpoint does not resend old worker results.
 MONITOR_FIELDS = ("on_demand_nodes", "on_demand_calls", "on_demand_state", "goal", "goal_history", "goal_assessment", "definition", "owner_contracts", "tasks", "checklist_disposition", "technical_plan", "decisions", "pending", "joins", "released_parallel_groups", "exhausted_retry_edges", "input_question", "orchestrator_usage_recovery", "worker_usage_recovery", "usage_recovery_history", "reason", "wait_reason", "checkout_wait", "summary", "failure_reason", "attention_reason", "builder_draft", "generated_definition", "editing_definition", "source_saved_definition", "prompt")
+MONITOR_FIELDS += ("resources", "resource_wait", "resource_waits", "worktree", "source_repo_path")
 VIEWS.update({field: field for field in MONITOR_FIELDS})
 VIEWS["execution_index"] = "execution_index"
 
@@ -30,6 +32,8 @@ def _digest(value: Any) -> str:
 
 
 def _view_value(run: dict[str, Any], view: str) -> Any:
+    if view == "resource_waits":
+        return _activation_resource_waits(run)
     if view == "execution_index":
         return [{"id": a["id"], "digest": _digest(a)} for a in run.get("activations", [])]
     if view.startswith("execution:"):
@@ -49,11 +53,11 @@ def monitor(run: dict[str, Any]) -> dict[str, Any]:
     for key in ("workflow_name", "source_name", "source_revision", "builder_followup"):
         if key in run:
             result[key] = run[key][:2000] if isinstance(run[key], str) else run[key]
-    result["monitor_digests"] = {field: _digest(run.get(field)) for field in MONITOR_FIELDS}
+    result["monitor_digests"] = {field: _digest(_view_value(run, field)) for field in MONITOR_FIELDS}
     result["monitor_digests"]["execution_index"] = _digest(_view_value(run, "execution_index"))
     # Digest references must fit the same transport budget as status metadata.
     if len(json.dumps(result, ensure_ascii=True).encode()) > BUDGET:
-        for key in ("decision_errors", "checkout_wait", "current_stage"):
+        for key in ("decision_errors", "checkout_wait", "current_stage", "resource_wait", "resource_waits", "resources", "worktree"):
             result.pop(key, None)
         for key, value in list(result.items()):
             if isinstance(value, str) and len(value) > 64:
@@ -89,6 +93,24 @@ def history_page(runs: list[dict[str, Any]], offset: int = 0, limit: int = 100) 
         entries.append(row)
     following = offset + len(entries)
     return {"runs": entries, "next_offset": following if following < len(ordered) else None}
+
+
+def _resource_blockers(wait: dict[str, Any]) -> dict[str, Any]:
+    return {"blocked_by": [{"name": str(row.get("name", ""))[:64],
+                            "holder_task_ids": [str(i)[:100] for i in row.get("holder_task_ids", [])[:8]],
+                            "holder_workflow_run_ids": [str(i)[:100] for i in row.get("holder_workflow_run_ids", [])[:8]],
+                            "since": str(row.get("since", ""))[:100]}
+                           for row in wait.get("blocked_by", [])[:16]]}
+
+
+def _activation_resource_waits(run: dict[str, Any]) -> list[dict[str, Any]]:
+    result = []
+    for activation in run.get("activations", []):
+        attempt = activation.get("resource_attempt") or {}
+        if activation.get("status") not in {"running", "starting", "reserved", "uncertain"} or attempt.get("released") or attempt.get("state") not in {"queued", "granted"}:
+            continue
+        result.append({"execution_id": activation["id"], **{k: v for k, v in attempt.items() if k in {"id", "names", "state", "reservation_id"}}, **_resource_blockers(activation.get("resource_wait", {}))})
+    return result
 
 
 def compact(run: dict[str, Any]) -> dict[str, Any]:
@@ -138,6 +160,13 @@ def compact(run: dict[str, Any]) -> dict[str, Any]:
     if isinstance(wait, dict):
         owner = wait.get("owner") or {}
         result["checkout_wait"] = {"reason": str(wait.get("reason", ""))[:300], "repo_path": str(wait.get("repo_path", ""))[:300], "owner": {key: str(owner.get(key, ""))[:100] for key in ("workflow_run_id", "task_id")}}
+    for field in ("resources", "worktree", "resource_wait"):
+        if isinstance(run.get(field), dict):
+            result[field] = {k: v for k, v in run[field].items() if k in {"names", "state", "reservation_id", "path", "source_repo_path", "branch", "detached", "base_ref", "base_commit", "wait_started_at", "deadline_at", "position"}}
+    if isinstance(result.get("resource_wait"), dict):
+        result["resource_wait"].update(_resource_blockers(run.get("resource_wait", {})))
+    result["resource_waits"] = _activation_resource_waits(run)[:8]
+    result["resource_held_waiting_for_slot"] = any(a.get("resource_held_waiting_for_slot") for a in activations if a.get("status") in {"running", "starting", "reserved", "uncertain"})
     result["current_stage"] = [{"execution_id": str(a.get("id", ""))[:100], "node_id": str(a.get("node_id", ""))[:100], "role": str(a.get("role", ""))[:100], "status": str(a.get("status", ""))[:100]} for a in activations if a.get("status") in {"running", "starting", "reserved", "uncertain"}][:8]
     invocations = [{"execution_id": str(a.get("id", ""))[:100], "child_workflow_run_id": str((a.get("invocation") or {}).get("child_workflow_run_id", ""))[:100], "stage": str((a.get("invocation") or {}).get("stage", ""))[:40], "child_outcome_kind": str((((a.get("node_result") or {}).get("result") or {}).get("child_outcome") or {}).get("kind", ""))[:40]} for a in activations if a.get("invocation")]
     if invocations:
@@ -158,6 +187,10 @@ def compact(run: dict[str, Any]) -> dict[str, Any]:
     if len(json.dumps(result, ensure_ascii=True).encode()) > BUDGET - 2048:
         result["current_stage"] = []
         result.pop("checkout_wait", None)
+        for field in ("resources", "resource_wait", "resource_waits", "worktree"):
+            if field in result:
+                result.pop(field)
+                result[field + "_truncated"] = True
         for key, value in list(result.items()):
             if isinstance(value, str) and len(value) > 64:
                 result[key] = value[:64]
@@ -190,7 +223,7 @@ def detail(run: dict[str, Any], view: str, cursor: str | None = None, limit: int
 def monitor_snapshot(run, run_id, cache, cursor=None, *, layout=None):
     """Local CLI-only lossless paging of a stable Monitor transport snapshot."""
     from .workflow_monitor_snapshot import snapshot
-    captured = run | {"monitor_digests": monitor(run)["monitor_digests"]} if run is not None else None
+    captured = run | {"resource_waits": _activation_resource_waits(run), "monitor_digests": monitor(run)["monitor_digests"]} if run is not None else None
     return snapshot(captured, run_id, cache, cursor, layout=layout)
 
 

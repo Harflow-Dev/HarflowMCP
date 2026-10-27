@@ -428,3 +428,35 @@ variant adding `plan_directory` plus `{device, inode}` in `plan_directory_identi
 references can establish availability independently of the reader's environment; legacy references
 remain readable but unavailable. No canonical fixture requires a shape change for these optional
 fields, and existing Mac decoders ignore unknown provenance members.
+
+
+### Workflow resources and worktrees
+
+Saved workflow definitions accept additive optional top-level `resources` and agent-node
+`resources`, including on-demand nodes. New run fields `resources`, `resource_scope`, `resource_anchor_names`,
+`resource_wait`, `worktree` and `source_repo_path` are codec OPTIONAL. Activations optionally carry
+`resource_attempt`, `resource_wait` and `resource_held_waiting_for_slot`; task reservations retain
+their candidate's resource-attempt receipt. These additions introduce no task status or wire
+version, and do not change the fixtures under `contracts/v1`.
+
+`start_workflow` and `preview_workflow_run` accept an optional worktree object using the task
+worktree options. Preview hashes bind the resource declarations and worktree plan. Compact and
+Monitor responses expose bounded resource waits and worktree metadata; paged views retain full
+content. Resources grant no permissions. Existing managed-agent dispatch authority remains
+unchanged; an independent workflow launched by a standalone holding task must borrow all names
+from that scope. Linked child runs share the root worktree and enclosing resource coverage.
+
+Worktree inventory rows for root workflow checkouts use optional `workflow_run_id` instead of
+`task_id`; existing task rows retain `task_id`. Usage rows likewise identify either a task or a
+workflow run. Human-only removal accepts either recorded owner ID. These additive optional
+fields do not change the version-one fixture bundle.
+
+Compact workflow status keeps optional `resource_wait` as a run-level object and adds
+`resource_waits`, an array of at most eight active activation waits. Each row includes an
+`execution_id` and resource attempt identity, names, state, reservation ID and bounded blockers.
+The `resource_waits` detail view and Monitor snapshot retain all active waits; Monitor digests
+track that derived view. Stale held-slot flags on settled activations do not affect compact status.
+The private `harflow.workflow.worktree` v1 lookup receipt qualifies product/version, selected state
+root path, run ID and canonical worktree/source paths; it is not part of the public fixture bundle.
+Source descriptor identity is checked within each read; no device/inode value binds a receipt
+across restarts. These receipts locate paths and never grant execution or removal authority.

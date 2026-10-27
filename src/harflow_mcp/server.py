@@ -688,13 +688,11 @@ async def start_task(
             raise MCPError(INVALID_PARAMS, "workflow runs do not accept task group or title")
         if resources is not None or resource_wait_seconds is not None:
             raise MCPError(INVALID_PARAMS, "resources are unavailable for workflow launches")
-        if worktree is not None:
-            raise MCPError(INVALID_PARAMS, "worktree is unavailable for workflow launches")
         return await start_workflow(
             name=workflow, prompt=prompt, repo_path=repo_path,
             overrides={k: v for k, v in {"backend": backend, "model": model, "max_turns": max_turns,
                        "reasoning_effort": reasoning_effort, "background_idle_seconds": background_idle_seconds}.items() if v is not None},
-            freedom=freedom, network=network,
+            freedom=freedom, network=network, worktree=worktree,
         )
 
     freedom = freedom if freedom is not None else DEFAULT_FREEDOM
@@ -2487,20 +2485,28 @@ async def apply_workflow_draft(definition: dict[str, Any], expected_draft_revisi
 
 @mcp.tool()
 @_task_document_errors
-async def preview_workflow_run(name: str, repo_path: str, overrides: dict[str, Any] | None = None, network: StrictBool | None = None) -> dict[str, Any]:
-    """Preview native ownership, inherited permissions and fallback reasons without launching.
+async def preview_workflow_run(name: str, repo_path: str, overrides: dict[str, Any] | None = None, network: StrictBool | None = None, worktree: dict[str, StrictStr | StrictBool | None] | None = None) -> dict[str, Any]:
+    """Preview resources, worktree plan, native ownership, permissions and fallback reasons without launching.
 
     The orchestrator receives the permissions required by compatible native
     children. Supply preview_hash as expected_preview_hash when starting to
     refuse changed workflow, launch settings or compatibility evidence.
     """
-    return await _workflow_call("preview", name=name, repo_path=repo_path, overrides=overrides, network=network)
+    return await _workflow_call("preview", name=name, repo_path=repo_path, overrides=overrides, network=network, **({"worktree": worktree} if worktree is not None else {}))
 
 
 @mcp.tool()
 @_task_document_errors
-async def start_workflow(name: str, prompt: str, repo_path: str, overrides: dict[str, Any] | None = None, freedom: str | None = None, network: StrictBool | None = None, expected_preview_hash: str | None = None, goal: str | None = None, notify: str | None = None, notify_events: list[str] | None = None) -> dict[str, Any]:
+async def start_workflow(name: str, prompt: str, repo_path: str, overrides: dict[str, Any] | None = None, freedom: str | None = None, network: StrictBool | None = None, expected_preview_hash: str | None = None, goal: str | None = None, notify: str | None = None, notify_events: list[str] | None = None, worktree: dict[str, StrictStr | StrictBool | None] | None = None) -> dict[str, Any]:
     """Start a durable workflow run; returns workflow_run_id rather than task_id.
+
+    Saved top-level resources are held through pauses and caller-input checkpoints;
+    agent-node resources are acquired before a harness slot. Resources grant no access.
+    Optional worktree {base_ref?, branch?, detach?} creates one shared checkout for
+    the root and every child run after the run-scope grant. Nested callers and
+    workflows whose agents are all read_only cannot request one. The default branch
+    is harflow/workflow-<run_id>. Removal is explicit through harflow-ctl.
+    Resources and the worktree plan are bound by expected_preview_hash.
 
     Preserve spaces and word boundaries in prompt rather than compressing natural prose;
     the caller's source text is stored unchanged before workflow input assembly.
@@ -2546,7 +2552,7 @@ async def start_workflow(name: str, prompt: str, repo_path: str, overrides: dict
             raise MCPError(INVALID_PARAMS, 'Notification reservation failed; no workflow was started') from None
     launch_notice = None
     try:
-        run = await _workflow_call("start", name=name, prompt=prompt, repo_path=repo_path, overrides=overrides, freedom=freedom, network=network, expected_preview_hash=expected_preview_hash, goal=goal, **({'run_id': reserved_id} if reserved_id else {}))
+        run = await _workflow_call("start", name=name, prompt=prompt, repo_path=repo_path, overrides=overrides, freedom=freedom, network=network, expected_preview_hash=expected_preview_hash, goal=goal, **({"worktree": worktree} if worktree is not None else {}), **({'run_id': reserved_id} if reserved_id else {}))
     except (Exception, asyncio.CancelledError) as exc:
         if reserved_id is None:
             raise

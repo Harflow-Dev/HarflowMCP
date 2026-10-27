@@ -422,7 +422,18 @@ def users(log_dir: Path, path: Path) -> list[dict[str, Any]]:
             continue
         if receipt["state"] not in ("settled", "not_started"):
             found.append({"task_id": receipt["task_id"], "kind": "launch", "status": receipt["state"]})
+    for run in _workflow_runs(log_dir):
+        if _inside(run.get("repo_path"), path) or _inside((run.get("worktree") or {}).get("path"), path):
+            if run["status"] not in {"completed", "failed", "cancelled"} or run.get("settling"):
+                found.append({"workflow_run_id": run["workflow_run_id"], "kind": "workflow_run", "status": run["status"]})
     return found
+
+
+def _workflow_runs(log_dir: Path) -> list[dict[str, Any]]:
+    if not (log_dir.parent / "workflow-runs").exists():
+        return []
+    from .workflows import WorkflowStore
+    return WorkflowStore(log_dir.parent).list_runs(strict=True)
 
 
 def recorded_paths(log_dir: Path) -> list[Path]:
@@ -438,6 +449,8 @@ def recorded_paths(log_dir: Path) -> list[Path]:
         info = getattr(record, "worktree", None)
         if isinstance(info, dict) and isinstance(info.get("path"), str):
             found.add(str(_canonical(Path(info["path"]))))
+    from .workflow_worktree_receipts import paths as workflow_paths
+    found.update(str(_canonical(path)) for path in workflow_paths(log_dir))
     return sorted(Path(item) for item in found)
 
 
@@ -445,6 +458,40 @@ def containing_worktree(log_dir: Path, repo_path: Path) -> Path | None:
     """The recorded worktree that `repo_path` is, or lies inside, from durable records only."""
     target = _canonical(Path(repo_path))
     return next((path for path in recorded_paths(log_dir) if target == path or target.is_relative_to(path)), None)
+
+
+def containing_worktree_for_publication(log_dir: Path, repo_path: Path) -> Path | None:
+    """Locate a launch lock without scanning full task or workflow history."""
+    from . import store
+    from .task_supervision import reservations, read_task_record
+    from .workflow_worktree_receipts import paths as workflow_paths
+    target = _canonical(Path(repo_path))
+    found = {str(_canonical(path)) for path in workflow_paths(log_dir)}
+    for receipt in reservations(log_dir):
+        info = receipt.get("worktree")
+        if isinstance(info, dict) and isinstance(info.get("path"), str):
+            found.add(str(_canonical(Path(info["path"]))))
+    match = next((Path(path) for path in sorted(found) if target == Path(path) or target.is_relative_to(Path(path))), None)
+    if match is not None:
+        return match
+    # Retention removes launch evidence before metadata. A record-only worktree
+    # must still participate in the usage lock even after the configured root changes.
+    lexical = Path(os.path.abspath(repo_path))
+    candidates = set()
+    for path in (lexical, target):
+        for ancestor in (path, *path.parents):
+            try:
+                candidates.add(store.validate_task_id(ancestor.name))
+            except store.InvalidTaskId:
+                continue
+    for task_id in sorted(candidates):
+        record = read_task_record(log_dir, task_id, include_prompt=False, metadata_byte_limit=4 * 1024 * 1024)
+        info = getattr(record, "worktree", None) if record is not None else None
+        if isinstance(info, dict) and isinstance(info.get("path"), str):
+            path = _canonical(Path(info["path"]))
+            if target == path or target.is_relative_to(path):
+                return path
+    return None
 
 
 def inventory(log_dir: Path) -> list[dict[str, Any]]:
@@ -460,6 +507,10 @@ def inventory(log_dir: Path) -> list[dict[str, Any]]:
         info = getattr(record, "worktree", None)
         if isinstance(info, dict) and info.get("path") and record.task_id == Path(info["path"]).name:
             entries.setdefault(info["path"], {**info, "task_id": record.task_id})
+    for run in _workflow_runs(log_dir):
+        info = run.get("worktree")
+        if isinstance(info, dict) and info.get("path") and not run.get("parent_link"):
+            entries[info["path"]] = {**info, "workflow_run_id": run["workflow_run_id"], "launch_state": run["status"]}
     result = []
     for path, entry in sorted(entries.items()):
         entry["exists"] = os.path.isdir(path)
@@ -474,7 +525,7 @@ def remove(log_dir: Path, task_id: str) -> dict[str, Any]:
     Refuses while any user is unsettled or uncertain and while the tree has any tracked or
     untracked change, refuses initialized submodules and locked worktrees, and keeps the branch.
     """
-    entry = next((e for e in inventory(log_dir) if e.get("task_id") == task_id), None)
+    entry = next((e for e in inventory(log_dir) if (e.get("task_id") or e.get("workflow_run_id")) == task_id), None)
     if entry is None:
         raise WorktreeError(f"no worktree is recorded for task {task_id}", code="worktree_unknown")
     path, source = Path(entry["path"]), Path(entry["source_repo_path"])
@@ -482,7 +533,7 @@ def remove(log_dir: Path, task_id: str) -> dict[str, Any]:
         busy = users(log_dir, path)
         if busy:
             raise WorktreeError(
-                "the worktree is still used by " + ", ".join(f"{u['task_id']} ({u['status']})" for u in busy)
+                "the worktree is still used by " + ", ".join(f"{u.get('task_id') or u['workflow_run_id']} ({u['status']})" for u in busy)
                 + "; wait for them to settle or settle them first", code="worktree_in_use")
         if not path.is_dir():
             raise WorktreeError(f"{path} no longer exists; run `git worktree prune` in {source} if Git still lists it", code="worktree_missing")
@@ -503,5 +554,5 @@ def remove(log_dir: Path, task_id: str) -> dict[str, Any]:
             detail = (result.stderr or result.stdout).strip()[:300]
             raise WorktreeError(f"git did not remove {path}: {detail}",
                                 code="worktree_git_failed")
-    return {"task_id": task_id, "path": str(path), "removed": True, "branch": entry.get("branch"),
+    return {("workflow_run_id" if "workflow_run_id" in entry else "task_id"): task_id, "path": str(path), "removed": True, "branch": entry.get("branch"),
             "note": "The branch, if any, was kept."}

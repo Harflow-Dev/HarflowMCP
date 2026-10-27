@@ -1802,3 +1802,49 @@ Agent candidates, including specialist candidates, accept
 maximum. Headless dispatches persist the resolved bound; resumed dispatches
 inherit it when omitted. Native child transports cannot independently configure
 this deadline and reject an explicit independent setting.
+
+
+## Resource scopes and shared worktrees
+
+A definition may declare top-level `resources` for the complete run and agent-node `resources`
+for one attempt (including on-demand agents). Node names must be covered by a declared run scope;
+otherwise nodes queue independently before taking a harness slot. Run holds survive pauses and
+caller questions. Siblings under one run scope share its names. `prefer_subagent` nodes cannot
+declare attempt names; native and headless execution share the same run coverage. Run-workflow
+nodes do not accept a resource field, and their linked child runs borrow enclosing coverage.
+Resources only coordinate execution and grant no permissions.
+
+`start_workflow` and its preview accept `worktree={base_ref?, branch?, detach?}`. The root supervisor
+creates one shared checkout after acquiring run resources; nodes and child runs execute there,
+with `source_repo_path` retained on the run. Nested callers and entirely read-only workflows
+cannot request creation. The default branch is `harflow/workflow-<run_id>`. Both resources and the
+worktree plan contribute to `preview_hash`. CLI equivalents are `workflow-preview --worktree`
+and `workflow-start --worktree`, with `--worktree-base`, `--worktree-branch` or `--worktree-detach`.
+
+Compact status, paged detail and Monitor snapshots expose `resources`, the run-level
+`resource_wait` object, an activation `resource_waits` array, `worktree` and
+`resource_held_waiting_for_slot`. Attempts retain candidate-specific `resource_attempt` IDs
+so fallback and crash recovery cannot confuse owners. Queued waits stop on pause/cancel; a
+3600-second expiry requires attention. Uncertain dispatched attempts retain their reservations.
+Scheduler recovery releases provably pre-dispatch attempts, but never infers settlement from the
+supervisor's death alone. Ledger repair reconstructs durable workflow holds and borrowers and
+confirms grants before dispatch. Worktree cleanup is explicit, clean-only and blocked by
+non-terminal workflow users; it never deletes branches.
+
+Standalone holding tasks may launch a workflow only if all names throughout the pinned tree,
+including on-demand nodes, are covered by their scope. The existing managed-agent direct-dispatch
+guard stays in force; nested workflow execution goes through saved Run workflow nodes.
+See [resources and worktrees](resources-and-worktrees.md) for usage, recovery and limitations.
+
+A standalone holding caller's workflow receives a durable borrow anchor before launch returns,
+so caller exit does not lose the workflow's declared coverage. Without explicit run resources,
+`resource_anchor_names` records only the runtime union of pinned declarations. Initial supervisor
+launch failure releases that anchor; resume requires the original lender to remain held and willing
+to lend. Failed replacement supervisors retain established holds for unresolved descendants.
+Dead queues remain blocked until explicit recovery or cancellation. Attempt retry/fallback
+resets the 3600-second resource wait and FIFO position. A `creating` worktree recovered as
+`unknown` requires cancellation, settlement, inspection and manual cleanup; it is never retried.
+
+Every pinned invocation path is checked before preview or launch: child run declarations and
+connected/on-demand node resources must fit the nearest enclosing run declaration. Children can
+narrow that scope and undeclared children inherit it. Reused definitions are checked per path.

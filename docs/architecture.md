@@ -195,7 +195,7 @@ only; liveness is never stored) and each owner kind supplies its own "is it fini
   read, edit and atomic replace (temp file, fsync, `os.replace`, directory fsync). It is never held
   across an `await`, a subprocess (including the `ps` behind identity checks), Git, or the
   acquisition of another lock. Taking it while a session, chain or store lock is held is allowed;
-  the reverse never happens, so it is last in the lock order: session or chain lock, then
+  the reverse never happens, so it is last in the lock order: session or chain lock, then worktree usage lock, then
   `<id>.lock` and `<id>.followups.lock`, then workflow store locks, then the ledger lock. It is
   taken with a non-blocking retry and a timeout (`ResourceLedgerUnavailable`), so a stopped holder
   cannot freeze an event loop.
@@ -220,7 +220,7 @@ only; liveness is never stored) and each owner kind supplies its own "is it fini
   the takeover gate) is atomic and fail-closed: `begin_repair` keeps the corrupt file as
   `ledger.corrupt-<timestamp>.json` and in the same step replaces it with a ledger carrying a repair
   marker that every operation refuses (`ResourceLedgerRepairing`); `task_resources.collect_evidence`
-  then reads the durable launch receipts and task records outside the lock, and `complete_repair`
+  then reads durable launch receipts, task records and workflow resource evidence outside the lock, and `complete_repair`
   publishes the whole reconstruction in one atomic replace. A crash in between leaves the ledger
   closed, not empty, and running the command again resumes it. The reconstruction keeps lending
   relationships: a lender stays (flagged `release_requested` once settled) while any borrower is
@@ -439,3 +439,60 @@ clamped. A request that outlives the client's deadline fails the *call* while th
 unharmed, so every wait is resumable by calling it again. The measured deadlines are under "MCP
 client request deadlines" in [backend-cli-facts.md](backend-cli-facts.md); waits are read-only and never write, signal or
 resume (`wait_policy.py` is the shared contract).
+
+
+### Workflow resource owners
+
+`workflow_resources.py` binds run and candidate-attempt ownership to the ledger. `_dispatch`
+persists `resource_attempt {id, candidate_index, state, reservation_id}` before enqueueing, acquires
+names before a tree slot, and atomically attaches the grant to `dispatch_reserved`. Fallbacks use
+new owner IDs. Publication failures and slot-wait cancellation release pre-dispatch grants;
+uncertain dispatches keep them. Reconciliation of a dead scheduler marks queued or unattached
+granted attempts not started without treating a resource-only activation as a failed execution.
+Read-only resolvers consult persisted run/attempt state; they never reconcile. A run is releasable
+only after terminal settlement and resolution of its linked descendants and attempts, regardless
+of supervisor liveness. Borrowers defer release through the ledger.
+
+Repair combines task and workflow evidence before reconstructing lenders. Granted and attached
+attempts and run-scope holds survive reconstruction; settled lenders are restored only when an
+unresolved borrower still needs them. A workflow publishes its grant and confirms it against the
+ledger before proceeding, retrying acquisition if an earlier repair omitted queued evidence.
+An unreadable run leaves repair closed. Waiting holds no workflow, usage, session or ledger lock.
+Named holders may wait on tree slots or bounded checkout leases, disclosed in status.
+
+Workflow worktrees use the existing hardened creation and removal implementation. The root run's
+plan is durable under the usage lock before creation. The supervisor creates it after the run
+resource grant, then publishes its execution `repo_path`; linked children inherit that path and
+source metadata. Run records participate in inventory and removal user checks between tasks.
+Shared scratch allocation and measured system guidance remain owned by the task launch path.
+
+Workflow holding-caller launches establish a durable workflow-run borrow anchor before supervisor
+launch or return. Runtime-only implicit anchor names never change saved definitions. Ledger
+borrowing flattens to the ultimate lender, and persisted repair evidence keeps that actual link
+and the lender's complete declared coverage. Run publication under a worktree usage lock occurs
+on a worker thread carrying state context, without holding the lock across an await. Dispatch
+exits settle tree permits before individually guarded resource bookkeeping; cleanup cannot replace
+an observed outcome. Run-level resource waits and activation waits are persisted separately.
+
+Workflow root creation centralizes usage locking, durable lookup registration and run publication.
+Ordinary task/workflow containment reads only bounded workflow-worktree receipts, never the full
+workflow listing catalog. Receipts use bounded nofollow/source-stable reads and selected-root
+qualification; conflicting run identities cannot overwrite them. Recovery ensures registration
+before Git creation. Human inventory and removal retain full qualified workflow settlement checks.
+
+Workflow-worktree receipt registration canonicalizes paths once. Decoding qualifies normalized
+absolute stored paths lexically, without resolving the current agent-controlled checkout or source
+filesystem. Ordinary containment canonicalizes returned paths for comparison; filesystem changes
+cannot turn an unchanged lookup receipt into incompatible metadata. Removal still proves current
+workflow settlement and Git linkage independently.
+
+Workflow publication never enumerates full task metadata to locate a checkout lock. It uses small
+launch/lookup receipts, then qualified direct records for candidate task IDs in lexical and canonical
+requested-path ancestors. This fallback retains the usage-lock guarantee when partial retention has
+removed a launch before its task metadata. An external resource_scope is provenance only: absent an
+own held grant, root coverage is empty. Linked children refresh the parent chain before saved scope
+hints, while root grant acquisition explicitly selects its original lender.
+
+Lookup receipts remain after removal; no automatic pruning or repair is part of G04. Corrupt
+engine-owned lookup metadata refuses lookup. Slot-wait disclosure observations and writes are
+best effort; they cannot replace the tree's actual liveness checks or alter dispatch outcomes.

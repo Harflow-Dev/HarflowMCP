@@ -31,7 +31,7 @@ def check_source(path: Path, expected) -> None:
         raise _unavailable(path, "Receipt source changed before replacement")
 
 
-def read(path: Path):
+def read(path: Path, *, decode_document=None):
     from .bounded_io import RECEIPT_BYTES, ReadLimit
     descriptor = None
     try:
@@ -63,7 +63,7 @@ def read(path: Path):
         raise ReadLimit("JSON nesting exceeds decoder bounds") from exc
     except (ValueError, UnicodeError) as exc:
         raise WorkflowReceiptDocumentError(path.stem, "Malformed receipt JSON") from exc
-    return decode(document, path.stem), source
+    return (decode if decode_document is None else decode_document)(document, path.stem), source
 
 
 def observe(path: Path):

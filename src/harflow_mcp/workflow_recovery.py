@@ -98,9 +98,13 @@ def request(storage: Any, root: dict[str, Any], reason: str, interaction_owner: 
 
 def restore_permits(supervisor: Any) -> None:
     """Charge each surviving attempt before any coroutine may acquire a new slot."""
-    runs = inventory(supervisor.store, supervisor.run(refresh_atomic=True))
+    root = supervisor.run(refresh_atomic=True)
+    runs = inventory(supervisor.store, root)
     supervisor.tree.recovered_run_ids = {run["workflow_run_id"] for run in runs}
     for run in runs:
+        if run["workflow_run_id"] != root["workflow_run_id"]:
+            from .workflows import _supervisor_present
+            run = supervisor.store.reconcile_run(run["workflow_run_id"], resource_owner_dead=not _supervisor_present(run))
         for activation in run["activations"]:
             for task in activation["tasks"]:
                 native_pending = False

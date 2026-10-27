@@ -272,13 +272,13 @@ def _inspection_result(value, path):
 
 def _authored(value, path):
     from .workflow_definition_documents import _shape as definition_shape, _candidate as definition_candidate
-    definition_shape(value, {"name": str, "workflow_id": str, "nodes": list, "connections": list, "orchestrator": dict, "on_demand_nodes": list}, path)
+    definition_shape(value, {"name": str, "workflow_id": str, "nodes": list, "connections": list, "orchestrator": dict, "on_demand_nodes": list, "resources": list}, path)
     if "orchestrator" in value:
         definition_candidate(value["orchestrator"])
     for node in value.get("nodes", []) + value.get("on_demand_nodes", []):
         if type(node) is not dict:
             raise ValueError(f"Malformed {path}.node")
-        definition_shape(node, {"id": str, "type": str, "agent": dict, "freedom": str, "network": (bool, N), "workflow_ref": dict}, path + ".node")
+        definition_shape(node, {"id": str, "type": str, "agent": dict, "freedom": str, "network": (bool, N), "workflow_ref": dict, "resources": list}, path + ".node")
         if "agent" in node:
             definition_candidate(node["agent"])
     for edge in value.get("connections", []):
@@ -286,9 +286,17 @@ def _authored(value, path):
             raise ValueError(f"Malformed {path}.connection")
 
 
+def _resource_attempt(value, path):
+    _shape(value, {"id": _id, "candidate_index": _counter, "state": str, "reservation_id": str,
+                   "names": _array(str), "task_id": _id, "wait_started_at": NUMBER,
+                   "granted_at": str, "borrowed_from": str, "released": bool}, path)
+    if value.get("state") not in {"queued", "granted", "not_started", "attached"}:
+        raise ValueError(f"Malformed {path}.state")
+
+
 def _attempt(value, path):
     _shape(value, {**_fields("task_id status dispatch_stage freedom repo_path session_mode assignment_prompt execution_kind dispatch_nonce owner_task_id owner_session_id transport_task_id assignment_sha256 activity_level native_owner_execution_id error recovery_reason", numbers="reserved_at finished_at started_at timeout_deadline timeout_requested_at", booleans="usage_recovery_checkpointed native_terminal can_cancel_child can_resume_child context_acknowledged", nullable_strings="resume_task_id execution_fallback_reason native_child_id owner_session_generation"),
-                   "candidate": _candidate, "network": (bool, N), "result": _result, "context_delivery": _context, "prompt_usage": _object({"usage": NULL_OBJECT, "cost_usd": NULL_NUMBER}), "liveness": _object({"process_alive": (bool, N), "outcome_known": bool, "resolved_status": str, "reason": str}), "native_owner_execution_ids": _array(str),
+                   "candidate": _candidate, "network": (bool, N), "result": _result, "resource_attempt": _resource_attempt, "context_delivery": _context, "prompt_usage": _object({"usage": NULL_OBJECT, "cost_usd": NULL_NUMBER}), "liveness": _object({"process_alive": (bool, N), "outcome_known": bool, "resolved_status": str, "reason": str}), "native_owner_execution_ids": _array(str),
                    "harness_metadata": _object({"requested": _candidate, "effective": _object({**_fields("backend freedom settings_source provider_identity", nullable_strings="model reasoning_effort default_model"), "network": (bool, N)}), "observed": _nullable(_result), "verification_status": str, "provenance": str, "metadata_source": str})}, path)
     missing = {"task_id", "status"} - value.keys()
     if missing:
@@ -314,7 +322,7 @@ def _pending_result(value, path):
 
 def _activation(value, path):
     _shape(value, {**_fields("id node_id role status visit_id decision_id assignment_prompt raw_output result_error pending_question_id resume_question_id turn_prompt retry_of_execution_id resolved_by_execution_id execution_kind on_demand_call_id execution_session_mode owner_task_id activity_level", numbers="created_at finished_at", arrays="resolved_execution_refs input_result_refs authorized_artifact_refs feedback_ids inspection_results", nullable_strings="execution_fallback_reason"),
-                   "optional_failure": bool, "assigned_task_ids": _array(str), "resolved_execution_refs": _array(str), "input_result_refs": _array(str), "token": _nullable(_token), "tasks": _array(_attempt), "questions": _array(_question), "result": dict, "node_result": _node_result, "invocation": _invocation, "inspection_requests": _array(_inspection), "can_cancel_child": bool, "can_resume_child": bool, "native_child_id": NULL_STRING, "draft_applied": bool, "continue_previous": bool, "authorized_artifact_refs": _array(_artifact), "authorized_input_refs": _array(_input_ref), "inspection_results": _array(_inspection_result), "resume_task_id": NULL_STRING, "on_demand_node": dict, "context_delivery": _context}, path)
+                   "optional_failure": bool, "assigned_task_ids": _array(str), "resolved_execution_refs": _array(str), "input_result_refs": _array(str), "token": _nullable(_token), "tasks": _array(_attempt), "questions": _array(_question), "result": dict, "node_result": _node_result, "invocation": _invocation, "inspection_requests": _array(_inspection), "can_cancel_child": bool, "can_resume_child": bool, "native_child_id": NULL_STRING, "draft_applied": bool, "continue_previous": bool, "authorized_artifact_refs": _array(_artifact), "authorized_input_refs": _array(_input_ref), "inspection_results": _array(_inspection_result), "resume_task_id": NULL_STRING, "resource_attempt": _resource_attempt, "resource_wait": dict, "resource_held_waiting_for_slot": bool, "on_demand_node": dict, "context_delivery": _context}, path)
     missing = {"id", "node_id", "role", "status", "created_at", "tasks"} - value.keys()
     if missing:
         raise ValueError(f"Incomplete {path}: missing {', '.join(sorted(missing))}")
@@ -348,6 +356,7 @@ def _recovery(value, path):
 CORE = _fields("workflow_run_id kind name definition_hash prompt repo_path freedom status instructions permission_policy", counters="revision sequence transitions", numbers="created_at updated_at")
 CORE.update(definition=_authored, network=(bool, N), activations=_array(_activation), decisions=_array(_decision), tasks=_array(_object(_fields("id title description status source_activation_id disposition reason disposition_execution_id disposition_decision_id status_decision_activation_id", numbers="status_changed_at", nullable_strings="completed_by_activation_id"))), sessions=_map(_binding), pending=_array(_token), joins=_map(_join), attempt_grants=_map(_counter), retry_counts=_map(_counter), retry_grants=_map(_counter), suppressed_candidates=_array(str), supervisor_pid=_nullable(_positive))
 OPTIONAL = _fields("scheduling_policy execution_contract runner_policy execution_policy interaction_owner reason wait_reason summary failure_reason attention_reason input_question input_decision_id technical_plan technical_plan_execution_id workflow_id orchestrator_mode caller_method goal source_name failed_since_source pause_origin failed_decision_id", counters="transition_grant goal_revision goal_replanning_revision source_revision draft_revision attention_checkpoint failed_since_sequence notification_point_error", booleans="execution_initialized recovered_inherited_turn suspended_via_root optional_review_skip_available goal_replanning_required", objects="builder_draft generated_definition editing_definition checklist_disposition released_parallel_groups context_delivery context_ack")
+OPTIONAL.update(resource_anchor_names=_array(str), resources=dict, resource_scope=dict, resource_wait=dict, worktree=dict, source_repo_path=str)
 OPTIONAL.update(supervisor_identity=_nullable(_identity), owner_contracts=_nullable(_owner_contracts), dependency_tree=_dependency, parent_link=_object({"workflow_run_id": _id, "root_workflow_run_id": _id, "execution_id": str, "node_id": str, "depth": _counter}), orchestrator_session_owner_run_id=_id, orchestrator_config=_candidate, parent_goal=_object({"workflow_run_id": _id, "goal": str, "revision": _counter}), child_session_selection=_selection, inherited_orchestrator_binding=_selection, invocation_inputs=list, invocation_artifact_refs=list, forwarded_delivery=_delivery, forwarded_delivery_receipt=_delivery, input_source=_source, attention_source=_source, orchestrator_usage_recovery=_recovery, worker_usage_recovery=_recovery, usage_recovery_history=_array(_recovery), orchestrator_recovery_candidate=_candidate, goal_history=_array(_object({"revision": _counter, "goal": str, "created_at": NUMBER})), goal_assessment=_nullable(_object({"revision": _counter, "status": str, "reason": str, "evidence_refs": _array(str)})), goal_replan=_object({"revision": _counter, "plan": str}), editing_source=_object({"name": str, "revision": _counter, "saved_definition": NULL_OBJECT}), source_saved_definition=NULL_OBJECT, notification_points=_array(_point), terminal_notification_points=_array(_point), notification_evicted=_object({"attention": _counter, "terminal": _counter}))
 for _key in ("suppressed_capability_candidates", "exhausted_retry_edges"):
     OPTIONAL[_key] = _array(str)

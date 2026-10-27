@@ -131,9 +131,10 @@ async def _dispatch_native_one(supervisor: Any, node: dict[str, Any], assignment
     state: dict[str, Any] = {"assignment": assignment, "owner_session_id": record.session_id, "expected_model": candidate.get("model"), "expected_repo": record.repo_path, "expected_network": settings["network"], "expected_reasoning_effort": candidate.get("reasoning_effort"), "expected_freedom": settings["freedom"], "owner_freedom": record.freedom, "native_settings": settings}
     try:
         # Cross-owner turns queue without consuming workers or checkout leases.
-        await supervisor.tree.acquire_slot(continue_running, control=True)
+        from .workflow_resources import acquire_slot
+        await acquire_slot(supervisor, activation, continue_running, control=True)
         control_held = True
-        await supervisor.tree.acquire_slot(continue_running)
+        await acquire_slot(supervisor, activation, continue_running)
         worker_held = True
         root_id = (run.get("parent_link") or {}).get("root_workflow_run_id", run["workflow_run_id"])
         lease_run = run if root_id == run["workflow_run_id"] else supervisor.store.get_run(root_id)

@@ -70,7 +70,7 @@ def decode(document: Any, name: str) -> dict[str, Any]:
             raise ValueError("Definition name does not match source name")
         shape = {key: str for key in ("name", "workflow_id", "description", "routing_mode", "context_delivery", "execution_contract")}
         shape.update({key: int for key in ("schema_version", "revision", "max_parallel", "max_transitions", "max_decision_attempts", "max_inspections", "max_on_demand_calls")})
-        shape.update(updated_at=(int, float), orchestrator=dict, nodes=list, connections=list, on_demand_nodes=list)
+        shape.update(updated_at=(int, float), orchestrator=dict, nodes=list, connections=list, on_demand_nodes=list, resources=list)
         _shape(value, shape, "definition")
         if "orchestrator" in value:
             _candidate(value["orchestrator"])
@@ -80,7 +80,7 @@ def decode(document: Any, name: str) -> dict[str, Any]:
             fields = {key: str for key in ("id", "type", "title", "purpose", "instructions", "prompt", "role", "freedom", "session_mode", "execution_mode", "branch_mode", "branch_selection", "selection_guidance", "parallel_group_id", "join_id", "workflow_name", "orchestrator_mode", "child_session_policy", "call_condition")}
             fields.update({key: bool for key in ("optional", "require_technical_plan", "require_tasks", "always_route")})
             fields.update({key: int for key in ("max_attempts", "max_context_questions")})
-            fields.update(network=(bool, type(None)), timeout_seconds=(int, type(None)), agent=dict, position=dict, workflow_ref=dict)
+            fields.update(network=(bool, type(None)), timeout_seconds=(int, type(None)), agent=dict, position=dict, workflow_ref=dict, resources=list)
             _shape(node, fields, "node")
             if "agent" in node:
                 _candidate(node["agent"])
