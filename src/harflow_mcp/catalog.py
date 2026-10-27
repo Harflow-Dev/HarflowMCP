@@ -24,6 +24,16 @@ from typing import Any, Callable
 
 from .read_metrics import span
 
+CATALOG_FILENAME = '.listing.v10.sqlite3'
+TASK_PROJECTION_VERSION = '2'
+RUN_PROJECTION_VERSION = '3'
+
+
+def catalog_path(directory: Path) -> Path:
+    """Keep independent compatible engines in separate derivative namespaces."""
+    return directory / CATALOG_FILENAME
+
+
 PAGE_LIMIT = 100
 PAGE_BYTES = 256 * 1024
 ROW_BYTES = 128 * 1024  # Reserve the other half for ownership/ancestor metadata.
@@ -215,9 +225,11 @@ def bound_header(header: dict[str, Any]) -> dict[str, Any]:
     if isinstance(result.get('sessions'), dict):
         result['sessions'] = {'orchestrator': str(result['sessions']['orchestrator'])[:128]} if result['sessions'].get('orchestrator') else {}
     protected = {'task_id', 'workflow_run_id', 'parent_workflow_run_id', 'root_workflow_run_id', 'orchestrator_session_owner_run_id', 'workflow_session_owner_run_id', 'session_id', 'parent_task_id', 'continuation_of_task_id', 'chain_root_task_id', 'root_task_id', 'spawned_by', 'status', 'started_at', 'created_at', 'updated_at', 'backend', 'kind', 'execution_contract', 'needs_direct_lookup', 'sessions'}
+    metadata = {'finished_at', 'workflow_id', 'workflow_builder', 'kind', 'settling', 'workflow_run_id', 'parent_workflow_run_id', 'root_workflow_run_id'}
+    protected.update(metadata)
     protected.update({'persisted_status', 'observed_exit', 'process_identity_state', 'needs_reconciliation', 'status_reconciled'})
     for key, value in list(result.items()):
-        if isinstance(value, str):
+        if isinstance(value, str) and key not in metadata:
             result[key] = value[:128 if key in protected else 200]
     for maximum in (100, 32, 8):
         if len(json.dumps(result, ensure_ascii=True).encode()) <= 2048:
@@ -230,6 +242,11 @@ def bound_header(header: dict[str, Any]) -> dict[str, Any]:
                     result.pop(key)
     if len(json.dumps(result, ensure_ascii=True).encode()) > 2048:
         result = {key: value for key, value in result.items() if key in protected}
+    if len(json.dumps(result, ensure_ascii=True).encode()) > 2048:
+        # Do not publish truncated classification or identity as complete evidence.
+        key = 'task_id' if 'task_id' in header else 'workflow_run_id'
+        result = {key: str(header.get(key, ''))[:100], 'status': 'unknown', 'needs_direct_lookup': True,
+                  'index_blocker': 'header_metadata_budget'}
     return result
 
 
@@ -409,7 +426,7 @@ class Catalog:
     def _discard_derivative_locked(self) -> None:
         """Drop only this derivative namespace, never metadata or older catalogs."""
         assert_owned(self.state_layout)
-        database = self.directory / '.listing.v9.sqlite3'
+        database = catalog_path(self.directory)
         for suffix in ('', '-journal', '-wal', '-shm'):
             Path(str(database) + suffix).unlink(missing_ok=True)
         # Make the removal durable before any authoritative replacement starts.
@@ -421,7 +438,7 @@ class Catalog:
 
     def _connect_locked(self) -> sqlite3.Connection:
         assert_owned(self.state_layout)
-        db = bind_connection(sqlite3.connect(self.directory / '.listing.v9.sqlite3', timeout=10, factory=CatalogConnection), self.state_layout)
+        db = bind_connection(sqlite3.connect(catalog_path(self.directory), timeout=10, factory=CatalogConnection), self.state_layout)
         try:
             return self._initialize(db)
         except BaseException:
@@ -469,16 +486,16 @@ class Catalog:
             db.execute('DELETE FROM seen')
             db.execute('DELETE FROM state')
             db.execute("INSERT INTO state VALUES ('schema_version','10')")
-        if self.suffix == '.meta.json' and db.execute("SELECT value FROM state WHERE key='task_projection_version'").fetchone() != ('1',):
+        if self.suffix == '.meta.json' and db.execute("SELECT value FROM state WHERE key='task_projection_version'").fetchone() != (TASK_PROJECTION_VERSION,):
             for table in ('entries', 'callers', 'task_groups', 'checkout_tasks', 'associations', 'sources', 'seen', 'pending'):
                 db.execute(f'DELETE FROM {table}')
             db.execute("DELETE FROM state WHERE key!='schema_version'")
-            db.execute("INSERT INTO state VALUES ('task_projection_version','1')")
-        if self.suffix == '.json' and db.execute("SELECT value FROM state WHERE key='run_projection_version'").fetchone() != ('1',):
+            db.execute("INSERT INTO state VALUES ('task_projection_version',?)", (TASK_PROJECTION_VERSION,))
+        if self.suffix == '.json' and db.execute("SELECT value FROM state WHERE key='run_projection_version'").fetchone() != (RUN_PROJECTION_VERSION,):
             for table in ('entries', 'callers', 'task_groups', 'checkout_tasks', 'associations', 'sources', 'seen', 'pending', 'workflow_links'):
                 db.execute(f'DELETE FROM {table}')
             db.execute("DELETE FROM state WHERE key!='schema_version'")
-            db.execute("INSERT INTO state VALUES ('run_projection_version','1')")
+            db.execute("INSERT INTO state VALUES ('run_projection_version',?)", (RUN_PROJECTION_VERSION,))
         # Build only after invalidating old derivative headers. The partial index
         # makes warm authority readiness independent of retained history size.
         db.execute("CREATE INDEX IF NOT EXISTS incomplete_headers ON entries(id) WHERE json_extract(payload,'$.needs_direct_lookup')=1")

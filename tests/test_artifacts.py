@@ -4,7 +4,7 @@ import json
 import os
 from pathlib import Path
 import pytest
-from harflow_mcp import artifacts, identity, lineage, state_ownership, store, workflow_hooks, workflow_run_documents
+from harflow_mcp import artifacts, catalog, identity, lineage, state_ownership, store, workflow_hooks, workflow_run_documents
 from harflow_mcp.state_layout import resolve_layout
 from harflow_mcp.wire_contracts import PRODUCT_VERSION
 from workflow_receipt_fixtures import persist_receipt
@@ -767,7 +767,7 @@ def test_caller_cold_catalog_advances_boundedly_and_retries(setup, monkeypatch):
     logs, _, record = setup
     for number in range(205):
         store.write(logs, replace(record, task_id=f'unrelated-{number:03}', pid=10000 + number, pgid=20000))
-    for path in logs.glob('.listing.v9.sqlite3*'):
+    for path in logs.glob(f'{catalog.CATALOG_FILENAME}*'):
         path.unlink()
     original = store._read
     reads = []

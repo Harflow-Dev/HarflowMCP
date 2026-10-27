@@ -50,6 +50,11 @@ Use `harflow-ctl version-info --json` to inspect runtime identity and compatibil
 - [Release validation and publication](docs/releasing.md)
 - [Development and technical references](docs/development.md)
 
+History pages expose optional completion and ownership metadata for retained-history
+summaries. Workflow completion time records the terminal status transition independently
+of settlement; legacy and mixed-writer completion without a matching sequence witness remains unknown. See [compact reads](docs/compact-task-reads.md#retained-history-metadata)
+for ownership, pinned workflow identity and completeness requirements.
+
 See the [Changelog](CHANGELOG.md) for change history.
 
 Licensed under [Apache-2.0](LICENSE). Git history preserves source authorship; the license notice does not assert ownership of prior contributions.

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add optional workflow `finished_at` and pinned-definition `workflow_id` to history projections, and explicit standalone task ownership nulls. Preserve classification and completion evidence within bounded headers, rebuilding derivative task/run projections without migrating authoritative history. A private sequence witness prevents compatible older writers from leaving stale completion dates authoritative; builders omit projected saved-workflow identity. Independent v10 derivative caches coexist with older caches without migrating authoritative history. Unknown completion or unreadable ownership remains unavailable for retained-history summaries.
+
 - Prevent fully qualified terminal launch history with device-only task-directory identity drift from blocking unrelated session checks, queued follow-up routing and task listing (#56). Historical scans retain terminal successor evidence with the same root and inode; direct launch reads and all unresolved ownership checks remain strict. No state migration or rewrite occurs.
 
 - Integrate workflow run and candidate-attempt resource scopes and one shared root-run worktree (#3). Resource acquisition precedes tree slots and checkout leases; candidate-specific receipts, read-only resolvers and scheduler recovery retain uncertain ownership. Ledger repair reconstructs workflow holds and borrowers, with grant confirmation before dispatch. Preview hashes bind resources and worktree plans, status exposes waits and slot-hold disclosure, and non-terminal workflow users block worktree removal. Managed-agent direct-dispatch authority is unchanged.

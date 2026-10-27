@@ -33,9 +33,16 @@ from .workflow_receipt_documents import WorkflowReceiptDocumentError
 from .bounded_io import ReadLimit
 from .workflow_run_documents import WorkflowRunDocumentError
 from . import backends, store as task_store
+from .workflow_completion import qualified_finished_at, TERMINAL_METADATA_STATUSES
 
 SCHEMA_VERSION = 1
 TERMINAL = {"completed", "failed", "cancelled"}
+
+
+def _run_settling(run: dict[str, Any]) -> bool:
+    """Project local unsettled attempts without reading child state."""
+    return any(task.get("status") in {"reserved", "running", "uncertain"}
+               for activation in run["activations"] for task in activation["tasks"])
 ACTIVE = {"running", "paused", "needs_attention", "starting"}
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$")
 
@@ -1007,9 +1014,10 @@ class WorkflowStore:
     def get_run(self, run_id: str, *, metadata_byte_limit: int | None = None, metadata_budget: Any = None, refresh_atomic: bool = False) -> dict[str, Any]:
         run, captured_source = self._read_run(run_id, metadata_byte_limit=metadata_byte_limit, metadata_budget=metadata_budget, refresh_atomic=refresh_atomic)
         path = self.runs / f"{run_id}.json"
-        from .catalog import source_identity
-        run["settling"] = any(t.get("status") in {"reserved", "running", "uncertain"} for a in run["activations"] for t in a["tasks"])
-        if metadata_byte_limit is None and (self.runs / '.listing.v9.sqlite3').exists():
+        from .catalog import source_identity, catalog_path
+        run["finished_at"] = qualified_finished_at(run)
+        run["settling"] = _run_settling(run)
+        if metadata_byte_limit is None and catalog_path(self.runs).exists():
             from .catalog import Catalog
             catalog = Catalog(self.runs, '.json', layout=self.state_layout)
             with catalog.connect() as db:
@@ -1038,6 +1046,7 @@ class WorkflowStore:
     def run_header(self, run: dict[str, Any]) -> dict[str, Any]:
         from .workflow_responses import compact
         result = compact(run)
+        result['settling'] = _run_settling(run)
         for key in ('name', 'repo_path', 'prompt'):
             result[key] = str(run.get(key, ''))[:1000]
         result['prompt_truncated'] = len(str(run.get('prompt', ''))) > 1000
@@ -1047,7 +1056,7 @@ class WorkflowStore:
         result['sessions'] = {'orchestrator': str(run['sessions']['orchestrator'])[:128]} if run.get('sessions', {}).get('orchestrator') else {}
         # The index contains headers, never execution history, graph or worker output.
         for key in list(result):
-            if isinstance(result[key], str):
+            if isinstance(result[key], str) and key != "workflow_id":
                 result[key] = result[key][:1000]
         from .catalog import bound_header
         return bound_header(result)
@@ -1214,6 +1223,7 @@ class WorkflowStore:
                     raise DispatchNotStarted("Scheduling stopped before reservation")
             attention_before = (run.get("status"), run.get("attention_reason"), run.get("failure_reason"), run.get("failed_decision_id"))
             checkpoint_before = run.get("attention_checkpoint")
+            finished_before = qualified_finished_at(run)
             mutator(run)
             attention_after = (run.get("status"), run.get("attention_reason"), run.get("failure_reason"), run.get("failed_decision_id"))
             if run.get("status") in {"needs_attention", "paused", "failed"}:
@@ -1221,8 +1231,14 @@ class WorkflowStore:
                     run["attention_checkpoint"] = run.get("sequence", 0) + 1
             else:
                 run.pop("attention_checkpoint", None)
-            run["updated_at"] = time.time()
+            now = time.time()
+            if run.get("status") in TERMINAL_METADATA_STATUSES:
+                run["finished_at"] = now if attention_before[0] not in TERMINAL_METADATA_STATUSES else finished_before
+            else:
+                run["finished_at"] = None
+            run["updated_at"] = now
             run["sequence"] = run.get("sequence", 0) + 1
+            run["finished_at_sequence"] = run["sequence"]
             self._record_notification_point(run, attention_before[0], event, checkpoint_before)
             run.pop("settling", None)
             run.pop("can_cancel_from_monitor", None)
@@ -1280,7 +1296,7 @@ class WorkflowStore:
                 if isinstance(exc, WorkflowReceiptDocumentError):
                     failure.receipt_diagnostic = exc.as_dict()
                 raise failure from exc
-            run["settling"] = any(t.get("status") in {"reserved", "running", "uncertain"} for a in run["activations"] for t in a["tasks"])
+            run["settling"] = _run_settling(run)
             return run
 
     @layout_operation
@@ -1295,7 +1311,7 @@ class WorkflowStore:
         if not Path(repo_path).is_dir():
             raise WorkflowError("Repository directory does not exist")
         rid = _identifier(run_id) if run_id is not None else uuid.uuid4().hex
-        run = {"workflow_run_id": rid, "kind": kind, "name": definition["name"], "definition": copy.deepcopy(definition), "revision": definition.get("revision", 0), "prompt": prompt, "repo_path": str(Path(repo_path).resolve()), "freedom": freedom, "network": network, "status": "starting", "created_at": time.time(), "updated_at": time.time(), "sequence": 0, "transitions": 0, "activations": [], "decisions": [], "sessions": {}, "suppressed_candidates": [], "pending": [], "joins": {}, "instructions": "", "attempt_grants": {}, "supervisor_pid": None}
+        run = {"workflow_run_id": rid, "kind": kind, "name": definition["name"], "definition": copy.deepcopy(definition), "revision": definition.get("revision", 0), "prompt": prompt, "repo_path": str(Path(repo_path).resolve()), "freedom": freedom, "network": network, "status": "starting", "finished_at": None, "finished_at_sequence": 0, "created_at": time.time(), "updated_at": time.time(), "sequence": 0, "transitions": 0, "activations": [], "decisions": [], "sessions": {}, "suppressed_candidates": [], "pending": [], "joins": {}, "instructions": "", "attempt_grants": {}, "supervisor_pid": None}
         if resource_scope is not None:
             run["resource_scope"] = copy.deepcopy(resource_scope)
         if worktree is not None:

@@ -78,7 +78,7 @@ implementation machine, with zero metadata reads and zero log reads. This is a
 local reproducibility sample, not a latency guarantee or a cold-bootstrap claim.
 
 Group matching uses a separate bounded index of the exact label, even when the
-displayed header is shortened. The v9 derivative catalog rebuilds existing history
+displayed header is shortened. The v10 derivative catalog rebuilds existing history
 through the usual bounded bootstrap; retry while `bootstrap_pending` is true.
 
 ## Batched full status reads
@@ -104,3 +104,54 @@ never constructs a registry. The workflow node reads (`workflow inspect`,
 that do need registry-backed server helpers (`permission-preview`, mutating
 workflow actions) install a registry without the maintenance sweep or the
 notification worker. See the Monitor contract notes in CLAUDE.md.
+
+## Retained-history metadata
+
+Workflow history headers and compact status may include nullable numeric `finished_at`
+(Unix seconds) and `workflow_id`. New runs start with `finished_at: null`. The engine
+stamps one observed time on a nonterminal-to-terminal status transition (`completed`,
+`failed`, `cancelled`, or `timed_out`), using that same time for `updated_at`. Reopening
+a terminal run clears completion time; a subsequent terminal transition records a new
+time. Private `finished_at_sequence` is a nonnegative integer witness matching the run's
+exact integer `sequence`. A completion date is qualified only for a terminal run whose
+finite numeric timestamp has a matching witness. Root and child runs initialize null
+completion with witness zero. Compatible older writers advance sequence without advancing
+the witness, so their writes conservatively invalidate completion evidence. Reads expose
+unknown without changing authoritative files. New terminal bookkeeping preserves only
+previously qualified evidence; it never certifies a stale timestamp by advancing its
+witness. Only a newly observed terminal transition restores a known completion date. `updated_at` is never backfilled as a completion date. Completion time is
+independent of `settling`; consumers counting finished work must also require false
+settlement state.
+
+Workflow identity comes only from the run's pinned definition, never the current saved
+workflow with the same name. Modern IDs distinguish deleted and recreated definitions.
+Historical definitions without an ID use the existing deterministic name-hash identity;
+two legacy generations with the same name can therefore be ambiguous. Builders always
+omit projected workflow identity because their descriptor is not a saved definition. Consumers can exclude builders and
+nested runs using `kind` and the parent/root discriminators.
+
+Task page `workflow_run_id: null` means an ownership receipt was conclusively absent
+at observation time. A valid nonempty string identifies its authoritative workflow owner.
+Missing ownership metadata does not mean standalone: older engines, malformed receipts,
+and unreadable receipts cannot establish that classification. Receipt uncertainty marks
+history and counts incomplete and retains structured diagnostics when available. These
+fields are projections, not a task-record migration or historical ownership inference.
+Task `finished_at` retains its existing nullable ISO8601 representation; workflow
+`finished_at` is numeric. A missing terminal task completion time is unknown and has no
+safe completion-date fallback in task listing metadata.
+
+Summaries describe retained history only, not all-time activity after retention. Require
+ready, complete pages, paginate primary items, and exclude related headers from totals.
+Do not treat missing timestamps, identity, classification or settlement evidence as known
+zero. A legacy terminal workflow's valid `updated_at` strictly before a requested window
+can establish only that it is too old for that window; it must never supply its completion
+date. Recent, future, invalid or contradictory metadata retains uncertainty.
+
+Task projection version 2 and workflow projection version 3 rebuild existing headers
+through bounded bootstrap without rewriting authoritative history. The `.listing.v10.sqlite3`
+derivative namespace coexists with older engines' v9 caches and sidecars, sharing the
+existing `.listing.lock`. Recovery removes only the current derivative namespace. Completion, identity,
+classification and settlement metadata survive normal 2 KiB header pressure. A header
+whose required evidence cannot fit retains a direct-lookup marker and makes the catalog
+incomplete instead of publishing truncated evidence. Public wire and persisted run
+formats remain additive version 1; older documents may omit every new field.

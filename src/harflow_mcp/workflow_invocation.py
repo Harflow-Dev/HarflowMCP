@@ -352,6 +352,8 @@ def child_run_record(store: Any, parent_run: dict[str, Any], activation: dict[st
         "freedom": "unrestricted",
         "network": parent_run.get("network"),
         "status": "starting",
+        "finished_at": None,
+        "finished_at_sequence": 0,
         "created_at": time.time(),
         "updated_at": time.time(),
         "sequence": 0,

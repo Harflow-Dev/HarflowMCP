@@ -460,3 +460,31 @@ The private `harflow.workflow.worktree` v1 lookup receipt qualifies product/vers
 root path, run ID and canonical worktree/source paths; it is not part of the public fixture bundle.
 Source descriptor identity is checked within each read; no device/inode value binds a receipt
 across restarts. These receipts locate paths and never grant execution or removal authority.
+
+### Retained-history completion and ownership
+
+Optional workflow-run `finished_at` is nullable finite numeric Unix seconds, persisted
+and projected in compact/history headers. It records the latest nonterminal-to-terminal
+status transition, clears on reopening, and remains independent of settlement. Terminal
+bookkeeping never invents missing historical completion evidence from `updated_at`.
+Private optional `finished_at_sequence` is a nonnegative exact integer witness matching
+`sequence`; a numeric completion is qualified only with that witness and terminal status.
+Older writers invalidate completion by advancing sequence alone. Reads expose unknown
+without rewriting state; new bookkeeping cannot recertify stale dates, while a fresh
+terminal transition records new evidence. Root and child creation initialize null with
+witness zero. Task projection 2 and run projection 3 use `.listing.v10.sqlite3`, preserving
+older derivative namespaces and their sidecars while retaining the shared lock.
+Optional `workflow_id` derives only from the pinned run definition; modern IDs identify
+definition generations and distinguish delete/recreate without matching the current
+name. The existing legacy name-hash fallback
+can be ambiguous between same-name legacy generations. Builders omit projected identity.
+
+Task page `workflow_run_id: null` explicitly establishes that no ownership receipt was
+present at observation time; a qualified string establishes workflow ownership. Missing
+metadata means unknown, including on older engines. Malformed or unreadable receipts
+make counts/history incomplete. This changes projections only, not TaskRecord storage.
+Task completion remains nullable ISO8601, while workflow completion uses Unix seconds.
+All fields remain additive wire v1 and run-document v1. The canonical task/workflow page
+metadata fixtures are synthetic compatibility vectors covering explicit standalone and owned tasks, pinned workflow identity,
+known completion and legacy missing evidence. See the [retained-history guide](compact-task-reads.md#retained-history-metadata)
+for bounded headers, derivative rebuilds and summary completeness requirements.

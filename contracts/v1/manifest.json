@@ -369,6 +369,20 @@
       "required_capabilities": [],
       "valid": true
     },
+    "ctl-task-page-metadata.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.3",
+      "format": "harflow.ctl",
+      "required_capabilities": [],
+      "valid": true
+    },
+    "ctl-workflow-page-metadata.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.3",
+      "format": "harflow.ctl",
+      "required_capabilities": [],
+      "valid": true
+    },
     "ctl-approval-error-already-answered.json": {
       "encoding": "json",
       "expected_product_version": "0.0.3",
@@ -744,7 +758,7 @@
     "workflow-definition-patch.json": "47f50395f2371a652dec8a6a612c1db95dbabffb43ede363e32369620a6c516d",
     "workflow-definition.json": "df51cdc3e2e4d37197e36173bda52cb71ece0e0c19453b947e89c6529b818309",
     "workflow-run.json": "ee491fc8c1f1da76ac4d59c0cd71b22a57416f727afe8defd701fa07c7b1edd7",
-    "workflow-run-patch.json": "95ceb423d7e75bdfc2f1e5af5af8b274cbc9455f3b53245bfd145d1cd71f96ef",
+    "workflow-run-patch.json": "f082898fa6108bf706de28a55db44ed7875778bc90937137fc8a24627ebc53c6",
     "invalid-workflow-run.json": "0df6a874e1f2d697f2e49b81d4cf1e8dba8f4c1faf554f46bdd56a3ea085166c",
     "ctl-recovery-activity.json": "8a871a1c8532521baea5fe6ad47d2b0c182518b7e381f357f66f724e7234d78d",
     "ctl-state-inspect.json": "522530ca16a3c9d92393052d9cb959787136c9fa5f99e718ab9d33ed1b38304d",
@@ -752,6 +766,8 @@
     "ctl-state-recover.json": "157a3f45cb6b9f9fe59495e0ec5dc9705762e97cd46b65fb27713aa3b58629d0",
     "ctl-state-recover-error.json": "57d96046ca33274faebf9d4ecf33d410bb253de1e1fde25ea64ef9c4852bf1f5",
     "ctl-state-error.json": "30b76ca1c9c9ef708d72698e6ab25d2c12da03f90f7c3358b6c129940f950d31",
+    "ctl-task-page-metadata.json": "d355d3a06a831e2c377d21042ed04d4ececb2dd4f7a258f269112d13c8940f68",
+    "ctl-workflow-page-metadata.json": "508b13dea2116cf0fb5769beb9794f756fa2eb53e396a137f7735b6e70922080",
     "ctl-approval-error-already-answered.json": "bd46fe55e6c3ae7df9490573e6ec82300dfe558794f85344765f2abc001cc2b3",
     "ctl-approval-error-caller-undecidable-approval.json": "ddb4c964715ac73beaff0c020b871fae28b63cda7a07565a856b82828bd7f6de",
     "ctl-approval-error-caller-undecidable-global.json": "e67503e4c216902b3f8b88247dc17935614c1a16fefcc1e41a575d56155d3d36",

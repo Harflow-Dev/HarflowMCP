@@ -34,8 +34,9 @@ def legacy_tasks(directory, count):
             store.write(directory, task)
         # Keep the qualified metadata but force this fixture through the cold
         # bootstrap path under test.
-        for suffix in ('.listing.v9.sqlite3', '.listing.v9.sqlite3-shm', '.listing.v9.sqlite3-wal'):
-            (directory / suffix).unlink(missing_ok=True)
+        current_catalog = catalog.catalog_path(directory)
+        for suffix in ('', '-shm', '-wal'):
+            Path(f'{current_catalog}{suffix}').unlink(missing_ok=True)
 
 
 def human_authority(monkeypatch):
@@ -1809,13 +1810,13 @@ def test_live_schema_seven_runtime_cannot_reset_schema_eight_discovery_progress(
                 db.execute("INSERT INTO state VALUES ('schema_version','7')")
             assert db.execute("SELECT value FROM state WHERE key='legacy_runtime'").fetchone() == ('preserved',)
     assert page['catalog_state']['status'] == 'ready'
-    assert (directory / '.listing.v9.sqlite3').exists()
+    assert catalog.catalog_path(directory).exists()
     assert originals == {path.name: path.read_bytes() for path in directory.glob('*.meta.json')}
 
 
 def corrupt_derivative(directory):
     directory.mkdir(parents=True, exist_ok=True)
-    (directory / '.listing.v9.sqlite3').write_bytes(b'corrupt derivative database' * 20)
+    catalog.catalog_path(directory).write_bytes(b'corrupt derivative database' * 20)
 
 
 @pytest.mark.parametrize('operation', ['task_create', 'task_terminal', 'workflow_create', 'workflow_update'])
@@ -1887,19 +1888,23 @@ def test_derivative_recovery_only_removes_current_cache_and_sidecars(tmp_path):
     store.write(directory, record('historical'))
     historical = (directory / 'historical.meta.json').read_bytes()
     preserved = {}
-    for name in ('.listing.sqlite3', '.listing.v7.sqlite3', '.listing.v7.sqlite3-journal', 'unrelated.tmp'):
+    for name in (
+        '.listing.sqlite3', '.listing.v7.sqlite3', '.listing.v7.sqlite3-journal',
+        '.listing.v9.sqlite3', '.listing.v9.sqlite3-shm', '.listing.v9.sqlite3-wal',
+        '.listing.v9.sqlite3-journal', 'unrelated.tmp',
+    ):
         path = directory / name
         path.write_bytes(b'preserve this unrelated source')
         preserved[path] = path.read_bytes()
     corrupt_derivative(directory)
     corrupt_sidecar = b'corrupt derivative sidecar' * 20
     for suffix in ('-journal', '-wal', '-shm'):
-        (directory / f'.listing.v9.sqlite3{suffix}').write_bytes(corrupt_sidecar)
+        Path(f'{catalog.catalog_path(directory)}{suffix}').write_bytes(corrupt_sidecar)
     assert store.write_landed(directory, record('target'))
     assert historical == (directory / 'historical.meta.json').read_bytes()
     assert all(path.read_bytes() == original for path, original in preserved.items())
     for suffix in ('-journal', '-wal', '-shm'):
-        path = directory / f'.listing.v9.sqlite3{suffix}'
+        path = Path(f'{catalog.catalog_path(directory)}{suffix}')
         assert not path.exists() or path.read_bytes() != corrupt_sidecar
 
 
@@ -2054,4 +2059,108 @@ def test_v8_cache_preserved_while_v9_group_index_bootstraps_bounded(tmp_path, mo
         assert len(reads) == expected
     assert page['items'][0]['task_id'] == 't0204'
     assert old_path.read_bytes() == old_bytes
-    assert (directory / '.listing.v9.sqlite3').exists()
+    assert catalog.catalog_path(directory).exists()
+
+
+def test_v9_catalog_coexists_with_v10_bootstrap_and_keeps_progress(tmp_path, monkeypatch):
+    import sqlite3
+    directory = tmp_path / 'state' / 'tasks'
+    legacy_tasks(directory, 205)
+    old_catalog = directory / '.listing.v9.sqlite3'
+    run_latest = store.read(directory, 't0204')
+    write_external(directory, replace(run_latest, finished_at='2026-10-27T00:00:00+00:00'))
+    original_read = store._read
+    calls = []
+    monkeypatch.setattr(store, '_read', lambda *args, **kwargs: (calls.append(args[1]), original_read(*args, **kwargs))[1])
+
+    original_header = store.listing_header
+
+    def legacy_header(task):
+        header, stamp, active = original_header(task)
+        header.pop('finished_at', None)
+        return header, stamp, active
+
+    with monkeypatch.context() as old_engine:
+        old_engine.setattr(catalog, 'CATALOG_FILENAME', '.listing.v9.sqlite3')
+        old_engine.setattr(catalog, 'TASK_PROJECTION_VERSION', '1')
+        old_engine.setattr(catalog, 'RUN_PROJECTION_VERSION', '1')
+        old_engine.setattr(store, 'listing_header', legacy_header)
+        calls.clear()
+        old_page = store.list_page(directory)
+        assert len(calls) == 100 and old_page['bootstrap_pending']
+        with sqlite3.connect(old_catalog) as db:
+            assert db.execute("SELECT value FROM state WHERE key='schema_version'").fetchone() == ('10',)
+            assert db.execute("SELECT value FROM state WHERE key='task_projection_version'").fetchone() == ('1',)
+            assert db.execute('SELECT COUNT(*) FROM pending').fetchone()[0] == 105
+
+    new_path = catalog.catalog_path(directory)
+    calls.clear()
+    new_page = store.list_page(directory)
+    assert len(calls) == 100 and new_page['bootstrap_pending']
+    with sqlite3.connect(new_path) as db:
+        assert db.execute("SELECT value FROM state WHERE key='schema_version'").fetchone() == ('10',)
+        assert db.execute("SELECT value FROM state WHERE key='task_projection_version'").fetchone() == ('2',)
+        assert db.execute('SELECT COUNT(*) FROM pending').fetchone()[0] == 105
+
+    # Alternating compatible engines advances each namespace independently.
+    with monkeypatch.context() as old_engine:
+        old_engine.setattr(catalog, 'CATALOG_FILENAME', '.listing.v9.sqlite3')
+        old_engine.setattr(catalog, 'TASK_PROJECTION_VERSION', '1')
+        old_engine.setattr(catalog, 'RUN_PROJECTION_VERSION', '1')
+        old_engine.setattr(store, 'listing_header', legacy_header)
+        calls.clear()
+        old_page = store.list_page(directory)
+        assert len(calls) == 100 and old_page['bootstrap_pending']
+        with sqlite3.connect(old_catalog) as db:
+            assert db.execute('SELECT COUNT(*) FROM pending').fetchone()[0] == 5
+
+    calls.clear()
+    new_page = store.list_page(directory)
+    assert len(calls) == 100 and new_page['bootstrap_pending']
+    with sqlite3.connect(new_path) as db:
+        assert db.execute('SELECT COUNT(*) FROM pending').fetchone()[0] == 5
+
+    with monkeypatch.context() as old_engine:
+        old_engine.setattr(catalog, 'CATALOG_FILENAME', '.listing.v9.sqlite3')
+        old_engine.setattr(catalog, 'TASK_PROJECTION_VERSION', '1')
+        old_engine.setattr(catalog, 'RUN_PROJECTION_VERSION', '1')
+        old_engine.setattr(store, 'listing_header', legacy_header)
+        old_page = store.list_page(directory)
+        assert old_page['catalog_state']['status'] == 'ready'
+        assert 'finished_at' not in old_page['items'][0]
+
+    new_page = store.list_page(directory)
+    assert new_page['catalog_state']['status'] == 'ready'
+    assert new_page['items'][0]['task_id'] == 't0204'
+    assert new_page['items'][0]['finished_at'] == '2026-10-27T00:00:00+00:00'
+
+    store.write(directory, record('new-after-bootstrap', title='created', finished_at='2026-10-27T00:00:00+00:00'))
+    with monkeypatch.context() as old_engine:
+        old_engine.setattr(catalog, 'CATALOG_FILENAME', '.listing.v9.sqlite3')
+        old_engine.setattr(catalog, 'TASK_PROJECTION_VERSION', '1')
+        old_engine.setattr(catalog, 'RUN_PROJECTION_VERSION', '1')
+        old_engine.setattr(store, 'listing_header', legacy_header)
+        assert store.list_page(directory, task_ids=['new-after-bootstrap'])['items'][0]['title'] == 'created'
+        assert 'finished_at' not in store.list_page(directory, task_ids=['new-after-bootstrap'])['items'][0]
+    assert store.list_page(directory, task_ids=['new-after-bootstrap'])['items'][0]['finished_at'] == '2026-10-27T00:00:00+00:00'
+
+    store.write(directory, record('new-after-bootstrap', title='replaced', finished_at='2026-10-28T00:00:00+00:00'))
+    with monkeypatch.context() as old_engine:
+        old_engine.setattr(catalog, 'CATALOG_FILENAME', '.listing.v9.sqlite3')
+        old_engine.setattr(catalog, 'TASK_PROJECTION_VERSION', '1')
+        old_engine.setattr(catalog, 'RUN_PROJECTION_VERSION', '1')
+        old_engine.setattr(store, 'listing_header', legacy_header)
+        assert store.list_page(directory, task_ids=['new-after-bootstrap'])['items'][0]['title'] == 'replaced'
+    assert store.list_page(directory, task_ids=['new-after-bootstrap'])['items'][0]['title'] == 'replaced'
+
+    from harflow_mcp import retention
+    layout = resolve_layout(log_dir=directory)
+    with state_ownership.state_session(layout):
+        assert retention._delete_task_files(directory, 'new-after-bootstrap')
+    with monkeypatch.context() as old_engine:
+        old_engine.setattr(catalog, 'CATALOG_FILENAME', '.listing.v9.sqlite3')
+        old_engine.setattr(catalog, 'TASK_PROJECTION_VERSION', '1')
+        old_engine.setattr(catalog, 'RUN_PROJECTION_VERSION', '1')
+        old_engine.setattr(store, 'listing_header', legacy_header)
+        assert store.list_page(directory, task_ids=['new-after-bootstrap'])['items'] == []
+    assert store.list_page(directory, task_ids=['new-after-bootstrap'])['items'] == []

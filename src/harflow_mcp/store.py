@@ -585,7 +585,11 @@ def list_page(log_dir: Path, *, limit: int = 100, cursor: str | None = None, act
         allowed = {'workflow_run_id', 'workflow_node_id', 'workflow_execution_id', 'workflow_role', 'workflow_name', 'workflow_status', 'workflow_session_owner_run_id', 'root_workflow_run_id', 'interaction_owner', 'execution_contract'}
         try:
             from .bounded_io import read_receipt
-            receipt = read_receipt(log_dir.parent / 'workflow-owners' / f"{validate_task_id(item['task_id'])}.json")
+            try:
+                receipt = read_receipt(log_dir.parent / 'workflow-owners' / f"{validate_task_id(item['task_id'])}.json")
+            except FileNotFoundError:
+                item['workflow_run_id'] = None
+                continue
             item.update({key: str(value)[:100] if isinstance(value, str) else value for key, value in receipt.items() if key in allowed and isinstance(value, (str, bool, int, type(None)))})
             if 'workflow_role' not in receipt:
                 from .workflows import WorkflowStore
@@ -603,10 +607,10 @@ def list_page(log_dir: Path, *, limit: int = 100, cursor: str | None = None, act
             for key in allowed:
                 item.pop(key, None)
             page.update(ownership_incomplete=True, history_incomplete=True, counts_complete=False, total_active_count=None, total_active_root_count=None, total_attention_root_count=None)
-        except (OSError, ValueError, TypeError) as exc:
-            if isinstance(exc, ValueError):
-                page.update(ownership_incomplete=True, history_incomplete=True, counts_complete=False, total_active_count=None, total_active_root_count=None, total_attention_root_count=None)
-            pass
+        except (OSError, ValueError, TypeError):
+            for key in allowed:
+                item.pop(key, None)
+            page.update(ownership_incomplete=True, history_incomplete=True, counts_complete=False, total_active_count=None, total_active_root_count=None, total_attention_root_count=None)
     from .catalog import bound_header
     with catalog.connect() as db:
         for item in page['items']:
@@ -738,17 +742,20 @@ def list_page(log_dir: Path, *, limit: int = 100, cursor: str | None = None, act
                 continue
             try:
                 from .bounded_io import read_receipt
-                receipt = read_receipt(log_dir.parent / 'workflow-owners' / f'{identifier}.json')
-                header.update({key: str(value)[:100] if isinstance(value, str) else value for key, value in receipt.items() if key.startswith('workflow_') and isinstance(value, (str, bool, int, type(None)))})
+                try:
+                    receipt = read_receipt(log_dir.parent / 'workflow-owners' / f'{identifier}.json')
+                except FileNotFoundError:
+                    receipt = None
+                    header['workflow_run_id'] = None
+                header.update({key: str(value)[:100] if isinstance(value, str) else value for key, value in (receipt or {}).items() if key.startswith('workflow_') and isinstance(value, (str, bool, int, type(None)))})
                 header = bound_header(header)
             except WorkflowReceiptDocumentError as exc:
                 header = {key: value for key, value in header.items() if not key.startswith('workflow_') and key not in {'root_workflow_run_id', 'interaction_owner', 'execution_contract'}}
                 header['workflow_diagnostic'] = exc.as_dict()
                 page.update(ownership_incomplete=True, history_incomplete=True, counts_complete=False, total_active_count=None, total_active_root_count=None, total_attention_root_count=None)
-            except (OSError, ValueError, TypeError) as exc:
-                if isinstance(exc, ValueError):
-                    page.update(ownership_incomplete=True, history_incomplete=True, counts_complete=False, total_active_count=None, total_active_root_count=None, total_attention_root_count=None)
-                pass
+            except (OSError, ValueError, TypeError):
+                header = {key: value for key, value in header.items() if not key.startswith('workflow_') and key not in {'root_workflow_run_id', 'interaction_owner', 'execution_contract'}}
+                page.update(ownership_incomplete=True, history_incomplete=True, counts_complete=False, total_active_count=None, total_active_root_count=None, total_attention_root_count=None)
             related.append(header)
             queue[0:0] = [header[key] for key in ('parent_task_id', 'continuation_of_task_id', 'chain_root_task_id', 'spawned_by', 'root_task_id') if header.get(key) and header[key] not in visited]
         apply_read_state(page, catalog.state(db))
@@ -758,6 +765,9 @@ def list_page(log_dir: Path, *, limit: int = 100, cursor: str | None = None, act
             item.update(supervision.observation_fields(SimpleNamespace(**item)))
     page['items'] = [bound_header(item) for item in page['items']]
     page['related_headers'] = [bound_header(item) for item in related]
+    if any(item.get('needs_direct_lookup') for item in [*page['items'], *page['related_headers']]):
+        page.update(history_incomplete=True, counts_complete=False, total_active_count=None,
+                    total_active_root_count=None, total_attention_root_count=None)
     return page
 
 
