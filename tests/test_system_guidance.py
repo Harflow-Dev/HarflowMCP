@@ -379,7 +379,7 @@ async def test_a_resume_reuses_a_delivered_note_and_never_claims_one_that_was_no
     assert codex_module.GUIDANCE_PAIR in capture.launches[0].argv and codex_module.GUIDANCE_PAIR not in capture.launches[1].argv
     assert resumed.snapshot()["scratch"]["system_guidance"]["state"] == "reused_from_session"
     # A parent that never carried the note (it predates the feature) gives a resume nothing to reuse.
-    unguided = replace(parent, task_id="older-parent", scratch=None, scratch_chain_id=None)
+    unguided = replace(parent, task_id="older-parent", scratch=None, scratch_chain_id=None, accounting=None)
     assert store.write_landed(log_dir_of(tmp_path), unguided)
     older = await registry.resume_record(store.read(log_dir_of(tmp_path), "older-parent"), "again")
     await asyncio.wait_for(older.done.wait(), 30)

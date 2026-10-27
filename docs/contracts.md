@@ -488,3 +488,70 @@ All fields remain additive wire v1 and run-document v1. The canonical task/workf
 metadata fixtures are synthetic compatibility vectors covering explicit standalone and owned tasks, pinned workflow identity,
 known completion and legacy missing evidence. See the [retained-history guide](compact-task-reads.md#retained-history-metadata)
 for bounded headers, derivative rebuilds and summary completeness requirements.
+
+## Finished retained-history statistics
+
+`harflow-ctl statistics-page --since=<ISO8601> --before=<ISO8601> --limit=100 --json`
+exposes capability `statistics-page.v1` through the existing `harflow.ctl` v1 result envelope.
+Both boundaries require time zones; `since` is inclusive and `before` exclusive. Clients derive
+local calendar-day boundaries, including daylight-saving changes, before sending UTC instants.
+This global read requires a verified direct caller; managed callers and undecidable caller
+identity are refused before history or derivative caches are read. It is not an MCP task tool.
+
+Results report `projection_version`, `state` (`preparing`, `ready`, `unavailable`), `snapshot_id`,
+`generation`, `observed_at`, flat `items`, `next_cursor`, `has_more`, `history_complete`,
+`ownership_complete`, `accounting_coverage`, `retained_history_only`, `retention`, and bounded
+`diagnostics`. Canonical examples are `contracts/v1/ctl-statistics-page-*.json`. Clients must finish
+all pages of one generation before treating aggregates as authoritative. A cursor binds schema,
+lexical state-root identity, bounds, stable order and generation; it is at most 4096 encoded bytes.
+A relevant mutation returns `snapshot_expired`; restart pagination. Missing or incompatible
+sources, ambiguous ownership, bounded-history exhaustion and unavailable ownership never produce
+partial authoritative totals. Unsupported engines require a capability-gated unavailable screen.
+
+Workflow records (`kind: workflow`) contribute the qualified finished root's `wall_seconds` on
+its root start day. Root completion requires a matching `finished_at_sequence`; surviving children
+never substitute for root timing. Terminal descendant executions, nested workflows, native logical
+children and control transports join that same cohort regardless of their own dates. Finished
+children of an active root are excluded. Standalone terminal initial/resume/continuation executions
+enter by their own start time. Ancestor identity can cross the range boundary without adding its
+usage or counts. Execution records contain nullable requested harness/model identity, task/chain/
+workflow/node/activation IDs, start/end timestamps, duration qualification and accounting.
+Requested model null means Unknown; effective or observed models never replace it. Filtered chart
+and ranking time sums matching `execution_seconds`; unfiltered time uses root wall time plus
+standalone execution time. These measures differ when work overlaps.
+
+Accounting is an optional bounded v1 object written atomically with the task outcome. Legacy
+records remain usage-unavailable; current writers distinguish pending normalization. Adapter
+failures are absorbed and persist unavailable evidence without changing the terminal outcome.
+Stable task contribution IDs replace cumulative snapshots rather than adding observations.
+Categories (`input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_creation_tokens`) are
+nullable integers; missing is not zero. `total_tokens` additionally requires qualified disjoint
+categories and execution scope. Execution `duration_additive` qualifies time independently of token scope; `usage_additive`
+requires independently owned execution-scoped usage. Execution counts are independent of both
+flags. Native logical copies reference their transport contribution and set both flags false
+unless separately proven disjoint. The nested `accounting.additive` flag qualifies token scope. See
+[backend accounting qualification](backend-cli-facts.md#durable-execution-accounting-qualification).
+
+The separate disposable `.statistics.v1.sqlite3` projection leaves listing v10 unchanged. Each
+foreground call classifies at most 100 metadata documents using the existing metadata-byte budget;
+there is no detached preparer. Discovery caps raw directory names at 100000 and candidate task/
+run/ownership documents at 10000. A two-second foreground deadline covers enumeration, reads,
+SQL, projection, source validation and page serialization. Pages contain at most 100 facts and
+256 KiB. Calls return preparing while bounded work remains; hard limits return explicit incomplete
+coverage. Cache/source projection bounds prevent uncontrolled cache growth. Unknown/corrupt
+schemas rebuild only the derivative. All cache writes require owned compatible state.
+
+Source witnesses include device, inode, nanosecond modification/change times and size, plus run
+sequence in query generation. Directory witnesses are roster hints, never generation inputs.
+Sources are checked around publication; active rewrites are ignored only after bounded
+classification confirms they remain active with unchanged ownership. Required active task ancestry
+binds its task/parent/continuation/chain/root identities and nonterminal classification in the
+generation while its physical witness is still revalidated. Mutable active-ancestor display or
+metric fields are not returned. Terminal transition or changed ancestry expires the page walk. Unrelated lock/artifact/
+follow-up files do not change finished history generation. The observation timestamp reports a
+validated observation, not a lock against future filesystem writes; changes without observable
+filesystem witnesses cannot be detected.
+
+Statistics describes retained history only. `retention` reports days (default 30), disabled or
+unknown; selecting 90 days does not imply 90-day history exists. This query never runs retention,
+reconstructs deleted data, replays raw logs, starts models or scans N task statuses.

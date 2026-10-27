@@ -489,6 +489,10 @@ def control_pipe_problem(backend: Any) -> str | None:
 class ExtraPathsUnsupported:
     """Default fail-closed seams for uncertified optional execution capabilities."""
 
+    def accounting_evidence(self, acc, context):
+        from ..accounting import unavailable
+        return unavailable(context["task_id"], "backend_accounting_unqualified")
+
     def configure_dispatch_context(self, invocation, background_idle_seconds):
         return invocation
 
@@ -693,6 +697,8 @@ class Backend(Protocol):
     binary: str
     capabilities: Capabilities
     mcp_approval: MCPApprovalPolicy
+
+    def accounting_evidence(self, acc: Accumulator, context: dict[str, Any]) -> dict[str, Any]: ...
 
     def execution_configuration_namespaces(self, repo: Path) -> dict[str, Any]: ...
 

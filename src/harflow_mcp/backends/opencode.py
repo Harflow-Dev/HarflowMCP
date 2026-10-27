@@ -600,6 +600,12 @@ class OpencodeBackend(ExtraPathsUnsupported):
             caveats=(_NO_SANDBOX_CAVEAT, *_MODE_CAVEATS[freedom]),
         )
 
+    def accounting_evidence(self, acc, context):
+        from ..accounting import normalize
+        return normalize(context["task_id"], acc.usage, fields={'input_tokens': 'input', 'output_tokens': 'output'},
+                         scope="unknown" if context.get("resumed") else "execution",
+                         diagnostics=("cache_category_disjointness_unqualified",))
+
     def ingest(self, event: dict[str, Any], acc: Accumulator) -> None:
         diagnostic = self.usage_limit_diagnostic(event)
         if diagnostic is not None and acc.failure_diagnostic is None:

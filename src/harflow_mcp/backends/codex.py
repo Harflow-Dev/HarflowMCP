@@ -1088,6 +1088,12 @@ class CodexBackend(ExtraPathsUnsupported):
             caveats=tuple(caveats),
         )
 
+    def accounting_evidence(self, acc, context):
+        from ..accounting import normalize
+        return normalize(context["task_id"], acc.usage, fields={'input_tokens': 'input_tokens', 'output_tokens': 'output_tokens', 'cache_read_tokens': 'cached_input_tokens'},
+                         scope="execution" if not context.get("resumed") and acc.num_turns == 1 else "unknown",
+                         diagnostics=("cache_category_disjointness_unqualified",))
+
     def ingest(self, event: dict[str, Any], acc: Accumulator) -> None:
         from . import codex_app_server as app_server
         if app_server.is_frame(event):

@@ -1176,6 +1176,12 @@ class ClaudeBackend(ExtraPathsUnsupported):
         from .claude_plan_files import observe
         return observe(event, acc.stream_state, repo)
 
+    def accounting_evidence(self, acc, context):
+        from ..accounting import normalize
+        return normalize(context["task_id"], acc.usage, fields={'input_tokens': 'input_tokens', 'output_tokens': 'output_tokens', 'cache_read_tokens': 'cache_read_input_tokens', 'cache_creation_tokens': 'cache_creation_input_tokens'},
+                         scope="unknown" if context.get("resumed") else "execution",
+                         diagnostics=("cache_category_disjointness_unqualified",))
+
     def ingest(self, event: dict[str, Any], acc: Accumulator) -> None:
         diagnostic = self.usage_limit_diagnostic(event)
         if diagnostic is not None and acc.failure_diagnostic is None:

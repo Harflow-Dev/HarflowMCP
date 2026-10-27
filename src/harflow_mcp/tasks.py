@@ -3183,6 +3183,23 @@ class TaskRegistry:
             raise TypeError("Cannot persist an attached task; only its supervisor owns metadata")
         task.latest_record_landed = False
         task.persistence_error = None
+        from .accounting import snapshot, unavailable
+        accounting = None
+        try:
+            accounting_task_id = store.validate_task_id(task.task_id)
+        except Exception:
+            # Preserve the persistence path's existing identity validation.
+            # Accounting cannot create an identity or change that outcome.
+            pass
+        else:
+            try:
+                accounting = snapshot(get_backend(task.backend), task.acc, {
+                    "task_id": accounting_task_id, "resumed": bool(task.parent_task_id),
+                    "observed": not (task.finished_at and task.exit_code is None),
+                    "terminal": task.finished_at is not None,
+                })
+            except Exception:
+                accounting = unavailable(accounting_task_id, "accounting_evidence_error")
         landed = store.write_landed(
             self._log_dir,
             store.TaskRecord(
@@ -3218,6 +3235,7 @@ class TaskRegistry:
                 chain_prompt=task.chain_prompt,
                 stderr_tail=list(task.stderr_tail),
                 failure_diagnostic=task.acc.failure_diagnostic,
+                accounting=accounting,
                 workflow_builder=task.workflow_builder,
                 prompt=(task.display_prompt if task.display_prompt is not None else task.prompt),
                 status=task.status,

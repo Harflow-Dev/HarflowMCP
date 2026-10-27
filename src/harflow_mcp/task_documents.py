@@ -71,6 +71,12 @@ BASELINE = {key: str | None for key in ("head", "branch", "repository_root", "wo
 
 
 def _nested(record: Any) -> None:
+    accounting = getattr(record, "accounting", None)
+    if accounting is not None:
+        from .accounting import validate, contribution_id
+        validate(accounting)
+        if accounting["contribution_id"] != contribution_id(record.task_id):
+            raise ValueError("Accounting contribution does not match task")
     if record.git_baseline is not None:
         _shape(record.git_baseline, BASELINE, "git_baseline")
     if record.failure_diagnostic is not None:

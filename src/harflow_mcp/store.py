@@ -114,6 +114,7 @@ class TaskRecord:
     output_drained: bool = False
     chain_prompt: str | None = None
     stderr_tail: list[str] = field(default_factory=list)
+    accounting: dict[str, Any] | None = None
     failure_diagnostic: dict[str, Any] | None = None
     workflow_builder: bool = False
     prompt: str = ""

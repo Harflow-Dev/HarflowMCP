@@ -1000,3 +1000,27 @@ Hazards recorded by the measurement: a note delivered once is sticky on claude a
 (paths come from the environment, so a stale copy is never wrong); the text must be ASCII and free of a leading `-` (a
 value that starts with `-` is refused by the strict option walks); and each backend's `assert_safe` accepts exactly the
 note, once, in exactly one position, so a caller-controlled string can never take that seam.
+
+## Durable execution accounting qualification
+
+The bounded `accounting_evidence` adapter seam consumes the accumulator produced by the
+measured stream parsers above. It does not re-read transcripts, infer a requested model from an
+observed model, or alter classification/live-input closure. Claude per-result usage and opencode
+per-step usage are accumulated; Antigravity keeps its measured per-process cumulative result.
+Codex `exec` retains its latest `turn.completed` usage; it is execution-scoped only for a fresh
+single-turn execution. App-server and multi-turn scope remain unknown. Vibe's measured stream
+has no usable token accounting and returns unavailable.
+
+Initial Claude/opencode/Antigravity observations expose their recognized input/output fields;
+Claude additionally exposes cache-read/cache-creation, and Codex its recognized cached-input
+field. Unsupported or absent categories remain null. The existing measurements do not establish
+that every reported category is non-overlapping, nor that resumed session counters are disjoint
+from earlier executions. Accordingly the adapters do not publish comparable totals; resumed
+usage has unknown scope and is not additive. A deterministic synthetic fixture can exercise the
+qualified-total contract but does not qualify a real CLI. No new paid qualification was performed.
+
+No current production adapter qualifies caller-input pause intervals. Question/approval timestamps
+and idle/background waits do not establish that a matching execution stopped work. Statistics
+therefore uses elapsed execution duration with `elapsed_may_include_waits`. The accounting seam
+can retain bounded, explicitly qualified matching-execution intervals; union/clamping tests are
+algorithm evidence only, not production pause qualification.

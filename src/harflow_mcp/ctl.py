@@ -113,6 +113,13 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     notification_p.add_argument('workflow_run_id')
     notification_p.add_argument('--json', action='store_true')
 
+    statistics_p = sub.add_parser("statistics-page", help="bounded finished retained-history statistics; direct callers only")
+    statistics_p.add_argument("--since", required=True, help="inclusive timezone-qualified ISO8601 start")
+    statistics_p.add_argument("--before", required=True, help="exclusive timezone-qualified ISO8601 end")
+    statistics_p.add_argument("--limit", type=int, default=100)
+    statistics_p.add_argument("--cursor")
+    statistics_p.add_argument("--json", action="store_true")
+
     list_p = sub.add_parser("list", help="list tasks recorded on disk")
     list_p.add_argument(
         "--since", default=None, help="only tasks started within this long ago, e.g. 7d, 12h"
@@ -1444,6 +1451,11 @@ def _main(argv: list[str] | None = None) -> int:
             return _fail(args, exc.code, str(exc), exc.as_dict())
         print(json.dumps(envelope(CTL_FORMAT, {"result": result})) if args.json else json.dumps(result, indent=2))
         return 0
+    if args.command == "statistics-page":
+        from .takeover import caller_refusal
+        refusal = caller_refusal(default_log_dir())
+        if refusal:
+            return _fail(args, refusal[0], "Statistics require a verified direct caller: " + refusal[1])
     # Informational backend/config inspection does not access engine state.
     config_only = args.command == "backends" or (
         args.command == "mcp-allowlist" and args.allow is None and args.remove is None)
@@ -1458,6 +1470,16 @@ def _main(argv: list[str] | None = None) -> int:
 
 
 def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
+    if args.command == "statistics-page":
+        from .statistics import statistics_page, StatisticsError
+        try:
+            result = statistics_page(task_layout(default_log_dir()), since=args.since, before=args.before,
+                                     limit=args.limit, cursor=args.cursor)
+        except StatisticsError as exc:
+            return _fail(args, exc.code, str(exc))
+        print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": result})) if args.json else json.dumps(result, indent=2))
+        return 0
+
     mutation_commands = {"run", "resume", "continue", "send", "cancel", "takeover", "takeover-attach", "approval-respond", "register-artifact"}
     from .workflow_reads import READ_ONLY_CLI_COMMANDS
     if args.command in mutation_commands or args.command.startswith("workflow-") and args.command not in READ_ONLY_CLI_COMMANDS or args.command == "mcp-allowlist" and (args.allow is not None or args.remove is not None):

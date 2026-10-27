@@ -55,6 +55,12 @@ summaries. Workflow completion time records the terminal status transition indep
 of settlement; legacy and mixed-writer completion without a matching sequence witness remains unknown. See [compact reads](docs/compact-task-reads.md#retained-history-metadata)
 for ownership, pinned workflow identity and completeness requirements.
 
+Finished retained-history statistics are available to verified direct callers through
+`harflow-ctl statistics-page --since=<ISO8601> --before=<ISO8601> --json`.
+Clients require capability `statistics-page.v1`; older engines remain unsupported. Results
+disclose retention, missing accounting and bounded preparation rather than assuming complete
+history or zero usage. See [statistics contracts](docs/contracts.md#finished-retained-history-statistics).
+
 See the [Changelog](CHANGELOG.md) for change history.
 
 Licensed under [Apache-2.0](LICENSE). Git history preserves source authorship; the license notice does not assert ownership of prior contributions.
