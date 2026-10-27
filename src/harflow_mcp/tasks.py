@@ -4008,11 +4008,15 @@ class TaskRegistry:
             # A pending launch can sit under a recorded intermediate (a task that already has a record),
             # so the walk is seeded with every recorded descendant the cascade covers.
             local_lineage = [(t.task_id, t.spawned_by, t.root_task_id) for t in self._tasks.values()]
-            recorded = await asyncio.to_thread(self._cascade_targets, task_id, local_lineage)
-            pending = [item for item in await asyncio.to_thread(task_resources.pending_descendants, self._log_dir, task_id, tuple(recorded))
+            seeds = await asyncio.to_thread(self._cascade_targets, task_id, local_lineage)
+            pending = [item for item in await asyncio.to_thread(task_resources.pending_descendants, self._log_dir, task_id, tuple(seeds))
                        if item not in handled]
-            # A pending launch that spawned after the last pass, but before the scan above, is no longer
-            # pending and was never signalled: it is a recorded task the cascade has not covered.
+            # A pending launch that spawns between the recorded snapshot above and the pending scan is in
+            # neither: it is no longer pending and was not recorded when the seeds were taken. Convergence is
+            # therefore decided from a view taken after the scan, and a launch that became a task at any
+            # point before it shows up there as a recorded task the cascade has not covered.
+            local_lineage = [(t.task_id, t.spawned_by, t.root_task_id) for t in self._tasks.values()]
+            recorded = await asyncio.to_thread(self._cascade_targets, task_id, local_lineage)
             unsignalled = set(recorded) - covered if covered is not None else set()
             if not pending and not unsignalled:
                 break

@@ -726,6 +726,43 @@ async def test_a_pending_child_that_spawns_before_the_pending_scan_is_cancelled_
     assert "_covered_targets" not in result
 
 
+@pytest.mark.asyncio
+async def test_a_pending_child_that_spawns_between_the_recorded_snapshot_and_the_pending_scan_is_cancelled_as_a_task(tmp_path, monkeypatch, identities):
+    install_fake_claude(tmp_path, monkeypatch)
+    log_dir = tasks_dir(tmp_path)
+    reg = registry(tmp_path)
+    root = await reg.start("slow 30 one", tmp_path, backend=get("claude"), freedom="read_only", task_id="a" * 32)
+    await wait_for(lambda: task_supervision.read_task_record(log_dir, root.task_id) is not None)
+    identities.alive(OWNER["pid"])
+    child = "b" * 32
+    write_receipt(tmp_path, child, "waiting_for_resources", owner=OWNER, spawned_by=root.task_id, root_task_id=root.task_id,
+                  resources={"names": ["sim"], "state": "waiting", "reservation_id": "r" * 32})
+    real_cascade = reg._cancel_cascade
+    real_scan = task_resources.pending_descendants
+    passes = []
+    scans = []
+
+    async def spying(task_id):
+        outcome = await real_cascade(task_id)
+        passes.append(set(outcome["_covered_targets"]))
+        return outcome
+
+    def scanning(directory, root_id, seeds=()):
+        scans.append(tuple(seeds))
+        if len(scans) == 1:  # the child spawns after the recorded targets were collected, before this scan
+            store.write(log_dir, store.TaskRecord(task_id=child, backend="claude", session_id=None, repo_path="/x",
+                                                  started_at="2026-01-01T00:00:00+00:00", status="running",
+                                                  spawned_by=root.task_id, root_task_id=root.task_id))
+        return real_scan(directory, root_id, seeds)
+
+    monkeypatch.setattr(reg, "_cancel_cascade", spying)
+    monkeypatch.setattr(task_resources, "pending_descendants", scanning)
+    result = await reg.cancel_cascade(root.task_id, workflow_control=True)
+    assert child not in scans[0] and child not in passes[0]
+    assert len(passes) >= 2 and child in passes[-1]
+    assert "_covered_targets" not in result
+
+
 def test_cascade_passes_are_merged_not_replaced() -> None:
     from harflow_mcp.tasks import TaskRegistry
     first = {"cancelled_descendants": ["x"], "sigkill_survivors": ["s"], "owner_still_settling": [], "rounds": 2,
