@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Prevent fully qualified terminal launch history with device-only task-directory identity drift from blocking unrelated session checks, queued follow-up routing and task listing (#56). Historical scans retain terminal successor evidence with the same root and inode; direct launch reads and all unresolved ownership checks remain strict. No state migration or rewrite occurs.
+
 - Integrate workflow run and candidate-attempt resource scopes and one shared root-run worktree (#3). Resource acquisition precedes tree slots and checkout leases; candidate-specific receipts, read-only resolvers and scheduler recovery retain uncertain ownership. Ledger repair reconstructs workflow holds and borrowers, with grant confirmation before dispatch. Preview hashes bind resources and worktree plans, status exposes waits and slot-hold disclosure, and non-terminal workflow users block worktree removal. Managed-agent direct-dispatch authority is unchanged.
 
 - Close the remaining review findings on cascades, repair and removal: a cancel cascade also cancels, as tasks, pending launches that spawned between its passes, and merges the results of its passes instead of replacing them; `resources-repair` keeps a borrower whose lender lost a name conflict covering every name it held, behind a conservative stand-in for the lender, rather than narrowing it to the names the other holder did not win; `worktree-remove` also refuses an initialized submodule with an empty working directory whose Git directory is under `<common>/modules`.

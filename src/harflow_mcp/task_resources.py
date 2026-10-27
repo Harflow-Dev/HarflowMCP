@@ -399,11 +399,15 @@ def pending_view(log_dir: Path, task_id: str, *, check_owner: bool = True) -> di
 
 
 def pending_views(log_dir: Path, *, check_owner: bool = False) -> list[dict[str, Any]]:
-    from .task_supervision import reservations
+    from .task_supervision import reservations, read_task_record
     found = []
     for receipt in reservations(log_dir):
         if is_pending_kind(receipt) and receipt["state"] not in ("spawned", "settled"):
-            if pending_receipt(log_dir, receipt["task_id"]) is not None:
+            # Terminal listing consumes already-qualified history without turning
+            # it into live launch authority through a second, strict launch read.
+            pending = (read_task_record(log_dir, receipt["task_id"], include_prompt=False) is None
+                       if receipt["state"] == "not_started" else pending_receipt(log_dir, receipt["task_id"]) is not None)
+            if pending:
                 found.append(view(log_dir, receipt, check_owner=check_owner))
     return found
 

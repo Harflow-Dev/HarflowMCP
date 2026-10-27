@@ -59,6 +59,13 @@ def _root_identity(log_dir):
 
 @task_operation
 def read_launch(log_dir: Path, task_id: str):
+    """Read launch authority with the exact current task-directory binding."""
+    return _read_launch(log_dir, task_id)
+
+
+def _read_launch(log_dir: Path, task_id: str, *, allow_terminal_device_drift: bool = False):
+    """Qualify before the history-only terminal device exception is considered."""
+    assert_task_owned(log_dir)
     store.validate_task_id(task_id)
     path = log_dir / f'{task_id}.launch.json'
     try:
@@ -87,7 +94,6 @@ def read_launch(log_dir: Path, task_id: str):
                 or value.get('product') != PRODUCT or type(value.get('v')) is not int or value.get('v') != 1
                 or not persisted_compatible(value.get('product_version'), FORMAT)
                 or value.get('task_id') != task_id or value.get('root') != str(log_dir.parent)
-                or value.get('directory_identity') != _root_identity(log_dir)
                 or not isinstance(value.get('generation'), str) or re.fullmatch('[a-f0-9]{32}', value['generation']) is None
                 or not isinstance(value.get('request_sha256'), str) or re.fullmatch('[a-f0-9]{64}', value['request_sha256']) is None
                 or not isinstance(value.get('backend'), str)
@@ -98,6 +104,14 @@ def read_launch(log_dir: Path, task_id: str):
                 or value.get('resources') is not None and (not isinstance(value['resources'], dict) or not isinstance(value['resources'].get('names'), list))
                 or value.get('worktree') is not None and (not isinstance(value['worktree'], dict) or not isinstance(value['worktree'].get('path'), str))
                 or value.get('followups') is not None and (not isinstance(value['followups'], dict) or not isinstance(value['followups'].get('task_id'), str) or not isinstance(value['followups'].get('ids'), list))):
+            raise ValueError('Incompatible task launch reservation')
+        directory = value.get('directory_identity')
+        if type(directory) is not list or len(directory) != 2 or any(type(part) is not int for part in directory):
+            raise ValueError('Incompatible task launch reservation')
+        current = _root_identity(log_dir)
+        historical_terminal = (allow_terminal_device_drift and value['state'] in {'settled', 'not_started'}
+                               and directory[1] == current[1])
+        if directory != current and not historical_terminal:
             raise ValueError('Incompatible task launch reservation')
         return value
     except (ValueError, TypeError) as exc:
@@ -117,9 +131,9 @@ def read_task_record(log_dir: Path, task_id: str, **read_options):
 
 @task_operation
 def reservations(log_dir: Path):
-    """Qualified launch evidence, including unresolved execution attempts."""
+    """Qualified history; only terminal rows may retain an earlier device ID."""
     return [value for path in log_dir.glob('*.launch.json')
-            if (value := read_launch(log_dir, path.name.removesuffix('.launch.json'))) is not None]
+            if (value := _read_launch(log_dir, path.name.removesuffix('.launch.json'), allow_terminal_device_drift=True)) is not None]
 
 
 @task_operation

@@ -107,6 +107,22 @@ creation and ordinary metadata publication. An ambiguous launch stays reserved;
 only a proven pre-execution failure permits an identical retry. Attached task
 handles are read-only and cannot publish owner metadata.
 
+Launch-history scans qualify the complete bounded, nofollow, source-stable receipt before applying
+a narrow directory-binding exception: terminal `settled` or `not_started` rows may retain an earlier
+device ID only when their recorded root and task-directory inode still match. Both identity fields
+must be exact integers. Terminal rows remain available to history readers; existing successor
+selection is unchanged, including its exclusion of `not_started` launches. Previously started
+successors still prevent stale follow-ups to the source checkpoint. Public listing uses this history for
+not-started resource/worktree launches only when no task record exists.
+
+Direct per-task, owner and replay launch reads still require the exact device and inode, as does
+every unresolved launch state. A related drifted successor can therefore remain in progress or
+`delivery_unknown`; history acceptance never invents delivery, death or settlement. Workflow
+recovery paths requiring a direct launch read can still refuse drifted metadata and require
+explicit recovery. Only device mismatches have been observed; their underlying cause is unproven.
+Nothing rewrites, migrates or deletes a receipt as part of this exception. Ordinary record-driven,
+age-based retention may resume once history scans succeed; orphan receipt cleanup is not promised.
+
 The detached owner remains responsible through automatic continuation
 reservation and successor acknowledgement. A workflow scheduler is a separate
 detached owner; recovering that scheduler requires an explicit control action,
