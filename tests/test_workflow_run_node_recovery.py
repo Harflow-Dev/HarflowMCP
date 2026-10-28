@@ -470,14 +470,10 @@ async def test_parallel_questions_preserve_first_identity_and_route_each_answer(
     root = store.get_run(run['workflow_run_id'])
     assert root['input_decision_id'] == first['input_decision_id']
     assert root['input_source']['workflow_run_id'] == first['workflow_run_id']
-    with pytest.raises(w.WorkflowError, match='decision_id'):
-        store.control(root['workflow_run_id'], 'resume', 'wrong source', decision_id=second['input_decision_id'])
+    store.control(root['workflow_run_id'], 'resume', 'Second answer', decision_id=second['input_decision_id'])
     store.control(root['workflow_run_id'], 'resume', 'First answer', decision_id=first['input_decision_id'])
     assert store.get_run(first['workflow_run_id'])['instructions'] == 'First answer'
-    assert store.get_run(second['workflow_run_id'])['status'] == 'needs_input'
-    inv.publish_input(store, store.get_run(second['workflow_run_id']))
-    root = store.get_run(root['workflow_run_id'])
-    assert root['input_decision_id'] == second['input_decision_id']
+    assert store.get_run(second['workflow_run_id'])['status'] == 'running'
     store.control(root['workflow_run_id'], 'resume', 'Second answer', decision_id=second['input_decision_id'])
     assert store.get_run(second['workflow_run_id'])['instructions'] == 'Second answer'
     assert store.get_run(first['workflow_run_id'])['instructions'] == 'First answer'
@@ -929,7 +925,7 @@ def test_forwarded_resume_delivery_is_durable_and_exactly_once(store, tmp_path, 
         # A child may already publish its next checkpoint before parent acknowledgment.
         restarted.update_run(child['workflow_run_id'], lambda r: r.update(status='needs_input', input_decision_id='question-two', input_question='Next question'), 'fixture')
     result = restarted.control(parent['workflow_run_id'], 'resume', 'exact answer', 2, interaction_owner='monitor', **options)
-    assert result['status'] == 'running' and 'forwarded_delivery' not in result
+    assert result['status'] == ('needs_input' if failure_target == 'parent' and kind == 'input' else 'running') and 'forwarded_delivery' not in result
     actual = restarted.get_run(child['workflow_run_id'])
     assert actual['transition_grant'] == 2
     assert actual['instructions'] == 'exact answer'
@@ -954,11 +950,9 @@ def test_forwarded_delivery_retry_preserves_and_allows_new_parent_question(store
             original(parent['workflow_run_id'], lambda r: r.update(input_decision_id='two', input_question='Second'), 'fixture')
         return original(identifier, change, event, detail)
     monkeypatch.setattr(store, 'update_run', moved)
-    with pytest.raises(w.WorkflowError, match='moved on'):
-        store.control(parent['workflow_run_id'], 'resume', 'First answer', 2, decision_id='one')
+    store.control(parent['workflow_run_id'], 'resume', 'First answer', 2, decision_id='one')
     restarted = w.WorkflowStore(root=store.root)
-    with pytest.raises(w.WorkflowError, match='current input decision_id'):
-        restarted.control(parent['workflow_run_id'], 'resume', 'First answer', 2, decision_id='one')
+    restarted.control(parent['workflow_run_id'], 'resume', 'First answer', 2, decision_id='one')
     assert restarted.get_run(parent['workflow_run_id'])['input_question'] == 'Second'
     restarted.control(parent['workflow_run_id'], 'resume', 'Second answer', 1, decision_id='two')
     assert restarted.get_run(child['workflow_run_id'])['transition_grant'] == 3

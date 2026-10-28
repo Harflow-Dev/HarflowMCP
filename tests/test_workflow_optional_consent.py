@@ -61,7 +61,11 @@ async def forwarded(storage, tmp_path):
     root = copy.deepcopy(child)
     root_id = 'forwarding-root'
     root.update(workflow_run_id=root_id, pending=[], activations=[], joins={}, input_source={'workflow_run_id': child['workflow_run_id']}, optional_review_skip_available=True)
+    activation = copy.deepcopy(child['activations'][0])
+    activation.update(id='forward-edge', status='waiting_for_child', invocation={'child_workflow_run_id': child['workflow_run_id'], 'stage': 'waiting'})
+    root['activations'] = [activation]
     persist_run(storage, root)
+    storage.update_run(child['workflow_run_id'], lambda r: r.update(parent_link={'workflow_run_id': root_id, 'root_workflow_run_id': root_id, 'execution_id': 'forward-edge', 'node_id': activation['node_id'], 'depth': 1}), 'fixture')
     return root, child
 
 
@@ -84,13 +88,19 @@ async def test_latest_checkpoint_answer_replaces_skip_consent(storage, tmp_path,
     registry.policy = lambda context, _: {'decision_id': context['decision_id'], 'action': 'needs_input', 'question': 'Still proceed without the reviewer?', 'reason': 'Reconsider coverage'}
     await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run['workflow_run_id']), 5)
     asked = storage.get_run(run['workflow_run_id'])
-    assert asked['status'] == 'needs_input' and asked['input_decision_id'] == decision_id
+    assert asked['status'] == 'needs_input' and asked['input_decision_id'] != decision_id
+    assert decision_id in asked['accepted_inputs']
+    decision_id = asked['input_decision_id']
     target_id = run['workflow_run_id']
     if forward_answer:
         root = copy.deepcopy(asked)
         target_id = 'forwarding-root'
         root.update(workflow_run_id=target_id, pending=[], activations=[], joins={}, input_source={'workflow_run_id': run['workflow_run_id']})
+        activation = copy.deepcopy(asked['activations'][0])
+        activation.update(id='forward-edge', status='waiting_for_child', invocation={'child_workflow_run_id': run['workflow_run_id'], 'stage': 'waiting'})
+        root['activations'] = [activation]
         persist_run(storage, root)
+        storage.update_run(run['workflow_run_id'], lambda r: r.update(parent_link={'workflow_run_id': target_id, 'root_workflow_run_id': target_id, 'execution_id': 'forward-edge', 'node_id': activation['node_id'], 'depth': 1}), 'fixture')
     storage.control(target_id, 'resume', instructions=answer, decision_id=decision_id, allow_optional_review_skip=allow)
     resumed = storage.get_run(run['workflow_run_id'])
     assert resumed['optional_skip_authorizations']['unrelated'] == unrelated

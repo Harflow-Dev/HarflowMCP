@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import re
 from typing import Any
 
 from .backends.workflow_diagnostics import valid_reset_value
@@ -22,6 +23,38 @@ MONITOR_FIELDS = ("on_demand_nodes", "on_demand_calls", "on_demand_state", "goal
 MONITOR_FIELDS += ("resources", "resource_wait", "resource_waits", "worktree", "source_repo_path")
 VIEWS.update({field: field for field in MONITOR_FIELDS})
 VIEWS["execution_index"] = "execution_index"
+
+
+# Actionable input deliberately exceeds the informational byte budget when
+# necessary: callers must see every question before sending an answer.
+_ACTION_FIELDS = frozenset({"input_question", "question_items", "pending_inputs", "pending_attention", "input_question_items"})
+
+
+def question_items(question: str) -> list[str]:
+    """Extract explicit list lines verbatim; never infer choices from prose."""
+    return [line for line in question.splitlines()
+            if re.match(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)", line)]
+
+
+def _metadata_size(result: dict[str, Any]) -> int:
+    return len(json.dumps({k: v for k, v in result.items() if k not in _ACTION_FIELDS or (k == "input_question" and result.get("input_question_truncated", True))}, ensure_ascii=True).encode())
+
+
+def _pending_inputs(rows: list[Any]) -> list[dict[str, Any]]:
+    result = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        entry = {key: str(row[key])[:200] for key in
+                 ("workflow_run_id", "workflow_name", "node_id", "node_title", "decision_id") if key in row}
+        entry["path"] = [str(item)[:100] for item in row.get("path", [])[:16]]
+        for key in ("waiting_since", "waiting_seconds", "optional_review_skip_available"):
+            if key in row and isinstance(row[key], (str, int, float, bool, type(None))):
+                entry[key] = row[key][:100] if isinstance(row[key], str) else row[key]
+        entry["question"] = str(row.get("question", ""))
+        entry["question_items"] = list(row["question_items"]) if isinstance(row.get("question_items"), list) and all(isinstance(item, str) for item in row["question_items"]) else question_items(entry["question"])
+        result.append(entry)
+    return result
 
 
 def _serialize(value: Any) -> str:
@@ -57,11 +90,11 @@ def monitor(run: dict[str, Any]) -> dict[str, Any]:
     result["monitor_digests"] = {field: _digest(_view_value(run, field)) for field in MONITOR_FIELDS}
     result["monitor_digests"]["execution_index"] = _digest(_view_value(run, "execution_index"))
     # Digest references must fit the same transport budget as status metadata.
-    if len(json.dumps(result, ensure_ascii=True).encode()) > BUDGET:
+    if _metadata_size(result) > BUDGET:
         for key in ("decision_errors", "checkout_wait", "current_stage", "resource_wait", "resource_waits", "resources", "worktree"):
             result.pop(key, None)
         for key, value in list(result.items()):
-            if isinstance(value, str) and len(value) > 64:
+            if (key not in _ACTION_FIELDS or (key == "input_question" and result.get("input_question_truncated", True))) and isinstance(value, str) and len(value) > 64:
                 result[key] = value[:64]
                 result[key + "_truncated"] = True
     return result
@@ -115,7 +148,7 @@ def _activation_resource_waits(run: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def compact(run: dict[str, Any]) -> dict[str, Any]:
-    keys = ("workflow_run_id", "name", "revision", "goal_revision", "goal_replanning_required", "can_revise_goal", "goal_revision_reason", "kind", "status", "created_at", "updated_at", "finished_at", "interaction_owner", "settling", "can_cancel_from_monitor", "monitor_cancel_reason", "input_decision_id", "optional_review_skip_available", "execution_contract", "draft_revision", "scheduling_policy", "preview_hash")
+    keys = ("workflow_run_id", "name", "revision", "goal_revision", "goal_replanning_required", "can_revise_goal", "goal_revision_reason", "kind", "status", "created_at", "updated_at", "finished_at", "interaction_owner", "settling", "can_cancel_from_monitor", "monitor_cancel_reason", "input_decision_id", "optional_review_skip_available", "execution_contract", "draft_revision", "scheduling_policy", "preview_hash", "pending_input_count", "pending_attention_count")
     result = {key: run[key] for key in keys if key in run and isinstance(run[key], (str, int, float, bool, type(None)))}
     result["finished_at"] = qualified_finished_at(run)
     definition = run.get("definition")
@@ -133,6 +166,23 @@ def compact(run: dict[str, Any]) -> dict[str, Any]:
         result["orchestrator_mode"] = str(run.get("orchestrator_mode", "child"))[:20]
     if run.get("orchestrator_session_owner_run_id"):
         result["orchestrator_session_owner_run_id"] = str(run["orchestrator_session_owner_run_id"])[:100]
+    if isinstance(run.get("pending_inputs"), list):
+        result["pending_inputs"] = _pending_inputs(run["pending_inputs"])
+        result["pending_input_count"] = len(result["pending_inputs"])
+    if isinstance(run.get("pending_attention"), list):
+        result["pending_attention"] = [
+            {key: ([str(item)[:100] for item in row[key][:16]] if key == "path" and isinstance(row[key], list)
+                   else str(row[key])[:300]) for key in
+             ("workflow_run_id", "workflow_name", "node_id", "node_title", "path", "status", "reason") if key in row}
+            | {key: row[key] for key in ("waiting_since", "waiting_seconds") if isinstance(row.get(key), (int, float))}
+            for row in run["pending_attention"] if isinstance(row, dict)
+        ]
+        result["pending_attention_count"] = len(run["pending_attention"])
+    if isinstance(run.get("input_delivery_receipt"), dict):
+        result["input_delivery_receipt"] = {key: value[:100] if isinstance(value, str) else value
+            for key, value in run["input_delivery_receipt"].items()
+            if key in {"workflow_run_id", "decision_id", "accepted_at", "delivery_id"}
+            and isinstance(value, (str, int, float, type(None)))}
     if isinstance(run.get("input_source"), dict):
         source = run["input_source"]
         result["input_source"] = {"workflow_run_id": str(source.get("workflow_run_id", ""))[:100], "workflow_name": str(source.get("workflow_name", ""))[:200], "path": [str(item)[:100] for item in source.get("path", [])][:16]}
@@ -160,8 +210,12 @@ def compact(run: dict[str, Any]) -> dict[str, Any]:
     for key in ("input_question", "reason", "wait_reason", "failure_reason", "attention_reason", "summary"):
         if key in run:
             text = str(run[key])
-            result[key] = text[:2000]
-            result[key + "_truncated"] = len(text) > 2000
+            actionable = key == "input_question" and run.get("status") == "needs_input"
+            result[key] = text if actionable else text[:2000]
+            result[key + "_truncated"] = False if actionable else len(text) > 2000
+            if actionable:
+                result["input_question_items"] = list(run["input_question_items"]) if isinstance(run.get("input_question_items"), list) and all(isinstance(item, str) for item in run["input_question_items"]) else question_items(text)
+                result["question_items"] = result["input_question_items"]
     wait = run.get("checkout_wait")
     if isinstance(wait, dict):
         owner = wait.get("owner") or {}
@@ -181,16 +235,16 @@ def compact(run: dict[str, Any]) -> dict[str, Any]:
     result["decision_errors"] = errors[-3:]
     # User-authored identity fields can also be large; never permit them to defeat the budget.
     for key, value in list(result.items()):
-        if isinstance(value, str) and len(value) > 2000:
+        if not (key in _ACTION_FIELDS and run.get("status") == "needs_input") and isinstance(value, str) and len(value) > 2000:
             result[key] = value[:2000]
             result[key + "_truncated"] = True
-    if len(json.dumps(result, ensure_ascii=True).encode()) > BUDGET - 2048:
+    if _metadata_size(result) > BUDGET - 2048:
         result.pop("decision_errors", None)
         for key, value in list(result.items()):
-            if isinstance(value, str) and len(value) > 200:
+            if (key not in _ACTION_FIELDS or (key == "input_question" and result.get("input_question_truncated", True))) and isinstance(value, str) and len(value) > 200:
                 result[key] = value[:200]
                 result[key + "_truncated"] = True
-    if len(json.dumps(result, ensure_ascii=True).encode()) > BUDGET - 2048:
+    if _metadata_size(result) > BUDGET - 2048:
         result["current_stage"] = []
         result.pop("checkout_wait", None)
         for field in ("resources", "resource_wait", "resource_waits", "worktree"):
@@ -198,7 +252,7 @@ def compact(run: dict[str, Any]) -> dict[str, Any]:
                 result.pop(field)
                 result[field + "_truncated"] = True
         for key, value in list(result.items()):
-            if isinstance(value, str) and len(value) > 64:
+            if (key not in _ACTION_FIELDS or (key == "input_question" and result.get("input_question_truncated", True))) and isinstance(value, str) and len(value) > 64:
                 result[key] = value[:64]
                 result[key + "_truncated"] = True
     return result

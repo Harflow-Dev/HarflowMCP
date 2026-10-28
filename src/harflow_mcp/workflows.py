@@ -1383,8 +1383,84 @@ class WorkflowStore:
                 raise WorkflowError("Forwarded delivery is internal only")
             if _delivery.get("payload", {}).get("allow_optional_review_skip", False) is not allow_optional_review_skip:
                 raise WorkflowError("Forwarded consent does not match its delivery")
-            if observed.get("forwarded_delivery_receipt") == _delivery:
+            if observed.get('accepted_inputs', {}).get(decision_id, {}).get('delivery') == _delivery or observed.get("forwarded_delivery_receipt") == _delivery:
                 return observed
+
+        # Root answers select a verified checkpoint independently of root status.
+        if action == "resume" and decision_id and not _internal and not observed.get("parent_link"):
+            if observed.get('status') in TERMINAL or observed.get('status') == 'cancelling':
+                raise WorkflowError('Workflow is terminal or cancelling')
+            from .workflow_inputs import project
+            tree = project(self, observed)
+            target = next((item for item in tree['pending_inputs'] if item['decision_id'] == decision_id), None)
+            if target is None and not observed.get('input_source') and observed.get('input_decision_id') != decision_id and decision_id not in observed.get('input_deliveries', {}):
+                raise WorkflowError('Resuming needs_input requires a current input decision_id')
+            prior_delivery = observed.get('input_deliveries', {}).get(decision_id) or observed.get('forwarded_delivery')
+            if prior_delivery and prior_delivery.get('payload', {}).get('decision_id') != decision_id:
+                prior_delivery = None
+            if target is None and prior_delivery:
+                prior_source = prior_delivery['payload']['source']
+                # The old edge must still be in this verified active tree.
+                from .workflow_inputs import verified_source
+                if verified_source(self, observed, prior_source['workflow_run_id']):
+                    target = dict(prior_source, decision_id=decision_id)
+            if target and target['workflow_run_id'] != run_id:
+                if not isinstance(instructions, str) or not instructions.strip():
+                    raise WorkflowError("Resuming needs_input requires an answer or reason")
+                source_id = target['workflow_run_id']
+                source = {"workflow_run_id": source_id, "workflow_name": target.get('workflow_name', ''), "path": target.get('path', [run_id, source_id])}
+                if prior_delivery and prior_delivery['payload'].get('source_id') == source_id:
+                    source = copy.deepcopy(prior_delivery['payload']['source'])
+                payload = dict(source_id=source_id, action='resume', instructions=instructions, additional_attempts=additional_attempts, decision_id=decision_id, allow_optional_review_skip=allow_optional_review_skip, interaction_owner=interaction_owner, source=source)
+                if allow_optional_review_skip and not (prior_delivery and (self.get_run(source_id, refresh_atomic=True).get('accepted_inputs', {}).get(decision_id, {}).get('delivery') or self.get_run(source_id, refresh_atomic=True).get('forwarded_delivery_receipt')) == prior_delivery):
+                    # Child control validates consent before any delivery is persisted.
+                    child = self.get_run(source_id, refresh_atomic=True)
+                    from .workflow_delegation import optional_review_refusal_join
+                    if not any(optional_review_refusal_join(child, node, execution, token) for token in child.get('pending', []) if token.get('decision_id') == decision_id for execution in child['activations'] if execution['id'] == token.get('execution_activation_id') for node in child['definition']['nodes'] if node['id'] == token.get('node_id')):
+                        raise WorkflowError("No qualifying optional review refusal is awaiting this answer")
+                def prepare_input(r):
+                    if r.get('status') in TERMINAL or r.get('status') == 'cancelling':
+                        raise WorkflowError('Workflow is terminal or cancelling')
+                    if r.get('interaction_owner') and interaction_owner is not None and r['interaction_owner'] != interaction_owner:
+                        raise WorkflowError("Workflow interaction belongs to its original caller")
+                    deliveries = r.setdefault('input_deliveries', {})
+                    prior = deliveries.get(decision_id) or r.get('forwarded_delivery')
+                    if prior and prior.get('payload', {}).get('decision_id') != decision_id:
+                        prior = None
+                    if prior and {**prior['payload'], 'allow_optional_review_skip': prior['payload'].get('allow_optional_review_skip', False)} != payload:
+                        raise WorkflowError("A forwarded delivery is pending; retry its original answer and grants")
+                    deliveries[decision_id] = prior or {'id': uuid.uuid4().hex, 'payload': copy.deepcopy(payload)}
+                    if r.get('input_decision_id') == decision_id:
+                        r['forwarded_delivery'] = copy.deepcopy(deliveries[decision_id])
+                prepared = self.update_run(run_id, prepare_input, 'input_delivery_prepared')
+                delivery = prepared['input_deliveries'][decision_id]
+                child = self.control(source_id, 'resume', instructions, additional_attempts, decision_id=decision_id, allow_optional_review_skip=allow_optional_review_skip, interaction_owner=interaction_owner, _internal=True, _delivery=delivery, _ordinary_answer=_ordinary_answer)
+                child = self.get_run(source_id, refresh_atomic=True)
+                accepted = child.get('accepted_inputs', {}).get(decision_id)
+                if not accepted and 'allow_optional_review_skip' not in delivery['payload'] and child.get('forwarded_delivery_receipt') == delivery and not (child.get('status') == 'needs_input' and child.get('input_decision_id') == decision_id):
+                    accepted = {'accepted_at': child.get('updated_at', time.time())}
+                if (accepted or {}).get('delivery', child.get('forwarded_delivery_receipt')) != delivery or not accepted or (child.get('status') == 'needs_input' and child.get('input_decision_id') == decision_id):
+                    raise WorkflowError("The source did not durably accept this answer; retry the original answer")
+                receipt = dict(workflow_run_id=source_id, decision_id=decision_id, accepted_at=accepted['accepted_at'], delivery_id=delivery['id'])
+                def finish_input(r):
+                    if r.get('forwarded_delivery') == delivery:
+                        r.pop('forwarded_delivery', None)
+                    r['input_delivery_receipt'] = receipt
+                    r.setdefault('accepted_inputs', {})[decision_id] = {'accepted_at': receipt['accepted_at']}
+                    if r.get('input_decision_id') == decision_id and (r.get('input_source') or {}).get('workflow_run_id') == source_id:
+                        for key in ('input_question', 'input_question_items', 'input_decision_id', 'input_source', 'optional_review_skip_available'):
+                            r.pop(key, None)
+                        if r.get('status') not in TERMINAL and r.get('status') != 'cancelling':
+                            r['status'] = 'running'
+                result = self.update_run(run_id, finish_input, 'forwarded_input_answered', {'source': source_id})
+                from .workflow_invocation import publish_input
+                publish_input(self, child)
+                result = self.get_run(run_id, refresh_atomic=True)
+                if not _supervisor_present(result):
+                    _launch(self, run_id)
+                return result
+            if target is None and (observed.get('input_source') or {}).get('workflow_run_id') not in (None, run_id):
+                raise WorkflowError('Forwarded input source is not an active verified decision_id')
 
         if action == "recover" and observed.get("status") in {"starting", "running", "cancelling"}:
             if additional_attempts:
@@ -1489,6 +1565,7 @@ class WorkflowStore:
                 r["status"] = "running"
                 r["instructions"] = instructions or ""
                 r.pop("input_question", None)
+                r.pop("input_question_items", None)
                 r.pop("input_decision_id", None)
                 r.pop("optional_review_skip_available", None)
                 r.pop("input_source", None)
@@ -1599,7 +1676,7 @@ class WorkflowStore:
                     # without revoking a previously delivered answer's authorization.
                     authorizations = r.get("optional_skip_authorizations", {})
                     for execution_id in list(authorizations):
-                        if authorizations[execution_id].get("source_decision_id") == decision_id:
+                        if authorizations[execution_id].get("source_decision_id") == decision_id or any(t.get("decision_id") == decision_id and t.get("execution_activation_id") == execution_id for t in r.get("pending", [])):
                             del authorizations[execution_id]
                     if allow_optional_review_skip:
                         for node, execution in qualifying_skips(r):
@@ -1612,6 +1689,10 @@ class WorkflowStore:
                             if caller_decision_block(execution):
                                 answered_executions.add(execution["id"])
                                 r.setdefault("blocker_retry_authorizations", {})[execution["id"]] = {"node_id": execution["node_id"], "reason": instructions, "authorization_kind": "caller_answer", "source_decision_id": decision_id, "granted_at": time.time()}
+                if r.get('status') == 'needs_input' and decision_id:
+                    accepted_at = time.time()
+                    r.setdefault('accepted_inputs', {})[decision_id] = {'accepted_at': accepted_at, **({'delivery': copy.deepcopy(_delivery)} if _delivery else {})}
+                    r['input_delivery_receipt'] = dict(workflow_run_id=run_id, decision_id=decision_id, accepted_at=accepted_at, delivery_id=(_delivery or {}).get('id', uuid.uuid4().hex))
                 r["status"] = "running"
                 r["instructions"] = instructions or ""
                 for token in r.get("pending", []):
@@ -1625,6 +1706,7 @@ class WorkflowStore:
                             question["on_demand_count"] = 0
                             question.pop("decision_error", None)
                 r.pop("input_question", None)
+                r.pop("input_question_items", None)
                 r.pop("input_decision_id", None)
                 r.pop("optional_review_skip_available", None)
                 r.pop("worker_usage_recovery", None)
@@ -2646,6 +2728,9 @@ class WorkflowSupervisor:
         if selection_failure:
             question = "Selected recovery candidate unavailable: " + selection_failure[1] + ". " + question
         def checkpoint(r: dict[str, Any]) -> None:
+            # Recovery is a new caller question even when the failed turn reused
+            # an already answered routing checkpoint. Keep the token identity.
+            presentation_id = uuid.uuid4().hex if decision_id in r.get("accepted_inputs", {}) else decision_id
             if recovered_task_id:
                 for prior in r["activations"]:
                     for task in prior["tasks"]:
@@ -2657,7 +2742,7 @@ class WorkflowSupervisor:
                 if identity not in r["suppressed_candidates"]:
                     r["suppressed_candidates"].append(identity)
                 r["usage_recovery_history"][-1]["selection_failure"] = selection_failure[1]
-            r.update(status="needs_input", input_question=question, input_decision_id=decision_id, attention_reason=reason, orchestrator_usage_recovery={"decision_id": decision_id, "role": role, "failure_diagnostic": copy.deepcopy(diagnostic), "failed_candidate": copy.deepcopy(candidate), "choices": choices, "token_id": token.get("id")})
+            r.update(status="needs_input", input_question=question, input_question_items=[choice["answer"] for choice in choices], input_decision_id=presentation_id, attention_reason=reason, orchestrator_usage_recovery={"decision_id": presentation_id, "role": role, "failure_diagnostic": copy.deepcopy(diagnostic), "failed_candidate": copy.deepcopy(candidate), "choices": choices, "token_id": token.get("id")})
             r.get("sessions", {}).pop(role, None)
         self.update(checkpoint, "usage_limit_recovery_required", {"role": role, "diagnostic": diagnostic})
         self.context_baselines.clear()

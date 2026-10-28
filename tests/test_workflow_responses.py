@@ -179,3 +179,52 @@ def test_builder_compact_revision_and_lossless_draft_views():
             if cursor is None:
                 break
         assert json.loads("".join(chunks)) == run[view]
+
+
+@pytest.mark.parametrize('projection', ['compact', 'monitor'])
+def test_actionable_questions_survive_every_budget_pass(projection):
+    from harflow_mcp import workflow_responses
+    question = 'Choose the compatible behavior.\n' + '🧠' * 30000 + '\n1. Preserve spacing\n2. Keep all choices'
+    run = large_run() | {'status': 'needs_input', 'input_question': question,
+        'name': '🧠' * 100000, 'reason': '🧠' * 100000,
+        'pending_inputs': [{'workflow_run_id': 'child', 'decision_id': 'decision',
+            'question': question, 'workflow_name': 'x' * 10000, 'path': ['root', 'child']}],
+        'pending_attention': [{'workflow_run_id': str(i), 'reason': 'x' * 10000} for i in range(200)],
+        'input_delivery_receipt': {'workflow_run_id': 'child', 'decision_id': 'decision',
+            'accepted_at': 12, 'delivery_id': 'delivery', 'private': 'secret'}}
+    result = getattr(workflow_responses, projection)(run)
+    assert result['input_question'] == question
+    assert result['input_question_truncated'] is False
+    assert result['question_items'] == ['1. Preserve spacing', '2. Keep all choices']
+    assert result['pending_inputs'][0]['question'] == question
+    assert result['pending_inputs'][0]['question_items'] == result['question_items']
+    assert result['pending_input_count'] == 1
+    assert result['pending_attention_count'] == 200
+    assert result['input_delivery_receipt'] == {'workflow_run_id': 'child', 'decision_id': 'decision',
+        'accepted_at': 12, 'delivery_id': 'delivery'}
+    assert workflow_responses._metadata_size(result) <= BUDGET
+
+
+def test_question_items_do_not_invent_choices():
+    from harflow_mcp.workflow_responses import question_items
+    assert question_items('Should we preserve compatibility or change it?') == []
+    assert question_items('Answer these:\n- First question?\n  * Second question?') == ['- First question?', '  * Second question?']
+
+
+async def test_status_and_wait_return_full_actionable_questions(monkeypatch):
+    question = 'Full question ' * 1000 + '\n1. First\n2. Second'
+    async def call(*args, **kwargs):
+        return {'workflow_run_id': 'r', 'status': 'needs_input', 'input_question': question}
+    monkeypatch.setattr(server, '_workflow_call', call)
+    for result in (await server.get_workflow_status('r'), await server.wait_for_workflow('r', 0)):
+        assert result['input_question'] == question
+        assert result['input_question_truncated'] is False
+
+
+def test_authored_question_items_survive_without_reinterpretation():
+    items = ['First question with punctuation?' + '🧠' * 4000, 'Second question without list marker']
+    result = compact({'workflow_run_id': 'r', 'status': 'needs_input',
+        'input_question': 'Please answer both questions.', 'input_question_items': items,
+        'pending_inputs': [{'question': 'Other exact prose', 'question_items': items}]})
+    assert result['input_question_items'] == items
+    assert result['pending_inputs'][0]['question_items'] == items

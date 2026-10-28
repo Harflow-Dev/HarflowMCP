@@ -104,7 +104,7 @@ async def answer_question(supervisor: Any, node: dict[str, Any], token: dict[str
                 "answer": {**base, "action": "answer", "question_id": question_id, "answer": "Focused answer", "session_mode": "resume" if answer_sessions else "fresh"},
                 "inspect": {**base, "action": "inspect", "requests": [{"execution_id": "settled execution ID", "view": "result"}]},
                 "failed": {**base, "action": "failed"},
-                "needs_input": {**base, "action": "needs_input", "question": "Question for the caller"},
+                "needs_input": {**base, "action": "needs_input", "question": "Question for the caller", "question_items": ["Each choice or clarification requiring an answer"]},
             }
             prompt = ("You are the workflow orchestrator. A worker needs clarification. Answer from the workflow objective, node instructions and evidence, or ask the caller. HarflowMCP owns state and dispatch; ordinary tools remain available under your access. Return ONLY one JSON object using the action-specific examples; omit fields belonging to other actions. Answer resumes the confirmed asking session when answer_sessions is nonempty; otherwise explicitly choose fresh. Fresh reconstructs only the assignment and observed progress. Inspect one settled execution page through final JSON requests. Examples:\n" + json.dumps(examples) + "\nContext:\n" + json.dumps(context))
             if question.get("decision_error"):
@@ -163,6 +163,8 @@ async def answer_question(supervisor: Any, node: dict[str, Any], token: dict[str
                         compatible_origin(supervisor.run(), node, activation, question, root=supervisor.store.root)
                 elif action == "needs_input" and (not isinstance(decision.get("question"), str) or not decision["question"].strip()):
                     raise w.WorkflowError("needs_input requires a nonempty question")
+                if "question_items" in decision:
+                    d.validate_question_items(decision["question_items"])
                 def accept(r: dict[str, Any]) -> None:
                     a = next(a for a in r["activations"] if a["id"] == orchestration["id"])
                     q = question_record(r, activation_id, question_id)
@@ -189,7 +191,9 @@ async def answer_question(supervisor: Any, node: dict[str, Any], token: dict[str
                     elif action == "failed":
                         r.update(status="failed", failure_reason=decision["reason"], failed_decision_id=q["decision_id"])
                     else:
-                        r.update(status="needs_input", input_question=decision["question"], input_decision_id=q["decision_id"], attention_reason=decision["reason"])
+                        if q["decision_id"] in r.get("accepted_inputs", {}):
+                            q["decision_id"] = uuid.uuid4().hex
+                        r.update(status="needs_input", input_question=decision["question"], input_question_items=copy.deepcopy(decision.get("question_items", [])), input_decision_id=q["decision_id"], attention_reason=decision["reason"])
                 accepted = supervisor.update(accept, "question_decision_accepted", decision)
                 return accepted["status"] == "running" and action == "answer"
             except (ValueError, TypeError, AttributeError) as exc:

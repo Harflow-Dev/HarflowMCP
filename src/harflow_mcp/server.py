@@ -2321,7 +2321,11 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
         if action == "inspect":
             from .workflow_node_reads import inspect_node
             return await asyncio.to_thread(inspect_node, managed, kwargs["run_id"], execution_id=kwargs["execution_id"], task_id=kwargs.get("task_id"), view=kwargs.get("view", "result"), cursor=kwargs.get("cursor"), limit=kwargs.get("limit"), before_seq=kwargs.get("before_seq"), after_seq=kwargs.get("after_seq"), root=_reg().log_dir.parent)
-        return await asyncio.to_thread(store_.control, action=action, **kwargs)
+        result = await asyncio.to_thread(store_.control, action=action, **kwargs)
+        if action == "resume":
+            from .workflow_reads import on_demand_projection
+            result = await asyncio.to_thread(on_demand_projection, store_, result)
+        return result
     except WorkflowDefinitionDocumentError as exc:
         raise MCPError(INVALID_PARAMS, str(exc), data=exc.as_dict()) from None
     except (ValueError, KeyError, OSError, backends.UnsupportedCapability) as exc:
@@ -2770,7 +2774,12 @@ async def _wait_workflow_full(
             last_seen_revision = current_revision
             revision_changed_at = wait_policy.monotonic()
         read_ok = current_revision is not None  # an unreadable run file is an unavailable read
-        if current_revision is None or current_revision != previous_revision:
+        # A descendant can request input without modifying the root record.
+        # Refresh linked trees even while the root's own file is unchanged.
+        linked_tree = "pending_input_count" in result or bool(result.get("dependency_tree") or result.get("child_invocations") or any(
+            a.get("invocation") for a in result.get("activations", [])
+        ))
+        if current_revision is None or current_revision != previous_revision or linked_tree:
             try:
                 result = await _workflow_call("status", run_id=workflow_run_id)
             except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):

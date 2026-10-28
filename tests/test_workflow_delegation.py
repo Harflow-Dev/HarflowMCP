@@ -1668,3 +1668,32 @@ def test_settled_timeout_never_overrides_unsafe_terminal_cause(mutation):
         activation["tasks"][0]["status"] = mutation if mutation == "cancelled" else "running"
     assert not d.settled_timeout(activation)
     assert not d.retry_eligible(activation)
+
+
+@pytest.mark.parametrize('guided', [False, True])
+async def test_reasked_caller_question_has_new_identity_and_authored_items(storage, tmp_path, guided):
+    questions = ['First clarification?', 'Second clarification?']
+    def policy(context, registry):
+        if questions:
+            return {'decision_id': context['decision_id'], 'action': 'needs_input',
+                    'reason': 'Caller choice required', 'question': questions.pop(0),
+                    'question_items': ['1. Preserve the complete first choice', '2. Preserve the complete second choice']}
+        return default_decision(context, registry)
+    run, registry = await run_flow(storage, tmp_path, registry=Registry(storage.root, policy), guided=guided)
+    first = run['input_decision_id']
+    assert len(run['input_question_items']) == 2
+    storage.control(run['workflow_run_id'], 'resume', instructions='First answer', decision_id=first)
+    await w.WorkflowSupervisor(registry, storage).execute(run['workflow_run_id'])
+    second = storage.get_run(run['workflow_run_id'])
+    assert second['status'] == 'needs_input'
+    assert second['input_decision_id'] != first
+    assert second['input_question'] == 'Second clarification?'
+    assert first in second['accepted_inputs']
+    with pytest.raises(w.WorkflowError, match='decision_id'):
+        storage.control(run['workflow_run_id'], 'resume', instructions='Stale answer', decision_id=first)
+
+
+@pytest.mark.parametrize('items', ['one item', [None], [''], [12]])
+def test_authored_question_items_refuse_malformed_values(items):
+    with pytest.raises(w.WorkflowError, match='question_items'):
+        d.validate_question_items(items)

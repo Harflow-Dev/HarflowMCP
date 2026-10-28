@@ -565,3 +565,25 @@ filesystem witnesses cannot be detected.
 Statistics describes retained history only. `retention` reports days (default 30), disabled or
 unknown; selecting 90 days does not imply 90-day history exists. This query never runs retention,
 reconstructs deleted data, replays raw logs, starts models or scans N task statuses.
+
+
+## Workflow caller input projections
+
+Workflow status, wait and resume payloads add optional `pending_inputs`, `pending_attention`,
+`pending_input_count` and `pending_attention_count`. Input entries identify the source run/name,
+node/title and verified invocation path, with `decision_id`, full `question`, `question_items`,
+`waiting_since`, `waiting_seconds` and `optional_review_skip_available`. Attention entries carry
+source identity, status, reason and waiting duration. Singular input fields remain compatible.
+These additive fields are available to the macOS consumer through the existing public ctl
+interface; rendering the list is a separate application feature. No canonical v1 fixture or
+manifest digest changes are required for these optional additions.
+
+`input_delivery_receipt` contains `workflow_run_id`, `decision_id`, `accepted_at` and `delivery_id`.
+It confirms durable acceptance by that source, not completion of the resumed work. Persisted run
+records add optional `input_deliveries` (exact per-decision payloads), `accepted_inputs` (acceptance
+timestamps), `input_delivery_receipt` and `input_question_items`; accepted decision records may
+include `question_items`. Parent child-question records may include a stable `checkpoint_id`
+separate from the public question identity to prevent automatic answer loops. These fields retain v1 qualification and existing legacy delivery
+receipts. Replies preserve complete actionable questions and item lists even above the compact
+informational byte target; informational output remains bounded. New input presentations after
+acceptance use fresh decision identities.

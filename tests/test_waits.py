@@ -503,6 +503,21 @@ async def test_workflow_attention_states_stop_the_wait(monkeypatch, fast_clock, 
     assert not result["timed_out"]
 
 
+async def test_workflow_wait_refreshes_descendants_without_root_file_change(monkeypatch, fast_clock):
+    tree = {"activations": [{"invocation": {"child_workflow_run_id": "child"}}]}
+    question = "Please review all items:\n" + "1. Full clarification\n" * 200
+    calls = workflow_status(monkeypatch, [
+        {"status": "running", **tree},
+        {"status": "running", **tree},
+        {"status": "needs_input", "input_question": question, "input_decision_id": "child-question", **tree},
+    ], touch=False)
+    result = await server.wait_for_workflow("r", 120)
+    assert len(calls) == 3
+    assert result["stop_reason"] == "attention"
+    assert result["input_question"] == question
+    assert not result["input_question_truncated"]
+
+
 async def test_workflow_terminal_but_settling_keeps_waiting(monkeypatch, fast_clock):
     calls = workflow_status(monkeypatch, [{"status": "completed", "settling": True},
                                           {"status": "completed", "settling": True},

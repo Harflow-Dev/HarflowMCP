@@ -183,7 +183,7 @@ def _inspection(value, path):
 
 def _question(value, path):
     _shape(value, {**_fields("question_id question origin_task_id status decision_id answer_delivery_state raw_output answer reply_task_id session_mode", counters="decision_attempts inspection_count on_demand_count", numbers="created_at delivered_at answered_at", arrays="evidence", objects="progress"),
-                   "inspection_results": _array(_inspection_result), "origin_candidate": _candidate, "child_question": _object({"workflow_run_id": _id, "decision_id": str, "question": str}), "child_answer_delivery": _delivery}, path)
+                   "inspection_results": _array(_inspection_result), "origin_candidate": _candidate, "child_question": _object({"workflow_run_id": _id, "decision_id": str, "question": str, "checkpoint_id": str}), "child_answer_delivery": _delivery}, path)
 
 
 def _dispatch(value, path):
@@ -310,7 +310,7 @@ def _invocation(value, path):
 
 
 def _node_result(value, path):
-    _shape(value, {"status": str, "evidence": list, "result": _object({**_fields("technical_plan checklist_reason verdict question failure_kind reason blocker_category", booleans="no_checklist_needed"), "tasks": _array(_object(_fields("id title description"))), "completed_task_ids": _array(str), "child_outcome": _child_outcome})}, path)
+    _shape(value, {"status": str, "evidence": list, "result": _object({**_fields("technical_plan checklist_reason verdict question failure_kind reason blocker_category", booleans="no_checklist_needed"), "tasks": _array(_object(_fields("id title description"))), "completed_task_ids": _array(str), "question_items": _array(str), "child_outcome": _child_outcome})}, path)
 
 
 def _pending_result(value, path):
@@ -329,7 +329,7 @@ def _activation(value, path):
 
 
 def _decision(value, path):
-    _shape(value, {**_fields("node_id activation_id action decision_id reason question execution_id question_id answer session_mode actor token_id", arrays="requests protocol_warnings selected_connections", counters="transition_sequence", nullable_strings="selected_join_id"), "connections": _array(str), "next": _array(_dispatch), "task_updates": _array(_object(_fields("task_id status reason")))}, path)
+    _shape(value, {**_fields("node_id activation_id action decision_id reason question execution_id question_id answer session_mode actor token_id", arrays="requests protocol_warnings selected_connections", counters="transition_sequence", nullable_strings="selected_join_id"), "question_items": _array(str), "connections": _array(str), "next": _array(_dispatch), "task_updates": _array(_object(_fields("task_id status reason")))}, path)
 
 
 def _point(value, path):
@@ -446,3 +446,7 @@ def encode(run: dict[str, Any]) -> dict[str, Any]:
     run_id = run.get("workflow_run_id") if type(run) is dict else None
     value = qualify_payload(run, run_id)
     return {"product": PRODUCT, "format": RUN_FORMAT, "v": 1, "product_version": PRODUCT_VERSION, "run": value}
+
+OPTIONAL.update(accepted_inputs=_map(_object({"accepted_at": NUMBER, "delivery": _delivery})), input_deliveries=_map(_delivery), input_delivery_receipt=_object({"workflow_run_id": _id, "decision_id": str, "accepted_at": NUMBER, "delivery_id": str}))
+
+OPTIONAL["input_question_items"] = _array(str)

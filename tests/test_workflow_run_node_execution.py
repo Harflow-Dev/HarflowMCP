@@ -366,6 +366,13 @@ async def test_child_question_parent_specialist_bridge_answers_exact_child_check
     else:
         assert run["status"] == "completed", run.get("attention_reason") or run.get("failure_reason")
     child_run = child_runs(store, run)[0]
+    if repeat_question:
+        delivered = [q for a in run["activations"] for q in a.get("questions", []) if q.get("answer_delivery_state") == "delivered" and q.get("child_question")]
+        assert len(delivered) == 1
+        source = delivered[0]["child_question"]
+        assert source["decision_id"] != child_run["input_decision_id"]
+        from harflow_mcp.workflow_child_questions import checkpoint_identity
+        assert source["checkpoint_id"] == checkpoint_identity(child_run)
     assert child_run["orchestrator_mode"] == "child"
     assert not any(entry["node_id"].startswith(child_run["workflow_run_id"] + ":") for entry in run.get("on_demand_nodes", []))
     assert len(run.get("on_demand_calls", [])) == 1
@@ -736,3 +743,38 @@ async def test_direct_child_checkpoint_chooses_default_conversation(two_level, t
     assert child["child_session_selection"]["selected_mode"] == "fresh"
     context = registry.contexts[0]
     assert context["valid_continuations"][0]["workflow"]["workflow_id"] == definition["nodes"][1]["workflow_ref"]["workflow_id"]
+
+
+def test_child_checkpoint_identity_distinguishes_new_worker_questions():
+    from harflow_mcp.workflow_child_questions import checkpoint_identity
+    child = {'input_decision_id': 'first-presentation', 'activations': [{'id': 'worker', 'questions': [{'question_id': 'first-question', 'decision_id': 'first-presentation', 'question': 'Same text'}]}], 'pending': []}
+    first = checkpoint_identity(child)
+    child['input_decision_id'] = 'second-presentation'
+    child['activations'][0]['questions'][0]['decision_id'] = 'second-presentation'
+    assert checkpoint_identity(child) == first
+    child['activations'][0]['questions'].append({'question_id': 'new-question', 'decision_id': 'third-presentation', 'question': 'Same text'})
+    child['input_decision_id'] = 'third-presentation'
+    assert checkpoint_identity(child) != first
+
+
+def test_child_checkpoint_identity_retains_routing_token_across_presentations():
+    from harflow_mcp.workflow_child_questions import checkpoint_identity
+    child = {'input_decision_id': 'first', 'pending': [{'id': 'routing-checkpoint', 'decision_id': 'first'}]}
+    first = checkpoint_identity(child)
+    child['input_decision_id'] = child['pending'][0]['decision_id'] = 'second'
+    assert checkpoint_identity(child) == first
+
+
+def test_child_checkpoint_identity_distinguishes_execution_progress():
+    from harflow_mcp.workflow_child_questions import checkpoint_identity
+    token = {'id': 'routing-checkpoint', 'node_id': 'worker', 'decision_id': 'first', 'execution_complete': False}
+    child = {'input_decision_id': 'first', 'pending': [token]}
+    before = checkpoint_identity(child)
+    token.update(decision_id='second', execution_complete=True, execution_activation_id='execution-one')
+    child['input_decision_id'] = 'second'
+    after = checkpoint_identity(child)
+    assert after != before
+    token['decision_id'] = child['input_decision_id'] = 'third'
+    assert checkpoint_identity(child) == after
+    token['execution_activation_id'] = 'execution-two'
+    assert checkpoint_identity(child) != after

@@ -421,8 +421,12 @@ it never writes HarflowMCP state directly. Definition saves use an expected revi
 concurrent edits. Editing or deleting a definition does not change existing run snapshots.
 
 MCP run start/status/wait/control responses use `response_version: 1` compact projections,
-with a 24 KiB target: identity, status, progress, interaction ownership, actionable question
-previews and recent decision errors. They omit the graph, assignments and full result history.
+with a 24 KiB informational target: identity, status, progress, interaction ownership and
+recent decision errors. Actionable questions and pending input/attention lists are exempt from
+that target: status, wait and resume replies preserve every complete question and its
+`input_question_items`, with `input_question_truncated: false`. They omit the graph,
+assignments and full result history. A question that still has a truncation marker from an
+older engine must be read completely through the `question` detail view before answering.
 `list_workflow_runs(offset=0, limit=10)` returns `runs` and `next_offset`; use the latter to
 continue listing. CLI run snapshots remain complete for the Monitor.
 
@@ -585,8 +589,22 @@ run records and immutable results. Full child results remain available through s
 inspection; bounded previews carry retrieval references and truncation information.
 
 Child questions are forwarded to the original caller with their exact decision identity and
-source. Concurrent questions are served in creation order. Answer the root's current decision ID;
-its answer goes to that source checkpoint without repeating completed work or granting attempts.
+source. Status and wait expose all verified active descendant questions in `pending_inputs`,
+with source run/name, node/title, path, full question, structured `question_items`, decision ID,
+waiting timestamp/duration and optional-review consent availability. `pending_attention` lists
+waiting attention checkpoints; the corresponding count fields describe both lists. The root
+reports input or attention while any descendant is waiting and names those runs in its reason.
+Answer any pending decision ID through the root; siblings can be answered in either order or
+concurrently, regardless of the root's own scheduling state. Its answer goes to that source
+checkpoint without repeating completed work or granting attempts. Scheduling remains suspended
+until the tree's caller questions are answered. Singular input fields retain a representative
+question for existing clients. Wait refreshes descendants even when the root record is unchanged.
+An accepted forwarded answer includes `input_delivery_receipt` with `workflow_run_id`,
+`decision_id`, `accepted_at` and `delivery_id`, confirmed against durable child acceptance.
+If delivery fails, retry the identical answer and grants; a changed payload is refused.
+A genuinely new question at the same checkpoint receives a fresh decision ID. If a child re-asks
+after an automatic parent answer, the stable underlying checkpoint stops repeated automatic
+answers and requests caller guidance; rotating the question ID does not reset that guard.
 Public child controls redirect callers to the root. Explicit attempt grants apply to the attention
 source only. A child invocation timeout excludes idle suspension for caller input. Cancellation
 and timeout follow persisted child invocation links and require settlement before redispatch.
@@ -1099,6 +1117,9 @@ Resume of `needs_input` includes the exact published `input_decision_id` as `dec
 `--decision-id`) and the answer in `instructions`, preventing stale answers from being applied to a
 later question. Monitor CLI controls also include `--monitor`. The caller's original request
 remains the workflow prompt; answer prompts are stored separately for their individual task attempts.
+Orchestrator `needs_input` decisions may include `question_items`, an array of complete nonempty
+choice or clarification strings alongside the full `question` prose. Include these items when
+asking several questions or offering choices; they remain separate from a long preamble.
 
 If a supervisor encounters an exception while cancelling, HarflowMCP makes a bounded attempt to
 settle its active dispatches, then records `needs_attention` with the cancellation error. It does

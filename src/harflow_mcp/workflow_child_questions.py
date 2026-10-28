@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import time
 import uuid
 from typing import Any
@@ -45,11 +46,27 @@ def protected_input(storage: Any, child: dict[str, Any]) -> bool:
             return True
 
 
+
+def checkpoint_identity(child: dict[str, Any]) -> str | None:
+    """Identify a live local checkpoint without presentation IDs or text matching."""
+    decision_id = child.get("input_decision_id")
+    if not decision_id:
+        return None
+    for activation in child.get("activations", []):
+        for question in activation.get("questions", []):
+            if question.get("decision_id") == decision_id and question.get("question_id"):
+                return "question:" + activation["id"] + ":" + question["question_id"]
+    for token in child.get("pending", []):
+        if token.get("decision_id") == decision_id and token.get("id"):
+            return "token:" + json.dumps([token["id"], token.get("node_id"), token.get("execution_complete", False), token.get("execution_activation_id")], separators=(",", ":"))
+    return None
+
 def prepare_question(supervisor: Any, node: dict[str, Any], token: dict[str, Any], activation_id: str, child: dict[str, Any]) -> str:
     """Bind the parent question once to the child's exact immutable input ID."""
     from .workflows import WorkflowError
     identifier = child["input_decision_id"]
     question_id = uuid.uuid4().hex
+    checkpoint_id = checkpoint_identity(child)
     def record(run: dict[str, Any]) -> None:
         nonlocal question_id
         activation = next(a for a in run["activations"] if a["id"] == activation_id)
@@ -59,7 +76,7 @@ def prepare_question(supervisor: Any, node: dict[str, Any], token: dict[str, Any
                 raise WorkflowError("Child question text changed without changing its input identity")
             question_id = existing["question_id"]
             return
-        question = {"question_id": question_id, "question": child["input_question"], "context": {"workflow_run_id": child["workflow_run_id"], "name": child.get("name", ""), "decision_id": identifier}, "progress": {}, "evidence": [], "origin_task_id": "child:" + child["workflow_run_id"], "origin_candidate": {}, "status": "waiting", "decision_id": uuid.uuid4().hex, "decision_attempts": 0, "inspection_count": 0, "answer_delivery_state": "waiting", "created_at": time.time(), "child_question": {"workflow_run_id": child["workflow_run_id"], "decision_id": identifier, "question": child["input_question"]}}
+        question = {"question_id": question_id, "question": child["input_question"], "context": {"workflow_run_id": child["workflow_run_id"], "name": child.get("name", ""), "decision_id": identifier}, "progress": {}, "evidence": [], "origin_task_id": "child:" + child["workflow_run_id"], "origin_candidate": {}, "status": "waiting", "decision_id": uuid.uuid4().hex, "decision_attempts": 0, "inspection_count": 0, "answer_delivery_state": "waiting", "created_at": time.time(), "child_question": {"workflow_run_id": child["workflow_run_id"], "decision_id": identifier, "question": child["input_question"], **({"checkpoint_id": checkpoint_id} if checkpoint_id else {})}}
         activation.setdefault("questions", []).append(question)
         activation["pending_question_id"] = question_id
         activation.setdefault("assignment_prompt", (activation.get("invocation") or {}).get("assignment", node.get("instructions", "")))
@@ -115,6 +132,21 @@ async def handle(supervisor: Any, node: dict[str, Any], token: dict[str, Any], a
     from .workflow_clarification import answer_question, question_record
     if child.get("orchestrator_mode") != "child" or not catalog(supervisor.store, supervisor.run()) or protected_input(supervisor.store, child):
         return "forwarded"
+    checkpoint_id = checkpoint_identity(child)
+    activation = next(a for a in supervisor.run()["activations"] if a["id"] == activation_id)
+    if checkpoint_id and any(
+        q.get("status") == "answered" and q.get("answer_delivery_state") == "delivered"
+        and (q.get("child_question") or {}).get("workflow_run_id") == child["workflow_run_id"]
+        and (q.get("child_question") or {}).get("checkpoint_id") == checkpoint_id
+        for q in activation.get("questions", [])
+    ):
+        supervisor.attention(
+            "Child workflow " + child["workflow_run_id"]
+            + " requested input again at an already answered checkpoint with current decision "
+            + child["input_decision_id"]
+            + "; caller guidance is required. The prior answer receipt is preserved."
+        )
+        return "suspended"
     question_id = prepare_question(supervisor, node, token, activation_id, child)
     question = question_record(supervisor.run(), activation_id, question_id)
     if question.get("status") == "answered" and question.get("answer_delivery_state") == "delivered":

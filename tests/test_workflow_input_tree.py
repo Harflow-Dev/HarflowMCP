@@ -56,10 +56,10 @@ def test_input_arbitration_never_reads_unrelated_retained_history(store, tmp_pat
     assert published['input_decision_id'] == 'first'
     assert published['input_source']['path'] == [root['workflow_run_id'], first['workflow_run_id']]
     assert set(reads) == {root['workflow_run_id'], first['workflow_run_id'], second['workflow_run_id']}
-    # An already displayed question is immutable and needs only its root read.
+    # An already displayed question remains stable while all siblings are verified.
     reads.clear()
     inv.publish_input(store, second)
-    assert reads == [root['workflow_run_id']]
+    assert set(reads) == {root['workflow_run_id'], first['workflow_run_id'], second['workflow_run_id']}
     store.control(root['workflow_run_id'], 'resume', 'first answer', decision_id='first')
     inv.publish_input(store, original(second['workflow_run_id']))
     assert original(root['workflow_run_id'])['input_decision_id'] == 'second'
@@ -259,3 +259,102 @@ def test_input_arbitration_budget_failure_is_recoverable_and_never_selects_parti
     # The same invocation reservation remains available for explicit retry.
     assert [a['id'] for a in actual['activations']] == [a['id'] for a in activations]
     assert used and max(used) <= 8 * 1024 * 1024
+
+
+def test_all_sibling_questions_answer_in_reverse_order(store, tmp_path, monkeypatch):
+    from harflow_mcp.workflow_inputs import project
+    root = seed_parent(store, tmp_path, 'parent', stage='waiting')
+    first = question(store, root, root['activations'][0], created=1, decision='first')
+    second_activation = copy.deepcopy(root['activations'][0])
+    second_activation['id'] = uuid.uuid4().hex
+    second_activation['invocation']['child_workflow_run_id'] = uuid.uuid4().hex
+    store.update_run(root['workflow_run_id'], lambda r: r['activations'].append(second_activation), 'fixture')
+    second = question(store, root, second_activation, created=2, decision='second')
+    inv.publish_input(store, first)
+    monkeypatch.setattr(workflows, '_launch', lambda *args: None)
+    assert {x['decision_id'] for x in project(store, root)['pending_inputs']} == {'first', 'second'}
+    result = store.control(root['workflow_run_id'], 'resume', 'second answer', decision_id='second')
+    assert result['input_decision_id'] == 'first'
+    assert result['input_delivery_receipt']['decision_id'] == 'second'
+    accepted = result['input_delivery_receipt']['accepted_at']
+    replay = store.control(root['workflow_run_id'], 'resume', 'second answer', decision_id='second')
+    assert replay['input_delivery_receipt']['accepted_at'] == accepted
+    assert project(store, result)['pending_input_count'] == 1
+    result = store.control(root['workflow_run_id'], 'resume', 'first answer', decision_id='first')
+    assert project(store, result)['pending_input_count'] == 0
+    assert store.get_run(second['workflow_run_id'])['instructions'] == 'second answer'
+
+
+def test_child_noop_does_not_accept_or_clear_root_question(store, tmp_path, monkeypatch):
+    root = seed_parent(store, tmp_path, 'parent', stage='waiting')
+    child = question(store, root, root['activations'][0], decision='first')
+    inv.publish_input(store, child)
+    original = store.control
+    def control(identifier, *args, **kwargs):
+        if identifier == child['workflow_run_id']:
+            return store.get_run(identifier)
+        return original(identifier, *args, **kwargs)
+    monkeypatch.setattr(store, 'control', control)
+    with pytest.raises(workflows.WorkflowError, match='durably accept'):
+        store.control(root['workflow_run_id'], 'resume', 'answer', decision_id='first')
+    assert store.get_run(root['workflow_run_id'])['input_decision_id'] == 'first'
+
+
+def test_concurrent_sibling_answers_keep_durable_receipts(store, tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from harflow_mcp.workflow_inputs import project
+    root = seed_parent(store, tmp_path, 'parent', stage='waiting')
+    children = [question(store, root, root['activations'][0], decision='one')]
+    for decision in ('two', 'three'):
+        activation = copy.deepcopy(root['activations'][0])
+        activation['id'] = uuid.uuid4().hex
+        activation['invocation']['child_workflow_run_id'] = uuid.uuid4().hex
+        store.update_run(root['workflow_run_id'], lambda r, a=activation: r['activations'].append(a), 'fixture')
+        children.append(question(store, root, activation, decision=decision))
+    inv.publish_input(store, children[0])
+    monkeypatch.setattr(workflows, '_launch', lambda *args: None)
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        results = list(pool.map(lambda child: store.control(root['workflow_run_id'], 'resume', 'answer '+child['input_decision_id'], decision_id=child['input_decision_id']), children))
+    assert project(store, store.get_run(root['workflow_run_id']))['pending_input_count'] == 0
+    final = store.get_run(root['workflow_run_id'])
+    assert set(final['accepted_inputs']) == {'one', 'two', 'three'}
+    assert 'input_decision_id' not in final
+    for child in children:
+        accepted = store.get_run(child['workflow_run_id'])
+        assert child['input_decision_id'] in accepted['accepted_inputs']
+
+
+def test_answering_descendant_preserves_roots_own_question(store, tmp_path, monkeypatch):
+    from harflow_mcp.workflow_inputs import project
+    root = seed_parent(store, tmp_path, 'parent', stage='waiting')
+    child = question(store, root, root['activations'][0], decision='child-question')
+    store.update_run(root['workflow_run_id'], lambda r: r.update(status='needs_input', input_decision_id='root-question', input_question='Root question'), 'fixture')
+    monkeypatch.setattr(workflows, '_launch', lambda *args: None)
+    assert project(store, root)['pending_input_count'] == 2
+    result = store.control(root['workflow_run_id'], 'resume', 'child answer', decision_id='child-question')
+    assert result['input_decision_id'] == 'root-question'
+    assert result['input_question'] == 'Root question'
+    assert project(store, result)['pending_input_count'] == 1
+
+
+@pytest.mark.parametrize('field,value', [('accepted_inputs', {'q': {'accepted_at': 'bad'}}), ('input_deliveries', {'q': {'id': 9}}), ('input_delivery_receipt', {'accepted_at': 'bad'}), ('input_question_items', [1])])
+def test_input_ledger_known_fields_are_qualified(store, tmp_path, field, value):
+    root = seed_parent(store, tmp_path, 'parent', stage='waiting')
+    root[field] = value
+    with pytest.raises(workflow_run_documents.WorkflowRunDocumentError):
+        workflow_run_documents.encode(root)
+
+
+def test_old_delivery_replays_after_source_accepts_new_decision(store, tmp_path, monkeypatch):
+    root = seed_parent(store, tmp_path, 'parent', stage='waiting')
+    child = question(store, root, root['activations'][0], decision='old')
+    inv.publish_input(store, child)
+    monkeypatch.setattr(workflows, '_launch', lambda *args: None)
+    first = store.control(root['workflow_run_id'], 'resume', 'old answer', decision_id='old')
+    accepted_at = first['input_delivery_receipt']['accepted_at']
+    store.update_run(child['workflow_run_id'], lambda r: r.update(status='needs_input', input_decision_id='new', input_question='New question'), 'fixture')
+    inv.publish_input(store, store.get_run(child['workflow_run_id']))
+    store.control(root['workflow_run_id'], 'resume', 'new answer', decision_id='new')
+    replay = store.control(root['workflow_run_id'], 'resume', 'old answer', decision_id='old')
+    assert replay['input_delivery_receipt']['accepted_at'] == accepted_at
+    assert store.get_run(child['workflow_run_id'])['instructions'] == 'new answer'

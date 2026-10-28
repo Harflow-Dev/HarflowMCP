@@ -645,7 +645,7 @@ def publish_input(store: Any, source: dict[str, Any]) -> None:
         return store.get_run(identifier, metadata_byte_limit=4 * 1024 * 1024, metadata_budget=budget, refresh_atomic=True)
     def unavailable(diagnostic: dict[str, Any] | None = None) -> None:
         def suspend(r: dict[str, Any]) -> None:
-            if r.get('status') not in _w().TERMINAL and r.get('status') != 'needs_input':
+            if r.get('status') not in _w().TERMINAL and r.get('status') not in {'needs_input', 'cancelling'}:
                 r.update(status='needs_attention', attention_reason='Workflow input tree could not be completely verified within bounded metadata arbitration; inspect its known runs directly before retrying')
         store.update_run(root_id, suspend, 'child_input_arbitration_unavailable',
                          {'diagnostic': diagnostic} if diagnostic is not None else None)
@@ -655,7 +655,7 @@ def publish_input(store: Any, source: dict[str, Any]) -> None:
         raise _w().WorkflowError('Workflow input ancestry exceeds bounded metadata arbitration') from None
     except (OSError, ValueError, KeyError):
         return
-    if root.get("status") in _w().TERMINAL or root.get("status") == "needs_input" and root.get("input_decision_id"):
+    if root.get("status") in _w().TERMINAL or root.get("status") == "cancelling":
         return
     records = {root_id: root}
     # Establish the publishing source's exact ownership before any root mutation.
@@ -710,7 +710,7 @@ def publish_input(store: Any, source: dict[str, Any]) -> None:
                     continue
                 paths[child_id] = [*path, child_id]
                 stack.append(child_id)
-                if child.get("status") == "needs_input" and child.get("input_decision_id") and child.get("input_question"):
+                if child.get("status") == "needs_input" and child.get("input_decision_id") and child.get("input_question") and child["input_decision_id"] not in child.get("accepted_inputs", {}):
                     waiting.append(child)
             except ReadLimit:
                 exhausted = True
@@ -734,14 +734,16 @@ def publish_input(store: Any, source: dict[str, Any]) -> None:
         return
     path = paths[source["workflow_run_id"]]
     def forward(r: dict[str, Any]) -> None:
-        if r["status"] in _w().TERMINAL:
+        if r["status"] in _w().TERMINAL or r["status"] == "cancelling":
             return
         # A displayed question is immutable until its exact answer is accepted.
         # Other descendants remain suspended and will publish on re-entry.
         if r.get("status") == "needs_input" and r.get("input_decision_id"):
             return
+        if decision_id in r.get("accepted_inputs", {}):
+            return
         r["optional_review_skip_available"] = source.get("optional_review_skip_available") is True
-        r.update(status="needs_input", input_question=question, input_decision_id=decision_id, attention_reason="A workflow node needs caller input", input_source={"workflow_run_id": source["workflow_run_id"], "workflow_name": source.get("name", ""), "path": path})
+        r.update(status="needs_input", input_question=question, input_question_items=copy.deepcopy(source.get("input_question_items", [])), input_decision_id=decision_id, attention_reason="A workflow node needs caller input", input_source={"workflow_run_id": source["workflow_run_id"], "workflow_name": source.get("name", ""), "path": path})
     store.update_run(root_id, forward, "child_input_forwarded", {"source": source["workflow_run_id"], "input_decision_id": decision_id})
 
 

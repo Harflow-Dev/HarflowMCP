@@ -53,7 +53,7 @@ async def bounded_caller(directory: Path):
 
 def managed_run_summary(run: dict[str, Any]) -> dict[str, Any]:
     """Expose current routing state; goal history remains in paged detail reads."""
-    keys = ("workflow_run_id", "name", "kind", "status", "goal", "goal_revision", "goal_assessment", "goal_replanning_required", "parent_goal", "definition", "revision", "prompt", "execution_contract", "tasks", "checklist_disposition", "decisions", "transitions", "settling", "input_question", "input_decision_id", "interaction_owner", "reason", "instructions", "created_at", "updated_at", "on_demand_nodes", "on_demand_calls", "on_demand_state", "approval_summary")
+    keys = ("workflow_run_id", "name", "kind", "status", "goal", "goal_revision", "goal_assessment", "goal_replanning_required", "parent_goal", "definition", "revision", "prompt", "execution_contract", "tasks", "checklist_disposition", "decisions", "transitions", "settling", "input_question", "input_decision_id", "interaction_owner", "reason", "instructions", "created_at", "updated_at", "on_demand_nodes", "on_demand_calls", "on_demand_state", "approval_summary", "input_question_items", "pending_inputs", "pending_attention", "pending_input_count", "pending_attention_count", "input_delivery_receipt", "attention_reason", "input_source")
     summary = {key: run[key] for key in keys if key in run}
     if isinstance(run.get("technical_plan"), str):
         summary.update(technical_plan=run["technical_plan"][:16000], technical_plan_truncated=len(run["technical_plan"]) > 16000, technical_plan_execution_id=run.get("technical_plan_execution_id"))
@@ -227,4 +227,19 @@ def on_demand_projection(storage: Any, run: dict[str, Any]) -> dict[str, Any]:
     from .workflow_on_demand import projection
     from .approval_runtime import workflow_summary
     view = {} if run.get("kind") == "builder" else projection(storage, run)
-    return {**run, **view, "approval_summary": workflow_summary(storage.root / "tasks", run["workflow_run_id"])}
+    result = {**run, **view, "approval_summary": workflow_summary(storage.root / "tasks", run["workflow_run_id"])}
+    if run.get("dependency_tree") or any(a.get("invocation") for a in run.get("activations", [])):
+        from .workflow_inputs import project
+        waiting = project(storage, run)
+        result.update(waiting)
+        if run.get("status") not in {"completed", "failed", "cancelled", "cancelling"}:
+            inputs, attention = waiting["pending_inputs"], waiting["pending_attention"]
+            if inputs:
+                first = inputs[0]
+                result.update(status="needs_input", input_question=first["question"], input_question_items=first["question_items"], input_decision_id=first["decision_id"], optional_review_skip_available=first["optional_review_skip_available"], input_source={key: first[key] for key in ("workflow_run_id", "workflow_name", "path")})
+            elif attention and run.get("status") == "running":
+                result["status"] = "needs_attention"
+            if inputs or attention:
+                names = [f"{item['workflow_name']} ({item['node_title']})" for item in [*inputs, *attention]]
+                result["attention_reason"] = f"{len(names)} workflow runs need input or attention: " + ", ".join(names)
+    return result

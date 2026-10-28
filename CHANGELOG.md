@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Expose all pending descendant workflow questions and attention checkpoints, accept independent answers through the root, confirm durable child delivery, and give re-asked questions fresh identities (#70, #71, #74). Preserve complete caller questions and structured clarification items in status and wait replies (#66).
+
 - Clarify observed commit ranges, including legacy read projections: imported history is newly reachable, never proof of task-created commits or authorship (#60). Compact status and notifications retain bounded Git endpoint provenance and disclose truncated commit lists.
 
 - Fix waits repeatedly returning approval attention after a decision was recorded but before delivery (#59). Preserve approval summary semantics, keep unanswered and uncertain requests actionable, and avoid claiming a recovered process is gone solely because an approval needs attention.

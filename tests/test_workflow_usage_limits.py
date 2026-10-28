@@ -582,3 +582,30 @@ def test_oversized_iso_reset_is_omitted_from_bounded_projection():
     response = compact(run)
     assert 'reset_at' not in response['usage_limit_recovery']['failure_diagnostic']
     assert len(json.dumps(response).encode()) < BUDGET
+
+
+async def test_limit_after_answer_uses_fresh_question_identity(storage, tmp_path):
+    def policy(context, registry):
+        if len(registry.contexts) == 1:
+            return {'decision_id': context['decision_id'], 'action': 'needs_input',
+                    'reason': 'Caller clarification', 'question': 'Proceed?', 'question_items': ['Original choice']}
+        return default_decision(context, registry)
+    class AfterAnswerLimit(Registry):
+        async def start(self, prompt, repo, **kwargs):
+            task = await super().start(prompt, repo, **kwargs)
+            if self.decode_context(prompt) is not None and len(self.contexts) == 2:
+                task.result.update(copy.deepcopy(LIMIT))
+            return task
+    registry = AfterAnswerLimit(storage.root, policy)
+    run, _ = await run_flow(storage, tmp_path, definition(), registry, guided=True)
+    first = run['input_decision_id']
+    storage.control(run['workflow_run_id'], 'resume', 'Proceed', decision_id=first)
+    await w.WorkflowSupervisor(registry, storage).execute(run['workflow_run_id'])
+    recovery = storage.get_run(run['workflow_run_id'])
+    assert recovery['status'] == 'needs_input'
+    assert recovery['input_decision_id'] != first
+    assert recovery['orchestrator_usage_recovery']['decision_id'] == recovery['input_decision_id']
+    assert recovery['input_question_items'] != ['Original choice']
+    storage.control(run['workflow_run_id'], 'resume', 'retry_current', decision_id=recovery['input_decision_id'])
+    await w.WorkflowSupervisor(registry, storage).execute(run['workflow_run_id'])
+    assert storage.get_run(run['workflow_run_id'])['status'] == 'completed'

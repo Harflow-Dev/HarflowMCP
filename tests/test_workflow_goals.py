@@ -106,6 +106,13 @@ async def test_completion_assessment(storage, tmp_path, assessment_status, expec
     assert result["goal_assessment"]["status"] == assessment_status
     assert all(c["goal"] == run["goal"] for c in registry.contexts)
     assert any("Goal constraints:" in prompt for prompt, kwargs in registry.calls)
+    if expected == "needs_input":
+        first = result["input_decision_id"]
+        storage.control(run["workflow_run_id"], "resume", instructions="Please reconsider", decision_id=first)
+        await w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"])
+        second = storage.get_run(run["workflow_run_id"])
+        assert second["status"] == "needs_input"
+        assert second["input_decision_id"] != first
 
 
 def test_assessment_requires_issued_evidence():
