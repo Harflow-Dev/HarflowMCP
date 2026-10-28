@@ -1905,3 +1905,31 @@ access. Read `readable_chunks_path` in pages of `read_page_lines` until `chunk_l
 consumed, decode each line as a JSON string, concatenate verbatim, then decode the resulting
 snapshot JSON. Its UTF-8 SHA-256 must equal `file_sha256`. This avoids long-line and tool-output
 truncation and does not require Bash classification or Harflow read tools.
+
+## Pending interactions and caller loss
+
+Root reads, launch responses and waits derive all verified active pending checkpoints
+through nested workflow links. Each question preserves full text, structured choices,
+source path and node identity. Usage-limit recovery details (`kind`, backend, model,
+and resume hint) are matched to the question's decision ID. Unavailable, malformed or
+foreign child links appear as `pending_attention` diagnostics with the known parent,
+child, execution, path and reason; verified siblings remain answerable. Preparing
+child reservations are not published as verified children. Global read budgets and
+ambiguous root identity still refuse the read.
+
+Answer a current question through the root using its exact `decision_id`. Routing
+is exclusive to that verified source. Receipt replay requires the source to remain
+verified; stale or unavailable decisions must be re-read before retrying. An accepted
+answer does not grant extra retries, skip consent or recovery authority implicitly.
+
+A verified human Monitor caller may claim a pending interaction when the original
+caller's qualified process is confirmed gone. Root authority then becomes Monitor
+and the accepted mutation records the handover time, reason, previous owner and
+responder. Descendants inherit that authority; a returning caller cannot answer the
+same question again. Live callers retain authority; missing historical evidence,
+failed process probes, unsupported launcher ancestry and ambiguous managed task or
+session continuations remain unknown and refuse handover. Scheduler loss alone never
+proves caller loss. The optional live-caller sharing mode is not implemented.
+Existing decision, permission, recovery and goal revision safeguards still apply;
+workflow tasks continue to require responses through workflow controls. See the
+[public interaction contract](contracts.md#caller-loss-and-workflow-interaction-handover).

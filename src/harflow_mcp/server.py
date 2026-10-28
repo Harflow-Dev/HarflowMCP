@@ -2714,7 +2714,9 @@ async def get_workflow_status(workflow_run_id: str) -> dict[str, Any]:
     per-execution child invocation status. Public controls on a child id are
     refused with the root run id. Resolved attention reasons are omitted on active runs.
     Workflow approval read failures appear as bounded approval_summary.read_errors,
-    separately from known pending or uncertain approvals.
+    separately from known pending or uncertain approvals. interaction_state reports qualified
+    caller liveness, advisory human Monitor availability and any persisted handover audit.
+    Unknown caller identity never authorizes handover; server death alone is insufficient.
     """
     from .workflow_responses import compact
     return compact(await _workflow_call("status", run_id=workflow_run_id))
@@ -2976,6 +2978,8 @@ def main() -> None:
     if "--help" in sys.argv[1:] or "-h" in sys.argv[1:]:
         print("HarflowMCP stdio server; state root: HARFLOW_STATE_ROOT or HOME/.harflow")
         return
+    from .workflow_interactions import capture_transport_parent
+    capture_transport_parent()
     from .state_layout import InvalidStateRoot, resolve_layout
     try:
         layout = resolve_layout()

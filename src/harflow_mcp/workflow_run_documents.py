@@ -424,6 +424,13 @@ def qualify_payload(value: Any, run_id: str) -> dict[str, Any]:
         if value["workflow_run_id"] != run_id:
             raise ValueError("Workflow run id does not match source id")
         _shape(value, {**CORE, **OPTIONAL}, "run")
+        from .workflow_interactions import validate_caller, validate_handover
+        if "interaction_caller" in value:
+            validate_caller(value["interaction_caller"])
+        if "interaction_handover" in value:
+            validate_handover(value["interaction_handover"])
+            if value.get("interaction_owner") != "monitor" or (value.get("interaction_caller") or {}).get("kind") not in {"external_parent", "managed_task"}:
+                raise ValueError("Handover requires qualified caller evidence and Monitor ownership")
         if "caller_record" in value:
             from .task_documents import qualify_payload as qualify_task_payload
             from .store import TaskRecord

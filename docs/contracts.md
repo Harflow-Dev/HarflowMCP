@@ -644,3 +644,32 @@ use complete digest-bound private temporary files rather than truncated prose. A
 JSONL string-chunk companion supports ordinary paged Read tools in plan mode, with complete
 reconstruction bound to the original file digest. These
 fields are private storage additions; no public event kind or wire requirement changes.
+
+### Caller loss and workflow interaction handover
+
+Workflow status/detail projections add `interaction_state`: `owner` (`caller` or
+`monitor`), `caller_state` (`alive`, `dead`, `unknown`), `monitor_available`, a
+human-readable `reason`, and nullable `handover`. A handover records `timestamp`,
+`reason`, `previous_owner`, `responder`, and `action`. These fields contain no
+process command lines. Full questions remain in `input_question` and
+`pending_inputs`; interaction metadata does not replace their existing fields.
+Availability is advisory; mutation rechecks authority and the current checkpoint.
+
+A verified human `--monitor` responder may take a pending interaction only after
+qualified caller identity confirms process absence or PID reuse. Unknown identity,
+failed probes and missing historical evidence refuse handover. The accepted action
+and root authority/audit are persisted under the tree mutation lock. Descendants
+inherit root authority, and returning callers cannot answer after handover. Existing
+scheduler recovery, permission, decision and goal revision gates still apply.
+
+Admission captures the managed dispatching task's qualified process identity, or
+an external executable client ancestor before detaching. The stdio server and ctl
+process themselves never establish caller loss. Known transparent `uv`, `uvx`,
+`env`, `nohup`, and `setsid` launchers are traversed with bounded, revalidated
+parent links. Shell/script/interpreter launchers and undecidable ancestry remain
+unknown; a client should launch Harflow directly or through a supported transparent
+launcher. Server death alone does not establish client death. Existing runs without
+admission evidence remain caller-owned. No live-caller opt-in is implemented.
+
+`ctl-workflow-interaction-handover.json` is a synthetic public-response fixture
+showing a handed-over root and its audit; it does not certify a real caller loss.

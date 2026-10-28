@@ -93,8 +93,11 @@ async def test_answer_authorizes_only_the_current_suspended_decision(storage, tm
     unrelated = copy.deepcopy(current)
     unrelated.update(id='unrelated-execution', token={'id': 'unrelated-token'})
     storage.update_run(run['workflow_run_id'], lambda r: r['activations'].append(unrelated), 'unrelated_fixture')
-    with pytest.raises(w.WorkflowError, match='current input decision_id'):
+    with pytest.raises(w.WorkflowError, match='Input decision_id .*not currently available from verified source') as error:
         storage.control(run['workflow_run_id'], 'resume', instructions=ANSWER, decision_id='stale')
+    assert "'stale'" in str(error.value)
+    assert run['workflow_run_id'] in str(error.value)
+    assert 'retry' in str(error.value)
     resumed = storage.control(run['workflow_run_id'], 'resume', instructions=ANSWER, decision_id=run['input_decision_id'])
     assert set(resumed['blocker_retry_authorizations']) == {current['id']}
     authorization = resumed['blocker_retry_authorizations'][current['id']]

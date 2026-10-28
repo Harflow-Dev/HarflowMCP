@@ -1,6 +1,7 @@
 """Bounded public workflow projections; durable records remain complete."""
 from __future__ import annotations
 
+import copy
 import base64
 import hashlib
 import json
@@ -46,7 +47,7 @@ def _pending_inputs(rows: list[Any]) -> list[dict[str, Any]]:
         if not isinstance(row, dict):
             continue
         entry = {key: str(row[key])[:200] for key in
-                 ("workflow_run_id", "workflow_name", "node_id", "node_title", "decision_id") if key in row}
+                 ("workflow_run_id", "workflow_name", "node_id", "node_title", "decision_id", "kind", "backend", "model", "resume_hint") if key in row}
         entry["path"] = [str(item)[:100] for item in row.get("path", [])[:16]]
         for key in ("waiting_since", "waiting_seconds", "optional_review_skip_available"):
             if key in row and isinstance(row[key], (str, int, float, bool, type(None))):
@@ -150,6 +151,8 @@ def _activation_resource_waits(run: dict[str, Any]) -> list[dict[str, Any]]:
 def compact(run: dict[str, Any]) -> dict[str, Any]:
     keys = ("workflow_run_id", "name", "revision", "goal_revision", "goal_replanning_required", "can_revise_goal", "goal_revision_reason", "kind", "status", "created_at", "updated_at", "finished_at", "interaction_owner", "settling", "can_cancel_from_monitor", "monitor_cancel_reason", "input_decision_id", "optional_review_skip_available", "execution_contract", "draft_revision", "scheduling_policy", "preview_hash", "pending_input_count", "pending_attention_count")
     result = {key: run[key] for key in keys if key in run and isinstance(run[key], (str, int, float, bool, type(None)))}
+    if "interaction_state" in run:
+        result["interaction_state"] = copy.deepcopy(run["interaction_state"])
     result["finished_at"] = qualified_finished_at(run)
     definition = run.get("definition")
     if run.get("kind") != "builder" and isinstance(definition, dict) and (definition.get("workflow_id") or definition.get("name")):
@@ -173,7 +176,7 @@ def compact(run: dict[str, Any]) -> dict[str, Any]:
         result["pending_attention"] = [
             {key: ([str(item)[:100] for item in row[key][:16]] if key == "path" and isinstance(row[key], list)
                    else str(row[key])[:300]) for key in
-             ("workflow_run_id", "workflow_name", "node_id", "node_title", "path", "status", "reason") if key in row}
+             ("workflow_run_id", "workflow_name", "node_id", "node_title", "path", "status", "reason", "parent_workflow_run_id", "child_workflow_run_id", "execution_id") if key in row}
             | {key: row[key] for key in ("waiting_since", "waiting_seconds") if isinstance(row.get(key), (int, float))}
             for row in run["pending_attention"] if isinstance(row, dict)
         ]

@@ -39,6 +39,10 @@ def no_caller_detected(monkeypatch: pytest.MonkeyPatch):
     (`tests/test_lineage.py`) grab the real function at import time, before this fixture can touch
     it, so they are unaffected.
     """
+    from harflow_mcp import workflow_interactions
+    # CLI entrypoint tests may capture their transport parent. Keep that admission
+    # evidence local to each test, just like the detected task caller below.
+    monkeypatch.setattr(workflow_interactions, "_transport_caller", None)
     monkeypatch.setattr(lineage, "detect_caller", lambda *args, **kwargs: None)
     # The fail-closed variant takeover uses: "positively no caller" by default. Tests of the
     # undecidable cases stub it themselves or restore the real one.

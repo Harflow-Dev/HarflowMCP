@@ -1285,6 +1285,9 @@ def _workflow_text(args: argparse.Namespace, field: str) -> str | None:
 
 def _cmd_workflow(args: argparse.Namespace) -> int:
     action = args.command.removeprefix("workflow-")
+    if action in {"start", "build"}:
+        from .workflow_interactions import capture_transport_parent
+        capture_transport_parent()
     async def invoke() -> Any:
         if getattr(args, 'monitor_view', False) and action in {'list', 'status', 'detail'}:
             from .catalog import Catalog

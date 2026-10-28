@@ -1329,6 +1329,8 @@ class WorkflowStore:
         initialize(run, goal)
         if caller is not None:
             run.update(caller_record=asdict(caller.record), caller_method=caller.method)
+        from .workflow_interactions import admission
+        run["interaction_caller"] = admission(caller)
         run["permission_policy"] = permission_policy
         run["definition_hash"] = hashlib.sha256(json.dumps(definition, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         from .workflow_native import scheduling_policy
@@ -1395,6 +1397,14 @@ class WorkflowStore:
             if observed.get('accepted_inputs', {}).get(decision_id, {}).get('delivery') == _delivery or observed.get("forwarded_delivery_receipt") == _delivery:
                 return observed
 
+        local_input_route = False
+        def local_checkpoint(r: dict[str, Any]) -> bool:
+            return (r.get('status') in {'paused', 'needs_attention', 'needs_input'}
+                    and (r.get('status') == 'needs_input' or any((r.get(key) or {}).get('decision_id') == decision_id for key in ('orchestrator_usage_recovery', 'worker_usage_recovery')))
+                    and r.get('input_decision_id') == decision_id
+                    and (r.get('input_source') or {}).get('workflow_run_id') in (None, run_id)
+                    and decision_id not in r.get('accepted_inputs', {}))
+
         # Root answers select a verified checkpoint independently of root status.
         if action == "resume" and decision_id and not _internal and not observed.get("parent_link"):
             if observed.get('status') in TERMINAL or observed.get('status') == 'cancelling':
@@ -1402,8 +1412,6 @@ class WorkflowStore:
             from .workflow_inputs import project
             tree = project(self, observed)
             target = next((item for item in tree['pending_inputs'] if item['decision_id'] == decision_id), None)
-            if target is None and not observed.get('input_source') and observed.get('input_decision_id') != decision_id and decision_id not in observed.get('input_deliveries', {}):
-                raise WorkflowError('Resuming needs_input requires a current input decision_id')
             prior_delivery = observed.get('input_deliveries', {}).get(decision_id) or observed.get('forwarded_delivery')
             if prior_delivery and prior_delivery.get('payload', {}).get('decision_id') != decision_id:
                 prior_delivery = None
@@ -1413,6 +1421,11 @@ class WorkflowStore:
                 from .workflow_inputs import verified_source
                 if verified_source(self, observed, prior_source['workflow_run_id']):
                     target = dict(prior_source, decision_id=decision_id)
+            # Local recovery checkpoints can be paused or lack display prose.
+            # Route only their exact unaccepted ID; locked control below remains
+            # authoritative for status, recovery consent and attempt grants.
+            if target is None and local_checkpoint(observed):
+                target = {'workflow_run_id': run_id, 'decision_id': decision_id}
             if target and target['workflow_run_id'] != run_id:
                 if not isinstance(instructions, str) or not instructions.strip():
                     raise WorkflowError("Resuming needs_input requires an answer or reason")
@@ -1430,8 +1443,8 @@ class WorkflowStore:
                 def prepare_input(r):
                     if r.get('status') in TERMINAL or r.get('status') == 'cancelling':
                         raise WorkflowError('Workflow is terminal or cancelling')
-                    if r.get('interaction_owner') and interaction_owner is not None and r['interaction_owner'] != interaction_owner:
-                        raise WorkflowError("Workflow interaction belongs to its original caller")
+                    from .workflow_interactions import authorize
+                    authorize(self, r, interaction_owner, 'resume', pending=True)
                     deliveries = r.setdefault('input_deliveries', {})
                     prior = deliveries.get(decision_id) or r.get('forwarded_delivery')
                     if prior and prior.get('payload', {}).get('decision_id') != decision_id:
@@ -1468,8 +1481,11 @@ class WorkflowStore:
                 if not _supervisor_present(result):
                     _launch(self, run_id)
                 return result
-            if target is None and (observed.get('input_source') or {}).get('workflow_run_id') not in (None, run_id):
-                raise WorkflowError('Forwarded input source is not an active verified decision_id')
+            local_input_route = target is not None and target['workflow_run_id'] == run_id
+            if target is None:
+                known = (prior_delivery or {}).get('payload', {}).get('source') or observed.get('input_source') or {}
+                source_label = known.get('workflow_run_id', run_id)
+                raise WorkflowError(f"Input decision_id {decision_id!r} is not currently available from verified source {source_label}; inspect the root and source workflow, then retry the current decision_id or the original answer once its source is available")
 
         if action == "recover" and observed.get("status") in {"starting", "running", "cancelling"}:
             if additional_attempts:
@@ -1536,8 +1552,8 @@ class WorkflowStore:
                 prior_source = self.get_run(previous["payload"]["source_id"], refresh_atomic=True)
                 replace_delivered = prior_source.get("forwarded_delivery_receipt") == previous
             def prepare(r: dict[str, Any]) -> None:
-                if r.get("interaction_owner") and interaction_owner is not None and interaction_owner != r["interaction_owner"]:
-                    raise WorkflowError("Workflow interaction belongs to its original caller")
+                from .workflow_interactions import authorize
+                authorize(self, r, interaction_owner, source_action, pending=True)
                 if r.get("status") != observed.get("status") or r.get("input_decision_id") != observed.get("input_decision_id") or r.get("input_source") != observed.get("input_source") or r.get("attention_source") != observed.get("attention_source"):
                     raise WorkflowError("The forwarded source moved on; re-read the current run")
                 pending = r.get("forwarded_delivery")
@@ -1623,6 +1639,9 @@ class WorkflowStore:
                 self.reconcile_run(run_id)
         control_detail: dict[str, Any] = {"instructions": instructions, "additional_attempts": additional_attempts, "retry_grants": {}, "allow_optional_review_skip": allow_optional_review_skip}
         def change(r: dict[str, Any]) -> None:
+            if local_input_route and not local_checkpoint(r):
+                source_label = (r.get('input_source') or observed.get('input_source') or {}).get('workflow_run_id', run_id)
+                raise WorkflowError(f"Input decision_id {decision_id!r} is not currently available from verified source {source_label}; inspect the root and source workflow, then retry the current decision_id or the original answer once its source is available")
             if _delivery is not None and r.get("forwarded_delivery_receipt") == _delivery:
                 return
             if _ordinary_answer:
@@ -1634,8 +1653,10 @@ class WorkflowStore:
                 allowed, reason = eligibility(self, r)
                 if not allowed:
                     raise WorkflowError(reason)
-            elif r.get("execution_contract") == "delegation" and r.get("interaction_owner") and interaction_owner is not None and interaction_owner != r["interaction_owner"]:
-                raise WorkflowError("Workflow interaction belongs to its original caller")
+            elif r.get("execution_contract") == "delegation":
+                from .workflow_interactions import authorize, authority_root
+                responder = authority_root(self, r).get("interaction_owner", "caller") if _ordinary_answer else interaction_owner
+                authorize(self, r, responder, action)
             if action in {"resume", "recover", "cancel"}:
                 if r.get("supervisor_identity"):
                     from . import identity

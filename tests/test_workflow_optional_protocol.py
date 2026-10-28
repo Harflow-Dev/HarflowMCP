@@ -72,5 +72,5 @@ def test_pause_cannot_erase_an_input_question(storage,tmp_path):
     assert paused['input_decision_id']=='question-id'
     with pytest.raises(w.WorkflowError,match='requires an answer'):
         storage.control(run['workflow_run_id'],'resume')
-    with pytest.raises(w.WorkflowError,match='current input decision_id'):
+    with pytest.raises(w.WorkflowError,match='Input decision_id .*not currently available from verified source'):
         storage.control(run['workflow_run_id'],'resume',instructions='Continue',decision_id='stale')

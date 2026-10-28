@@ -418,6 +418,13 @@
       "required_capabilities": [],
       "valid": true
     },
+    "ctl-workflow-interaction-handover.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.4",
+      "format": "harflow.ctl",
+      "required_capabilities": [],
+      "valid": true
+    },
     "ctl-approval-error-already-answered.json": {
       "encoding": "json",
       "expected_product_version": "0.0.4",
@@ -808,6 +815,7 @@
     "ctl-statistics-page-ready.json": "d0047629ff3fe0999f9c3b6ae69f5975ab2ec5f09bd29e5e4f1222ff022e6e66",
     "ctl-statistics-page-unavailable.json": "935dcf42cc0a91b7f641261ae530ea5cca6915a11152e541c12113ab7200ec8a",
     "ctl-statistics-snapshot-expired.json": "a193e3c0a446a1d8dee4c6147a54cfecb860ba7e3ebcbae56814b18a90d8d006",
+    "ctl-workflow-interaction-handover.json": "d00d3d93eafe1dc008b6232de709ce790bd9201d0c4ec53294915154abd7f80e",
     "ctl-approval-error-already-answered.json": "e68d84b216dee7a0f960405a4ad0f78db6c00ab1167b900ea4215a5a5a4ddac2",
     "ctl-approval-error-caller-undecidable-approval.json": "a05370c49b211008d5284adee7293e0f979c1176d567edc45442b9d5b5df9940",
     "ctl-approval-error-caller-undecidable-global.json": "d14d15cec909851972b2478a032cb7033fbf5c612a4d7c7fb6ba6a0dc32b3930",

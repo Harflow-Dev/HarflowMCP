@@ -53,7 +53,7 @@ async def bounded_caller(directory: Path):
 
 def managed_run_summary(run: dict[str, Any]) -> dict[str, Any]:
     """Expose current routing state; goal history remains in paged detail reads."""
-    keys = ("workflow_run_id", "name", "kind", "status", "goal", "goal_revision", "goal_assessment", "goal_replanning_required", "parent_goal", "definition", "revision", "prompt", "execution_contract", "tasks", "checklist_disposition", "decisions", "transitions", "settling", "input_question", "input_decision_id", "interaction_owner", "reason", "instructions", "created_at", "updated_at", "on_demand_nodes", "on_demand_calls", "on_demand_state", "approval_summary", "input_question_items", "pending_inputs", "pending_attention", "pending_input_count", "pending_attention_count", "input_delivery_receipt", "attention_reason", "input_source")
+    keys = ("workflow_run_id", "name", "kind", "status", "goal", "goal_revision", "goal_assessment", "goal_replanning_required", "parent_goal", "definition", "revision", "prompt", "execution_contract", "tasks", "checklist_disposition", "decisions", "transitions", "settling", "input_question", "input_decision_id", "interaction_owner", "reason", "instructions", "created_at", "updated_at", "on_demand_nodes", "on_demand_calls", "on_demand_state", "approval_summary", "input_question_items", "pending_inputs", "pending_attention", "pending_input_count", "pending_attention_count", "input_delivery_receipt", "attention_reason", "input_source", "interaction_state")
     summary = {key: run[key] for key in keys if key in run}
     if isinstance(run.get("technical_plan"), str):
         summary.update(technical_plan=run["technical_plan"][:16000], technical_plan_truncated=len(run["technical_plan"]) > 16000, technical_plan_execution_id=run.get("technical_plan_execution_id"))
@@ -245,6 +245,14 @@ def on_demand_projection(storage: Any, run: dict[str, Any]) -> dict[str, Any]:
             elif attention and run.get("status") == "running":
                 result["status"] = "needs_attention"
             if inputs or attention:
-                names = [f"{item['workflow_name']} ({item['node_title']})" for item in [*inputs, *attention]]
+                names = []
+                for item in [*inputs, *attention]:
+                    label = f"{item['workflow_name']} ({item['node_title']})"
+                    if item.get('kind') == 'usage_limit':
+                        candidate = " / ".join(str(item[key]) for key in ('backend', 'model') if item.get(key))
+                        label += " [usage_limit" + (f": {candidate}" if candidate else "") + "]"
+                    names.append(label)
                 result["attention_reason"] = f"{len(names)} workflow runs need input or attention: " + ", ".join(names)
+    from .workflow_interactions import projection as interaction_projection
+    result.update(interaction_projection(storage, result))
     return result

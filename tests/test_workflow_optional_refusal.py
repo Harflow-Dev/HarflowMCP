@@ -94,7 +94,7 @@ async def test_answer_cannot_offer_skip_without_settled_optional_review_scope(st
 
 async def test_skip_requires_current_answer_and_exclusive_structural_decision(storage, tmp_path):
     run, _ = await suspended(storage, tmp_path)
-    with pytest.raises(w.WorkflowError, match='current input decision_id'):
+    with pytest.raises(w.WorkflowError, match='Input decision_id .*not currently available from verified source'):
         storage.control(run['workflow_run_id'], 'resume', instructions=ANSWER, decision_id='stale')
     token = next(t for t in run['pending'] if t['node_id'] == 'right')
     node = next(n for n in run['definition']['nodes'] if n['id'] == 'right')

@@ -75,12 +75,13 @@ def request(storage: Any, root: dict[str, Any], reason: str, interaction_owner: 
         raise WorkflowError("Interrupted scheduler recovery requires a delegation root")
     if not isinstance(reason, str) or not reason.strip():
         raise WorkflowError("Recovery requires a nonempty reason")
-    if root.get("interaction_owner") and interaction_owner is not None and interaction_owner != root["interaction_owner"]:
-        raise WorkflowError("Workflow interaction belongs to its original caller")
     from . import identity
     owner = root.get("supervisor_identity")
     verdict = identity.identity_check(owner) if owner else "undecidable"
     if verdict == "alive" and root.get("scheduler_recovery"):
+        from .workflow_interactions import authorize
+        import copy
+        authorize(storage, copy.deepcopy(root), interaction_owner, "recover", pending=True)
         return root
     if verdict != "dead":
         raise WorkflowError("Workflow scheduler is live or uncertain; confirmed owner death is required for recovery")
@@ -90,6 +91,8 @@ def request(storage: Any, root: dict[str, Any], reason: str, interaction_owner: 
             raise WorkflowError("Workflow scheduler changed before recovery")
         if run.get("status") != root.get("status") or run.get("sequence") != root.get("sequence"):
             raise WorkflowError("Workflow changed before recovery; read it again")
+        from .workflow_interactions import authorize
+        authorize(storage, run, interaction_owner, "recover", pending=True)
         run["scheduler_recovery"] = {"reason": reason, "requested_at": time.time()}
     result = storage.update_run(root["workflow_run_id"], reserve, "scheduler_recovery_requested")
     _launch(storage, root["workflow_run_id"])

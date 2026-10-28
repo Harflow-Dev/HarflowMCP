@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Keep verified nested questions visible and answerable when sibling links are unavailable or preparing, retain usage-limit source details, and report decision-specific retry guidance instead of root status errors (#76, #77).
+- Allow a verified human Monitor responder to claim pending workflow interactions after qualified caller loss, with durable root handover audit and fail-closed unknown ownership (#69).
+
 - Publish task-identifiable review reports and workflow plans without widening read-only permissions; allow ordinary project `.claude/plans` files through caller approval protection while retaining configuration and symlink protections (#62, #73).
 - Support exact, publish-level Git branch-preparation command grants, including fast-forward-only pulls, with explicit configuration required on existing workflow nodes (#63).
 - Pin complete parent specifications into linked child runs and deliver them to later workers with revision digests and a lossless file fallback (#72).

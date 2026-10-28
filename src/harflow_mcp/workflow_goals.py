@@ -101,8 +101,8 @@ def revise(store: Any, run_id: str, goal: str, expected_revision: int, *, intera
     def change(run: dict[str, Any]) -> None:
         if run.get("kind") != "workflow" or run.get("parent_link"):
             raise WorkflowError("Revise the root workflow goal")
-        if run.get("interaction_owner", "caller") != interaction_owner:
-            raise WorkflowError("Workflow interaction belongs to its original caller")
+        from .workflow_interactions import authorize
+        authorize(store, run, interaction_owner, "revise_goal")
         if run.get("status") not in {"paused", "needs_input"}:
             raise WorkflowError("Goal revision requires a paused or awaiting-input checkpoint")
         if run.get("goal_revision", 0) != expected_revision:

@@ -657,8 +657,6 @@ def publish_input(store: Any, source: dict[str, Any]) -> None:
     from .catalog import Catalog
     from .workflow_references import MAX_WORKFLOW_NESTING_DEPTH
     budget = Catalog(store.runs, '.json', layout=store.state_layout)
-    exhausted = False
-    refusal = None
     def read(identifier: str) -> dict[str, Any]:
         return store.get_run(identifier, metadata_byte_limit=4 * 1024 * 1024, metadata_budget=budget, refresh_atomic=True)
     def unavailable(diagnostic: dict[str, Any] | None = None) -> None:
@@ -671,7 +669,7 @@ def publish_input(store: Any, source: dict[str, Any]) -> None:
         root = read(root_id)
     except ReadLimit:
         raise _w().WorkflowError('Workflow input ancestry exceeds bounded metadata arbitration') from None
-    except (OSError, ValueError, KeyError):
+    except (OSError, ValueError, KeyError, WorkflowRunDocumentError):
         return
     if root.get("status") in _w().TERMINAL or root.get("status") == "cancelling":
         return
@@ -692,7 +690,7 @@ def publish_input(store: Any, source: dict[str, Any]) -> None:
             parent = records.get(parent_id) or read(parent_id)
             records[parent_id] = parent
             activation = next((a for a in parent.get('activations', []) if a.get('id') == child_link.get('execution_id') and (a.get('invocation') or {}).get('child_workflow_run_id') == child_id), None)
-            if activation is None:
+            if activation is None or activation['invocation'].get('stage') == 'preparing':
                 return
             outcome = (activation.get('node_result', {}).get('result') or {}).get('child_outcome') or {}
             if activation.get('status') == 'completed' and activation['invocation'].get('stage') == 'settled' and outcome.get('kind') == 'completed':
@@ -700,57 +698,21 @@ def publish_input(store: Any, source: dict[str, Any]) -> None:
             child_id = parent_id
     except ReadLimit:
         raise _w().WorkflowError('Workflow input ancestry exceeds bounded metadata arbitration') from None
-    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, WorkflowRunDocumentError):
         return
-    paths = {root_id: [root_id]}
-    stack, waiting = [root_id], []
-    while stack:
-        parent_id = stack.pop()
-        parent, path = records[parent_id], paths[parent_id]
-        if len(path) >= MAX_WORKFLOW_NESTING_DEPTH:
-            continue
-        for activation in parent.get("activations", []):
-            invocation = activation.get("invocation")
-            if not invocation:
-                continue
-            outcome = (activation.get('node_result', {}).get('result') or {}).get('child_outcome') or {}
-            if activation.get('status') == 'completed' and invocation.get('stage') == 'settled' and outcome.get('kind') == 'completed':
-                continue
-            try:
-                child_id = invocation["child_workflow_run_id"]
-                child = records.get(child_id) or read(child_id)
-                child_link = child.get("parent_link") or {}
-                if child.get("workflow_run_id") != child_id or child_link.get("workflow_run_id") != parent_id or child_link.get("execution_id") != activation.get("id") or child_link.get("root_workflow_run_id") != root_id:
-                    exhausted = True
-                    break
-                records[child_id] = child
-                if child_id in paths:
-                    continue
-                paths[child_id] = [*path, child_id]
-                stack.append(child_id)
-                if child.get("status") == "needs_input" and child.get("input_decision_id") and child.get("input_question") and child["input_decision_id"] not in child.get("accepted_inputs", {}):
-                    waiting.append(child)
-            except ReadLimit:
-                exhausted = True
-                break
-            except WorkflowRunDocumentError as exc:
-                exhausted = True
-                refusal = exc.as_dict()
-                break
-            except (OSError, ValueError, KeyError, TypeError, AttributeError):
-                exhausted = True
-                break
-        if exhausted:
-            unavailable(refusal)
-            return
-    if source['workflow_run_id'] not in paths or not waiting:
+    from .workflow_inputs import project
+    try:
+        tree = project(store, root, _cached=records, _budget=budget)
+    except (ReadLimit, _w().WorkflowError):
+        unavailable()
         return
-    source = min(waiting, key=lambda r: (r.get("created_at", 0), r["workflow_run_id"]))
-    question = source.get("input_question")
-    decision_id = source.get("input_decision_id")
-    if not question or not decision_id:
+    waiting = tree['pending_inputs']
+    if not waiting:
         return
-    path = paths[source["workflow_run_id"]]
+    selected = min(waiting, key=lambda item: (records[item['workflow_run_id']].get('created_at', 0), item['workflow_run_id']))
+    question, decision_id = selected['question'], selected['decision_id']
+    path = selected['path']
+    source = records[selected['workflow_run_id']]
     def forward(r: dict[str, Any]) -> None:
         if r["status"] in _w().TERMINAL or r["status"] == "cancelling":
             return

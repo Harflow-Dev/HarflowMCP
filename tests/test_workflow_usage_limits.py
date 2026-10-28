@@ -184,7 +184,7 @@ async def test_pause_retains_limit_checkpoint_and_resume_requires_fallback_conse
     assert paused["pending"] == run["pending"]
     with pytest.raises(w.WorkflowError, match="exact offered recovery"):
         storage.control(run["workflow_run_id"], "resume", "continue", decision_id=run["input_decision_id"])
-    with pytest.raises(w.WorkflowError, match="current input decision_id"):
+    with pytest.raises(w.WorkflowError, match="Input decision_id .*not currently available from verified source"):
         storage.control(run["workflow_run_id"], "resume", "fallback", decision_id="stale")
     approved = storage.control(run["workflow_run_id"], "resume", "fallback", decision_id=run["input_decision_id"])
     assert approved["status"] == "running"
@@ -303,7 +303,7 @@ async def test_failed_approved_control_fallback_requires_new_consent(storage, tm
     assert recovery["failure_diagnostic"] == LIMIT["failure_diagnostic"]
     assert [c["candidate"]["model"] for c in recovery["choices"] if c["answer"] != "retry_current"] == ["remaining-fixture"]
     assert recovered["usage_recovery_history"][-1]["selection_failure"]
-    with pytest.raises(w.WorkflowError, match="current input decision_id"):
+    with pytest.raises(w.WorkflowError, match="Input decision_id .*not currently available from verified source"):
         storage.control(run["workflow_run_id"], "resume", "fallback", decision_id=old_decision)
     assert not any(kwargs.get("model") == "remaining-fixture" for _, kwargs in registry.calls)
     registry.start = Registry.start.__get__(registry)
@@ -464,7 +464,7 @@ async def test_paused_control_limit_without_fallback_can_explicitly_retry_curren
     await w.WorkflowSupervisor(registry, storage).execute(run['workflow_run_id'])
     assert len(registry.calls) == before
     assert paused['input_decision_id'] == run['input_decision_id']
-    with pytest.raises(w.WorkflowError, match='current input decision_id'):
+    with pytest.raises(w.WorkflowError, match='Input decision_id .*not currently available from verified source'):
         storage.control(run['workflow_run_id'], 'resume', 'retry_current', decision_id='stale')
     identity = 'orchestrator:' + w._candidate_key(run['orchestrator_usage_recovery']['failed_candidate'])
     storage.update_run(run['workflow_run_id'], lambda r: r['suppressed_candidates'].extend([identity, 'orchestrator:unrelated']), 'test_suppression')
@@ -494,7 +494,7 @@ async def test_retry_current_repeated_limit_reissues_consent_without_auto_launch
     assert [c['answer'] for c in checkpoint['orchestrator_usage_recovery']['choices']] == ['retry_current']
     assert len(registry.calls) == 2
     assert 'orchestrator_recovery_candidate' not in checkpoint
-    with pytest.raises(w.WorkflowError, match='current input decision_id'):
+    with pytest.raises(w.WorkflowError, match='Input decision_id .*not currently available from verified source'):
         storage.control(run['workflow_run_id'], 'resume', 'retry_current', decision_id=run['input_decision_id'])
 
 

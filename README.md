@@ -46,6 +46,15 @@ Live background wait bounds are persisted and configurable; see [task continuati
 
 Use `harflow-ctl version-info --json` to inspect runtime identity and compatibility without initializing state. Engine operations require compatible Harflow state, task metadata, saved workflow definitions, workflow run documents and workflow ownership receipts. Known qualified storage lines migrate conservatively before new-line writes. Use `harflow-ctl state-inspect --json` to inspect an incompatible root without changing it, then explicitly confirm its `state-recover` proposal to retain a sibling backup and create fresh state. `HARFLOW_STATE_ROOT` can also select a separate fresh state directory; see [state ownership and recovery](docs/contracts.md#state-ownership-and-recovery) for compatibility requirements.
 
+Root workflow status and waits retain verified nested questions with their full source
+paths and usage-limit details, even when another child link is unavailable. Answers
+route by the current decision ID; unavailable decisions report specific retry guidance.
+Pending workflow questions, recovery and goal revision can pass to a verified human
+Monitor responder when the original caller's qualified process is confirmed gone.
+Live or unknown callers retain ownership. Caller identity is captured before
+launch detaches; unsupported launcher ancestry and older runs without evidence
+remain unknown. See [the interaction contract](docs/contracts.md#caller-loss-and-workflow-interaction-handover).
+
 - [Getting started](docs/getting-started.md)
 - [Workflows](docs/workflows.md), including acknowledged context sections and bounded instruction inspection
 - [Task continuation](docs/task-continuation.md)
