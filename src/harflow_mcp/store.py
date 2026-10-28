@@ -36,6 +36,7 @@ from . import control, events, identity, supervision, background_idle
 from .backends import Accumulator, classified_denials
 from .backends import get as get_backend
 from .backends import resume_command
+from .group_report_output import has_authority as has_group_report_authority
 from .extra_paths import has_extra_path_authority
 from .stream import parse_line
 from .task_documents import TaskDocumentError, decode as decode_task, encode as encode_task
@@ -1202,7 +1203,7 @@ def snapshot(log_dir: Path, record: TaskRecord, *, _replay_provider=None, respon
         "start_dirty": record.start_dirty,
         "outcome": project_outcome(record.outcome),
         "events_log": str(events.events_path(log_dir, record.task_id)),
-        "resume_command": None if has_extra_path_authority(record) else resume_command(record.backend, record.session_id, record.repo_path),
+        "resume_command": None if has_extra_path_authority(record) or has_group_report_authority(record) else resume_command(record.backend, record.session_id, record.repo_path),
         "extra_writable_paths": record.extra_writable_paths,
         "extra_path_certification": record.extra_path_certification,
         "allowed_commands": list(record.allowed_commands),

@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any
 
 from . import backends, control, identity, lineage, store
+from .group_report_output import has_authority as has_group_report_authority
 from .extra_paths import has_extra_path_authority
 
 log = logging.getLogger(__name__)
@@ -195,6 +196,8 @@ def _open_attempt(
         record = store.read(log_dir, task_id)
         if record is None:
             raise control.TakeoverRefused("unknown_task", f"unknown task_id: {task_id}")
+        if has_group_report_authority(record):
+            raise control.TakeoverRefused("group_report_output_unsupported", "Interactive takeover cannot preserve scoped group report output; use headless resume or continue instead")
         if has_extra_path_authority(record):
             raise control.TakeoverRefused("extra_paths_unsupported", "Interactive takeover cannot preserve scoped extra writable paths")
         try:
@@ -335,6 +338,8 @@ async def take_over(
     await asyncio.to_thread(_refuse_agents, log_dir, environ)
     if record is None:
         raise control.TakeoverRefused("unknown_task", f"unknown task_id: {task_id}")
+    if has_group_report_authority(record):
+        raise control.TakeoverRefused("group_report_output_unsupported", "Interactive takeover cannot preserve scoped group report output; use headless resume or continue instead")
     if has_extra_path_authority(record):
         raise control.TakeoverRefused("extra_paths_unsupported", "Interactive takeover cannot preserve scoped extra writable paths")
     from .workflow_hooks import refuse_takeover
@@ -446,6 +451,8 @@ def attach(
     _refuse_agents(log_dir, environ)
     if record is None:
         raise control.TakeoverRefused("unknown_task", f"unknown task_id: {task_id}")
+    if has_group_report_authority(record):
+        raise control.TakeoverRefused("group_report_output_unsupported", "Interactive takeover cannot preserve scoped group report output; use headless resume or continue instead")
     if has_extra_path_authority(record):
         raise control.TakeoverRefused("extra_paths_unsupported", "Interactive takeover cannot preserve scoped extra writable paths")
     from .workflow_hooks import refuse_takeover

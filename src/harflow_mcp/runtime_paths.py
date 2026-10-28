@@ -66,7 +66,7 @@ def _chain(path: Path) -> tuple[set[Path], Path]:
     return protected, current
 
 
-def assert_runtime_outside_writes(scopes: list[tuple[Path, str]]) -> None:
+def assert_runtime_outside_writes(scopes: list[tuple[Path, str]], *, allow_missing_directories: bool = False) -> None:
     """Reject authority capable of replacing helpers or introducing PATH helpers.
 
     No subprocess is executed. Recompute on each preflight/final check so ambient
@@ -197,7 +197,12 @@ def assert_runtime_outside_writes(scopes: list[tuple[Path, str]]) -> None:
             raise ValueError('writable authority overlaps protected server runtime paths')
         if any(scope.is_relative_to(root) or (kind == 'directory' and root.is_relative_to(scope)) for root in directories):
             raise ValueError('writable authority overlaps protected server runtime namespace')
-        info = scope.stat()
+        try:
+            info = scope.stat()
+        except FileNotFoundError:
+            if allow_missing_directories and kind == "directory" and not scope.is_symlink():
+                continue
+            raise
         if (info.st_dev, info.st_ino) in linked_inodes:
             raise ValueError('writable authority overlaps protected server runtime executable hardlink')
 

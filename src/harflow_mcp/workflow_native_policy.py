@@ -113,6 +113,8 @@ def plan_owner_contracts(definition: dict[str, Any], tree: dict[str, Any] | None
                     reason = "The node harness differs from its owning orchestrator"
                 elif item["candidate"].get("caller_approvals") or candidate.get("caller_approvals"):
                     reason = "Caller approvals require Headless execution; native approval transport is unsupported"
+                elif item["candidate"].get("group_report_output"):
+                    reason = "Group report output requires qualified Headless execution; native children cannot receive this scoped write exception"
                 elif "git_https_rewrite" in item["candidate"]:
                     reason = "Git environment overrides require Headless execution; native execution inherits its host environment"
                 elif item["candidate"].get("allowed_commands"):

@@ -175,3 +175,25 @@ def test_managed_preferences_unreadable_fails_closed(monkeypatch):
     monkeypatch.setattr(ctypes,'CDLL',unavailable)
     with pytest.raises(ValueError,match='cannot be qualified') as exc: _mdm_absence()
     assert 'sensitive' not in str(exc.value)
+
+
+@pytest.mark.parametrize('text', [
+    'sandbox_mode="danger-full-access"', '[sandbox_workspace_write]\nnetwork_access=true',
+    'default_permissions=":workspace"', '[permissions.hostile.filesystem]\n":root"="write"',
+    'profile="hostile"', '[profiles.hostile]\nmodel="anything"',
+    '[agents.default]\nsandbox_mode="workspace-write"',
+])
+def test_group_report_configuration_refuses_policy_selectors(context, text):
+    home, repo, grant = context
+    (home / 'config.toml').write_text(text)
+    with pytest.raises(ValueError, match='legacy sandbox or permission/profile selectors'):
+        qualify_configuration(repo, [(grant, 'directory')], [(grant, 'directory')], group_reports=True)
+
+
+@pytest.mark.parametrize('where', ['global', 'project'])
+def test_group_report_configuration_refuses_rule_directories(context, where):
+    home, repo, grant = context
+    rules = home / 'rules' if where == 'global' else repo / '.codex/rules'
+    rules.mkdir(parents=True)
+    with pytest.raises(ValueError, match='auxiliary'):
+        qualify_configuration(repo, [(grant, 'directory')], [(grant, 'directory')], group_reports=True)

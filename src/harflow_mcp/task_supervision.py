@@ -231,6 +231,10 @@ def invocation_request(invocation):
         request_invocation['control_context'] = invocation.control_context
     if invocation.identity_markers is not None:
         request_invocation['identity_markers'] = list(invocation.identity_markers)
+    for name in ('group_report_directory', 'group_report_identity', 'group_report_runtime', 'group_report_configuration', 'group_report_qualification'):
+        value = getattr(invocation, name, None)
+        if value is not None:
+            request_invocation[name] = value
     request_invocation['env'] = dict(invocation.env)
     request_invocation['initial_input'] = base64.b64encode(invocation.initial_input).decode('ascii') if invocation.initial_input is not None else None
     return request_invocation

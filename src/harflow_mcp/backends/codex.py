@@ -392,6 +392,33 @@ class CodexBackend(ExtraPathsUnsupported):
         configured = environment_path('CODEX_HOME', home)
         return (home, configured, *project_namespaces(repo, ('.codex',)))
 
+    def group_report_output_support(self):
+        from .codex_group_reports import support
+        return support()
+
+    def qualify_group_report_output(self):
+        from .codex_group_reports import qualify
+        return qualify(self)
+
+    def preview_group_report_output(self, invocation, path, freedom, network=None):
+        from .codex_group_reports import preview
+        return preview(self, invocation, path, freedom, network)
+
+    def configure_group_report_output(self, invocation, path, freedom, network=None):
+        from .codex_group_reports import configure
+        return configure(self, invocation, path, freedom, network)
+
+    def assert_group_report_output(self, invocation, path, freedom, network=None):
+        from .codex_group_reports import assert_grant
+        try:
+            assert_grant(self, invocation, path, freedom, network)
+        except (ValueError, OSError, RuntimeError) as exc:
+            raise UnsafeInvocationError(str(exc)) from exc
+
+    def group_report_output_enforcement(self, enforcement, path):
+        from .codex_group_reports import enforcement as report_enforcement
+        return report_enforcement(enforcement, path)
+
     def extra_path_support(self) -> dict[str, Any]:
         return {"supported": RENAMED_EXTRA_PATHS_QUALIFIED, "platforms": ["darwin"], "versions": [EXTRA_PATHS_VERSION],
                 "freedoms": ["write_in_repo", "publish"], "network": [False, True],
@@ -421,7 +448,7 @@ class CodexBackend(ExtraPathsUnsupported):
             raise UnsupportedCapability("extra writable paths require macOS and " + EXTRA_PATHS_VERSION)
         revalidate_paths(grants)
 
-    def _assert_launcher_outside_writes(self, invocation, grants, runtime):
+    def _assert_launcher_outside_writes(self, invocation, grants, runtime, *, prospective=False, readonly_repo=False):
         """Keep every launcher path outside the effective writable authority.
 
         Walk symlinks component by component: resolving only the final target
@@ -464,21 +491,26 @@ class CodexBackend(ExtraPathsUnsupported):
         # case-insensitive filesystem.
         from ..canonical_paths import canonical
         repo = canonical(Path(invocation.argv[invocation.argv.index('-C') + 1]))
-        scopes = [(repo, 'directory')]
+        scopes = [] if readonly_repo else [(repo, 'directory')]
         for scratch in ((invocation.scratch_directory,) if invocation.scratch_directory else ()) + tuple(invocation.shared_scratch_directories):
             scopes.append((canonical(Path(scratch)), 'directory'))
         scopes.extend((Path(grant.path), grant.kind) for grant in grants)
         for scope, kind in scopes:
-            info = scope.stat()
-            same_inode = (info.st_dev, info.st_ino) == (target_info.st_dev, target_info.st_ino)
+            try:
+                info = scope.stat()
+            except FileNotFoundError:
+                if not prospective or kind != "directory" or scope.is_symlink():
+                    raise
+                info = None
+            same_inode = info is not None and (info.st_dev, info.st_ino) == (target_info.st_dev, target_info.st_ino)
             if same_inode or any(scope == path or (kind == 'directory' and scope in path.parents)
                                  for path in protected):
                 raise UnsafeInvocationError("writable authority overlaps the qualified CLI launcher")
 
         from ..runtime_paths import assert_runtime_outside_writes, assert_single_link_writable_files
         try:
-            assert_runtime_outside_writes(scopes)
-            assert_single_link_writable_files(scopes)
+            assert_runtime_outside_writes(scopes, allow_missing_directories=prospective)
+            assert_single_link_writable_files([(path, kind) for path, kind in scopes if not prospective or path.exists()])
         except (ValueError, OSError, RuntimeError) as exc:
             raise UnsafeInvocationError(str(exc)) from exc
 
@@ -762,7 +794,13 @@ class CodexBackend(ExtraPathsUnsupported):
     def assert_safe(
         self, invocation: Invocation, freedom: Freedom, network: bool | None = None
     ) -> None:
-        validate_invocation_env(invocation, {})
+        validate_invocation_env(invocation, {}, allow_group_report_output=True)
+        from .codex_group_reports import FIELDS as report_fields
+        if any(getattr(invocation, field, None) is not None for field in report_fields):
+            if not invocation.group_report_directory:
+                raise UnsafeInvocationError("group report authority has no directory")
+            self.assert_group_report_output(invocation, Path(invocation.group_report_directory), freedom, network)
+            return
         if isinstance(invocation, Invocation) and (invocation.control_pipe or invocation.control_context is not None):
             # The one other exact shape: `codex app-server` for caller approvals (see codex_app_server).
             from . import codex_app_server as app_server

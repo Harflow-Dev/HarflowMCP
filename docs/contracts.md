@@ -802,3 +802,24 @@ Task enforcement may additionally contain `git_environment`, with `github_https_
 observation is not authority and does not change network enforcement. Old records omit it; resumed
 and continued tasks inherit a saved effective rewrite when present. `list_backends` also exposes
 this optional observation using the server default. See [Git transport](git-transport.md).
+
+### Scoped group report output
+
+`group_report_output` is an optional boolean launch/candidate setting. It requests a qualified
+headless read-only repository policy with a write exception for the task's resolved group scratch
+directory. It does not authorize repository writes, task or chain scratch writes, caller-approved
+escapes, native children or interactive takeover. Unsupported backend/version/platform/configuration
+combinations refuse the request explicitly. Omission preserves historical behavior; headless resumes
+and continuations inherit the saved effective setting, while an explicit false disables it.
+
+Optional `enforcement.group_report_output: true` records the effective exception. The existing
+`writable_roots` and `scratch.access.group` disclose its exact scope. Permission previews accept a
+group and disclose `group_report_directory` without allocating it, checking the same configuration
+requirements as launch. Saved workflow candidates requesting the feature use the root run's stable
+`workflow:<root run id>` group, subject to the existing nested caller authority checks.
+
+The group is shared authority, not per-file ownership. Concurrent tasks should use task-identifiable
+report filenames and atomic updates; peers can overwrite a file with the same name. Scope identity
+and qualified configuration are checked before launch, without an atomic pin against independent
+external writers. See [shared scratch](shared-scratch.md) for the supported backend matrix and limits.
+These are optional v1 additions; canonical fixtures and existing consumer gates are unchanged.

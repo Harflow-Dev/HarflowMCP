@@ -1132,3 +1132,31 @@ per-run grant update for its concrete repositories and branches.
 Initial-dispatch and permission-preview checks refuse dirty transition targets before spawning
 an agent, without stashing/resetting. The check is not a lock; later dirty races and Git config,
 hooks or remote helper behavior remain outside this measured grant boundary.
+
+## Codex scoped read-only group reports (0.165.0, macOS, 2026-10-28)
+
+Actual `codex sandbox` and localhost fake Responses API `codex exec` probes established native
+permission profiles on installed codex-cli 0.165.0. A profile extending `:read-only`, with
+`:root = read`, exactly one canonical group-directory `write` rule and network disabled, allowed
+report creation, update and same-group peer reads while denying repository, repository `.codex`
+configuration, unrelated-group, outside, traversal and symlink-escape writes. The repository stayed
+the working directory. Fresh, resumed and new continuation sessions preserved those boundaries;
+a different group's profile could read the original report but could not write its directory.
+No paid model calls were made.
+
+The production configurator is verified by `HARFLOW_CLI_INTEGRATION=1 uv run pytest -q
+tests/test_codex_group_reports_cli.py`: native create/update plus denial checks across fresh,
+resume, continuation, peer and different-group sessions. It also checks that the actual writable
+group path appears in the native model-visible permission instructions. This qualifies macOS
+0.165.0 only. Other versions/platforms have no auto-probe for this feature and refuse explicitly.
+
+Canonical argv removes the legacy `-s read-only` pair and adds `-c default_permissions` plus one
+whole inline TOML `permissions` table; the directory is not added as a workspace root. Dotted
+`-c` keys with quoted filesystem path components were rejected because quotes became part of
+the path. Legacy `sandbox_mode` configuration can override profiles, so the supported execution
+profile conservatively refuses legacy sandbox settings, existing permissions/profile selectors,
+project configuration, rule directories, managed configuration and unsafe execution configuration.
+Runtime/configuration identities and the group-directory identity are checked before execution;
+these observations are not an atomic lock against independent concurrent modification. Ordinary
+read-only tasks keep their previous profile. Scoped output does not authorize caller approvals,
+native children, additional writable paths or a change in repository access.

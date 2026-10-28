@@ -82,9 +82,11 @@ def feature_specs():
     from .qualification import FeatureSpec
     from .qualification_probes import codex_probe
     features = ("caller_approval_tools", "caller_write_tools")
-    return {feature: FeatureSpec(feature, "codex-permissions-v1",
+    specs = {feature: FeatureSpec(feature, "codex-permissions-v1",
                                 seeds={v: dict(row) for v, row in MEASURED.items() if row.get(feature)},
                                 probe=codex_probe, timeout_seconds=180, seed_platforms=("darwin",)) for feature in features}
+    specs["group_report_output"] = FeatureSpec("group_report_output", "codex-group-reports-v1", seeds={"0.165.0": {"group_report_output": True}}, platforms=("darwin",), seed_platforms=("darwin",))
+    return specs
 
 
 def qualify(backend: Any, platform: str | None = None) -> str:

@@ -119,3 +119,9 @@ for observations and sandbox limitations.
 See the [Changelog](CHANGELOG.md) for change history.
 
 Licensed under [Apache-2.0](LICENSE). Git history preserves source authorship; the license notice does not assert ownership of prior contributions.
+
+Read-only reviewers can opt in to a qualified group-scoped report output directory with
+`group_report_output: true` and a nonempty `group` (`--group-report-output` in `harflow-ctl`).
+The initial supported configuration is headless Codex CLI 0.165.0 on macOS with network disabled
+and compatible execution configuration; unsupported combinations fail explicitly. The repository
+stays read-only. See [shared scratch and review reports](docs/shared-scratch.md#read-only-review-reports).

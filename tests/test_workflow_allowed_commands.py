@@ -281,3 +281,48 @@ def test_git_transport_override_round_trip(storage):
         assert agent['fallbacks'][0]['git_https_rewrite'] is True
     with pytest.raises(w.WorkflowError, match='must be a boolean'):
         w._candidate({'backend': 'codex', 'git_https_rewrite': 'false'})
+
+
+def test_group_report_candidate_round_trip_and_freedom(storage):
+    definition = node_graph({'backend': 'codex', 'group_report_output': True,
+        'fallbacks': [{'backend': 'claude', 'group_report_output': False}]})
+    definition['nodes'][1]['freedom'] = 'read_only'
+    saved = storage.save('group-report', definition)
+    for document in (saved, storage.get('group-report')):
+        agent = document['nodes'][1]['agent']
+        assert agent['group_report_output'] is True
+        assert agent['fallbacks'][0]['group_report_output'] is False
+    with pytest.raises(w.WorkflowError, match='requires read_only'):
+        storage.save('bad-report', node_graph({'backend': 'codex', 'group_report_output': True}))
+    with pytest.raises(w.WorkflowError, match='must be a boolean'):
+        w._candidate({'backend': 'codex', 'group_report_output': 'true'})
+    with pytest.raises(w.WorkflowError, match='agent nodes'):
+        w._candidate({'backend': 'codex', 'group_report_output': True}, False)
+
+
+async def test_group_report_dispatch_uses_root_run_owned_group(storage, tmp_path):
+    definition = node_graph({'backend': 'codex', 'group_report_output': True})
+    definition['nodes'][1]['freedom'] = 'read_only'
+    seen = []
+    def output(prompt, kwargs):
+        seen.append(kwargs)
+        return {'status': 'succeeded', 'result': {'summary': 'Reviewed'}, 'evidence': []}
+    run, _ = await run_flow(storage, tmp_path, definition, Registry(storage.root, outputs={'work': output}))
+    assert run['status'] == 'completed'
+    assert seen[0]['group_report_output'] is True
+    assert seen[0]['group'] == 'workflow:' + run['workflow_run_id']
+
+
+def test_group_report_output_forces_headless_in_prefer_subagent_plan(monkeypatch):
+    class Adapter:
+        def eligible(self, parent, candidate, settings):
+            return None
+    monkeypatch.setattr('harflow_mcp.backends.native.adapter', lambda backend: Adapter())
+    monkeypatch.setattr(w.backends, 'version', lambda _: 'certified')
+    definition = node_graph({'backend': 'codex', 'group_report_output': True}, execution_mode='prefer_subagent')
+    definition['nodes'][1]['freedom'] = 'read_only'
+    definition['orchestrator'] = {'backend': 'codex'}
+    plan = plan_owner_contracts(w.validate_definition(definition), freedom='unrestricted', permission_policy='saved_node')
+    outcome = next(iter(next(iter(plan['owners'].values()))['candidates'].values()))['nodes'][0]
+    assert outcome['execution_kind'] == 'headless'
+    assert 'Group report output' in outcome['fallback_reason']

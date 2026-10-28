@@ -128,7 +128,7 @@ def describe(backend: Backend) -> dict[str, Any]:
         "installed": installed,
         "version": version(backend) if installed else None,
         "qualification": qualification_metadata(backend),
-        "capabilities": capability_metadata(backend),
+        "capabilities": {**capability_metadata(backend), "group_report_output": getattr(backend, "group_report_output_support", lambda: {"supported": False, "reason": "No qualified group report output mechanism"})()},
         "freedoms": {
             freedom: backend.enforcement(freedom).as_dict()  # type: ignore[arg-type]
             for freedom in FREEDOMS

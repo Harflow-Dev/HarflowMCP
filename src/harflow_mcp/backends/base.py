@@ -54,6 +54,11 @@ class Invocation:
     # boundary refreshes it before any scratch allocation; final checks only inspect identity.
     extra_path_runtime: tuple[Any, ...] | None = None
     extra_path_configuration: tuple[Any, ...] | None = None
+    group_report_directory: str | None = None
+    group_report_identity: tuple[Any, ...] | None = None
+    group_report_runtime: tuple[Any, ...] | None = None
+    group_report_configuration: tuple[Any, ...] | None = None
+    group_report_qualification: dict[str, Any] | None = None
     scratch_directory: str | None = None
     # The shared chain and group folders granted to this run, in that order, after `scratch_directory`
     # and before any extra writable paths in a backend's `--add-dir` list.
@@ -94,12 +99,16 @@ class Invocation:
         return self.stdin_mode == STDIN_PIPE
 
 
-def validate_invocation_env(invocation: Any, expected: Mapping[str, str]) -> None:
+def validate_invocation_env(invocation: Any, expected: Mapping[str, str], *, allow_group_report_output: bool = False) -> None:
     """Require the invocation's complete environment contribution to match its backend contract."""
     # Leave shape diagnostics to each backend's existing Invocation validation. In particular,
     # preserve the established "expected an Invocation" error for bare argv lists.
     if not isinstance(invocation, Invocation):
         return
+    if not allow_group_report_output and any(getattr(invocation, name, None) is not None for name in (
+            "group_report_directory", "group_report_identity", "group_report_runtime",
+            "group_report_configuration", "group_report_qualification")):
+        raise InvocationEnvironmentError("group report authority is unsupported by this backend invocation")
     env = getattr(invocation, "env", None)
     if not isinstance(env, Mapping) or any(type(key) is not str or type(value) is not str for key, value in env.items()):
         raise InvocationEnvironmentError("invocation env must be a string-to-string mapping")
@@ -340,6 +349,7 @@ class Enforcement:
     """Tools a caller may be asked to approve for this run; empty (and omitted from `as_dict`) without caller approvals."""
     git_environment: dict[str, Any] | None = None
     """Observed process Git configuration; never a network or credential access guarantee."""
+    group_report_output: bool | None = None
     extra_allowed_commands: tuple[str, ...] = ()
     """Dispatch-time command patterns granted to this run; empty (and omitted from `as_dict`) without `allowed_commands`."""
 
@@ -360,6 +370,7 @@ class Enforcement:
             "os_enforced": self.os_enforced,
             "writes_confined": self.writes_confined,
             "writable_roots": list(self.writable_roots),
+            **({"group_report_output": self.group_report_output} if self.group_report_output is not None else {}),
             "commit_push_blocked": self.commit_push_blocked,
             "direct_commit_commands_denied": self.direct_commit_commands_denied,
             "publish_attempts_allowed": self.publish_attempts_allowed,
@@ -497,6 +508,24 @@ class ExtraPathsUnsupported:
         from .qualification import FeatureSpec
         return {name: FeatureSpec(name, "unsupported-v1") for name in
                 ("caller_approval_tools", "caller_write_tools", "path_safety_prompts", "denial_texts", "allowed_commands")}
+
+    def group_report_output_support(self):
+        return {"supported": False, "reason": "This backend has no qualified scoped read-only group report output; return the report in your task result"}
+
+    def qualify_group_report_output(self):
+        raise UnsupportedCapability(self.group_report_output_support()["reason"])
+
+    def preview_group_report_output(self, invocation, path, freedom, network=None):
+        raise UnsupportedCapability(self.group_report_output_support()["reason"])
+
+    def configure_group_report_output(self, invocation, path, freedom, network=None):
+        raise UnsupportedCapability(self.group_report_output_support()["reason"])
+
+    def assert_group_report_output(self, invocation, path, freedom, network=None):
+        raise UnsupportedCapability(self.group_report_output_support()["reason"])
+
+    def group_report_output_enforcement(self, enforcement, path):
+        raise UnsupportedCapability(self.group_report_output_support()["reason"])
 
     def qualification_version(self, observed):
         return observed.strip() if isinstance(observed, str) and observed.strip() else None
@@ -742,6 +771,12 @@ class Backend(Protocol):
     def approval_outcomes(self, event: dict[str, Any]) -> list[tuple[str, str]]: ...
     def approval_frame_kind(self, event: dict[str, Any]) -> str | None: ...
     def approval_request_key(self, event: dict[str, Any]) -> str | None: ...
+    def group_report_output_support(self) -> dict[str, Any]: ...
+    def qualify_group_report_output(self) -> dict[str, Any]: ...
+    def preview_group_report_output(self, invocation: Invocation, path: Path, freedom: Freedom, network: bool | None = None) -> None: ...
+    def configure_group_report_output(self, invocation: Invocation, path: Path, freedom: Freedom, network: bool | None = None) -> Invocation: ...
+    def assert_group_report_output(self, invocation: Invocation, path: Path, freedom: Freedom, network: bool | None = None) -> None: ...
+    def group_report_output_enforcement(self, enforcement: Enforcement, path: Path) -> Enforcement: ...
     def approval_paths(self, decoded: dict[str, Any]) -> list[str]: ...
     def approval_write_tools(self) -> frozenset[str]: ...
     def protected_config_paths(self, repo: Path) -> list[Path]: ...

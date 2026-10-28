@@ -43,7 +43,8 @@ has one of three states in `scratch.access`:
 
 * `writable`: Harflow added an explicit write grant. Claude and Codex get one repeated `--add-dir` per
   folder (task, chain, group, in that order, before any extra writable paths) and the folder is in
-  `enforcement.writable_roots`.
+  `enforcement.writable_roots`. The opt-in read-only group report profile below instead grants
+  only the group directory through a native filesystem permission profile.
 * `no_additional_grant`: no grant was added. The backend does not confine writes (opencode, vibe,
   Antigravity, and Claude when read-only), or approved commands may still write. The folder exists and the
   variable is set; the claim is only that Harflow added nothing.
@@ -52,8 +53,68 @@ has one of three states in `scratch.access`:
   `no_additional_grant` for the shared folders: an approved command may run outside the sandbox, so the sandbox
   alone is not a promise that they stay read-only.
 
-A `read_only` task gets the folders and variables (it may read earlier outputs) and no write grant.
+An ordinary `read_only` task gets the folders and variables (it may read earlier outputs) and no write grant.
+The explicit `group_report_output` option below enables a separately qualified group-only exception.
 Native workflow children get no shared folders. `scratch.notice` states the actual state of each path.
+
+### Read-only review reports
+
+Set `group_report_output: true` together with `freedom: "read_only"` and a nonempty `group`
+to request report output while preserving read-only repository access:
+
+```bash
+harflow-ctl permission-preview --repo /path/to/repo --backend codex --freedom read_only \
+  --group review-batch --group-report-output --json
+harflow-ctl run --repo /path/to/repo --backend codex --freedom read_only \
+  --group review-batch --group-report-output "Review the change and save your findings"
+```
+
+MCP `start_task`, `resume_task`, `continue_task` and `preview_task_permissions` accept the same
+`group_report_output` boolean. Preview also accepts `group`; it computes the concrete canonical
+folder without allocating it and checks the backend's prospective configuration. Preview is an
+observation, not a reservation; launch rechecks identities and configuration after allocation.
+Cached-only qualification discovery reports the `group_report_output` feature; an opted-in
+cached-only preview requires an explicit group rather than discovering caller authority.
+
+The initial supported combination is **Codex CLI 0.165.0 on macOS, headless read-only, network
+disabled**. The native profile extends `:read-only` and adds exactly one write root: the task's own
+canonical group directory. It does not add the repository, task scratch, chain scratch, `/tmp`,
+other groups, or protected configuration to the writable set. `enforcement.group_report_output`
+is true, `enforcement.writable_roots` names only this group folder, and `scratch.access.group` is
+`writable`. The group path is available as `$HARFLOW_GROUP_SCRATCH`; task scratch remains unset.
+A missing group is an error; there is no implicit standalone group.
+
+Qualification is version/platform specific and currently uses measured feature evidence. Launch
+and preview refuse inherited legacy sandbox or permission-profile selectors, project or managed
+execution configuration, hooks, MCP or plugins that the narrow native profile cannot certify.
+The CLI runtime and configuration namespaces must lie outside the writable report root.
+Changing user configuration to satisfy this feature is never automatic. Other versions, platforms,
+Claude plan mode, opencode, Vibe and Antigravity explicitly refuse this option. Omit it to retain
+the existing backend behavior and return findings for engine-generated output. In measured Claude
+2.1.312 probes, scoped Write/Edit allow rules and additional directories did not override plan
+mode's refusal to write ordinary report files.
+
+Caller approvals, native children, workflow builders, extra writable path grants and other freedom
+levels cannot be combined with this option. Interactive takeover is refused, and no ambient
+interactive resume command is offered; use headless resume or continue instead. `None`/omission on
+resume or continuation inherits the saved opt-in; explicit false (`--no-group-report-output`)
+disables it. An opted-in resume/continuation cannot change the saved group. Ordinary tasks remain
+off by default, including grouped read-only tasks.
+
+Saved workflow agent candidates may opt in only at `read_only`. Opted-in nodes share the explicit
+`workflow:<root-workflow-run-id>` group across the root workflow and nested child runs. Root-run
+identity comes from the workflow's existing parent link; no unrelated run or caller group is
+implicitly granted. Native execution requests cannot represent this exception and are refused
+or select headless execution according to the existing execution policy.
+
+Use `report-$HARFLOW_TASK_ID.md` so concurrent reviewers write distinct files. Create a temporary
+file inside the same writable group and atomically replace the final report when updating it.
+Peers in the same authorized group can read earlier reports; a full group-directory grant also
+allows them to update each other's files, so filename ownership and report-content arbitration
+are conventions, not an enforced boundary. Do not place executable configuration in report output.
+Native scope checks deny traversal and symlink writes that resolve outside the authorized group;
+prelaunch identity checks do not atomically pin paths against independently authorized concurrent
+external writers.
 
 ### Nested dispatch
 
@@ -66,7 +127,9 @@ dispatched by it (strict `spawned_by` ancestry, not merely a shared root task). 
 read-only with the real state in `scratch.access`, and a denial persists across hops: a grandchild of a
 task holding a folder read-only is denied too. A `continue_task` takes the source's lineage, but the grant
 is bounded by the actual caller as well: a confined caller continuing another family's task gets that
-folder read-only.
+folder read-only. An explicit `group_report_output` request instead fails if its group
+write grant is outside either the source dispatcher's or the current caller's authority; it is never
+silently downgraded.
 
 ## Lifecycle
 

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add opt-in group report output for qualified read-only Codex tasks, with repository denial, group-only scope, configuration qualification, inherited headless resumes and explicit unsupported-mode refusals (#84).
 - Add bounded Claude `publish` grants for PR creation, editing, comments, reviews and reads, including help; disclose excluded raw API and destructive GitHub operations and backend policy differences (#81).
 - Allow exact branch-preparation grants at `write_in_repo`, retaining publication restrictions and refusing dirty initial transition targets. Verify saved-node preparation with concrete per-run grants; dynamic workflow templates still require per-run configuration (#58, #63).
 - Rewrite GitHub SSH dependency URLs to HTTPS through the shared headless process environment on every backend, with server/task overrides, inherited continuation settings and sanitized authentication observations (#46).

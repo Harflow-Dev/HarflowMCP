@@ -12,12 +12,13 @@ from typing import Any, Sequence
 
 def required_features(*, caller_approvals: bool = False,
                       caller_write_approvals: bool = False,
-                      allowed_commands: Sequence[str] | None = None) -> tuple[str, ...]:
+                      allowed_commands: Sequence[str] | None = None, group_report_output: bool | None = None) -> tuple[str, ...]:
     """The gated permission features requested by one validated launch candidate."""
     return tuple(name for name, enabled in (
         ("caller_approval_tools", caller_approvals),
         ("caller_write_tools", caller_write_approvals),
         ("allowed_commands", bool(allowed_commands)),
+        ("group_report_output", bool(group_report_output)),
     ) if enabled)
 
 
@@ -47,7 +48,7 @@ def discover(candidates: list[tuple[str, dict[str, Any]]]) -> dict[str, Any]:
     for origin, candidate in candidates:
         name = candidate["backend"]
         required = required_features(**{key: candidate.get(key) for key in
-            ("caller_approvals", "caller_write_approvals", "allowed_commands")})
+            ("caller_approvals", "caller_write_approvals", "allowed_commands", "group_report_output")})
         if not required:
             append({"id": origin, "backend": name, "required_features": [], "features": {}})
             continue

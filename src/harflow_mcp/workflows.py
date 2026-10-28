@@ -180,6 +180,8 @@ def check_node_grants(node: dict[str, Any], label: str, freedom: str | None = No
     freedom = freedom or node.get("freedom", ROLE_FREEDOM_DEFAULTS[node.get("role", "task")])
     agent = node.get("agent", {})
     for candidate in [agent, *agent.get("fallbacks", [])]:
+        if candidate.get("group_report_output") and freedom != "read_only":
+            raise WorkflowError(f"Node {label}: group_report_output requires read_only")
         if candidate.get("allowed_commands"):
             try:
                 backends.get(candidate["backend"]).validate_allowed_commands(tuple(candidate["allowed_commands"]), freedom, repo)
@@ -196,7 +198,7 @@ def _candidate(raw: Any, grants: bool = True) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise WorkflowError("Agent must be an object")
     candidate = copy.deepcopy(raw)
-    unknown = set(candidate) - {"backend", "model", "reasoning_effort", "max_turns", "background_idle_seconds", "caller_approvals", "caller_write_approvals", "allowed_commands", "git_https_rewrite", "fallbacks"}
+    unknown = set(candidate) - {"backend", "model", "reasoning_effort", "max_turns", "background_idle_seconds", "caller_approvals", "caller_write_approvals", "allowed_commands", "git_https_rewrite", "group_report_output", "fallbacks"}
     if unknown:
         raise WorkflowError(f"Unknown agent settings: {sorted(unknown)}")
     if not isinstance(candidate.get("fallbacks", []), list):
@@ -212,6 +214,13 @@ def _candidate(raw: Any, grants: bool = True) -> dict[str, Any]:
             raise WorkflowError("caller_write_approvals requires caller_approvals")
         if not candidate["caller_write_approvals"]:
             del candidate["caller_write_approvals"]
+    if "group_report_output" in candidate:
+        if type(candidate["group_report_output"]) is not bool:
+            raise WorkflowError("group_report_output must be a boolean")
+        if candidate["group_report_output"] and not grants:
+            raise WorkflowError("group_report_output belongs to workflow agent nodes, not orchestrators or builders")
+        if candidate["group_report_output"] and (candidate["caller_approvals"] or candidate.get("caller_write_approvals")):
+            raise WorkflowError("group_report_output cannot be combined with caller approvals")
     if "git_https_rewrite" in candidate and type(candidate["git_https_rewrite"]) is not bool:
         raise WorkflowError("git_https_rewrite must be a boolean")
     if "allowed_commands" in candidate:
@@ -3137,13 +3146,13 @@ class WorkflowSupervisor:
                         if use_resume:
                             parent = self.registry.get(previous["task_id"])
                             if parent:
-                                task = await self.registry.resume(parent, dispatch_prompt, max_turns=candidate.get("max_turns"), background_idle_seconds=candidate.get("background_idle_seconds"), network=network, **({"git_https_rewrite": candidate["git_https_rewrite"]} if "git_https_rewrite" in candidate else {}), task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder", **({"require_unchanged_session": True} if strict_child_resume else {}))
+                                task = await self.registry.resume(parent, dispatch_prompt, max_turns=candidate.get("max_turns"), background_idle_seconds=candidate.get("background_idle_seconds"), network=network, **({"git_https_rewrite": candidate["git_https_rewrite"]} if "git_https_rewrite" in candidate else {}), **({"group_report_output": candidate["group_report_output"]} if "group_report_output" in candidate else {}), task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder", **({"require_unchanged_session": True} if strict_child_resume else {}))
                             else:
                                 from .task_supervision import read_task_record
                                 record = read_task_record(self.registry._log_dir, previous["task_id"])
                                 if record is None:
                                     raise SessionUnknownError("Previous resume session is unavailable")
-                                task = await self.registry.resume_record(record, dispatch_prompt, max_turns=candidate.get("max_turns"), background_idle_seconds=candidate.get("background_idle_seconds"), network=network, **({"git_https_rewrite": candidate["git_https_rewrite"]} if "git_https_rewrite" in candidate else {}), task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder", **({"require_unchanged_session": True} if strict_child_resume else {}))
+                                task = await self.registry.resume_record(record, dispatch_prompt, max_turns=candidate.get("max_turns"), background_idle_seconds=candidate.get("background_idle_seconds"), network=network, **({"git_https_rewrite": candidate["git_https_rewrite"]} if "git_https_rewrite" in candidate else {}), **({"group_report_output": candidate["group_report_output"]} if "group_report_output" in candidate else {}), task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder", **({"require_unchanged_session": True} if strict_child_resume else {}))
                         else:
                             if role == "builder":
                                 latest = self.run(refresh_atomic=True)
@@ -3154,7 +3163,7 @@ class WorkflowSupervisor:
                                 context_delivery["total_characters"] = context_delivery["serialized_characters"] = len(dispatch_prompt)
                                 context_delivery["budget_overflow_bytes"] = max(0, len(dispatch_prompt.encode()) - context_delivery["budget_bytes"])
                                 self._task_update(activation["id"], task_id, {"context_delivery": context_delivery})
-                            task = await self.registry.start(dispatch_prompt, Path(run["repo_path"]), backend=backend, freedom=freedom, network=network, **({"git_https_rewrite": candidate["git_https_rewrite"]} if "git_https_rewrite" in candidate else {}), caller_approvals=candidate.get("caller_approvals", False), **({"allowed_commands": list(candidate["allowed_commands"])} if candidate.get("allowed_commands") else {}), **({"caller_write_approvals": True} if candidate.get("caller_write_approvals") else {}), model=candidate.get("model"), reasoning_effort=candidate.get("reasoning_effort"), max_turns=candidate.get("max_turns"), background_idle_seconds=candidate.get("background_idle_seconds"), task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder", title=f"{run['name']} · {node.get('title', key)}")
+                            task = await self.registry.start(dispatch_prompt, Path(run["repo_path"]), **({"group": f"workflow:{root_id}"} if candidate.get("group_report_output") else {}), backend=backend, freedom=freedom, network=network, **({"git_https_rewrite": candidate["git_https_rewrite"]} if "git_https_rewrite" in candidate else {}), **({"group_report_output": candidate["group_report_output"]} if "group_report_output" in candidate else {}), caller_approvals=candidate.get("caller_approvals", False), **({"allowed_commands": list(candidate["allowed_commands"])} if candidate.get("allowed_commands") else {}), **({"caller_write_approvals": True} if candidate.get("caller_write_approvals") else {}), model=candidate.get("model"), reasoning_effort=candidate.get("reasoning_effort"), max_turns=candidate.get("max_turns"), background_idle_seconds=candidate.get("background_idle_seconds"), task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder", title=f"{run['name']} · {node.get('title', key)}")
                         self.update(lambda r: r.pop("checkout_wait", None), "checkout_acquired")
                         self._task_update(activation["id"], task_id, {"status": "running", "dispatch_stage": "spawn_confirmed", **({"timeout_deadline": timeout_deadline} if timeout_deadline is not None else {})})
                     snapshot = await self._observe_attempt(task, node, role, activation, reservation)
@@ -4052,6 +4061,8 @@ def _candidate_key(candidate: dict[str, Any]) -> str:
         signature["caller_approvals"] = True
     if candidate.get("caller_write_approvals", False):
         signature["caller_write_approvals"] = True
+    if "group_report_output" in candidate:
+        signature["group_report_output"] = candidate["group_report_output"]
     if "git_https_rewrite" in candidate:
         signature["git_https_rewrite"] = candidate["git_https_rewrite"]
     if candidate.get("allowed_commands"):

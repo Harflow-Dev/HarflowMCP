@@ -53,7 +53,7 @@ def _mdm_absence() -> tuple:
     return ('managed_preferences_absent',)
 
 
-def qualify_configuration(repo: Path, scopes: list[tuple[Path, str]], grants: list[tuple[Path, str]] = ()) -> tuple:
+def qualify_configuration(repo: Path, scopes: list[tuple[Path, str]], grants: list[tuple[Path, str]] = (), *, group_reports: bool = False) -> tuple:
     from ..canonical_paths import canonical
     from ..runtime_paths import _chain
     repo = canonical(repo)
@@ -96,6 +96,8 @@ def qualify_configuration(repo: Path, scopes: list[tuple[Path, str]], grants: li
     # certified minimal profile. Protect absent names and refuse any presence.
     auxiliary = [home / name for name in (
         'hooks/hooks.json', 'hooks.json', 'managed_config.toml', 'requirements.toml')]
+    if group_reports:
+        auxiliary.append(home / 'rules')
     auxiliary += [Path('/etc/codex') / name for name in (
         'config.toml', 'managed_config.toml', 'requirements.toml', 'hooks.json', 'hooks/hooks.json')]
     preference_paths = [Path.home() / 'Library/Preferences/com.openai.codex.plist',
@@ -159,6 +161,8 @@ def qualify_configuration(repo: Path, scopes: list[tuple[Path, str]], grants: li
             raise ValueError('Codex configuration exceeds structural bound')
         if isinstance(value, dict):
             for key, item in value.items():
+                if group_reports and key in ('sandbox_mode', 'sandbox_workspace_write', 'permissions', 'default_permissions', 'profile', 'profiles', 'permission_profile', 'active_permission_profile'):
+                    raise ValueError('group report output requires Codex configuration without legacy sandbox or permission/profile selectors')
                 if key == 'codex_hooks' and item is not False:
                     raise ValueError('Codex hook feature configuration is not qualified')
                 if key in EXECUTION_KEYS and not disabled(item):
@@ -186,7 +190,7 @@ def qualify_configuration(repo: Path, scopes: list[tuple[Path, str]], grants: li
             raise ValueError('project Codex configuration aliases are not qualified')
         if any(scope.is_relative_to(path.parent) for scope, _ in grants):
             raise ValueError('explicit writable grants overlap protected project Codex configuration')
-        for name in ('hooks.json', 'hooks/hooks.json', 'managed_config.toml', 'requirements.toml'):
+        for name in ('hooks.json', 'hooks/hooks.json', 'managed_config.toml', 'requirements.toml', *(('rules',) if group_reports else ())):
             extra = path.parent / name
             extra_chain, extra_target = _chain(extra)
             if extra.exists() or extra.is_symlink():

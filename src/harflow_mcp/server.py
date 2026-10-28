@@ -508,7 +508,7 @@ async def start_task(
     auto_continue: StrictInt = 0,
     notify: str | None = None,
     extra_writable_paths: list[StrictStr] | None = None,
-    allowed_commands: list[StrictStr] | None = None, git_https_rewrite: StrictBool | None = None,
+    allowed_commands: list[StrictStr] | None = None, git_https_rewrite: StrictBool | None = None, group_report_output: StrictBool | None = None,
     resources: list[StrictStr] | None = None,
     resource_wait_seconds: StrictInt | None = None,
     worktree: dict[str, StrictStr | StrictBool | None] | None = None,
@@ -605,6 +605,10 @@ async def start_task(
             native adapters do not accept these grants. Use preview_task_permissions before launch.
             Keep qualified startup inputs stable: checks refuse observed changes but do not atomically
             pin configuration or executables against independently authorized concurrent writers.
+        group_report_output: Opt in to a qualified read_only repository run with write access only
+            to its own nonempty group scratch folder. Defaults off; resumes/continuations inherit
+            unless overridden. Unsupported backends and conflicting grants are refused; see list_backends.
+            Prompt prose is preserved; use $HARFLOW_GROUP_SCRATCH/report-$HARFLOW_TASK_ID.md.
         git_https_rewrite: Optional boolean overriding HARFLOW_GIT_HTTPS_REWRITE (default on).
             Appends process-local GitHub SSH-to-HTTPS URL configuration; never changes Git files.
             HTTPS credentials, sandbox access and reachability remain external requirements.
@@ -693,6 +697,8 @@ async def start_task(
             raise MCPError(INVALID_PARAMS, "Workflow approval policy and ownership belong to saved candidates and root workflow launch")
         if extra_writable_paths is not None:
             raise MCPError(INVALID_PARAMS, "extra_writable_paths is unavailable for workflow launches")
+        if group_report_output is not None:
+            raise MCPError(INVALID_PARAMS, "Set group_report_output on saved workflow agent candidates")
         if git_https_rewrite is not None:
             raise MCPError(INVALID_PARAMS, "Set git_https_rewrite on saved workflow agent candidates")
         if allowed_commands is not None:
@@ -782,7 +788,7 @@ async def start_task(
             title=normalized_title,
             auto_continue=auto_continue,
             **({'extra_writable_paths': extra_writable_paths} if extra_writable_paths is not None else {}),
-            **({'allowed_commands': allowed_commands} if allowed_commands is not None else {}), **({'git_https_rewrite': git_https_rewrite} if git_https_rewrite is not None else {}),
+            **({'allowed_commands': allowed_commands} if allowed_commands is not None else {}), **({'git_https_rewrite': git_https_rewrite} if git_https_rewrite is not None else {}), **({'group_report_output': group_report_output} if group_report_output is not None else {}),
             **({'resources': resources} if resources is not None else {}),
             **({'resource_wait_seconds': resource_wait_seconds} if resource_wait_seconds is not None else {}),
             **({'worktree': worktree} if worktree is not None else {}),
@@ -904,7 +910,8 @@ async def preview_task_permissions(
     caller_approvals: StrictBool = False,
     extra_writable_paths: list[StrictStr] | None = None,
     caller_write_approvals: StrictBool = False,
-    allowed_commands: list[StrictStr] | None = None, git_https_rewrite: StrictBool | None = None,
+    allowed_commands: list[StrictStr] | None = None, git_https_rewrite: StrictBool | None = None, group_report_output: StrictBool | None = None,
+    group: str | None = None,
     qualification_only: StrictBool = False,
 ) -> dict[str, Any]:
     """Preview standalone task permissions without launching an agent or allocating scratch.
@@ -925,9 +932,14 @@ async def preview_task_permissions(
     as a future repository, hook or executable. Startup inputs are checked, not atomically
     pinned against independently authorized concurrent writers; see docs/extra-writable-paths.md.
 
+    group_report_output opts in to a qualified read_only run whose sole writable root is its
+    concrete canonical group folder (group is required or inherited). No folder is allocated.
+    This excludes caller approvals, native children and extra writable grants.
+
     allowed_commands is validated exactly as in start_task (grammar, installed Claude Code version,
     nested-subset cap) and the returned enforcement lists it as extra_allowed_commands.
     """
+    _check_group(group)
     chosen = _backend(backend or DEFAULT_BACKEND)
     access = freedom if freedom is not None else DEFAULT_FREEDOM
     _check_freedom(access)
@@ -938,10 +950,11 @@ async def preview_task_permissions(
         return await _reg().preview_permissions(
             path, backend=chosen, freedom=access, network=network,
             qualification_only=qualification_only,
+            **({"group": group} if group is not None else {}),
             extra_writable_paths=extra_writable_paths,
             caller_approvals=caller_approvals,
             **({"caller_write_approvals": True} if caller_write_approvals else {}),
-            **({"allowed_commands": allowed_commands} if allowed_commands is not None else {}), **({"git_https_rewrite": git_https_rewrite} if git_https_rewrite is not None else {}),
+            **({"allowed_commands": allowed_commands} if allowed_commands is not None else {}), **({"git_https_rewrite": git_https_rewrite} if git_https_rewrite is not None else {}), **({"group_report_output": group_report_output} if group_report_output is not None else {}),
         )
     except (ValueError, backends.UnsupportedCapability) as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
@@ -1539,7 +1552,7 @@ async def wait_for_tasks(
 
 @mcp.tool()
 @_task_document_errors
-async def continue_task(task_id: str, extra_prompt: str | None = None, notes_path: str | None = None, background_idle_seconds: StrictFloat | StrictInt | None = None, allowed_commands: list[StrictStr] | None = None, git_https_rewrite: StrictBool | None = None) -> dict[str, Any]:
+async def continue_task(task_id: str, extra_prompt: str | None = None, notes_path: str | None = None, background_idle_seconds: StrictFloat | StrictInt | None = None, allowed_commands: list[StrictStr] | None = None, git_https_rewrite: StrictBool | None = None, group_report_output: StrictBool | None = None) -> dict[str, Any]:
     """Start a fresh session from a conclusively settled standalone task.
 
     This differs from resume_task: it reconstructs the original assignment, latest summary and
@@ -1560,6 +1573,7 @@ async def continue_task(task_id: str, extra_prompt: str | None = None, notes_pat
     notes are the same request whatever is queued: the queue is read once, when the successor is
     reserved, and a retry returns that successor. An automatic continuation never consumes.
 
+    group_report_output: omitted or null inherits the saved opt-in; false disables scoped output.
     allowed_commands: omitted or null inherits the source task's saved command grants (an automatic
     continuation always does); a list replaces them after the same validation and nested-subset check
     as start_task. See start_task for the grammar and limits.
@@ -1574,7 +1588,7 @@ async def continue_task(task_id: str, extra_prompt: str | None = None, notes_pat
         if source is not None:
             _check_allowed_commands(backends.get(source.backend), source.freedom, Path(source.repo_path), allowed_commands)
     try:
-        task = await _reg().continue_task(task_id, extra_prompt, notes_path, consume_followups=True, **({'background_idle_seconds': background_idle_seconds} if background_idle_seconds is not None else {}), **({'allowed_commands': allowed_commands} if allowed_commands is not None else {}), **({'git_https_rewrite': git_https_rewrite} if git_https_rewrite is not None else {}))
+        task = await _reg().continue_task(task_id, extra_prompt, notes_path, consume_followups=True, **({'background_idle_seconds': background_idle_seconds} if background_idle_seconds is not None else {}), **({'allowed_commands': allowed_commands} if allowed_commands is not None else {}), **({'git_https_rewrite': git_https_rewrite} if git_https_rewrite is not None else {}), **({'group_report_output': group_report_output} if group_report_output is not None else {}))
     except (ValueError, OSError, backends.UnsupportedCapability) as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
     return task.brief() | {"enforcement": task.enforcement}
@@ -1588,7 +1602,7 @@ async def resume_task(
     max_turns: int | None = None,
     background_idle_seconds: StrictFloat | StrictInt | None = None,
     network: StrictBool | None = None,
-    allowed_commands: list[StrictStr] | None = None, git_https_rewrite: StrictBool | None = None,
+    allowed_commands: list[StrictStr] | None = None, git_https_rewrite: StrictBool | None = None, group_report_output: StrictBool | None = None,
 ) -> dict[str, Any]:
     """Continue a finished task's session with follow-up instructions.
 
@@ -1606,6 +1620,7 @@ async def resume_task(
             historical default for a record written before the field existed — True asks for no
             network barrier of harflow_mcp's own, False asks for one, honoured or refused exactly
             as on start_task for the parent's freedom.
+        group_report_output: None inherits the saved group-scoped output opt-in; false disables it.
         allowed_commands: None (the default) inherits the parent's saved command grants; a list replaces
             them for this run after the same validation and nested-subset check as start_task, which
             documents the grammar and limits.
@@ -1670,7 +1685,7 @@ async def resume_task(
                 _check_allowed_commands(backends.get(parent.backend), parent.freedom, Path(parent.repo_path), allowed_commands)
             task = await _reg().resume(
                 parent, followup_prompt, max_turns=max_turns, network=network, background_idle_seconds=background_idle_seconds,
-                consume_followups=True, **({'allowed_commands': allowed_commands} if allowed_commands is not None else {}), **({'git_https_rewrite': git_https_rewrite} if git_https_rewrite is not None else {}),
+                consume_followups=True, **({'allowed_commands': allowed_commands} if allowed_commands is not None else {}), **({'git_https_rewrite': git_https_rewrite} if git_https_rewrite is not None else {}), **({'group_report_output': group_report_output} if group_report_output is not None else {}),
             )
         else:
             record = _reg().recover(task_id)
@@ -1688,7 +1703,7 @@ async def resume_task(
                 _check_allowed_commands(backends.get(record.backend), record.freedom, Path(record.repo_path), allowed_commands)
             task = await _reg().resume_record(
                 record, followup_prompt, max_turns=max_turns, network=network, background_idle_seconds=background_idle_seconds,
-                consume_followups=True, **({'allowed_commands': allowed_commands} if allowed_commands is not None else {}), **({'git_https_rewrite': git_https_rewrite} if git_https_rewrite is not None else {}),
+                consume_followups=True, **({'allowed_commands': allowed_commands} if allowed_commands is not None else {}), **({'git_https_rewrite': git_https_rewrite} if git_https_rewrite is not None else {}), **({'group_report_output': group_report_output} if group_report_output is not None else {}),
             )
     except (SessionBusyError, SessionUnknownError, RepoUnavailableError) as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from None

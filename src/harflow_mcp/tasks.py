@@ -59,6 +59,7 @@ from .backends import (
 )
 from .backends import get as get_backend
 from .backends import resume_command
+from .group_report_output import has_authority as has_group_report_authority
 from .extra_paths import has_extra_path_authority
 from .events import EVENTS_SUFFIX, EventLog, events_path
 from .runtime_paths import MONITOR_BUNDLE
@@ -990,7 +991,7 @@ class Task:
             "auto_continue": self.auto_continue,
             "output_drained": self.output_drained,
             "events_log": str(self.log_path.with_name(f"{self.task_id}{EVENTS_SUFFIX}")),
-            "resume_command": None if has_extra_path_authority(self) else resume_command(self.backend, self.session_id, self.repo_path),
+            "resume_command": None if has_extra_path_authority(self) or has_group_report_authority(self) else resume_command(self.backend, self.session_id, self.repo_path),
             "extra_writable_paths": self.extra_writable_paths,
             "extra_path_certification": self.extra_path_certification,
             "allowed_commands": list(self.allowed_commands),
@@ -1245,7 +1246,7 @@ class TaskRegistry:
 
     @_with_authority_check_budget
     @layout_operation
-    async def preview_permissions(self, repo_path: Path, *, backend: Backend, freedom: str = "write_in_repo", network: bool | None = None, caller_approvals: bool = False, extra_writable_paths: list[str] | None = None, caller_write_approvals: bool = False, allowed_commands: list[str] | None = None, git_https_rewrite: bool | None = None, qualification_only: bool = False) -> dict[str, Any]:
+    async def preview_permissions(self, repo_path: Path, *, backend: Backend, freedom: str = "write_in_repo", network: bool | None = None, caller_approvals: bool = False, extra_writable_paths: list[str] | None = None, caller_write_approvals: bool = False, allowed_commands: list[str] | None = None, git_https_rewrite: bool | None = None, group_report_output: bool | None = None, group: str | None = None, qualification_only: bool = False) -> dict[str, Any]:
         from .extra_paths import serialize_paths
         from . import approval_runtime
         approval_runtime.validate(backend, caller_approvals, freedom, None, write=caller_write_approvals)
@@ -1255,13 +1256,21 @@ class TaskRegistry:
         await asyncio.to_thread(check_branch_preparation, commands, repo_path)
         git_https_rewrite = git_environment.resolve(git_https_rewrite)
         if qualification_only:
+            from . import group_report_output as report_output
+            report_output.validate(report_output.effective(group_report_output), backend=backend, log_dir=self._log_dir, repo=repo_path, group=group, freedom=freedom, caller_approvals=caller_approvals, caller_write_approvals=caller_write_approvals, extra_paths=bool(extra_writable_paths), network=network)
             from .qualification_plan import discover
-            return await asyncio.to_thread(discover, [("task", {"backend": backend.name, "caller_approvals": caller_approvals, "caller_write_approvals": caller_write_approvals, "allowed_commands": commands})])
+            return await asyncio.to_thread(discover, [("task", {"backend": backend.name, "caller_approvals": caller_approvals, "caller_write_approvals": caller_write_approvals, "allowed_commands": commands, "group_report_output": group_report_output})])
         approval_version = None
         if caller_approvals:
             approval_version = await asyncio.to_thread(backend.qualify_caller_approvals)
             approval_runtime._write_validator(backend)(caller_write_approvals, caller_approvals, approval_version)
         caller = await self._mutation_caller()
+        resolved_group = group if group is not None else (caller.record.group if caller else None)
+        from . import group_report_output as report_output
+        group_report_output = report_output.effective(group_report_output)
+        report_path = report_output.validate(group_report_output, backend=backend, log_dir=self._log_dir, repo=repo_path, group=resolved_group, freedom=freedom, caller_approvals=caller_approvals, caller_write_approvals=caller_write_approvals, extra_paths=bool(extra_writable_paths), network=network)
+        if report_path is not None:
+            await _bounded_extra_path_check(backend.qualify_group_report_output)
         grants = await self._resolve_extra_paths_async(caller, extra_writable_paths, backend)
         if grants:
             await _bounded_extra_path_check(self._assert_extra_state, repo_path, grants)
@@ -1274,9 +1283,13 @@ class TaskRegistry:
             await _bounded_extra_path_check(self._assert_extra_state, repo_path, grants, invocation)
         else:
             backend.assert_safe(invocation, freedom, network)
+        if report_path is not None:
+            await _bounded_extra_path_check(backend.preview_group_report_output, invocation, report_path, freedom, network)
         enforcement = self._extra_enforcement(backend, backend.enforcement(freedom, network), grants, repo_path)
         enforcement = self._with_commands(backend, approval_runtime.with_approval_enforcement(backend, enforcement, approval_version, caller_approvals, caller_write_approvals), commands)
         enforcement = replace(enforcement, git_environment=git_environment.disclosure(git_https_rewrite, await asyncio.to_thread(git_environment.auth_status)))
+        if report_path is not None:
+            enforcement = replace(backend.group_report_output_enforcement(enforcement, report_path), group_report_output=True)
         self._resolve_lineage(caller, child_enforcement=enforcement, child_backend=backend.name, child_repo=repo_path, caller_write_approvals=caller_write_approvals)
         # A dispatch grants every non-read-only task of a scratch-aware backend a task-owned
         # scratch directory and appends its path to the recorded writable_roots — after the
@@ -1286,7 +1299,7 @@ class TaskRegistry:
             enforcement = replace(enforcement, writable_roots=(*enforcement.writable_roots, FUTURE_TASK_SCRATCH_ROOT))
             if getattr(backend, "with_shared_directories", None) is not None:
                 enforcement = replace(enforcement, writable_roots=(*enforcement.writable_roots, FUTURE_CHAIN_SCRATCH_ROOT, FUTURE_GROUP_SCRATCH_ROOT))
-        return {"backend": backend.name, "qualification": backends.qualification_metadata(backend), "caller_approvals": caller_approvals, "caller_write_approvals": caller_write_approvals, "caller_approval_support": backend.caller_approval_support() if getattr(backend.capabilities, "supports_caller_approvals", False) else {"supported": False}, "approval_scope": "exact_action_once" if caller_approvals else None, "approval_transport": approval_runtime.transport(backend) if caller_approvals else None, "approval_limitations": approval_runtime.limitations(backend, caller_write_approvals), "freedom": freedom, "network": network, "repo_path": str(repo_path), "extra_writable_paths": serialize_paths(grants), "extra_path_certification": enforcement.extra_path_certification, "allowed_commands": list(commands), "enforcement": enforcement.as_dict(), "task_outputs": {"report": "<state root>/outputs/<task_id>/report-<task_id>.md", "plan": "<state root>/outputs/<task_id>/plan-<task_id>.md", "writer": "engine_after_settlement", "agent_writable": False, "plan_source": "result.technical_plan in final workflow JSON", "intermediate_plan": "$HARFLOW_SCRATCH/plan-<task_id>.md when scratch.access.task is writable; otherwise the backend built-in plan location under its existing permissions"}, "limitations": "Existing typed path identities are checked before launch; grants are unavailable to native workflows and interactive takeover. Project .claude/plans ordinary files are excluded from Harflow's configuration protection; harness permission policy still applies. Other .claude paths remain protected."}
+        return {"group": resolved_group, "group_report_output": group_report_output, "group_report_directory": str(report_path) if report_path is not None else None, "backend": backend.name, "qualification": backends.qualification_metadata(backend), "caller_approvals": caller_approvals, "caller_write_approvals": caller_write_approvals, "caller_approval_support": backend.caller_approval_support() if getattr(backend.capabilities, "supports_caller_approvals", False) else {"supported": False}, "approval_scope": "exact_action_once" if caller_approvals else None, "approval_transport": approval_runtime.transport(backend) if caller_approvals else None, "approval_limitations": approval_runtime.limitations(backend, caller_write_approvals), "freedom": freedom, "network": network, "repo_path": str(repo_path), "extra_writable_paths": serialize_paths(grants), "extra_path_certification": enforcement.extra_path_certification, "allowed_commands": list(commands), "enforcement": enforcement.as_dict(), "task_outputs": {"report": "<state root>/outputs/<task_id>/report-<task_id>.md", "plan": "<state root>/outputs/<task_id>/plan-<task_id>.md", "writer": "engine_after_settlement", "agent_writable": False, "plan_source": "result.technical_plan in final workflow JSON", "intermediate_plan": "$HARFLOW_SCRATCH/plan-<task_id>.md when scratch.access.task is writable; otherwise the backend built-in plan location under its existing permissions"}, "limitations": "Existing typed path identities are checked before launch; grants are unavailable to native workflows and interactive takeover. Project .claude/plans ordinary files are excluded from Harflow's configuration protection; harness permission policy still applies. Other .claude paths remain protected."}
 
     @_with_authority_check_budget
     @layout_operation
@@ -1316,7 +1329,7 @@ class TaskRegistry:
         chain_prompt: str | None = None,
         extra_writable_paths: list[str] | None = None,
         message_ids: list[str] | None = None,
-        allowed_commands: list[str] | None = None, git_https_rewrite: bool | None = None,
+        allowed_commands: list[str] | None = None, git_https_rewrite: bool | None = None, group_report_output: bool | None = None,
         resources: list[str] | None = None,
         resource_wait_seconds: int | None = None,
         resource_inherit: dict[str, Any] | None = None,
@@ -1411,6 +1424,14 @@ class TaskRegistry:
             # An explicit group wins; otherwise it is inherited from the caller (never invented for a
             # root task with none given).
             resolved_group = group if group is not None else (caller.record.group if caller else None)
+            from . import group_report_output as report_output
+            group_report_output = report_output.effective(group_report_output, source)
+            report_path = report_output.validate(group_report_output, backend=backend, log_dir=self._log_dir, repo=repo_path, group=resolved_group, freedom=freedom, caller_approvals=caller_approvals, caller_write_approvals=caller_write_approvals, builder=workflow_builder, extra_paths=bool(grants), network=network)
+            if report_path is not None:
+                if source is not None and source.group != resolved_group:
+                    raise ValueError("Group report output continuation cannot change the saved group")
+                await _bounded_extra_path_check(backend.qualify_group_report_output)
+                planned_enforcement = replace(backend.group_report_output_enforcement(planned_enforcement, report_path), group_report_output=True)
 
         return await self._spawn(
             invocation,
@@ -1431,6 +1452,7 @@ class TaskRegistry:
             caller_write_approvals=caller_write_approvals,
             allowed_commands=commands,
             git_https_rewrite=git_https_rewrite,
+            group_report_output=group_report_output,
             interaction_owner=interaction_owner,
             spawned_by=spawned_by,
             root_task_id=root_task_id,
@@ -1550,7 +1572,7 @@ class TaskRegistry:
 
     @_with_authority_check_budget
     @layout_operation
-    async def continue_task(self, task_id: str, extra_prompt: str | None = None, notes_path: str | None = None, *, automatic: bool = False, consume_followups: bool = False, background_idle_seconds: float | None = None, allowed_commands: list[str] | None = None, git_https_rewrite: bool | None = None) -> Task:
+    async def continue_task(self, task_id: str, extra_prompt: str | None = None, notes_path: str | None = None, *, automatic: bool = False, consume_followups: bool = False, background_idle_seconds: float | None = None, allowed_commands: list[str] | None = None, git_https_rewrite: bool | None = None, group_report_output: bool | None = None) -> Task:
         """Start a fresh session from a durably settled task without broadening access.
 
         `consume_followups` is set by the caller-facing paths only; an automatic continuation never
@@ -1558,7 +1580,7 @@ class TaskRegistry:
         from .state_layout import require_dispatch_layout
         require_dispatch_layout(self._log_dir)
         from .task_continuation import continue_task
-        return await continue_task(self, task_id, extra_prompt, notes_path, automatic=automatic, consume_followups=consume_followups, background_idle_seconds=background_idle_seconds, allowed_commands=allowed_commands, git_https_rewrite=git_https_rewrite)
+        return await continue_task(self, task_id, extra_prompt, notes_path, automatic=automatic, consume_followups=consume_followups, background_idle_seconds=background_idle_seconds, allowed_commands=allowed_commands, git_https_rewrite=git_https_rewrite, group_report_output=group_report_output)
 
     @_with_authority_check_budget
     @layout_operation
@@ -1577,7 +1599,7 @@ class TaskRegistry:
         native_settings: dict[str, Any] | None = None,
         require_unchanged_session: bool = False,
         consume_followups: bool = False,
-        allowed_commands: list[str] | None = None, git_https_rewrite: bool | None = None,
+        allowed_commands: list[str] | None = None, git_https_rewrite: bool | None = None, group_report_output: bool | None = None,
     ) -> Task:
         """Continue the session; strict inheritance may require no later writers.
 
@@ -1593,7 +1615,7 @@ class TaskRegistry:
                 network=network, task_id=task_id, display_prompt=display_prompt,
                 workflow_builder=workflow_builder, native_subagent=native_subagent,
                 native_settings=native_settings, require_unchanged_session=require_unchanged_session,
-                consume_followups=consume_followups, allowed_commands=allowed_commands, git_https_rewrite=git_https_rewrite)
+                consume_followups=consume_followups, allowed_commands=allowed_commands, git_https_rewrite=git_https_rewrite, group_report_output=group_report_output)
         from .task_supervision import read_task_record
         read_task_record(self._log_dir, parent.task_id, include_prompt=False)
         from .state_layout import require_dispatch_layout
@@ -1638,6 +1660,13 @@ class TaskRegistry:
             caller_write_approvals=parent.caller_write_approvals,
         )
         resolved_group = caller.record.group if caller is not None else parent.group
+        from . import group_report_output as report_output
+        group_report_output = report_output.effective(group_report_output, parent)
+        report_path = report_output.validate(group_report_output, backend=backend, log_dir=self._log_dir, repo=Path(parent.repo_path), group=resolved_group, freedom=parent.freedom, caller_approvals=parent.caller_approvals, caller_write_approvals=parent.caller_write_approvals, native=native_subagent, builder=workflow_builder, extra_paths=bool(grants), network=effective_network)
+        if report_path is not None:
+            if resolved_group != parent.group:
+                raise ValueError("Group report output resume cannot change the saved group")
+            await _bounded_extra_path_check(backend.qualify_group_report_output)
 
         if task_id is None:
             from .workflow_hooks import pause_for_task
@@ -1691,6 +1720,7 @@ class TaskRegistry:
                     caller_write_approvals=parent.caller_write_approvals,
                     allowed_commands=commands,
                     git_https_rewrite=git_https_rewrite,
+                    group_report_output=group_report_output,
                     interaction_owner=parent.interaction_owner,
                     grants=grants,
                     native_subagent=native_subagent,
@@ -1747,7 +1777,7 @@ class TaskRegistry:
         consume_followups: bool,
         background_idle_seconds: float | None = None,
         allowed_commands: tuple[str, ...] = (),
-        git_https_rewrite: bool | None = None,
+        git_https_rewrite: bool | None = None, group_report_output: bool | None = None,
         resource_request: dict[str, Any] | None = None,
         worktree_info: dict[str, Any] | None = None,
         scratch_chain_id: str | None = None,
@@ -1830,6 +1860,7 @@ class TaskRegistry:
                 caller_write_approvals=caller_write_approvals,
                 allowed_commands=allowed_commands,
                 git_https_rewrite=git_https_rewrite,
+                group_report_output=group_report_output,
                 interaction_owner=interaction_owner,
                 parent_task_id=parent_task_id,
                 spawned_by=spawned_by,
@@ -1862,6 +1893,10 @@ class TaskRegistry:
 
     @layout_operation
     async def _spawn(self, invocation: Invocation, **kwargs) -> Task:
+        # Disabled is the legacy execution shape; the prepared owner has no source from which
+        # to inherit, so omission preserves old launch fingerprints without changing policy.
+        if kwargs.get("group_report_output") is False:
+            kwargs.pop("group_report_output")
         from .disk_space import check_launch_space
         if "worktree_request" not in kwargs:  # a planned path does not exist yet; the owner checks after creating it
             with _before_spawn():
@@ -1920,7 +1955,7 @@ class TaskRegistry:
         chain_prompt: str | None = None,
         message_ids: list[str] | None = None,
         allowed_commands: tuple[str, ...] | list[str] = (),
-        git_https_rewrite: bool | None = None,
+        git_https_rewrite: bool | None = None, group_report_output: bool | None = None,
         resource_grant: dict[str, Any] | None = None,
         worktree_info: dict[str, Any] | None = None,
     ) -> Task:
@@ -1939,6 +1974,13 @@ class TaskRegistry:
         # prompt pipe which closes immediately at EOF, without a live-input pump.
         from .background_idle import resolve
         background_idle_seconds = resolve(background_idle_seconds)
+        from . import group_report_output as report_output
+        group_report_output = report_output.effective(group_report_output)
+        report_path = report_output.validate(group_report_output, backend=backend, log_dir=self._log_dir, repo=repo_path, group=group, freedom=freedom, caller_approvals=caller_approvals, caller_write_approvals=caller_write_approvals, native=invocation.native_subagent, builder=workflow_builder, extra_paths=bool(extra_path_grants or invocation.extra_writable_paths), network=network)
+        if getattr(invocation, "group_report_directory", None) is not None and not group_report_output:
+            raise ValueError("Group report invocation requires group_report_output opt-in")
+        if report_path is not None:
+            await _bounded_extra_path_check(backend.qualify_group_report_output)
         from .state_layout import require_dispatch_layout
         require_dispatch_layout(self._log_dir)
         with _before_spawn():
@@ -2018,6 +2060,8 @@ class TaskRegistry:
             git_https_rewrite = git_environment.resolve(git_https_rewrite)
             git_auth_status = await asyncio.to_thread(git_environment.auth_status)
             enforcement = replace(enforcement, git_environment=git_environment.disclosure(git_https_rewrite, git_auth_status))
+            if group_report_output:
+                enforcement = replace(enforcement, group_report_output=True)
 
             # Before the spawn, deliberately. Between `create_subprocess_exec` and the registration
             # below there must be no await at all: one there could be cancelled — a client
@@ -2108,7 +2152,7 @@ class TaskRegistry:
                         invocation, backend=backend, freedom=freedom, network=network, enforcement=enforcement,
                         task_id=task_id, chain_id=scratch_chain_id or task_id, group=group, spawned_by=spawned_by,
                         shared_caller=shared_caller, max_depth=max_depth, hold=shared_hold, task_scratch=task_scratch, task_granted=task_granted,
-                        scratch_allowed=scratch_allowed, extra_grants=bool(extra_path_grants))
+                        scratch_allowed=scratch_allowed, extra_grants=bool(extra_path_grants), group_report_output=group_report_output)
                     for kind in allocation.denied:
                         bridge_notices.append(
                             f"No write access was granted to the shared {kind} scratch folder "
@@ -2412,6 +2456,7 @@ class TaskRegistry:
         task_granted: bool,
         scratch_allowed: bool,
         extra_grants: bool,
+        group_report_output: bool = False,
     ) -> tuple[Invocation, Enforcement, shared_scratch.Allocation]:
         """Allocate this run's shared chain and group folders and grant the ones it may write.
 
@@ -2441,7 +2486,19 @@ class TaskRegistry:
                     granted.append(paths[kind])
                 else:
                     denied.append(kind)
-        if granted:
+        if group_report_output:
+            expected = paths.get("group")
+            if expected is None:
+                raise ValueError("group_report_output requires a nonempty group")
+            for who in dict.fromkeys((spawned_by, shared_caller)):
+                if who is not None and not await asyncio.to_thread(self._caller_allows_shared, "group", expected, group, task_id, who, max_depth, created["group"]):
+                    raise ValueError("Caller authority does not permit writes to this group report directory")
+            invocation = await _bounded_extra_path_check(backend.configure_group_report_output, invocation, expected, freedom, network)
+            await _bounded_extra_path_check(backend.assert_group_report_output, invocation, expected, freedom, network)
+            await _bounded_extra_path_check(backend.assert_safe, invocation, freedom, network)
+            enforcement = replace(backend.group_report_output_enforcement(enforcement, expected), group_report_output=True)
+            granted.append(expected)
+        if granted and not group_report_output:
             if extra_grants:
                 invocation = await _bounded_extra_path_check(with_shared, invocation, tuple(granted), freedom)
             else:
@@ -4364,7 +4421,7 @@ class TaskRegistry:
         native_settings: dict[str, Any] | None = None,
         require_unchanged_session: bool = False,
         consume_followups: bool = False,
-        allowed_commands: list[str] | None = None, git_https_rewrite: bool | None = None,
+        allowed_commands: list[str] | None = None, git_https_rewrite: bool | None = None, group_report_output: bool | None = None,
     ) -> Task:
         """Continue the session of a task recovered from disk (see `resume` for the flags)."""
         from .state_layout import require_dispatch_layout
@@ -4418,6 +4475,13 @@ class TaskRegistry:
             caller_write_approvals=record.caller_write_approvals,
         )
         resolved_group = caller.record.group if caller is not None else record.group
+        from . import group_report_output as report_output
+        group_report_output = report_output.effective(group_report_output, record)
+        report_path = report_output.validate(group_report_output, backend=backend, log_dir=self._log_dir, repo=Path(record.repo_path), group=resolved_group, freedom=record.freedom, caller_approvals=record.caller_approvals, caller_write_approvals=record.caller_write_approvals, native=native_subagent, builder=workflow_builder, extra_paths=bool(grants), network=effective_network)
+        if report_path is not None:
+            if resolved_group != record.group:
+                raise ValueError("Group report output resume cannot change the saved group")
+            await _bounded_extra_path_check(backend.qualify_group_report_output)
 
         if task_id is None:
             from .workflow_hooks import pause_for_task
@@ -4466,6 +4530,7 @@ class TaskRegistry:
                     caller_write_approvals=record.caller_write_approvals,
                     allowed_commands=commands,
                     git_https_rewrite=git_https_rewrite,
+                    group_report_output=group_report_output,
                     interaction_owner=record.interaction_owner,
                     grants=grants,
                     native_subagent=native_subagent,

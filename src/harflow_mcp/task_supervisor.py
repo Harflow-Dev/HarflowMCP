@@ -24,6 +24,19 @@ from . import task_resources
 from datetime import datetime, timedelta, timezone
 
 
+def restore_group_report_observations(prepared):
+    """Restore request-local identity tuples after the supervisor JSON boundary."""
+    def freeze(value):
+        if isinstance(value, list):
+            return tuple(freeze(item) for item in value)
+        if isinstance(value, dict):
+            return {key: freeze(item) for key, item in value.items()}
+        return value
+    for field in ('group_report_identity', 'group_report_runtime', 'group_report_configuration'):
+        if field in prepared:
+            prepared[field] = freeze(prepared[field])
+
+
 REAP_INTERVAL_SECONDS = 15.0
 
 
@@ -236,6 +249,7 @@ async def run(descriptor: int, task_id: str, generation: str):
                     prepared['initial_input'] = base64.b64decode(prepared['initial_input'], validate=True) if prepared['initial_input'] is not None else None
                     prepared['extra_writable_paths'] = tuple(prepared['extra_writable_paths'])
                     prepared['allowed_commands'] = tuple(prepared['allowed_commands'])
+                    restore_group_report_observations(prepared)
                     if 'identity_markers' in prepared:
                         prepared['identity_markers'] = tuple(prepared['identity_markers'])
                     invocation = Invocation(**prepared)

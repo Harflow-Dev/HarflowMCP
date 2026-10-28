@@ -103,7 +103,7 @@ async def stop_chain(registry: Any, task_id: str) -> None:
 
 
 @storage_operation
-async def continue_task(registry: Any, task_id: str, extra_prompt: str | None = None, notes_path: str | None = None, *, automatic: bool = False, consume_followups: bool = False, background_idle_seconds: float | None = None, allowed_commands: list[str] | None = None, git_https_rewrite: bool | None = None) -> Any:
+async def continue_task(registry: Any, task_id: str, extra_prompt: str | None = None, notes_path: str | None = None, *, automatic: bool = False, consume_followups: bool = False, background_idle_seconds: float | None = None, allowed_commands: list[str] | None = None, git_https_rewrite: bool | None = None, group_report_output: bool | None = None) -> Any:
     from .state_layout import require_dispatch_layout
     require_dispatch_layout(registry.log_dir)
     from .command_grants import normalize
@@ -149,7 +149,7 @@ async def continue_task(registry: Any, task_id: str, extra_prompt: str | None = 
             raise ValueError('Original assignment unavailable; continuation refused')
         path = registry.log_dir / f'{task_id}.continuation.json'
         prompt = await run_owned_worker(registry.state_layout, context, registry, source, extra_prompt, notes_path)
-        fingerprint = hashlib.sha256(json.dumps({'prompt': prompt, 'automatic': automatic, **({'git_https_rewrite': git_https_rewrite} if git_https_rewrite is not None else {}), **({'background_idle_seconds': effective_idle} if background_idle_seconds is not None else {}), **({'allowed_commands': list(explicit_commands)} if explicit_commands is not None else {})}, ensure_ascii=False).encode('utf-8')).hexdigest()
+        fingerprint = hashlib.sha256(json.dumps({'prompt': prompt, 'automatic': automatic, **({'group_report_output': group_report_output} if group_report_output is not None else {}), **({'git_https_rewrite': git_https_rewrite} if git_https_rewrite is not None else {}), **({'background_idle_seconds': effective_idle} if background_idle_seconds is not None else {}), **({'allowed_commands': list(explicit_commands)} if explicit_commands is not None else {})}, ensure_ascii=False).encode('utf-8')).hexdigest()
         reservation = None
         if path.exists():
             with path.open('rb') as file:
@@ -208,10 +208,10 @@ async def continue_task(registry: Any, task_id: str, extra_prompt: str | None = 
                 # one (the caller's own prose stays verbatim) so a large consuming prompt does not end
                 # in it, which vibe refuses over 32 KiB. The fingerprint above never saw these ids.
                 prompt = (await run_owned_worker(registry.state_layout, context, registry, source, extra_prompt, notes_path, attempt.items)).removesuffix('\n')
-            _write(path, {'task_id': identifier, 'state': 'reserved', 'chain_root_task_id': root, 'automatic': automatic, **({'git_https_rewrite': git_https_rewrite} if git_https_rewrite is not None else {}), 'request_fingerprint': fingerprint}, layout=registry.state_layout)
+            _write(path, {'task_id': identifier, 'state': 'reserved', 'chain_root_task_id': root, 'automatic': automatic, **({'group_report_output': group_report_output} if group_report_output is not None else {}), **({'git_https_rewrite': git_https_rewrite} if git_https_rewrite is not None else {}), 'request_fingerprint': fingerprint}, layout=registry.state_layout)
             try:
                 spawn_called = True
-                child = await registry.start(prompt, Path(source.repo_path), git_https_rewrite=git_https_rewrite, backend=get_backend(source.backend), freedom=source.freedom, model=source.model, reasoning_effort=source.reasoning_effort, network=source.network, caller_approvals=source.caller_approvals, caller_write_approvals=source.caller_write_approvals, interaction_owner=source.interaction_owner, max_turns=source.max_turns, background_idle_seconds=effective_idle, group=source.group, title=source.title, task_id=identifier, auto_continue=max(source.auto_continue - 1, 0) if automatic else 0, continuation_of_task_id=task_id, chain_root_task_id=root, scratch_chain_id=shared_scratch.effective_chain(source), chain_prompt=None, **({'allowed_commands': list(explicit_commands)} if explicit_commands is not None else {}), **({'message_ids': attempt.ids, 'followup_source_task_id': task_id} if attempt is not None else {}), **({'resource_inherit': source.resources} if source.resources and source.resources.get('names') else {}), **({'worktree_inherit': source.worktree} if source.worktree else {}))
+                child = await registry.start(prompt, Path(source.repo_path), git_https_rewrite=git_https_rewrite, group_report_output=group_report_output, backend=get_backend(source.backend), freedom=source.freedom, model=source.model, reasoning_effort=source.reasoning_effort, network=source.network, caller_approvals=source.caller_approvals, caller_write_approvals=source.caller_write_approvals, interaction_owner=source.interaction_owner, max_turns=source.max_turns, background_idle_seconds=effective_idle, group=source.group, title=source.title, task_id=identifier, auto_continue=max(source.auto_continue - 1, 0) if automatic else 0, continuation_of_task_id=task_id, chain_root_task_id=root, scratch_chain_id=shared_scratch.effective_chain(source), chain_prompt=None, **({'allowed_commands': list(explicit_commands)} if explicit_commands is not None else {}), **({'message_ids': attempt.ids, 'followup_source_task_id': task_id} if attempt is not None else {}), **({'resource_inherit': source.resources} if source.resources and source.resources.get('names') else {}), **({'worktree_inherit': source.worktree} if source.worktree else {}))
                 from .task_attachment import AttachedTask
                 from .task_resources import PendingLaunch
                 if isinstance(child, PendingLaunch):

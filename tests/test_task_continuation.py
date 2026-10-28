@@ -753,3 +753,11 @@ async def test_continuation_passes_git_transport_override(tmp_path, monkeypatch)
     registry = Registry(tmp_path)
     await continue_task(registry, source.task_id, git_https_rewrite=False)
     assert registry.start.await_args.kwargs['git_https_rewrite'] is False
+
+
+async def test_continuation_passes_group_report_override(tmp_path, monkeypatch):
+    monkeypatch.setattr('harflow_mcp.workflow_hooks.refuse_managed', lambda *args: None)
+    source = record(tmp_path)
+    registry = Registry(tmp_path)
+    await continue_task(registry, source.task_id, group_report_output=False)
+    assert registry.start.await_args.kwargs['group_report_output'] is False
