@@ -148,3 +148,24 @@ def only_v1_event_kinds(request: pytest.FixtureRequest, monkeypatch: pytest.Monk
         return
     unknown = attempted - events.EVENT_KINDS
     assert not unknown, f"event kinds outside events.EVENT_KINDS were written: {sorted(unknown)}"
+
+
+@pytest.fixture
+def synthetic_permission_identity(fake_backend_clis, monkeypatch):
+    """Use seeded macOS evidence only for scripted permission unit fixtures.
+
+    These tests exercise registry/ledger plumbing, not installed-harness qualification. Stand-ins
+    remove developer CLI dependencies; the explicit platform models the fixture's qualified row
+    on every CI host without weakening production platform gates or running OS probes.
+    """
+    from dataclasses import replace
+    from harflow_mcp.backends import qualification
+    identify = qualification.identify
+    monkeypatch.setenv("HARFLOW_STATE_ROOT", str(fake_backend_clis.parent / "qualification-state"))
+    def fixture_identity(backend):
+        result = identify(backend)
+        # A test must select its own stand-in, never silently borrow a developer CLI.
+        assert Path(result.executable).is_relative_to(fake_backend_clis.parent.resolve())
+        return replace(result, platform="darwin")
+    monkeypatch.setattr(qualification, "identify", fixture_identity)
+    return fake_backend_clis

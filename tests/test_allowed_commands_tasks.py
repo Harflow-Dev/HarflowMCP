@@ -27,7 +27,7 @@ PUBLISH = "Bash(git commit:*),Bash(git push:*)"
 
 
 @pytest.fixture
-def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, git_repo: Path) -> SimpleNamespace:
+def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, git_repo: Path, synthetic_permission_identity) -> SimpleNamespace:
     bin_dir = fake_claude_cli.install(tmp_path / "bin")
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     log = tmp_path / "argv.jsonl"
@@ -52,6 +52,18 @@ async def run(env, **kwargs):
 
 
 # --- start ----------------------------------------------------------------------------------------
+
+async def test_scripted_permissions_use_the_fixture_seed_without_host_probes(env, monkeypatch):
+    from harflow_mcp.backends import qualification
+    def unexpected_probe(*_args):
+        raise AssertionError("scripted unit tests must not run installed-harness probes")
+    monkeypatch.setattr(qualification, "_probe", unexpected_probe)
+    identity = qualification.identify(get("claude"))
+    assert identity.platform == "darwin"
+    assert Path(identity.executable).is_relative_to(env.tmp.resolve())
+    task = await run(env, allowed_commands=GRANTS)
+    assert task.allowed_commands == GRANTS
+
 
 async def test_start_records_grants_on_argv_task_record_and_snapshots(env):
     task = await run(env, allowed_commands=GRANTS)
@@ -216,7 +228,7 @@ class _ContinuationRegistry:
         pass
 
 
-async def test_continuation_forwards_only_an_explicit_list(tmp_path, monkeypatch):
+async def test_continuation_forwards_only_an_explicit_list(tmp_path, monkeypatch, synthetic_permission_identity):
     monkeypatch.setattr("harflow_mcp.workflow_hooks.refuse_managed", lambda *args: None)
     monkeypatch.setattr(backends, "version", lambda backend, **kwargs: "2.1.310 (Claude Code)")
     state = tmp_path / "state" / "tasks"
@@ -236,7 +248,7 @@ async def test_continuation_forwards_only_an_explicit_list(tmp_path, monkeypatch
         await continuation(_ContinuationRegistry(tmp_path / "state3" / "tasks"), source.task_id, allowed_commands=["make build", "make build"])
 
 
-async def test_automatic_continuation_inherits(tmp_path, monkeypatch):
+async def test_automatic_continuation_inherits(tmp_path, monkeypatch, synthetic_permission_identity):
     monkeypatch.setattr("harflow_mcp.workflow_hooks.refuse_managed", lambda *args: None)
     monkeypatch.setattr(backends, "version", lambda backend, **kwargs: "2.1.310 (Claude Code)")
     state = tmp_path / "state" / "tasks"

@@ -593,6 +593,12 @@ def prepared(tmp_path_factory, monkeypatch):
         monkeypatch.setenv("TMPDIR", str(tmpdir))
         monkeypatch.setattr(backends, "version", lambda b: "codex-cli 0.163.0")
         monkeypatch.setattr(sys, "platform", "darwin")
+        # Protocol unit tests model a measured macOS executable, independently
+        # of whether the development machine/CI runner has Codex installed.
+        from harflow_mcp.backends import qualification as shared
+        def identify(backend):
+            return shared.Identity(backend.name, "0.163.0", str(base / "fixture-codex"), "a" * 64, sys.platform)
+        monkeypatch.setattr(shared, "identify", identify)
         yield SimpleNamespace(repo=repo, home=home, base=base)
 
 
