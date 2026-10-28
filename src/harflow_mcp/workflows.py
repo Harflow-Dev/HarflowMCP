@@ -2107,8 +2107,12 @@ async def start_workflow(name: str, prompt: str, repo_path: Path, *, overrides: 
 
 
 @root_operation
-def preview_workflow_run(name: str, repo_path: Path, *, overrides: dict[str, Any] | None = None, network: bool | None = None, root: Path | None = None, worktree: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Read-only launch permissions and compatibility for the same pinned launch inputs."""
+def preview_workflow_run(name: str, repo_path: Path, *, overrides: dict[str, Any] | None = None, network: bool | None = None, root: Path | None = None, worktree: dict[str, Any] | None = None, qualification_only: bool = False) -> dict[str, Any]:
+    """Read-only launch permissions, or cached-only requirements before provider self-tests.
+
+    Qualification-only mode validates the resolved definition tree and pure resource/worktree
+    inputs; native compatibility and launch authority remain independently validated at launch.
+    """
     from .workflow_references import definition_sha256, resolve_dependencies
     from .workflow_native_policy import digest, plan_owner_contracts, orchestrator_contract
     if not Path(repo_path).is_dir():
@@ -2119,6 +2123,12 @@ def preview_workflow_run(name: str, repo_path: Path, *, overrides: dict[str, Any
     for entry in tree["workflows"].values():
         entry["definition"]["context_delivery"] = "optimized_v1"
         entry["definition_sha256"] = definition_sha256(entry["definition"])
+    if qualification_only:
+        from .qualification_plan import discover, workflow_candidates
+        from .workflow_resources import worktree_preview, validate_tree_scopes
+        validate_tree_scopes(tree)
+        worktree_preview(Path(repo_path), worktree, storage.root / "tasks", tree)
+        return discover(workflow_candidates(tree))
     contracts = plan_owner_contracts(definition, tree, network=network)
     from .workflow_resources import worktree_preview, validate_tree_scopes
     validate_tree_scopes(tree)

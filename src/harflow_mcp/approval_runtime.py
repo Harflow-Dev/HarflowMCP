@@ -55,7 +55,9 @@ def validate(backend: Any, enabled: bool, freedom: str, max_turns: int | None, n
         raise ValueError("caller_approvals must be a boolean")
     if write or hasattr(backend, "validate_caller_write_approvals"):
         _write_validator(backend)(write, enabled)
-    if enabled:
+    from .qualification_plan import required_features
+    required = required_features(caller_approvals=enabled, caller_write_approvals=write)
+    if "caller_approval_tools" in required:
         if not backend.capabilities.supports_caller_approvals:
             from .backends.base import UnsupportedCapability
             raise UnsupportedCapability(f"{backend.name} has no qualified caller approval transport")

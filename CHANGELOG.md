@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add capability-gated cached qualification plans for standalone and workflow launches, with binary-bound required feature evidence and repeated feature selection for explicit refresh (#36).
+
 - Keep verified nested questions visible and answerable when sibling links are unavailable or preparing, retain usage-limit source details, and report decision-specific retry guidance instead of root status errors (#76, #77).
 - Allow a verified human Monitor responder to claim pending workflow interactions after qualified caller loss, with durable root handover audit and fail-closed unknown ownership (#69).
 

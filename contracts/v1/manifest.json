@@ -763,6 +763,15 @@
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
+    },
+    "ctl-backend-qualification.json": {
+      "encoding": "json",
+      "expected_product_version": "0.0.4",
+      "format": "harflow.ctl",
+      "required_capabilities": [
+        "backend-qualification.v1"
+      ],
+      "valid": true
     }
   },
   "files": {
@@ -796,7 +805,7 @@
     "version-info-build-metadata.json": "cd52be9dfd5f8af9f60513ea8601df70321937d5b15374688f8eb296cae45081",
     "version-info-patch-backward.json": "2922c8b2f832988bb411437f5664a4fc0f671660cb0bc4747a4be7ba6030f174",
     "version-info-patch-forward.json": "4c4f1185e7d562dd64a406c0034ba7cbca3a3594f9c76a5abc474d648a5ac8b0",
-    "version-info.json": "657c83d9cebb31cc29c1b84e44742969a42793c6f37b5855852cbedfb8cb5a2c",
+    "version-info.json": "2cb3d418172500799238b21c27e2198cd4558961dac645e84773fe2df5c6318c",
     "workflow-definition-patch.json": "47f50395f2371a652dec8a6a612c1db95dbabffb43ede363e32369620a6c516d",
     "workflow-definition.json": "df51cdc3e2e4d37197e36173bda52cb71ece0e0c19453b947e89c6529b818309",
     "workflow-run.json": "ee491fc8c1f1da76ac4d59c0cd71b22a57416f727afe8defd701fa07c7b1edd7",
@@ -862,6 +871,7 @@
     "ctl-approval-state-system-rejected-admission.json": "6a5f95aa98e56aecc4e3218be512df2842d47501e72d807eeb845467a7fc79b6",
     "ctl-approval-state-system-rejected-delivery.json": "06b8be6cfe084eec87a749618c223ee8871fb664067f52951a1b6dbf361b21ef",
     "ctl-approval-state-unsupported.json": "e6fd0a4588ebed3287787e161cbfab8155c5662fbd051da6c720a1bdd260259c",
-    "ctl-approval-status-awaiting.json": "c2179c931e15bc2bac616ce9c5bbf8c23ae3acbb5a19fcea5304c94132fd2edf"
+    "ctl-approval-status-awaiting.json": "c2179c931e15bc2bac616ce9c5bbf8c23ae3acbb5a19fcea5304c94132fd2edf",
+    "ctl-backend-qualification.json": "d9804f21dea92490752a555f32e405d297dfd6d1d8b600ed2f5363698db26680"
   }
 }

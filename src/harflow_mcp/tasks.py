@@ -1155,7 +1155,8 @@ class TaskRegistry:
         against the current repository, so a stale or tampered saved list is never trusted."""
         from . import command_grants
         patterns = command_grants.check_bounds(list(inherited or ())) if requested is None else command_grants.check_bounds(requested)
-        if patterns:
+        from .qualification_plan import required_features
+        if "allowed_commands" in required_features(allowed_commands=patterns):
             if native or builder:
                 raise command_grants.CommandGrantError("allowed_commands is unavailable to native workflows and workflow builders")
             backend.validate_allowed_commands(patterns, freedom, repo_path)
@@ -1244,11 +1245,14 @@ class TaskRegistry:
 
     @_with_authority_check_budget
     @layout_operation
-    async def preview_permissions(self, repo_path: Path, *, backend: Backend, freedom: str = "write_in_repo", network: bool | None = None, caller_approvals: bool = False, extra_writable_paths: list[str] | None = None, caller_write_approvals: bool = False, allowed_commands: list[str] | None = None) -> dict[str, Any]:
+    async def preview_permissions(self, repo_path: Path, *, backend: Backend, freedom: str = "write_in_repo", network: bool | None = None, caller_approvals: bool = False, extra_writable_paths: list[str] | None = None, caller_write_approvals: bool = False, allowed_commands: list[str] | None = None, qualification_only: bool = False) -> dict[str, Any]:
         from .extra_paths import serialize_paths
         from . import approval_runtime
         approval_runtime.validate(backend, caller_approvals, freedom, None, write=caller_write_approvals)
         commands = self._command_grants(backend, allowed_commands, (), freedom, repo_path)
+        if qualification_only:
+            from .qualification_plan import discover
+            return await asyncio.to_thread(discover, [("task", {"backend": backend.name, "caller_approvals": caller_approvals, "caller_write_approvals": caller_write_approvals, "allowed_commands": commands})])
         approval_version = None
         if caller_approvals:
             approval_version = await asyncio.to_thread(backend.qualify_caller_approvals)

@@ -443,9 +443,9 @@ def require(backend, feature: str, *, refresh=False, root=None) -> Qualification
     return result
 
 
-def inspect(backend, *, root=None) -> dict[str, Any]:
+def inspect(backend, *, root=None, identity: Identity | None = None) -> dict[str, Any]:
     """Cached-only inspection; never starts a provider probe."""
-    identity = identify(backend)
+    identity = identity or identify(backend)
     return {feature: _operate(backend, feature, root=root, read_only=True, identity=identity).as_dict() for feature in backend.qualification_features()}
 
 

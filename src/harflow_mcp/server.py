@@ -890,8 +890,13 @@ async def preview_task_permissions(
     extra_writable_paths: list[StrictStr] | None = None,
     caller_write_approvals: StrictBool = False,
     allowed_commands: list[StrictStr] | None = None,
+    qualification_only: StrictBool = False,
 ) -> dict[str, Any]:
     """Preview standalone task permissions without launching an agent or allocating scratch.
+
+    With qualification_only, returns only the cached qualification requirement plan before
+    provider self-tests, path certification or owner checks; launch still validates those gates.
+    Empty required feature sets need no binary inspection.
 
     Uses the same bounded extra_writable_paths validation, installed-version checks and detected
     owner caps as start_task. Returns requested/effective typed paths, certification and truthful
@@ -917,6 +922,7 @@ async def preview_task_permissions(
     try:
         return await _reg().preview_permissions(
             path, backend=chosen, freedom=access, network=network,
+            qualification_only=qualification_only,
             extra_writable_paths=extra_writable_paths,
             caller_approvals=caller_approvals,
             **({"caller_write_approvals": True} if caller_write_approvals else {}),

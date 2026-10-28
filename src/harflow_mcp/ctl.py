@@ -147,7 +147,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
 
     qualify_p = sub.add_parser("qualify", help="run isolated, no-paid backend feature self-tests and refresh cached results")
     qualify_p.add_argument("backend", choices=sorted(backends.BACKENDS))
-    qualify_p.add_argument("--feature", help="test only one declared feature (default: all)")
+    qualify_p.add_argument("--feature", action="append", help="test a declared feature; repeat for several (default: all)")
     qualify_p.add_argument("--json", action="store_true")
 
     status_p = sub.add_parser("status", help="show one task's full state")
@@ -347,6 +347,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
                            help="Existing absolute file/directory grant; repeat up to 16 times")
     preview_p.add_argument("--allowed-command", action="append", default=None,
                            help="Bash command pattern granted for this run only; repeat up to 16 times. Claude Code at write_in_repo or publish only; see docs/harness-permissions.md")
+    preview_p.add_argument("--qualification-only", action="store_true", help="discover required cached qualification without provider self-tests")
     preview_p.add_argument("--json", action="store_true")
 
     resume_p = sub.add_parser(
@@ -470,6 +471,8 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
             if action == "save":
                 wp.add_argument("--expected-revision", type=int)
                 wp.add_argument("--expected-workflow-id", help="Loaded stable workflow identity; rejects deleted or replaced definitions")
+        if action == "preview":
+            wp.add_argument("--qualification-only", action="store_true", help="discover required cached qualification without provider self-tests")
         if action in {"start", "build", "preview"}:
             wp.add_argument("--repo", required=action in {"start", "preview"})
             prompt_group = wp.add_mutually_exclusive_group(required=action != "preview")
@@ -643,12 +646,14 @@ def _cmd_qualify(args: argparse.Namespace) -> int:
     from .backends.base import UnsupportedCapability
     backend = backends.get(args.backend)
     specs = backend.qualification_features()
-    if args.feature is not None and args.feature not in specs:
-        return _fail(args, "invalid_params", "Unknown qualification feature: " + args.feature)
+    selected = list(dict.fromkeys(args.feature or specs))
+    unknown = [feature for feature in selected if feature not in specs]
+    if unknown:
+        return _fail(args, "invalid_params", "Unknown qualification feature: " + unknown[0])
     results = {}
     refreshed = set()
     failed = False
-    for feature in ([args.feature] if args.feature else specs):
+    for feature in selected:
         spec = specs[feature]
         try:
             print(f"Qualifying {backend.name}: {feature}…", file=sys.stderr)
@@ -661,9 +666,9 @@ def _cmd_qualify(args: argparse.Namespace) -> int:
             failed = True
             refreshed.add(spec.revision)
             try:
-                results[feature] = qualification.inspect(backend).get(feature, {"ok": False, "reason": str(exc)})
+                results[feature] = qualification.inspect(backend).get(feature, {"ok": False, "source": "unavailable", "reason": str(exc)[:1000]})
             except (UnsupportedCapability, OSError, ValueError):
-                results[feature] = {"ok": False, "reason": str(exc)}
+                results[feature] = {"ok": False, "source": "unavailable", "reason": str(exc)[:1000]}
     result = {"backend": backend.name, "features": results, "ok": not failed}
     print(json.dumps(envelope(CTL_FORMAT, {"result": result})) if args.json else json.dumps(result, indent=2))
     return 1 if failed else 0
@@ -1403,7 +1408,7 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
                 if getattr(args, "worktree", False):
                     worktree_guard = {"worktree": {k: v for k, v in (("base_ref", args.worktree_base), ("branch", args.worktree_branch), ("detach", args.worktree_detach or None)) if v is not None}}
             if action == "preview":
-                return await server._workflow_call("preview", name=args.name, repo_path=args.repo, overrides=candidate or None, network=_network(args.network), **worktree_guard)
+                return await server._workflow_call("preview", name=args.name, repo_path=args.repo, overrides=candidate or None, network=_network(args.network), qualification_only=args.qualification_only, **worktree_guard)
             if action == "build":
                 definition = json.loads(args.definition_json) if args.definition_json else None
                 if args.definition:
@@ -1583,6 +1588,7 @@ def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
                 repo_path=args.repo, backend=args.backend, freedom=args.freedom,
                 network=_network(args.network), extra_writable_paths=args.extra_writable_path,
                 caller_approvals=args.caller_approvals,
+                qualification_only=args.qualification_only,
                 **({"caller_write_approvals": True} if args.caller_write_approvals else {}),
                 **({"allowed_commands": getattr(args, 'allowed_command', None)} if getattr(args, 'allowed_command', None) is not None else {}),
             ))

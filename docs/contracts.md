@@ -39,7 +39,7 @@ Setup results retain `server_path` and per-client `clients` rows. Client failure
 
 `harflow-ctl version-info --json` uses the thin lazy installed entrypoint. Success and invalid-usage paths import no ctl, task, backend, server, store or client runtime, read no configuration/history, probe no harness and create no files or directories, including with stale caller environment variables. Invalid usage emits a `harflow.version-info` envelope with `error.code: "usage"` and exits 2.
 
-The payload has `component: "engine"`, `contracts` entries named `ctl`, `setup` and `events` with their exact `format`/integer `v`, and `capabilities: ["ctl.v1", "setup.v1", "events.v1", "version-info.v1", "state-recovery.v1", "caller-approvals.monitor-respond.v1"]`. The last capability qualifies Monitor-channel responses to caller-owned approval requests; a consumer must require it on the fresh handshake for that response operation. Missing required capabilities fail the corresponding operation; unknown additive capabilities are tolerated. `os` is Python's platform identifier (`darwin` or `linux`, for example); `architecture` reports the actual machine architecture. App integration requires `darwin`/`arm64`; reporting other platforms does not remove Linux engine support.
+The payload has `component: "engine"`, `contracts` entries named `ctl`, `setup` and `events` with their exact `format`/integer `v`, and `capabilities: ["ctl.v1", "setup.v1", "events.v1", "version-info.v1", "state-recovery.v1", "caller-approvals.monitor-respond.v1"]`. `caller-approvals.monitor-respond.v1` qualifies Monitor-channel responses to caller-owned approval requests; a consumer must require it on the fresh handshake for that response operation. Missing required capabilities fail the corresponding operation; unknown additive capabilities are tolerated. `os` is Python's platform identifier (`darwin` or `linux`, for example); `architecture` reports the actual machine architecture. App integration requires `darwin`/`arm64`; reporting other platforms does not remove Linux engine support.
 
 `state_root` is the selected absolute lexical engine root. An explicit supervisor `--root` or Python registry/store root takes precedence over `HARFLOW_STATE_ROOT`; otherwise the default is `Path.home()/.harflow`. A present override must be a nonempty absolute path without NUL characters. Relative explicit paths and relative HOME values are normalized against the process working directory; normalization collapses repeated separators, dot/dotdot components and trailing separators, preserves case and never resolves symlinks. The root need not exist. Compare roots case-sensitively; aliases that differ lexically refuse safely. Root selection and version-info remain independent of store ownership; version-info never acquires a lease or inspects the marker.
 
@@ -673,3 +673,54 @@ admission evidence remain caller-owned. No live-caller opt-in is implemented.
 
 `ctl-workflow-interaction-handover.json` is a synthetic public-response fixture
 showing a handed-over root and its audit; it does not certify a real caller loss.
+
+## Backend qualification discovery
+
+Capability `backend-qualification.v1` qualifies cached-only launch requirement discovery:
+
+```sh
+harflow-ctl permission-preview --repo PATH --backend BACKEND --qualification-only --json
+harflow-ctl workflow-preview NAME --repo PATH --qualification-only --json
+harflow-ctl qualify BACKEND --feature caller_approval_tools --feature caller_write_tools --json
+```
+
+Existing permission and orchestrator override flags apply to discovery. It returns the
+ordinary ctl v1 `result` envelope containing `qualification_version: 1`, `discovery_only: true`
+and `requirements`. Each requirement contains a stable `id`, `backend`, `required_features`
+and a `features` map keyed by required feature. Standalone origin is `task`; resolved workflow
+origins are `<workflow_id>/orchestrator/<position>`, `<workflow_id>/node/<node_id>/<position>`
+and `<workflow_id>/on-demand/<node_id>/<position>`, including primary position zero and all
+fallbacks. Orchestrator origins identify only actual owners: the root and Child-mode targets,
+including Child boundaries reached through Current-mode descendants. An unused orchestrator
+of a Current-only descendant is omitted; that descendant's nodes remain included. A workflow
+referenced in both modes contributes its owner once. Multiple references to the same pinned
+workflow share its stable workflow identity. Discovery rejects invalid or unresolvable definitions;
+it never returns a truncated authoritative plan. Enumeration stops at 4096 origins. Incremental
+ASCII-escaped JSON byte accounting rejects a row before it exceeds the 1 MiB ctl envelope
+budget, including the trailing newline; repeated cached facts cannot build an oversized document.
+
+The required set is derived by the same pure policy used by launch permission validation:
+`caller_approvals` requires `caller_approval_tools`; `caller_write_approvals` additionally
+requires `caller_write_tools`; nonempty `allowed_commands` requires `allowed_commands`.
+No requested gated features means an empty required set and empty feature map. Such an entry
+satisfies qualification without inspecting the binary and omits identity. This does not establish
+binary installation or launch eligibility: normal launch validation remains authoritative.
+Extra writable paths retain their independent existing certification gate and are never
+represented as these three permission features.
+
+For nonempty required sets, optional `identity` identifies backend, observed version, executable,
+SHA-256 and platform. Every feature evidence row binds that same identity and includes boolean
+`ok`, `source`, bounded `reason` and available revision/facts. Undeclared or missing required
+features are unavailable, never implicitly successful. A bounded `unavailable_reason` identifies
+missing identity/evidence; unavailable identity is omitted rather than fabricated. Consumers must
+require every requested feature's `ok` and matching identity; version display alone authorizes
+nothing. Discovery may invoke `--version`, hash executables and read existing qualification
+receipts or maintainer seeds. It never invokes provider self-tests or starts an agent. Evidence
+is deduplicated per backend while every origin remains visible. Launch revalidates current inputs.
+
+`qualify --feature` is repeatable; omission refreshes all declared features. Repeated feature
+names are deduplicated and each shared probe revision refreshes once. Existing single-feature
+invocations preserve their result shape and exit semantics. Failed feature results always include
+a source and a reason bounded to 1000 characters; unavailable inspection uses source `unavailable`
+and omits identity rather than fabricating one. Explicit qualify is the action that
+may run isolated no-paid provider self-tests; discovery never starts them.
