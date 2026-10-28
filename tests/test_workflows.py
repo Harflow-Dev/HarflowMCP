@@ -925,12 +925,13 @@ class FeatureRegistry(FakeRegistry):
 
 async def execute_persisted_feature_flow(storage, registry, run):
     # The longest retry graph performs ~292 durable updates / 5,094 atomic JSON
-    # writes. Main and this branch take ~4.3s locally; profiling alone takes 8.7s,
-    # and the macOS CI runner exceeded the old 10s guard. Keep a finite liveness
-    # guard with load headroom; semantic completion/retry assertions remain below.
+    # writes. The code-gate retry takes ~10s locally and 20-22s under profiling.
+    # Ubuntu CI exceeded 20s (20.508s) with all 32 activations completed and only
+    # End pending. This finite guard checks liveness, not performance; retain
+    # real persistence and the semantic completion/retry assertions below.
     await run_bounded(
         w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]),
-        20,
+        60,
         label="persisted feature flow",
         diagnostic=lambda: workflow_snapshot(storage, run["workflow_run_id"], registry),
     )

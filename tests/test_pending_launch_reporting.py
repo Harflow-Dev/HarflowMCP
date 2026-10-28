@@ -74,14 +74,40 @@ async def test_cascade_cancels_a_pending_grandchild_under_a_recorded_intermediat
 # ---- item 15: ledger reads on the request path stay off the event loop ---------------------------
 
 
+def record_with_resources(log_dir, task_id):
+    record = store.read(log_dir, task_id)
+    return record if record is not None and record.resources else None
+
+
+@pytest.mark.asyncio
+async def test_parent_record_capture_retries_replacement_without_rereading(tmp_path, monkeypatch):
+    record = record_for("a" * 32, str(tmp_path), resources={"names": ["sim"]})
+    calls = []
+
+    def read(log_dir, task_id):
+        calls.append(task_id)
+        if len(calls) == 1:
+            error = store.TaskDocumentError(task_id, "Task metadata changed while reading", code="task_unavailable")
+            error._source_changed_during_read = True
+            raise error
+        assert len(calls) == 2, "caller construction must use the captured record"
+        return record
+
+    monkeypatch.setattr(store, "read", read)
+    captured = await wait_for(lambda: record_with_resources(tmp_path, record.task_id))
+    caller = lineage.Caller(captured, "session")
+    assert caller.record is record
+    assert calls == [record.task_id, record.task_id]
+
+
 @pytest.mark.asyncio
 async def test_a_nested_request_checks_the_ledger_off_the_event_loop(tmp_path, monkeypatch, identities) -> None:
     install_fake_claude(tmp_path, monkeypatch)
     log_dir = tasks_dir(tmp_path)
     reg = registry(tmp_path)
     parent = await reg.start("slow 6 one", tmp_path, backend=get("claude"), freedom="read_only", resources=["sim"], task_id="a" * 32)
-    await wait_for(lambda: store.read(log_dir, parent.task_id) is not None and store.read(log_dir, parent.task_id).resources)
-    caller = lineage.Caller(store.read(log_dir, parent.task_id), "session")
+    parent_record = await wait_for(lambda: record_with_resources(log_dir, parent.task_id))
+    caller = lineage.Caller(parent_record, "session")
     monkeypatch.setattr(lineage, "detect_caller_detail", lambda *a, **k: lineage.Detection(caller))
     monkeypatch.setattr(lineage, "detect_caller", lambda *a, **k: caller)
     main = threading.main_thread()
