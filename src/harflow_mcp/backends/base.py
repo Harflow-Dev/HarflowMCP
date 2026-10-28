@@ -503,6 +503,10 @@ def control_pipe_problem(backend: Any) -> str | None:
 class ExtraPathsUnsupported:
     """Default fail-closed seams for uncertified optional execution capabilities."""
 
+    def verify_launch_identity(self) -> None:
+        """Last check before spawn. The default accepts the selected binary."""
+        return None
+
     def qualification_features(self):
         """Versioned unsupported features; no probe runs for ordinary dispatch."""
         from .qualification import FeatureSpec

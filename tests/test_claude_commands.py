@@ -410,7 +410,7 @@ def test_validate_allowed_commands_runs_bounds_then_grammar(repo):
         CLAUDE.validate_allowed_commands(("make test",), "read_only", repo)
 
 
-@pytest.mark.parametrize("name", ["codex", "opencode", "vibe", "antigravity"])
+@pytest.mark.parametrize("name", ["codex", "opencode", "vibe", "antigravity", "cursor"])
 def test_other_backends_refuse_with_their_reason(name, repo):
     backend = get(name)
     support = backend.allowed_commands_support()
@@ -437,7 +437,7 @@ def test_capability_metadata_reports_support(repo):
     assert metadata["freedoms"] == ["write_in_repo", "publish"]
     assert (metadata["max_patterns"], metadata["max_pattern_bytes"], metadata["max_total_bytes"]) == (16, 256, 2048)
     assert "not a security boundary" in metadata["boundary"]
-    for name in ("codex", "opencode", "vibe", "antigravity"):
+    for name in ("codex", "opencode", "vibe", "antigravity", "cursor"):
         assert backends.capability_metadata(get(name))["allowed_commands"]["supported"] is False
 
 

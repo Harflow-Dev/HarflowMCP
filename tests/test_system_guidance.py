@@ -61,8 +61,8 @@ def test_the_codex_pair_is_a_toml_string_that_decodes_to_the_note():
 
 def test_capabilities_declare_exactly_the_measured_seams():
     seams = {name: backend.capabilities.system_guidance for name, backend in backends.BACKENDS.items()}
-    assert seams == {"claude": "first_turn_sticky", "codex": "first_turn_sticky", "opencode": "per_run", "vibe": None, "antigravity": None}
-    for name in ("claude", "codex", "opencode", "vibe", "antigravity"):
+    assert seams == {"claude": "first_turn_sticky", "codex": "first_turn_sticky", "opencode": "per_run", "vibe": None, "antigravity": None, "cursor": None}
+    for name in ("claude", "codex", "opencode", "vibe", "antigravity", "cursor"):
         assert backends.get(name).capabilities.as_dict()["system_guidance"] == seams[name]
 
 
@@ -295,7 +295,7 @@ def test_opencode_refuses_any_other_environment_contribution(tmp_path, monkeypat
         backend.assert_safe(replace(invocation, env={"OPENCODE_CONFIG_CONTENT": good}), "write_in_repo")
 
 
-@pytest.mark.parametrize("name", ["vibe", "antigravity"])
+@pytest.mark.parametrize("name", ["vibe", "antigravity", "cursor"])
 def test_backends_without_a_seam_are_left_alone(name, tmp_path):
     backend, invocation = build(name, tmp_path)
     assert getattr(backend, "with_system_guidance", None) is None

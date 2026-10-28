@@ -30,6 +30,7 @@ from .base import (
 )
 from .claude_code import ClaudeCodeClient
 from .codex import CodexClient
+from .cursor import CursorClient
 from .desktop import DesktopClient, desktop_config_path
 from .opencode import OpencodeClient
 from .vibe import VibeClient
@@ -45,6 +46,7 @@ CLIENTS: dict[str, Client] = {
         OpencodeClient(),
         VibeClient(),
         AntigravityClient(),
+        CursorClient(),
     )
 }
 
@@ -371,6 +373,7 @@ __all__ = [
     "Client",
     "CliClient",
     "CodexClient",
+    "CursorClient",
     "DesktopClient",
     "Inspection",
     "OpencodeClient",

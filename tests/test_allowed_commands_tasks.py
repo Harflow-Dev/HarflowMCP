@@ -115,7 +115,7 @@ async def test_a_refused_pattern_never_spawns(env, pattern):
     assert env.launches() == []
 
 
-@pytest.mark.parametrize("name", ["codex", "opencode", "vibe", "antigravity"])
+@pytest.mark.parametrize("name", ["codex", "opencode", "vibe", "antigravity", "cursor"])
 async def test_unsupported_backends_refuse_before_spawn(env, name):
     with pytest.raises(UnsupportedCapability, match=name):
         await env.registry.start("go", env.repo, backend=get(name), allowed_commands=["make test"])

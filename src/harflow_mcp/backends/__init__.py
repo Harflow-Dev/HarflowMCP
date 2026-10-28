@@ -43,6 +43,7 @@ from .base import (
 from .antigravity import AntigravityBackend
 from .claude import ClaudeBackend
 from .codex import CodexBackend
+from .cursor import CursorBackend
 from .opencode import OpencodeBackend
 from .vibe import VibeBackend
 
@@ -54,6 +55,7 @@ BACKENDS: dict[str, Backend] = {
     OpencodeBackend.name: OpencodeBackend(),
     VibeBackend.name: VibeBackend(),
     AntigravityBackend.name: AntigravityBackend(),
+    CursorBackend.name: CursorBackend(),
 }
 
 DEFAULT_BACKEND = ClaudeBackend.name

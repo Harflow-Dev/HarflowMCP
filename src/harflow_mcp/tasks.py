@@ -2218,6 +2218,7 @@ class TaskRegistry:
                             log.exception("task %s: could not clean scratch after a cancel", task_id)
                     raise task_resources.LaunchCancelled("cancelled before the task started")
 
+        await asyncio.to_thread(backend.verify_launch_identity)
         try:
             proc = await asyncio.create_subprocess_exec(
                 *invocation.argv,

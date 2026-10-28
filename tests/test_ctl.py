@@ -489,7 +489,7 @@ def test_backends_json_reports_the_registry_in_order(
     doc = _one_doc(capsys)
     assert doc["v"] == 1
     assert [b["backend"] for b in doc["backends"]] == [
-        "claude", "codex", "opencode", "vibe", "antigravity"
+        "claude", "codex", "opencode", "vibe", "antigravity", "cursor"
     ]
     assert doc["backends"] == [
         {
@@ -551,6 +551,7 @@ def test_backends_plain_text_is_one_line_per_backend(
         "opencode  not found on PATH",
         "vibe  installed",
         "antigravity  not found on PATH",
+        "cursor  not found on PATH",
     ]
 
 

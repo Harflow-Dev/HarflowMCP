@@ -88,7 +88,7 @@ async def test_list_backends_describes_every_one(monkeypatch) -> None:
     listed = (await call("list_backends")).structured_content["result"]
 
     by_name = {entry["backend"]: entry for entry in listed}
-    assert sorted(by_name) == ["antigravity", "claude", "codex", "opencode", "vibe"]
+    assert sorted(by_name) == ["antigravity", "claude", "codex", "cursor", "opencode", "vibe"]
     # The differences a caller has to plan around.
     assert by_name["claude"]["capabilities"]["supports_turn_cap"] is True
     assert by_name["codex"]["capabilities"]["supports_turn_cap"] is False

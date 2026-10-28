@@ -65,7 +65,7 @@ def test_claude_preview_transport_and_limitations_text_is_unchanged():
 
 # --- fail-closed defaults -------------------------------------------------------------------------
 
-@pytest.mark.parametrize("name", ["opencode", "vibe", "antigravity"])
+@pytest.mark.parametrize("name", ["opencode", "vibe", "antigravity", "cursor"])
 def test_backends_without_the_seams_default_closed(name):
     backend = get(name)
     assert backend.approval_frame_kind({"type": "control_request", "request_id": "x"}) is None

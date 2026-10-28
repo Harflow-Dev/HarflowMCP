@@ -49,11 +49,12 @@ from harflow_mcp.backends.vibe import AGENTS as VIBE_AGENTS
 from harflow_mcp.backends.vibe import REJECTED_FLAGS as VIBE_REJECTED_FLAGS
 from harflow_mcp.backends.vibe import VibeBackend
 from harflow_mcp.backends.vibe import UnsafeInvocationError as VibeUnsafe
+from harflow_mcp.backends.cursor import CursorBackend
 
 REPO = Path("/tmp/repo")
 SESSION = "11111111-1111-1111-1111-111111111111"
 
-ALL = [ClaudeBackend(), CodexBackend(), OpencodeBackend(), VibeBackend(), AntigravityBackend()]
+ALL = [ClaudeBackend(), CodexBackend(), OpencodeBackend(), VibeBackend(), AntigravityBackend(), CursorBackend()]
 
 # network=None keeps each freedom's historical default; the doubles and helpers below carry it
 # explicitly so the default is pinned by tests rather than only implied.
@@ -234,7 +235,7 @@ def resume_invocation(backend, **kwargs):
 
 
 def test_every_backend_is_registered() -> None:
-    assert sorted(backends.BACKENDS) == ["antigravity", "claude", "codex", "opencode", "vibe"]
+    assert sorted(backends.BACKENDS) == ["antigravity", "claude", "codex", "cursor", "opencode", "vibe"]
 
 
 def test_unknown_backend_is_rejected() -> None:
@@ -335,11 +336,17 @@ def test_assert_safe_refuses_an_argv_built_for_a_different_authorization(
         # the only thing that permits a publish (measured), and it removes every other
         # restriction with it — like vibe, publish is a relabelling of unrestricted here.
         (AntigravityBackend(), "publish", "unrestricted"),
+        (CursorBackend(), "write_in_repo", "publish"),
+        (CursorBackend(), "publish", "unrestricted"),
+        (CursorBackend(), "write_in_repo", "unrestricted"),
     ],
     ids=[
         "opencode-write_in_repo-publish",
         "vibe-publish-unrestricted",
         "antigravity-publish-unrestricted",
+        "cursor-write_in_repo-publish",
+        "cursor-publish-unrestricted",
+        "cursor-write_in_repo-unrestricted",
     ],
 )
 def test_known_freedom_collapses_produce_byte_identical_argv(backend, freedom_a, freedom_b) -> None:
@@ -448,6 +455,7 @@ EXPECTED_NETWORK_ACCESS: dict[str, dict[str, str]] = {
     },
     "opencode": dict.fromkeys(FREEDOMS, "not_controlled"),
     "vibe": dict.fromkeys(FREEDOMS, "not_controlled"),
+    "cursor": dict.fromkeys(FREEDOMS, "not_controlled"),
 }
 
 
@@ -630,6 +638,7 @@ EXPECTED_REASONING_EFFORT_FLAGS: dict[str, tuple[bool, bool]] = {
     "opencode": (True, True),
     # vibe has no effort flag at all — see VibeBackend's _EFFORT_CAVEAT for why it is not attempted.
     "vibe": (False, False),
+    "cursor": (False, False),
 }
 
 
@@ -690,6 +699,7 @@ EXPECTED_NETWORK_CONTROL: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "claude": (FREEDOMS, ()),
     "opencode": (FREEDOMS, ()),
     "vibe": (FREEDOMS, ()),
+    "cursor": (FREEDOMS, ()),
 }
 
 
@@ -1088,6 +1098,49 @@ LEGACY_ARGV: dict[str, dict[str, dict[str, list[str]]]] = {
                 "agy", "--output-format", "stream-json", "--input-format", "stream-json",
                 "--add-dir", "/tmp/repo", "--dangerously-skip-permissions",
                 "--conversation", "abc-123",
+            ],
+        },
+    },
+    "cursor": {
+        "read_only": {
+            "start": [
+                "cursor-agent", "-p", "--output-format", "stream-json", "--trust",
+                "--workspace", "/tmp/repo", "--mode", "plan", "--", "do a thing",
+            ],
+            "resume": [
+                "cursor-agent", "-p", "--output-format", "stream-json", "--trust",
+                "--workspace", "/tmp/repo", "--mode", "plan", "--resume", "abc-123",
+                "--", "more",
+            ],
+        },
+        "write_in_repo": {
+            "start": [
+                "cursor-agent", "-p", "--output-format", "stream-json", "--trust",
+                "--workspace", "/tmp/repo", "--", "do a thing",
+            ],
+            "resume": [
+                "cursor-agent", "-p", "--output-format", "stream-json", "--trust",
+                "--workspace", "/tmp/repo", "--resume", "abc-123", "--", "more",
+            ],
+        },
+        "publish": {
+            "start": [
+                "cursor-agent", "-p", "--output-format", "stream-json", "--trust",
+                "--workspace", "/tmp/repo", "--", "do a thing",
+            ],
+            "resume": [
+                "cursor-agent", "-p", "--output-format", "stream-json", "--trust",
+                "--workspace", "/tmp/repo", "--resume", "abc-123", "--", "more",
+            ],
+        },
+        "unrestricted": {
+            "start": [
+                "cursor-agent", "-p", "--output-format", "stream-json", "--trust",
+                "--workspace", "/tmp/repo", "--", "do a thing",
+            ],
+            "resume": [
+                "cursor-agent", "-p", "--output-format", "stream-json", "--trust",
+                "--workspace", "/tmp/repo", "--resume", "abc-123", "--", "more",
             ],
         },
     },
@@ -4438,6 +4491,7 @@ def test_claude_live_and_classic_shapes_differ_only_in_the_input_wiring(freedom:
         ("opencode", ["opencode", "/work/repo", "-s", "abc-123"]),
         ("vibe", ["vibe", "--trust", "--workdir", "/work/repo", "--resume", "abc-123"]),
         ("antigravity", ["agy", "--conversation", "abc-123"]),
+        ("cursor", ["cursor-agent", "--trust", "--workspace", "/work/repo", "--resume", "abc-123"]),
     ],
 )
 def test_interactive_resume_argv_is_the_measured_command(name: str, expected: list[str]) -> None:
@@ -4485,6 +4539,7 @@ def test_interactive_resume_argv_accepts_every_id_shape_the_clis_mint(name: str)
         ("opencode", ["opencode", "/work/repo", "-s", "abc-123"]),
         ("vibe", ["vibe", "--trust", "--workdir", "/work/repo", "--resume", "abc-123"]),
         ("antigravity", ["agy", "--conversation", "abc-123"]),
+        ("cursor", ["cursor-agent", "--trust", "--workspace", "/work/repo", "--resume", "abc-123"]),
     ],
 )
 def test_resume_command_matches_each_backends_measured_argv(

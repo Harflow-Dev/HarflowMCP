@@ -258,3 +258,22 @@ class OpencodeApproval(JsonApproval):
         elif permission.get(native) == "allow":
             del permission[native]
         return _json_root_patch(raw, "permission", permission)
+
+
+class CursorApproval(ApprovalPolicy):
+    """Cursor stores MCP approval per working directory. Harflow does not edit those files."""
+
+    def config_path(self) -> Path:
+        return Path.home() / ".cursor" / "mcp.json"
+
+    def unsupported_reason(self) -> str | None:
+        return "Cursor MCP approvals are per project directory and are not edited by Harflow."
+
+    def parse(self, raw: str) -> dict:
+        raise ValueError("Cursor MCP approvals are not edited by Harflow")
+
+    def entries(self, data: dict) -> list[str]:
+        return []
+
+    def update(self, raw: str, data: dict, entry: str, *, allow: bool) -> str:
+        raise ValueError("Cursor MCP approvals are not edited by Harflow")

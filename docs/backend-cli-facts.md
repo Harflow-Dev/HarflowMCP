@@ -1160,3 +1160,59 @@ Runtime/configuration identities and the group-directory identity are checked be
 these observations are not an atomic lock against independent concurrent modification. Ordinary
 read-only tasks keep their previous profile. Scoped output does not authorize caller approvals,
 native children, additional writable paths or a change in repository access.
+
+## Cursor Agent CLI (2026.10.22-27dcf5f, 2026-10-28, macOS arm64)
+
+`cursor-agent` and `agent` are the same wrapper. Both are symlinks into a versioned
+directory. Harflow invokes the symlink name and does not resolve it. `agent --version`
+prints only `2026.10.22-27dcf5f`.
+
+Signing into the Cursor editor does not sign in this CLI. The credential `agent status`
+reads is for the current `HOME`. After `agent login`, `agent status --format json` in a
+shell with the real home directory reports an access token and a refresh token. The same
+binary with `HOME` pointed at another directory reports `Not logged in`. `CURSOR_API_KEY`
+is the non-interactive alternative. Confirm with `agent status` before headless dispatch.
+
+Parser, still true on this version: `-p` is a boolean (`-p=hello` is rejected). The prompt
+is one positional after `--`, so a prompt that looks like a flag is preserved. Stdin is
+read only when it is not a terminal and there is no positional prompt, and that text is
+trimmed. Unknown `--effort` is rejected. `--mode` accepts `plan` and `ask`. `--sandbox`
+accepts `enabled` and `disabled`. `--trust` and `--workspace` are accepted. A missing
+workspace path is rejected before auth. `--output-format` in the shipped writer allows
+`text`, `json`, and `stream-json`; Harflow launches only `stream-json` and refuses the
+other two because that is the stream it parses. There is no live follow-up stdin protocol.
+
+`--new-session-id` wants a UUIDv4 and refuses combining with `--resume`. Resume of an
+unknown id was not observed past auth, so `resume_may_start_fresh` is true. `--system-prompt`
+is a file path. Delivery of that file into a model request was not observed, so system
+guidance is not shipped.
+
+Global MCP config is `~/.cursor/mcp.json`, key `mcpServers`, with `command`, optional `args`,
+and `env`. `agent mcp list` accepts JSONC and does not rewrite it. Harflow refuses a file
+`json.loads` cannot round-trip. Registration writes only the global file. `agent mcp enable`
+approves the server for the working directory of that command (setup uses the home directory)
+and does not rewrite `mcp.json`. `agent mcp disable` does not remove the entry. Whether an
+MCP child observes `env.PATH` was not measured; the entry still carries it because that is
+the registration contract.
+
+Tool behavior on one authenticated scratch repository, print mode, 2026-10-28. Each row is
+one run. "Rejected" here means the model did not perform the step, not a captured tool error,
+unless the filesystem shows the write or the commit:
+
+| Launch | Read | Write in repo | Write outside repo | Commit | Push | Network file |
+| --- | --- | --- | --- | --- | --- | --- |
+| `-p` | yes | yes | yes | no | no | no |
+| `-p --mode plan` | no tool call | no | no | no | no | no |
+| `-p --mode ask` | yes | no | no | no | no | no |
+| `-p --sandbox enabled` | yes | yes | yes | yes | no | no |
+| `-p --sandbox disabled` | yes | yes | yes | no | no | no |
+| `-p --force` | yes | yes | yes | yes | no | yes |
+
+Plan mode declined without a tool call. Ask mode read the file and said it would not write.
+Default print mode wrote outside the repository. `--sandbox enabled` did not confine that
+write and did create a commit. `--force` also fetched a public URL. Push to a local bare
+remote was not observed in any of these runs, so Harflow does not claim push is blocked.
+None of these flags is an OS sandbox Harflow can report. `write_in_repo`, `publish`, and
+`unrestricted` therefore share one `-p` argv, and `read_only` only adds `--mode plan`.
+Caller approvals, `allowed_commands`, a turn cap, reasoning effort, and extra writable paths
+are refused. The user's `~/.cursor/mcp.json` was unchanged by these runs.

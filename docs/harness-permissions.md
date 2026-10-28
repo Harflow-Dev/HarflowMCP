@@ -17,10 +17,15 @@ vendor documentation; the Vibe example explicitly covers the locally inspected *
 ## First-time setup for every harness
 
 1. Install the CLI and make its binary available on the `PATH` used by the HarflowMCP server or
-   Monitor service: `claude`, `codex`, `opencode`, `vibe`, or `agy`. A working terminal alone does
+   Monitor service: `claude`, `codex`, `opencode`, `vibe`, `agy`, or `cursor-agent` (`agent` is the
+   same program when its `--version` line is Cursor's). A working terminal alone does
    not establish that a desktop-launched process has the same environment.
 2. Complete the harness's interactive login or provider/API-key setup before starting a workflow.
    Confirm that its configured model is accessible and has quota. HarflowMCP supplies no accounts.
+   For Cursor, signing into the editor is a different login from the `agent` CLI. Run `agent login`
+   or set `CURSOR_API_KEY`, then run `agent status` in a shell whose `HOME` is your real home
+   directory. The status has to report an access token (`hasAccessToken` true). A process with a
+   different `HOME` reports "Not logged in" even after that login succeeds.
 3. Prepare the repository, dependencies, build tools, and any required external files. Use a known
    starting Git state so you can attribute changes and inspect the resulting diff.
 4. Register required MCP servers **inside the worker harness**, configure their credentials, and
@@ -83,8 +88,9 @@ or move verification to a suitable node.
 | OpenCode | `plan` agent | `build` agent | `build` agent; same mechanism as local writing | `build` plus `--auto` |
 | Vibe | `ask` approval profile (not a write-tool exclusion) | `accept-edits` profile | `auto-approve`; same mechanism as unrestricted | `auto-approve` profile |
 | Antigravity | `--mode plan` | `--mode accept-edits` | `--dangerously-skip-permissions`; same mechanism as unrestricted | `--dangerously-skip-permissions` |
+| Cursor Agent CLI | `--mode plan` on `cursor-agent -p` | print mode, no `--mode` | same command as `write_in_repo` | same command as `write_in_repo` |
 
-These levels authorize an assignment; they do not make the five harnesses equally confined:
+These levels authorize an assignment; they do not make the harnesses equally confined:
 
 - **Claude:** restrictions use the harness permission layer, with no bridge OS sandbox. Accept-edits
   approves file edits, not arbitrary Bash or MCP calls. Publish adds direct Git commit/push,
@@ -104,6 +110,12 @@ These levels authorize an assignment; they do not make the five harnesses equall
 - **Antigravity:** no bridge OS sandbox. Plan/accept-edits use the harness permission layer and
   settings. Builds/tests can be denied as mutating commands unless allowed. Publish bypasses the
   permission layer broadly, including operations outside the repository.
+- **Cursor:** measured on Cursor Agent CLI `2026.10.22-27dcf5f`, macOS arm64, on 2026-10-28.
+  There is no bridge OS sandbox in the launch Harflow sends. `read_only` adds `--mode plan`.
+  `write_in_repo`, `publish`, and `unrestricted` share one print-mode argv, so Harflow cannot tell
+  these two freedoms apart. Caller approvals, `allowed_commands`, a turn cap, and reasoning effort
+  are refused. Live follow-up on stdin is off. The editor login does not authenticate `agent`;
+  see the first-time setup above.
 
 Write-capable workers receive `HARFLOW_SCRATCH` (alias `HARFLOW_TASK_SCRATCH`), and every worker receives
 `HARFLOW_CHAIN_SCRATCH` and, in a group, `HARFLOW_GROUP_SCRATCH` (shared folders; see

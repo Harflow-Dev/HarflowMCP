@@ -52,6 +52,9 @@ HELP_CHECKS: dict[str, list[tuple[list[str], list[str], set[str]]]] = {
     "antigravity": [
         (["--help"], [r"--conversation"], {"--conversation"}),
     ],
+    "cursor": [
+        (["--help"], [r"--trust\b", r"--workspace", r"--resume"], {"--trust", "--workspace", "--resume"}),
+    ],
 }
 
 

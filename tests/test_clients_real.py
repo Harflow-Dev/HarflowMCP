@@ -349,10 +349,10 @@ def test_setup_install_status_uninstall_end_to_end(
     assert code == 0, rows
     assert rows["opencode"]["action"] == "skipped"
     assert rows["opencode"]["installed"] is True
-    for key in ("claude-desktop", "claude-code", "codex", "vibe", "antigravity"):
+    for key in ("claude-desktop", "claude-code", "codex", "vibe", "antigravity", "cursor"):
         assert (rows[key]["action"], rows[key]["installed"]) == ("removed", False), rows[key]
 
     code, rows = invoke("--uninstall")
     assert code == 0
-    for key in ("claude-desktop", "claude-code", "codex", "vibe", "antigravity"):
+    for key in ("claude-desktop", "claude-code", "codex", "vibe", "antigravity", "cursor"):
         assert rows[key]["action"] == "not_installed", rows[key]

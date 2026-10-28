@@ -23,6 +23,7 @@ from harflow_mcp.clients.base import CliClient
 from harflow_mcp.clients.antigravity import AntigravityClient
 from harflow_mcp.clients.claude_code import ClaudeCodeClient
 from harflow_mcp.clients.codex import CodexClient
+from harflow_mcp.clients.cursor import CursorClient
 from harflow_mcp.clients.desktop import DesktopClient
 from harflow_mcp.clients.opencode import OpencodeClient
 from harflow_mcp.clients.vibe import (
@@ -104,6 +105,7 @@ def test_every_client_is_registered() -> None:
         "claude-code",
         "claude-desktop",
         "codex",
+        "cursor",
         "opencode",
         "vibe",
     ]
@@ -900,9 +902,9 @@ def test_a_client_named_alongside_all_is_still_an_error_when_missing(
 
 def test_parse_selection_rejects_an_unknown_name() -> None:
     with pytest.raises(clients.UnknownClient) as excinfo:
-        clients.parse_selection(["cursor"])
+        clients.parse_selection(["not-a-client"])
 
-    assert "cursor" in str(excinfo.value)
+    assert "not-a-client" in str(excinfo.value)
     assert "codex" in str(excinfo.value)
 
 
@@ -2145,3 +2147,165 @@ def test_a_bare_entry_under_a_path_with_a_space_is_current(tmp_path: Path) -> No
 
     assert inspection.command == server
     assert clients.is_current(inspection, server, "/p") is True
+
+
+# --- Cursor (global mcp.json, no mcp add) -------------------------------------------------------
+
+
+def _cursor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[CursorClient, Path]:
+    monkeypatch.setattr(
+        "harflow_mcp.clients.cursor.find_executable", lambda: "cursor-agent"
+    )
+    path = tmp_path / "mcp.json"
+    return CursorClient(config_path=path), path
+
+
+def test_cursor_is_not_a_cli_client() -> None:
+    assert not isinstance(clients.CLIENTS["cursor"], CliClient)
+
+
+def test_cursor_absent_executable_is_unavailable_and_creates_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr("harflow_mcp.cursor_cli.shutil.which", lambda name: f"/tmp/{name}")
+    monkeypatch.setattr("harflow_mcp.cursor_cli.version_line", lambda executable: None)
+
+    availability = CursorClient().availability()
+
+    assert availability.available is False
+    assert not (tmp_path / ".cursor").exists()
+
+
+def test_cursor_non_cursor_agent_version_is_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("harflow_mcp.cursor_cli.shutil.which", lambda name: f"/tmp/{name}")
+    monkeypatch.setattr("harflow_mcp.cursor_cli.version_line", lambda executable: None)
+
+    assert CursorClient().availability().available is False
+
+
+def test_cursor_version_line_accepts_the_measured_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "harflow_mcp.cursor_cli.subprocess.run",
+        lambda *args, **kwargs: type("R", (), {"stdout": "2026.10.22-27dcf5f\n", "returncode": 0})(),
+    )
+
+    from harflow_mcp.cursor_cli import version_line
+
+    assert version_line("cursor-agent") == "2026.10.22-27dcf5f"
+
+
+def test_cursor_writes_beside_another_server(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    client, path = _cursor(tmp_path, monkeypatch)
+    path.write_text(json.dumps({"mcpServers": {"other": {"command": "other", "args": ["--flag"]}}}))
+    runner = FakeRunner(ok("enabled"))
+
+    result = client.apply(REGISTRATION, runner)
+
+    assert result.status == "applied"
+    written = json.loads(path.read_text())
+    assert written["mcpServers"]["other"] == {"command": "other", "args": ["--flag"]}
+    assert written["mcpServers"]["harflow_mcp"] == {
+        "command": "/opt/bin/harflow-server",
+        "env": {"PATH": "/a:/b"},
+    }
+    assert runner.calls == [["cursor-agent", "mcp", "enable", "harflow_mcp"]]
+
+
+def test_cursor_replaces_its_own_entry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    client, path = _cursor(tmp_path, monkeypatch)
+    path.write_text(json.dumps({"mcpServers": {"harflow_mcp": {"command": "old"}}}))
+
+    result = client.apply(REGISTRATION, FakeRunner(ok()))
+
+    assert result.status == "applied"
+    assert json.loads(path.read_text())["mcpServers"]["harflow_mcp"]["command"] == "/opt/bin/harflow-server"
+
+
+def test_cursor_refuses_jsonc_without_rewriting_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    client, path = _cursor(tmp_path, monkeypatch)
+    original = '{ "mcpServers": { "other": { "command": "other", }, }, }\n'
+    path.write_text(original)
+
+    with pytest.raises(SetupError, match="not valid JSON"):
+        client.apply(REGISTRATION, FakeRunner())
+
+    assert path.read_text() == original
+
+
+def test_cursor_refuses_a_concurrent_edit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    client, path = _cursor(tmp_path, monkeypatch)
+    path.write_text(json.dumps({"mcpServers": {}}))
+    original = path.read_text()
+    reads = iter([original, original, '{"mcpServers": {"someone-else": {}}}'])
+
+    def fake(_path: Path) -> str:
+        return next(reads)
+
+    monkeypatch.setattr("harflow_mcp.clients.cursor.read_raw", fake)
+    monkeypatch.setattr("harflow_mcp.clients.desktop.read_raw", fake)
+
+    result = client.apply(REGISTRATION, FakeRunner())
+
+    assert result.status == "failed"
+    assert "changed while it was being edited" in result.detail
+    assert json.loads(path.read_text()) == {"mcpServers": {}}
+
+
+def test_cursor_enable_failure_keeps_the_written_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    client, path = _cursor(tmp_path, monkeypatch)
+
+    result = client.apply(REGISTRATION, FakeRunner(fails(1, "enable failed")))
+
+    assert result.status == "failed"
+    assert "wrote" in result.detail
+    assert "harflow_mcp" in json.loads(path.read_text())["mcpServers"]
+
+
+def test_cursor_remove_edits_the_file_and_does_not_call_disable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, path = _cursor(tmp_path, monkeypatch)
+    path.write_text(
+        json.dumps({"mcpServers": {"harflow_mcp": {"command": "x"}, "other": {"command": "other"}}})
+    )
+    runner = FakeRunner()
+
+    result = client.remove("harflow_mcp", runner)
+
+    assert result.status == "removed"
+    assert runner.calls == []
+    assert json.loads(path.read_text())["mcpServers"] == {"other": {"command": "other"}}
+
+
+def test_cursor_remove_of_a_missing_entry_is_not_installed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, path = _cursor(tmp_path, monkeypatch)
+    path.write_text(json.dumps({"mcpServers": {}}))
+
+    assert client.remove("harflow_mcp", FakeRunner()).status == "not_installed"
+
+
+def test_cursor_inspect_reads_command_args_and_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    client, path = _cursor(tmp_path, monkeypatch)
+    path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "harflow_mcp": {
+                        "command": "/opt/bin/harflow-server",
+                        "args": ["--flag"],
+                        "env": {"PATH": "/a:/b"},
+                    }
+                }
+            }
+        )
+    )
+
+    inspection = client.inspect("harflow_mcp", FakeRunner())
+
+    assert inspection.installed is True
+    assert inspection.argv == ("/opt/bin/harflow-server", "--flag")
+    assert inspection.path_env == "/a:/b"
+

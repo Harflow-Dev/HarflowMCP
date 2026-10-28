@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Add the Cursor client and Cursor Agent CLI backend for `2026.10.22-27dcf5f`. Headless dispatch needs `agent login` or `CURSOR_API_KEY`; signing into the Cursor editor does not authenticate the CLI, and `agent status` has to report an access token in the same `HOME`. Caller approvals, command grants, a turn cap, reasoning effort, and live follow-up are refused. `write_in_repo`, `publish`, and `unrestricted` share one print-mode command.
 - Add opt-in group report output for qualified read-only Codex tasks, with repository denial, group-only scope, configuration qualification, inherited headless resumes and explicit unsupported-mode refusals (#84).
 - Add bounded Claude `publish` grants for PR creation, editing, comments, reviews and reads, including help; disclose excluded raw API and destructive GitHub operations and backend policy differences (#81).
 - Allow exact branch-preparation grants at `write_in_repo`, retaining publication restrictions and refusing dirty initial transition targets. Verify saved-node preparation with concrete per-run grants; dynamic workflow templates still require per-run configuration (#58, #63).
