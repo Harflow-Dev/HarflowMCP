@@ -67,6 +67,22 @@ def test_cursor_cannot_cross_execution_attempt_or_changed_content(run):
         result_page(run, "old", cursor="broken")
 
 
+def test_inspection_attempt_keeps_candidate_identity_without_observed_payload(run):
+    run["activations"][0]["tasks"][1]["candidate"] = {"backend": "codex", "model": "gpt", "fallbacks": [{"backend": "claude"}]}
+    run["activations"][0]["tasks"][1]["harness_metadata"] = {
+        "verification_status": "matched",
+        "observed": {"summary": "x" * 5000},
+        "effective": {"backend": "codex", "model": "gpt"},
+    }
+    page = result_page(run, "old", limit=10)
+    attempt = next(item for item in page["attempts"] if item["task_id"] == "second")
+    assert attempt["candidate"] == {"backend": "codex", "model": "gpt"}
+    assert attempt["harness"]["verification_status"] == "matched"
+    assert attempt["harness"]["effective"] == {"backend": "codex", "model": "gpt"}
+    assert "observed" not in attempt["harness"]
+    assert "x" * 100 not in json.dumps(page["attempts"])
+
+
 @pytest.mark.parametrize("state", ["running", "reserved", "uncertain"])
 def test_whole_execution_must_settle_including_fallbacks(run, state):
     run["activations"][0]["tasks"][0]["status"] = state

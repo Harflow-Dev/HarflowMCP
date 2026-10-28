@@ -231,6 +231,6 @@ async def continue_worker(supervisor: Any, node: dict[str, Any], token: dict[str
     supervisor.update(prepare, "answer_prepared", {"question_id": question_id})
     activation = next(a for a in supervisor.run()["activations"] if a["id"] == activation_id)
     history = [{"question_id": q["question_id"], "question": q["question"], "answer": q.get("answer"), "observed_progress": w._bounded(q.get("progress", {})), "evidence": w._bounded(q.get("evidence", []))} for q in activation.get("questions", [])]
-    prompt = d.worker_prompt(run, node, token, root=supervisor.store.root) + "\nClarification history and observed progress (continue without repeating completed work):\n" + json.dumps(history) + "\nAnswer to your latest question:\n" + question["answer"]
+    prompt = d.worker_prompt(run, node, token, root=supervisor.store.root) + "\nClarification history and observed progress (continue without repeating completed work):\n" + d.prompt_json(history) + "\nAnswer to your latest question:\n" + question["answer"]
     dispatch_node = {**node, "session_mode": mode}
     return await supervisor._dispatch(dispatch_node, prompt, "node", activation)

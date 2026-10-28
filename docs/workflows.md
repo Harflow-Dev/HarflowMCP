@@ -34,6 +34,8 @@ instructions stay inline. Restart, recovery, repair, definition changes and scop
 require full delivery; only the actual selected candidate/model and receiving session may
 acknowledge a baseline.
 
+Stable protocol text (`guidance` and `examples`), the run goal, parent goal, goal assessment, goal replan, inherited parent specification, inspection instructions, on-demand guidance, and current-mode workflow scope use that same reference protocol and are resent only when their digest changes. The current goal revision and replanning flags stay inline. Examples are resent when the issued decision id changes, so a copied example still carries that id. Worker prompts encode goals, task descriptors, inherited specifications, and input results as compact UTF-8 JSON. Workers receive goal guidance only when a goal or parent goal exists, and that guidance does not ask them to return orchestrator fields. Worker inputs omit harness-attempt metadata. Settled-execution checkpoints list each attempt's task id and status; an inspection page adds candidate identity and harness verification fields, without the observed payload.
+
 The orchestrator graph contains node identities, purposes, execution constraints and every
 connection and condition. Optional node `purpose` is a nonempty single line of at most 500
 characters. Missing executable agent or workflow node purposes produce advisory `warnings` in `workflow-validate`, a context warning,

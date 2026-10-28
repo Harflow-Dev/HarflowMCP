@@ -72,6 +72,27 @@ def assigned_input_page(managed: tuple[dict[str, Any], dict[str, Any]] | None, r
     return page
 
 
+def _attempt_summary(task: dict[str, Any]) -> dict[str, Any]:
+    """Candidate identity for inspection. Observed payloads stay in the result chunk."""
+    summary: dict[str, Any] = {"task_id": task.get("task_id"), "status": task.get("status")}
+    candidate = task.get("candidate")
+    if isinstance(candidate, dict):
+        identity = {key: candidate[key] for key in ("backend", "model", "reasoning_effort") if isinstance(candidate.get(key), str)}
+        if identity:
+            summary["candidate"] = identity
+    metadata = task.get("harness_metadata")
+    if isinstance(metadata, dict):
+        harness = {key: metadata[key] for key in ("verification_status", "provenance", "metadata_source") if isinstance(metadata.get(key), str)}
+        effective = metadata.get("effective")
+        if isinstance(effective, dict):
+            effective_identity = {key: effective[key] for key in ("backend", "model", "reasoning_effort", "freedom") if isinstance(effective.get(key), str)}
+            if effective_identity:
+                harness["effective"] = effective_identity
+        if harness:
+            summary["harness"] = harness
+    return summary
+
+
 def result_page(run: dict[str, Any], execution_id: str, *, task_id: str | None = None, cursor: str | None = None, limit: int = 16000) -> dict[str, Any]:
     """Return lossless JSON text chunks, bound to execution, attempt, and immutable content."""
     if type(limit) is not int or not 1 <= limit <= 32000:
@@ -98,7 +119,7 @@ def result_page(run: dict[str, Any], execution_id: str, *, task_id: str | None =
     chunk = serialized[offset:offset + limit]
     end = offset + len(chunk)
     next_cursor = base64.urlsafe_b64encode(json.dumps({"identity": identity, "offset": end}, separators=(",", ":")).encode()).decode() if end < len(serialized) else None
-    return {"workflow_run_id": run["workflow_run_id"], "execution_id": execution_id, "node_id": activation["node_id"], "status": activation["status"], "task_id": task.get("task_id") if task else None, "attempts": [{"task_id": t.get("task_id"), "status": t.get("status")} for t in activation.get("tasks", [])], "encoding": "json", "content_sha256": digest, "offset": offset, "total_characters": len(serialized), "chunk": chunk, "next_cursor": next_cursor, "has_more": next_cursor is not None}
+    return {"workflow_run_id": run["workflow_run_id"], "execution_id": execution_id, "node_id": activation["node_id"], "status": activation["status"], "task_id": task.get("task_id") if task else None, "attempts": [_attempt_summary(t) for t in activation.get("tasks", [])], "encoding": "json", "content_sha256": digest, "offset": offset, "total_characters": len(serialized), "chunk": chunk, "next_cursor": next_cursor, "has_more": next_cursor is not None}
 
 
 @task_operation(parameter="log_dir")

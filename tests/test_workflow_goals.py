@@ -1,5 +1,6 @@
 """Goals are caller data and versioned completion judgments, never permissions."""
 import copy
+import json
 
 import pytest
 
@@ -216,9 +217,16 @@ async def test_revised_goal_replan_and_complete(storage, tmp_path, optimized):
     assert result["status"] == "completed"
     assert result["goal_replan"]["revision"] == 2
     assert result["goal_assessment"]["revision"] == 2
-    assert all(c["goal"] == " revised\nverbatim " for c in registry.contexts)
     assert not result.get("goal_replanning_required")
-    assert all("revised" in prompt for prompt, kwargs in registry.calls)
+    if optimized:
+        full = [c for c in registry.contexts if c["goal"] == " revised\nverbatim "]
+        referenced = [c for c in registry.contexts if isinstance(c.get("goal"), dict) and c["goal"].get("mode") == "reference"]
+        assert full and len(full) + len(referenced) == len(registry.contexts)
+        assert all(c["goal_revision"] == 2 for c in registry.contexts)
+    else:
+        assert all(c["goal"] == " revised\nverbatim " for c in registry.contexts)
+    assert all("revised" in prompt for prompt, kwargs in registry.calls if "Goal constraints:" in prompt)
+    assert any("revised" in prompt for prompt, kwargs in registry.calls if "Goal constraints:" not in prompt)
 
 
 def test_unsettled_evidence_is_not_issued():
@@ -286,3 +294,43 @@ def test_recovered_overlimit_goals_remain_readable(storage, tmp_path, goals):
     with pytest.raises(w.WorkflowError, match="new run"):
         g.revise(recovered_store, run["workflow_run_id"], "new", len(goals))
     assert recovered_store.get_run(run["workflow_run_id"]) == recovered
+
+
+def test_worker_prompt_keeps_unicode_goals_and_omits_unused_harness_metadata():
+    node = {"role": "task", "instructions": "Do the work"}
+    token = {"assignment_prompt": "assignment", "input_result_refs": [], "assigned_task_ids": []}
+    bare = {"definition": {"nodes": []}, "tasks": [], "activations": []}
+    assert "Goal constraints:" not in d.worker_prompt(bare, node, token)
+    assert "goal_replan" not in d.worker_prompt(bare, node, token)
+    goal = "Ship あ feature"
+    prompted = d.worker_prompt({**bare, "goal": goal, "goal_revision": 1}, node, token)
+    assert "Goal constraints:" in prompted
+    assert goal in prompted
+    assert "\\u3042" not in prompted
+    assert "goal_replan" not in prompted
+    assert "goal_assessment" not in prompted
+    run = {
+        "definition": {"nodes": [{"id": "work", "type": "agent", "role": "task"}]},
+        "tasks": [],
+        "activations": [{
+            "id": "exec", "role": "node", "node_id": "work", "status": "completed",
+            "node_result": {"status": "succeeded", "result": {"summary": "done あ"}, "evidence": []},
+            "tasks": [{"task_id": "task-1", "status": "completed", "candidate": {"backend": "codex"}, "harness_metadata": {"verification_status": "matched", "observed": {"summary": "x" * 2000}}}],
+        }],
+        "workflow_run_id": "run", "decisions": [], "transitions": 0, "prompt": "request",
+    }
+    run["definition"]["connections"] = []
+    run["definition"]["max_transitions"] = 10
+    work = {"id": "work", "type": "agent", "role": "task", "instructions": "Do the work", "agent": {"backend": "codex"}}
+    run["definition"]["nodes"] = [
+        {"id": "start", "type": "start", "prompt": "begin"},
+        work,
+        {"id": "end", "type": "end"},
+    ]
+    worker = d.worker_prompt(run, work, {**token, "input_result_refs": ["exec"]})
+    inputs = json.loads(worker.split("\nInput results:\n", 1)[1])
+    assert "harness_attempts" not in inputs[0]
+    assert inputs[0]["node_result"]["result"]["summary"] == "done あ"
+    assert "\\u" not in worker.split("\nInput results:\n", 1)[1]
+    context = d.decision_context(run, run["definition"]["nodes"][1], {"id": "token", "decision_id": "issued", "node_id": "work"}, False)
+    assert context["settled_executions"][0]["attempts"] == [{"task_id": "task-1", "status": "completed"}]

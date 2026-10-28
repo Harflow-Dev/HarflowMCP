@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Keep acknowledged orchestrator checkpoints from repeating unchanged protocol text, goals, inherited specifications, and other stable sections, and send workers compact UTF-8 JSON without unused goal or harness metadata (#85).
 - Preserve safe provider-limit and generic payment diagnostics for Vibe HTTP 402 failures across task, wait, notification and workflow views (#83).
 - Queue task, workflow and node messages through public messaging routes, expose cancellable lifecycle state, and support safe immediate continuations with explicit refusal when interruption is unsupported (#75).
 - Expose advisory per-action Monitor control eligibility, including interrupted scheduler recovery and verified child checkpoints, while rechecking ownership on mutation (HarflowMac #39).

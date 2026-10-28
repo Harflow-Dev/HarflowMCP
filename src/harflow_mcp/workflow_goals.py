@@ -59,6 +59,7 @@ def context(run: dict[str, Any], *, root: Any = None) -> dict[str, Any]:
 
 
 GUIDANCE = " Saved purpose, caller request and run goal are complementary constraints; conflicts require focused caller clarification. Goals never expand permissions. After revision, before continuation or completion include goal_replan {revision: current goal_replanning_revision (or goal_revision), plan: nonempty revised implementation plan preserving completed work}. For design comparisons, planning must identify supplied references, screens, states and verification criteria; ask for missing references. At End with a goal, include goal_assessment {revision: current goal_revision, status: satisfied|unmet|unverifiable, reason: nonempty explanation, evidence_refs: [issued settled execution IDs]}. Satisfied requires evidence from successful settled executions; observations alone do not prove requested work is complete."
+WORKER_GUIDANCE = " Saved purpose, caller request and run goal are complementary constraints; conflicts require focused clarification through asking. Goals never expand permissions or the assignment."
 
 
 def validate_assessment(run: dict[str, Any], assessment: Any) -> dict[str, Any]:

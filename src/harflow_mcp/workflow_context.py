@@ -14,7 +14,11 @@ from typing import Any
 CONTEXT_DELIVERY_VERSION = 2
 DEFAULT_PROMPT_BUDGET_BYTES = 64 * 1024
 _BOOTSTRAP_KEYS = {"original_request", "workflow_purpose", "workflow_graph", "routing_mode", "routing_rules", "workflow_definition_digest"}
-_REFERENCE_KEYS = {"technical_plan", "checklist", "settled_executions", "recent_decisions", "inspection_history", "on_demand_history", "input_results"}
+_REFERENCE_KEYS = {
+    "technical_plan", "checklist", "settled_executions", "recent_decisions", "inspection_history",
+    "on_demand_history", "input_results", "goal", "parent_goal", "goal_assessment", "goal_replan",
+    "inherited_context", "inspection", "on_demand_guidance", "workflow_scope",
+}
 _ACK_KEYS = ("version", "scope", "session_owner", "revision", "digest", "base_revision")
 
 
@@ -218,15 +222,20 @@ def render_decision_context(context: dict[str, Any], *, session_owner: str | Non
         if key in previous_sections:
             section_metadata[key] = {**copy.deepcopy(previous_sections[key]), "mode": "reference"}
     for key in _REFERENCE_KEYS & value.keys():
+        # A reference object is larger than JSON null, so absent sections stay inline.
+        if value[key] is None:
+            continue
         value[key], section_metadata[key] = _project_section(key, value[key], previous_sections.get(key), revision)
     for node_id, instructions in value.get("node_instructions", {}).items():
         key = "node_instructions:" + node_id
         value["node_instructions"][node_id], section_metadata[key] = _project_section(key, instructions, previous_sections.get(key), revision)
+    for name, content in (("guidance", guidance), ("examples", examples)):
+        sections[name], section_metadata[name] = _project_section(name, content, previous_sections.get(name), revision)
     receipt = {"version": CONTEXT_DELIVERY_VERSION, "scope": scope, "session_owner": session_owner,
                "revision": revision, "digest": _digest(sections),
                "base_revision": baseline["revision"] if delivery_mode == "delta" else None,
                "bootstrap_digest": stable_digest, "delivery_mode": delivery_mode, "section_state": section_metadata}
-    active_sections = {"bootstrap"} | (_REFERENCE_KEYS & value.keys()) | {"node_instructions:" + node_id for node_id in value.get("node_instructions", {})}
+    active_sections = {"bootstrap", "guidance", "examples"} | (_REFERENCE_KEYS & section_metadata.keys()) | {"node_instructions:" + node_id for node_id in value.get("node_instructions", {})}
     sections["delivery"] = {"mode": delivery_mode, "acknowledgement": context_ack(receipt),
                             "sections": {name: {key: section_metadata[name][key] for key in ("mode", "revision", "digest")}
                                          for name in sorted(active_sections)}}
@@ -234,8 +243,10 @@ def render_decision_context(context: dict[str, Any], *, session_owner: str | Non
     measurements = {key: {"bytes": len(_json(item).encode("utf-8")), "characters": len(_json(item))} for key, item in sections.items()}
     accounting = {"prompt_version": CONTEXT_DELIVERY_VERSION, "role": "orchestrator", "checkpoint": context.get("decision_id"), "session_mode": "resume" if session_owner else "fresh", "delivery_mode": delivery_mode, "classification": classification, "sections": measurements, "context_fields": {key: {"bytes": len(_json(item).encode("utf-8")), "characters": len(_json(item))} for key, item in {**bootstrap, **value}.items()}, "serialized_bytes": len(prompt.encode("utf-8")), "serialized_characters": len(prompt), "budget_bytes": budget_bytes, "budget_overflow_bytes": max(0, len(prompt.encode("utf-8")) - budget_bytes), "compatibility_reasons": sorted(set(compatibility))}
     delivered = {"bootstrap": stable} if delivery_mode == "bootstrap" else {}
-    delivered.update({key: value[key] for key in _REFERENCE_KEYS & value.keys()})
+    delivered.update({key: value[key] for key in _REFERENCE_KEYS & section_metadata.keys()})
     delivered.update({"node_instructions:" + node_id: instructions for node_id, instructions in value.get("node_instructions", {}).items()})
+    delivered["guidance"] = sections["guidance"]
+    delivered["examples"] = sections["examples"]
     accounting["section_delivery"] = {
         key: {**copy.deepcopy(metadata),
               "delivered_bytes": len(_json(delivered[key]).encode("utf-8")) if key in delivered else 0,

@@ -169,7 +169,7 @@ def worker_input_refs(run: dict[str, Any], root: Any, token: dict[str, Any]) -> 
 
 def render_worker_inputs(prompt: str, run: dict[str, Any], node: dict[str, Any], activation: dict[str, Any], *, root: Any) -> tuple[str, dict[str, Any]]:
     """Preserve required text, replace large evidence only with issued lossless refs."""
-    from .workflow_delegation import result_inputs, worker_prompt
+    from .workflow_delegation import prompt_json, result_inputs, worker_prompt
     if activation.get('on_demand_call_id'):
         # Standalone assignments are complete worker prompts and do not carry
         # graph-token evidence refs or checklist assignment authority.
@@ -180,8 +180,8 @@ def render_worker_inputs(prompt: str, run: dict[str, Any], node: dict[str, Any],
     refs = token.get('input_result_refs', []) + token.get('additional_result_refs', [])
     if token.get('resume_source_execution_id'):
         refs += [token['resume_source_execution_id']]
-    inputs = result_inputs(run, refs, preview=False, root=root)
-    original = json.dumps(inputs)
+    inputs = result_inputs(run, refs, preview=False, root=root, include_harness=False)
+    original = prompt_json(inputs)
     base = worker_prompt(run, node, token, root=root)
     reasons = []
     if not prompt.startswith(base) or not base.endswith(original):
@@ -199,7 +199,7 @@ def render_worker_inputs(prompt: str, run: dict[str, Any], node: dict[str, Any],
                  'concatenate chunk strings and decode JSON. Verify content_sha256 equals the issued manifest. '
                  'If retrieval is unavailable, report status asking with the required evidence; never guess or broaden permissions.')
     def assembled() -> str:
-        return prefix + json.dumps(projected, ensure_ascii=False, separators=(',', ':')) + suffix + (retrieval if projected != inputs else '')
+        return prefix + prompt_json(projected) + suffix + (retrieval if projected != inputs else '')
     for index in sorted(range(len(inputs)), key=lambda i: len(json.dumps(inputs[i])), reverse=True):
         if len(assembled().encode()) <= DEFAULT_PROMPT_BUDGET_BYTES:
             break
@@ -221,7 +221,7 @@ def render_worker_inputs(prompt: str, run: dict[str, Any], node: dict[str, Any],
             else:
                 projected[index]['child_retrieval'] = copy.deepcopy(child_refs)
     rendered = assembled()
-    accounting = account_legacy_prompt(rendered, role='node', sections={'constraints': prefix, 'inputs': json.dumps(projected, ensure_ascii=False, separators=(',', ':')), 'additional_context': suffix, 'retrieval_guidance': retrieval if projected != inputs else ''})
+    accounting = account_legacy_prompt(rendered, role='node', sections={'constraints': prefix, 'inputs': prompt_json(projected), 'additional_context': suffix, 'retrieval_guidance': retrieval if projected != inputs else ''})
     accounting.update(prompt_version=1, delivery_mode='bounded_inputs', compatibility_reasons=sorted(set(reasons)))
     return rendered, accounting
 

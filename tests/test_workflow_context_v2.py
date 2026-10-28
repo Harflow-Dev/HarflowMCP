@@ -301,3 +301,38 @@ def test_ctl_validation_reports_missing_purpose_warning(tmp_path, capsys, monkey
     result = json.loads(capsys.readouterr().out)["result"]
     assert result["valid"] is True
     assert not any("purpose" in warning for warning in result.get("warnings", []))
+
+
+def test_delta_checkpoint_references_unchanged_goal_spec_and_protocol():
+    source = _context()
+    goal = "Ship あ " * 2000
+    plan = "Parent plan " * 2000
+    source.update(
+        goal=goal,
+        goal_revision=3,
+        goal_replanning_required=False,
+        parent_goal={"workflow_run_id": "parent", "goal": goal, "revision": 1},
+        inherited_context={"version": 1, "sha256": "abc", "payload": {"technical_plan": plan}},
+        inspection="Inspect settled evidence with the issued execution id. " * 20,
+        on_demand_guidance="Call specialists only with an issued node id. " * 20,
+        workflow_scope={"assignment": "Child assignment " * 200, "orchestrator_mode": "current"},
+    )
+    first = render_decision_context(source, session_owner="candidate:session", scope="run")
+    source["decision_id"] = "d2"
+    second = render_decision_context(source, session_owner="candidate:session", scope="run", baseline=_acknowledge(first))
+    payload = _payload(second)
+    assert second.receipt["delivery_mode"] == "delta"
+    assert payload["guidance"]["mode"] == "reference"
+    for key in ("goal", "parent_goal", "inherited_context", "inspection", "on_demand_guidance", "workflow_scope"):
+        assert payload["checkpoint"][key]["mode"] == "reference"
+    assert payload["checkpoint"]["goal_revision"] == 3
+    assert payload["checkpoint"]["goal_replanning_required"] is False
+    assert payload["examples"]["needs_input"]["decision_id"] == "d2"
+    assert goal not in second.prompt
+    assert plan not in second.prompt
+    assert "You are the workflow orchestrator" not in second.prompt
+    assert len(second.prompt.encode()) < 24 * 1024
+    assert len(first.prompt.encode()) > len(second.prompt.encode()) + len(goal.encode())
+    source["decision_id"] = "d2"
+    third = render_decision_context(source, session_owner="candidate:session", scope="run", baseline=_acknowledge(second))
+    assert _payload(third)["examples"]["mode"] == "reference"
