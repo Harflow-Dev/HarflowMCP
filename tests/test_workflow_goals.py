@@ -14,6 +14,7 @@ from test_workflow_delegation import graph, Registry, default_decision
 @pytest.fixture
 def storage(tmp_path, monkeypatch):
     monkeypatch.setattr(w.backends, "is_installed", lambda backend: True)
+    monkeypatch.setattr(w, "_launch", lambda *args: None)
     return w.WorkflowStore(tmp_path)
 
 
@@ -93,7 +94,7 @@ def test_revision_rejects_active_even_monitor(storage, tmp_path):
 
 
 @pytest.mark.parametrize("assessment_status, expected", [("satisfied", "completed"), ("unmet", "needs_input"), ("unverifiable", "needs_input")])
-async def test_completion_assessment(storage, tmp_path, assessment_status, expected):
+async def test_completion_assessment(storage, tmp_path, monkeypatch, assessment_status, expected):
     run = create(storage, tmp_path)
     def policy(context, registry):
         decision = default_decision(context, registry)
@@ -109,7 +110,10 @@ async def test_completion_assessment(storage, tmp_path, assessment_status, expec
     assert any("Goal constraints:" in prompt for prompt, kwargs in registry.calls)
     if expected == "needs_input":
         first = result["input_decision_id"]
+        launches = []
+        monkeypatch.setattr(w, "_launch", lambda store, run_id: launches.append((store, run_id)))
         storage.control(run["workflow_run_id"], "resume", instructions="Please reconsider", decision_id=first)
+        assert launches == [(storage, run["workflow_run_id"])]
         await w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"])
         second = storage.get_run(run["workflow_run_id"])
         assert second["status"] == "needs_input"
