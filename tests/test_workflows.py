@@ -15,6 +15,11 @@ from harflow_mcp import bounded_io
 from execution_helper import run_bounded, workflow_snapshot
 
 
+# Ordinary structural graphs exceeded 3s on macOS Python 3.11 CI (3.2-3.6s).
+# Match delegation's finite 10s liveness guard; this is not a performance assertion.
+DEFAULT_WORKFLOW_TIMEOUT_SECONDS = 10
+
+
 def definition(role="task"):
     return {"name": "example", "orchestrator": {"backend": "codex"}, "nodes": [{"id": "start", "type": "start"}, {"id": "work", "type": "agent", "role": role, "agent": {"backend": "codex"}, "instructions": "Work"}, {"id": "end", "type": "end"}], "connections": [{"id": "begin", "source": "start", "target": "work"}, {"id": "finish", "source": "work", "target": "end"}]}
 
@@ -95,7 +100,7 @@ def storage(tmp_path, monkeypatch):
     return storage
 
 
-async def execute(storage, tmp_path, definition_, responses, timeout_seconds=3):
+async def execute(storage, tmp_path, definition_, responses, timeout_seconds=DEFAULT_WORKFLOW_TIMEOUT_SECONDS):
     d = w.validate_definition(definition_)
     run = storage.create_run(d, "build it", tmp_path)
     registry = FakeRegistry(storage.root, responses)
@@ -1133,7 +1138,12 @@ async def test_active_fork_escaping_retry_is_corrected_before_dispatch(storage, 
             self.tasks[task.task_id] = task
             return task
     registry = Registry(storage.root, [])
-    await asyncio.wait_for(w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]), 5)
+    await run_bounded(
+        w.WorkflowSupervisor(registry, storage).execute(run["workflow_run_id"]),
+        DEFAULT_WORKFLOW_TIMEOUT_SECONDS,
+        label="active fork retry correction",
+        diagnostic=lambda: workflow_snapshot(storage, run["workflow_run_id"], registry),
+    )
     observed = storage.get_run(run["workflow_run_id"])
     assert observed["status"] == "completed"
     assert sum(a["role"] == "node" and a["node_id"] == "work" for a in observed["activations"]) == 1
