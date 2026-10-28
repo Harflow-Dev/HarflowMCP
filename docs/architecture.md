@@ -173,13 +173,14 @@ answering `queued`. A stalled process holding the inbox flock can still delay
 idle closure; acquisition is nonblocking and cancellation remains available.
 Delivery uncertainty is reported rather than replaying a message blindly.
 
-**Queued follow-ups for tasks without live input (`followups.py`) are a separate ledger that never
-touches the inbox, its `flock` or the close protocol above.** `send_message` on a standalone task
-whose `live_input` is false appends to `<id>.followups.json` under `<id>.followups.lock` — an empty,
+**Public queued follow-ups (`followups.py`) are a separate ledger that never
+touches the inbox, its `flock` or the close protocol above.** `send_message` on any standalone task
+(including one with live input) appends to `<id>.followups.json` under `<id>.followups.lock` — an empty,
 permanent lock file that retention leaves in place, like the other two. The state is one bounded
 document replaced atomically under that lock (32 KiB per message, 16 outstanding, 960 KiB admission
-budget inside a 1 MiB read budget; unreadable reads as `unavailable`, never guessed). It answers
-`queued` with `delivery: "next_continuation"`, never "delivered". Consumption happens only through
+budget inside a 1 MiB read budget; unreadable reads as `unavailable`, never guessed). Public admission answers
+`queued` with `delivery: "queue"`, never "delivered". The legacy internal follow-up route retains
+`next_continuation`; workflow-builder internal live delivery still uses the inbox. Consumption happens only through
 explicit flags: `TaskRegistry.resume`/`resume_record` take `consume_followups` (set by MCP
 `resume_task` and `harflow-ctl resume`) and `continue_task` takes it (MCP and ctl); the flag is
 never inferred from `task_id`, which keeps meaning supervisor-owned for `pause_for_task`, and an

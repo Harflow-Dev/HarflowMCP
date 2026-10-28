@@ -225,6 +225,9 @@ def _final(item: dict[str, Any], status: str, at: str) -> dict[str, Any]:
     kept = {"id": item["id"], "seq": item["seq"], "status": status, "at": at}
     if item.get("successor_task_id"):
         kept["successor_task_id"] = item["successor_task_id"]
+    for key in ("target", "delivery"):
+        if key in item:
+            kept[key] = item[key]
     return kept
 
 
@@ -524,7 +527,7 @@ def _guard(log_dir: Path, task_id: str) -> None:
 @task_operation
 def send(
     log_dir: Path, task_id: str, text: str, *, by: dict[str, Any] | None,
-    timeout: float = LOCK_TIMEOUT_SECONDS,
+    timeout: float = LOCK_TIMEOUT_SECONDS, allow_live: bool = False, delivery: str = "queue",
 ) -> dict[str, Any]:
     """Queue `text` for the next continuation of a task without live input. Blocking: run it in a
     worker thread, or from a CLI. Refusals raise `inbox.SendRefused` with a stable `code`."""
@@ -543,7 +546,7 @@ def send(
     record = store.read(log_dir, task_id)
     if record is None:
         raise inbox.SendRefused(f"unknown task_id: {task_id}", code="unknown_task")
-    if record.live_input:
+    if record.live_input and not allow_live:
         raise inbox.SendRefused(
             f"task {task_id} has live input; its messages go to the running agent, not a ledger",
             code="live_input",
@@ -580,6 +583,7 @@ def send(
             item = {
                 "id": uuid.uuid4().hex, "seq": doc["next_seq"], "status": QUEUED,
                 "text": text, "queued_at": _now(), "by": by,
+                "delivery": delivery, "target": {"kind": "task", "task_id": task_id},
             }
             doc["next_seq"] += 1
             doc["items"].append(item)
@@ -696,6 +700,9 @@ def _present(doc: dict[str, Any]) -> dict[str, Any]:
             for extra in ("successor_task_id", "reason"):
                 if item.get(extra):
                     shown[extra] = item[extra]
+        for key in ("delivery", "target"):
+            if key in item:
+                shown[key] = item[key]
         items.append(shown)
     return {"state": "available", "items": items, "omitted_final": doc["omitted_final"]}
 

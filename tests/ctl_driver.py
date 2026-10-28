@@ -20,12 +20,13 @@ import os
 import sys
 from pathlib import Path
 
+from harflow_mcp.backends.base import ExtraPathsUnsupported
 from harflow_mcp import backends, control, ctl, detached, lineage, store
 from harflow_mcp.backends import Enforcement, Invocation
 from harflow_mcp.tasks import TaskRegistry, default_log_dir
 
 
-class FakeBackend:
+class FakeBackend(ExtraPathsUnsupported):
     """Runs `/bin/sh -c <script>` — installed everywhere, and nothing reads its output."""
 
     name = "fake"

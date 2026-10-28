@@ -173,7 +173,7 @@ def authorize(storage: Any, run: dict[str, Any], responder: str | None, action: 
         responder = "caller"
     if responder == owner:
         return
-    if responder != "monitor" or owner != "caller" or action not in {"resume", "recover", "revise_goal"}:
+    if responder != "monitor" or owner != "caller" or action not in {"resume", "recover", "revise_goal", "message", "cancel_message"}:
         raise WorkflowError("Workflow interaction belongs to its original caller")
     state, reason = owner_state(root, storage)
     if state != "dead":
@@ -199,5 +199,5 @@ def projection(storage: Any, run: dict[str, Any]) -> dict[str, Any]:
 
 def validate_handover(value: Any) -> None:
     import math
-    if type(value) is not dict or set(value) != {"timestamp", "reason", "previous_owner", "responder", "action"} or type(value["timestamp"]) not in (int, float) or not math.isfinite(value["timestamp"]) or value["timestamp"] <= 0 or value["previous_owner"] != "caller" or value["responder"] != "monitor" or value["action"] not in {"resume", "recover", "revise_goal"} or type(value["reason"]) is not str or value["reason"] not in {"pid_absent", "start_time_differs"}:
+    if type(value) is not dict or set(value) != {"timestamp", "reason", "previous_owner", "responder", "action"} or type(value["timestamp"]) not in (int, float) or not math.isfinite(value["timestamp"]) or value["timestamp"] <= 0 or value["previous_owner"] != "caller" or value["responder"] != "monitor" or value["action"] not in {"resume", "recover", "revise_goal", "message", "cancel_message"} or type(value["reason"]) is not str or value["reason"] not in {"pid_absent", "start_time_differs"}:
         raise ValueError("Malformed interaction_handover")

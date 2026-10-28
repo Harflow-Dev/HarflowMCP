@@ -173,12 +173,18 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
 
     send_p = sub.add_parser(
         "send",
-        help="queue a message: for a live-input task's running agent, or for the next continuation "
-             "of a task without live input (reports queued, never delivered)",
+        help="queue a task or workflow-node message; request safe immediate continuation with --delivery now",
     )
     send_p.add_argument("task_id")
     send_p.add_argument("text")
     send_p.add_argument("--json", action="store_true")
+    send_p.add_argument("--delivery", choices=("queue", "now"), default="queue")
+    send_p.add_argument("--monitor", action="store_true")
+    cancel_message_p = sub.add_parser("cancel-message", help="withdraw a queued task or workflow-node message")
+    cancel_message_p.add_argument("task_id")
+    cancel_message_p.add_argument("message_id")
+    cancel_message_p.add_argument("--monitor", action="store_true")
+    cancel_message_p.add_argument("--json", action="store_true")
 
     cancel_p = sub.add_parser(
         "cancel", help="cancel a task and, best-effort, its live descendants (like cancel_task)"
@@ -394,7 +400,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     edits.add_argument("--remove")
 
     workflow_parsers = []
-    for action in ("validate", "list", "list-page", "get", "save", "delete", "build", "preview", "start", "list-runs", "status", "detail", "wait", "pause", "resume", "cancel", "revise-goal", "builder-followup", "builder-apply", "inspect", "assigned-input", "artifacts", "recover", "migrate", "abandon-dispatch"):
+    for action in ("validate", "list", "list-page", "get", "save", "delete", "build", "preview", "start", "list-runs", "status", "detail", "wait", "pause", "resume", "cancel", "revise-goal", "builder-followup", "builder-apply", "inspect", "assigned-input", "artifacts", "recover", "migrate", "abandon-dispatch", "send", "cancel-message"):
         wp = sub.add_parser("workflow-" + action, help=action + " workflows")
         if action == "recover":
             wp.description = "Explicitly recover a failed settled run or an interrupted root with a confirmed-dead scheduler. Supply a reason; uncertain task ownership blocks recovery. Interrupted recovery preserves existing attempts and decision budgets."
@@ -408,8 +414,16 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
         wp.add_argument("--json", action="store_true")
         if action in {"get", "save", "delete", "build", "preview", "start"}:
             wp.add_argument("name")
-        if action in {"status", "detail", "wait", "pause", "resume", "cancel", "revise-goal", "builder-followup", "inspect", "assigned-input", "artifacts", "recover", "abandon-dispatch"}:
+        if action in {"status", "detail", "wait", "pause", "resume", "cancel", "revise-goal", "builder-followup", "inspect", "assigned-input", "artifacts", "recover", "abandon-dispatch", "send", "cancel-message"}:
             wp.add_argument("workflow_run_id")
+        if action in {"send", "cancel-message"}:
+            wp.add_argument("--monitor", action="store_true")
+            if action == "send":
+                wp.add_argument("text")
+                wp.add_argument("--task-id")
+                wp.add_argument("--delivery", choices=("queue", "now"), default="queue")
+            else:
+                wp.add_argument("message_id")
         if action == "list":
             wp.add_argument("--monitor-view", action="store_true")
         if action == "status":
@@ -459,7 +473,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
             reason_group.add_argument("--reason")
             reason_group.add_argument("--reason-file", help="UTF-8 recovery reason file")
             wp.add_argument("--additional-attempts", type=int, default=0)
-        if action in {"start", "pause", "resume", "recover", "cancel", "revise-goal"}:
+        if action in {"start", "build", "pause", "resume", "recover", "cancel", "revise-goal"}:
             wp.add_argument("--monitor", action="store_true", help="Use Harflow as the workflow interaction channel")
         if action in {"start", "revise-goal"}:
             goal_group = wp.add_mutually_exclusive_group(required=action == "revise-goal")
@@ -848,16 +862,31 @@ def _cmd_send(args: argparse.Namespace) -> int:
             raise inbox.SendRefused("Caller authority cannot be verified", code="caller_undecidable")
         if detection.caller is not None:
             refuse_message_caller(default_log_dir(), detection.caller.record.task_id)
-        result = followups.dispatch_send(default_log_dir(), task_id, args.text, by=by)
+        from . import messaging
+        owner = "monitor" if getattr(args, "monitor", False) else "caller"
+        if owner == "monitor":
+            refusal = takeover.caller_refusal(default_log_dir())
+            if refusal is not None:
+                raise inbox.SendRefused("Only a verified human may send as monitor: " + refusal[1], code="caller_refused")
+        registry = tasks_module.TaskRegistry(log_dir=default_log_dir(), open_monitor=False, execution_mode="supervised")
+        result = asyncio.run(messaging.send(registry, task_id, args.text, delivery=getattr(args, "delivery", "queue"), interaction_owner=owner))
     except inbox.SendRefused as exc:
         return fail(exc.code, str(exc))
+    except ValueError as exc:
+        return fail("invalid_params", str(exc))
 
     if args.json:
         print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": result})))
-    elif result.get("delivery") == "next_continuation":
+    elif result.get("status") == "undeliverable":
+        print(f"undeliverable {result['message_id']} for {task_id}: {result.get('reason', 'No successor is available')}")
+    elif result.get("status") in {"delivering", "delivered"}:
+        print(f"{result['status']} {result['message_id']} for {task_id}; inspect continuation status")
+    elif result.get("delivery") in {"next_continuation", "queue"}:
         print(f"queued {result['message_id']} for {task_id} (next continuation; nothing started or delivered)")
     else:
         print(f"queued {result['message_id']} for {task_id} (not yet delivered)")
+    if not args.json and result.get("refusal"):
+        print(f"{result['refusal']['code']}: {result['refusal']['message']}")
     return 0
 
 
@@ -1393,6 +1422,10 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
         # Registry-backed helpers below get a registry without maintenance or notifications: ctl
         # has no MCP session, and its asyncio.run loop would cancel a notification worker anyway.
         server.install_cli_registry()
+        if action == "send":
+            return await server.send_workflow_message(args.workflow_run_id, args.text, args.task_id, args.delivery, "monitor" if args.monitor else "caller")
+        if action == "cancel-message":
+            return await server.cancel_workflow_message(args.workflow_run_id, args.message_id, "monitor" if args.monitor else "caller")
         if action == "recover":
             reason = _workflow_text(args, "reason")
             if args.monitor:
@@ -1436,6 +1469,8 @@ def _cmd_workflow(args: argparse.Namespace) -> int:
                 source = json.loads(args.source) if args.source else None
                 if args.source_file:
                     source = json.loads(Path(args.source_file).read_text())
+                if args.monitor:
+                    return await server._workflow_call("build", name=args.name, prompt=prompt, repo_path=args.repo, agent=candidate, fallbacks=json.loads(args.fallbacks), definition=definition, source=source, interaction_owner="monitor")
                 return await server.workflow_builder(args.name, prompt, args.repo, candidate, json.loads(args.fallbacks), definition, source)
             preview_guard = {"expected_preview_hash": args.expected_preview_hash} if getattr(args, "expected_preview_hash", None) is not None else {}
             goal = _workflow_text(args, "goal")
@@ -1544,7 +1579,7 @@ def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
         print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": result})) if args.json else json.dumps(result, indent=2))
         return 0
 
-    mutation_commands = {"run", "resume", "continue", "send", "cancel", "takeover", "takeover-attach", "approval-respond", "register-artifact", "qualify"}
+    mutation_commands = {"run", "resume", "continue", "send", "cancel-message", "cancel", "takeover", "takeover-attach", "approval-respond", "register-artifact", "qualify"}
     from .workflow_reads import READ_ONLY_CLI_COMMANDS
     if args.command in mutation_commands or args.command.startswith("workflow-") and args.command not in READ_ONLY_CLI_COMMANDS or args.command == "mcp-allowlist" and (args.allow is not None or args.remove is not None):
         from .caller_policy import require_mutation
@@ -1680,6 +1715,15 @@ def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
         return _cmd_qualify(args)
     if args.command == "send":
         return _cmd_send(args)
+    if args.command == "cancel-message":
+        from . import server
+        server.install_cli_registry()
+        try:
+            result = asyncio.run(server.cancel_queued_message(args.task_id, args.message_id, "monitor" if args.monitor else "caller"))
+        except Exception as exc:
+            return _fail(args, getattr(exc, "code", "invalid_params"), str(exc))
+        print(json.dumps(envelope(CTL_FORMAT, {"v": CTL_JSON_VERSION, "result": result})) if args.json else json.dumps(result))
+        return 0
     if args.command == "worktree-list":
         return _cmd_worktree_list(args)
     if args.command == "worktree-remove":

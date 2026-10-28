@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Preserve safe provider-limit and generic payment diagnostics for Vibe HTTP 402 failures across task, wait, notification and workflow views (#83).
+- Queue task, workflow and node messages through public messaging routes, expose cancellable lifecycle state, and support safe immediate continuations with explicit refusal when interruption is unsupported (#75).
+- Expose advisory per-action Monitor control eligibility, including interrupted scheduler recovery and verified child checkpoints, while rechecking ownership on mutation (HarflowMac #39).
+
 - Add the Cursor client and Cursor Agent CLI backend for `2026.10.22-27dcf5f`. Headless dispatch needs `agent login` or `CURSOR_API_KEY`; signing into the Cursor editor does not authenticate the CLI, and `agent status` has to report an access token in the same `HOME`. Caller approvals, command grants, a turn cap, reasoning effort, and live follow-up are refused. `write_in_repo`, `publish`, and `unrestricted` share one print-mode command.
 - Add opt-in group report output for qualified read-only Codex tasks, with repository denial, group-only scope, configuration qualification, inherited headless resumes and explicit unsupported-mode refusals (#84).
 - Add bounded Claude `publish` grants for PR creation, editing, comments, reviews and reads, including help; disclose excluded raw API and destructive GitHub operations and backend policy differences (#81).

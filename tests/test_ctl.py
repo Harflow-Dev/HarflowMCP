@@ -405,7 +405,7 @@ def _one_doc(capsys: pytest.CaptureFixture) -> dict:
     return json.loads(lines[0])
 
 
-def test_send_queues_a_message_in_the_inbox(
+def test_send_queues_a_message_without_folding_live_turn(
     identities, home: Path, capsys: pytest.CaptureFixture) -> None:
     store.write(_log_dir(home), _live_running())
 
@@ -415,23 +415,23 @@ def test_send_queues_a_message_in_the_inbox(
     doc = _one_doc(capsys)
     assert doc["v"] == 1
     assert doc["result"]["status"] == "queued"
-    messages, _ = inbox.read_new(_log_dir(home), "task-1", 0)
+    from harflow_mcp import followups
+    messages = followups.view(_log_dir(home), "task-1")["items"]
     assert [m["text"] for m in messages] == ["please also check the tests"]
     assert messages[0]["id"] == doc["result"]["message_id"]
+    assert inbox.read_new(_log_dir(home), "task-1", 0)[0] == []
 
 
-def test_send_after_close_says_to_resume(
+def test_send_after_live_close_queues_for_continuation(
     identities, home: Path, capsys: pytest.CaptureFixture) -> None:
     store.write(_log_dir(home), _live_running())
     inbox.mark_closed(_log_dir(home), "task-1")
 
     code = ctl.main(["send", "task-1", "hi", "--json"])
 
-    assert code == 1
+    assert code == 0
     doc = _one_doc(capsys)
-    assert doc["error"]["code"] == "closed"
-    assert "closed live input" in doc["error"]["message"]
-    assert "Wait for settlement" in doc["error"]["message"]
+    assert doc["result"]["status"] == "queued" and doc["result"]["delivery"] == "queue"
 
 
 @pytest.mark.parametrize(
@@ -442,12 +442,12 @@ def test_send_after_close_says_to_resume(
     ],
     ids=["settled", "no-owner"],
 )
-def test_send_refusals_are_json_errors(
+def test_queue_does_not_require_an_open_live_channel(
     identities, home: Path, capsys: pytest.CaptureFixture, record, code) -> None:
     store.write(_log_dir(home), record())
 
-    assert ctl.main(["send", "task-1", "hi", "--json"]) == 1
-    assert _one_doc(capsys)["error"]["code"] == code
+    assert ctl.main(["send", "task-1", "hi", "--json"]) == 0
+    assert _one_doc(capsys)["result"]["status"] == "queued"
 
 
 def test_send_rejects_bad_ids_unknown_tasks_and_empty_text(

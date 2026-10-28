@@ -123,9 +123,11 @@ def decorate_tasks(entries: list[dict[str, Any]], log_dir: Any) -> list[dict[str
         run = storage.get_run(_identifier(run_id))
         from .workflow_invocation import tree_state
         state = tree_state(storage, run)
+        from .workflow_messages import projection as message_projection
         for activation in run.get("activations", []):
             for task in activation.get("tasks", []):
                 association = {"workflow_run_id": run["workflow_run_id"], "workflow_node_id": activation["node_id"], "workflow_execution_id": activation["id"], "workflow_role": activation["role"], "execution_contract": run.get("execution_contract"), "interaction_owner": run.get("interaction_owner", "caller"), "workflow_status": run.get("status"), "workflow_settling": run.get("settling", False), "workflow_name": run.get("name"), "root_workflow_run_id": state["root_workflow_run_id"], "workflow_tree_status": state["root_status"], "workflow_tree_settling": state["settling"], "suspended_via_root": state.get("suspended_via_root", False)}
+                association["messages"] = message_projection(run, task["task_id"])
                 if run.get("orchestrator_session_owner_run_id") and activation.get("role") == "orchestrator":
                     association["workflow_session_owner_run_id"] = run["orchestrator_session_owner_run_id"]
                 if run.get("execution_contract") == "delegation" and activation.get("role") == "node" and isinstance(activation.get("assignment_prompt"), str):
@@ -192,6 +194,9 @@ def decorate_tasks(entries: list[dict[str, Any]], log_dir: Any) -> list[dict[str
                  {"root_workflow_run_id", "suspended_via_root", "execution_contract"}}
         if task_id in refusals:
             clean.update(history_incomplete=True, refused_tasks=[refusals[task_id]])
+        if association is None and task_id not in refusals and "queued_followups" in clean:
+            from .messaging import task_messages
+            clean["messages"] = task_messages(task_id, clean["queued_followups"])
         result.append(clean | (association or {}))
     return result
 

@@ -184,7 +184,9 @@ def _payload(row, record, *, recovered=False, evidence=None):
         projection['new_commits_truncated'] = bool(outcome.get('new_commits_truncated') or len(outcome['new_commits']) > 10)
         projection['new_commits'] = [_text(item, 128) for item in outcome['new_commits'][:10] if isinstance(item, str)]
     diagnostic = record.failure_diagnostic if isinstance(record.failure_diagnostic, dict) else {}
-    failure = {key: _text(diagnostic[key], 256) for key in ('category', 'reason', 'source', 'reset_at') if key in diagnostic}
+    failure = {key: _text(diagnostic[key], 256) for key in ('category', 'reason', 'source', 'reset_at', 'provider_code') if key in diagnostic}
+    if type(diagnostic.get('http_status')) is int:
+        failure['http_status'] = diagnostic['http_status']
     if diagnostic.get('category') == 'background_abandoned_at_idle_bound':
         for key in ('background_idle_seconds', 'elapsed_background_wait_seconds', 'successful_agent_result'):
             value = diagnostic.get(key)

@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from harflow_mcp.backends.base import ExtraPathsUnsupported
 from harflow_mcp import backends, tasks as tasks_module
 from harflow_mcp.backends import Invocation
 from harflow_mcp.backends.base import Enforcement
@@ -22,7 +23,7 @@ from harflow_mcp.tasks import Task, TaskRegistry
 from harflow_mcp.wire_contracts import PRODUCT_VERSION
 
 
-class _RecordingBackend:
+class _RecordingBackend(ExtraPathsUnsupported):
     """A double that spawns a real, instant `/bin/sh` process emitting a fixed line of JSON per
     stdout line, so the drain path can be exercised end to end without a real agent CLI."""
 

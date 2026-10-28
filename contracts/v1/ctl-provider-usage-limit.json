@@ -1,0 +1,1 @@
+{"format":"harflow.ctl","product":"harflow","product_version":"0.0.4","task":{"backend":"vibe","exit_code":2,"failure_diagnostic":{"category":"usage_limit","http_status":402,"provider_code":"usage_limit","reason":"Provider rejected this turn because its usage limit was reached.","source":"stream:error"},"status":"failed","summary":null,"task_id":"provider-failure-fixture"},"v":1}

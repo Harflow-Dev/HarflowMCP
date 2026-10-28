@@ -1,0 +1,1 @@
+{"format":"harflow.ctl","product":"harflow","product_version":"0.0.4","result":{"delivery":"now","message_id":"fixture-message","refusal":{"code":"interrupt_unsupported","message":"Message stays queued: safe interruption is unsupported."},"seq":1,"status":"queued","task_id":"fixture-task"},"v":1}

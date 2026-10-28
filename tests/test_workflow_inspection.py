@@ -209,7 +209,7 @@ def test_cli_task_list_uses_managed_scope(run, monkeypatch, tmp_path, capsys, ro
         "scan",
         lambda path: scan,
     )
-    monkeypatch.setattr(store, "brief", lambda path, record: {"task_id": record.task_id})
+    monkeypatch.setattr(store, "brief", lambda path, record, *, ctl_observation=False: {"task_id": record.task_id})
     assert ctl.main(["list", "--json"]) == 0
     output = json.loads(capsys.readouterr().out)
     assert [t["task_id"] for t in output["tasks"]] == expected

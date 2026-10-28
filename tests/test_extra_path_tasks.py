@@ -829,3 +829,46 @@ async def test_expired_request_budget_leaves_ordinary_no_extra_dispatch_availabl
         task = await registry.start('Task', tmp_path, backend=backend)
     await asyncio.wait_for(task.done.wait(), 5)
     assert task.status == 'completed'
+
+
+@pytest.mark.parametrize('operation', ['send', 'cancel'])
+async def test_public_messaging_keeps_saved_extra_path_sender_authority(tmp_path, monkeypatch, backend, operation):
+    from unittest.mock import AsyncMock
+    from harflow_mcp import backends, followups, messaging
+    repo = tmp_path / 'caller-repo'
+    repo.mkdir()
+    shared = tmp_path / 'outside-caller'
+    shared.mkdir()
+    registry = tasks.TaskRegistry(log_dir=_state_logs(tmp_path))
+    source = replace(owner(repo, normalize_paths([str(shared)])), backend=backend.name, status='completed', exit_code=0)
+    assert store.write_landed(registry.log_dir, source)
+    admitted = followups.send(registry.log_dir, source.task_id, 'keep this queued', by=None)
+    caller = SimpleNamespace(record=store.TaskRecord(task_id='narrow-caller', backend=backend.name, session_id=None, repo_path=str(repo), started_at='2026-01-01T00:00:00+00:00'))
+    monkeypatch.setattr(backends, 'get', lambda _: backend)
+    monkeypatch.setattr(registry, '_mutation_caller', AsyncMock(return_value=caller))
+    before = followups.state_path(registry.log_dir, source.task_id).read_bytes()
+    with pytest.raises(ValueError, match='widen'):
+        if operation == 'send':
+            await messaging.send(registry, source.task_id, 'unauthorized queue')
+        else:
+            await messaging.cancel_message(registry, source.task_id, admitted['message_id'])
+    assert followups.state_path(registry.log_dir, source.task_id).read_bytes() == before
+
+
+def test_cli_queued_send_keeps_saved_extra_path_sender_authority(tmp_path, monkeypatch, backend, capsys):
+    from unittest.mock import AsyncMock
+    from harflow_mcp import backends, ctl, followups
+    repo = tmp_path / 'caller-repo'
+    repo.mkdir()
+    shared = tmp_path / 'outside-caller'
+    shared.mkdir()
+    directory = _state_logs(tmp_path)
+    source = replace(owner(repo, normalize_paths([str(shared)])), backend=backend.name, status='completed', exit_code=0)
+    assert store.write_landed(directory, source)
+    caller = SimpleNamespace(record=store.TaskRecord(task_id='narrow-caller', backend=backend.name, session_id=None, repo_path=str(repo), started_at='2026-01-01T00:00:00+00:00'))
+    monkeypatch.setattr(backends, 'get', lambda _: backend)
+    monkeypatch.setattr(tasks.TaskRegistry, '_mutation_caller', AsyncMock(return_value=caller))
+    monkeypatch.setattr(ctl, 'default_log_dir', lambda: directory)
+    assert ctl.main(['send', source.task_id, 'unauthorized queue', '--json']) == 1
+    assert 'widen' in capsys.readouterr().out
+    assert not followups.state_path(directory, source.task_id).exists()

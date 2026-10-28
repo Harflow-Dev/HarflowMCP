@@ -738,6 +738,8 @@ class ExtraPathsUnsupported:
 
 @runtime_checkable
 class Backend(Protocol):
+    def verify_launch_identity(self) -> None: ...
+
     name: str
     binary: str
     capabilities: Capabilities

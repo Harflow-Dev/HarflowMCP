@@ -5013,8 +5013,11 @@ async def _drain_stdout(task: Task, registry: TaskRegistry) -> None:
                     log.warning('task %s: built-in plan artifact observation unavailable', task.task_id, exc_info=True)
                     if 'Built-in plan artifact tracking is unavailable; inspect the raw stream for successful plan writes.' not in task.bridge_notices:
                         task.bridge_notices.append('Built-in plan artifact tracking is unavailable; inspect the raw stream for successful plan writes.')
-            if task.acc.failure_diagnostic is not None and previous_diagnostic is None:
-                registry._record_usage_limit(task)
+            if task.acc.failure_diagnostic is not None and task.acc.failure_diagnostic != previous_diagnostic:
+                if task.acc.failure_diagnostic.get("category") == "usage_limit":
+                    registry._record_usage_limit(task)
+                else:
+                    registry.persist(task)
             _record_events(task, backend, event, raw_offset)
             if task.pump is not None:
                 task.pump_wake.set()
@@ -5137,6 +5140,7 @@ async def _drain_stderr(task: Task, registry: TaskRegistry | None = None) -> Non
             line = raw.decode("utf-8", errors="replace").rstrip("\n")
             if line.strip():
                 task.stderr_tail.append(line[:TAIL_LINE_CHARS])
+                previous_diagnostic = task.acc.failure_diagnostic
                 try:
                     getattr(get_backend(task.backend), "observe_stderr", lambda _acc, _line: None)(task.acc, line)
                 except Exception:
@@ -5147,8 +5151,11 @@ async def _drain_stderr(task: Task, registry: TaskRegistry | None = None) -> Non
                 if diagnostic is not None and task.acc.failure_diagnostic is None:
                     task.acc.failure_diagnostic = diagnostic
                     task.acc.error_result_seen = True
-                    if registry is not None:
+                if registry is not None and task.acc.failure_diagnostic is not None and task.acc.failure_diagnostic != previous_diagnostic:
+                    if task.acc.failure_diagnostic.get("category") == "usage_limit":
                         registry._record_usage_limit(task)
+                    else:
+                        registry.persist(task)
     except asyncio.CancelledError:
         raise
     except StateOwnershipError:

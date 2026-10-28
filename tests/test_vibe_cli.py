@@ -96,6 +96,8 @@ thinking="off"
             for entry in entries:
                 backend.ingest(entry, acc)
                 backend.normalize(entry, acc)
+            for line in process.stderr.decode(errors="replace").splitlines():
+                backend.observe_stderr(acc, line)
             return process, acc, entries
         process, acc, entries = run("isolated assignment")
         assert requests
@@ -132,3 +134,5 @@ thinking="off"
                 assert not acc.saw_final_message
             else:
                 assert b"Usage limit exceeded" in process.stderr
+                assert acc.failure_diagnostic["category"] == "usage_limit"
+                assert acc.failure_diagnostic["http_status"] == 402

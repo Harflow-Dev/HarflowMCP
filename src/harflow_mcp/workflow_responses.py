@@ -21,7 +21,7 @@ PUBLIC_VIEWS = frozenset(VIEWS) | {"goal", "goal_history", "goal_assessment"}
 # These lossless views are fetched only when their digest changes. Executions have
 # individual identities so a new checkpoint does not resend old worker results.
 MONITOR_FIELDS = ("on_demand_nodes", "on_demand_calls", "on_demand_state", "goal", "goal_history", "goal_assessment", "definition", "owner_contracts", "tasks", "checklist_disposition", "technical_plan", "decisions", "pending", "joins", "released_parallel_groups", "exhausted_retry_edges", "input_question", "orchestrator_usage_recovery", "worker_usage_recovery", "usage_recovery_history", "reason", "wait_reason", "checkout_wait", "summary", "failure_reason", "attention_reason", "builder_draft", "generated_definition", "editing_definition", "source_saved_definition", "prompt")
-MONITOR_FIELDS += ("resources", "resource_wait", "resource_waits", "worktree", "source_repo_path")
+MONITOR_FIELDS += ("messages", "resources", "resource_wait", "resource_waits", "worktree", "source_repo_path")
 VIEWS.update({field: field for field in MONITOR_FIELDS})
 VIEWS["execution_index"] = "execution_index"
 
@@ -151,6 +151,13 @@ def _activation_resource_waits(run: dict[str, Any]) -> list[dict[str, Any]]:
 def compact(run: dict[str, Any]) -> dict[str, Any]:
     keys = ("workflow_run_id", "name", "revision", "goal_revision", "goal_replanning_required", "can_revise_goal", "goal_revision_reason", "kind", "status", "created_at", "updated_at", "finished_at", "interaction_owner", "settling", "can_cancel_from_monitor", "monitor_cancel_reason", "input_decision_id", "optional_review_skip_available", "execution_contract", "draft_revision", "scheduling_policy", "preview_hash", "pending_input_count", "pending_attention_count")
     result = {key: run[key] for key in keys if key in run and isinstance(run[key], (str, int, float, bool, type(None)))}
+    if "monitor_controls" in run:
+        result["monitor_controls"] = copy.deepcopy(run["monitor_controls"])
+    if "messages" in run:
+        pending_messages = [m for m in run["messages"] if m["status"] in {"queued", "delivering"}]
+        final_messages = [m for m in run["messages"] if m["status"] not in {"queued", "delivering"}][-8:]
+        result["messages"] = [{key: value for key, value in m.items() if key != "text"} | ({"text": m["text"][:200], "text_truncated": len(m["text"]) > 200} if "text" in m else {}) for m in sorted(pending_messages + final_messages, key=lambda m: m["seq"])]
+        result["messages_truncated"] = len(result["messages"]) != len(run["messages"]) or any(m.get("text_truncated") for m in result["messages"])
     if "interaction_state" in run:
         result["interaction_state"] = copy.deepcopy(run["interaction_state"])
     result["finished_at"] = qualified_finished_at(run)
@@ -203,7 +210,7 @@ def compact(run: dict[str, Any]) -> dict[str, Any]:
         result["checklist_disposition"].update(reason=reason[:256], reason_truncated=len(reason) > 256)
     recovery = run.get("orchestrator_usage_recovery")
     if isinstance(recovery, dict):
-        result["usage_limit_recovery"] = {"decision_id": str(recovery.get("decision_id", ""))[:100], "choices": [{"answer": str(c.get("answer", ""))[:100], "candidate": {k: str(v)[:100] if v is not None else None for k, v in c.get("candidate", {}).items() if k in {"backend", "model", "reasoning_effort", "max_turns"}}} for c in recovery.get("choices", [])[:20]], "failure_diagnostic": {k: v if k == "reset_at" else str(v)[:500] for k, v in recovery.get("failure_diagnostic", {}).items() if k in {"category", "reason", "source"} or (k == "reset_at" and valid_reset_value(v))}}
+        result["usage_limit_recovery"] = {"decision_id": str(recovery.get("decision_id", ""))[:100], "choices": [{"answer": str(c.get("answer", ""))[:100], "candidate": {k: str(v)[:100] if v is not None else None for k, v in c.get("candidate", {}).items() if k in {"backend", "model", "reasoning_effort", "max_turns"}}} for c in recovery.get("choices", [])[:20]], "failure_diagnostic": {k: v if k in {"reset_at", "http_status"} else str(v)[:500] for k, v in recovery.get("failure_diagnostic", {}).items() if k in {"category", "reason", "source", "http_status", "provider_code"} or (k == "reset_at" and valid_reset_value(v))}}
     result["on_demand_calls_count"] = len(run.get("on_demand_calls", []))
     result["on_demand_state"] = run.get("on_demand_state", {"kind": "deciding", "node_id": None, "title": None})
     result["response_version"] = 1
@@ -242,6 +249,11 @@ def compact(run: dict[str, Any]) -> dict[str, Any]:
             result[key] = value[:2000]
             result[key + "_truncated"] = True
     if _metadata_size(result) > BUDGET - 2048:
+        for message in result.get("messages", []):
+            if "text" in message:
+                message.pop("text")
+                message["text_truncated"] = True
+                result["messages_truncated"] = True
         result.pop("decision_errors", None)
         for key, value in list(result.items()):
             if (key not in _ACTION_FIELDS or (key == "input_question" and result.get("input_question_truncated", True))) and isinstance(value, str) and len(value) > 200:

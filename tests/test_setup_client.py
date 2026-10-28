@@ -14,7 +14,7 @@ import pytest
 from harflow_mcp import setup_client
 from harflow_mcp.clients import Result, SetupError
 
-EVERYTHING = {"harflow-server", "claude", "codex", "opencode", "vibe", "agy", "git"}
+EVERYTHING = {"harflow-server", "claude", "codex", "opencode", "vibe", "agy", "git", "cursor-agent"}
 
 
 class FakeCli:
@@ -47,6 +47,7 @@ def fake_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeCli:
     """Every client CLI faked, and every config location a client reads pointed into tmp_path."""
     fake = FakeCli()
     fake.reply(("codex", "mcp", "list", "--json"), 0, "[]")
+    fake.reply(("/fake/bin/cursor-agent", "--version"), 0, "2026.10.22-27dcf5f")
     monkeypatch.setattr("harflow_mcp.clients.base.subprocess.run", fake)
     home = tmp_path / "home"
     home.mkdir()
@@ -156,7 +157,7 @@ def test_clients_that_are_not_installed_are_skipped_not_failed(
     out = capsys.readouterr().out
     assert code == 0
     assert json.loads((tmp_path / "claude_desktop_config.json").read_text())["mcpServers"]
-    assert out.count("skipped") == 5
+    assert out.count("skipped") == 6
 
 
 def test_asking_for_a_client_that_is_not_installed_is_an_error(
@@ -173,7 +174,7 @@ def test_asking_for_a_client_that_is_not_installed_is_an_error(
 def test_an_unknown_client_name_is_rejected(tmp_path: Path, which, capsys) -> None:
     which(*EVERYTHING)
 
-    code = run(tmp_path, "--client", "cursor")
+    code = run(tmp_path, "--client", "not-a-client")
 
     assert code == 1
     assert "unknown client" in capsys.readouterr().err
@@ -338,6 +339,7 @@ def test_status_json_is_version_one_with_exactly_the_documented_fields(
         "opencode",
         "vibe",
         "antigravity",
+        "cursor",
     ]
     for row in document["clients"]:
         assert set(row) == ROW_KEYS
@@ -402,7 +404,7 @@ def test_status_runs_nothing_but_codex_s_listing(tmp_path: Path, which, fake_cli
 
     run(tmp_path, "--status")
 
-    assert fake_cli.calls == [["codex", "mcp", "list", "--json"]]
+    assert fake_cli.calls == [["codex", "mcp", "list", "--json"], ["/fake/bin/cursor-agent", "--version"]]
 
 
 def test_status_table_is_readable(tmp_path: Path, which, capsys) -> None:
@@ -449,6 +451,7 @@ def test_uninstall_treats_nothing_to_remove_as_success(
         "opencode": "not_installed",
         "vibe": "not_installed",
         "antigravity": "not_installed",
+        "cursor": "not_installed",
     }
     assert document["server_path"] is None
 

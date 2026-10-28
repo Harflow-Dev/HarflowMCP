@@ -204,7 +204,8 @@ def _join(value, path):
 
 
 def _diagnostic(value, path):
-    _shape(value, {"category": str, "reason": str, "source": str, "reset_at": (str, int, float)}, path)
+    _shape(value, {"category": str, "reason": str, "source": str, "reset_at": (str, int, float),
+                   "http_status": int, "provider_code": str}, path)
     if "reset_at" in value:
         reset = value["reset_at"]
         if type(reset) is str:
@@ -479,3 +480,19 @@ OPTIONAL["input_question_items"] = _array(str)
 
 # Immutable inherited specification content is validated as a JSON object.
 OPTIONAL["inherited_context"] = _inherited_context
+
+
+def _message(value, path):
+    from .workflow_messages import STATUSES
+    _shape(value, {"id": str, "seq": _counter, "status": str, "text": str, "delivery": str, "queued_at": NUMBER, "at": NUMBER, "delivery_task_id": str, "execution_id": str, "target": _object({"kind": str, "workflow_run_id": _id, "task_id": str, "node_id": str, "role": str})}, path)
+    if not {"id", "seq", "target", "queued_at"}.issubset(value) or value.get("status") not in STATUSES or value.get("delivery") not in {"queue", "now"} or type(value.get("target")) is not dict or value["target"].get("kind") not in {"task", "workflow"}:
+        raise ValueError("Malformed workflow message")
+    if value["status"] in {"queued", "delivering", "undeliverable"} and type(value.get("text")) is not str:
+        raise ValueError("Missing workflow message text")
+    if value["target"]["kind"] == "task" and not {"task_id", "node_id", "role"}.issubset(value["target"]):
+        raise ValueError("Incomplete workflow task message target")
+    if value["status"] == "delivering" and not {"execution_id", "delivery_task_id"}.issubset(value):
+        raise ValueError("Incomplete workflow message reservation")
+
+
+OPTIONAL.update(messages=_array(_message), message_sequence=_counter)

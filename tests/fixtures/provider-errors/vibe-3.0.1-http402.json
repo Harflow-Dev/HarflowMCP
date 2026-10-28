@@ -1,0 +1,11 @@
+{
+  "provenance": "Measured Vibe 3.0.1 on macOS against tests/test_vibe_cli.py loopback provider, 2026-10-28; URL port and session identifiers sanitized. This is a scripted provider, not a paid provider response.",
+  "provider_response": {"status": 402, "body": {"error": {"message": "Usage limit exceeded", "type": "usage_limit"}}},
+  "exit_code": 2,
+  "stdout_types": ["message:user"],
+  "stderr": [
+    "Reading API keys from the macOS Keychain (set them as environment variables to skip this)",
+    "Error: Client error '402 Payment Required' for url 'http://127.0.0.1:12345/v1/chat/completions'",
+    "For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/402: Usage limit exceeded"
+  ]
+}

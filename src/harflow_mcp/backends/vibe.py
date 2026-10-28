@@ -344,11 +344,14 @@ class VibeBackend(ExtraPathsUnsupported):
     @staticmethod
     def workflow_stderr_blocks_availability_failure(diagnostic: str) -> bool:
         from .workflow_diagnostics import stderr_blocks_availability
-        return stderr_blocks_availability(diagnostic)
+        from .vibe_provider_errors import PAYMENT_LINE
+        return stderr_blocks_availability(diagnostic) or any(PAYMENT_LINE.fullmatch(line) for line in diagnostic.splitlines())
 
     @staticmethod
     def workflow_stderr_availability_failure(diagnostic: str) -> str | None:
         from .workflow_diagnostics import stderr_availability
+        if VibeBackend.workflow_stderr_blocks_availability_failure(diagnostic):
+            return None
         return stderr_availability(diagnostic, model_patterns=(r"(?im)^.*\bmodel_not_found\b.*$",))
 
     @staticmethod
@@ -359,7 +362,23 @@ class VibeBackend(ExtraPathsUnsupported):
     @staticmethod
     def usage_limit_diagnostic(event: dict[str, Any]) -> dict[str, Any] | None:
         from .workflow_diagnostics import usage_limit
+        error = event.get("error")
+        # Vibe's provider error type is distinct from the older shared quota codes.
+        # HTTP 402 alone is payment evidence, never quota evidence.
+        if event.get("type") == "error" and isinstance(error, dict):
+            statuses = [error.get(key) for key in ("status", "status_code", "statusCode")]
+            code = next((error[key] for key in ("type", "code", "name")
+                         if isinstance(error.get(key), str) and error[key] in {"usage_limit", "usage_limit_reached", "insufficient_quota"}), None)
+            if code and 402 in statuses and all(value is None or type(value) is int and value == 402 for value in statuses):
+                from .workflow_diagnostics import USAGE_LIMIT_REASON
+                return {"category": "usage_limit", "reason": USAGE_LIMIT_REASON,
+                        "source": "stream:error", "http_status": 402, "provider_code": code}
         return usage_limit(event, envelope='error', claude=False, agy=False)
+
+    @staticmethod
+    def observe_stderr(acc: Accumulator, line: str) -> None:
+        from .vibe_provider_errors import observe_stderr
+        observe_stderr(acc, line)
 
     @staticmethod
     def stderr_usage_limit_diagnostic(line: str) -> dict[str, Any] | None:
@@ -661,7 +680,11 @@ class VibeBackend(ExtraPathsUnsupported):
 
     def ingest(self, event: dict[str, Any], acc: Accumulator) -> None:
         diagnostic = self.usage_limit_diagnostic(event)
-        if diagnostic is not None and acc.failure_diagnostic is None:
+        if diagnostic is None:
+            from .vibe_provider_errors import structured_payment_error
+            diagnostic = structured_payment_error(event)
+        if diagnostic is not None and (acc.failure_diagnostic is None or
+                                      diagnostic.get("category") == "usage_limit" and acc.failure_diagnostic.get("category") == "provider_error"):
             acc.failure_diagnostic = diagnostic
             acc.error_result_seen = True
         session_id = event.get("sessionId")

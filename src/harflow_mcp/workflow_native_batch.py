@@ -136,14 +136,22 @@ async def _execute(requests: list[dict[str, Any]]) -> list[tuple[bool, dict[str,
         lease_run = run if root_id == run["workflow_run_id"] else supervisor.store.get_run(root_id)
         async with CheckoutLease(supervisor.store, run["repo_path"], tree_write_strength(lease_run, record.freedom), continue_running, pool=supervisor.checkout_leases, owned_run_ids=getattr(supervisor.tree, "recovered_run_ids", set())):
             def reserve(r: dict[str, Any]) -> None:
-                for item in children:
+                for batch_index, item in enumerate(children):
                     a = next(a for a in r["activations"] if a["id"] == item["request"]["activation"]["id"])
-                    item["child"]["native_replay_state"] = {**copy.deepcopy(item["state"]), "batch_entries": copy.deepcopy(entries)}
+                    from .workflow_messages import claim, render
+                    supplement = render(claim(r, a, item["child"]["task_id"]))
+                    item["state"]["assignment"] += supplement
+                    entries[batch_index]["assignment"] += supplement
+                    item["child"]["assignment_sha256"] = hashlib.sha256(item["state"]["assignment"].encode()).hexdigest()
+                    item["child"]["native_replay_state"] = copy.deepcopy(item["state"])
                     if item["request"]["node"].get("timeout_seconds"):
                         item["child"]["timeout_deadline"] = time.time() + item["request"]["node"]["timeout_seconds"]
                     a["tasks"].append(copy.deepcopy(item["child"]))
                     a.update(presentation(item["child"]))
                     a.pop("execution_fallback_reason", None)
+                for item in children:
+                    attempt = next(t for a in r["activations"] for t in a["tasks"] if t["task_id"] == item["child"]["task_id"])
+                    attempt["native_replay_state"]["batch_entries"] = copy.deepcopy(entries)
                 r["activations"].append({"id": transport_id, "node_id": "orchestrator", "role": "native_control", "status": "running", "created_at": time.time(), "tasks": [{"task_id": transport_id, "status": "reserved", "dispatch_stage": "preparing", "candidate": {"backend": record.backend, "model": record.model, "reasoning_effort": record.reasoning_effort}, "freedom": record.freedom, "network": record.network, "repo_path": run["repo_path"], "native_owner_execution_ids": [i["child"]["task_id"] for i in children]}]})
             supervisor.update(reserve, "native_batch_reserved", {"transport_task_id": transport_id, "count": len(children)})
             for item in children:
@@ -169,6 +177,8 @@ async def _execute(requests: list[dict[str, Any]]) -> list[tuple[bool, dict[str,
                             a = next(a for a in r["activations"] if a["id"] == activation_id)
                             attempt = next(t for t in a["tasks"] if t["task_id"] == execution_id)
                             update_task_state(a, attempt, {"status": "running", "dispatch_stage": "child_confirmed", "native_child_id": update["native_child_id"], "started_at": time.time()})
+                            from .workflow_messages import task_state
+                            task_state(r, execution_id, "running")
                             a["native_child_id"] = update["native_child_id"]
                         supervisor.update(started, "native_child_started")
                     elif kind == "settled":

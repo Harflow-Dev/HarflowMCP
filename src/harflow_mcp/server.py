@@ -88,6 +88,9 @@ def _status_payload(
     if "queued_followups" not in payload:
         # Read here, in the caller's worker thread, rather than in a live snapshot built on the loop.
         payload["queued_followups"] = followups.view(log_dir, task_id)
+    if "messages" not in payload:
+        from .messaging import task_messages
+        payload["messages"] = task_messages(task_id, payload["queued_followups"])
     payload["recent_activity"] = read_recent(events_path(log_dir, task_id), limit=RECENT_ACTIVITY_LIMIT, layout=task_layout(log_dir))
     recovery = payload.get("recovery_activity")
     if isinstance(recovery, dict):
@@ -182,18 +185,14 @@ mcp = MCPServer(
         "see docs/multi-task-waiting.md. Tasks outlive this server process: ones started by an earlier "
         "harflow_mcp server are still reported, marked 'recovered: true'.\n\n"
         "A claude task started without max_turns, and every antigravity task, has live input "
-        "(`live_input: true`): send_message adds a message while it runs — folded into the "
-        "running turn on claude, or starting a new one if the agent is idle; on antigravity each "
-        "written message is its own turn, even mid-turn. It returns 'queued', never 'delivered'. "
-        "Once every turn the run owes has been answered and nothing is queued the task closes its "
-        "own input before process exit; check input_channel and input_closed_reason. After input closes, wait for settlement before calling "
-        "resume_task.\n\n"
-        "Any other standalone task (a backend without live input, or claude with max_turns) takes "
-        "send_message too, but nothing is delivered while it runs: the message is queued "
-        "(`delivery: 'next_continuation'`) and consumed, verbatim and exactly once, by the next "
-        "continuation you start explicitly from that task — resume_task (whose followup_prompt may "
-        "then be omitted) or continue_task. Queuing starts nothing. cancel_queued_message withdraws "
-        "a message that is still queued; queued_followups on the task status lists every one.\n\n"
+        "(`live_input: true`). Public send_message queues exact caller prose for the next "
+        "explicit continuation, including live-input tasks; it never folds into the current turn "
+        "by default. delivery=now starts a safely settled standalone continuation or returns a "
+        "stable refusal while keeping the message queued. No backend currently certifies safe "
+        "mid-turn interruption. Workflow and node messages route through their owning workflow "
+        "and are consumed by the next matching issued dispatch, without changing authority. "
+        "cancel_queued_message withdraws a still-queued message. Status exposes messages and "
+        "queued_followups; send_workflow_message addresses a run directly.\n\n"
         "Workflows are durable graphs owned by HarflowMCP. start_workflow gives the caller's "
         "original prompt and workflow context to an orchestrator harness. The orchestrator "
         "chooses valid next nodes and writes focused assignments; HarflowMCP validates those "
@@ -2070,102 +2069,92 @@ async def get_task_event_page(
 
 @mcp.tool()
 @_task_document_errors
-async def send_message(task_id: str, text: str) -> dict[str, Any]:
-    """Add a message to a running live-input task, as if the user had typed it mid-run — or queue
-    it for the next continuation of a task that has no live input.
+async def send_message(task_id: str, text: str, delivery: str = "queue", interaction_owner: str = "caller") -> dict[str, Any]:
+    """Queue exact caller prose for any task's next continuation or owning workflow dispatch.
 
-    Args:
-        task_id: A running task whose `live_input` is true (claude started without `max_turns`,
-            or any antigravity task); or any other standalone task, running or settled, whose
-            message waits for its next continuation (see below).
-        text: The message, stored and delivered exactly as submitted — keep plain prose intact,
-            as with start_task's prompt: spaces and word boundaries preserved, never words
-            concatenated to save tokens. Blank or all-whitespace messages are rejected.
-
-    Returns `status: "queued"` — never "delivered". The task's input pump writes the message to the
-    agent: on claude, a message arriving while a turn is running is folded into that turn, and one
-    arriving while the agent is idle starts a new turn; on antigravity every written message is its
-    own turn, even mid-turn. The task's event log then records a `user_message` event
-    (`source: "injected"`) when it is written, or an `undelivered` event plus a notice if it never
-    is (the run errored or exited first).
-
-    A live task closes its own input once all owed results arrive and nothing is queued, so it
-    settles unattended. Input can close before the process exits, including while autonomous
-    follow-up work continues. `live_input` describes the invocation capability; `input_channel`
-    and `supervision.live_input_state` describe current acceptance. A refusal names the closure
-    reason: wait for settlement before resume_task. Also refused: a settled task or one whose
-    owner is not confirmed alive. The response carries `delivery: "live_input"`.
-
-    A task without live input (a backend that has none, or claude started with max_turns) is not
-    refused: the message goes to a durable per-task queue and the response is `status: "queued"`
-    with `delivery: "next_continuation"`, `message_id` and `seq`. Nothing is started and nothing is
-    delivered. The next continuation you start explicitly from that task — resume_task (its
-    followup_prompt may then be omitted) or continue_task, or `harflow-ctl resume|continue`
-    and Resume in the Monitor — consumes every queued message, verbatim and in order, exactly once
-    (see those tools for the prompt shape); an automatic continuation does not. Withdraw a message
-    that is still queued with cancel_queued_message; task status lists them all as
-    `queued_followups`. Refused with a stable code: `superseded` (a successor already exists or
-    probably exists — the error names it; send there), `message_too_large` (over 32 KiB of UTF-8),
-    `queue_full` (16 outstanding, or the queue's byte budget), `unavailable` (the queue cannot be
-    read), `invalid_text` (not valid UTF-8), `live_input` (the task has live input), `workflow_owned`
-    and the workflow-active codes (a task owned by a workflow), `unknown_task`, `lock_timeout` (try
-    again) and `write_failed`.
+    `delivery` is `queue` (default; never folds into the current turn) or `now`. Now starts a
+    safely settled standalone continuation; an unsafe interruption returns a stable `refusal`
+    alongside the queued message id, preserving the message for later. Workflow/node messages
+    follow their owning workflow and never widen node authority. Use `interaction_owner=monitor`
+    only from a verified human Monitor caller. Status exposes messages and queued_followups.
     """
-    from .caller_policy import require_mutation
     await _guard_mutation()
     try:
         store.validate_task_id(task_id)
-    except store.InvalidTaskId as exc:
-        raise MCPError(INVALID_PARAMS, str(exc)) from None
-    if not isinstance(text, str) or not text.strip():
-        raise MCPError(INVALID_PARAMS, "text must be a non-empty string")
-
-    try:
-        caller = await _verified_workflow_caller()
-        if caller is not None:
-            from .workflow_hooks import refuse_message_caller
-            refuse_message_caller(_reg().log_dir, caller.record.task_id)
-        task = _reg().get(task_id)
-        if task is not None:
-            return await _reg().send_message(task, text)
-        if _reg().recover(task_id) is None:
-            raise MCPError(INVALID_PARAMS, f"unknown task_id: {task_id}")
-        return await _reg().send_to_record(task_id, text)
+        await _guard_message_sender(interaction_owner)
+        from . import messaging
+        return await messaging.send(_reg(), task_id, text, delivery=delivery, interaction_owner=interaction_owner)
     except inbox.SendRefused as exc:
+        raise MCPError(INVALID_PARAMS, str(exc), data={"code": exc.code}) from None
+    except (ValueError, store.InvalidTaskId) as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+
+async def _guard_message_sender(interaction_owner: str) -> None:
+    if interaction_owner not in {"caller", "monitor"}:
+        raise MCPError(INVALID_PARAMS, "interaction_owner must be caller or monitor")
+    caller = await _verified_workflow_caller()
+    if caller is not None:
+        from .workflow_hooks import refuse_message_caller
+        refuse_message_caller(_reg().log_dir, caller.record.task_id)
+    if interaction_owner == "monitor":
+        from .takeover import caller_refusal
+        refusal = await asyncio.to_thread(caller_refusal, _reg().log_dir)
+        if refusal is not None:
+            raise inbox.SendRefused("Only a verified human Monitor caller may send as monitor: " + refusal[1], code="caller_refused")
+
+
+@mcp.tool()
+@_task_document_errors
+async def cancel_queued_message(task_id: str, message_id: str, interaction_owner: str = "caller") -> dict[str, Any]:
+    """Withdraw a still-queued task or workflow-owned message; claimed messages are refused."""
+    await _guard_mutation()
+    try:
+        store.validate_task_id(task_id)
+        await _guard_message_sender(interaction_owner)
+        from . import messaging
+        return await messaging.cancel_message(_reg(), task_id, message_id, interaction_owner=interaction_owner)
+    except inbox.SendRefused as exc:
+        raise MCPError(INVALID_PARAMS, str(exc), data={"code": exc.code}) from None
+    except ValueError as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
 
 
 @mcp.tool()
 @_task_document_errors
-async def cancel_queued_message(task_id: str, message_id: str) -> dict[str, Any]:
-    """Withdraw a follow-up that send_message queued for a task's next continuation.
-
-    Args:
-        task_id: The task the message was queued on.
-        message_id: The `message_id` send_message returned (also listed in the task's
-            `queued_followups`).
-
-    Only a message that is still `queued` can be cancelled: one already reserved for, or consumed
-    by, a continuation is refused (`not_cancellable`), and so is an unknown id (`unknown_message`).
-    The checks are the ones send_message takes: workflow-owned tasks and workflow-managed callers
-    are refused. Returns `status: "cancelled"`; the message is kept as metadata only.
+async def send_workflow_message(run_id: str, text: str, task_id: str | None = None, delivery: str = "queue", interaction_owner: str = "caller") -> dict[str, Any]:
+    """Queue a workflow or node message for its next issued dispatch. Exact prose and order are
+    preserved. `now` refuses unsupported interruption or required checkpoints while keeping the
+    queued message and returning its id plus a stable refusal code. No permission, goal, decision
+    or attempt budget is changed. Owner checks match other workflow interactions.
     """
-    from .caller_policy import require_mutation
     await _guard_mutation()
     try:
-        store.validate_task_id(task_id)
-    except store.InvalidTaskId as exc:
-        raise MCPError(INVALID_PARAMS, str(exc)) from None
-    if not isinstance(message_id, str) or not message_id.strip():
-        raise MCPError(INVALID_PARAMS, "message_id must be a non-empty string")
-    await _guard_task_read(task_id)
-    try:
-        caller = await _verified_workflow_caller()
-        if caller is not None:
-            from .workflow_hooks import refuse_message_caller
-            refuse_message_caller(_reg().log_dir, caller.record.task_id)
-        return await _reg().cancel_queued_followup(task_id, message_id)
+        await _guard_message_sender(interaction_owner)
+        from .workflow_messages import send, deliver_now
+        from .workflows import WorkflowStore
+        storage = WorkflowStore(_reg().log_dir.parent)
+        result = await asyncio.to_thread(send, storage, run_id, text, task_id=task_id, delivery=delivery, interaction_owner=interaction_owner)
+        return await deliver_now(storage, result, interaction_owner=interaction_owner)
     except inbox.SendRefused as exc:
+        raise MCPError(INVALID_PARAMS, str(exc), data={"code": exc.code}) from None
+    except ValueError as exc:
+        raise MCPError(INVALID_PARAMS, str(exc)) from None
+
+
+@mcp.tool()
+@_task_document_errors
+async def cancel_workflow_message(run_id: str, message_id: str, interaction_owner: str = "caller") -> dict[str, Any]:
+    """Cancel one queued workflow message. Delivering and delivered messages cannot be withdrawn."""
+    await _guard_mutation()
+    try:
+        await _guard_message_sender(interaction_owner)
+        from .workflow_messages import cancel
+        from .workflows import WorkflowStore
+        return await asyncio.to_thread(cancel, WorkflowStore(_reg().log_dir.parent), run_id, message_id, interaction_owner=interaction_owner)
+    except inbox.SendRefused as exc:
+        raise MCPError(INVALID_PARAMS, str(exc), data={"code": exc.code}) from None
+    except ValueError as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
 
 
@@ -2279,7 +2268,7 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
                 refuse_managed(_reg().log_dir, caller.record.task_id)
             kwargs["repo_path"] = await _validate_repo_path(kwargs["repo_path"])
             return await asyncio.to_thread(workflows.preview_workflow_run, root=_reg().log_dir.parent, **kwargs)
-        if action in {"pause", "resume", "recover", "revise_goal"}:
+        if action in {"pause", "resume", "recover", "revise_goal", "builder_followup"}:
             kwargs.setdefault("interaction_owner", "caller")
         if action not in {"list", "list_runs", "list_run_page", "get_run_header", "get", "status", "inspect", "assigned_input", "detail"}:
             from .workflow_hooks import refuse_managed
@@ -2389,6 +2378,8 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
         return result
     except WorkflowDefinitionDocumentError as exc:
         raise MCPError(INVALID_PARAMS, str(exc), data=exc.as_dict()) from None
+    except inbox.SendRefused as exc:
+        raise MCPError(INVALID_PARAMS, str(exc), data={"code": exc.code}) from None
     except (ValueError, KeyError, OSError, backends.UnsupportedCapability) as exc:
         data = None
         if hasattr(exc, "missing_references"):

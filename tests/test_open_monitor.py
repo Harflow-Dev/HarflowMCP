@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from harflow_mcp.backends.base import ExtraPathsUnsupported
 from harflow_mcp import backends, git_environment, lineage, server, store
 from harflow_mcp import state_ownership
 from harflow_mcp.backends import Enforcement, Invocation
@@ -28,7 +29,7 @@ def deterministic_git_observation(monkeypatch):
     monkeypatch.setenv(git_environment.REWRITE_ENV, "1")
 
 
-class _Backend:
+class _Backend(ExtraPathsUnsupported):
     name = "fake-open"
     binary = "/bin/sh"
     capabilities = backends.get("claude").capabilities._replace(

@@ -30,6 +30,12 @@
     "count": 2
   },
   {
+    "file": "src/harflow_mcp/backends/cursor.py",
+    "literal": "polybridge",
+    "reason": "Stable pre-extraction wire field; contract reset deferred.",
+    "count": 1
+  },
+  {
     "file": "src/harflow_mcp/backends/opencode.py",
     "literal": "polybridge",
     "reason": "Stable pre-extraction wire field; contract reset deferred.",

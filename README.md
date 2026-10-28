@@ -26,6 +26,8 @@ Current seed measurements for these two features: `allowed_commands` is qualifie
 
 Vibe 3.0.1 headless dispatch uses its Rust CLI and the `ask` approval profile for `read_only`. This is an approval policy, not a write-tool exclusion: inherited policies or custom profiles can pre-approve writes. The retained `VIBE_CLI=python` selector is ignored by Vibe 3; interactive takeover inherits the user's environment.
 
+Vibe provider HTTP 402 failures retain a safe explanation even without final agent prose. A measured usage-limit response is reported as a usage limit; an unknown payment response stays a provider error and asks you to check billing and usage. Neither automatically retries or switches providers.
+
 `publish` authorizes publication attempts; its enforcement depends on the backend:
 
 | Backend | Publish mechanism |
@@ -129,3 +131,8 @@ Read-only reviewers can opt in to a qualified group-scoped report output directo
 The initial supported configuration is headless Codex CLI 0.165.0 on macOS with network disabled
 and compatible execution configuration; unsupported combinations fail explicitly. The repository
 stays read-only. See [shared scratch and review reports](docs/shared-scratch.md#read-only-review-reports).
+
+Messages to tasks, workflow runs and workflow nodes queue by default, preserving exact text and order.
+Use `send_message(..., delivery="now")` or `harflow-ctl send TASK TEXT --delivery now` to request
+immediate continuation; unsafe interruption returns a reason and leaves the message queued.
+See [queued messaging](docs/contracts.md#queued-task-and-workflow-messaging).

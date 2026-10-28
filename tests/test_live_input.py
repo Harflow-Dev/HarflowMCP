@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from harflow_mcp.backends.base import ExtraPathsUnsupported
 from harflow_mcp import backends, store
 from harflow_mcp import inbox_documents
 from harflow_mcp.backends import STDIN_PIPE, Invocation
@@ -36,7 +37,7 @@ def tmp_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
 RESULT_LINE = '{"type":"result","subtype":"success","is_error":false,"result":"ok"}'
 
 
-class _CatDouble:
+class _CatDouble(ExtraPathsUnsupported):
     """Spawns a shell on a stdin pipe that copies the first line it reads to a file, answers with a
     claude `result`, then waits for EOF — the smallest process that behaves like a live agent.
     Ingest and classify are claude's own, so the input pump sees the result and closes stdin."""
@@ -517,7 +518,7 @@ def _no_ps_needed(identities):
 SETTLE_SECONDS = 20.0
 
 
-class _FakeClaude:
+class _FakeClaude(ExtraPathsUnsupported):
     """claude's own ingest/normalize/classify/encoding, driving `tests/fake_claude_agent.py`."""
 
     name = "fake-claude"
@@ -1667,7 +1668,7 @@ AGY_RESULT_LINE = json.dumps(
 )
 
 
-class _PerTurnDouble:
+class _PerTurnDouble(ExtraPathsUnsupported):
     """Spawns a shell that answers one agy-shaped result per stdin line read, appending each line
     to a sink so the test sees exactly what reached the process. The sleep before the first result
     makes the two queued messages land while the first turn is still running — agy's measured

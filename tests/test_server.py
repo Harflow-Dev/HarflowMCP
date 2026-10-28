@@ -79,7 +79,7 @@ async def test_task_and_workflow_tools_are_exposed() -> None:
     async with Client(server.mcp) as client:
         names = sorted(tool.name for tool in (await client.list_tools()).tools)
 
-    assert names == ['apply_workflow_draft', 'cancel_queued_message', 'cancel_task', 'cancel_workflow', 'continue_task', 'delete_workflow', 'followup_workflow_builder', 'get_approval_request', 'get_task_artifacts', 'get_task_event_page', 'get_task_events', 'get_task_notifications', 'get_task_status', 'get_workflow', 'get_workflow_artifacts', 'get_workflow_notifications', 'get_workflow_run_detail', 'get_workflow_status', 'inspect_workflow_node', 'list_approval_requests', 'list_backends', 'list_task_page', 'list_tasks', 'list_workflow_run_page', 'list_workflow_runs', 'list_workflows', 'pause_workflow', 'preview_task_permissions', 'preview_workflow_run', 'read_workflow_assigned_input', 'recover_workflow', 'register_artifact', 'respond_approval_request', 'resume_task', 'resume_workflow', 'revise_workflow_goal', 'save_workflow', 'send_message', 'start_task', 'start_workflow', 'subscribe', 'subscribe_workflow', 'unsubscribe', 'unsubscribe_workflow', 'wait_for_task', 'wait_for_tasks', 'wait_for_workflow', 'workflow_builder']
+    assert names == ['apply_workflow_draft', 'cancel_queued_message', 'cancel_task', 'cancel_workflow', 'cancel_workflow_message', 'continue_task', 'delete_workflow', 'followup_workflow_builder', 'get_approval_request', 'get_task_artifacts', 'get_task_event_page', 'get_task_events', 'get_task_notifications', 'get_task_status', 'get_workflow', 'get_workflow_artifacts', 'get_workflow_notifications', 'get_workflow_run_detail', 'get_workflow_status', 'inspect_workflow_node', 'list_approval_requests', 'list_backends', 'list_task_page', 'list_tasks', 'list_workflow_run_page', 'list_workflow_runs', 'list_workflows', 'pause_workflow', 'preview_task_permissions', 'preview_workflow_run', 'read_workflow_assigned_input', 'recover_workflow', 'register_artifact', 'respond_approval_request', 'resume_task', 'resume_workflow', 'revise_workflow_goal', 'save_workflow', 'send_message', 'send_workflow_message', 'start_task', 'start_workflow', 'subscribe', 'subscribe_workflow', 'unsubscribe', 'unsubscribe_workflow', 'wait_for_task', 'wait_for_tasks', 'wait_for_workflow', 'workflow_builder']
 
 
 async def test_list_backends_describes_every_one(monkeypatch) -> None:
@@ -785,28 +785,30 @@ async def test_resume_preserves_followup_prompt_bytes_through_transport_and_reco
 
 async def test_send_message_queues_for_a_live_task_the_server_owns(fake_task: Task) -> None:
     fake_task.live_input = True
+    server._reg().persist(fake_task)
     result = (await call("send_message", task_id="task-1", text="also this")).structured_content
-    assert result["status"] == "queued"
-    from harflow_mcp import inbox
-    queued, _ = inbox.read_new(server._reg().log_dir, fake_task.task_id, 0)
+    assert result["status"] == "queued" and result["delivery"] == "queue"
+    from harflow_mcp import inbox, followups
+    queued = followups.view(server._reg().log_dir, fake_task.task_id)["items"]
     assert [(m["id"], m["text"]) for m in queued] == [(result["message_id"], "also this")]
-    assert not fake_task.inbox_queue  # The durable inbox is the single source for the pump.
-    assert fake_task.pump_wake.is_set()
+    assert inbox.read_new(server._reg().log_dir, fake_task.task_id, 0)[0] == []
+    assert not fake_task.pump_wake.is_set()
 
 
 async def test_send_message_queues_for_the_next_continuation_without_live_input(fake_task: Task) -> None:
     server._reg().persist(fake_task)
     result = (await call("send_message", task_id="task-1", text="hi")).structured_content
-    assert result["status"] == "queued" and result["delivery"] == "next_continuation"
+    assert result["status"] == "queued" and result["delivery"] == "queue"
     from harflow_mcp import inbox
     assert inbox.read_new(server._reg().log_dir, fake_task.task_id, 0)[0] == []  # never the inbox
 
 
-async def test_send_message_after_close_says_to_resume(fake_task: Task) -> None:
+async def test_send_message_after_live_close_queues_for_continuation(fake_task: Task) -> None:
     fake_task.live_input = True
     fake_task.inbox_closed = True
-    with pytest.raises(MCPError, match="closed live input.*Wait for settlement.*resume_task"):
-        await call("send_message", task_id="task-1", text="hi")
+    server._reg().persist(fake_task)
+    result = (await call("send_message", task_id="task-1", text="hi")).structured_content
+    assert result["status"] == "queued" and result["delivery"] == "queue"
 
 
 async def test_send_message_validates_its_arguments() -> None:
@@ -818,7 +820,7 @@ async def test_send_message_validates_its_arguments() -> None:
         await call("send_message", task_id="nope", text="  ")
 
 
-async def test_send_message_reaches_a_recorded_task_via_its_inbox(identities) -> None:
+async def test_send_message_queues_on_a_recorded_live_task(identities) -> None:
     from conftest import ALIVE_OWNER
 
     from harflow_mcp import inbox
@@ -838,8 +840,9 @@ async def test_send_message_reaches_a_recorded_task_via_its_inbox(identities) ->
     )
     result = (await call("send_message", task_id="other", text="hello")).structured_content
     assert result["status"] == "queued"
-    messages, _ = inbox.read_new(log_dir, "other", 0)
-    assert [m["text"] for m in messages] == ["hello"]
+    from harflow_mcp import followups
+    assert [m["text"] for m in followups.view(log_dir, "other")["items"]] == ["hello"]
+    assert inbox.read_new(log_dir, "other", 0)[0] == []
 
 
 # --- Tests for lean status payloads ----------------------------------------------------------------

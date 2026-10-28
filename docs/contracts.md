@@ -844,3 +844,90 @@ status and list reads preserve identity and liveness diagnostics but suppress sy
 adoption by their ephemeral process. Actual MCP server adoption retains its
 existing `{at, previous_server, current_server}` shape. Nothing writes ownership
 or task state; older consumers can ignore these optional v1 fields.
+
+
+## Provider failure diagnostics
+
+Task status and persisted task records carry additive `failure_diagnostic` metadata with
+`category`, a bounded safe `reason`, and `source`. The optional `http_status` integer and
+`provider_code` string retain established provider evidence; URLs, headers and arbitrary
+provider response text are not copied into this metadata. `provider_code` is present only
+for a recognized backend-owned code, never inferred from prose. Wait summaries keep the
+bounded category and reason; terminal notification payloads and workflow execution/result
+diagnostics retain the safe cause. Existing consumers may ignore the optional fields.
+
+For Vibe 3.0.1, the measured HTTPX stderr pair for HTTP 402 followed immediately by
+`Usage limit exceeded` establishes `category: usage_limit`. A typed Vibe error with an
+explicit 402 and recognized `usage_limit`, `usage_limit_reached` or `insufficient_quota`
+code does too. Other 402 responses use `category: provider_error`, with a safe billing/usage
+explanation. HTTP status alone never establishes a usage limit. No reset time is invented
+and classification never retries, continues or switches providers automatically. See
+[the qualification evidence](backend-cli-facts.md#vibe-http-402-diagnostics).
+
+### Monitor workflow control eligibility
+
+`workflow-status --monitor-view` includes additive `monitor_controls`. Each key
+(`pause`, `resume`, `recover`, `revise_goal`, `skip_optional_review`,
+`additional_attempts`, `cancel`) contains `allowed`, `reason`, and
+`target_workflow_run_id`. Disabled actions remain visible with their reason.
+Children identify the root route and require opening that root's current
+checkpoint; a child's displayed answer must not implicitly answer a root question.
+Missing fields on older engines mean eligibility is unknown, not granted.
+
+These fields are advisory observations, not authority or durable grants. Every
+command rechecks current ownership, checkpoint, execution and takeover state.
+The Monitor always identifies itself with `--monitor`; it cannot impersonate a
+live caller. Only qualified caller death permits the existing atomic interaction
+handover for resume, recovery and goal revision, and for explicit queued message
+send/cancellation. Pause does not claim caller authority. Pending questions,
+optional-review consent and additional attempts retain their existing decision
+and reason requirements. Rendering these controls never claims ownership.
+
+
+## Queued task and workflow messaging
+
+The fresh handshake capability `messaging.v1` qualifies `send`, `cancel-message`, `workflow-send`
+and `workflow-cancel-message`, plus the additive `messages` lifecycle on task and workflow status.
+Consumers must require this capability before using the new modes. Public MCP equivalents are
+`send_message`, `cancel_queued_message`, `send_workflow_message` and `cancel_workflow_message`.
+The task forms route workflow-owned targets through their owning workflow, including builders.
+Workflow forms accept a run ID and an optional `task_id` (CLI `--task-id`). All forms preserve
+exact caller prose. `--monitor` / `interaction_owner: "monitor"` requires a verified human caller;
+workflow interaction ownership and proven-dead caller handover match the other workflow controls.
+Managed node callers cannot use messaging to change other assignments.
+
+`delivery` is `queue` by default or `now`. Queue never folds into the current live turn. Standalone
+messages wait for the next explicitly requested continuation; automatic continuation never consumes
+them. Workflow messages wait for the next issued orchestrator or builder dispatch; a task target
+waits for its node's next issued attempt, including when the original task settles first. Messaging
+never issues a node, changes a goal, grants another attempt or widens permissions. Completed or
+cancelled non-builder workflows mark waiting messages `undeliverable` with a reason; failed runs
+retain queued messages for explicit recovery. Completed builders can take another builder turn.
+
+Now on a conclusively settled standalone task requests the existing guarded fresh continuation.
+On safely paused or attention-stopped workflows it uses the existing resume control with no answer,
+retry grant or changed goal; the engine revalidates the current checkpoint. A completed builder
+uses its existing builder continuation route. Pending questions, approvals, uncertain ownership,
+attempt budgets and unsupported interruption remain barriers. No current backend adapter certifies
+a safe mid-turn interrupt primitive. A now refusal is an accepted queued response carrying
+`refusal: {code, message}` and the message ID; it does not roll back admission. Codes include
+`interrupt_unsupported`, `workflow_checkpoint_required` and `continuation_refused`. Successful
+continuation adds `successor_task_id` or `delivery_started`; it does not claim the model has read it.
+
+Responses contain `message_id`, `seq`, `status`, `delivery`, and task/run IDs. Workflow status
+`messages` entries contain `id`, monotonically increasing `seq`, `target` (`kind`, run ID and,
+for node targets, task/node/role), `delivery`, `status`, timestamps, and optional text, reason and
+`delivery_task_id`. Statuses are `queued`, `delivering`, `delivered`, `undeliverable`, `cancelled`.
+Dispatch reservation atomically claims eligible messages in order; positive no-spawn evidence
+releases a claim, while uncertain delivery never requeues it. Delivered means handed to an issued
+process, not successful execution. Delivered/cancelled records retain metadata only. Task status
+also keeps the existing `queued_followups` ledger (`reserved`/`consumed` map to
+`delivering`/`delivered` in `messages`; uncertain consumption remains delivering with a reason).
+Cancel accepts only queued records; claiming and cancellation serialize through the same lock.
+
+Messages are limited to 32 KiB UTF-8 each and 16 outstanding per task/run. Workflow ledgers retain
+at most 256 KiB of text and bounded terminal history. Compact workflow status returns text previews
+and `messages_truncated`; `workflow-detail --view messages` pages the full retained messages.
+The queue limits are admission limits, not additional execution or filesystem authority.
+
+`workflow-build --monitor` (qualified by `messaging.v1`) records human Monitor ownership in the initial builder document before launch. The public MCP builder keeps caller ownership by default. Builder follow-up, including the legacy builder-followup tool, rechecks the current owner inside its feedback mutation; Send now additionally requires an idle builder there. A terminal workflow Send now response is `undeliverable` with `workflow_terminal`, never a promise that the message remains queued.

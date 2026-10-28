@@ -1241,6 +1241,8 @@ class WorkflowStore:
             suspension_fields = ("attention_reason", "attention_source", "input_question", "input_question_items", "input_decision_id", "input_source", "optional_review_skip_available")
             suspension_before = {key: copy.deepcopy(run[key]) for key in suspension_fields if key in run}
             mutator(run)
+            from .workflow_messages import reconcile as reconcile_messages
+            reconcile_messages(run)
             if attention_before[0] in {"needs_input", "needs_attention", "paused", "failed"} and run.get("status") in {"running", "building", "starting", "pending"}:
                 for key, value in suspension_before.items():
                     if key in run and run[key] == value:
@@ -1320,7 +1322,9 @@ class WorkflowStore:
             return run
 
     @layout_operation
-    def create_run(self, definition: dict[str, Any], prompt: str, repo_path: Path, *, freedom: str = "write_in_repo", network: bool | None = None, kind: str = "workflow", permission_policy: str = "legacy_ceiling", caller: Any = None, dependency_tree: dict[str, Any] | None = None, owner_contracts: dict[str, Any] | None = None, goal: str | None = None, run_id: str | None = None, resource_scope: dict[str, Any] | None = None, worktree: dict[str, Any] | None = None) -> dict[str, Any]:
+    def create_run(self, definition: dict[str, Any], prompt: str, repo_path: Path, *, freedom: str = "write_in_repo", network: bool | None = None, kind: str = "workflow", permission_policy: str = "legacy_ceiling", caller: Any = None, dependency_tree: dict[str, Any] | None = None, owner_contracts: dict[str, Any] | None = None, goal: str | None = None, run_id: str | None = None, resource_scope: dict[str, Any] | None = None, worktree: dict[str, Any] | None = None, interaction_owner: str | None = None) -> dict[str, Any]:
+        if interaction_owner is not None and interaction_owner not in {"caller", "monitor"}:
+            raise WorkflowError("interaction_owner must be caller or monitor")
         if permission_policy not in {"saved_node", "legacy_ceiling"}:
             raise WorkflowError("Unknown workflow permission policy")
         if freedom not in FREEDOMS:
@@ -1342,6 +1346,8 @@ class WorkflowStore:
             run.update(caller_record=asdict(caller.record), caller_method=caller.method)
         from .workflow_interactions import admission
         run["interaction_caller"] = admission(caller)
+        if interaction_owner is not None:
+            run["interaction_owner"] = interaction_owner
         run["permission_policy"] = permission_policy
         run["definition_hash"] = hashlib.sha256(json.dumps(definition, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         from .workflow_native import scheduling_policy
@@ -2312,7 +2318,9 @@ async def apply_workflow_draft(definition: dict[str, Any], expected_draft_revisi
 
 
 @root_operation
-async def followup_workflow_builder(run_id: str, prompt: str, *, root: Path | None = None) -> dict[str, Any]:
+async def followup_workflow_builder(run_id: str, prompt: str, *, root: Path | None = None, interaction_owner: str = "caller", _require_idle: bool = False) -> dict[str, Any]:
+    if interaction_owner not in {"caller", "monitor"}:
+        raise WorkflowError("interaction_owner must be caller or monitor")
     if not isinstance(prompt, str) or not prompt.strip() or len(prompt.encode("utf-8")) > 1024 * 1024:
         raise WorkflowError("Builder feedback must be nonempty and at most one megabyte")
     storage = WorkflowStore(root)
@@ -2320,6 +2328,14 @@ async def followup_workflow_builder(run_id: str, prompt: str, *, root: Path | No
     launch = False
     def queue(r: dict[str, Any]) -> None:
         nonlocal launch
+        from .workflow_messages import _authorize
+        _authorize(storage, r, interaction_owner, "message")
+        if _require_idle:
+            from .inbox import SendRefused
+            if any(t["status"] in {"reserved", "running", "uncertain"} for a in r["activations"] for t in a["tasks"]):
+                raise SendRefused("The message stays queued: safe interruption is unsupported", code="interrupt_unsupported")
+            if r["status"] not in {"completed", "needs_attention"} or r.get("input_question") or r.get("pending_inputs") or r.get("orchestrator_usage_recovery"):
+                raise SendRefused("The message stays queued: inspect the builder's current checkpoint", code="workflow_checkpoint_required")
         if r["kind"] != "builder" or r["status"] in {"cancelled", "cancelling", "paused"}:
             raise WorkflowError("This builder cannot accept feedback")
         if any(t["status"] in {"reserved", "running", "uncertain"} for a in r["activations"] for t in a["tasks"]) and not _supervisor_present(r):
@@ -2352,7 +2368,9 @@ def builder_workspace(storage: WorkflowStore) -> Path:
 
 
 @root_operation
-async def build_workflow(name: str, prompt: str, repo_path: Path | None = None, *, agent: dict[str, Any], fallbacks: list[dict[str, Any]] | None = None, definition: dict[str, Any] | None = None, source: dict[str, Any] | None = None, root: Path | None = None, _verified_caller: Any = _CALLER_UNSET) -> dict[str, Any]:
+async def build_workflow(name: str, prompt: str, repo_path: Path | None = None, *, agent: dict[str, Any], fallbacks: list[dict[str, Any]] | None = None, definition: dict[str, Any] | None = None, source: dict[str, Any] | None = None, root: Path | None = None, interaction_owner: str = "caller", _verified_caller: Any = _CALLER_UNSET) -> dict[str, Any]:
+    if interaction_owner not in {"caller", "monitor"}:
+        raise WorkflowError("interaction_owner must be caller or monitor")
     if not isinstance(prompt, str) or not prompt.strip():
         raise WorkflowError("Builder prompt must be nonempty")
     storage = WorkflowStore(root)
@@ -2377,7 +2395,7 @@ async def build_workflow(name: str, prompt: str, repo_path: Path | None = None, 
     caller = await _capture_caller(storage, None, _verified_caller)
     supplied_repo = repo_path is not None
     repo_path = repo_path if supplied_repo else builder_workspace(storage)
-    run = storage.create_run(descriptor, prompt, repo_path, freedom="read_only", kind="builder", caller=caller)
+    run = storage.create_run(descriptor, prompt, repo_path, freedom="read_only", kind="builder", caller=caller, interaction_owner=interaction_owner)
     if editing is not None:
         run = storage.update_run(run["workflow_run_id"], lambda r: r.update(editing_definition=editing, editing_source=metadata, source_name=metadata["name"], source_revision=metadata["revision"], source_saved_definition=metadata["saved_definition"]), "builder_edit_requested")
     try:
@@ -2419,6 +2437,9 @@ def parse_json(text: str) -> dict[str, Any]:
 
 def failure_diagnostic(snapshot: dict[str, Any], prompt: str) -> str:
     """A bounded startup diagnostic without exposing injected dispatch context."""
+    structured = snapshot.get("failure_diagnostic")
+    if isinstance(structured, dict) and isinstance(structured.get("reason"), str):
+        return structured["reason"][:500]
     lines = list(snapshot.get("stderr_tail", []))
     stream = snapshot.get("raw_stream_log")
     adapter = backends.BACKENDS.get(snapshot.get("backend"))
@@ -2458,8 +2479,9 @@ def availability_failure(snapshot: dict[str, Any]) -> str | None:
     """Only process diagnostics, never summaries or tool output, authorize fallback."""
     if snapshot.get("status") != "failed" or snapshot.get("outcome_unknown") or snapshot.get("permission_denials"):
         return None
-    if usage_limit(snapshot):
-        return None  # Usage limits require an explicit recovery decision.
+    diagnostic = snapshot.get("failure_diagnostic")
+    if isinstance(diagnostic, dict) and diagnostic.get("category") in {"usage_limit", "provider_error"}:
+        return None  # Quota and payment failures never authorize automatic provider replacement.
     diagnostic = "\n".join(snapshot.get("stderr_tail", []))
     adapter = backends.BACKENDS.get(snapshot.get("backend"))
     stderr_veto = getattr(adapter, "workflow_stderr_blocks_availability_failure", None)
@@ -3090,12 +3112,15 @@ class WorkflowSupervisor:
             reservation["harness_metadata"] = {"requested": copy.deepcopy(candidate), "effective": {"backend": candidate["backend"], "model": candidate.get("model"), "reasoning_effort": candidate.get("reasoning_effort"), "freedom": freedom, "settings_source": "explicit_launch_arguments", "default_model": "unknown" if not candidate.get("model") else None, "provider_identity": "unknown"}, "observed": None, "provenance": "validated_launch_configuration", "verification_status": "configured_not_observed"}
             if existing_attempt:
                 reservation = copy.deepcopy(existing_attempt)
+            claimed_messages: list[dict[str, Any]] = []
             def reserve(r: dict[str, Any]) -> None:
                 a = next(a for a in r["activations"] if a["id"] == activation["id"])
                 if resource_attempt is not None:
                     workflow_resources.attach_attempt(self, activation["id"], resource_attempt, reservation)
                     a["resource_attempt"] = copy.deepcopy(resource_attempt)
                 a["tasks"].append(reservation)
+                from .workflow_messages import claim
+                claimed_messages.extend(claim(r, a, task_id))
                 if role == "node" and a.get("continue_previous"):
                     a["execution_session_mode"] = reservation["session_mode"]
                     a["session_reason"] = a.get("session_reason", "Resumed previous node") if use_resume else ("Started Fresh: fallback selected" if candidate != config else a.get("session_reason", "Started Fresh: compatible previous session unavailable"))
@@ -3112,6 +3137,13 @@ class WorkflowSupervisor:
                 self.tree.release_slot(control=role != "node")
                 workflow_resources.cleanup(lambda: workflow_resources.abandon_attempt(self, activation["id"], resource_attempt))
                 raise
+            from .workflow_messages import render as render_messages
+            dispatch_prompt += render_messages(claimed_messages)
+            if claimed_messages:
+                context_delivery["total_bytes"] = context_delivery["serialized_bytes"] = len(dispatch_prompt.encode())
+                context_delivery["total_characters"] = context_delivery["serialized_characters"] = len(dispatch_prompt)
+                context_delivery["budget_overflow_bytes"] = max(0, len(dispatch_prompt.encode()) - context_delivery["budget_bytes"])
+                self._task_update(activation["id"], task_id, {"context_delivery": context_delivery})
             capability_stage = "settings"
             try:
                 if not existing_attempt:
@@ -3409,6 +3441,8 @@ class WorkflowSupervisor:
             a = next(a for a in r["activations"] if a["id"] == aid)
             task = next(t for t in a["tasks"] if t["task_id"] == tid)
             update_task_state(a, task, values)
+            from .workflow_messages import task_state
+            task_state(r, tid, values.get("status", ""))
         self.update(update, "task_state", {"task_id": tid, **values})
 
     def _activation(self, node_id: str, role: str, token: dict[str, Any] | None = None) -> dict[str, Any]:

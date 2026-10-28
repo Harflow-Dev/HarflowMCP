@@ -23,6 +23,7 @@ from types import SimpleNamespace
 import pytest
 from mcp import Client, MCPError
 
+from harflow_mcp.backends.base import ExtraPathsUnsupported
 from harflow_mcp import backends, control, lineage, server, store
 from harflow_mcp import state_ownership
 from harflow_mcp.state_layout import resolve_layout
@@ -46,7 +47,7 @@ async def call(tool: str, **arguments):
     raise error
 
 
-class _FakeBackend:
+class _FakeBackend(ExtraPathsUnsupported):
     """A backend double that spawns a real, instant process, so `_spawn` runs end to end without
     a real agent CLI. `enforcement_kwargs` lets a test shape exactly the `Enforcement` fields the
     nested-dispatch caps compare."""

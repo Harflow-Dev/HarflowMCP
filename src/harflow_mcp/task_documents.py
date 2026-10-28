@@ -80,7 +80,8 @@ def _nested(record: Any) -> None:
     if record.git_baseline is not None:
         _shape(record.git_baseline, BASELINE, "git_baseline")
     if record.failure_diagnostic is not None:
-        _shape(record.failure_diagnostic, {"category": str, "reason": str, "source": str, "reset_at": str | int | float}, "failure_diagnostic")
+        _shape(record.failure_diagnostic, {"category": str, "reason": str, "source": str, "reset_at": str | int | float,
+                                          "http_status": int, "provider_code": str}, "failure_diagnostic")
     outcome = record.outcome
     if outcome is None:
         return

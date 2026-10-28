@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 from mcp import MCPError
 
+from harflow_mcp.backends.base import ExtraPathsUnsupported
 from harflow_mcp import backends, control, ctl, followup_documents, followups, inbox, retention, server, store
 from harflow_mcp import state_ownership
 from harflow_mcp.events import events_path
@@ -147,7 +148,7 @@ def send(log_dir: Path, text: str = "hello", task_id: str = SRC, **kwargs) -> di
 async def test_a_task_without_live_input_queues_instead_of_refusing(log_dir: Path) -> None:
     put_record(log_dir)
     result = await server.send_message(SRC, "  keep  my   spacing \r\n")
-    assert result["status"] == "queued" and result["delivery"] == "next_continuation"
+    assert result["status"] == "queued" and result["delivery"] == "queue"
     assert result["seq"] == 1 and "nothing was started" in result["note"]
     assert "delivered" not in result["status"]
     item = state_doc(log_dir)["items"][0]
@@ -158,22 +159,22 @@ async def test_a_task_without_live_input_queues_instead_of_refusing(log_dir: Pat
     assert not inbox.closed_path(log_dir, SRC).exists()
 
 
-async def test_a_live_input_task_keeps_its_inbox_path(log_dir: Path, identities) -> None:
+async def test_a_live_input_task_queues_without_folding_current_turn(log_dir: Path, identities) -> None:
     put_record(log_dir, live_input=True, status="running", exit_code=None, finished_at=None,
                owner={"pid": 424_242, "start_time": "Wed Jan  1 00:00:00 2026", "markers": []})
     result = await server.send_message(SRC, "to the running agent")
-    assert result["status"] == "queued" and result["delivery"] == "live_input"
-    assert not followups.state_path(log_dir, SRC).exists()
-    assert [m["text"] for m in inbox.read_new(log_dir, SRC, 0)[0]] == ["to the running agent"]
+    assert result["status"] == "queued" and result["delivery"] == "queue"
+    assert followups.view(log_dir, SRC)["items"][0]["text"] == "to the running agent"
+    assert not inbox.inbox_path(log_dir, SRC).exists()
 
 
-async def test_a_closed_live_task_is_not_redirected_into_the_ledger(log_dir: Path, identities) -> None:
+async def test_a_closed_live_task_accepts_durable_next_continuation_messages(log_dir: Path, identities) -> None:
     put_record(log_dir, live_input=True, status="running", exit_code=None, finished_at=None,
                owner={"pid": 424_242, "start_time": "Wed Jan  1 00:00:00 2026", "markers": []})
     inbox.mark_closed(log_dir, SRC)
-    with pytest.raises(MCPError, match="closed live input.*Wait for settlement.*resume_task"):
-        await server.send_message(SRC, "too late")
-    assert not followups.state_path(log_dir, SRC).exists()
+    result = await server.send_message(SRC, "for later")
+    assert result["status"] == "queued"
+    assert followups.view(log_dir, SRC)["items"][0]["text"] == "for later"
 
 
 def test_unknown_and_workflow_owned_tasks_are_refused(log_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -470,7 +471,7 @@ async def test_the_successors_task_started_event_lists_the_consumed_ids(
     """The real `_spawn`, with a shell for an agent."""
     sink = log_dir.parent / "prompt.txt"
 
-    class Shell:
+    class Shell(ExtraPathsUnsupported):
         name = "followup-shell"
         binary = "/bin/sh"
         capabilities = backends.CodexBackend.capabilities
@@ -925,7 +926,7 @@ async def test_status_carries_queued_followups_live_and_recovered(
     for view, name in ((live, "live-one"), (recovered, SRC)):
         assert view["state"] == "available" and view["omitted_final"] == 0
         assert [i["text"] for i in view["items"]] == [f"for {name}", "second"]
-        assert set(view["items"][0]) == {"id", "seq", "status", "text", "queued_at"}
+        assert set(view["items"][0]) == {"id", "seq", "status", "text", "queued_at", "target", "delivery"}
     assert registry.get("live-one").brief()["queued_followup_count"] == 2
     assert store.brief(log_dir, store.read(log_dir, SRC))["queued_followup_count"] == 2
     payload = await server.get_task_status(SRC)
@@ -957,7 +958,7 @@ def test_ctl_send_and_the_mcp_tool_share_the_dispatcher(
     put_record(ctl_home)
     assert ctl.main(["send", SRC, "from the cli", "--json"]) == 0
     doc = json.loads(capsys.readouterr().out)
-    assert doc["v"] == 1 and doc["result"]["delivery"] == "next_continuation" and doc["result"]["seq"] == 1
+    assert doc["v"] == 1 and doc["result"]["delivery"] == "queue" and doc["result"]["seq"] == 1
     assert state_doc(ctl_home)["items"][0]["text"] == "from the cli"
     assert ctl.main(["send", SRC, "x" * (followups.MAX_MESSAGE_BYTES + 1), "--json"]) == 1
     assert json.loads(capsys.readouterr().out)["error"]["code"] == "message_too_large"

@@ -450,13 +450,14 @@ async def test_bounded_wait_ignores_persistent_unavailability(monkeypatch, fake_
     assert result["elapsed_seconds"] >= 10
 
 
-async def test_rows_carry_bounded_failure_diagnostic(tmp_path):
+@pytest.mark.parametrize("category", ["usage_limit", "provider_error"])
+async def test_rows_carry_bounded_failure_diagnostic(tmp_path, category):
     task = add_task("t", tmp_path, "failed")
-    task.acc.failure_diagnostic = {"category": "usage_limit", "reason": "r" * 5000, "source": "x"}
+    task.acc.failure_diagnostic = {"category": category, "reason": "r" * 5000, "source": "x"}
     plain = add_task("p", tmp_path, "completed")
     result = await server.wait_for_tasks(["t", "p"], "all", 0)
     diagnostic = result["tasks"][0]["failure_diagnostic"]
-    assert set(diagnostic) == {"category", "reason"} and diagnostic["category"] == "usage_limit"
+    assert set(diagnostic) == {"category", "reason"} and diagnostic["category"] == category
     assert len(diagnostic["reason"].encode()) <= task_waiting.FAILURE_REASON_BYTES
     assert "failure_diagnostic" not in result["tasks"][1] and plain.done.is_set()
 

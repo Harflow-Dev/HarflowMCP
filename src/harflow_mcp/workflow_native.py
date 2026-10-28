@@ -140,7 +140,12 @@ async def _dispatch_native_one(supervisor: Any, node: dict[str, Any], assignment
         lease_run = run if root_id == run["workflow_run_id"] else supervisor.store.get_run(root_id)
         async with CheckoutLease(supervisor.store, run["repo_path"], tree_write_strength(lease_run, record.freedom), continue_running, pool=supervisor.checkout_leases, owned_run_ids=getattr(supervisor.tree, "recovered_run_ids", set())):
             def reserve(r: dict[str, Any]) -> None:
+                nonlocal assignment
                 a = next(a for a in r["activations"] if a["id"] == activation["id"])
+                from .workflow_messages import claim, render
+                assignment += render(claim(r, a, execution_id))
+                state["assignment"] = assignment
+                child["assignment_sha256"] = hashlib.sha256(assignment.encode()).hexdigest()
                 child["native_replay_state"] = copy.deepcopy(state)
                 if node.get("timeout_seconds"):
                     child["timeout_deadline"] = time.time() + node["timeout_seconds"]
@@ -164,6 +169,8 @@ async def _dispatch_native_one(supervisor: Any, node: dict[str, Any], assignment
                             a = next(a for a in r["activations"] if a["id"] == activation["id"])
                             attempt = next(t for t in a["tasks"] if t["task_id"] == execution_id)
                             update_task_state(a, attempt, {"status": "running", "dispatch_stage": "child_confirmed", "native_child_id": update["native_child_id"], "started_at": time.time()})
+                            from .workflow_messages import task_state
+                            task_state(r, execution_id, "running")
                             a["native_child_id"] = update["native_child_id"]
                         supervisor.update(start_child, "native_child_started")
                     elif kind == "settled":

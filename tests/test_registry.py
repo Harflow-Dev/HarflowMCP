@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from harflow_mcp.backends.base import ExtraPathsUnsupported
 from harflow_mcp import backends
 from harflow_mcp.backends.base import FREEDOMS
 from harflow_mcp.backends import Invocation
@@ -817,7 +818,7 @@ def test_a_detached_head_reports_that_it_could_not_tell(tmp_path: Path) -> None:
     assert "could not be determined" in notice
 
 
-class _TrivialBackend:
+class _TrivialBackend(ExtraPathsUnsupported):
     """A backend that spawns a real but instant process, so `_spawn` can be exercised end to end.
 
     The doubles in tests/test_backends.py exist for the same reason: no real backend has the shape

@@ -1216,3 +1216,26 @@ None of these flags is an OS sandbox Harflow can report. `write_in_repo`, `publi
 `unrestricted` therefore share one `-p` argv, and `read_only` only adds `--mode plan`.
 Caller approvals, `allowed_commands`, a turn cap, reasoning effort, and extra writable paths
 are refused. The user's `~/.cursor/mcp.json` was unchanged by these runs.
+
+
+## Vibe HTTP 402 diagnostics
+
+Re-measured Vibe 3.0.1 on macOS, 2026-10-28, using the existing isolated HOME/VIBE_HOME
+loopback fixture in `tests/test_vibe_cli.py`, with no inherited provider credentials and no
+paid calls. The fake provider returned HTTP 402 and
+`{"error":{"message":"Usage limit exceeded","type":"usage_limit"}}`. Vibe made one request,
+exited 2, emitted only the user turn on stdout, and wrote two stderr lines:
+
+```text
+Error: Client error '402 Payment Required' for url 'http://127.0.0.1:12345/v1/chat/completions'
+For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/402: Usage limit exceeded
+```
+
+The port is sanitized; identifiers were omitted. The captured sanitized fixture is
+`tests/fixtures/provider-errors/vibe-3.0.1-http402.json`. The old one-line parser missed this
+pair and the structured parser rejected 402 before checking the provider's quota code.
+The Vibe adapter now recognizes the exact adjacent stderr pair and preserves HTTP 402
+without a URL or response body. Unknown 402 details retain a generic provider-error
+diagnostic instead. Structured Vibe error tests are synthetic compatibility cases, not a
+claim that Vibe 3 emitted a structured terminal error in this probe. This measurement
+qualifies the CLI event path with a scripted provider, not every real provider's 402 meaning.

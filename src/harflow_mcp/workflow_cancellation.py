@@ -94,6 +94,8 @@ def monitor_projection(store: Any, run: dict[str, Any]) -> dict[str, Any]:
     if not projection(store, run)["interaction_state"]["monitor_available"]:
         result["can_revise_goal"] = False
         result["goal_revision_reason"] = "Workflow interaction belongs to its original caller"
+    from .workflow_monitor_controls import projection as controls_projection
+    result["monitor_controls"] = controls_projection(store, run)
     return result
 
 
