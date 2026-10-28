@@ -10,7 +10,7 @@ from harflow_mcp import lineage, resources, store, task_resources
 from harflow_mcp.backends import get
 
 from restart_test_support import install_fake_claude
-from test_task_resources import OWNER, ledger, owned, registry, tasks_dir, wait_for, write_receipt  # noqa: F401
+from test_task_resources import OWNER, ledger, owned, registry, tasks_dir, wait_for, wait_for_record, write_receipt  # noqa: F401
 from test_worktrees import record_for  # noqa: F401
 
 
@@ -74,11 +74,6 @@ async def test_cascade_cancels_a_pending_grandchild_under_a_recorded_intermediat
 # ---- item 15: ledger reads on the request path stay off the event loop ---------------------------
 
 
-def record_with_resources(log_dir, task_id):
-    record = store.read(log_dir, task_id)
-    return record if record is not None and record.resources else None
-
-
 @pytest.mark.asyncio
 async def test_parent_record_capture_retries_replacement_without_rereading(tmp_path, monkeypatch):
     record = record_for("a" * 32, str(tmp_path), resources={"names": ["sim"]})
@@ -94,7 +89,7 @@ async def test_parent_record_capture_retries_replacement_without_rereading(tmp_p
         return record
 
     monkeypatch.setattr(store, "read", read)
-    captured = await wait_for(lambda: record_with_resources(tmp_path, record.task_id))
+    captured = await wait_for_record(tmp_path, record.task_id, lambda record: record.resources)
     caller = lineage.Caller(captured, "session")
     assert caller.record is record
     assert calls == [record.task_id, record.task_id]
@@ -106,7 +101,7 @@ async def test_a_nested_request_checks_the_ledger_off_the_event_loop(tmp_path, m
     log_dir = tasks_dir(tmp_path)
     reg = registry(tmp_path)
     parent = await reg.start("slow 6 one", tmp_path, backend=get("claude"), freedom="read_only", resources=["sim"], task_id="a" * 32)
-    parent_record = await wait_for(lambda: record_with_resources(log_dir, parent.task_id))
+    parent_record = await wait_for_record(log_dir, parent.task_id, lambda record: record.resources)
     caller = lineage.Caller(parent_record, "session")
     monkeypatch.setattr(lineage, "detect_caller_detail", lambda *a, **k: lineage.Detection(caller))
     monkeypatch.setattr(lineage, "detect_caller", lambda *a, **k: caller)
@@ -121,3 +116,20 @@ async def test_a_nested_request_checks_the_ledger_off_the_event_loop(tmp_path, m
     monkeypatch.setattr(resources.ResourceLedger, "_read_only", spy)
     await reg.start("reply child", tmp_path, backend=get("claude"), freedom="read_only", resources=["sim"], task_id="b" * 32)
     assert threads and not any(threads)
+
+
+@pytest.mark.asyncio
+async def test_record_capture_waits_for_the_qualifying_snapshot(tmp_path, monkeypatch):
+    initial = record_for("a" * 32, str(tmp_path), resources={})
+    qualified = record_for("a" * 32, str(tmp_path), resources={"names": ["sim"]})
+    snapshots = iter([None, initial, qualified])
+    reads = []
+
+    def read(log_dir, task_id):
+        reads.append(task_id)
+        return next(snapshots)
+
+    monkeypatch.setattr(store, "read", read)
+    captured = await wait_for_record(tmp_path, initial.task_id, lambda record: record.resources)
+    assert captured is qualified
+    assert reads == [initial.task_id] * 3

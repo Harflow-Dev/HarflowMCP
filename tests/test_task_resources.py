@@ -32,6 +32,15 @@ async def wait_for(predicate, timeout: float = 20.0):
         await asyncio.sleep(0.05)
 
 
+async def wait_for_record(log_dir: Path, task_id: str, predicate=lambda record: True, timeout: float = 20.0):
+    """Return the exact qualifying strict read while the supervised writer is active."""
+    def qualifying_record():
+        record = store.read(log_dir, task_id)
+        return record if record is not None and predicate(record) else None
+
+    return await wait_for(qualifying_record, timeout)
+
+
 def registry(root: Path) -> TaskRegistry:
     return TaskRegistry(log_dir=tasks_dir(root), execution_mode="supervised")
 
@@ -53,8 +62,7 @@ async def test_second_task_waits_then_spawns_after_first_releases(tmp_path, monk
     brief = second.brief()
     assert brief["status"] == "running" and brief["launch_state"] == "waiting_for_resources"
     assert store.read(log_dir, second.task_id) is None
-    await wait_for(lambda: store.read(log_dir, second.task_id) is not None and launch_state(tmp_path, second.task_id) in {"spawned", "settled"})
-    record = store.read(log_dir, second.task_id)
+    record = await wait_for_record(log_dir, second.task_id, lambda record: record.resources and launch_state(tmp_path, second.task_id) in {"spawned", "settled"})
     assert record.resources["names"] == ["sim"]
 
 
@@ -122,9 +130,11 @@ async def test_grants_are_first_come_first_served_and_release_on_exit(tmp_path, 
     view = task_resources.pending_view(log_dir, third.task_id)
     assert view["resources"]["position"] == 2
     assert view["resources"]["blocked_by"][0]["holder_task_ids"] == [first.task_id]
-    await wait_for(lambda: store.read(log_dir, third.task_id) is not None and store.read(log_dir, third.task_id).finished_at)
-    assert store.read(log_dir, second.task_id).started_at < store.read(log_dir, third.task_id).started_at
-    records = [store.read(log_dir, task_id) for task_id in (first.task_id, second.task_id, third.task_id)]
+    records = [await wait_for_record(
+        log_dir, task_id,
+        lambda record: record.finished_at and record.resources.get("state") == "released" and record.resources.get("released_at"),
+    ) for task_id in (first.task_id, second.task_id, third.task_id)]
+    assert records[1].started_at < records[2].started_at
     assert all(record.resources["state"] == "released" and record.resources["released_at"] for record in records)
     assert ledger(tmp_path).entries() == []
 
@@ -260,17 +270,15 @@ async def test_nested_child_borrows_and_uncovered_names_are_refused(tmp_path, mo
     from harflow_mcp import lineage
     install_fake_claude(tmp_path, monkeypatch)
     log_dir = tasks_dir(tmp_path)
-    read = task_supervision.read_task_record  # retries a record replaced mid-read
     reg = registry(tmp_path)
     parent = await reg.start("slow 6 one", tmp_path, backend=get("claude"), freedom="read_only", resources=["sim", "lab"], task_id="a" * 32)
-    await wait_for(lambda: read(log_dir, parent.task_id) is not None and read(log_dir, parent.task_id).resources)
-    record = read(log_dir, parent.task_id)
+    record = await wait_for_record(log_dir, parent.task_id, lambda record: record.resources)
     caller = lineage.Caller(record, "session")
     monkeypatch.setattr(lineage, "detect_caller_detail", lambda *a, **k: lineage.Detection(caller))
     monkeypatch.setattr(lineage, "detect_caller", lambda *a, **k: caller)
     child = await reg.start("reply child", tmp_path, backend=get("claude"), freedom="read_only", resources=["sim"], task_id="b" * 32)
-    await wait_for(lambda: read(log_dir, child.task_id) is not None and read(log_dir, child.task_id).resources)
-    assert read(log_dir, child.task_id).resources["borrowed_from"] == record.resources["reservation_id"]
+    child_record = await wait_for_record(log_dir, child.task_id, lambda record: record.resources)
+    assert child_record.resources["borrowed_from"] == record.resources["reservation_id"]
     with pytest.raises(resources.ResourceNotDeclaredByScope) as refused:
         await reg.start("reply other", tmp_path, backend=get("claude"), freedom="read_only", resources=["elsewhere"], task_id="c" * 32)
     assert "outermost" in str(refused.value)
@@ -356,8 +364,7 @@ async def test_owner_killed_after_spawn_keeps_the_hold_until_the_agent_is_dead(t
     log_dir = tasks_dir(tmp_path)
     reg = registry(tmp_path)
     task = await reg.start("slow 30 one", tmp_path, backend=get("claude"), freedom="read_only", resources=["sim"], task_id="a" * 32)
-    await wait_for(lambda: store.read(log_dir, task.task_id) is not None and store.read(log_dir, task.task_id).pid)
-    record = store.read(log_dir, task.task_id)
+    record = await wait_for_record(log_dir, task.task_id, lambda record: record.pid and record.owner)
     os.kill(record.owner["pid"], signal.SIGKILL)
     identities.dead(record.owner["pid"])
     identities.alive(record.pid)
@@ -407,8 +414,7 @@ async def test_repair_restores_provable_holders(tmp_path, monkeypatch, identitie
     log_dir = tasks_dir(tmp_path)
     reg = registry(tmp_path)
     task = await reg.start("slow 6 one", tmp_path, backend=get("claude"), freedom="read_only", resources=["sim"], task_id="a" * 32)
-    await wait_for(lambda: store.read(log_dir, task.task_id) is not None and store.read(log_dir, task.task_id).resources)
-    record = store.read(log_dir, task.task_id)
+    record = await wait_for_record(log_dir, task.task_id, lambda record: record.resources and record.pid and record.owner)
     identities.alive(record.pid)
     identities.alive(record.owner["pid"])
     write_receipt(tmp_path, "8" * 32, "granted", owner=OWNER, resources={"names": ["device"], "state": "granted", "reservation_id": "f" * 32})
@@ -426,9 +432,12 @@ async def test_repair_restores_provable_holders(tmp_path, monkeypatch, identitie
 async def finished_task(reg, root: Path, task_id: str, **kwargs):
     log_dir = tasks_dir(root)
     task = await reg.start("reply done", root, backend=get("claude"), freedom="read_only", max_turns=3, task_id=task_id, **kwargs)
-    await wait_for(lambda: (record := store.read(log_dir, task_id)) is not None and record.finished_at and record.output_drained)
     await wait_for(lambda: launch_state(root, task_id) == "settled")
-    return store.read(log_dir, task_id)
+    return await wait_for_record(
+        log_dir, task_id,
+        lambda record: record.finished_at and record.output_drained
+        and (not record.resources or record.resources.get("state") == "released"),
+    )
 
 
 @pytest.mark.asyncio
@@ -495,8 +504,7 @@ async def test_explicit_continuation_while_blocked_is_accepted_not_started(tmp_p
     assert reservation["state"] == "accepted" and reservation["task_id"] == pending.task_id
     again = await reg.continue_task(source.task_id, "carry on")
     assert isinstance(again, task_resources.PendingLaunch) and again.task_id == pending.task_id
-    await wait_for(lambda: store.read(log_dir, pending.task_id) is not None)
-    child = store.read(log_dir, pending.task_id)
+    child = await wait_for_record(log_dir, pending.task_id, lambda record: record.resources and record.continuation_of_task_id is not None)
     assert child.continuation_of_task_id == source.task_id and child.resources["names"] == ["sim"]
 
 
@@ -571,10 +579,13 @@ async def test_automatic_continuation_requeues_and_is_acknowledged_while_blocked
     successor = reservation["task_id"]
     if reservation["state"] == "accepted":
         assert launch_state(tmp_path, successor) in {"waiting_for_resources", "granted", "spawned", "settled"}
-    await wait_for(lambda: store.read(log_dir, successor) is not None, 60)
-    # read_task_record retries a metadata replacement observed mid-read, which the successor's first writes cause.
-    assert task_supervision.read_task_record(log_dir, successor).continuation_of_task_id == first.task_id
-    assert task_supervision.read_task_record(log_dir, successor).resources["names"] == ["sim"]
+    successor_record = await wait_for_record(
+        log_dir, successor,
+        lambda record: record.resources and record.continuation_of_task_id is not None,
+        timeout=60,
+    )
+    assert successor_record.continuation_of_task_id == first.task_id
+    assert successor_record.resources["names"] == ["sim"]
     assert competitor.task_id != successor
 
 
