@@ -170,3 +170,12 @@ Observed settled live-input tasks refuse sends as `settled`, naming their termin
 checking sealed input. A running sealed task still returns `closed` and its closure reason. A
 terminal-looking record without an observed outcome retains closed/exited/uncertain guidance;
 its saved status is not proof that the process settled.
+
+
+A confirmed dispatcher exit with a live execution owner is a normal observation change.
+Full task snapshots expose stable optional `supervision.adopted_after_restart` metadata;
+compact MCP polling shows it once per reader generation and keeps the obsolete origin in
+full diagnostics. The timestamp identifies the new reader's process start, not the exact
+crash. Owner/capture/input uncertainty remains visible and does not qualify as safe adoption.
+See [the projection contract](contracts.md#surviving-execution-after-dispatcher-restart).
+The Mac restart-note presentation remains pending separate design/implementation.

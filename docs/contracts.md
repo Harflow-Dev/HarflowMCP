@@ -724,3 +724,50 @@ invocations preserve their result shape and exit semantics. Failed feature resul
 a source and a reason bounded to 1000 characters; unavailable inspection uses source `unavailable`
 and omits identity rather than fabricating one. Explicit qualify is the action that
 may run isolated no-paid provider self-tests; discovery never starts them.
+
+
+### Compact MCP polling and workflow discovery
+
+MCP `get_task_status` and `wait_for_task` default to `detail="compact"`.
+`detail="full"` retains the previous complete MCP metadata; `include_tail=true` explicitly
+includes the raw tail in either projection. The compatibility `brief=true` parameter selects
+compact status and now preserves the complete summary. Compact replies retain the full
+`summary` (including a final report), status, approval and failure evidence, outcome headline,
+recent activity and detail references. They omit static enforcement and MCP-server inventories,
+raw outcome probes, `dispatch_origin` and diagnostic `supervision.dispatch_origin_state`.
+Their overhead is independent of those omitted inventories; complete reports and outstanding
+interaction evidence intentionally have no fixed display-size cap. `get_task_events` retains
+its existing event/page limits; read the complete final report from compact task status.
+No persisted task snapshot or ctl projection is replaced by this MCP projection.
+
+All waits recommend explicit `timeout_seconds <= 50` for remote MCP clients. The single-task
+default is 50 seconds. Requested supported holds remain unclamped; a client deadline can still
+end a call before the server finishes observing, without cancelling execution.
+
+MCP `list_workflows` defaults to compact entries with `name`, `description`, `revision` and
+`workflow_id`, without node instructions or graph bodies. `detail="full"` returns complete
+definitions and `get_workflow(name)` is unchanged. Source compatibility/availability validation
+still applies to the entire listing. `harflow-ctl workflow list`, including the Mac's monitor
+projection, is unchanged; it does not call the MCP listing tool.
+
+### Surviving execution after dispatcher restart
+
+Optional additive `supervision.adopted_after_restart` contains `{at, previous_server,
+current_server}` when the dispatch origin is confirmed dead, the execution owner is alive,
+the agent is not confirmed dead, capture is live, and live input is neither lost nor unknown.
+This describes adoption of observation only: execution ownership and task state never change.
+`at` is the current reader's process start time converted from local `ps lstart` evidence to
+UTC, or null if that timestamp cannot be parsed. It is not a measured instant of the old
+server's crash or an ownership-transfer timestamp. The previous/current identities contain
+only PID and process-generation start time. Full reads retain this stable metadata on every
+observation; compact replies emit it and its quiet observation note once per task and reader
+generation. Display deduplication is in-memory, shared by clients of that MCP process and
+bounded to 1024 recently observed tasks; eviction or a new process can re-emit the note.
+There is no acknowledgement ledger and waits write no execution state.
+
+A dead origin with lost or uncertain supervision remains highlighted as `supervision_issue`
+in running compact replies, alongside the actual owner/process/capture/input evidence.
+Full diagnostic reads retain dispatch identities and their liveness verdict. This is an
+additive optional v1 field: existing fixtures and consumer gates remain unchanged. The Mac
+presentation of this optional metadata is deferred; it needs a separate design and consumer
+implementation before claiming the app renders a restart note.

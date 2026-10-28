@@ -866,7 +866,7 @@ async def test_public_definition_list_does_not_require_catalog_bootstrap(tmp_pat
     storage = workflows.WorkflowStore(root=tmp_path)
     monkeypatch.setattr(workflows, 'WorkflowStore', lambda *args, **kwargs: storage)
     monkeypatch.setattr(storage, 'list', lambda: [{'name': 'public'}])
-    assert await server.list_workflows() == [{'name': 'public'}]
+    assert await server.list_workflows(detail='full') == [{'name': 'public'}]
 
 
 def test_discovery_queue_survives_unrelated_churn_and_new_earlier_names(tmp_path, monkeypatch):

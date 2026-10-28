@@ -8,6 +8,18 @@ from typing import Any
 from . import identity, inbox
 
 
+def _observer_started_at(responder: dict[str, Any]) -> str | None:
+    """Convert qualified ps start-time evidence, without inventing a restart timestamp."""
+    start = responder.get("start_time")
+    if not isinstance(start, str):
+        return None
+    try:
+        # ps lstart is local time. Its generation remains the unmodified identity below.
+        return datetime.strptime(start, "%a %b %d %H:%M:%S %Y").astimezone(timezone.utc).isoformat()
+    except ValueError:
+        return None
+
+
 def observation_fields(record: Any, *, responding_server=None) -> dict[str, Any]:
     """Describe the reader's relationship without making any process-liveness claim."""
     responder = identity.own_identity() if responding_server is None else responding_server
@@ -85,6 +97,24 @@ def fields(record: Any, raw_log: Path, *, responding_server=None, **kwargs) -> d
             "alive" if origin == observation["responding_server"] else
             "undecidable" if kwargs.get("observed_terminal", False) else
             identity.identity_check(origin)
+        )
+    if (observation["observation_mode"] == "recovered"
+            and value.get("dispatch_origin_state") == "dead"
+            and value["owner_state"] == "alive"
+            and value["process_state"] != "dead"
+            and value["capture_state"] == "live"
+            and value["live_input_state"] not in {"closed_with_owner", "unknown"}):
+        # Adoption is observation by a replacement reader, never execution ownership transfer.
+        # Stable identity-derived metadata makes repeated reads quiet without writing task state.
+        responder = observation["responding_server"]
+        value["adopted_after_restart"] = {
+            "at": _observer_started_at(responder),
+            "previous_server": origin,
+            "current_server": responder,
+        }
+        observation["observation_note"] = (
+            "The dispatch server has exited; this reader observes the surviving execution owner. "
+            "Execution and output capture remain with that owner."
         )
     return {**observation, "supervision": value, "output_capture": value["capture_state"],
             "input_channel": value["live_input_state"],

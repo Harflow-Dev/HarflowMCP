@@ -29,7 +29,7 @@ For multi-task waits, caller cancellation also propagates when bounded metadata 
 I/O, or progress delivery, completes concurrently with the cancellation request.
 
 - `timeout_seconds` accepts integers 0 through 3600. Zero performs one observation without
-  sleeping. Defaults are unchanged: 55 for `wait_for_task`, 30 for `wait_for_tasks` and
+  sleeping. Defaults are 50 for `wait_for_task`, 30 for `wait_for_tasks` and
   `wait_for_workflow`. A request is honoured as asked and never silently clamped; out of range is
   `INVALID_PARAMS`. **Breaking change:** `wait_for_task` now accepts 0 and rejects values above
   3600, and the old silent 45 second cap on `wait_for_tasks` and `wait_for_workflow` is gone.
@@ -41,13 +41,13 @@ I/O, or progress delivery, completes concurrently with the cancellation request.
 
 Every response carries the same additive fields: `requested_timeout_seconds` (null for
 `until="terminal"`), `effective_timeout_seconds`, `until`, `timed_out`, `stop_reason`,
-`elapsed_seconds` and `polling_guidance`. `wait_for_task` keeps its full status payload and
+`elapsed_seconds` and `polling_guidance`. `wait_for_task` defaults to compact status (use `detail="full"` for execution metadata) and keeps
 `next_step`. `stop_reason` is one of:
 
 | `stop_reason` | Meaning |
 | --- | --- |
 | `terminal` | The target settled (or, for `wait_for_tasks`, the mode was satisfied). |
-| `attention` | Workflows only: the run reached `needs_input`, `needs_attention` or `paused`. |
+| `attention` | A task needs an approval decision or has approval uncertainty; or a workflow reached `needs_input`, `needs_attention` or `paused`. Answered approvals awaiting delivery keep waiting. |
 | `observation_unavailable` | The target could not be observed for 3 consecutive rounds, or its outcome cannot be observed (see below). |
 | `timeout` | `timeout_seconds` elapsed; the target is unaffected. Call again. |
 | `ceiling` | The 6 hour `until="terminal"` ceiling elapsed. Call again. |
@@ -96,6 +96,12 @@ for an unknown run id.
 
 ## MCP client request deadlines
 
+For remote MCP connections, prefer holds of **50 seconds or less** on all three waits,
+particularly after "device did not respond" or "connection closed" deadline errors.
+The default single-task hold is 50 seconds; the other two defaults remain 30 seconds.
+These are recommendations, not caps: explicit timeouts and `until="terminal"` are honoured.
+Progress notifications do not guarantee a remote transport will extend its request deadline.
+
 Your MCP client applies its own deadline to each tool call, independent of these timeouts.
 Exceeding it fails the call while the dispatched run continues unharmed, so a wait is always
 safe to repeat with the same arguments. Measured 2026-10-17 with
@@ -130,3 +136,26 @@ waits at or below 270 seconds. On Claude Code, `MCP_TOOL_TIMEOUT` (if set) bound
 HarflowMCP still sends progress every 5 seconds because it is cheap and other clients may honour
 it, but neither measured client extends its deadline on progress. When unsure of a client's
 deadline, keep holds short.
+
+## Compact MCP polling and complete reports
+
+`get_task_status` and `wait_for_task` default to `detail="compact"`. They keep the
+**complete summary**, including a terminal report of any length, approval attention,
+failure diagnostics, recovery uncertainty, recent activity and detail references. Static
+permission/enforcement configuration, loaded MCP servers and detailed Git probes are omitted.
+Use `detail="full"` to inspect those details. `brief=true` on `get_task_status` is a
+compatibility alias for compact detail and also preserves the complete summary. No compact
+status byte limit is applied to final reports. `include_tail=true` explicitly adds the full
+bounded raw tail in either detail mode, including when `brief=true`; otherwise failed tasks
+retain a short diagnostic tail and running/completed tasks omit it.
+
+`get_task_events` is a bounded, paginated event read; an event page or output tail need not
+contain the complete final report. Read `get_task_status(task_id=..., detail="compact")`
+(or `detail="full"`) for the complete stored summary. Activity headlines are short display
+summaries and do not replace the report or full event text.
+
+`list_workflows()` similarly defaults to compact discovery rows: `name`, `description`,
+`revision` and `workflow_id`. These identify a definition for selection and a pinned start.
+Read `get_workflow(name)` for one complete graph and authored instructions, or use
+`list_workflows(detail="full")` for all complete definitions. This shaping affects MCP only;
+`harflow-ctl` and the native application's wire contracts retain their existing payloads.

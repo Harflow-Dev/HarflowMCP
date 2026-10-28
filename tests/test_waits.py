@@ -1004,3 +1004,111 @@ async def test_recovered_approval_attention_preserves_final_outcome_evidence(
         assert result["status"] == "running"
         assert "outcome_observed" not in result
         assert "process is gone" not in result["polling_guidance"]
+
+
+@pytest.mark.parametrize("path", ["owned", "recovered"])
+async def test_answered_approval_waits_through_delay_and_wakes_for_next_cycle(
+    tmp_path, monkeypatch, path,
+):
+    """A rejected request must not hide a later request or replay attention during delivery."""
+    from harflow_mcp import approvals
+    from test_approval_lifecycle import _admit
+
+    directory = server._reg().log_dir
+    first = _admit(directory)
+    task = add_task("task-1", tmp_path) if path == "owned" else None
+    if task is not None:
+        task.caller_approvals = True
+    record = write_record(tmp_path, task_id="task-1", status="running", caller_approvals=True,
+                          approval_generation=first["generation"], start_time="task-start",
+                          owner={"pid": 5678, "start_time": "bridge-start", "markers": []})
+    monkeypatch.setattr(identity, "identity_check", lambda _: "alive")
+    monkeypatch.setattr(store, "record_process_alive", lambda _: True)
+    now, rounds, next_request = [100.0], [], []
+    monkeypatch.setattr(wait_policy, "monotonic", lambda: now[0])
+
+    async def sleep(interval):
+        now[0] += interval
+        rounds.append(interval)
+        if len(rounds) == 2:
+            next_request.append(_admit(directory, index=2))
+        elif len(rounds) == 4:
+            # The harness starts executing only after a second delayed delivery.
+            if task is not None:
+                task.status = "completed"
+                task.done.set()
+            store.write(directory, store.TaskRecord(**{
+                **record.__dict__, "status": "completed", "exit_code": 0, "output_drained": True,
+            }))
+
+    async def wait_for(awaitable, timeout):
+        awaitable.close()
+        await sleep(timeout)
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    monkeypatch.setattr(asyncio, "wait_for", wait_for)
+
+    async def wait():
+        plan = wait_policy.WaitPlan.validate(10, "timeout", 30)
+        if task is not None:
+            return await server._await_with_progress(task, plan, None)
+        return (await server._poll_recovered(record, plan, None))[1]
+
+    assert await wait() == "attention"
+    assert not rounds
+    approvals.reserve(directory, "task-1", first["request_id"], first["action_digest"],
+                      first["owner_revision"], "reject", first["generation"])
+    assert await wait() == "attention"
+    assert len(rounds) == 2  # A genuinely new request wakes the observer after the delay.
+    second = next_request[0]
+    approvals.reserve(directory, "task-1", second["request_id"], second["action_digest"],
+                      second["owner_revision"], "approve", second["generation"])
+    assert await wait() == "terminal"
+    assert len(rounds) == 4
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_answered_approval_observer_timeout_or_cancel_preserves_durable_state(
+    tmp_path, monkeypatch, cancel,
+):
+    from harflow_mcp import approvals
+    from test_approval_lifecycle import _admit
+
+    directory = server._reg().log_dir
+    row = _admit(directory)
+    record = write_record(tmp_path, task_id="task-1", status="running", caller_approvals=True,
+                          approval_generation=row["generation"], start_time="task-start",
+                          owner={"pid": 5678, "start_time": "bridge-start", "markers": []})
+    monkeypatch.setattr(identity, "identity_check", lambda _: "alive")
+    monkeypatch.setattr(store, "record_process_alive", lambda _: True)
+    approvals.reserve(directory, "task-1", row["request_id"], row["action_digest"],
+                      row["owner_revision"], "approve", row["generation"])
+    record_path = store.record_path(directory, "task-1")
+    before_record = record_path.read_bytes()
+    before_approval = approvals.summary(directory, "task-1")
+    now = [100.0]
+    slept = asyncio.Event()
+    monkeypatch.setattr(wait_policy, "monotonic", lambda: now[0])
+
+    async def sleep(interval):
+        slept.set()
+        if cancel:
+            await asyncio.Event().wait()
+        now[0] += interval
+
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    monkeypatch.setattr(store, "write", lambda *a, **k: pytest.fail("observer wrote task state"))
+    monkeypatch.setattr(approvals, "update", lambda *a, **k: pytest.fail("observer changed approval delivery"))
+    waiter = asyncio.create_task(server._poll_recovered(
+        record, wait_policy.WaitPlan.validate(3, "timeout", 30), None))
+    if cancel:
+        await slept.wait()
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+    else:
+        assert (await waiter)[1] == "timeout"
+        assert now[0] == 103.0
+    assert record_path.read_bytes() == before_record
+    assert approvals.summary(directory, "task-1") == before_approval

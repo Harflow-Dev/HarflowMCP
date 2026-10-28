@@ -157,8 +157,8 @@ async def test_mcp_compact_projection_and_page(tmp_path, monkeypatch):
     monkeypatch.setattr(workflow_inspection, 'managed_page_reader', lambda _: (True, None))
     server._reg()._tasks[task.task_id] = task
     brief = await server.get_task_status(task.task_id, brief=True, include_tail=True)
-    assert len(json.dumps(brief).encode()) <= task_reads.BRIEF_BYTES
-    assert 'last_output_tail' not in brief
+    assert brief['summary'] == task.acc.summary
+    assert 'last_output_tail' in brief
     assert task.acc.summary == '界' * 10000
     store.write(server._reg().log_dir, record('history', group='review'))
     page = await server.list_tasks(group='review', limit=1, fields=['title'])

@@ -4,16 +4,22 @@ Full task status, events, and the existing `harflow-ctl list` / `status` remain
 available. Compact reads are explicit display projections; they never rewrite
 prompts, follow-ups, messages, summaries, or any other stored caller prose.
 
-`get_task_status(..., brief=True)` returns an at most 8 KiB JSON projection:
-identity, status and reconciliation evidence, title, bounded summary and outcome,
-up to three recent activity lines, and references to full status and event reads.
-Oversized fields appear in `truncated_fields`. Outcome publication values remain
-nullable: absence of publication evidence does not mean a push failed or succeeded.
-The same projection is available with `harflow-ctl status TASK --brief --json`.
+MCP `get_task_status` and `wait_for_task` default to `detail="compact"`: identity,
+status and reconciliation evidence, the complete summary/report, an outcome headline,
+up to three recent activity lines, approval/failure/recovery evidence and references to
+full status and event reads. `get_task_status(..., brief=True)` is a compatibility alias
+for this projection. `detail="full"` restores static execution metadata and detailed
+outcomes; `include_tail=True` explicitly adds the raw tail in either mode. Complete reports
+are not subject to a display-size cap; see [waiting and polling](multi-task-waiting.md).
+
+The separate ctl option `harflow-ctl status TASK --brief --json` retains its existing
+at most 8 KiB display projection with bounded summary/outcome and `truncated_fields`.
+It does not select the MCP projection. Outcome publication values remain nullable:
+absence of publication evidence does not mean a push failed or succeeded.
 Standalone artifact registrations add a bounded `artifact_summary` with a count,
 availability of registration metadata, and a detail reference. Full notes and current
 file observations are paged separately through [task artifact reads](task-artifacts.md).
-The projection bounds response size; obtaining a full recovered status can still
+The ctl brief projection bounds response size; obtaining a recovered status can still
 require the existing recovery/replay work before projection.
 
 For indexed history use `harflow-ctl task-list-compact --json --limit 50`, or

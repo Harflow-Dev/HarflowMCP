@@ -68,7 +68,10 @@ def test_other_observer_does_not_infer_owner_loss(saved, monkeypatch, origin_sta
         assert payload['supervision']['owner_state'] == 'alive'
         assert payload['supervision']['dispatch_origin_state'] == origin_state
         assert payload['owner'] == OWNER
-        assert 'does not imply owner loss' in payload['observation_note']
+        if origin_state == 'dead':
+            assert 'surviving execution owner' in payload['observation_note']
+        else:
+            assert 'does not imply owner loss' in payload['observation_note']
 
 
 def test_catalog_projections_follow_current_reader_not_cached_writer(saved, monkeypatch):
@@ -151,6 +154,43 @@ def test_current_origin_is_alive_without_origin_probe(saved, monkeypatch):
     payload = store.snapshot(directory, record, responding_server=ORIGIN)
     assert payload['supervision']['dispatch_origin_state'] == 'alive'
     assert all(value.get('pid') != ORIGIN['pid'] for value in calls)
+
+
+def test_restart_adoption_is_stable_and_read_only(saved, monkeypatch):
+    directory, record = saved
+    responder = dict(OTHER, start_time='Wed Oct 28 16:58:00 2026')
+    monkeypatch.setattr(identity, 'identity_check',
+                        lambda value: 'dead' if value['pid'] == ORIGIN['pid'] else 'alive')
+    before = store.record_path(directory, record.task_id).read_bytes()
+    first = supervision.fields(record, directory / 'raw.jsonl', responding_server=responder)
+    second = supervision.fields(record, directory / 'raw.jsonl', responding_server=responder)
+    assert first == second
+    adoption = first['supervision']['adopted_after_restart']
+    assert adoption['at'] is not None
+    assert adoption['previous_server']['pid'] == ORIGIN['pid']
+    assert adoption['current_server']['pid'] == OTHER['pid']
+    assert first['supervision']['owner_state'] == 'alive'
+    assert first['output_capture'] == 'live'
+    assert 'surviving execution owner' in first['observation_note']
+    assert store.record_path(directory, record.task_id).read_bytes() == before
+
+
+@pytest.mark.parametrize('owner_state,process_state,live_input', [
+    ('dead', 'alive', False), ('undecidable', 'alive', False),
+    ('alive', 'dead', False), ('alive', 'alive', True),
+])
+def test_restart_does_not_hide_lost_or_uncertain_supervision(
+    saved, monkeypatch, owner_state, process_state, live_input,
+):
+    directory, record = saved
+    record = replace(record, live_input=live_input)
+    monkeypatch.setattr(identity, 'identity_check',
+                        lambda value: 'dead' if value['pid'] == ORIGIN['pid'] else owner_state)
+    monkeypatch.setattr(identity, 'check_detail', lambda _: (process_state, 'test'))
+    payload = supervision.fields(record, directory / 'raw.jsonl', responding_server=OTHER)
+    assert 'adopted_after_restart' not in payload['supervision']
+    assert payload['supervision']['dispatch_origin_state'] == 'dead'
+    assert payload['supervision']['owner_state'] == owner_state
 
 
 @pytest.mark.parametrize('origin', [None, {'pid': 101, 'start_time': None, 'markers': []}])

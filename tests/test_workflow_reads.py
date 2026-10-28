@@ -292,7 +292,10 @@ async def test_server_workflow_wrappers_use_selected_registry_root(tmp_path, mon
     monkeypatch.setattr(server, "_registry", registry)
 
     listed = await server.list_workflows()
-    assert [item["name"] for item in listed] == ["only-a"]
+    assert listed == [{key: selected_definition[key] for key in
+        ("name", "description", "revision", "workflow_id")}]
+    assert await server.list_workflows(detail="full") == selected_store.list()
+    assert "nodes" in selected_store.list()[0]  # ctl/store still receive full definitions.
     assert (await server.get_workflow("only-a"))["name"] == "only-a"
     runs = await server.list_workflow_runs()
     assert [item["workflow_run_id"] for item in runs["runs"]] == [run["workflow_run_id"]]

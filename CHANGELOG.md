@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Default MCP task polling and workflow discovery to compact projections with explicit full detail, retain complete final reports, and recommend remote waits of at most 50 seconds (#48, #65).
+- Verify delayed approval/rejection cycles and read-only observer timeout/cancellation behavior (#59).
+- Report surviving execution after dispatcher restart as a quiet observation change once per MCP reader, retaining diagnostic and lost-supervision evidence (#82; Mac presentation pending).
+
 - Add capability-gated cached qualification plans for standalone and workflow launches, with binary-bound required feature evidence and repeated feature selection for explicit refresh (#36).
 
 - Keep verified nested questions visible and answerable when sibling links are unavailable or preparing, retain usage-limit source details, and report decision-specific retry guidance instead of root status errors (#76, #77).

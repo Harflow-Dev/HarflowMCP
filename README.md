@@ -4,6 +4,17 @@
 
 HarflowMCP is a local MCP server that dispatches coding tasks to Claude Code, Codex, opencode, Vibe, and Antigravity. It provides persistent task history, bounded reads, cancellation, continuation, and reusable workflows. On measured Claude Code versions, callers can opt in to approving individual Bash, Read, Write and Edit requests one exact action at a time (see [harness permissions](docs/harness-permissions.md#exact-action-caller-approvals)); on macOS with codex-cli 0.163.0 the same opt-in approves individual Codex commands and, with `caller_write_approvals`, patches through `codex app-server` (see [Codex caller approvals](docs/harness-permissions.md#codex-caller-approvals-codex-app-server)), and can grant a task a bounded list of specific Bash commands with `allowed_commands` instead of `unrestricted` access (see [dispatch-time command grants](docs/harness-permissions.md#dispatch-time-command-grants-allowed_commands)).
 
+MCP task status and single-task waits default to compact polling while preserving the complete
+final summary, approval attention and recovery diagnostics. Use `detail="full"` for execution
+metadata; `include_tail=true` explicitly includes the raw tail in either mode. Workflow discovery
+returns names, descriptions, revisions and IDs by default; `get_workflow(name)` reads the full
+graph. Prefer wait holds of 50 seconds or less on remote MCP connections. See the
+[waiting and polling guide](docs/multi-task-waiting.md).
+
+After a dispatch server restart, surviving execution is reported as a quiet observation change;
+lost or uncertain owner/capture evidence remains visible. Full diagnostics retain the original
+dispatcher identity. See [supervision](docs/supervision.md#dispatch-origin-owner-and-responding-server).
+
 Workflow callers can see every pending child question in status and wait replies and answer them independently by decision ID through the root run. Questions and structured clarification items remain complete, and forwarded answers return a durable child acceptance receipt. Resolved attention reasons disappear when execution resumes; unreadable workflow approval metadata is reported separately from requests needing a decision. See [workflow input and recovery](docs/workflows.md).
 
 Permission features use cached, binary-bound qualification: measured versions seed the cache, and unseen versions run isolated no-paid behavior probes before use. `harflow-ctl qualify <backend>` explicitly reruns the probes; cached discovery reports per-feature results. Add `--qualification-only` to `permission-preview` or `workflow-preview NAME` to discover only the features requested by that launch without provider self-tests; `qualify --feature FEATURE` is repeatable. Ordinary permission previews may qualify requested features. Automatic probes currently require macOS isolation. See [qualification](docs/harness-permissions.md).

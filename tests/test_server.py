@@ -417,7 +417,7 @@ async def test_wait_tells_the_caller_what_to_do_when_still_running(
 
 async def test_a_started_task_reports_its_enforcement(fake_task: Task) -> None:
     """The caller should never have to infer what the freedom parameter actually bought."""
-    status = (await call("get_task_status", task_id=fake_task.task_id)).structured_content
+    status = (await call("get_task_status", task_id=fake_task.task_id, detail="full")).structured_content
 
     assert status["backend"] == "claude"
     assert "enforcement" in status

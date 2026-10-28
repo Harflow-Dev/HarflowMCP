@@ -458,7 +458,7 @@ a resumed run. Three rules keep that honest:
   change an outcome. The probes run off the event loop, since they are blocking calls inside an
   async `_spawn`.
 
-`wait_for_task`'s default (55s) and the other waits' defaults stay short because a client's request
+`wait_for_task`'s default (50s) and the other waits' defaults stay short because a client's request
 deadline is not discoverable from the server (see [backend-cli-facts.md](backend-cli-facts.md)); an explicit
 `timeout_seconds` up to 3600, or `until="terminal"` (6 hour ceiling), is honoured as asked, never
 clamped. A request that outlives the client's deadline fails the *call* while the run continues

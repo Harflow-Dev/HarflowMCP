@@ -54,7 +54,7 @@ VALID_STATUSES = frozenset({"running"}) | TERMINAL_STATUSES
 # transport error (-32001) even though the dispatched run is unaffected. A client's deadline is not
 # discoverable from here, so the default stays short enough for clients that apply the common 60s;
 # longer holds are an explicit, honoured request (see wait_policy).
-DEFAULT_WAIT_SECONDS = 55
+DEFAULT_WAIT_SECONDS = 50
 
 # How often wait_for_workflow re-checks the run while it is active.
 WORKFLOW_POLL_SECONDS = 1.0
@@ -992,6 +992,7 @@ async def get_task_status(
     include_tail: bool = False,
     brief: StrictBool = False,
     include_successors: StrictBool = False,
+    detail: Literal["compact", "full"] = "compact",
 ) -> dict[str, Any]:
     """Report a dispatched task's current state without blocking.
 
@@ -1000,10 +1001,13 @@ async def get_task_status(
         include_tail: If True, include the full last_output_tail (20 lines × 2000 chars each);
             if False (default), the tail is omitted for running/completed tasks and shortened
             to 5 lines × 500 chars for failed tasks. The caller can request the full raw stream
-            log path from `raw_stream_log` for complete output, or use get_task_events for
+            log path from `raw_stream_log` in full detail for complete output, or use get_task_events for
             normalized events.
-        brief: Return an 8 KiB display projection with bounded summary/outcome, the last three
-            activities and detail references. Overrides include_tail. Full reads remain available.
+        brief: Compatibility alias for detail="compact"; preserves the complete summary.
+            include_tail=True still explicitly requests the full tail.
+        detail: "compact" (default) omits static execution metadata and detailed outcome probes;
+            "full" returns complete MCP status. Both retain the complete summary/report,
+            approval attention, failure diagnostics and recovery uncertainty.
         include_successors: Fetch the first authorized page of successor IDs. Defaults false:
             ordinary polling includes a detail reference without scanning retained task history.
 
@@ -1012,7 +1016,7 @@ async def get_task_status(
     settled without starting, with `not_started_reason`) and `resources` (names, queue `position`,
     `blocked_by`, deadline). See docs/resources-and-worktrees.md.
 
-    Returns the task's status, summary, enforcement, and `recent_activity` — a list of ≤ 5 one-line
+    Full detail returns the task's status, summary, enforcement, and `recent_activity` — a list of ≤ 5 one-line
     strings describing the most recent meaningful events (tool calls, failed tool results, assistant
     messages, notices). For running tasks this gives a live summary without the bulk of the
     raw stream. These lines deliberately collapse whitespace and truncate to stay short — they are
@@ -1056,9 +1060,13 @@ async def get_task_status(
     observed publication evidence. These shared-repository observations do not establish task
     authorship or goal completion. Old records without captured outcomes return null.
     """
+    if detail not in ("compact", "full"):
+        raise MCPError(INVALID_PARAMS, "detail must be compact or full")
     if brief:
-        from .task_reads import brief_status
-        return brief_status(await get_task_status(task_id, include_tail=False, include_successors=include_successors))
+        detail = "compact"
+    from .mcp_projections import task_status as compact_status
+    def project(payload):
+        return compact_status(payload) if detail == "compact" else payload
     await _guard_task_read(task_id)
     task = _reg().get(task_id)
     if task is not None:
@@ -1066,14 +1074,14 @@ async def get_task_status(
         payload = await asyncio.to_thread(
             _status_payload, snapshot, include_tail=include_tail, log_dir=_reg().log_dir, task_id=task_id
         )
-        return await _with_successor_links(payload, include=include_successors)
+        return project(await _with_successor_links(payload, include=include_successors))
 
     record = _reg().recover(task_id)
     if record is None:
         pending = await asyncio.to_thread(task_resources.pending_view, _reg().log_dir, task_id)
         if pending is not None:
             # No record exists until the task spawns; the launch receipt is the whole truth.
-            return pending | {"recent_activity": [], "queued_followups": await asyncio.to_thread(followups.view, _reg().log_dir, task_id)}
+            return project(pending | {"recent_activity": [], "queued_followups": await asyncio.to_thread(followups.view, _reg().log_dir, task_id)})
         raise MCPError(
             INVALID_PARAMS,
             f"unknown task_id: {task_id}. No task with that id is running, and no record of one "
@@ -1083,7 +1091,7 @@ async def get_task_status(
     payload = await asyncio.to_thread(
         _status_payload, snapshot, include_tail=include_tail, log_dir=_reg().log_dir, task_id=task_id
     )
-    return await _with_successor_links(payload, include=include_successors)
+    return project(await _with_successor_links(payload, include=include_successors))
 
 
 async def _with_successor_links(payload: dict[str, Any], *, include: bool = False) -> dict[str, Any]:
@@ -1300,12 +1308,13 @@ async def wait_for_task(
     include_tail: bool = False,
     until: Literal["timeout", "terminal"] = "timeout",
     ctx: Context | None = None,
+    detail: Literal["compact", "full"] = "compact",
 ) -> dict[str, Any]:
     """Wait for a task to finish, giving up after a timeout without disturbing the run.
 
     Args:
         task_id: Identifier of the task to await.
-        timeout_seconds: How long to hold, 0..3600 (default 55; 0 observes once without
+        timeout_seconds: How long to hold, 0..3600 (default 50; 0 observes once without
             sleeping). Honoured as asked, never silently clamped; out of range is INVALID_PARAMS.
             Breaking change: values above 3600 are now rejected (0 is newly accepted). Your MCP
             client applies its own request deadline, and exceeding it fails the *call* even though
@@ -1313,6 +1322,10 @@ async def wait_for_task(
         include_tail: If True, include the full last_output_tail (20 lines × 2000 chars each);
             if False (default), the tail is omitted for running/completed tasks and shortened
             to 5 lines × 500 chars for failed tasks.
+        detail: "compact" (default) omits static execution metadata and detailed outcome probes;
+            "full" returns complete MCP status. Both preserve the complete summary/report,
+            approval attention, failure diagnostics and wait fields. include_tail=True retains
+            the full tail in either mode.
         until: "timeout" (default) returns when the task settles or timeout_seconds elapses.
             "terminal" holds until the task settles, bounded only by a 6 hour server ceiling;
             timeout_seconds must then be omitted (passing both is INVALID_PARAMS).
@@ -1339,10 +1352,18 @@ async def wait_for_task(
     A task still waiting for its `resources` is running as far as a wait is concerned: the wait
     holds until it spawns and settles, or reports `not_started` if it never starts.
 
+    Prefer holds <=50 seconds after remote "device did not respond" or "connection closed"
+    deadline errors; the task continues and a shorter wait is safe to repeat.
+
     A coding task can easily run for many minutes. Expect several calls rather than one long one.
     Confirmed usage limits retain `failure_diagnostic` and partial output while the task owner
     settles the process. Waiting does not retry the task or authorize a paid fallback.
     """
+    if detail not in ("compact", "full"):
+        raise MCPError(INVALID_PARAMS, "detail must be compact or full")
+    from .mcp_projections import task_status as compact_status
+    def project(payload):
+        return compact_status(payload) if detail == "compact" else payload
     plan = _wait_plan(timeout_seconds, until, DEFAULT_WAIT_SECONDS)
     await _guard_task_read(task_id)
 
@@ -1377,7 +1398,7 @@ async def wait_for_task(
                         "call wait_for_task again, or poll get_task_status")
                 view.update(recent_activity=[], outcome_observed=True) if finished else view.update(recent_activity=[])
                 view.update(wait_policy.result_fields(plan, stop_reason, clock.elapsed(), "wait_for_task", "get_task_status", None))
-                return view
+                return project(view)
             # It spawned while we waited: carry on with what is left of the hold.
             record = outcome[0]
             plan = wait_policy.WaitPlan(plan.until, plan.requested, max(0, int(clock.remaining())))
@@ -1456,7 +1477,7 @@ async def wait_for_task(
         )
     payload.update(wait_policy.result_fields(
         plan, stop_reason, elapsed, "wait_for_task", "get_task_status", guidance))
-    return payload
+    return project(payload)
 
 
 @mcp.tool()
@@ -1472,7 +1493,8 @@ async def wait_for_tasks(
     timeout_seconds accepts 0..3600 (default 30) and is honoured as asked, never silently clamped;
     out of range is INVALID_PARAMS. Zero polls immediately. until="terminal" holds until the mode
     is satisfied, bounded by a 6 hour server ceiling, and requires timeout_seconds to be omitted.
-    Your MCP client's own request deadline still applies; see docs/multi-task-waiting.md.
+    Your MCP client's own request deadline still applies. Prefer holds <=50 seconds after
+    remote "device did not respond" or "connection closed" errors; see docs/multi-task-waiting.md.
     All IDs must exist and pass caller read authorization before waiting.
     Existence checks and initial metadata share a two-second I/O budget; undecidable existence
     rejects the request. A final metadata observation can add up to two more seconds.
@@ -1895,6 +1917,9 @@ async def get_task_events(
     - `next_before_seq`: the `seq` of the oldest event in this page (for paging older)
     - `next_after_seq`: the `seq` of the newest event in this page (for paging newer)
     - `skipped_oversized`: count of lines > 1 MiB that were skipped (not parsed, not counted as events)
+
+    For the complete final summary/report, use get_task_status in compact or full detail;
+    event pages are bounded and are not a lossless final report read.
 
     Each returned event has its long string fields truncated to 2000 chars, lists to 50 items,
     and dict nesting to depth 4, with `"truncated": true` added if anything was cut. An event still
@@ -2344,9 +2369,17 @@ async def _workflow_call(action: str, **kwargs: Any) -> Any:
 
 @mcp.tool()
 @_task_document_errors
-async def list_workflows() -> list[dict[str, Any]]:
-    """List inner saved definitions; any incompatible or unavailable source refuses the whole list."""
-    return await _workflow_call("list")
+async def list_workflows(detail: Literal["compact", "full"] = "compact") -> list[dict[str, Any]]:
+    """List name, description, revision and workflow_id without graphs/instructions by default.
+
+    Use get_workflow(name) for one complete definition, or detail="full" for all definitions.
+    Incompatible or unavailable sources refuse the whole list in either mode.
+    """
+    if detail not in ("compact", "full"):
+        raise MCPError(INVALID_PARAMS, "detail must be compact or full")
+    definitions = await _workflow_call("list")
+    from .mcp_projections import workflow_definition
+    return [workflow_definition(item) for item in definitions] if detail == "compact" else definitions
 
 
 @mcp.tool()
@@ -2829,7 +2862,8 @@ async def wait_for_workflow(
     silently clamped; out of range is INVALID_PARAMS. Breaking change: values above 300 used to
     be rejected, and 46..300 were silently held for only 45 seconds. until="terminal" holds until the run stops
     needing the wait, bounded by a 6 hour server ceiling, and requires timeout_seconds to be
-    omitted. Your MCP client's own request deadline still applies; see docs/multi-task-waiting.md.
+    omitted. Your MCP client's own request deadline still applies. Prefer holds <=50 seconds after
+    remote "device did not respond" or "connection closed" errors; see docs/multi-task-waiting.md.
 
     Returns when the run is completed, failed or cancelled and has finished settling
     (stop_reason terminal), or reaches needs_input, needs_attention or paused (stop_reason
