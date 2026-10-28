@@ -40,7 +40,8 @@ command requires approval", because `acceptEdits` auto-approves *edits*, not arb
 headless `-p` mode has nobody to give that approval. The lever that actually works is an allow-list:
 `--permission-mode acceptEdits --allowedTools "Bash(git commit:*),Bash(git push:*)"` let both commands
 succeed with an empty `permission_denials`, and the commit landed in a bare remote. So at `publish`
-the deny patterns are dropped and `--allowedTools "Bash(git commit:*),Bash(git push:*)"` is added instead — the freedom's own allow-list is never combined with
+the deny patterns are dropped and the `ALLOWED_TOOLS` publish list is added instead. It also
+includes the bounded GitHub PR/review command families and repository reads below; the freedom's own allow-list is never combined with
 its own deny patterns, since deny beats allow and would be self-defeating. Everything else still needs approval, which a headless run cannot give, so it is
 still refused — `publish` is a genuine middle tier here, not a fallback to `bypassPermissions`. Also
 measured: the approval layer refuses a *chained* command citing each part separately (e.g.
@@ -115,9 +116,15 @@ DISALLOWED_TOOLS = "Bash(git commit:*),Bash(git push:*)"
 # allow-list, and `unrestricted` drops them as the (documented) compatibility break above.
 DENY_FREEDOMS: frozenset[str] = frozenset({"read_only", "write_in_repo"})
 
-# Publish grants generic VCS publishing only. Harness settings own other commands.
+# Deliberate command families, not a broad `gh` grant. Raw `gh api` is absent:
+# prefix matching cannot restrict its HTTP method or field-induced POST behavior.
+PUBLISH_COMMANDS: tuple[str, ...] = (
+    "git commit", "git push",
+    "gh pr create", "gh pr edit", "gh pr view", "gh pr comment", "gh pr review",
+    "gh pr checks", "gh pr diff", "gh pr list", "gh repo view",
+)
 ALLOWED_TOOLS: dict[str, str] = {
-    "publish": "Bash(git commit:*),Bash(git push:*)",
+    "publish": ",".join(f"Bash({command}:*)" for command in PUBLISH_COMMANDS),
 }
 
 # Flags that would cut a dispatched agent off from the user's own MCP servers, settings, hooks and
@@ -206,7 +213,9 @@ _PUBLISH_ALLOWLIST_CAVEAT = (
     "approval\"; the allow-list is the mechanism that actually works). Everything not allow-listed "
     "still needs approval, which a headless run cannot give, so it is still refused — this is a "
     "genuine middle tier, not a fallback to bypassPermissions. Inherited user rules can grant additional commands, "
-    "and command-prefix approval is not an OS sandbox"
+    "and command-prefix approval is not an OS sandbox. Harflow adds no grant for gh pr merge, "
+    "gh repo delete, gh release or gh api (including GET): the prefix matcher cannot confine "
+    "gh api to read requests. Use gh pr view --json or gh repo view --json for supported reads"
 )
 _COMMAND_GRANT_CAVEATS = (
     "allowed_commands grants are prefix approvals in Claude's permission layer, not OS enforcement; the grammar is a guard against caller mistakes, not a security boundary",

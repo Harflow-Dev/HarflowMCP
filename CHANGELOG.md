@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Add bounded Claude `publish` grants for PR creation, editing, comments, reviews and reads, including help; disclose excluded raw API and destructive GitHub operations and backend policy differences (#81).
+- Allow exact branch-preparation grants at `write_in_repo`, retaining publication restrictions and refusing dirty initial transition targets. Verify saved-node preparation with concrete per-run grants; dynamic workflow templates still require per-run configuration (#58, #63).
+- Rewrite GitHub SSH dependency URLs to HTTPS through the shared headless process environment on every backend, with server/task overrides, inherited continuation settings and sanitized authentication observations (#46).
+
 - Default MCP task polling and workflow discovery to compact projections with explicit full detail, retain complete final reports, and recommend remote waits of at most 50 seconds (#48, #65).
 - Verify delayed approval/rejection cycles and read-only observer timeout/cancellation behavior (#59).
 - Report surviving execution after dispatcher restart as a quiet observation change once per MCP reader, retaining diagnostic and lost-supervision evidence (#82; Mac presentation pending).

@@ -1082,3 +1082,53 @@ feature does not erase unrelated observed successes. Unavailable OS isolation re
 auto qualification; no support is inferred for unmeasured platforms or unimplemented
 backend permission adapters. See `docs/harness-permissions.md` for the cache and runtime
 invalidation boundaries.
+
+## Claude publish PR/review command families (2.1.312, 2026-10-28)
+
+Measured installed Claude Code 2.1.312 without paid model calls using an isolated
+HOME/CLAUDE_CONFIG_DIR, the localhost fake Anthropic API and a harmless `gh` executable
+that writes an execution marker instead of contacting GitHub:
+
+```sh
+HARFLOW_CLI_INTEGRATION=1 uv run pytest -q tests/test_claude_commands_cli.py -k publish_github
+```
+
+All 23 probes passed. At `publish`, each of `gh pr create`, `edit`, `view`, `comment`,
+`review`, `checks`, `diff`, `list` and `gh repo view` executed, both alone and with
+`--help`, without permission denial. `gh pr merge`, `gh repo delete`, `gh release create`,
+`gh api repos/example/repo/pulls` and `gh api --method POST repos/example/repo/pulls`
+produced classified `approval_required` denials and did not execute the stub.
+This qualifies Claude's matching and denial behavior, not GitHub authentication,
+request success or actual PR mutations. These built-in grants do not depend on the
+separately qualified `allowed_commands` escape hatch.
+
+The shipped allow-list is constructed from exact command families in
+`backends/claude.py::PUBLISH_COMMANDS`; enforcement's `mechanism` contains the actual
+CLI patterns. It grants no raw `gh api` calls, including GET: the prefix matcher cannot
+prevent a caller from appending a different HTTP method or fields that cause POST.
+Supported PR/repository reads use `gh pr view --json` or `gh repo view --json` instead.
+The exclusions describe grants Harflow omits, not an OS boundary: inherited Claude
+settings, granted programs and repository code may enable additional behavior.
+
+## Claude exact branch preparation at write_in_repo (2.1.312, 2026-10-28)
+
+The installed Claude Code 2.1.312 passed 18 no-paid localhost fake-provider probes in
+`tests/test_claude_commands_cli.py -k git_preparation`, covering both `write_in_repo`
+and `publish`. Exact fetch, ff-only pull and non-force branch creation executed in disposable
+clean Git repositories with local bare remotes; reset, force variants and commands with no
+grants were denied. At `write_in_repo` the existing direct commit/push deny rules remain present.
+Broad patterns, config overrides, outside paths, destructive commands and launcher nesting
+remain refused by the grammar unit tests. This extends the earlier publish-only preparation
+measurement; it does not qualify an OS sandbox or arbitrary vendor versions.
+
+`test_saved_prepare_branches_workflow_clean_multi_repo` additionally saves and reloads an
+isolated Multi-platform Feature Implementation fixture, executes the actual workflow scheduler
+with deterministic in-process orchestrator decisions and an actual Claude worker, and observes
+fetch, ff-only pull and feature branch creation in two contained clean repositories with no
+caller approvals or permission denials. Both branches are verified afterward. It does not mutate
+or certify the user's existing saved workflow: that definition still needs an explicitly authorized
+per-run grant update for its concrete repositories and branches.
+
+Initial-dispatch and permission-preview checks refuse dirty transition targets before spawning
+an agent, without stashing/resetting. The check is not a lock; later dirty races and Git config,
+hooks or remote helper behavior remain outside this measured grant boundary.

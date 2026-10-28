@@ -196,7 +196,7 @@ def _candidate(raw: Any, grants: bool = True) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise WorkflowError("Agent must be an object")
     candidate = copy.deepcopy(raw)
-    unknown = set(candidate) - {"backend", "model", "reasoning_effort", "max_turns", "background_idle_seconds", "caller_approvals", "caller_write_approvals", "allowed_commands", "fallbacks"}
+    unknown = set(candidate) - {"backend", "model", "reasoning_effort", "max_turns", "background_idle_seconds", "caller_approvals", "caller_write_approvals", "allowed_commands", "git_https_rewrite", "fallbacks"}
     if unknown:
         raise WorkflowError(f"Unknown agent settings: {sorted(unknown)}")
     if not isinstance(candidate.get("fallbacks", []), list):
@@ -212,6 +212,8 @@ def _candidate(raw: Any, grants: bool = True) -> dict[str, Any]:
             raise WorkflowError("caller_write_approvals requires caller_approvals")
         if not candidate["caller_write_approvals"]:
             del candidate["caller_write_approvals"]
+    if "git_https_rewrite" in candidate and type(candidate["git_https_rewrite"]) is not bool:
+        raise WorkflowError("git_https_rewrite must be a boolean")
     if "allowed_commands" in candidate:
         if not grants:
             raise WorkflowError("allowed_commands belongs to workflow agent nodes, not orchestrators or builders")
@@ -3135,13 +3137,13 @@ class WorkflowSupervisor:
                         if use_resume:
                             parent = self.registry.get(previous["task_id"])
                             if parent:
-                                task = await self.registry.resume(parent, dispatch_prompt, max_turns=candidate.get("max_turns"), background_idle_seconds=candidate.get("background_idle_seconds"), network=network, task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder", **({"require_unchanged_session": True} if strict_child_resume else {}))
+                                task = await self.registry.resume(parent, dispatch_prompt, max_turns=candidate.get("max_turns"), background_idle_seconds=candidate.get("background_idle_seconds"), network=network, **({"git_https_rewrite": candidate["git_https_rewrite"]} if "git_https_rewrite" in candidate else {}), task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder", **({"require_unchanged_session": True} if strict_child_resume else {}))
                             else:
                                 from .task_supervision import read_task_record
                                 record = read_task_record(self.registry._log_dir, previous["task_id"])
                                 if record is None:
                                     raise SessionUnknownError("Previous resume session is unavailable")
-                                task = await self.registry.resume_record(record, dispatch_prompt, max_turns=candidate.get("max_turns"), background_idle_seconds=candidate.get("background_idle_seconds"), network=network, task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder", **({"require_unchanged_session": True} if strict_child_resume else {}))
+                                task = await self.registry.resume_record(record, dispatch_prompt, max_turns=candidate.get("max_turns"), background_idle_seconds=candidate.get("background_idle_seconds"), network=network, **({"git_https_rewrite": candidate["git_https_rewrite"]} if "git_https_rewrite" in candidate else {}), task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder", **({"require_unchanged_session": True} if strict_child_resume else {}))
                         else:
                             if role == "builder":
                                 latest = self.run(refresh_atomic=True)
@@ -3152,7 +3154,7 @@ class WorkflowSupervisor:
                                 context_delivery["total_characters"] = context_delivery["serialized_characters"] = len(dispatch_prompt)
                                 context_delivery["budget_overflow_bytes"] = max(0, len(dispatch_prompt.encode()) - context_delivery["budget_bytes"])
                                 self._task_update(activation["id"], task_id, {"context_delivery": context_delivery})
-                            task = await self.registry.start(dispatch_prompt, Path(run["repo_path"]), backend=backend, freedom=freedom, network=network, caller_approvals=candidate.get("caller_approvals", False), **({"allowed_commands": list(candidate["allowed_commands"])} if candidate.get("allowed_commands") else {}), **({"caller_write_approvals": True} if candidate.get("caller_write_approvals") else {}), model=candidate.get("model"), reasoning_effort=candidate.get("reasoning_effort"), max_turns=candidate.get("max_turns"), background_idle_seconds=candidate.get("background_idle_seconds"), task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder", title=f"{run['name']} · {node.get('title', key)}")
+                            task = await self.registry.start(dispatch_prompt, Path(run["repo_path"]), backend=backend, freedom=freedom, network=network, **({"git_https_rewrite": candidate["git_https_rewrite"]} if "git_https_rewrite" in candidate else {}), caller_approvals=candidate.get("caller_approvals", False), **({"allowed_commands": list(candidate["allowed_commands"])} if candidate.get("allowed_commands") else {}), **({"caller_write_approvals": True} if candidate.get("caller_write_approvals") else {}), model=candidate.get("model"), reasoning_effort=candidate.get("reasoning_effort"), max_turns=candidate.get("max_turns"), background_idle_seconds=candidate.get("background_idle_seconds"), task_id=task_id, display_prompt=display_prompt, workflow_builder=role == "builder", title=f"{run['name']} · {node.get('title', key)}")
                         self.update(lambda r: r.pop("checkout_wait", None), "checkout_acquired")
                         self._task_update(activation["id"], task_id, {"status": "running", "dispatch_stage": "spawn_confirmed", **({"timeout_deadline": timeout_deadline} if timeout_deadline is not None else {})})
                     snapshot = await self._observe_attempt(task, node, role, activation, reservation)
@@ -4050,6 +4052,8 @@ def _candidate_key(candidate: dict[str, Any]) -> str:
         signature["caller_approvals"] = True
     if candidate.get("caller_write_approvals", False):
         signature["caller_write_approvals"] = True
+    if "git_https_rewrite" in candidate:
+        signature["git_https_rewrite"] = candidate["git_https_rewrite"]
     if candidate.get("allowed_commands"):
         signature["allowed_commands"] = list(candidate["allowed_commands"])
     return json.dumps(signature, sort_keys=True)

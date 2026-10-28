@@ -17,7 +17,7 @@ from harflow_mcp.task_documents import TaskDocumentError, qualify_enforcement
 
 SESSION = "11111111-1111-4111-8111-111111111111"
 CLAUDE = ClaudeBackend()
-PUBLISH_ENTRIES = "Bash(git commit:*),Bash(git push:*)"
+PUBLISH_ENTRIES = "Bash(git commit:*),Bash(git push:*),Bash(gh pr create:*),Bash(gh pr edit:*),Bash(gh pr view:*),Bash(gh pr comment:*),Bash(gh pr review:*),Bash(gh pr checks:*),Bash(gh pr diff:*),Bash(gh pr list:*),Bash(gh repo view:*)"
 
 
 @pytest.fixture
@@ -670,10 +670,11 @@ def test_cross_check_names_the_feature_and_both_versions():
     "git switch develop", "git switch -c feature/63 origin/develop",
     "git checkout -b feature/63 develop", "git -C . pull --ff-only origin develop",
 ])
-def test_git_preparation_exact_publish_grants(repo, pattern):
-    build(repo, "publish", (pattern,))
-    with pytest.raises(CommandGrantError):
-        claude_commands.validate(pattern, "write_in_repo", repo)
+@pytest.mark.parametrize("freedom", ["write_in_repo", "publish"])
+def test_git_preparation_exact_grants(repo, pattern, freedom):
+    invocation = build(repo, freedom, (pattern,))
+    if freedom == "write_in_repo":
+        assert flag(invocation.argv, "--disallowedTools") == [DISALLOWED_TOOLS]
 
 
 @pytest.mark.parametrize("pattern", [
@@ -685,6 +686,7 @@ def test_git_preparation_exact_publish_grants(repo, pattern):
     "git switch --detach develop", "git branch -D feature", "uv run git fetch origin",
     "git fetch origin refs/../heads", "git push origin develop", "git commit -m x",
 ])
-def test_git_preparation_refuses_other_grammar(repo, pattern):
+@pytest.mark.parametrize("freedom", ["write_in_repo", "publish"])
+def test_git_preparation_refuses_other_grammar(repo, pattern, freedom):
     with pytest.raises(CommandGrantError):
-        claude_commands.validate(pattern, "publish", repo)
+        claude_commands.validate(pattern, freedom, repo)

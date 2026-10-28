@@ -23,7 +23,7 @@ from harflow_mcp.task_continuation import continue_task as continuation
 
 GRANTS = ["make test:*", "python3 -m pytest:*"]
 ALLOWED = "Bash(make test:*),Bash(python3 -m pytest:*)"
-PUBLISH = "Bash(git commit:*),Bash(git push:*)"
+PUBLISH = "Bash(git commit:*),Bash(git push:*),Bash(gh pr create:*),Bash(gh pr edit:*),Bash(gh pr view:*),Bash(gh pr comment:*),Bash(gh pr review:*),Bash(gh pr checks:*),Bash(gh pr diff:*),Bash(gh pr list:*),Bash(gh repo view:*)"
 
 
 @pytest.fixture
@@ -567,3 +567,28 @@ def test_a_malformed_saved_list_makes_the_document_unreadable(tmp_path):
         path.write_text(json.dumps({**document, "allowed_commands": bad}))
         with pytest.raises(store.TaskDocumentError):
             store.read(state, record.task_id)
+
+
+@pytest.mark.parametrize('kind', ['tracked', 'untracked', 'staged'])
+async def test_branch_transition_refuses_dirty_checkout_before_spawn(env, kind):
+    import subprocess
+    changed = env.repo / ('new' if kind == 'untracked' else 'tracked')
+    if kind != 'untracked':
+        changed.write_text('original')
+        subprocess.run(['git', 'add', '.'], cwd=env.repo, check=True)
+        subprocess.run(['git', '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-m', 'seed'], cwd=env.repo, check=True, capture_output=True)
+    changed.write_text('preserve edits')
+    if kind == 'staged':
+        subprocess.run(['git', 'add', '.'], cwd=env.repo, check=True)
+    with pytest.raises(CommandGrantError, match='dirty checkout'):
+        await run(env, allowed_commands=['git switch -c feature/prep'])
+    assert env.launches() == []
+    assert changed.read_text() == 'preserve edits'
+
+
+async def test_permission_preview_refuses_dirty_branch_transition_without_spawn(env):
+    (env.repo / 'untracked').write_text('preserve edits')
+    with pytest.raises(CommandGrantError, match='dirty checkout'):
+        await env.registry.preview_permissions(env.repo, backend=get('claude'), freedom='write_in_repo',
+                                               allowed_commands=['git switch -c feature/prep'])
+    assert env.launches() == []

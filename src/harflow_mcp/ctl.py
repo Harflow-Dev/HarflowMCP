@@ -318,8 +318,9 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     run_p.add_argument("--network", choices=("true", "false"), default=None)
     run_p.add_argument("--extra-writable-path", action="append", default=None,
                        help="Existing absolute file/directory grant; repeat up to 16 times; verified harnesses only")
+    run_p.add_argument("--git-https-rewrite", action=argparse.BooleanOptionalAction, default=None, help="Rewrite GitHub SSH dependency URLs to HTTPS for this run (default: server setting; resumes inherit)")
     run_p.add_argument("--allowed-command", action="append", default=None,
-                       help="Bash command pattern granted for this run only; repeat up to 16 times. Claude Code at write_in_repo or publish only; see docs/harness-permissions.md")
+                       help="Bash command pattern granted for this run only; repeat up to 16 times. Claude Code at write_in_repo or publish only; exact Git preparation requires clean initial checkout; see docs/harness-permissions.md")
     run_p.add_argument("--resource", action="append", default=None, metavar="NAME",
                        help="exclusive named resource the task needs before it starts (repeatable, at most 16); "
                             "the task waits in the background while another run holds it. Not for --workflow runs")
@@ -345,8 +346,9 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     preview_p.add_argument("--network", choices=("true", "false"), default=None)
     preview_p.add_argument("--extra-writable-path", action="append", default=None,
                            help="Existing absolute file/directory grant; repeat up to 16 times")
+    preview_p.add_argument("--git-https-rewrite", action=argparse.BooleanOptionalAction, default=None, help="Rewrite GitHub SSH dependency URLs to HTTPS for this run (default: server setting; resumes inherit)")
     preview_p.add_argument("--allowed-command", action="append", default=None,
-                           help="Bash command pattern granted for this run only; repeat up to 16 times. Claude Code at write_in_repo or publish only; see docs/harness-permissions.md")
+                           help="Bash command pattern granted for this run only; repeat up to 16 times. Claude Code at write_in_repo or publish only; exact Git preparation requires clean initial checkout; see docs/harness-permissions.md")
     preview_p.add_argument("--qualification-only", action="store_true", help="discover required cached qualification without provider self-tests")
     preview_p.add_argument("--json", action="store_true")
 
@@ -360,6 +362,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     resume_p.add_argument("--max-turns", type=int, default=None)
     resume_p.add_argument("--background-idle-seconds", type=float)
     resume_p.add_argument("--network", choices=("true", "false"), default=None)
+    resume_p.add_argument("--git-https-rewrite", action=argparse.BooleanOptionalAction, default=None, help="Rewrite GitHub SSH dependency URLs to HTTPS for this run (default: server setting; resumes inherit)")
     resume_p.add_argument("--allowed-command", action="append", default=None,
                           help="Replace the saved command grants for this run (repeatable); omitted inherits them")
     resume_p.add_argument("--json", action="store_true")
@@ -371,6 +374,7 @@ def _build_parser() -> tuple[_ArgumentParser, ...]:
     extra.add_argument("--extra-prompt-file", help="UTF-8 caller follow-up file")
     continue_p.add_argument("--background-idle-seconds", type=float)
     continue_p.add_argument("--notes-path", help="Optional UTF-8 notes file")
+    continue_p.add_argument("--git-https-rewrite", action=argparse.BooleanOptionalAction, default=None, help="Rewrite GitHub SSH dependency URLs to HTTPS for this run (default: server setting; resumes inherit)")
     continue_p.add_argument("--allowed-command", action="append", default=None,
                             help="Replace the saved command grants for the successor (repeatable); omitted inherits them")
     continue_p.add_argument("--json", action="store_true")
@@ -1189,7 +1193,7 @@ def _run_action(args: argparse.Namespace):
             **({'caller_write_approvals': True} if getattr(args, 'caller_write_approvals', None) else {}),
             interaction_owner="monitor" if args.monitor else "caller",
             **({'extra_writable_paths': args.extra_writable_path} if args.extra_writable_path is not None else {}),
-            **({'allowed_commands': getattr(args, 'allowed_command', None)} if getattr(args, 'allowed_command', None) is not None else {}),
+            **({'allowed_commands': getattr(args, 'allowed_command', None)} if getattr(args, 'allowed_command', None) is not None else {}), **({'git_https_rewrite': args.git_https_rewrite} if getattr(args, 'git_https_rewrite', None) is not None else {}),
             **({'resources': args.resource} if getattr(args, 'resource', None) is not None else {}),
             **({'worktree': {key: value for key, value in (('base_ref', args.worktree_base), ('branch', args.worktree_branch), ('detach', args.worktree_detach or None)) if value is not None}} if getattr(args, 'worktree', False) else {}),
             **({'resource_wait_seconds': args.resource_wait_seconds} if getattr(args, 'resource_wait_seconds', None) is not None else {}),
@@ -1227,7 +1231,7 @@ def _resume_action(args: argparse.Namespace):
             server._check_allowed_commands(backends.get(record.backend), record.freedom, Path(record.repo_path), args.allowed_command)
         return await registry.resume_record(
             record, args.text, max_turns=args.max_turns, **({'background_idle_seconds': args.background_idle_seconds} if getattr(args, 'background_idle_seconds', None) is not None else {}), network=network, consume_followups=True,
-            **({'allowed_commands': getattr(args, 'allowed_command', None)} if getattr(args, 'allowed_command', None) is not None else {}),
+            **({'allowed_commands': getattr(args, 'allowed_command', None)} if getattr(args, 'allowed_command', None) is not None else {}), **({'git_https_rewrite': args.git_https_rewrite} if getattr(args, 'git_https_rewrite', None) is not None else {}),
         )
 
     return action
@@ -1244,7 +1248,7 @@ def _continue_action(args: argparse.Namespace):
             source = await asyncio.to_thread(store.read, registry.log_dir, args.task_id, include_prompt=False)
             if source is not None:
                 server._check_allowed_commands(backends.get(source.backend), source.freedom, Path(source.repo_path), args.allowed_command)
-        return await registry.continue_task(args.task_id, _workflow_text(args, "extra_prompt"), args.notes_path, consume_followups=True, **({'background_idle_seconds': args.background_idle_seconds} if getattr(args, 'background_idle_seconds', None) is not None else {}), **({'allowed_commands': getattr(args, 'allowed_command', None)} if getattr(args, 'allowed_command', None) is not None else {}))
+        return await registry.continue_task(args.task_id, _workflow_text(args, "extra_prompt"), args.notes_path, consume_followups=True, **({'background_idle_seconds': args.background_idle_seconds} if getattr(args, 'background_idle_seconds', None) is not None else {}), **({'allowed_commands': getattr(args, 'allowed_command', None)} if getattr(args, 'allowed_command', None) is not None else {}), **({'git_https_rewrite': args.git_https_rewrite} if getattr(args, 'git_https_rewrite', None) is not None else {}))
     return action
 
 
@@ -1590,7 +1594,7 @@ def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
                 caller_approvals=args.caller_approvals,
                 qualification_only=args.qualification_only,
                 **({"caller_write_approvals": True} if args.caller_write_approvals else {}),
-                **({"allowed_commands": getattr(args, 'allowed_command', None)} if getattr(args, 'allowed_command', None) is not None else {}),
+                **({"allowed_commands": getattr(args, 'allowed_command', None)} if getattr(args, 'allowed_command', None) is not None else {}), **({"git_https_rewrite": args.git_https_rewrite} if getattr(args, "git_https_rewrite", None) is not None else {}),
             ))
         except (StateOwnershipError, store.TaskDocumentError, WorkflowRunDocumentError, WorkflowReceiptDocumentError):
             raise
@@ -1681,6 +1685,8 @@ def _execute(args: argparse.Namespace, list_p: _ArgumentParser) -> int:
         return _cmd_takeover_attach(args)
     if args.command == "run":
         if args.workflow:
+            if getattr(args, "git_https_rewrite", None) is not None:
+                return _fail(args, "invalid_params", "Set git_https_rewrite on saved workflow agent candidates")
             if args.extra_writable_path is not None:
                 return _fail(args, "invalid_params", "Extra writable paths are unavailable for workflow launches")
             if getattr(args, 'allowed_command', None) is not None:

@@ -338,6 +338,8 @@ class Enforcement:
     extra_path_certification: str | None = None
     caller_approval_tools: tuple[str, ...] = ()
     """Tools a caller may be asked to approve for this run; empty (and omitted from `as_dict`) without caller approvals."""
+    git_environment: dict[str, Any] | None = None
+    """Observed process Git configuration; never a network or credential access guarantee."""
     extra_allowed_commands: tuple[str, ...] = ()
     """Dispatch-time command patterns granted to this run; empty (and omitted from `as_dict`) without `allowed_commands`."""
 
@@ -348,6 +350,7 @@ class Enforcement:
 
     def as_dict(self) -> dict[str, Any]:
         return {
+            **({"git_environment": self.git_environment} if self.git_environment is not None else {}),
             **({"caller_approval_tools": list(self.caller_approval_tools)} if self.caller_approval_tools else {}),
             **({"extra_allowed_commands": list(self.extra_allowed_commands)} if self.extra_allowed_commands else {}),
             "extra_writable_paths": list(self.extra_writable_paths),

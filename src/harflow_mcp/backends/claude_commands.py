@@ -33,7 +33,7 @@ _REFUSED_GROUPS = {
     "container, remote and flake launchers are not supported": "docker podman kubectl nix",
 }
 REFUSED_PROGRAMS = {name: reason for reason, names in _REFUSED_GROUPS.items() for name in names.split()}
-_GIT_REASON = "git is refused outside the dedicated exact publish preparation grammar; aliases, arbitrary subcommands and non-publish grants are unsupported"
+_GIT_REASON = "git is refused outside the dedicated exact preparation grammar; aliases and arbitrary subcommands are unsupported"
 
 # Exact-only: no wildcard, and every operand (bare names included) must resolve inside the repository.
 _PATH_SENSITIVE = frozenset("cp mv tee install touch mkdir truncate dd diskutil chmod chown chflags rm rmdir shred unlink ln".split())
@@ -76,7 +76,7 @@ GRAMMAR = {
     "interpreters": "python -m <module> or <interpreter> <script with a script extension>",
     "launchers": f"the launched command is validated recursively, at most {MAX_LAUNCHER_DEPTH} deep",
     "gh": "publish only, for a fixed list of subcommand pairs",
-    "git": "publish only; exact fetch, ff-only pull and non-force branch preparation, optionally with one contained -C path",
+    "git": "write_in_repo and publish; exact fetch, ff-only pull and non-force branch preparation, optionally with one contained -C path",
 }
 
 
@@ -240,8 +240,6 @@ def _tokens(tokens: list[str], freedom: str, root: str | None, depth: int, lenie
 
 def _git(tokens: list[str], wildcard: bool, freedom: str, root: str | None) -> None:
     """Closed exact-command route; never grant an extensible Git prefix."""
-    if freedom != "publish":
-        raise _Refusal(_GIT_REASON)
     if wildcard:
         raise _Refusal("git is refused with wildcards; grants accept only exact commands")
     args = tokens[1:]

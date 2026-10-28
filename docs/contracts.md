@@ -375,6 +375,31 @@ covers the runner decision provenance.
 
 ### Additive permission and continuation projections
 
+#### Publication permission policy
+
+`publish_attempts_allowed` records caller intent to permit publication attempts. It does not
+guarantee command approval, credentials, remote access or publication success. Backend policy
+remains visible through `enforcement.mechanism` and `enforcement.caveats` in task records and
+permission previews.
+
+Claude's built-in `publish` allow-list grants `git commit`, `git push`, `gh pr create`,
+`gh pr edit`, `gh pr view`, `gh pr comment`, `gh pr review`, `gh pr checks`, `gh pr diff`,
+`gh pr list` and `gh repo view`, including arguments and `--help`. These built-in grants
+do not depend on dispatch-time `allowed_commands` qualification. They do not include
+`gh pr merge`, `gh repo delete`, `gh release`, or raw `gh api`. Claude's prefix patterns
+cannot ensure GET-only API access: appended method flags or fields can turn an apparent
+read into a write. Use the supported PR/repository commands with `--json` for reads.
+No excluded command is implicitly granted by this list; inherited harness settings may
+grant additional authority, and shell wrappers are not confined by an OS Git sandbox.
+
+Other backends do not implement this command allow-list. Codex enables network within its
+workspace sandbox and does not filter GitHub subcommands. opencode retains the `build`
+policy shared with `write_in_repo`, so inherited permissions can still require approvals.
+Vibe and Antigravity collapse `publish` into their unrestricted approval mechanism and
+cannot separately exclude merge, deletion, release or API writes. Callers requiring those
+exclusions must select a backend/policy that can express them; the freedom name alone does
+not enforce them. Network restrictions remain independently reported.
+
 Enforcement adds `publish_attempts_allowed`, retaining
 `publish_attempts_allowed_by_polybridge` as a deprecated, identical alias for one release.
 Legacy-only records remain readable. Contradictory dual values are invalid, including during
@@ -771,3 +796,9 @@ Full diagnostic reads retain dispatch identities and their liveness verdict. Thi
 additive optional v1 field: existing fixtures and consumer gates remain unchanged. The Mac
 presentation of this optional metadata is deferred; it needs a separate design and consumer
 implementation before claiming the app renders a restart note.
+
+Task enforcement may additionally contain `git_environment`, with `github_https_rewrite` (boolean),
+`https_auth_observation` (sanitized string), and `reachability_verified` (false). This optional
+observation is not authority and does not change network enforcement. Old records omit it; resumed
+and continued tasks inherit a saved effective rewrite when present. `list_backends` also exposes
+this optional observation using the server default. See [Git transport](git-transport.md).

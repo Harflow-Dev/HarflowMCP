@@ -857,7 +857,7 @@ LEGACY_ARGV: dict[str, dict[str, dict[str, list[str]]]] = {
                 "claude", "-p", "--output-format", "stream-json", "--verbose",
                 "--include-partial-messages",
                 "--permission-mode", "acceptEdits",
-                "--allowedTools", "Bash(git commit:*),Bash(git push:*)",
+                "--allowedTools", "Bash(git commit:*),Bash(git push:*),Bash(gh pr create:*),Bash(gh pr edit:*),Bash(gh pr view:*),Bash(gh pr comment:*),Bash(gh pr review:*),Bash(gh pr checks:*),Bash(gh pr diff:*),Bash(gh pr list:*),Bash(gh repo view:*)",
                 "--session-id", SESSION,
                 "--", "do a thing",
             ],
@@ -865,7 +865,7 @@ LEGACY_ARGV: dict[str, dict[str, dict[str, list[str]]]] = {
                 "claude", "-p", "--output-format", "stream-json", "--verbose",
                 "--include-partial-messages",
                 "--permission-mode", "acceptEdits",
-                "--allowedTools", "Bash(git commit:*),Bash(git push:*)",
+                "--allowedTools", "Bash(git commit:*),Bash(git push:*),Bash(gh pr create:*),Bash(gh pr edit:*),Bash(gh pr view:*),Bash(gh pr comment:*),Bash(gh pr review:*),Bash(gh pr checks:*),Bash(gh pr diff:*),Bash(gh pr list:*),Bash(gh repo view:*)",
                 "--resume", "abc-123",
                 "--", "more",
             ],
@@ -1434,7 +1434,14 @@ def test_claude_publish_carries_the_allowlist_and_no_deny_patterns() -> None:
     assert argv[argv.index("--allowedTools") + 1] == ALLOWED_TOOLS["publish"]
     assert "Bash(git commit:*)" in ALLOWED_TOOLS["publish"]
     assert "Bash(git push:*)" in ALLOWED_TOOLS["publish"]
-    assert "gh " not in ALLOWED_TOOLS["publish"]
+    for command in ("create", "edit", "view", "comment", "review", "checks", "diff", "list"):
+        assert f"Bash(gh pr {command}:*)" in ALLOWED_TOOLS["publish"]
+    assert "Bash(gh repo view:*)" in ALLOWED_TOOLS["publish"]
+    for command in ("gh pr merge", "gh repo delete", "gh release", "gh api"):
+        assert command not in ALLOWED_TOOLS["publish"]
+    enforcement = ClaudeBackend().enforcement("publish")
+    assert ALLOWED_TOOLS["publish"] in enforcement.mechanism
+    assert "gh api" in " ".join(enforcement.caveats)
     ClaudeBackend().assert_safe(inv(argv), "publish")
 
 

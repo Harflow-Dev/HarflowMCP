@@ -270,3 +270,14 @@ async def test_build_precheck_refuses_write_approvals_the_caller_lacks(agent_cal
     with pytest.raises(MCPError) as raised:
         await holder.server._workflow_call("build", name="b", prompt="Create", repo_path=str(holder.repo), agent={"backend": "claude", "caller_approvals": True, "caller_write_approvals": True})
     assert "caller_write_approvals" in str(raised.value)
+
+
+def test_git_transport_override_round_trip(storage):
+    saved = storage.save('git-transport', node_graph({'backend': 'codex', 'git_https_rewrite': False,
+        'fallbacks': [{'backend': 'vibe', 'git_https_rewrite': True}]}))
+    for document in (saved, storage.get('git-transport')):
+        agent = document['nodes'][1]['agent']
+        assert agent['git_https_rewrite'] is False
+        assert agent['fallbacks'][0]['git_https_rewrite'] is True
+    with pytest.raises(w.WorkflowError, match='must be a boolean'):
+        w._candidate({'backend': 'codex', 'git_https_rewrite': 'false'})

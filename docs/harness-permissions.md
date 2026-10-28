@@ -78,7 +78,7 @@ or move verification to a suitable node.
 
 | Harness | `read_only` | `write_in_repo` | `publish` | `unrestricted` |
 | --- | --- | --- | --- | --- |
-| Claude Code | `plan`; direct Git commit/push deny patterns | `acceptEdits`; same deny patterns (plus any `allowed_commands`, which cannot override them) | `acceptEdits`; Git commit/push allow rules only, with bridge deny patterns removed | `bypassPermissions`; bridge allow/deny patterns omitted |
+| Claude Code | `plan`; direct Git commit/push deny patterns | `acceptEdits`; same deny patterns (plus any `allowed_commands`, which cannot override them) | `acceptEdits`; Git commit/push and bounded PR/repository command allow rules, with bridge deny patterns removed | `bypassPermissions`; bridge allow/deny patterns omitted |
 | Codex | `read-only` OS sandbox | `workspace-write`; network off by default | `workspace-write`; network on by default | `danger-full-access` |
 | OpenCode | `plan` agent | `build` agent | `build` agent; same mechanism as local writing | `build` plus `--auto` |
 | Vibe | `ask` approval profile (not a write-tool exclusion) | `accept-edits` profile | `auto-approve`; same mechanism as unrestricted | `auto-approve` profile |
@@ -87,8 +87,10 @@ or move verification to a suitable node.
 These levels authorize an assignment; they do not make the five harnesses equally confined:
 
 - **Claude:** restrictions use the harness permission layer, with no bridge OS sandbox. Accept-edits
-  approves file edits, not arbitrary Bash or MCP calls. Publish adds only direct Git commit/push
-  allowances; commands such as `gh pr create` still need their own approval rules. Deny rules win.
+  approves file edits, not arbitrary Bash or MCP calls. Publish adds direct Git commit/push,
+  `gh pr create/edit/view/comment/review/checks/diff/list` and `gh repo view` allowances, including
+  help. Raw `gh api`, merges, releases and repository deletion are excluded from these grants;
+  see [publication policy](contracts.md#publication-permission-policy). Deny rules win.
 - **Codex:** HarflowMCP pins `approval_policy="never"`. Missing permission cannot be approved
   interactively. Workspace writes can include the checkout, temporary directories, configured
   writable roots, and the task scratch grant. There is no per-command commit deny list: a local
@@ -193,7 +195,7 @@ explicit list replaces it after full revalidation (an empty list clears it). Aut
 - `find` is refused with a wildcard or with `-exec`, `-delete` and similar actions.
 - `gh` is refused below `publish`, where it is limited to `workflow run|view`, `run view|watch|list` and
   `pr create|view|list|checks|status`. This deviates from allowing `gh workflow run *` at `write_in_repo`.
-- Git grants are supported only at `publish`, as exact commands: `git fetch <remote> [branch]`,
+- Git preparation grants are supported at `write_in_repo` and `publish`, as exact commands: `git fetch <remote> [branch]`,
   `git pull --ff-only <remote> <branch>`, `git switch <branch>`, `git switch -c <branch> [start]`, or
   `git checkout -b <branch> [start]`. Each may have one `-C <directory>` before the subcommand; the directory
   must resolve inside the dispatch repository. Remote, branch and start names use letters, digits, `_`, `-` and
@@ -201,6 +203,14 @@ explicit list replaces it after full revalidation (an empty list clears it). Aut
   revision expression, additional option, launcher, config override, reset or force form is accepted.
   Other Git grant patterns remain refused. `publish` still independently allows commit and push; these grants
   do not make it a Git sandbox. Repository configuration, hooks, remote helpers and credentials remain effective.
+
+**Clean checkout preflight.** Initial dispatch with a `pull`, `switch` or `checkout` grant refuses
+tracked, staged or untracked changes in each targeted checkout, with instructions to inspect and
+preserve them before retrying. It never stashes, resets or switches automatically. Fetch-only grants
+need no clean tree. This check happens before launch, not under a checkout lock: later edits may
+race execution, and ordinary non-force Git protects conflicting changes but can carry compatible
+edits across a switch. Resume does not recheck a task's own edits. At `write_in_repo`, preparation
+grants retain the direct commit/push deny rules; publication remains separately authorized.
 
 **What it is not.** The grammar is a guard against caller mistakes and obvious escalation, not a security boundary.
 A grant is a prefix approval in Claude's permission layer, not OS enforcement; a granted program can run code from the

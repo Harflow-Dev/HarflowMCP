@@ -168,7 +168,8 @@ def test_wildcard_forms_match_with_and_without_arguments_and_respect_the_word_bo
     pytest.param("git -C . fetch origin develop", True, False, id="no-grants-fetch"),
     pytest.param("git -C . pull --ff-only origin develop", True, False, id="no-grants-pull"),
 ])
-async def test_git_preparation_grants_real_cli(tmp_path, monkeypatch, command, denied, grants_enabled):
+@pytest.mark.parametrize("freedom", ["write_in_repo", "publish"])
+async def test_git_preparation_grants_real_cli(tmp_path, monkeypatch, command, denied, grants_enabled, freedom):
     require_claude("allowed_commands", monkeypatch)
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -184,9 +185,9 @@ async def test_git_preparation_grants_real_cli(tmp_path, monkeypatch, command, d
     with fake_anthropic_api(steps=bash(command)) as (url, requests):
         isolate(monkeypatch, tmp_path, url)
         registry = TaskRegistry(log_dir=tmp_path / "state" / "tasks", open_monitor=False)
-        preview = await registry.preview_permissions(repo, backend=get("claude"), freedom="publish", allowed_commands=grants)
+        preview = await registry.preview_permissions(repo, backend=get("claude"), freedom=freedom, allowed_commands=grants)
         assert preview["enforcement"].get("extra_allowed_commands", []) == grants
-        task = await registry.start("run scripted Git preparation", repo, backend=get("claude"), freedom="publish", allowed_commands=grants)
+        task = await registry.start("run scripted Git preparation", repo, backend=get("claude"), freedom=freedom, allowed_commands=grants)
         try:
             await asyncio.wait_for(task.done.wait(), timeout=90)
         finally:
@@ -200,3 +201,102 @@ async def test_git_preparation_grants_real_cli(tmp_path, monkeypatch, command, d
             assert git("branch", "--show-current").stdout.strip() == "feature/prep"
         else:
             assert (repo / ".git" / "FETCH_HEAD").is_file()
+
+
+@pytest.mark.parametrize("command,denied", [
+    *[(f"gh pr {verb}{suffix}", False)
+      for verb in ("create", "edit", "view", "comment", "review", "checks", "diff", "list")
+      for suffix in ("", " --help")],
+    ("gh repo view", False),
+    ("gh repo view --help", False),
+    ("gh pr merge", True),
+    ("gh repo delete", True),
+    ("gh release create v0", True),
+    ("gh api repos/example/repo/pulls", True),
+    ("gh api --method POST repos/example/repo/pulls", True),
+])
+def test_publish_github_command_families_real_cli(tmp_path, monkeypatch, command, denied):
+    """Real CLI permissions with a harmless gh executable: no GitHub request or paid model."""
+    require_claude("allowed_commands", monkeypatch)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    binaries = tmp_path / "bin"
+    binaries.mkdir()
+    marker = tmp_path / "executed"
+    executable = binaries / "gh"
+    executable.write_text(f"#!/bin/sh\nprintf '%s\\n' \\\"$*\\\" > '{marker}'\n")
+    executable.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{binaries}{os.pathsep}{os.environ['PATH']}")
+    invocation = get("claude").build_start_argv(
+        "run the scripted action", repo=repo, freedom="publish", session_id=str(uuid.uuid4()),
+        model=None, max_turns=None, reasoning_effort=None,
+    )
+    with fake_anthropic_api(steps=bash(command)) as (url, requests):
+        isolate(monkeypatch, tmp_path, url)
+        events, texts = run_direct(invocation.argv, invocation.initial_input, repo)
+    assert requests
+    result = next(event for event in events if event.get("type") == "result")
+    assert bool(result["permission_denials"]) is denied
+    assert marker.exists() is not denied
+    if denied:
+        assert claude_denials.match(texts["grant_1"])[0] == "approval_required"
+
+
+@pytest.mark.asyncio
+async def test_saved_prepare_branches_workflow_clean_multi_repo(tmp_path, monkeypatch):
+    """Actual saved-flow scheduler and Claude worker; deterministic in-process orchestrator decisions."""
+    from fake_anthropic_api import serve
+    from harflow_mcp import workflows as w
+    from test_workflow_delegation import Registry, graph, run_flow
+
+    require_claude('allowed_commands', monkeypatch)
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    grants = []
+    repos = []
+    for name in ('app', 'server'):
+        repo = workspace / name
+        repo.mkdir()
+        def git(*args):
+            return subprocess.run(['git', '-c', 'core.hooksPath=/dev/null', *args], cwd=repo, check=True, capture_output=True)
+        git('init', '-b', 'develop')
+        git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-m', 'seed')
+        remote = tmp_path / (name + '.git')
+        git('clone', '--bare', str(repo), str(remote))
+        git('remote', 'add', 'origin', str(remote))
+        repos.append(repo)
+        grants.extend([f'git -C {name} fetch origin develop', f'git -C {name} pull --ff-only origin develop', f'git -C {name} switch -c feature/prep develop'])
+    def decide(body):
+        answered = sum(1 for message in body.get('messages', []) for block in (message.get('content') if isinstance(message.get('content'), list) else []) if block.get('type') == 'tool_result')
+        if answered < len(grants):
+            return [{'type': 'tool_use', 'id': f'prep_{answered}', 'name': 'Bash', 'input': {'command': grants[answered]}}], 'tool_use'
+        result = {'status': 'succeeded', 'result': {'summary': 'Prepared both branches'}, 'evidence': ['local Git checkout branches observed']}
+        return [{'type': 'text', 'text': json.dumps(result)}], 'end_turn'
+
+    with serve(decide) as (url, requests):
+        isolate(monkeypatch, tmp_path, url)
+        monkeypatch.setattr(w, '_launch', lambda *_args: None)
+        storage = w.WorkflowStore(tmp_path / 'state')
+        actual = TaskRegistry(log_dir=storage.root / 'tasks', open_monitor=False)
+        class Hybrid(Registry):
+            async def start(self, prompt, repo, **kwargs):
+                if self.decode_context(prompt) is not None:
+                    return await super().start(prompt, repo, **kwargs)
+                task = await actual.start(prompt, repo, **kwargs)
+                self.tasks[task.task_id] = task
+                return task
+        registry = Hybrid(storage.root)
+        definition = graph()
+        definition['name'] = 'Multi-platform Feature Implementation fixture'
+        definition['nodes'][1].update(title='Prepare Branches', freedom='write_in_repo', agent={'backend': 'claude', 'allowed_commands': grants})
+        storage.save('prepare-fixture', definition)
+        saved = storage.get('prepare-fixture')
+        run, registry = await run_flow(storage, workspace, saved, registry, timeout_seconds=120)
+    assert run['status'] == 'completed', run
+    workers = [task for task in registry.tasks.values() if hasattr(task, 'acc')]
+    assert len(workers) == 1
+    assert workers[0].snapshot()['permission_denials'] == []
+    assert not workers[0].caller_approvals
+    assert requests
+    for repo in repos:
+        assert subprocess.check_output(['git', 'branch', '--show-current'], cwd=repo).strip() == b'feature/prep'

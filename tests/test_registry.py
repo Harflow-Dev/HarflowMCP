@@ -941,7 +941,7 @@ async def test_a_dispatch_below_publish_pays_no_thread_hop_for_the_branch_check(
     await task.done.wait()
 
     assert tasks_module._publish_branch_notice not in hops
-    assert task.bridge_notices == []
+    assert not any("default branch" in notice for notice in task.bridge_notices)
 
 
 def test_a_remote_head_pointing_at_a_deleted_branch_is_not_trusted(tmp_path: Path) -> None:

@@ -48,3 +48,42 @@ def check_bounds(patterns: Iterable[object]) -> tuple[str, ...]:
 def normalize(patterns: Iterable[object] | None) -> tuple[str, ...] | None:
     """None stays None (inherit); a list becomes a validated tuple (replace)."""
     return None if patterns is None else check_bounds(patterns)  # type: ignore[arg-type]
+
+
+def check_branch_preparation(patterns: Iterable[str], repo) -> None:
+    """Refuse initial dispatch with transition grants into dirty or unreadable repositories.
+
+    This is a dispatch preflight, not an execution-time lock. Call only after backend grammar
+    validation, never from invocation revalidation or resume of an editing task.
+    """
+    import os
+    import subprocess
+    from pathlib import Path
+
+    targets = set()
+    for pattern in patterns:
+        tokens = pattern.split(" ")
+        if tokens[:1] != ["git"]:
+            continue
+        args = tokens[1:]
+        target = Path(repo)
+        if args[:1] == ["-C"] and len(args) >= 3:
+            target = target / args[1]
+            args = args[2:]
+        if args and args[0] in ("pull", "switch", "checkout"):
+            targets.add(target.resolve())
+    for target in sorted(targets):
+        env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+        try:
+            result = subprocess.run(
+                ["git", "--no-optional-locks", "status", "--porcelain=v1", "--untracked-files=normal"],
+                cwd=target, env=env, capture_output=True, timeout=10, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise CommandGrantError(f"branch preparation cannot inspect {target}: {exc}; inspect the checkout and retry") from exc
+        if result.returncode:
+            raise CommandGrantError(f"branch preparation cannot inspect {target}: git status failed; verify this is an accessible Git checkout and retry")
+        if result.stdout:
+            raise CommandGrantError(
+                f"branch preparation refused for dirty checkout {target}; inspect git status and preserve or commit your changes before retrying; Harflow did not stash, reset or switch branches"
+            )

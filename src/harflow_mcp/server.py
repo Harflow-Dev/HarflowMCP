@@ -453,7 +453,14 @@ async def list_backends() -> list[dict[str, Any]]:
     capabilities.allowed_commands and caller_approval_support report their qualification gates.
     At unrestricted freedom, extra_writable_paths is a validated, disclosed no-op, not a bounded grant.
     """
-    return await asyncio.to_thread(backends.describe_all)
+    def describe():
+        from . import git_environment
+        result = backends.describe_all()
+        observation = git_environment.disclosure(git_environment.resolve(), git_environment.auth_status())
+        for item in result:
+            item["git_environment"] = observation
+        return result
+    return await asyncio.to_thread(describe)
 
 
 @task_operation(parameter="directory")
@@ -501,7 +508,7 @@ async def start_task(
     auto_continue: StrictInt = 0,
     notify: str | None = None,
     extra_writable_paths: list[StrictStr] | None = None,
-    allowed_commands: list[StrictStr] | None = None,
+    allowed_commands: list[StrictStr] | None = None, git_https_rewrite: StrictBool | None = None,
     resources: list[StrictStr] | None = None,
     resource_wait_seconds: StrictInt | None = None,
     worktree: dict[str, StrictStr | StrictBool | None] | None = None,
@@ -598,14 +605,20 @@ async def start_task(
             native adapters do not accept these grants. Use preview_task_permissions before launch.
             Keep qualified startup inputs stable: checks refuse observed changes but do not atomically
             pin configuration or executables against independently authorized concurrent writers.
+        git_https_rewrite: Optional boolean overriding HARFLOW_GIT_HTTPS_REWRITE (default on).
+            Appends process-local GitHub SSH-to-HTTPS URL configuration; never changes Git files.
+            HTTPS credentials, sandbox access and reachability remain external requirements.
         allowed_commands: Optional list of Bash command patterns granted for this run only, so a task can run
             specific commands (a test runner, a build) without `unrestricted`. At most 16 patterns, 256 bytes
             each and 2048 in total. Supported on Claude Code at write_in_repo and publish (see list_backends
             capabilities.allowed_commands); every other backend and access level refuses the request. Each
             pattern is a lowercase program followed by literal tokens, with at most one `*` as the final
             token or the `:*` suffix (`pytest` style: `python3 -m pytest:*`), and a wildcard needs a literal
-            subcommand or target (`make test:*`). Shells, wrappers, interpreter evaluation, git (use `publish`
-            for commit and push) and gh below `publish` are refused, and paths must stay inside the repository.
+            subcommand or target (`make test:*`). Shells, wrappers, interpreter evaluation and gh below
+            `publish` are refused. Exact Git fetch, ff-only pull and non-force switch/create grants are
+            supported at write_in_repo and publish; wildcard/config/reset/force Git grants are refused.
+            Initial transition grants require clean checkouts; later dirty races remain Git controlled.
+            Commit/push authority is separate (`publish`); paths must stay inside the repository.
             The grammar is a guard against mistakes, not a security boundary: grants are prefix approvals in
             Claude's permission layer, a granted program can run repository code, chained commands need every
             part allowed, and the access level's git commit and push denies still win. Omitted or null grants
@@ -680,6 +693,8 @@ async def start_task(
             raise MCPError(INVALID_PARAMS, "Workflow approval policy and ownership belong to saved candidates and root workflow launch")
         if extra_writable_paths is not None:
             raise MCPError(INVALID_PARAMS, "extra_writable_paths is unavailable for workflow launches")
+        if git_https_rewrite is not None:
+            raise MCPError(INVALID_PARAMS, "Set git_https_rewrite on saved workflow agent candidates")
         if allowed_commands is not None:
             raise MCPError(INVALID_PARAMS, "allowed_commands is unavailable for workflow launches; grant commands on saved workflow agent candidates instead")
         if auto_continue:
@@ -767,7 +782,7 @@ async def start_task(
             title=normalized_title,
             auto_continue=auto_continue,
             **({'extra_writable_paths': extra_writable_paths} if extra_writable_paths is not None else {}),
-            **({'allowed_commands': allowed_commands} if allowed_commands is not None else {}),
+            **({'allowed_commands': allowed_commands} if allowed_commands is not None else {}), **({'git_https_rewrite': git_https_rewrite} if git_https_rewrite is not None else {}),
             **({'resources': resources} if resources is not None else {}),
             **({'resource_wait_seconds': resource_wait_seconds} if resource_wait_seconds is not None else {}),
             **({'worktree': worktree} if worktree is not None else {}),
@@ -889,7 +904,7 @@ async def preview_task_permissions(
     caller_approvals: StrictBool = False,
     extra_writable_paths: list[StrictStr] | None = None,
     caller_write_approvals: StrictBool = False,
-    allowed_commands: list[StrictStr] | None = None,
+    allowed_commands: list[StrictStr] | None = None, git_https_rewrite: StrictBool | None = None,
     qualification_only: StrictBool = False,
 ) -> dict[str, Any]:
     """Preview standalone task permissions without launching an agent or allocating scratch.
@@ -926,7 +941,7 @@ async def preview_task_permissions(
             extra_writable_paths=extra_writable_paths,
             caller_approvals=caller_approvals,
             **({"caller_write_approvals": True} if caller_write_approvals else {}),
-            **({"allowed_commands": allowed_commands} if allowed_commands is not None else {}),
+            **({"allowed_commands": allowed_commands} if allowed_commands is not None else {}), **({"git_https_rewrite": git_https_rewrite} if git_https_rewrite is not None else {}),
         )
     except (ValueError, backends.UnsupportedCapability) as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
@@ -1524,7 +1539,7 @@ async def wait_for_tasks(
 
 @mcp.tool()
 @_task_document_errors
-async def continue_task(task_id: str, extra_prompt: str | None = None, notes_path: str | None = None, background_idle_seconds: StrictFloat | StrictInt | None = None, allowed_commands: list[StrictStr] | None = None) -> dict[str, Any]:
+async def continue_task(task_id: str, extra_prompt: str | None = None, notes_path: str | None = None, background_idle_seconds: StrictFloat | StrictInt | None = None, allowed_commands: list[StrictStr] | None = None, git_https_rewrite: StrictBool | None = None) -> dict[str, Any]:
     """Start a fresh session from a conclusively settled standalone task.
 
     This differs from resume_task: it reconstructs the original assignment, latest summary and
@@ -1559,7 +1574,7 @@ async def continue_task(task_id: str, extra_prompt: str | None = None, notes_pat
         if source is not None:
             _check_allowed_commands(backends.get(source.backend), source.freedom, Path(source.repo_path), allowed_commands)
     try:
-        task = await _reg().continue_task(task_id, extra_prompt, notes_path, consume_followups=True, **({'background_idle_seconds': background_idle_seconds} if background_idle_seconds is not None else {}), **({'allowed_commands': allowed_commands} if allowed_commands is not None else {}))
+        task = await _reg().continue_task(task_id, extra_prompt, notes_path, consume_followups=True, **({'background_idle_seconds': background_idle_seconds} if background_idle_seconds is not None else {}), **({'allowed_commands': allowed_commands} if allowed_commands is not None else {}), **({'git_https_rewrite': git_https_rewrite} if git_https_rewrite is not None else {}))
     except (ValueError, OSError, backends.UnsupportedCapability) as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
     return task.brief() | {"enforcement": task.enforcement}
@@ -1573,7 +1588,7 @@ async def resume_task(
     max_turns: int | None = None,
     background_idle_seconds: StrictFloat | StrictInt | None = None,
     network: StrictBool | None = None,
-    allowed_commands: list[StrictStr] | None = None,
+    allowed_commands: list[StrictStr] | None = None, git_https_rewrite: StrictBool | None = None,
 ) -> dict[str, Any]:
     """Continue a finished task's session with follow-up instructions.
 
@@ -1655,7 +1670,7 @@ async def resume_task(
                 _check_allowed_commands(backends.get(parent.backend), parent.freedom, Path(parent.repo_path), allowed_commands)
             task = await _reg().resume(
                 parent, followup_prompt, max_turns=max_turns, network=network, background_idle_seconds=background_idle_seconds,
-                consume_followups=True, **({'allowed_commands': allowed_commands} if allowed_commands is not None else {}),
+                consume_followups=True, **({'allowed_commands': allowed_commands} if allowed_commands is not None else {}), **({'git_https_rewrite': git_https_rewrite} if git_https_rewrite is not None else {}),
             )
         else:
             record = _reg().recover(task_id)
@@ -1673,7 +1688,7 @@ async def resume_task(
                 _check_allowed_commands(backends.get(record.backend), record.freedom, Path(record.repo_path), allowed_commands)
             task = await _reg().resume_record(
                 record, followup_prompt, max_turns=max_turns, network=network, background_idle_seconds=background_idle_seconds,
-                consume_followups=True, **({'allowed_commands': allowed_commands} if allowed_commands is not None else {}),
+                consume_followups=True, **({'allowed_commands': allowed_commands} if allowed_commands is not None else {}), **({'git_https_rewrite': git_https_rewrite} if git_https_rewrite is not None else {}),
             )
     except (SessionBusyError, SessionUnknownError, RepoUnavailableError) as exc:
         raise MCPError(INVALID_PARAMS, str(exc)) from None
@@ -3018,6 +3033,8 @@ def main() -> None:
     if "--help" in sys.argv[1:] or "-h" in sys.argv[1:]:
         print("HarflowMCP stdio server; state root: HARFLOW_STATE_ROOT or HOME/.harflow")
         return
+    from .git_environment import auth_status
+    auth_status()  # bounded, sanitized observation; no credential output is retained
     from .workflow_interactions import capture_transport_parent
     capture_transport_parent()
     from .state_layout import InvalidStateRoot, resolve_layout

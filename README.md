@@ -23,6 +23,21 @@ Current seed measurements for these two features: `allowed_commands` is qualifie
 
 Vibe 3.0.1 headless dispatch uses its Rust CLI and the `ask` approval profile for `read_only`. This is an approval policy, not a write-tool exclusion: inherited policies or custom profiles can pre-approve writes. The retained `VIBE_CLI=python` selector is ignored by Vibe 3; interactive takeover inherits the user's environment.
 
+`publish` authorizes publication attempts; its enforcement depends on the backend:
+
+| Backend | Publish mechanism |
+| --- | --- |
+| Claude | Allows `git commit`, `git push`, `gh pr create/edit/view/comment/review/checks/diff/list`, and `gh repo view`, including their `--help` forms. |
+| Codex | Enables network in its workspace sandbox; it does not restrict individual GitHub commands. |
+| opencode | Uses the same `build` policy as `write_in_repo`; inherited harness settings still decide command approval. |
+| Vibe / Antigravity | Uses the same approval bypass as `unrestricted`; individual GitHub operations are not filtered. |
+
+Claude's built-in list excludes merge, repository deletion, releases and raw `gh api` calls.
+Its prefix matcher cannot safely distinguish read API calls from writes; use `gh pr view --json`
+or `gh repo view --json` for supported reads. These are Harflow-supplied command grants,
+not an OS Git sandbox; inherited settings and hooks can still allow or deny commands.
+Permission previews expose the actual mechanism and caveats. See [publication permissions](docs/contracts.md#publication-permission-policy).
+
 Version 0.0.4 is a pre-release. [Harflow](https://github.com/Harflow-Dev/HarflowMac), the companion macOS application, is maintained separately and prepares its own exact paired engine runtime. Its managed runtime and MCP registrations work independently of the app process; see the [managed runtime guide](https://github.com/Harflow-Dev/HarflowMac/blob/main/docs/managed-runtime.md).
 
 Detached task owners preserve output capture and live input across MCP server restarts.
@@ -87,6 +102,19 @@ Finished retained-history statistics are available to verified direct callers th
 Clients require capability `statistics-page.v1`; older engines remain unsupported. Results
 disclose retention, missing accounting and bounded preparation rather than assuming complete
 history or zero usage. See [statistics contracts](docs/contracts.md#finished-retained-history-statistics).
+
+For narrowly authorized branch preparation on qualified Claude Code, exact `allowed_commands`
+grants for fetch, fast-forward-only pull and non-force branch switching/creation work at
+`write_in_repo` as well as `publish`. Initial transitions refuse dirty checkouts without stashing
+or resetting; commit/push authority remains separate. See the
+[grant grammar and per-run workflow migration](docs/harness-permissions.md#dispatch-time-command-grants-allowed_commands).
+Other backends explicitly refuse command-grant requests rather than silently broadening access.
+
+GitHub dependencies using SSH URLs are configured to use HTTPS in headless child processes by
+default. Set `HARFLOW_GIT_HTTPS_REWRITE=0` on the server to disable this, or override a task with
+`git_https_rewrite` (`harflow-ctl run --no-git-https-rewrite`). Configure private repository credentials
+with `gh auth setup-git`; Harflow never reads or stores tokens. See [Git transport](docs/git-transport.md)
+for observations and sandbox limitations.
 
 See the [Changelog](CHANGELOG.md) for change history.
 

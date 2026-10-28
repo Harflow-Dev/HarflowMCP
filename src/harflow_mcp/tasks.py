@@ -1245,11 +1245,15 @@ class TaskRegistry:
 
     @_with_authority_check_budget
     @layout_operation
-    async def preview_permissions(self, repo_path: Path, *, backend: Backend, freedom: str = "write_in_repo", network: bool | None = None, caller_approvals: bool = False, extra_writable_paths: list[str] | None = None, caller_write_approvals: bool = False, allowed_commands: list[str] | None = None, qualification_only: bool = False) -> dict[str, Any]:
+    async def preview_permissions(self, repo_path: Path, *, backend: Backend, freedom: str = "write_in_repo", network: bool | None = None, caller_approvals: bool = False, extra_writable_paths: list[str] | None = None, caller_write_approvals: bool = False, allowed_commands: list[str] | None = None, git_https_rewrite: bool | None = None, qualification_only: bool = False) -> dict[str, Any]:
         from .extra_paths import serialize_paths
         from . import approval_runtime
         approval_runtime.validate(backend, caller_approvals, freedom, None, write=caller_write_approvals)
         commands = self._command_grants(backend, allowed_commands, (), freedom, repo_path)
+        from . import git_environment
+        from .command_grants import check_branch_preparation
+        await asyncio.to_thread(check_branch_preparation, commands, repo_path)
+        git_https_rewrite = git_environment.resolve(git_https_rewrite)
         if qualification_only:
             from .qualification_plan import discover
             return await asyncio.to_thread(discover, [("task", {"backend": backend.name, "caller_approvals": caller_approvals, "caller_write_approvals": caller_write_approvals, "allowed_commands": commands})])
@@ -1272,6 +1276,7 @@ class TaskRegistry:
             backend.assert_safe(invocation, freedom, network)
         enforcement = self._extra_enforcement(backend, backend.enforcement(freedom, network), grants, repo_path)
         enforcement = self._with_commands(backend, approval_runtime.with_approval_enforcement(backend, enforcement, approval_version, caller_approvals, caller_write_approvals), commands)
+        enforcement = replace(enforcement, git_environment=git_environment.disclosure(git_https_rewrite, await asyncio.to_thread(git_environment.auth_status)))
         self._resolve_lineage(caller, child_enforcement=enforcement, child_backend=backend.name, child_repo=repo_path, caller_write_approvals=caller_write_approvals)
         # A dispatch grants every non-read-only task of a scratch-aware backend a task-owned
         # scratch directory and appends its path to the recorded writable_roots — after the
@@ -1311,7 +1316,7 @@ class TaskRegistry:
         chain_prompt: str | None = None,
         extra_writable_paths: list[str] | None = None,
         message_ids: list[str] | None = None,
-        allowed_commands: list[str] | None = None,
+        allowed_commands: list[str] | None = None, git_https_rewrite: bool | None = None,
         resources: list[str] | None = None,
         resource_wait_seconds: int | None = None,
         resource_inherit: dict[str, Any] | None = None,
@@ -1358,6 +1363,11 @@ class TaskRegistry:
             if grants and workflow_builder:
                 raise ValueError("Extra writable paths are unavailable to workflow builders")
             commands = self._command_grants(backend, allowed_commands, source.allowed_commands if source is not None else (), freedom, repo_path, builder=workflow_builder)
+            from . import git_environment
+            git_https_rewrite = git_environment.inherited(git_https_rewrite, source)
+            if not continuation_of_task_id:
+                from .command_grants import check_branch_preparation
+                await asyncio.to_thread(check_branch_preparation, commands, repo_path)
             # Only some backends let us name the session up front. Where we can, knowing it immediately
             # means a resume works even if the run dies before saying anything.
             session_id = str(uuid.uuid4()) if backend.capabilities.chooses_session_id else None
@@ -1420,6 +1430,7 @@ class TaskRegistry:
             caller_approvals=caller_approvals,
             caller_write_approvals=caller_write_approvals,
             allowed_commands=commands,
+            git_https_rewrite=git_https_rewrite,
             interaction_owner=interaction_owner,
             spawned_by=spawned_by,
             root_task_id=root_task_id,
@@ -1539,7 +1550,7 @@ class TaskRegistry:
 
     @_with_authority_check_budget
     @layout_operation
-    async def continue_task(self, task_id: str, extra_prompt: str | None = None, notes_path: str | None = None, *, automatic: bool = False, consume_followups: bool = False, background_idle_seconds: float | None = None, allowed_commands: list[str] | None = None) -> Task:
+    async def continue_task(self, task_id: str, extra_prompt: str | None = None, notes_path: str | None = None, *, automatic: bool = False, consume_followups: bool = False, background_idle_seconds: float | None = None, allowed_commands: list[str] | None = None, git_https_rewrite: bool | None = None) -> Task:
         """Start a fresh session from a durably settled task without broadening access.
 
         `consume_followups` is set by the caller-facing paths only; an automatic continuation never
@@ -1547,7 +1558,7 @@ class TaskRegistry:
         from .state_layout import require_dispatch_layout
         require_dispatch_layout(self._log_dir)
         from .task_continuation import continue_task
-        return await continue_task(self, task_id, extra_prompt, notes_path, automatic=automatic, consume_followups=consume_followups, background_idle_seconds=background_idle_seconds, allowed_commands=allowed_commands)
+        return await continue_task(self, task_id, extra_prompt, notes_path, automatic=automatic, consume_followups=consume_followups, background_idle_seconds=background_idle_seconds, allowed_commands=allowed_commands, git_https_rewrite=git_https_rewrite)
 
     @_with_authority_check_budget
     @layout_operation
@@ -1566,7 +1577,7 @@ class TaskRegistry:
         native_settings: dict[str, Any] | None = None,
         require_unchanged_session: bool = False,
         consume_followups: bool = False,
-        allowed_commands: list[str] | None = None,
+        allowed_commands: list[str] | None = None, git_https_rewrite: bool | None = None,
     ) -> Task:
         """Continue the session; strict inheritance may require no later writers.
 
@@ -1582,7 +1593,7 @@ class TaskRegistry:
                 network=network, task_id=task_id, display_prompt=display_prompt,
                 workflow_builder=workflow_builder, native_subagent=native_subagent,
                 native_settings=native_settings, require_unchanged_session=require_unchanged_session,
-                consume_followups=consume_followups, allowed_commands=allowed_commands)
+                consume_followups=consume_followups, allowed_commands=allowed_commands, git_https_rewrite=git_https_rewrite)
         from .task_supervision import read_task_record
         read_task_record(self._log_dir, parent.task_id, include_prompt=False)
         from .state_layout import require_dispatch_layout
@@ -1617,6 +1628,8 @@ class TaskRegistry:
         if grants and (native_subagent or workflow_builder):
             raise ValueError("Extra writable paths are unavailable to native workflows or workflow builders")
         commands = self._command_grants(backend, allowed_commands, parent.allowed_commands, parent.freedom, Path(parent.repo_path), native=native_subagent, builder=workflow_builder)
+        from . import git_environment
+        git_https_rewrite = git_environment.inherited(git_https_rewrite, parent)
         spawned_by, root_task_id, depth, max_depth, lineage_detected = self._resolve_lineage(
             caller,
             child_enforcement=self._with_commands(backend, self._extra_enforcement(backend, backend.enforcement(parent.freedom, effective_network), grants, parent.repo_path), commands),  # type: ignore[arg-type]
@@ -1677,6 +1690,7 @@ class TaskRegistry:
                     caller_approvals=parent.caller_approvals,
                     caller_write_approvals=parent.caller_write_approvals,
                     allowed_commands=commands,
+                    git_https_rewrite=git_https_rewrite,
                     interaction_owner=parent.interaction_owner,
                     grants=grants,
                     native_subagent=native_subagent,
@@ -1733,6 +1747,7 @@ class TaskRegistry:
         consume_followups: bool,
         background_idle_seconds: float | None = None,
         allowed_commands: tuple[str, ...] = (),
+        git_https_rewrite: bool | None = None,
         resource_request: dict[str, Any] | None = None,
         worktree_info: dict[str, Any] | None = None,
         scratch_chain_id: str | None = None,
@@ -1814,6 +1829,7 @@ class TaskRegistry:
                 caller_approvals=caller_approvals,
                 caller_write_approvals=caller_write_approvals,
                 allowed_commands=allowed_commands,
+                git_https_rewrite=git_https_rewrite,
                 interaction_owner=interaction_owner,
                 parent_task_id=parent_task_id,
                 spawned_by=spawned_by,
@@ -1904,6 +1920,7 @@ class TaskRegistry:
         chain_prompt: str | None = None,
         message_ids: list[str] | None = None,
         allowed_commands: tuple[str, ...] | list[str] = (),
+        git_https_rewrite: bool | None = None,
         resource_grant: dict[str, Any] | None = None,
         worktree_info: dict[str, Any] | None = None,
     ) -> Task:
@@ -1997,6 +2014,10 @@ class TaskRegistry:
                 enforcement = self._extra_enforcement(backend, enforcement, extra_path_grants, repo_path)
             enforcement = approval_runtime.with_approval_enforcement(backend, enforcement, approval_version, caller_approvals, caller_write_approvals)
             enforcement = self._with_commands(backend, enforcement, allowed_commands)
+            from . import git_environment
+            git_https_rewrite = git_environment.resolve(git_https_rewrite)
+            git_auth_status = await asyncio.to_thread(git_environment.auth_status)
+            enforcement = replace(enforcement, git_environment=git_environment.disclosure(git_https_rewrite, git_auth_status))
 
             # Before the spawn, deliberately. Between `create_subprocess_exec` and the registration
             # below there must be no await at all: one there could be cancelled — a client
@@ -2030,6 +2051,7 @@ class TaskRegistry:
             # harflow_mcp imposes rather than about reachability. Sync, so the no-await window below
             # is untouched.
             bridge_notices: list[str] = [publish_notice] if publish_notice else []
+            bridge_notices.append(git_environment.notice(git_https_rewrite, git_auth_status))
             if caller_approvals:
                 bridge_notices.append(approval_runtime.notice(backend, caller_write_approvals))
             if network is True and enforcement.network_access == "not_controlled":
@@ -2061,6 +2083,9 @@ class TaskRegistry:
 
             # Allocate after initial probes. Final authority reads may await below; the enclosing
             # cleanup boundary removes scratch on timeout, refusal or cancellation.
+            # Refuse malformed ambient Git config before allocating any scratch folders.
+            from .state_layout import child_environment
+            git_environment.configure({**child_environment(self.state_layout), **invocation.env}, git_https_rewrite)
             task_scratch = None
             allocation = None
             try:
@@ -2068,7 +2093,6 @@ class TaskRegistry:
                 task_granted = False
                 if freedom != "read_only" and scratch_allowed:
                     from . import scratch
-                    from dataclasses import replace
                     task_scratch = scratch.create(self._log_dir, task_id)
                     writable = getattr(backend, "with_writable_directory", None)
                     if writable is not None:
@@ -2094,6 +2118,24 @@ class TaskRegistry:
                     await _bounded_extra_path_check(self._assert_extra_state, repo_path, extra_path_grants, invocation)
                     if freedom != "unrestricted":
                         await _bounded_extra_path_check(backend.assert_extra_writable_paths, invocation, extra_path_grants, freedom, network)
+                # So a nested harflow_mcp server started by this agent (a codex/vibe MCP tool call, a
+                # claude/opencode subprocess) can find its way back to this task via
+                # `lineage.detect_caller`'s HARFLOW_TASK_ID method, when the environment survives that far.
+                # Built here, synchronously, so it introduces no await into the no-await window below.
+                from .state_layout import child_environment
+                spawn_env = {
+                    **child_environment(self.state_layout),
+                    **invocation.env,
+                    lineage.ENV_TASK_ID: task_id,
+                    lineage.ENV_ROOT_TASK_ID: root_task_id,
+                    lineage.ENV_DEPTH: str(depth),
+                    "PB_TASK_ID": task_id,
+                    "PB_DEPTH": str(depth),
+                    "HARFLOW_BACKGROUND_IDLE_SECONDS": str(background_idle_seconds),
+                }
+
+                spawn_env = git_environment.configure(spawn_env, git_https_rewrite)
+
             except BaseException:
                 shared_hold.release()
                 if task_scratch is not None:
@@ -2107,22 +2149,6 @@ class TaskRegistry:
             guidance_state = system_guidance.state_of(
                 mode, delivered=invocation.system_guidance is not None,
                 resume=parent_task_id is not None and self._parent_carried_guidance(parent_task_id))
-
-            # So a nested harflow_mcp server started by this agent (a codex/vibe MCP tool call, a
-            # claude/opencode subprocess) can find its way back to this task via
-            # `lineage.detect_caller`'s HARFLOW_TASK_ID method, when the environment survives that far.
-            # Built here, synchronously, so it introduces no await into the no-await window below.
-            from .state_layout import child_environment
-            spawn_env = {
-                **child_environment(self.state_layout),
-                **invocation.env,
-                lineage.ENV_TASK_ID: task_id,
-                lineage.ENV_ROOT_TASK_ID: root_task_id,
-                lineage.ENV_DEPTH: str(depth),
-                "PB_TASK_ID": task_id,
-                "PB_DEPTH": str(depth),
-                "HARFLOW_BACKGROUND_IDLE_SECONDS": str(background_idle_seconds),
-            }
 
             for name in shared_scratch.ENV_NAMES:
                 spawn_env.pop(name, None)
@@ -4338,7 +4364,7 @@ class TaskRegistry:
         native_settings: dict[str, Any] | None = None,
         require_unchanged_session: bool = False,
         consume_followups: bool = False,
-        allowed_commands: list[str] | None = None,
+        allowed_commands: list[str] | None = None, git_https_rewrite: bool | None = None,
     ) -> Task:
         """Continue the session of a task recovered from disk (see `resume` for the flags)."""
         from .state_layout import require_dispatch_layout
@@ -4382,6 +4408,8 @@ class TaskRegistry:
         if grants and (native_subagent or workflow_builder):
             raise ValueError("Extra writable paths are unavailable to native workflows or workflow builders")
         commands = self._command_grants(backend, allowed_commands, record.allowed_commands, record.freedom, repo_path, native=native_subagent, builder=workflow_builder)
+        from . import git_environment
+        git_https_rewrite = git_environment.inherited(git_https_rewrite, record)
         spawned_by, root_task_id, depth, max_depth, lineage_detected = self._resolve_lineage(
             caller,
             child_enforcement=self._with_commands(backend, self._extra_enforcement(backend, backend.enforcement(record.freedom, effective_network), grants, repo_path), commands),  # type: ignore[arg-type]
@@ -4437,6 +4465,7 @@ class TaskRegistry:
                     caller_approvals=record.caller_approvals,
                     caller_write_approvals=record.caller_write_approvals,
                     allowed_commands=commands,
+                    git_https_rewrite=git_https_rewrite,
                     interaction_owner=record.interaction_owner,
                     grants=grants,
                     native_subagent=native_subagent,

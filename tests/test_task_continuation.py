@@ -745,3 +745,11 @@ async def test_recovered_cancel_handoff_retries_only_verified_replacement(tmp_pa
         assert raised.value is failure
         assert calls == (3 if failure_mode == 'exhausted' else 1)
         delivery.assert_not_awaited()
+
+
+async def test_continuation_passes_git_transport_override(tmp_path, monkeypatch):
+    monkeypatch.setattr('harflow_mcp.workflow_hooks.refuse_managed', lambda *args: None)
+    source = record(tmp_path)
+    registry = Registry(tmp_path)
+    await continue_task(registry, source.task_id, git_https_rewrite=False)
+    assert registry.start.await_args.kwargs['git_https_rewrite'] is False
