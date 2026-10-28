@@ -454,6 +454,14 @@ carry `requested_timeout_seconds`, `effective_timeout_seconds`, `until`, `timed_
 Repeat the wait while the run is active, and see
 [the wait guide](multi-task-waiting.md) for client request deadlines.
 
+When an answer or recovery returns a run to active execution, its resolved attention reason
+and obsolete input presentation are cleared. Status reads also suppress these stale fields
+on older active records, while still deriving current questions and attention from children.
+Workflow approval summaries keep read problems separate from approval interactions: an
+unreadable ledger does not itself interrupt a wait for caller attention. Incomplete summaries
+include bounded `read_errors` identifying the task (or workflow traversal), exception type
+and message. Readable sibling requests and known approval ownership uncertainty remain visible.
+
 For example, load the supplied [implementation/review workflow](../examples/workflows/implement-review.json):
 
 ```bash

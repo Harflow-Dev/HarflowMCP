@@ -228,6 +228,11 @@ def on_demand_projection(storage: Any, run: dict[str, Any]) -> dict[str, Any]:
     from .approval_runtime import workflow_summary
     view = {} if run.get("kind") == "builder" else projection(storage, run)
     result = {**run, **view, "approval_summary": workflow_summary(storage.root / "tasks", run["workflow_run_id"])}
+    if run.get("status") in {"running", "building", "starting", "pending"}:
+        # Older records may retain a resolved suspension. Derive any live
+        # descendant attention below, rather than displaying its stale reason.
+        for key in ("attention_reason", "attention_source", "input_question", "input_question_items", "input_decision_id", "input_source", "optional_review_skip_available"):
+            result.pop(key, None)
     if run.get("dependency_tree") or any(a.get("invocation") for a in run.get("activations", [])):
         from .workflow_inputs import project
         waiting = project(storage, run)

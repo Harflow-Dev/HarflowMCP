@@ -99,7 +99,7 @@ def _qualified(data: Any, task_id: str) -> bytes:
         raise ValueError("Invalid approval ledger") from exc
 
 
-def _read(directory: Path, path: Path, task_id: str) -> dict[str, Any]:
+def _read(directory: Path, path: Path, task_id: str, *, source_budget: list[int] | None = None) -> dict[str, Any]:
     layout = task_layout(directory)
     require_state_path(layout, path)
     validate_task_id(task_id)
@@ -118,14 +118,19 @@ def _read(directory: Path, path: Path, task_id: str) -> dict[str, Any]:
             raise ValueError("Approval ledger is not a regular file")
         if source.st_size > MAX_LEDGER_BYTES:
             raise ValueError("Approval ledger exceeds its byte bound")
+        available = MAX_LEDGER_BYTES if source_budget is None else min(MAX_LEDGER_BYTES, source_budget[0])
+        if source.st_size > available:
+            raise ValueError("Approval summary source budget exceeded")
         raw = bytearray()
-        while len(raw) <= MAX_LEDGER_BYTES:
-            chunk = os.read(fd, min(64 * 1024, MAX_LEDGER_BYTES + 1 - len(raw)))
+        while len(raw) <= available:
+            chunk = os.read(fd, min(64 * 1024, available + 1 - len(raw)))
             if not chunk:
                 break
             raw.extend(chunk)
-        if len(raw) > MAX_LEDGER_BYTES:
-            raise ValueError("Approval ledger exceeds its byte bound")
+            if source_budget is not None:
+                source_budget[0] = max(0, source_budget[0] - len(chunk))
+        if len(raw) > available:
+            raise ValueError("Approval summary source budget exceeded" if available < MAX_LEDGER_BYTES else "Approval ledger exceeds its byte bound")
     finally:
         fd.close()
     try:
@@ -193,35 +198,54 @@ def awaiting_count(requests: list[dict[str, Any]]) -> int:
 
 
 @task_operation
-def summary(directory: Path, task_id: str) -> dict[str, Any]:
+def summary_strict(directory: Path, task_id: str, *, source_budget: list[int] | None = None) -> dict[str, Any]:
+    """Project known state, propagating source errors for workflow diagnostics."""
+    records = _read(directory, _path(directory, task_id), task_id, source_budget=source_budget)["requests"]
+    # A Harflow system rejection is answered at admission: nothing for a caller to decide.
+    pending = [r for r in records if r["disposition"] == "pending" and r["delivery"] in ACTIVE and not r.get("system_rejection")]
+    uncertain = [r for r in records if r["delivery"] in {"sending", "delivery_unknown"} and r["execution_outcome"] == "unknown"]
+    result = {"pending_count": 0, "awaiting_decision_count": 0, "delivery_uncertain_count": 0, "interaction_state": None, "requests": [], "uncertainty_requests": []}
+    if not pending and not uncertain:
+        return result
+    from . import identity, store
     try:
-        records = rows(directory, task_id)
-        # A Harflow system rejection is answered at admission: nothing for a caller to decide.
-        pending = [r for r in records if r["disposition"] == "pending" and r["delivery"] in ACTIVE and not r.get("system_rejection")]
-        uncertain = [r for r in records if r["delivery"] in {"sending", "delivery_unknown"} and r["execution_outcome"] == "unknown"]
-        result = {"pending_count": 0, "awaiting_decision_count": 0, "delivery_uncertain_count": 0, "interaction_state": None, "requests": [], "uncertainty_requests": []}
-        if not pending and not uncertain:
-            return result
-        from . import identity, store
         record = store.read(directory, task_id, include_prompt=False, metadata_byte_limit=256 * 1024)
         if record is None:
             raise ValueError("Approval task record unavailable")
-        # PID loss and inferred failure are not observed execution settlement.
-        settled = record.exit_code is not None and record.output_drained is True
-        if settled:
-            result["invalidated_count"] = len(pending)
-            return result
-        if uncertain:
-            result.update(delivery_uncertain_count=len(uncertain), uncertainty_requests=[metadata(r) for r in uncertain], interaction_state="approval_state_uncertain")
-        if pending:
-            process_state = identity.identity_check(pending[0]["process_identity"])
-            owner_state = identity.identity_check(pending[0]["bridge_owner"])
-            if record.status != "running" or process_state != "alive" or owner_state != "alive":
-                result.update(interaction_state="approval_state_uncertain", error="Approval pipe ownership is lost or uncertain; prior decisions cannot be replayed")
-            else:
-                result.update(pending_count=len(pending), awaiting_decision_count=awaiting_count(pending), requests=[metadata(r) for r in pending])
-                if not uncertain:
-                    result["interaction_state"] = "waiting_for_approval"
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        # The ledger already established unresolved requests. Missing task metadata
+        # cannot establish settlement or ownership, so preserve that uncertainty.
+        result.update(interaction_state="approval_state_uncertain",
+                      delivery_uncertain_count=len(uncertain),
+                      uncertainty_requests=[metadata(r) for r in uncertain],
+                      error="Approval task ownership is unavailable",
+                      read_error={"error_type": type(exc).__name__, "message": str(exc)[:512]})
+        return result
+    # PID loss and inferred failure are not observed execution settlement.
+    settled = record.exit_code is not None and record.output_drained is True
+    if settled:
+        result["invalidated_count"] = len(pending)
+        return result
+    if uncertain:
+        result.update(delivery_uncertain_count=len(uncertain), uncertainty_requests=[metadata(r) for r in uncertain], interaction_state="approval_state_uncertain")
+    if pending:
+        process_state = identity.identity_check(pending[0]["process_identity"])
+        owner_state = identity.identity_check(pending[0]["bridge_owner"])
+        if record.status != "running" or process_state != "alive" or owner_state != "alive":
+            result.update(interaction_state="approval_state_uncertain", error="Approval pipe ownership is lost or uncertain; prior decisions cannot be replayed")
+        else:
+            result.update(pending_count=len(pending), awaiting_decision_count=awaiting_count(pending), requests=[metadata(r) for r in pending])
+            if not uncertain:
+                result["interaction_state"] = "waiting_for_approval"
+    return result
+
+
+@task_operation
+def summary(directory: Path, task_id: str) -> dict[str, Any]:
+    try:
+        result = summary_strict(directory, task_id)
+        if "read_error" in result:
+            raise ValueError("Approval task record unavailable")
         return result
     except (OSError, ValueError, KeyError):
         return {"pending_count": 0, "awaiting_decision_count": 0, "delivery_uncertain_count": 0, "interaction_state": "approval_state_uncertain", "requests": [], "uncertainty_requests": [], "error": "Approval ledger unavailable; execution must be reconciled"}

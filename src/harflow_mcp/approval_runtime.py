@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import time
 import uuid
@@ -581,25 +582,57 @@ async def pump(registry: Any, task: Any) -> bool:
     return task.approval_pending
 
 
+WORKFLOW_APPROVAL_SOURCE_BYTES = 8 * 1024 * 1024
+MAX_APPROVAL_READ_ERRORS = 32
+MAX_APPROVAL_ERROR_MESSAGE = 512
+
+
 @task_operation
 def workflow_summary(directory: Path, run_id: str) -> dict[str, Any]:
-    """Bounded metadata only, aggregated through reciprocal root-owned child links."""
+    """Aggregate readable ledgers, separating source failures from known approval state."""
+    records = []
+    uncertainty_records = []
+    uncertain = False
+    errors = []
+    error_count = 0
+
+    def read_error(identifier_key, identifier, exc):
+        nonlocal error_count
+        error_count += 1
+        if len(errors) < MAX_APPROVAL_READ_ERRORS:
+            errors.append({identifier_key: identifier[:256], "error_type": type(exc).__name__,
+                           "message": str(exc)[:MAX_APPROVAL_ERROR_MESSAGE]})
+
     try:
-        records = []
-        remaining = 8 * 1024 * 1024
-        uncertain = False
-        uncertainty_records = []
-        for task_id in workflow_task_ids(directory, run_id):
-            path = approvals._path(directory, task_id)
-            if path.exists():
-                remaining -= path.stat().st_size
-                if remaining < 0:
-                    raise ValueError("Approval summary source budget exceeded")
-            view = approvals.summary(directory, task_id)
-            uncertain |= view["interaction_state"] == "approval_state_uncertain"
-            records.extend(view["requests"])
-            uncertainty_records.extend(view.get("uncertainty_requests", []))
-        records.sort(key=lambda row: (row["created_at"], row["request_id"]))
-        return {"pending_count": len(records), "awaiting_decision_count": approvals.awaiting_count(records), "delivery_uncertain_count": len(uncertainty_records), "uncertainty_requests": uncertainty_records[:32], "interaction_state": "approval_state_uncertain" if uncertain else "waiting_for_approval" if records else None, "requests": records[:32], "has_more": len(records) > 32}
-    except (OSError, ValueError, KeyError, TypeError):
-        return {"pending_count": 0, "awaiting_decision_count": 0, "interaction_state": "approval_state_uncertain", "requests": [], "error": "Workflow approval ownership is unavailable"}
+        task_ids = workflow_task_ids(directory, run_id)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        read_error("workflow_run_id", run_id, exc)
+        task_ids = []
+    budget = [WORKFLOW_APPROVAL_SOURCE_BYTES]
+    for task_id in task_ids:
+        try:
+            view = approvals.summary_strict(directory, task_id, source_budget=budget)
+            for row in [*view["requests"], *view.get("uncertainty_requests", [])]:
+                created = row.get("created_at")
+                if (type(created) not in {int, float} or type(created) is float and not math.isfinite(created)
+                        or not isinstance(row.get("request_id"), str)):
+                    raise ValueError("Invalid approval request ordering metadata")
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            read_error("task_id", task_id, exc)
+            continue
+        if detail := view.get("read_error"):
+            error_count += 1
+            if len(errors) < MAX_APPROVAL_READ_ERRORS:
+                errors.append({"task_id": task_id[:256], **detail})
+        uncertain |= view["interaction_state"] == "approval_state_uncertain"
+        records.extend(view["requests"])
+        uncertainty_records.extend(view.get("uncertainty_requests", []))
+    records.sort(key=lambda row: (row["created_at"], row["request_id"]))
+    result = {"pending_count": len(records), "awaiting_decision_count": approvals.awaiting_count(records),
+            "delivery_uncertain_count": len(uncertainty_records), "uncertainty_requests": uncertainty_records[:32],
+            "interaction_state": "approval_state_uncertain" if uncertain else "waiting_for_approval" if records else None,
+            "requests": records[:32], "has_more": len(records) > 32}
+    if error_count:
+        result.update(read_status="incomplete", read_errors=errors, read_error_count=error_count,
+                      read_errors_truncated=error_count > len(errors))
+    return result

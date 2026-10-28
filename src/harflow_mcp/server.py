@@ -2712,7 +2712,9 @@ async def get_workflow_status(workflow_run_id: str) -> dict[str, Any]:
     Child runs of Run workflow nodes report their parent and root links,
     orchestrator mode and session owner, input source, tree settling state and
     per-execution child invocation status. Public controls on a child id are
-    refused with the root run id.
+    refused with the root run id. Resolved attention reasons are omitted on active runs.
+    Workflow approval read failures appear as bounded approval_summary.read_errors,
+    separately from known pending or uncertain approvals.
     """
     from .workflow_responses import compact
     return compact(await _workflow_call("status", run_id=workflow_run_id))
@@ -2828,6 +2830,9 @@ async def wait_for_workflow(
     until="terminal" wait on a terminal run that stays settling with its run file unchanged for
     300 seconds. Also
     returns requested/effective timeout, until, timed_out, elapsed_seconds and polling_guidance.
+    Approval read errors alone do not stop the wait for attention; inspect
+    approval_summary.read_errors for incomplete sources. Known unanswered requests and
+    uncertain approval ownership still stop for attention.
     Progress is sent every 5 seconds, best effort. A wait never changes, resumes or cancels a run.
     """
     from .workflow_responses import compact

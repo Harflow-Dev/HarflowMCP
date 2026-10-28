@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Clear resolved workflow attention and input presentation when execution resumes (#64). Report unreadable approval sources with bounded task-specific diagnostics, preserving readable approvals without falsely requesting caller attention (#67).
+
 - Expose all pending descendant workflow questions and attention checkpoints, accept independent answers through the root, confirm durable child delivery, and give re-asked questions fresh identities (#70, #71, #74). Preserve complete caller questions and structured clarification items in status and wait replies (#66).
 
 - Clarify observed commit ranges, including legacy read projections: imported history is newly reachable, never proof of task-created commits or authorship (#60). Compact status and notifications retain bounded Git endpoint provenance and disclose truncated commit lists.

@@ -1224,7 +1224,16 @@ class WorkflowStore:
             attention_before = (run.get("status"), run.get("attention_reason"), run.get("failure_reason"), run.get("failed_decision_id"))
             checkpoint_before = run.get("attention_checkpoint")
             finished_before = qualified_finished_at(run)
+            # These fields describe the current suspension, not its history. Keep
+            # replacements installed by the mutator, but retire carried-over
+            # presentation state when execution becomes active again.
+            suspension_fields = ("attention_reason", "attention_source", "input_question", "input_question_items", "input_decision_id", "input_source", "optional_review_skip_available")
+            suspension_before = {key: copy.deepcopy(run[key]) for key in suspension_fields if key in run}
             mutator(run)
+            if attention_before[0] in {"needs_input", "needs_attention", "paused", "failed"} and run.get("status") in {"running", "building", "starting", "pending"}:
+                for key, value in suspension_before.items():
+                    if key in run and run[key] == value:
+                        run.pop(key)
             attention_after = (run.get("status"), run.get("attention_reason"), run.get("failure_reason"), run.get("failed_decision_id"))
             if run.get("status") in {"needs_attention", "paused", "failed"}:
                 if attention_before != attention_after or "attention_checkpoint" not in run:
