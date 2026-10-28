@@ -111,6 +111,27 @@ def test_invalid_state_root_server_exits_before_mcp_or_store_initialization(tmp_
     assert "state root" in result.stderr.lower()
 
 
+@pytest.mark.parametrize("state_root", ["", "relative-root"])
+def test_invalid_state_root_server_rejects_before_startup_probes(monkeypatch, capsys, state_root: str) -> None:
+    from harflow_mcp import git_environment, server, workflow_interactions
+
+    def unexpected_probe():
+        pytest.fail("invalid state root reached a startup probe")
+
+    monkeypatch.setenv("HARFLOW_STATE_ROOT", state_root)
+    monkeypatch.setattr(sys, "argv", ["harflow-server"])
+    monkeypatch.setattr(git_environment, "auth_status", unexpected_probe)
+    monkeypatch.setattr(workflow_interactions, "capture_transport_parent", unexpected_probe)
+
+    with pytest.raises(SystemExit) as raised:
+        server.main()
+
+    assert raised.value.code == 2
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "state root" in output.err.lower()
+
+
 def test_valid_custom_root_version_info_is_side_effect_free(tmp_path: Path) -> None:
     selected = tmp_path / "custom-state"
     result = _run(tmp_path, [str(_entrypoint("harflow-ctl")), "version-info", "--json"], state_root=str(selected))

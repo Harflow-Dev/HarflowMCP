@@ -466,231 +466,231 @@
     },
     "ctl-approval-error-already-answered.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.4",
+      "expected_product_version": "0.0.5",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-approval-error-caller-undecidable-approval.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.4",
+      "expected_product_version": "0.0.5",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-approval-error-caller-undecidable-global.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.4",
+      "expected_product_version": "0.0.5",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-approval-error-expired.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.4",
+      "expected_product_version": "0.0.5",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-approval-error-generic-no-reason.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.4",
+      "expected_product_version": "0.0.5",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-approval-error-legacy-no-reason-synthetic.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.4",
+      "expected_product_version": "0.0.5",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-approval-error-not-current.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.4",
+      "expected_product_version": "0.0.5",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-approval-error-ownership-lost.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.4",
+      "expected_product_version": "0.0.5",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-approval-error-reason-incomplete-synthetic.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.4",
+      "expected_product_version": "0.0.5",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-approval-error-reason-unsupported-synthetic.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.4",
+      "expected_product_version": "0.0.5",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-approval-error-settled.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.4",
+      "expected_product_version": "0.0.5",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-approval-error-unauthorized-agent.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.4",
+      "expected_product_version": "0.0.5",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-approval-error-unauthorized-managed-task.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.4",
+      "expected_product_version": "0.0.5",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-approval-error-unauthorized-owner.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.4",
+      "expected_product_version": "0.0.5",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-approval-error-unknown-reason-synthetic.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.4",
+      "expected_product_version": "0.0.5",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-approval-get-claude-bash-no-reason.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.4",
+      "expected_product_version": "0.0.5",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-approval-get-claude-bash.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.4",
+      "expected_product_version": "0.0.5",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-approval-get-claude-edit.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.4",
+      "expected_product_version": "0.0.5",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-approval-get-claude-write.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.4",
+      "expected_product_version": "0.0.5",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-approval-get-codex-command.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.4",
+      "expected_product_version": "0.0.5",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-approval-get-codex-file-change-move.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.4",
+      "expected_product_version": "0.0.5",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-approval-get-codex-file-change.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.4",
+      "expected_product_version": "0.0.5",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-approval-get-optional-fields-omitted-synthetic.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.4",
+      "expected_product_version": "0.0.5",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-approval-list-codex.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.4",
+      "expected_product_version": "0.0.5",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-approval-list-history.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.4",
+      "expected_product_version": "0.0.5",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-approval-list-optional-fields-omitted-synthetic.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.4",
+      "expected_product_version": "0.0.5",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-approval-list-page-1.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.4",
+      "expected_product_version": "0.0.5",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-approval-list-page-2.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.4",
+      "expected_product_version": "0.0.5",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-approval-list-page-3.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.4",
+      "expected_product_version": "0.0.5",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-approval-list-pending.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.4",
+      "expected_product_version": "0.0.5",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-approval-respond-caller.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.4",
+      "expected_product_version": "0.0.5",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-approval-respond-monitor-owned.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.4",
+      "expected_product_version": "0.0.5",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-approval-respond-monitor.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.4",
+      "expected_product_version": "0.0.5",
       "format": "harflow.ctl",
       "required_capabilities": [
         "caller-approvals.monitor-respond.v1"
@@ -699,14 +699,14 @@
     },
     "ctl-approval-state-cancelled.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.4",
+      "expected_product_version": "0.0.5",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-approval-state-codex-sent.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.4",
+      "expected_product_version": "0.0.5",
       "format": "harflow.ctl",
       "required_capabilities": [
         "caller-approvals.monitor-respond.v1"
@@ -715,35 +715,35 @@
     },
     "ctl-approval-state-delivery-unknown.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.4",
+      "expected_product_version": "0.0.5",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-approval-state-expired-override.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.4",
+      "expected_product_version": "0.0.5",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-approval-state-expired-unanswered.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.4",
+      "expected_product_version": "0.0.5",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-approval-state-invalidated.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.4",
+      "expected_product_version": "0.0.5",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-approval-state-reserved.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.4",
+      "expected_product_version": "0.0.5",
       "format": "harflow.ctl",
       "required_capabilities": [
         "caller-approvals.monitor-respond.v1"
@@ -752,21 +752,21 @@
     },
     "ctl-approval-state-sending.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.4",
+      "expected_product_version": "0.0.5",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-approval-state-sent-approved.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.4",
+      "expected_product_version": "0.0.5",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-approval-state-sent-rejected-monitor.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.4",
+      "expected_product_version": "0.0.5",
       "format": "harflow.ctl",
       "required_capabilities": [
         "caller-approvals.monitor-respond.v1"
@@ -775,14 +775,14 @@
     },
     "ctl-approval-state-system-rejected-admission.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.4",
+      "expected_product_version": "0.0.5",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-approval-state-system-rejected-delivery.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.4",
+      "expected_product_version": "0.0.5",
       "format": "harflow.ctl",
       "required_capabilities": [
         "caller-approvals.monitor-respond.v1"
@@ -791,14 +791,14 @@
     },
     "ctl-approval-state-unsupported.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.4",
+      "expected_product_version": "0.0.5",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
     },
     "ctl-approval-status-awaiting.json": {
       "encoding": "json",
-      "expected_product_version": "0.0.4",
+      "expected_product_version": "0.0.5",
       "format": "harflow.ctl",
       "required_capabilities": [],
       "valid": true
@@ -835,7 +835,7 @@
     "version-info-build-metadata.json": "cd52be9dfd5f8af9f60513ea8601df70321937d5b15374688f8eb296cae45081",
     "version-info-patch-backward.json": "2922c8b2f832988bb411437f5664a4fc0f671660cb0bc4747a4be7ba6030f174",
     "version-info-patch-forward.json": "4c4f1185e7d562dd64a406c0034ba7cbca3a3594f9c76a5abc474d648a5ac8b0",
-    "version-info.json": "9b5ae322ae2f7b5ece8e8be6029223c505d40199908ac60acfa60a01423226ce",
+    "version-info.json": "939af33c57c3211d77f0c6d50dcd1e3cd9606b0710f9fc4fe2426799a1efec74",
     "workflow-definition-patch.json": "47f50395f2371a652dec8a6a612c1db95dbabffb43ede363e32369620a6c516d",
     "workflow-definition.json": "df51cdc3e2e4d37197e36173bda52cb71ece0e0c19453b947e89c6529b818309",
     "workflow-run.json": "ee491fc8c1f1da76ac4d59c0cd71b22a57416f727afe8defd701fa07c7b1edd7",
@@ -861,52 +861,52 @@
     "ctl-messaging-queued.json": "6950e16c2872fa6cf1165ee7ee90804a3d4ba2cadbfbb0cc221319f4a54ccc23",
     "ctl-workflow-messages.json": "c59fe9c78bdff72687feea8820667c356d6452bd086c25b8c9a5d9b7320e8543",
     "ctl-workflow-monitor-controls.json": "c3f3ad60ad44ebafa6271dd8e870979f398181820773084a09262866205d37b8",
-    "ctl-approval-error-already-answered.json": "e68d84b216dee7a0f960405a4ad0f78db6c00ab1167b900ea4215a5a5a4ddac2",
-    "ctl-approval-error-caller-undecidable-approval.json": "a05370c49b211008d5284adee7293e0f979c1176d567edc45442b9d5b5df9940",
-    "ctl-approval-error-caller-undecidable-global.json": "d14d15cec909851972b2478a032cb7033fbf5c612a4d7c7fb6ba6a0dc32b3930",
-    "ctl-approval-error-expired.json": "3c2de1644eaced4cfc4f0b4860a78e945377a5f72d7e0321d6162a44d8ab3e71",
-    "ctl-approval-error-generic-no-reason.json": "add4f726be8b4974d320c8a4c9f2da94b2280d9c69e4fa89b009d2fd55ea9d9e",
-    "ctl-approval-error-legacy-no-reason-synthetic.json": "f1bbef09636f3eaa331aea12faafd5424f9f58ac6338fa8f3146708b8ef92650",
-    "ctl-approval-error-not-current.json": "2e9747d9b8971d14a357b22cf5faf8bb98266fa3865c742982c7e11f02b61877",
-    "ctl-approval-error-ownership-lost.json": "ea9c5ad15a8a08bb653185e32b55e10f3e41716c28cacd919c0e67ffb1432b87",
-    "ctl-approval-error-reason-incomplete-synthetic.json": "9f5d2e796e76d0d0a9d2fbe36bd60d810c0a02c661ab47c64eec398551fa90e2",
-    "ctl-approval-error-reason-unsupported-synthetic.json": "326ff79ed538b42a9738539056ea883c60ae98de0424d5de309f473e29d49352",
-    "ctl-approval-error-settled.json": "b558a3f5f0d6c497edd9eed277bb4e8e28f3b256ad8e51ed88c6a0c4f66949ee",
-    "ctl-approval-error-unauthorized-agent.json": "7890886295affb70ce2571b380a31357901f7c4ca15c320b6925358c7a4c0081",
-    "ctl-approval-error-unauthorized-managed-task.json": "7d1ee54a4aebeb832f90e62ce1378e901aa29457950d46ce7f32682bd78832fe",
-    "ctl-approval-error-unauthorized-owner.json": "e6db854aba2368cb481fb66de7ec24a6d632ba9d151a69a82dc1063ec0dc1903",
-    "ctl-approval-error-unknown-reason-synthetic.json": "6fdae2690fed2f649f5424e9e7b421b7ae0e4c0289855d5d2fb0b314ce40740a",
-    "ctl-approval-get-claude-bash-no-reason.json": "797b086628115534f7a9987165524048bd82b894072bed3ac171737b5accc102",
-    "ctl-approval-get-claude-bash.json": "f9ff36033df36a211be1c7ddceda2e06441c6ba0f8c5b40ba4fbd141727cd0b1",
-    "ctl-approval-get-claude-edit.json": "d567d2399d015207ef9d52addc9520da583558385caf9276992d4c7ba38946d0",
-    "ctl-approval-get-claude-write.json": "75918cf7093c6d8bacde5f5f0776dcf2dc95f5a6009fcdca68c2374a12a0f952",
-    "ctl-approval-get-codex-command.json": "aec0d32003421c1cbab821046e6aa0b4fbdd6ec45c12627fb1880bd0ca31889a",
-    "ctl-approval-get-codex-file-change-move.json": "7620fe9c6567362d44143d8cc4c0605a388854a1ea74ed4aa009b72ae975a681",
-    "ctl-approval-get-codex-file-change.json": "7f3e77ca9fa3aa428c1fa6c20594b07dac5f58694fd47656b39bffe78101da51",
-    "ctl-approval-get-optional-fields-omitted-synthetic.json": "41a9a79df277b987fdbd343504f71d1ae23cd546e5fba320254b9f302a644bc7",
-    "ctl-approval-list-codex.json": "e886e75040d21f0cd55a431e3441ceae7ea7c82e8c9dddbb8c0f3d923683c06a",
-    "ctl-approval-list-history.json": "a3fbd29734bff47d049e9454a6a217b65210b7f7b3bcf967f05dda89fe5a4ef5",
-    "ctl-approval-list-optional-fields-omitted-synthetic.json": "c147cc800d254c552b2bc4678575a0668977cc7f22d3a0c5694b8da40d1a4659",
-    "ctl-approval-list-page-1.json": "0189eb74a463e55707050525989adac0e5dd801a244cbe560028d778df6ab11e",
-    "ctl-approval-list-page-2.json": "19d717631d4d20adf60c28fccd85a0d1f951b6db1bf3e63f69f83430ebeee987",
-    "ctl-approval-list-page-3.json": "896aedbd85c32303361664eb6558aaca3ebc08d0c87453f093ead7e1d3353827",
-    "ctl-approval-list-pending.json": "5bd988dc80e0fac8b336289310525a8e18cb7182bf35dbf3a97d05f98a8854cc",
-    "ctl-approval-respond-caller.json": "ccd3f8d673549fbe487c828e34a801022302b21056b5dff94d65e143d1967370",
-    "ctl-approval-respond-monitor-owned.json": "22e1f629f3afa606cb9a09fac8fa4f804097d135aad854f84a389b1191a66991",
-    "ctl-approval-respond-monitor.json": "706b836223c6638896d4944a786451c53eedd342e1fb2fafaea454d7d32fdb14",
-    "ctl-approval-state-cancelled.json": "64454b55ea2c949a62d33ec6a0dba872d38368f14208f7ec373cc9921d450176",
-    "ctl-approval-state-codex-sent.json": "48537c7cf97145491a9e5fa94e3e96576aa31eafe9194fdd4ba9040d31a7aa09",
-    "ctl-approval-state-delivery-unknown.json": "3dad31438e2bb9854b5a6169310f552478106e553759ec728d2b61d1d54a6490",
-    "ctl-approval-state-expired-override.json": "28c1798e2ec04d5889265509e230c7c865ccea739684ac204d72459ec5e889bc",
-    "ctl-approval-state-expired-unanswered.json": "d93a3105f15a49976a7ea9e23d6960d5bb7557205a5ca1d203804d6c59a36807",
-    "ctl-approval-state-invalidated.json": "c76882a7465b777b8f660c70cb0de2454f949eb399f50d743d7d57248dc064a0",
-    "ctl-approval-state-reserved.json": "706b836223c6638896d4944a786451c53eedd342e1fb2fafaea454d7d32fdb14",
-    "ctl-approval-state-sending.json": "760629cfbc20803846d7e1068513763f74e73cb498067ffe7b350ddca71068e5",
-    "ctl-approval-state-sent-approved.json": "fb66990daeb53cc3b00deb7ccd83c6c1c4f38ff6b5303a4240a50153e04a619d",
-    "ctl-approval-state-sent-rejected-monitor.json": "3d4f11ef18b3bff51c1dd68d060370e4ec9d272e6fca511d45903a8ca9a24379",
-    "ctl-approval-state-system-rejected-admission.json": "6a5f95aa98e56aecc4e3218be512df2842d47501e72d807eeb845467a7fc79b6",
-    "ctl-approval-state-system-rejected-delivery.json": "06b8be6cfe084eec87a749618c223ee8871fb664067f52951a1b6dbf361b21ef",
-    "ctl-approval-state-unsupported.json": "e6fd0a4588ebed3287787e161cbfab8155c5662fbd051da6c720a1bdd260259c",
-    "ctl-approval-status-awaiting.json": "d7350d6c6acaaec08d1749e66c387b4160f22619a58f79923968c49a2df196ec"
+    "ctl-approval-error-already-answered.json": "adca538a289a9b3bd8caeac8e643e240c01e3f21ccd401724c36b0765d86b0c4",
+    "ctl-approval-error-caller-undecidable-approval.json": "19b205b2f9abb54468e4e60db7194179c9080e0518a02ecfe6311eb88cfd3985",
+    "ctl-approval-error-caller-undecidable-global.json": "6860900bbc83a59a3a4f79bea00507ef9811b90b38de4db99e74697589ffb092",
+    "ctl-approval-error-expired.json": "f3272525706d70238570cc1a7259f8fdfe1e2801815bb81c133e3726824ca761",
+    "ctl-approval-error-generic-no-reason.json": "adaddd883f07064f19b5a666e66942742931caff0c254eddf3570924454945e8",
+    "ctl-approval-error-legacy-no-reason-synthetic.json": "64d384c124208802d0f1521f874314bbe085a4b5ee10df9343c69506422d068e",
+    "ctl-approval-error-not-current.json": "1b560af44d35864befbd741e32c1537a9b8ca97d8d87997b4caf9566b2cb99d2",
+    "ctl-approval-error-ownership-lost.json": "76ba4c9a20feaed24bbd581605d07664d89340675d144ada0c7c679a4bae7062",
+    "ctl-approval-error-reason-incomplete-synthetic.json": "bfcbe25a16010a2117596f819c4977e9b75e26a85329cf7cc5abc2a865baf754",
+    "ctl-approval-error-reason-unsupported-synthetic.json": "a2aa3b4d0f3ebd00e8ae58e2f93fe2e55a24dc651e440064ca1654f07d6aacdd",
+    "ctl-approval-error-settled.json": "334a8851dea8a7ae78d31a21c61904e0ae66ebc971b91f4024fc475d223f9b8b",
+    "ctl-approval-error-unauthorized-agent.json": "a8a506dde0fe6d2e9f3aae232ea516872ca779015e63788cfb544fb0c3df39c8",
+    "ctl-approval-error-unauthorized-managed-task.json": "f1ce43f6abe7f8e1ac0b5bdbc144c972dd5f80ef83fd1c165ef31b97992a9920",
+    "ctl-approval-error-unauthorized-owner.json": "bdf0168643b39c89a12d79ad5a4a9175e6d65200594d852284c2fc95559c8bfa",
+    "ctl-approval-error-unknown-reason-synthetic.json": "7773ec5cdb987a8db54fde8369fc0588aba229832ade5bd40393bd3eeea79970",
+    "ctl-approval-get-claude-bash-no-reason.json": "54140bf3d54a7aabcab0af000de6ede395196491ba37bae492cb012a5d22eb1b",
+    "ctl-approval-get-claude-bash.json": "ad783291d7faca7b6f573976d7407fc998a00e3f16c7d31d70aa4930fcaf3376",
+    "ctl-approval-get-claude-edit.json": "5e35850bc4cd4b46d9002d6fc1fe951b80844c7157770ffd8265ae28302a6f13",
+    "ctl-approval-get-claude-write.json": "efb7145f16426e45a577722edeccab91d7c5ef8e3ac88dd1df3c724b5a3460f2",
+    "ctl-approval-get-codex-command.json": "46fbb8a935bf10ea3a4db2acd11c21dc90a25683f5ac8b131da7f134d7e55f3f",
+    "ctl-approval-get-codex-file-change-move.json": "254f0efbcb82481c7ad7a0f3bbf50ae07351fd401d7fd759cfd0d1127586c144",
+    "ctl-approval-get-codex-file-change.json": "6cee1ae080223e63d3af237adcbd4412507abd6a5e2bf730d239667825acee9d",
+    "ctl-approval-get-optional-fields-omitted-synthetic.json": "286d06e6c0434587040203e6c05b79602313603d57c39031a59698c6bad4e941",
+    "ctl-approval-list-codex.json": "826aa2021fcdcf4ab3c569a1ab7aed07660b0fde95b781c17ca76edde185c48f",
+    "ctl-approval-list-history.json": "8808e390c24e7b841795e66f8e7fe2902ced844036e190efcb4c2efef4f67a11",
+    "ctl-approval-list-optional-fields-omitted-synthetic.json": "d6c1c4f07257b0507dcf1654e413f9ec58914810548256d87af15d25503ec42d",
+    "ctl-approval-list-page-1.json": "a1048af8e1b6dd284d27bbee71d479ca1f7028ec524343fa94a39e1ce137d89c",
+    "ctl-approval-list-page-2.json": "8355247a9a3bbc5b4d7b5ab137354bc264ff4f785a04d5f805847ac8ea2650dc",
+    "ctl-approval-list-page-3.json": "22cfbaf2b63840a28035bcc5ae722a70a7c228a6f0d5b5fce645df1b79162230",
+    "ctl-approval-list-pending.json": "125fae4eb7ff1d048508a4c2492a0a1765d5bbae2f2bbc7add98f79f21ec8d7d",
+    "ctl-approval-respond-caller.json": "efaa9050edf1bcd35641d87d346a49a8c8ad9c5feb8536be70c0de3ce6af4859",
+    "ctl-approval-respond-monitor-owned.json": "a960beaa4d6e3234556161fe95b650fab7a999dad9f7580656d48ad01b8633f5",
+    "ctl-approval-respond-monitor.json": "32e91501ff0fbbaf7188dc27f370ec1d88f417fcab6bc76414bba435da4190a8",
+    "ctl-approval-state-cancelled.json": "7310069d6473dac00d1e97a61a4fce06f6882d7deeb38df93fb2e0cacf794392",
+    "ctl-approval-state-codex-sent.json": "42658eeb4f3bdfabe9ad0d6a2ef00738b54fd847a9c9c4c17460cc80f9a8f55d",
+    "ctl-approval-state-delivery-unknown.json": "c027db11c4232f41d8de87069b429f1b15498b90d6af82aa82075b4c3437b8ff",
+    "ctl-approval-state-expired-override.json": "e4b65de14524c2bdc555784e8db941daa4e445b89e896eedde34eaa8133223e2",
+    "ctl-approval-state-expired-unanswered.json": "b5bcd872527ae5ec1872730fb9ebe611bc6a192f4af2c9057f501d8653a4c109",
+    "ctl-approval-state-invalidated.json": "9a660d0054c313f0d671ee1592950f032f32b641c3c9ba6923790957122cbc25",
+    "ctl-approval-state-reserved.json": "32e91501ff0fbbaf7188dc27f370ec1d88f417fcab6bc76414bba435da4190a8",
+    "ctl-approval-state-sending.json": "ffa7945acead5fc85c33eb2cefadbca0d97b86f5cad8ca9a35fa801bd703cf07",
+    "ctl-approval-state-sent-approved.json": "6add806e1417cf1cba626776949dd62eb85ff46db9d977de9fd8facf6b3f9937",
+    "ctl-approval-state-sent-rejected-monitor.json": "071c68e260c3b47698d7b89c54a3179d21ff6a94e863e7ac3203cce7e1fe44ce",
+    "ctl-approval-state-system-rejected-admission.json": "17e5bc79ea674ffa7c18fbded62c97b7a06427182e9b65b6f02a4a8026efb6f7",
+    "ctl-approval-state-system-rejected-delivery.json": "076d23d723b73fdae054e2e852d996974306a39979d32d31a9abc1bdda8297dc",
+    "ctl-approval-state-unsupported.json": "0e68277cf8cb333bbc6d5e2c08bdce41030310d93667130352d9a86d8aea89a1",
+    "ctl-approval-status-awaiting.json": "67bbe416360dad3ef58c2069b3b33fcad2c0033a7b0bc1f0605f8c1619a31d9c"
   }
 }

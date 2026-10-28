@@ -361,6 +361,26 @@ class CursorBackend(ExtraPathsUnsupported):
             return "completed"
         return "failed"
 
+    def normalize(self, event: dict[str, Any], acc: Accumulator) -> list[dict[str, Any]]:
+        from . import normalize as nz
+
+        if event.get("type") != "assistant":
+            return []
+        message = event.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            return []
+        return [
+            nz.assistant_text(part["text"])
+            for part in content
+            if isinstance(part, dict)
+            and part.get("type") == "text"
+            and isinstance(part.get("text"), str)
+        ]
+
+    def continuation_reason(self, acc: Accumulator, exit_code: int | None) -> str | None:
+        return None
+
     def encode_live_message(self, text: str) -> bytes:
         raise UnsupportedCapability(
             f"the {self.name} backend has no live input, so a message cannot be added to a running "
@@ -383,5 +403,14 @@ class CursorBackend(ExtraPathsUnsupported):
         from .workflow_diagnostics import usage_limit
 
         return usage_limit(event, envelope="error", claude=False, agy=False)
+
+    @staticmethod
+    def stderr_usage_limit_diagnostic(line: str) -> dict[str, Any] | None:
+        # No Cursor stderr quota signal has been qualified.
+        return None
+
+    @staticmethod
+    def workflow_stderr_blocks_availability_failure(diagnostic: str) -> bool:
+        return False
 
 

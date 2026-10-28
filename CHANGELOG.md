@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.0.5
+
+- Restore Cursor Monitor assistant text normalization and complete its backend protocol with conservative defaults for unqualified stderr and continuation signals.
+
+- Reject invalid state roots before startup authentication or transport probes, avoiding external CLI side effects before validation.
 - Keep acknowledged orchestrator checkpoints from repeating unchanged protocol text, goals, inherited specifications, and other stable sections, and send workers compact UTF-8 JSON without unused goal or harness metadata (#85).
 - Preserve safe provider-limit and generic payment diagnostics for Vibe HTTP 402 failures across task, wait, notification and workflow views (#83).
 - Queue task, workflow and node messages through public messaging routes, expose cancellable lifecycle state, and support safe immediate continuations with explicit refusal when interruption is unsupported (#75).

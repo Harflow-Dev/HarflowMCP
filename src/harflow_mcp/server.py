@@ -3039,16 +3039,16 @@ def main() -> None:
     if "--help" in sys.argv[1:] or "-h" in sys.argv[1:]:
         print("HarflowMCP stdio server; state root: HARFLOW_STATE_ROOT or HOME/.harflow")
         return
-    from .git_environment import auth_status
-    auth_status()  # bounded, sanitized observation; no credential output is retained
-    from .workflow_interactions import capture_transport_parent
-    capture_transport_parent()
     from .state_layout import InvalidStateRoot, resolve_layout
     try:
         layout = resolve_layout()
     except InvalidStateRoot as exc:
         print(f"harflow-server: error: {exc}", file=sys.stderr)
         raise SystemExit(2) from None
+    from .git_environment import auth_status
+    auth_status()  # bounded, sanitized observation; no credential output is retained
+    from .workflow_interactions import capture_transport_parent
+    capture_transport_parent()
     try:
         with state_session(layout):
             logging.basicConfig(

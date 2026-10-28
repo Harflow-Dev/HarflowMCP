@@ -1218,6 +1218,15 @@ Caller approvals, `allowed_commands`, a turn cap, reasoning effort, and extra wr
 are refused. The user's `~/.cursor/mcp.json` was unchanged by these runs.
 
 
+Offline normalization coverage (2026-10-29) uses
+`tests/fixtures/cursor/success-result.jsonl`, reconstructed from this installed CLI's
+stream-json writer, not a captured live transcript. Its `assistant.message.content`
+text blocks become Monitor assistant text; the result event is ignored by normalization
+to avoid repeating the final reply. Malformed blocks and unknown event types are ignored.
+No Cursor stderr quota or recoverable-cutoff signal is qualified, so those protocol
+hooks return conservative defaults. This fixture check adds no live CLI qualification.
+
+
 ## Vibe HTTP 402 diagnostics
 
 Re-measured Vibe 3.0.1 on macOS, 2026-10-28, using the existing isolated HOME/VIBE_HOME
