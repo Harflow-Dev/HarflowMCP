@@ -1115,7 +1115,7 @@ async def _await_with_progress(task: Task, plan: wait_policy.WaitPlan, ctx: Cont
             from .task_attachment import AttachedTask
             if not isinstance(task, AttachedTask):
                 task.approval_view = attention
-            if attention.get("interaction_state"):
+            if wait_policy.approval_needs_attention(attention):
                 return wait_policy.STOP_ATTENTION
         if task.done.is_set():
             return wait_policy.STOP_TERMINAL
@@ -1224,8 +1224,10 @@ async def _poll_recovered(
         if record.caller_approvals:
             from . import approvals
             attention = await asyncio.to_thread(approvals.summary, _reg().log_dir, record.task_id)
-            if attention.get("interaction_state"):
-                return record, wait_policy.STOP_ATTENTION, False
+            if wait_policy.approval_needs_attention(attention):
+                # False is reserved for a confirmed-gone process with no observed exit.
+                # Approval attention provides no such liveness evidence.
+                return record, wait_policy.STOP_ATTENTION, True
         round_failed = False
         try:
             status, gone = await asyncio.to_thread(_recovered_settlement, _reg().log_dir, record)
@@ -1308,7 +1310,7 @@ async def wait_for_task(
         ctx: Injected by the server; not a caller argument.
 
     The result is the task status plus `requested_timeout_seconds`, `effective_timeout_seconds`,
-    `until`, `timed_out`, `stop_reason` (terminal, timeout, ceiling or observation_unavailable),
+    `until`, `timed_out`, `stop_reason` (terminal, attention, timeout, ceiling or observation_unavailable),
     `elapsed_seconds` and `polling_guidance`. If the task is still going when the wait ends, the
     status is "running" with a `next_step` hint: call this again, or poll get_task_status. The
     dispatched process is never signalled, written or resumed by a wait, so waiting is always safe
@@ -1318,6 +1320,9 @@ async def wait_for_task(
     exit was never observed, so the status is an inference — inspect it with get_task_status;
     true otherwise. It is never present on a task that is still running. Live tasks carry it
     (true) once finished.
+    Undecided approvals and approval uncertainty stop the wait as attention. Answered approvals
+    still awaiting delivery keep waiting. Older summaries without a decision count retain
+    attention. Approval attention alone says nothing about process liveness.
     Progress is sent every 5 seconds, best effort. Returns
     `recent_activity` — a list of ≤ 5 one-line strings describing the most recent meaningful events
     — for a live summary without the bulk of the raw stream.
@@ -1386,6 +1391,11 @@ async def wait_for_task(
         finished = snapshot["status"] in TERMINAL_STATUSES
 
     elapsed = clock.elapsed()
+    if task is None and finished and stop_reason == wait_policy.STOP_ATTENTION:
+        # Attention takes priority, but the final snapshot may expose an inferred terminal
+        # status. Derive its outcome evidence separately from the reason we stopped waiting.
+        outcome_observed = not await asyncio.to_thread(
+            _dead_without_observed_exit, record, snapshot["status"])
     if task is None and finished and stop_reason in (wait_policy.STOP_TIMEOUT, wait_policy.STOP_CEILING):
         # The hold ran out as the record settled; apply the same unobserved-outcome rule the
         # polling loop uses before calling that a settled outcome.
@@ -2735,7 +2745,7 @@ async def _wait_workflow_full(
         from .approval_runtime import workflow_summary
         if "approval_summary" in result:
             result["approval_summary"] = await asyncio.to_thread(workflow_summary, _reg().log_dir, workflow_run_id)
-        if result.get("approval_summary", {}).get("interaction_state"):
+        if wait_policy.approval_needs_attention(result.get("approval_summary", {})):
             return finish(wait_policy.STOP_ATTENTION)
         phase = wait_policy.workflow_phase(result.get("status"), bool(result.get("settling")))
         if phase == "terminal":

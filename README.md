@@ -34,7 +34,9 @@ New launches and resumes require at least 256 MiB free on state, checkout and te
 filesystems. Confirmed-dead detached executions can resume their recorded conversation; live or
 uncertain sessions remain protected. See [supervision and recovery](docs/supervision.md).
 Backend discovery reports qualification gates for writable paths, caller approvals and command
-grants. At unrestricted access, validated extra writable paths are disclosed as a no-op.
+grants, with network caveats returned as complete entries. At unrestricted access, validated extra writable paths are disclosed as a no-op.
+Waits return for approvals that still need a decision or require reconciliation; a recorded
+approval or rejection awaiting delivery does not by itself interrupt the next wait.
 Live background wait bounds are persisted and configurable; see [task continuation](docs/task-continuation.md#live-background-wait-bound).
 
 Use `harflow-ctl version-info --json` to inspect runtime identity and compatibility without initializing state. Engine operations require compatible Harflow state, task metadata, saved workflow definitions, workflow run documents and workflow ownership receipts. Known qualified storage lines migrate conservatively before new-line writes. Use `harflow-ctl state-inspect --json` to inspect an incompatible root without changing it, then explicitly confirm its `state-recover` proposal to retain a sibling backup and create fresh state. `HARFLOW_STATE_ROOT` can also select a separate fresh state directory; see [state ownership and recovery](docs/contracts.md#state-ownership-and-recovery) for compatibility requirements.

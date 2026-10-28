@@ -356,7 +356,7 @@ class CodexBackend(ExtraPathsUnsupported):
                 "unrestricted cannot block (danger-full-access disables the sandbox entirely, "
                 "so no barrier remains to raise). Either direction is a claim about "
                 "harflow_mcp's own -c override only, never about reachability — the "
-                "surrounding network can still defeat it"
+                "surrounding network can still defeat it",
             ),
         ),
         supports_live_input=False,

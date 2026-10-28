@@ -82,7 +82,9 @@ async def test_task_and_workflow_tools_are_exposed() -> None:
     assert names == ['apply_workflow_draft', 'cancel_queued_message', 'cancel_task', 'cancel_workflow', 'continue_task', 'delete_workflow', 'followup_workflow_builder', 'get_approval_request', 'get_task_artifacts', 'get_task_event_page', 'get_task_events', 'get_task_notifications', 'get_task_status', 'get_workflow', 'get_workflow_artifacts', 'get_workflow_notifications', 'get_workflow_run_detail', 'get_workflow_status', 'inspect_workflow_node', 'list_approval_requests', 'list_backends', 'list_task_page', 'list_tasks', 'list_workflow_run_page', 'list_workflow_runs', 'list_workflows', 'pause_workflow', 'preview_task_permissions', 'preview_workflow_run', 'read_workflow_assigned_input', 'recover_workflow', 'register_artifact', 'respond_approval_request', 'resume_task', 'resume_workflow', 'revise_workflow_goal', 'save_workflow', 'send_message', 'start_task', 'start_workflow', 'subscribe', 'subscribe_workflow', 'unsubscribe', 'unsubscribe_workflow', 'wait_for_task', 'wait_for_tasks', 'wait_for_workflow', 'workflow_builder']
 
 
-async def test_list_backends_describes_every_one() -> None:
+async def test_list_backends_describes_every_one(monkeypatch) -> None:
+    # Capability disclosure should not depend on installed CLIs or invoke version probes.
+    monkeypatch.setattr(backends, "is_installed", lambda backend: False)
     listed = (await call("list_backends")).structured_content["result"]
 
     by_name = {entry["backend"]: entry for entry in listed}
@@ -91,6 +93,15 @@ async def test_list_backends_describes_every_one() -> None:
     assert by_name["claude"]["capabilities"]["supports_turn_cap"] is True
     assert by_name["codex"]["capabilities"]["supports_turn_cap"] is False
     assert by_name["codex"]["capabilities"]["os_sandbox"] is True
+    assert by_name["codex"]["capabilities"]["network_control"]["caveats"] == [
+        "support is non-rectangular on purpose: read-only cannot enable (the "
+        "sandbox_workspace_write.network_access key is inert under the read-only "
+        "sandbox, measured — set true, curl still could not resolve the host) and "
+        "unrestricted cannot block (danger-full-access disables the sandbox entirely, "
+        "so no barrier remains to raise). Either direction is a claim about "
+        "harflow_mcp's own -c override only, never about reachability — the "
+        "surrounding network can still defeat it"
+    ]
     assert by_name["opencode"]["capabilities"]["supports_turn_cap"] is False
     # Only codex has an OS boundary; opencode's restrictions are the agent's own.
     assert by_name["opencode"]["capabilities"]["os_sandbox"] is False

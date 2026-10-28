@@ -56,6 +56,15 @@ WORKFLOW_ACTIVE = frozenset({"running", "pending", "building", "pausing", "start
 WORKFLOW_TERMINAL = frozenset({"completed", "failed", "cancelled"})
 
 
+def approval_needs_attention(summary: dict[str, Any]) -> bool:
+    """Answered deliveries keep moving; missing counts and unknown states remain conservative."""
+    state = summary.get("interaction_state")
+    if state == "waiting_for_approval":
+        count = summary.get("awaiting_decision_count")
+        return not (type(count) is int and count == 0)
+    return bool(state)
+
+
 def workflow_phase(status: Any, settling: bool, tree_settling: bool = False) -> str:
     """Classify a workflow run: terminal, settling, attention or active.
 

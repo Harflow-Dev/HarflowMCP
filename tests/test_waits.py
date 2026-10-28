@@ -881,3 +881,111 @@ async def test_workflow_wait_settling_phase_holds(monkeypatch, fast_clock):
     workflow_status(monkeypatch, [{"status": "cancelled", "settling": True}])
     result = await server.wait_for_workflow("r", 10)
     assert result["stop_reason"] == "timeout"
+
+
+@pytest.mark.parametrize("summary,expected", [
+    ({}, False),
+    ({"interaction_state": "waiting_for_approval"}, True),
+    ({"interaction_state": "waiting_for_approval", "awaiting_decision_count": 0}, False),
+    ({"interaction_state": "waiting_for_approval", "awaiting_decision_count": 1}, True),
+    ({"interaction_state": "approval_state_uncertain", "awaiting_decision_count": 0}, True),
+    ({"interaction_state": "future_state", "awaiting_decision_count": 0}, True),
+])
+def test_approval_attention_policy(summary, expected):
+    assert wait_policy.approval_needs_attention(summary) is expected
+
+
+@pytest.mark.parametrize("decision", ["approve", "reject", None, "uncertain", "legacy", "unknown"])
+@pytest.mark.parametrize("path", ["owned", "recovered", "multi", "workflow"])
+async def test_waits_distinguish_reserved_delivery_from_caller_decision(
+    tmp_path, monkeypatch, decision, path,
+):
+    from harflow_mcp import approvals, approval_runtime
+    from test_approval_lifecycle import _admit
+
+    directory = server._reg().log_dir
+    row = _admit(directory)
+    write_record(tmp_path, task_id="task-1", status="running", caller_approvals=True,
+                          approval_generation=row["generation"], start_time="task-start",
+                          owner={"pid": 5678, "start_time": "bridge-start", "markers": []})
+    monkeypatch.setattr(identity, "identity_check", lambda _: "alive")
+    monkeypatch.setattr(store, "record_process_alive", lambda _: True)
+    answered = decision in {"approve", "reject"}
+    if answered:
+        approvals.reserve(directory, "task-1", row["request_id"], row["action_digest"],
+                          row["owner_revision"], decision, row["generation"])
+    summary = approvals.summary(directory, "task-1")
+    assert summary["interaction_state"] == "waiting_for_approval"
+    assert summary["pending_count"] == 1
+    assert summary["awaiting_decision_count"] == (0 if answered else 1)
+    if decision in {"uncertain", "legacy", "unknown"}:
+        summary = {"interaction_state": "waiting_for_approval"} if decision == "legacy" else {
+            "interaction_state": "approval_state_uncertain" if decision == "uncertain" else "future_state",
+            "awaiting_decision_count": 0,
+        }
+        monkeypatch.setattr(approvals, "summary", lambda *args: summary)
+    now = [100.0]
+    rounds = []
+    async def sleep(interval):
+        rounds.append(interval)
+        now[0] += interval
+    async def wait_for(awaitable, timeout):
+        awaitable.close()
+        await sleep(timeout)
+        raise asyncio.TimeoutError
+    monkeypatch.setattr(wait_policy, "monotonic", lambda: now[0])
+    monkeypatch.setattr(task_waiting, "_now", lambda: now[0])
+    monkeypatch.setattr(task_waiting, "_sleep", sleep)
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    monkeypatch.setattr(asyncio, "wait_for", wait_for)
+    plan = wait_policy.WaitPlan.validate(3, "timeout", 30)
+    if path == "owned":
+        task = add_task("task-1", tmp_path)
+        task.caller_approvals = True
+        reason = await server._await_with_progress(task, plan, None)
+    elif path == "recovered":
+        result = await server.wait_for_task("task-1", 3)
+        reason = result["stop_reason"]
+        assert "process is gone" not in result["polling_guidance"]
+        assert "outcome_observed" not in result
+    elif path == "multi":
+        result = await task_waiting.wait_for_tasks(server._reg(), ["task-1"], timeout_seconds=3)
+        reason = result["stop_reason"]
+    else:
+        async def status(*args, **kwargs):
+            return {"status": "running", "approval_summary": summary}
+        monkeypatch.setattr(server, "_workflow_call", status)
+        monkeypatch.setattr(approval_runtime, "workflow_summary", lambda *args: summary)
+        monkeypatch.setattr(server, "WORKFLOW_POLL_SECONDS", 1)
+        reason = (await server._wait_workflow_full("r", 3))["stop_reason"]
+    assert reason == ("timeout" if answered else "attention")
+    assert len(rounds) >= 3 if answered else not rounds
+
+
+@pytest.mark.parametrize("process_state", ["alive", "dead", "undecidable"])
+async def test_recovered_approval_attention_preserves_final_outcome_evidence(
+    tmp_path, monkeypatch, process_state,
+):
+    from harflow_mcp import approvals
+    from test_approval_lifecycle import _admit
+
+    directory = server._reg().log_dir
+    _admit(directory)
+    write_record(tmp_path, task_id="task-1", status="running", caller_approvals=True,
+                 start_time="task-start", exit_code=None,
+                 owner={"pid": 5678, "start_time": "bridge-start", "markers": []})
+    monkeypatch.setattr(identity, "identity_check", lambda _: process_state)
+    monkeypatch.setattr(store, "record_process_alive", lambda _: process_state != "dead")
+    summary = approvals.summary(directory, "task-1")
+    assert summary["interaction_state"] == (
+        "waiting_for_approval" if process_state == "alive" else "approval_state_uncertain")
+    result = await server.wait_for_task("task-1", 3)
+    assert result["stop_reason"] == "attention"
+    if process_state == "dead":
+        assert result["status"] == "failed"
+        assert result["outcome_observed"] is False
+        assert "process is gone" in result["polling_guidance"]
+    else:
+        assert result["status"] == "running"
+        assert "outcome_observed" not in result
+        assert "process is gone" not in result["polling_guidance"]

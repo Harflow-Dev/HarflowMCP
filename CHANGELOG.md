@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Fix waits repeatedly returning approval attention after a decision was recorded but before delivery (#59). Preserve approval summary semantics, keep unanswered and uncertain requests actionable, and avoid claiming a recovered process is gone solely because an approval needs attention.
+- Return the Codex network-control caveat as one complete entry in `list_backends` instead of individual characters (#61).
+
 ## 0.0.4
 
 - Add the capability-gated `statistics-page` command with bounded retained-history projection, execution accounting snapshots, separate duration and usage qualification, requested-model identity and explicit history coverage. Legacy or unqualified usage remains unavailable; reads do not replay historical agent streams or launch agents.

@@ -223,7 +223,7 @@ async def wait_for_tasks(
             unsettled = [row["task_id"] for row in rows if row["task_id"] not in settled]
             satisfied = bool(settled) if mode == "any" else not unsettled
             stop_reason = None
-            if any(row.get("approval_summary", {}).get("interaction_state") for row in rows):
+            if any(wait_policy.approval_needs_attention(row.get("approval_summary", {})) for row in rows):
                 stop_reason = wait_policy.STOP_ATTENTION
             elif satisfied:
                 stop_reason = wait_policy.STOP_TERMINAL

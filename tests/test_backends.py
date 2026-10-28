@@ -60,6 +60,20 @@ ALL = [ClaudeBackend(), CodexBackend(), OpencodeBackend(), VibeBackend(), Antigr
 NETWORKS = [None, True, False]
 
 
+@pytest.mark.parametrize(
+    ("caveats", "expected"),
+    [
+        ((), []),
+        (("one caveat",), ["one caveat"]),
+        (("first caveat", "second caveat"), ["first caveat", "second caveat"]),
+    ],
+)
+def test_network_control_serializes_caveat_collections_as_lists(caveats, expected) -> None:
+    control = NetworkControl(can_enable=(), can_block=(), caveats=caveats)
+
+    assert control.as_dict()["caveats"] == expected
+
+
 class _NoEffortBackend:
     """A minimal Backend double whose capabilities decline reasoning_effort outright.
 

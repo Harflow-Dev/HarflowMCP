@@ -428,6 +428,13 @@ Bridge mapping sources: [Claude](../src/harflow_mcp/backends/claude.py), [Codex]
 
 ## Exact-action caller approvals
 
+Wait tools return `stop_reason: "attention"` for unanswered approval requests or uncertain
+approval state. Once an approval or rejection is recorded, waiting continues while the owner
+delivers that decision; a later unanswered request can interrupt it again. `pending_count` and
+`interaction_state` still include decisions awaiting delivery, so use `awaiting_decision_count`
+to distinguish requests that need an answer. Older summaries without that count retain their
+attention behavior. Approval attention alone says nothing about whether the process has exited.
+
 `caller_approvals` is a strict boolean, defaulting to `false`. The adapter is limited to
 non-native uncapped Claude Code stream JSON on a measured version, or Codex through `codex app-server` (see
 [Codex caller approvals](#codex-caller-approvals-codex-app-server)), at `write_in_repo` or `publish`, with
