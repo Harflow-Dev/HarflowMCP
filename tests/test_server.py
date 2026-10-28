@@ -127,6 +127,24 @@ async def test_list_backends_describes_every_one(monkeypatch) -> None:
     assert agy["reasoning_effort"]["levels"] == ["low", "medium", "high"]
 
 
+@pytest.mark.parametrize(
+    "caveats",
+    [(), ("one caveat",), ("first caveat", "second caveat")],
+)
+async def test_list_backends_serializes_network_control_caveats(monkeypatch, caveats) -> None:
+    # Keep the public response independent of installed CLIs and version probes.
+    monkeypatch.setattr(backends, "is_installed", lambda backend: False)
+    codex = backends.get("codex")
+    monkeypatch.setattr(codex, "capabilities", codex.capabilities._replace(
+        network_control=codex.capabilities.network_control._replace(caveats=caveats)
+    ))
+
+    listed = (await call("list_backends")).structured_content["result"]
+    codex_entry = next(entry for entry in listed if entry["backend"] == "codex")
+
+    assert codex_entry["capabilities"]["network_control"]["caveats"] == list(caveats)
+
+
 async def test_unknown_backend_is_rejected(git_repo: Path) -> None:
     with pytest.raises(MCPError, match="unknown backend"):
         await call("start_task", prompt="x", repo_path=str(git_repo), backend="gemini")
