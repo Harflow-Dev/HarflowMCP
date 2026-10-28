@@ -6,12 +6,16 @@ from harflow_mcp.backends.claude import ALLOWED_TOOLS
 from harflow_mcp.backends.vibe import VibeBackend
 
 
-def test_publish_adds_narrow_review_comment_commands_only():
+def test_publish_adds_only_explicit_pr_review_and_repository_command_families():
     rules = ALLOWED_TOOLS["publish"].split(",")
-    assert rules == ["Bash(git commit:*)", "Bash(git push:*)"]
-    assert "Bash(gh pr review:*)" not in rules
-    assert "Bash(gh pr comment:*)" not in rules
-    for blocked in ("Bash(gh api:*)", "Bash(gh pr merge:*)", "Bash(gh pr close:*)", "Bash(gh repo edit:*)", "Bash(gh repo delete:*)"):
+    assert rules == [
+        "Bash(git commit:*)", "Bash(git push:*)",
+        "Bash(gh pr create:*)", "Bash(gh pr edit:*)", "Bash(gh pr view:*)",
+        "Bash(gh pr comment:*)", "Bash(gh pr review:*)", "Bash(gh pr checks:*)",
+        "Bash(gh pr diff:*)", "Bash(gh pr list:*)", "Bash(gh repo view:*)",
+    ]
+    for blocked in ("Bash(gh api:*)", "Bash(gh pr merge:*)", "Bash(gh pr close:*)",
+                    "Bash(gh repo edit:*)", "Bash(gh repo delete:*)", "Bash(gh release:*)"):
         assert blocked not in rules
 
 

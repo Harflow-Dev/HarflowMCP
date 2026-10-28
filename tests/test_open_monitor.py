@@ -9,11 +9,23 @@ from pathlib import Path
 
 import pytest
 
-from harflow_mcp import backends, lineage, server, store
+from harflow_mcp import backends, git_environment, lineage, server, store
 from harflow_mcp import state_ownership
 from harflow_mcp.backends import Enforcement, Invocation
 from harflow_mcp.state_layout import resolve_layout
 from harflow_mcp.tasks import TaskRegistry
+
+
+GIT_ONLY_NOTICES = [
+    "Git: GitHub SSH URLs configured to rewrite to HTTPS; HTTPS authentication observation: unknown. "
+    "Network, sandbox and repository access are not verified."
+]
+
+
+@pytest.fixture(autouse=True)
+def deterministic_git_observation(monkeypatch):
+    monkeypatch.setattr(git_environment, "auth_status", lambda: "unknown")
+    monkeypatch.setenv(git_environment.REWRITE_ENV, "1")
 
 
 class _Backend:
@@ -101,7 +113,7 @@ async def test_a_root_task_does_not_open_monitor_automatically(
     task = await _start(registry, git_repo, backend)
 
     assert launcher.urls == []
-    assert task.bridge_notices == []
+    assert task.bridge_notices == GIT_ONLY_NOTICES
 
 
 async def test_a_nested_task_does_not_open_the_monitor(
@@ -163,8 +175,9 @@ async def test_monitor_launcher_is_unused_and_adds_no_notice(
     task = await _start(registry, git_repo, backend)
 
     assert task.status == "completed"
-    assert task.bridge_notices == []
-    assert store.read(owned_state, task.task_id).bridge_notices == []
+    assert task.bridge_notices == GIT_ONLY_NOTICES
+    assert store.read(owned_state, task.task_id).bridge_notices == GIT_ONLY_NOTICES
+    assert launcher.urls == []
 
 
 @pytest.mark.parametrize("result", [0, 1, OSError("no app")])
@@ -182,14 +195,14 @@ async def test_start_task_response_is_the_same_whatever_the_launcher_does(
 
     response = await server.start_task("hi", str(git_repo), backend="fake-open")
 
-    assert response["notices"] == []
+    assert response["notices"] == GIT_ONLY_NOTICES
     assert "monitor" not in str(response).lower()
     task = registry.get(response["task_id"])
     await asyncio.wait_for(task.done.wait(), timeout=10)
     await asyncio.gather(*registry._monitor_jobs, return_exceptions=True)
     assert launcher.urls == []
     assert task.status == "completed"
-    assert task.bridge_notices == []
+    assert task.bridge_notices == GIT_ONLY_NOTICES
 
 
 @pytest.mark.parametrize('saturated', [False, True])

@@ -32,10 +32,16 @@ def test_claude_safety_shape_denial_retains_reason():
     assert acc.denials[0]['tool_input']['command'] == 'printf payload'
 
 
-def test_publish_does_not_allow_approval_or_raw_api():
-    rules = ALLOWED_TOOLS['publish']
-    assert 'Bash(gh pr review:*)' not in rules
-    assert 'Bash(gh api' not in rules
+def test_publish_allows_reviews_but_omits_raw_api_and_destructive_families():
+    rules = ALLOWED_TOOLS["publish"].split(",")
+    assert rules == [
+        "Bash(git commit:*)", "Bash(git push:*)",
+        "Bash(gh pr create:*)", "Bash(gh pr edit:*)", "Bash(gh pr view:*)",
+        "Bash(gh pr comment:*)", "Bash(gh pr review:*)", "Bash(gh pr checks:*)",
+        "Bash(gh pr diff:*)", "Bash(gh pr list:*)", "Bash(gh repo view:*)",
+    ]
+    for family in ("gh api", "gh pr merge", "gh repo delete", "gh release"):
+        assert not any(rule.startswith(f"Bash({family}") for rule in rules)
 
 
 def test_vibe_unified_session_model(tmp_path, monkeypatch):
