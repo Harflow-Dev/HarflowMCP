@@ -199,6 +199,16 @@ deleting its state file and unlinking the record.
 `<id>.followups.lock`, never the reverse; the reaper takes its catalog locks and then the follow-up
 lock, and never a session lock while holding it.
 
+### Metadata replacement during guarded reads
+
+Worktree recorded-path discovery and the initial cascade-cancellation guard explicitly retry
+positively observed atomic metadata replacements, with at most three acquisitions and no delay.
+Discovery reacquires the whole task scan and requires complete history; it retries only when every
+refusal is a marked `task_unavailable` source replacement. Malformed or otherwise unavailable
+records still refuse the operation before cancellation side effects. The core `store.read`,
+`store.scan`, and `store.read_all` primitives remain strict and never retry implicitly.
+
+
 ## Resource reservations (`resources.py`)
 
 Named, exclusive, cross-process locks for dispatched work. The state is one private ledger,

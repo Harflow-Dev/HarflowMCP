@@ -130,6 +130,18 @@ def read_task_record(log_dir: Path, task_id: str, **read_options):
 
 
 @task_operation
+def read_task_records(log_dir: Path):
+    """Reacquire complete history only when every refusal proves source replacement."""
+    for attempt in range(3):
+        result = store.scan(log_dir)
+        if (attempt == 2 or not result.refusals or any(
+                error.code != 'task_unavailable'
+                or getattr(error, '_source_changed_during_read', None) is not True
+                for error in result.refusals.values())):
+            return result.require_complete()
+
+
+@task_operation
 def reservations(log_dir: Path):
     """Qualified history; only terminal rows may retain an earlier device ID."""
     return [value for path in log_dir.glob('*.launch.json')

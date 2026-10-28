@@ -438,14 +438,13 @@ def _workflow_runs(log_dir: Path) -> list[dict[str, Any]]:
 
 def recorded_paths(log_dir: Path) -> list[Path]:
     """Canonical paths of every worktree Harflow recorded (receipts and records), without inspecting them."""
-    from . import store
-    from .task_supervision import reservations
+    from .task_supervision import read_task_records, reservations
     found: set[str] = set()
     for receipt in reservations(log_dir):
         info = receipt.get("worktree")
         if isinstance(info, dict) and isinstance(info.get("path"), str):
             found.add(str(_canonical(Path(info["path"]))))
-    for record in store.read_all(log_dir):
+    for record in read_task_records(log_dir):
         info = getattr(record, "worktree", None)
         if isinstance(info, dict) and isinstance(info.get("path"), str):
             found.add(str(_canonical(Path(info["path"]))))

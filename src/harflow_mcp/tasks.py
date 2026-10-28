@@ -4008,7 +4008,8 @@ class TaskRegistry:
         Same reason `cancel` shields `_escalate`: the SIGKILL escalation for tasks this server does
         not own lives inside the cascade, and a client disconnecting mid-call must not abandon it.
         """
-        store.read(self._log_dir, task_id, include_prompt=False)
+        from .task_supervision import read_task_record
+        read_task_record(self._log_dir, task_id, include_prompt=False)
         if not workflow_control:
             from .workflow_hooks import pause_for_task, refuse_managed, refuse_native_control
             refuse_native_control(self._log_dir, task_id)
