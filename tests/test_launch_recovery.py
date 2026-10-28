@@ -124,11 +124,14 @@ def test_cancel_requests_are_only_written_for_launches_an_owner_can_still_read(t
 @pytest.mark.asyncio
 async def test_rebuild_failure_after_creation_settles_not_started_and_keeps_the_worktree(tmp_path, source, monkeypatch, identities):
     install_fake_claude(tmp_path, monkeypatch)
-    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(filter(None, [str(HOOKS), os.environ.get("PYTHONPATH", "")])))
+    # Held at creation so `start` acknowledges the grant before the owner can settle the launch.
+    signal_dir = hook(monkeypatch, tmp_path, "worktree_create")
     monkeypatch.setenv("HARFLOW_TEST_FAIL", "rebuild")
     log_dir = tasks_dir(tmp_path)
     reg = registry(tmp_path)
     started = await reg.start("reply x", source, backend=get("claude"), freedom="write_in_repo", worktree={}, resources=["sim"], task_id="a" * 32)
+    await wait_for(lambda: (signal_dir / "reached").exists())
+    (signal_dir / "release").write_text("1")
     await wait_for(lambda: launch_state(tmp_path, started.task_id) == "not_started")
     receipt = task_supervision.read_launch(log_dir, started.task_id)
     assert receipt["not_started_reason"] == "owner_error" and "rebuild failed" in receipt["error"]
